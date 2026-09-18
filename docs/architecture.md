@@ -1,49 +1,53 @@
 # Architecture and development direction
 
-## Current implementation
+## Current layers
 
-`column.mojo` owns typed lists and validity bitmaps. `series.mojo` holds a named
-variant of the four supported column types, keeping runtime type dispatch at the
-column level. `frame.mojo` validates schemas and implements eager relational
-operations. `kernels.mojo` contains scalar CPU arithmetic and reduction kernels.
+- `column.mojo`: typed storage and validity bitmaps.
+- `series.mojo`: named, runtime-tagged columns and batch slicing/concatenation.
+- `expr.mojo`: flat expression nodes and composition, independent of data.
+- `binding.mojo`: schema resolution, dtypes, shape, and aggregate dependencies.
+- `execution.mojo`: bounded eager evaluation and grouped accumulator scheduling.
+- `expr_kernels.mojo`: specialized binary kernels, including explicit Float64 SIMD.
+- `reductions.mojo`: mergeable exact-integer and reassociable floating-point states.
+- `frame.mojo`: validated eager dataframe operations and expression entry points.
+- `kernels.mojo`: original scalar reference/legacy operations.
 
-This establishes a correctness baseline. It is intentionally not yet an optimized
-query engine. The only dependency is the Mojo standard library. Owned copies make
-lifetimes straightforward but increase peak memory use; explicit moves into
-constructors avoid copies where possible. Column lookup is currently O(width).
+The only runtime dependency is the Mojo standard library. This is an eager CPU
+implementation, not a production query engine. All public extraction APIs copy;
+expression execution reads bounded slices rather than repeatedly copying complete
+source columns. GroupBy currently owns a copied snapshot. Column lookup at binding
+is O(schema width), but execution uses resolved source indices.
 
-Sorting is O(n log n) with O(n) index workspace. Grouping is expected O(n) with
-hash tables. Joins are expected O(left + right + output) for their index-building
-phase; full output materialization also scales with the number of columns.
-Many-to-many joins can produce much larger output than either input. Hashing and
-copying variable-length strings also depend on string length.
+Sorting is O(n log n) with O(n) index workspace. Hash grouping is expected O(n).
+Join index construction is expected O(left + right + output); materialization
+also scales with column count. Variable-length string costs depend on their length.
 
-No universal DataFrame trait is imposed. Narrow schema/batch traits should be
-introduced when a second real consumer or implementation establishes the need.
-A portable operation API would also require a separately tested semantic contract.
+See [expression semantics](expressions.md) for the broadcasting, ordering, and
+reduction contracts that deliberately leave room for parallelism and SIMD.
+No universal dataframe trait or foreign-backend abstraction is imposed.
 
-## Next milestones
+## Next milestones, with CPU performance central
 
-1. **Storage and measurements:** benchmarks for filter/group/join/sort across row
-   counts and null densities; borrowed read-only column views; shared immutable
-   buffers; an explicit logical-type enum; contiguous UTF-8 offsets/data storage;
-   chunked columns and batch consumption. Preserve the current contract tests.
-2. **Expressions:** `col`, literals, comparisons, arithmetic, named aggregates;
-   schema/type validation before execution; a small logical plan with a reference
-   executor. Add laziness and optimizations after the representation is useful.
-3. **Interchange:** Arrow C Data import/export with tested release callbacks,
-   ownership, offsets, null masks, and dtype validation. Current bitmaps are a
-   building block, not a claim that current arrays can be exported zero-copy.
-   String and Boolean payload layouts must be addressed first.
-4. **Broader operations and input:** numeric/multiple join and grouping keys,
-   additional reductions, cast rules, multi-column sorting, and a CSV reader.
-   Parquet can remain an optional integration initially; making it native is a
-   separate substantial project.
-5. **CPU performance:** specialize dtype dispatch outside hot loops, bitmap-aware
-   iteration, SIMD kernels, and parallel execution where contract semantics permit.
-   Retain scalar kernels as correctness references. Revisit checked integer sums
-   and floating-point accumulation semantics before parallelizing reductions.
+1. **Measurements and copies:** benchmark representative expressions, scans,
+   grouping, joins, and sorting across row counts/null densities. Add read-only
+   buffer views and immutable shared storage. Measure allocations and peak memory,
+   not just kernel throughput.
+2. **Fusion and SIMD:** fuse compatible elementwise nodes within a batch, release
+   dead intermediates, share subexpressions, load contiguous SIMD vectors directly,
+   and optimize validity handling. Add vector overflow detection for Int64 kernels.
+3. **Parallel execution:** schedule disjoint row batches; use worker-private
+   reduction states with explicit merges. Share a group-key mapping or reconcile
+   worker-local mappings. Apply `maintain_order` as an explicit requirement rather
+   than an accidental default. Validate against scalar and partitioned oracles.
+4. **Planning:** add a lazy relational plan using the same expressions, predicate
+   and projection pushdown, multi-aggregate scans, and an explicit logical-type
+   representation. Keep runtime schemas supported.
+5. **Storage and interchange:** contiguous UTF-8 buffers, chunked arrays, Arrow
+   C Data import/export with ownership/release/offset tests. Current storage is
+   not yet Arrow-compatible for every dtype.
+6. **Broader operations and input:** additional expressions/reductions, multiple
+   and numeric grouping/join keys, casts, multi-column sorting, and CSV input.
+   Parquet remains a separate integration project.
 
-GPU execution, distributed execution, Python-object columns, automatic host/device
-migration, pandas index compatibility, and cross-engine adapters are outside these
-initial milestones. No CPU/GPU fallback is implicit.
+GPU execution, distributed execution, arbitrary Python-object columns, pandas
+index compatibility, and cross-engine adapters remain outside the initial scope.

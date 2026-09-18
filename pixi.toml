@@ -9,8 +9,8 @@ platforms = ["linux-64"]
 mojo = "==1.1.0"
 
 [tasks]
-test = "mojo run -I . tests/test_dataframe.mojo"
-example = "mojo run -I . examples/sales.mojo"
+test = "mojo run -I . tests/test_dataframe.mojo && mojo run -I . tests/test_expressions.mojo"
+example = "mojo run -I . examples/sales.mojo && mojo run -I . examples/expressions.mojo"
 format = "mblack --target-version mojo --line-length 80 dataframe tests examples"
 format-check = "mblack --check --target-version mojo --line-length 80 dataframe tests examples"
-build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales"
+build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales && mojo build -I . examples/expressions.mojo -o build/expressions"

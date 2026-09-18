@@ -3,6 +3,9 @@ from std.collections import Dict
 from .column import Column
 from .series import Series
 from .kernels import checked_add
+from .expr import Expr
+from .binding import bind, BoundExpr, ROWS, AGGREGATE
+from .execution import evaluate
 
 
 @fieldwise_init
@@ -235,3 +238,162 @@ struct DataFrame(Copyable):
                 )
                 name_index += 1
         return Self(columns^, height=len(left_rows))
+
+    def select(
+        self, expression: Expr, *, batch_size: Int = 1024
+    ) raises -> Self:
+        return self.select_exprs([expression.copy()], batch_size=batch_size)
+
+    def select_exprs(
+        self, expressions: List[Expr], *, batch_size: Int = 1024
+    ) raises -> Self:
+        """Evaluate against the original frame. Scalar-only output has one row.
+
+        If any expression is row-valued, scalar results broadcast to height,
+        including zero rows. An empty selection preserves the input height.
+        """
+        var bound = _bind_all(expressions, self._columns)
+        var has_rows = len(expressions) == 0
+        for expression in bound:
+            has_rows = has_rows or expression.shape() == ROWS
+        var height = self._height if has_rows else 1
+        var columns = List[Series]()
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        for expression in bound:
+            var result = evaluate(
+                expression, self._columns, self._height, batch_size=batch_size
+            )
+            if expression.shape() != ROWS and has_rows:
+                result = result._broadcast(height)
+            columns.append(result^)
+        return Self(columns^, height=height)
+
+    def with_columns(
+        self, expression: Expr, *, batch_size: Int = 1024
+    ) raises -> Self:
+        return self.with_columns([expression.copy()], batch_size=batch_size)
+
+    def with_columns(
+        self, expressions: List[Expr], *, batch_size: Int = 1024
+    ) raises -> Self:
+        """All siblings see the original schema and data; aliases are outputs."""
+        var bound = _bind_all(expressions, self._columns)
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        var columns = self._columns.copy()
+        for expression in bound:
+            var result = evaluate(
+                expression, self._columns, self._height, batch_size=batch_size
+            )
+            if expression.shape() != ROWS:
+                result = result._broadcast(self._height)
+            var replacement = -1
+            for i in range(len(columns)):
+                if columns[i].name() == result.name():
+                    replacement = i
+                    break
+            if replacement < 0:
+                columns.append(result^)
+            else:
+                columns[replacement] = result^
+        return Self(columns^, height=self._height)
+
+    def filter(self, predicate: Expr, *, batch_size: Int = 1024) raises -> Self:
+        var bound = bind(predicate, self._columns)
+        if bound.dtypes[len(bound.dtypes) - 1] != "bool":
+            raise Error("Filter expression must return Boolean values")
+        var result = evaluate(
+            bound, self._columns, self._height, batch_size=batch_size
+        )
+        if bound.shape() != ROWS:
+            result = result._broadcast(self._height)
+        return self.filter(result._data[Column[Bool]])
+
+    def group_by(
+        self, key: String, *, maintain_order: Bool = False
+    ) raises -> GroupBy:
+        """Create an owned eager snapshot; unordered group output by default."""
+        if self._columns[self._index(key)].dtype() != "string":
+            raise Error("group_by currently requires one String key")
+        return GroupBy(self.copy(), key, maintain_order)
+
+
+def _bind_all(
+    expressions: List[Expr], columns: List[Series]
+) raises -> List[BoundExpr]:
+    var bound = List[BoundExpr]()
+    var names = Dict[String, Bool]()
+    for expression in expressions:
+        if expression._name in names:
+            raise Error("Duplicate expression output name: " + expression._name)
+        names[expression._name] = True
+        bound.append(bind(expression, columns))
+    return bound^
+
+
+@fieldwise_init
+struct GroupBy(Copyable):
+    """An eager grouping request. No per-group dataframe materialization."""
+
+    var _frame: DataFrame
+    var _key: String
+    var _maintain_order: Bool
+
+    def agg(
+        self, expression: Expr, *, batch_size: Int = 1024
+    ) raises -> DataFrame:
+        return self.agg([expression.copy()], batch_size=batch_size)
+
+    def agg(
+        self, expressions: List[Expr], *, batch_size: Int = 1024
+    ) raises -> DataFrame:
+        var bound = _bind_all(expressions, self._frame._columns)
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        for expression in bound:
+            if expression.shape() != AGGREGATE:
+                raise Error(
+                    "Group aggregation requires scalar aggregate expressions"
+                )
+            if expression.expr._name == self._key:
+                raise Error("Aggregate output name collides with grouping key")
+        var key_index = self._frame._index(self._key)
+        # Borrow the variant's column in the loops; don't use copying extraction.
+        var lookup = Dict[String, Int]()
+        var representatives = List[Int]()
+        var groups = List[Int](capacity=self._frame.height())
+        var null_group = -1
+        for i in range(self._frame.height()):
+            var group: Int
+            if self._frame._columns[key_index]._data[Column[String]].is_null(i):
+                if null_group < 0:
+                    null_group = len(representatives)
+                    representatives.append(i)
+                group = null_group
+            else:
+                var key = (
+                    self._frame._columns[key_index]
+                    ._data[Column[String]]
+                    .value(i)
+                )
+                if key not in lookup:
+                    lookup[key] = len(representatives)
+                    representatives.append(i)
+                group = lookup[key]
+            groups.append(group)
+        var columns = List[Series]()
+        columns.append(self._frame._columns[key_index].take(representatives))
+        for expression in bound:
+            columns.append(
+                evaluate(
+                    expression,
+                    self._frame._columns,
+                    self._frame.height(),
+                    batch_size=batch_size,
+                    grouped=True,
+                    groups=groups,
+                    group_count=len(representatives),
+                )
+            )
+        return DataFrame(columns^, height=len(representatives))

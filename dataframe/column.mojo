@@ -74,3 +74,40 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
                 values.append(self._values[i].copy())
                 valid.append(not self.is_null(i))
         return Self(values^, valid)
+
+    def _valid(self, i: Int) -> Bool:
+        """Internal unchecked access after batch bounds validation."""
+        return (self._validity[i // 8] & (UInt8(1) << UInt8(i % 8))) != 0
+
+    def slice(self, offset: Int, length: Int) raises -> Self:
+        if (
+            offset < 0
+            or length < 0
+            or offset > len(self)
+            or length > len(self) - offset
+        ):
+            raise Error("Invalid column slice")
+        var values = List[Self.T](capacity=length)
+        var valid = List[Bool](capacity=length)
+        for i in range(offset, offset + length):
+            values.append(self._values[i].copy())
+            valid.append(self._valid(i))
+        return Self(values^, valid)
+
+    def _append_column(mut self, other: Self):
+        for i in range(len(other)):
+            var dest = len(self)
+            if dest % 8 == 0:
+                self._validity.append(0)
+            elif dest % 8 != 0:
+                self._validity[dest // 8] &= ~(UInt8(1) << UInt8(dest % 8))
+            if other._valid(i):
+                self._validity[dest // 8] |= UInt8(1) << UInt8(dest % 8)
+            self._values.append(other._values[i].copy())
+
+    def _broadcast(self, length: Int) raises -> Self:
+        if len(self) != 1 or length < 0:
+            raise Error("Only a scalar result can broadcast")
+        var values = List[Self.T](length=length, fill=self._values[0].copy())
+        var valid = List[Bool](length=length, fill=self._valid(0))
+        return Self(values^, valid)

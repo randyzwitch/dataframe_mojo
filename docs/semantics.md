@@ -78,3 +78,11 @@ Invalid shape, names, indices, masks, dtype requests, join modes, and integer
 sum overflow raise Mojo `Error`. Allocation failure behavior follows Mojo's
 standard containers. Underscored storage fields are implementation details;
 mutating them directly is outside this contract.
+
+## Expression API
+
+The reduction and grouping rules above describe the original column-kernel and
+`group_by_sum` APIs. The new expression API has a separate, deliberately more
+parallel-friendly contract: zero-for-empty sums with `min_count`, wide integer
+accumulation with final overflow checking, floating-point reassociation, and
+explicit `maintain_order` for grouped output. See [expressions](expressions.md).
