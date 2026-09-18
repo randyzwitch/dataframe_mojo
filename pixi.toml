@@ -1,0 +1,16 @@
+[workspace]
+name = "dataframe_mojo"
+version = "0.1.0"
+description = "An experimental native CPU dataframe library for Mojo"
+channels = ["https://conda.modular.com/max", "conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+mojo = "==1.1.0"
+
+[tasks]
+test = "mojo run -I . tests/test_dataframe.mojo"
+example = "mojo run -I . examples/sales.mojo"
+format = "mblack --target-version mojo --line-length 80 dataframe tests examples"
+format-check = "mblack --check --target-version mojo --line-length 80 dataframe tests examples"
+build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales"
