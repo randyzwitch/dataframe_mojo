@@ -203,3 +203,55 @@ struct Series(Copyable, Sized):
             scratch = old^
             width *= 2
         return indices^
+
+    def slice(self, offset: Int, length: Int) raises -> Self:
+        if self._data.isa[Column[Int64]]():
+            return Self(
+                self._name, self._data[Column[Int64]].slice(offset, length)
+            )
+        if self._data.isa[Column[Float64]]():
+            return Self(
+                self._name, self._data[Column[Float64]].slice(offset, length)
+            )
+        if self._data.isa[Column[Bool]]():
+            return Self(
+                self._name, self._data[Column[Bool]].slice(offset, length)
+            )
+        if self._data.isa[Column[String]]():
+            return Self(
+                self._name, self._data[Column[String]].slice(offset, length)
+            )
+        raise Error("Unknown column type")
+
+    def _broadcast(self, length: Int) raises -> Self:
+        if self._data.isa[Column[Int64]]():
+            return Self(
+                self._name, self._data[Column[Int64]]._broadcast(length)
+            )
+        if self._data.isa[Column[Float64]]():
+            return Self(
+                self._name, self._data[Column[Float64]]._broadcast(length)
+            )
+        if self._data.isa[Column[Bool]]():
+            return Self(self._name, self._data[Column[Bool]]._broadcast(length))
+        if self._data.isa[Column[String]]():
+            return Self(
+                self._name, self._data[Column[String]]._broadcast(length)
+            )
+        raise Error("Unknown column type")
+
+    def _append_series(mut self, other: Self) raises:
+        if self.dtype() != other.dtype():
+            raise Error("Cannot append different dtypes")
+        if self._data.isa[Column[Int64]]():
+            self._data[Column[Int64]]._append_column(other._data[Column[Int64]])
+        if self._data.isa[Column[Float64]]():
+            self._data[Column[Float64]]._append_column(
+                other._data[Column[Float64]]
+            )
+        if self._data.isa[Column[Bool]]():
+            self._data[Column[Bool]]._append_column(other._data[Column[Bool]])
+        if self._data.isa[Column[String]]():
+            self._data[Column[String]]._append_column(
+                other._data[Column[String]]
+            )
