@@ -145,7 +145,7 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 
 - Typed `Column[T]` with bit-packed validity and checked element access.
 - Heterogeneous `Series` and runtime-schema `DataFrame`: Int64, Float64, Bool,
-  and String. The runtime tag is per column, not per cell.
+  String, Date, Datetime, Duration, and Time. The runtime tag is per column, not per cell.
 - Schema inspection, projection, indexed gathering, nullable Boolean filtering,
   and adding/replacing columns.
 - Vertical, diagonal, and horizontal `concat`, plus `vstack`/`hstack`.

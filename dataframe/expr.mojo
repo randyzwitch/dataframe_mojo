@@ -117,6 +117,25 @@ comptime BACKWARD_FILL = 121
 # Evaluate the child per partition of the SEP-joined key names in text2.
 comptime OVER = 122
 
+# Temporal field and conversion operations occupy 130..149 (text holds an
+# interval, format, or unit; text2 a target dtype name).
+comptime DT_YEAR = 130
+comptime DT_MONTH = 131
+comptime DT_DAY = 132
+comptime DT_HOUR = 133
+comptime DT_MINUTE = 134
+comptime DT_SECOND = 135
+comptime DT_NANOSECOND = 136
+comptime DT_WEEKDAY = 137
+comptime DT_ORDINAL_DAY = 138
+comptime DT_DATE = 139
+comptime DT_TIME = 140
+comptime DT_TRUNCATE = 141
+comptime DT_OFFSET_BY = 142
+comptime DT_TOTAL = 143
+comptime DT_STRFTIME = 144
+comptime DT_STRPTIME = 145
+
 
 def is_binary(op: Int) -> Bool:
     return (op >= ADD and op <= EQ) or (op >= 20 and op < 50)
@@ -136,6 +155,10 @@ def is_comparison(op: Int) -> Bool:
 
 def is_string_op(op: Int) -> Bool:
     return op >= STR_LEN_CHARS and op <= STR_PAD
+
+
+def is_dt_op(op: Int) -> Bool:
+    return op >= DT_YEAR and op <= DT_STRPTIME
 
 
 def is_window(op: Int) -> Bool:
@@ -537,6 +560,10 @@ struct Expr(Copyable):
         """String operations: col("name").str().to_uppercase()."""
         return StrNamespace(self.copy())
 
+    def dt(self) -> DtNamespace:
+        """Temporal operations: col("when").dt().year()."""
+        return DtNamespace(self.copy())
+
     def min(self) -> Self:
         """Smallest non-null value. NaN sorts above every number, so it is
         the minimum only when every valid value is NaN."""
@@ -886,6 +913,20 @@ struct StrNamespace(Copyable):
     def pad_end(self, width: Int, fill_char: String = " ") -> Expr:
         return self._op(STR_PAD, fill_char, 1, width)
 
+    def strptime(
+        self, dtype: String, format: String = "", strict: Bool = True
+    ) -> Expr:
+        """Parse text as "date", "datetime[unit]", or "time" using a
+        strftime-style format (ISO 8601 when empty); unparseable text raises
+        when strict, or is null otherwise."""
+        return self._op(DT_STRPTIME, format, Int64(strict), text2=dtype)
+
+    def to_date(self, format: String = "") -> Expr:
+        return self.strptime("date", format)
+
+    def to_datetime(self, format: String = "", unit: String = "us") -> Expr:
+        return self.strptime("datetime[" + unit + "]", format)
+
     def zfill(self, width: Int) -> Expr:
         """Left-pad with zeros, after a leading + or - sign."""
         return self._op(STR_PAD, "0", 2, width)
@@ -936,3 +977,91 @@ def subtree(expr: Expr, root: Int) -> Expr:
                 copied.extra = position[copied.extra]
             nodes.append(copied^)
     return Expr(nodes^, expr._name)
+
+
+@fieldwise_init
+struct DtNamespace(Copyable):
+    """Temporal operations on date, datetime, time, and duration expressions.
+
+    Fields use the proleptic Gregorian calendar with no time zones. Nulls
+    propagate.
+    """
+
+    var _expr: Expr
+
+    def _op(self, op: Int, text: String = "", text2: String = "") -> Expr:
+        var nodes = self._expr._nodes.copy()
+        nodes.append(_node(op, len(nodes) - 1, text=text, text2=text2))
+        return Expr(nodes^, self._expr._name)
+
+    def year(self) -> Expr:
+        return self._op(DT_YEAR)
+
+    def month(self) -> Expr:
+        return self._op(DT_MONTH)
+
+    def day(self) -> Expr:
+        return self._op(DT_DAY)
+
+    def hour(self) -> Expr:
+        return self._op(DT_HOUR)
+
+    def minute(self) -> Expr:
+        return self._op(DT_MINUTE)
+
+    def second(self) -> Expr:
+        return self._op(DT_SECOND)
+
+    def nanosecond(self) -> Expr:
+        """Nanoseconds within the second."""
+        return self._op(DT_NANOSECOND)
+
+    def weekday(self) -> Expr:
+        """ISO weekday: Monday is 1, Sunday is 7."""
+        return self._op(DT_WEEKDAY)
+
+    def ordinal_day(self) -> Expr:
+        """Day of the year, starting at 1."""
+        return self._op(DT_ORDINAL_DAY)
+
+    def date(self) -> Expr:
+        """The calendar date of a datetime."""
+        return self._op(DT_DATE)
+
+    def time(self) -> Expr:
+        """The time of day of a datetime."""
+        return self._op(DT_TIME)
+
+    def truncate(self, every: String) -> Expr:
+        """Round down to a multiple of every, such as "1d", "15m", "1w"
+        (Monday-aligned), "1mo", "3mo", or "1y" (calendar-aligned)."""
+        return self._op(DT_TRUNCATE, every)
+
+    def offset_by(self, by: String) -> Expr:
+        """Shift by an interval such as "2d", "-3h", "1mo" or "1y2mo";
+        month shifts clamp to the last day of the target month."""
+        return self._op(DT_OFFSET_BY, by)
+
+    def total(self, unit: String) -> Expr:
+        """A duration as a whole number of days, hours, minutes, seconds,
+        milliseconds, microseconds, or nanoseconds (truncated), as Int64."""
+        return self._op(DT_TOTAL, unit)
+
+    def total_days(self) -> Expr:
+        return self.total("days")
+
+    def total_hours(self) -> Expr:
+        return self.total("hours")
+
+    def total_minutes(self) -> Expr:
+        return self.total("minutes")
+
+    def total_seconds(self) -> Expr:
+        return self.total("seconds")
+
+    def total_milliseconds(self) -> Expr:
+        return self.total("milliseconds")
+
+    def strftime(self, format: String) -> Expr:
+        """Format as text; see dataframe/temporal.mojo for directives."""
+        return self._op(DT_STRFTIME, format)

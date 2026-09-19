@@ -88,7 +88,7 @@ def test_sample_limits_and_conflicts() raises:
     with assert_raises(contains="schema_overrides names unknown column: w"):
         _ = read_csv(PATH, schema_overrides={"w": "int64"})
     with assert_raises(contains="Unknown dtype in schema_overrides"):
-        _ = read_csv(PATH, schema_overrides={"v": "date"})
+        _ = read_csv(PATH, schema_overrides={"v": "decimal"})
     with assert_raises(contains="infer_schema_length"):
         _ = read_csv(PATH, infer_schema_length=-2)
 

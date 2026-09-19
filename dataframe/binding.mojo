@@ -70,6 +70,18 @@ from .expr import (
     FORWARD_FILL,
     BACKWARD_FILL,
     OVER,
+    FLOORDIV,
+    DT_YEAR,
+    DT_DAY,
+    DT_NANOSECOND,
+    DT_DATE,
+    DT_TIME,
+    DT_TRUNCATE,
+    DT_OFFSET_BY,
+    DT_TOTAL,
+    DT_STRFTIME,
+    DT_STRPTIME,
+    is_dt_op,
     is_window,
     STR_CONCAT,
     CAST,
@@ -90,6 +102,7 @@ from .expr import (
 )
 from .series import Series
 from .dtype import DataType
+from .temporal import parse_every
 
 comptime SCALAR = 0
 comptime ROWS = 1
@@ -210,9 +223,64 @@ def _numeric(dtype: DataType) -> Bool:
     return dtype.is_numeric()
 
 
+def temporal_result(
+    op: Int, left: DataType, right: DataType
+) raises -> DataType:
+    """Result type of + - * // involving a temporal operand."""
+    var ok = False
+    var result = left
+    if op == SUB and left == right and left.is_datetime():
+        result = DataType.duration(left.unit())
+        ok = True
+    elif op == SUB and left == right and left.is_date():
+        result = DataType.duration("ms")
+        ok = True
+    elif op == SUB and left == right and left.is_time():
+        result = DataType.duration("ns")
+        ok = True
+    elif (op == ADD or op == SUB) and left.is_duration() and right == left:
+        result = left
+        ok = True
+    elif (
+        (op == ADD or op == SUB) and left.is_datetime() and right.is_duration()
+    ):
+        ok = left.unit() == right.unit()
+        result = left
+    elif op == ADD and left.is_duration() and right.is_datetime():
+        ok = left.unit() == right.unit()
+        result = right
+    elif (op == ADD or op == SUB) and left.is_date() and right.is_duration():
+        result = DataType.datetime(right.unit())
+        ok = True
+    elif (
+        (op == MUL or op == FLOORDIV)
+        and left.is_duration()
+        and right == DataType.INT64
+    ):
+        result = left
+        ok = True
+    elif op == MUL and left == DataType.INT64 and right.is_duration():
+        result = right
+        ok = True
+    if not ok:
+        raise Error(
+            op_name(op)
+            + " is not defined for "
+            + left.name()
+            + " and "
+            + right.name()
+            + "; cast to matching temporal types and units"
+        )
+    return result
+
+
 def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
     if op == KEEP_NULLS:
         return right
+    if (left.is_temporal() or right.is_temporal()) and (
+        op == ADD or op == SUB or op == MUL or op == FLOORDIV
+    ):
+        return temporal_result(op, left, right)
     if op == STR_CONCAT:
         if left != DataType.STRING or right != DataType.STRING:
             raise Error(
@@ -259,6 +327,8 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
 
 
 def _unary_dtype(op: Int, input: DataType) raises -> DataType:
+    if (op == NEG or op == ABS) and input.is_duration():
+        return input
     if op == IS_NULL or op == IS_NOT_NULL:
         return DataType.BOOL
     if op == NOT:
@@ -285,6 +355,8 @@ def _unary_dtype(op: Int, input: DataType) raises -> DataType:
 def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     var op = node.op
     if op == SUM:
+        if input.is_duration():
+            return input
         if not _numeric(input):
             raise Error(
                 "sum requires a numeric expression, found " + input.name()
@@ -350,6 +422,59 @@ def _fusible(expr: Expr, types: List[DataType], fuse: Bool) -> List[Bool]:
                 and types[node.right] == DataType.FLOAT64
             )
     return result^
+
+
+def _dt_dtype(node: Node, input: DataType) raises -> DataType:
+    var op = node.op
+    if op == DT_STRPTIME:
+        if input != DataType.STRING:
+            raise Error(
+                "strptime requires a string expression, found " + input.name()
+            )
+        var target = DataType.parse(node.text2)
+        if not (target.is_date() or target.is_datetime() or target.is_time()):
+            raise Error("strptime target must be date, datetime, or time")
+        return target
+    if op == DT_TOTAL:
+        if not input.is_duration():
+            raise Error(
+                "total requires a duration expression, found " + input.name()
+            )
+        var unit = node.text
+        if (
+            unit != "days"
+            and unit != "hours"
+            and unit != "minutes"
+            and unit != "seconds"
+            and unit != "milliseconds"
+            and unit != "microseconds"
+            and unit != "nanoseconds"
+        ):
+            raise Error("unknown total unit: " + unit)
+        return DataType.INT64
+    if not (input.is_date() or input.is_datetime() or input.is_time()):
+        raise Error(
+            "dt operations require a date, datetime, or time expression, found "
+            + input.name()
+        )
+    if op == DT_STRFTIME:
+        return DataType.STRING
+    if op == DT_DATE:
+        if not input.is_datetime():
+            raise Error("dt.date requires a datetime expression")
+        return DataType.DATE
+    if op == DT_TIME:
+        if not input.is_datetime():
+            raise Error("dt.time requires a datetime expression")
+        return DataType.TIME
+    if op == DT_TRUNCATE or op == DT_OFFSET_BY:
+        _ = parse_every(node.text)
+        return input
+    if input.is_time() and op <= DT_DAY:
+        raise Error("time values have no calendar fields")
+    if input.is_date() and op > DT_DAY and op <= DT_NANOSECOND:
+        raise Error("date values have no time-of-day fields")
+    return DataType.INT64
 
 
 def bind(
@@ -447,7 +572,7 @@ def bind(
             var input = types[node.left]
             dtype = input
             if node.op == CUM_SUM or node.op == ROLLING_SUM:
-                if not _numeric(input):
+                if not _numeric(input) and not input.is_duration():
                     raise Error(
                         "cum_sum and rolling_sum require a numeric expression,"
                         " found " + input.name()
@@ -487,6 +612,12 @@ def bind(
             ) and node.integer < -1:
                 raise Error("fill limit must be nonnegative")
             shape = ROWS
+            has_aggregate = aggregated[node.left]
+        elif is_dt_op(node.op):
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid dt input")
+            dtype = _dt_dtype(node, types[node.left])
+            shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif node.op == OVER:
             if node.left < 0 or node.left >= i:

@@ -27,6 +27,10 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
 - `def __eq__(self, other: Self) -> Bool`
 - `def null(dtype: DataType) -> Self`
 - `def null(dtype: String) -> Self`
+- `def temporal(dtype: DataType, value: Int64) -> Self`
+  A date, datetime, duration, or time from its stored Int64.
+- `def to_physical(self) -> Int64`
+  The stored Int64 of an Int64 or temporal value.
 - `def dtype(self) -> DataType`
 - `def is_null(self) -> Bool`
 - `def int64(self) -> Int64`
@@ -101,10 +105,17 @@ def concat_str(exprs: List[Expr], separator: String = "") -> Expr
 
 One CSV output field. Names and dtypes are always explicit.
 
+Temporal fields take an optional strftime-style format; an empty format
+means ISO 8601 (see dataframe/temporal.mojo).
+
+- `def __init__(out self, name: String, dtype: DataType, nullable: Bool = True, format: String = "")`
 - `def int64(name: String, nullable: Bool = True) -> Self`
 - `def float64(name: String, nullable: Bool = True) -> Self`
 - `def bool(name: String, nullable: Bool = True) -> Self`
 - `def string(name: String, nullable: Bool = True) -> Self`
+- `def date(name: String, format: String = "", nullable: Bool = True) -> Self`
+- `def datetime(name: String, unit: String = "us", format: String = "", nullable: Bool = True) -> Self`
+- `def time(name: String, format: String = "", nullable: Bool = True) -> Self`
 
 ## `CsvOptions`
 
@@ -239,10 +250,18 @@ Own equal-length, uniquely named columns; transformations copy storage.
 
 ## `DataType`
 
-A logical column type: INT64, FLOAT64, BOOL, or STRING.
+A logical column type.
+
+INT64, FLOAT64, BOOL, STRING, DATE (days since 1970-01-01), TIME
+(nanoseconds since midnight), and datetime(unit) / duration(unit) with
+unit "ns", "us", or "ms". Temporal types are stored as Int64.
 
 - `def __eq__(self, other: Self) -> Bool`
 - `def __ne__(self, other: Self) -> Bool`
+- `def datetime(unit: String = "us") -> Self`
+  A time-zone-naive instant counted in unit since the epoch.
+- `def duration(unit: String = "us") -> Self`
+  A signed length of time counted in unit.
 - `def parse(name: String) -> Self`
   The type with this canonical name; raises for unknown names.
 - `def is_known(name: String) -> Bool`
@@ -250,6 +269,17 @@ A logical column type: INT64, FLOAT64, BOOL, or STRING.
   The canonical name, as accepted by parse.
 - `def short_name(self) -> String`
   The compact name used in table headers (i64, f64, bool, str).
+- `def unit(self) -> String`
+  The time unit of a datetime or duration ("" otherwise).
+- `def per_second(self) -> Int64`
+  Ticks per second: 1e9 for ns, 1e6 for us, 1e3 for ms, and 1e9 for TIME; 0 for other types.
+- `def is_temporal(self) -> Bool`
+- `def is_date(self) -> Bool`
+- `def is_datetime(self) -> Bool`
+- `def is_duration(self) -> Bool`
+- `def is_time(self) -> Bool`
+- `def physical(self) -> Self`
+  The storage type: INT64 for temporal types, otherwise self.
 - `def is_numeric(self) -> Bool`
 - `def is_integer(self) -> Bool`
 - `def is_float(self) -> Bool`
@@ -258,6 +288,59 @@ A logical column type: INT64, FLOAT64, BOOL, or STRING.
 - `def bit_width(self) -> Int`
   Bits per value for fixed-width types; 0 for variable-width.
 - `def write_to(self, mut writer: T)`
+
+## `date_range`
+
+Dates from start through end (inclusive, ISO 8601 text) every interval, such as "1d", "1w", or "1mo".
+
+```mojo
+def date_range(start: String, end: String, interval: String = "1d", name: String = "date") -> Series
+```
+
+## `datetime_range`
+
+Datetimes from start through end (inclusive) every interval.
+
+```mojo
+def datetime_range(start: String, end: String, interval: String, unit: String = "us", name: String = "datetime") -> Series
+```
+
+## `DtNamespace`
+
+Temporal operations on date, datetime, time, and duration expressions.
+
+Fields use the proleptic Gregorian calendar with no time zones. Nulls
+propagate.
+
+- `def year(self) -> Expr`
+- `def month(self) -> Expr`
+- `def day(self) -> Expr`
+- `def hour(self) -> Expr`
+- `def minute(self) -> Expr`
+- `def second(self) -> Expr`
+- `def nanosecond(self) -> Expr`
+  Nanoseconds within the second.
+- `def weekday(self) -> Expr`
+  ISO weekday: Monday is 1, Sunday is 7.
+- `def ordinal_day(self) -> Expr`
+  Day of the year, starting at 1.
+- `def date(self) -> Expr`
+  The calendar date of a datetime.
+- `def time(self) -> Expr`
+  The time of day of a datetime.
+- `def truncate(self, every: String) -> Expr`
+  Round down to a multiple of every, such as "1d", "15m", "1w" (Monday-aligned), "1mo", "3mo", or "1y" (calendar-aligned).
+- `def offset_by(self, by: String) -> Expr`
+  Shift by an interval such as "2d", "-3h", "1mo" or "1y2mo"; month shifts clamp to the last day of the target month.
+- `def total(self, unit: String) -> Expr`
+  A duration as a whole number of days, hours, minutes, seconds, milliseconds, microseconds, or nanoseconds (truncated), as Int64.
+- `def total_days(self) -> Expr`
+- `def total_hours(self) -> Expr`
+- `def total_minutes(self) -> Expr`
+- `def total_seconds(self) -> Expr`
+- `def total_milliseconds(self) -> Expr`
+- `def strftime(self, format: String) -> Expr`
+  Format as text; see dataframe/temporal.mojo for directives.
 
 ## `exclude`
 
@@ -368,6 +451,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   Evaluate within partitions of the key columns, keeping row order.
 - `def str(self) -> StrNamespace`
   String operations: col("name").str().to_uppercase().
+- `def dt(self) -> DtNamespace`
+  Temporal operations: col("when").dt().year().
 - `def min(self) -> Self`
   Smallest non-null value. NaN sorts above every number, so it is the minimum only when every valid value is NaN.
 - `def max(self) -> Self`
@@ -563,6 +648,8 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def __and__(self, other: Self) -> Self`
 - `def __or__(self, other: Self) -> Self`
 - `def __xor__(self, other: Self) -> Self`
+- `def with_dtype(self, dtype: DataType) -> Self`
+  The same values tagged with another logical type that shares their storage (temporal types and INT64).
 - `def name(self) -> String`
 - `def write_to(self, mut writer: T)`
 - `def to_string(self, *, max_rows: Int = Int(10), max_string_length: Int = Int(32)) -> String`
@@ -661,6 +748,10 @@ String expressions. Character operations work on Unicode code points; there is n
 - `def pad_start(self, width: Int, fill_char: String = " ") -> Expr`
   Left-pad to width code points; longer strings are unchanged.
 - `def pad_end(self, width: Int, fill_char: String = " ") -> Expr`
+- `def strptime(self, dtype: String, format: String = "", strict: Bool = True) -> Expr`
+  Parse text as "date", "datetime[unit]", or "time" using a strftime-style format (ISO 8601 when empty); unparseable text raises when strict, or is null otherwise.
+- `def to_date(self, format: String = "") -> Expr`
+- `def to_datetime(self, format: String = "", unit: String = "us") -> Expr`
 - `def zfill(self, width: Int) -> Expr`
   Left-pad with zeros, after a leading + or - sign.
 

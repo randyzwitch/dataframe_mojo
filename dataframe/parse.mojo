@@ -50,11 +50,56 @@ def edge_ascii_whitespace(text: String) -> Bool:
     )
 
 
+def _is_decimal(text: String) -> Bool:
+    """[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?"""
+    var b = text.as_bytes()
+    var i = 0
+    var n = len(b)
+    if i < n and (b[i] == 43 or b[i] == 45):
+        i += 1
+    var digits = 0
+    while i < n and b[i] >= 48 and b[i] <= 57:
+        i += 1
+        digits += 1
+    if i < n and b[i] == 46:
+        i += 1
+        while i < n and b[i] >= 48 and b[i] <= 57:
+            i += 1
+            digits += 1
+    if digits == 0:
+        return False
+    if i < n and (b[i] == 101 or b[i] == 69):
+        i += 1
+        if i < n and (b[i] == 43 or b[i] == 45):
+            i += 1
+        var exponent = 0
+        while i < n and b[i] >= 48 and b[i] <= 57:
+            i += 1
+            exponent += 1
+        if exponent == 0:
+            return False
+    return i == n
+
+
+def _is_special_float(text: String) -> Bool:
+    var body = text
+    if text.startswith("+") or text.startswith("-"):
+        body = String(text[byte=1:])
+    return (
+        body == "inf"
+        or body == "Infinity"
+        or ((body == "nan" or body == "NaN") and body == text)
+    )
+
+
 def parse_float64(text: String) raises -> Float64:
-    """Mojo's float grammar without surrounding whitespace; only explicit
-    infinity spellings may produce infinity."""
+    """Decimal text with an optional exponent, "nan"/"NaN", or an explicit
+    infinity spelling. Mojo's own parser is more lenient (it reads
+    "2024-02-28" as a number), so the grammar is checked first."""
     if edge_ascii_whitespace(text):
         raise Error("Float64 fields cannot have surrounding whitespace")
+    if not _is_decimal(text) and not _is_special_float(text):
+        raise Error("invalid Float64 value '" + text + "'")
     var value: Float64
     try:
         value = Float64(text)

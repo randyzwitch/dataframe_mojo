@@ -20,6 +20,12 @@ Whitespace is data and is never trimmed. The UTF-8 BOM is ignored only at byte
 zero; elsewhere it is ordinary Unicode text. Every completed field is validated
 as UTF-8, even across input-buffer boundaries.
 
+Temporal fields are `CsvField.date(name, format="")`,
+`CsvField.datetime(name, unit="us", format="")`, and
+`CsvField.time(name, format="")`; an empty format means ISO 8601, and a value
+that does not parse is an error naming the record and field. The writer formats
+temporal columns in ISO form, and `CsvSchema.of(frame)` keeps their types.
+
 ## Null and conversion rules
 
 An empty unquoted field is the sole null marker. Null markers never match quoted
@@ -28,8 +34,9 @@ Boolean fields. Null in a non-nullable field raises.
 
 Int64 accepts an optional leading `+` or `-` followed by ASCII decimal digits.
 It checks magnitude before every operation and supports the exact range, without
-passing through Float64. Float64 uses Mojo's parser but rejects surrounding ASCII
-space/tab/newline, and rejects overflow-to-infinity unless the token is one of
+passing through Float64. Float64 accepts only decimal text with an optional sign, fraction, and
+exponent (Mojo's own parser is laxer and would read `2024-02-28` as a number),
+plus `nan`/`NaN`; it rejects surrounding ASCII space/tab/newline, and rejects overflow-to-infinity unless the token is one of
 the documented explicit infinity spellings. Valid NaN remains a value, distinct
 from null. Boolean accepts only lowercase `true` and `false`. String preserves
 decoded content exactly after CSV unquoting.
@@ -63,7 +70,8 @@ external measurement so the parser has no platform-specific runtime dependency.
 `read_csv(path)` without a schema infers one. It tokenizes the header and the
 first `infer_schema_length` data records (default 10,000; `-1` reads every
 record) with the same options, and keeps those fields in memory as text. Each
-column takes the first type in Bool, Int64, Float64, String that reads every
+column takes the first type in Bool, Int64, Float64, Date, Datetime[us], String
+(ISO 8601 forms for the temporal types) that reads every
 sampled value:
 
 - Nulls (empty unquoted fields and `null_values` tokens) are ignored; a column
@@ -135,5 +143,4 @@ strings, nulls, embedded quotes, separators, and line breaks.
   `line_terminator` is LF or CRLF; `null_value` cannot contain the separator,
   quotes, or line breaks.
 
-Deferred features include dates, compression, remote URLs, and lazy
-`scan_csv`.
+Deferred features include compression and remote URLs.

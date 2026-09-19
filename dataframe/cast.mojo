@@ -4,6 +4,7 @@ from .column import Column
 from .dtype import DataType
 from .parse import parse_bool, parse_float64, parse_int64
 from .series import Series
+from .temporal_kernels import cast_temporal
 
 
 def _dtype(series: Series) -> DataType:
@@ -49,6 +50,9 @@ def cast_series(
     var source = _dtype(input)
     if source == target:
         return input.copy()
+    if source.is_temporal() or target.is_temporal():
+        var observed = input.copy()
+        return cast_temporal(observed, source, target, strict)
     var n = len(input)
     var valid = List[Bool](length=n, fill=False)
     var ints = List[Int64](length=n if target == DataType.INT64 else 0, fill=0)

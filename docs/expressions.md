@@ -94,6 +94,48 @@ operations likewise run per group, so `col("x").cum_sum().max()` is each
 group's running peak. Rolling min/max are O(n x window); other kernels are
 linear apart from `rank`, which sorts each partition.
 
+### Temporal types
+
+`DataType.DATE` (days since 1970-01-01), `DataType.datetime(unit)`
+(time-zone-naive ticks since the epoch), `DataType.duration(unit)`, and
+`DataType.TIME` (nanoseconds since midnight) are stored as Int64, with unit
+`"ns"`, `"us"` (default), or `"ms"`. The calendar is proleptic Gregorian with
+no time zones or DST. Sorting, grouping, joins, `unique`, windows, `min`/`max`,
+and comparisons between equal types work on the stored values.
+
+| Operation | Result |
+|---|---|
+| datetime[u] - datetime[u] | duration[u] |
+| datetime[u] ± duration[u], duration[u] + datetime[u] | datetime[u] |
+| date - date | duration[ms] |
+| date ± duration[u] | datetime[u] |
+| time - time | duration[ns] |
+| duration ± duration (same unit), `-`, `abs`, `sum`, `cum_sum` | duration |
+| duration * Int64, Int64 * duration, duration // Int64 | duration (Int64 `//` 0 is null) |
+
+Units must match; cast first otherwise. Arithmetic is overflow-checked.
+
+`col(...).dt()` provides `year`, `month`, `day`, `hour`, `minute`, `second`,
+`nanosecond`, `weekday` (ISO, Monday = 1), `ordinal_day`, `date()` and
+`time()` of a datetime, `truncate(every)`, `offset_by(interval)`, and
+`strftime(format)`; durations have `total(unit)` and `total_days()` through
+`total_milliseconds()` (truncated toward zero). Intervals combine amounts and
+units: `ns`, `us`, `ms`, `s`, `m`, `h`, `d`, `w`, `mo`, `y` (for example
+`"1h30m"` or `"-2mo"`). `truncate` accepts one positive interval; fixed units
+align to the epoch, whole weeks to Monday, and months/years to the calendar.
+Month offsets clamp to the target month's last day. Date values reject
+sub-day intervals. `str().strptime(dtype, format, strict)`, `to_date`, and
+`to_datetime` parse text.
+
+Formats use `%Y %m %d %H %M %S %f %j %%`; `%f` reads up to nine fractional
+digits and writes the unit's precision (omitted when zero). Without a format,
+dates are `YYYY-MM-DD`, datetimes accept `YYYY-MM-DD[T| ]HH:MM[:SS[.f]]`, and
+times `HH:MM[:SS[.f]]`. Invalid dates such as `2023-02-29` fail. Durations
+display compactly (`1d 2h 3.5s`). `date_range(start, end, interval="1d")` and
+`datetime_range(start, end, interval, unit)` build inclusive sequences; month
+steps are measured from the start, so `2024-01-31` stepping `1mo` gives
+`2024-02-29`, `2024-03-31`, ...
+
 ### Casts
 
 `cast(dtype, strict=True)` converts between the four dtypes; `Series.cast` and
@@ -108,6 +150,11 @@ that cannot convert raises `cast from <a> to <b> failed at row <n> for value
 | float64 | truncate toward zero; NaN, ±inf, and values outside [-2^63, 2^63) fail | identity | `x != 0`; NaN fails | shortest round-trip form |
 | bool | 0 / 1 | 0.0 / 1.0 | identity | `true` / `false` |
 | string | `read_csv` Int64 rules | `read_csv` Float64 rules | exactly `true` or `false` | identity |
+
+Temporal casts: to and from Int64 (the stored value), to and from String
+(ISO 8601), date ↔ datetime (midnight / floor to the day), datetime → time,
+and between datetime or duration units (finer is exact and checked, coarser
+floors).
 
 String parsing shares `dataframe/parse.mojo` with `read_csv`, so a string casts
 exactly when the same text would load from CSV: no surrounding whitespace, an

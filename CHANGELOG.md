@@ -23,7 +23,17 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - `group_by` and `join` accept keys of any dtype, and `join` supports `how="full"`;
   code that relied on these raising must be updated.
 
+### Fixed
+
+- Float64 text parsing (CSV, casts, inference) no longer accepts malformed
+  numbers that Mojo's parser tolerates, such as `2024-02-28` (read as
+  2024002028.0), `1-2`, or `1.5.5`.
+
 ### Added
+
+- Date, Datetime, Duration, and Time types with a `.dt()` namespace, temporal
+  arithmetic and casts, strptime/strftime-style formats, CSV support,
+  inference, and `date_range`/`datetime_range`.
 
 - Frame utilities, display, concatenation, multi-column sort, multi-key
   grouping and joins, reshaping, deduplication, and a Series API.
