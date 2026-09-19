@@ -59,6 +59,7 @@ from .expr import (
     Node,
     WHEN,
     STR_CONCAT,
+    CAST,
     STR_LEN_CHARS,
     STR_LEN_BYTES,
     STR_STARTS_WITH,
@@ -377,6 +378,15 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
                     shape = ROWS
             if shape != ROWS and has_aggregate:
                 shape = AGGREGATE
+        elif node.op == CAST:
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid cast input")
+            var target = node.text
+            if not (_numeric(target) or target == "bool" or target == "string"):
+                raise Error("Unknown cast dtype: " + target)
+            dtype = target
+            shape = shapes[node.left]
+            has_aggregate = aggregated[node.left]
         elif is_string_op(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid string expression input")

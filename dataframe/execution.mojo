@@ -54,10 +54,12 @@ from .expr import (
     NULL_COUNT,
     WHEN,
     STR_CONCAT,
+    CAST,
     is_reduction,
     is_string_op,
 )
 from .str_kernels import string_op, concat_strings
+from .cast import cast_series
 from .binding import BoundExpr, ROWS, AGGREGATE
 from .column import Column
 from .series import Series
@@ -205,6 +207,16 @@ def _eval[
     var left = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
+    if node.op == CAST:
+        var observed = fit_mask(mask, len(left))
+        # A scalar input is observed if any row is; its offset is not a row.
+        return cast_series(
+            left,
+            node.text,
+            node.integer == 1,
+            offset if len(left) == length else 0,
+            observed.copy() if len(observed) == len(left) else List[Bool](),
+        )
     if is_string_op(node.op):
         return string_op(node, left)
     if node.right < 0:
