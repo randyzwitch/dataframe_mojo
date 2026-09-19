@@ -69,8 +69,8 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 
     def _shares_buffers_with(self, other: Self) -> Bool:
         return (
-            self._data.unsafe_ptr() == other._data.unsafe_ptr()
-            and self._bits.unsafe_ptr() == other._bits.unsafe_ptr()
+            self._data.ptr() == other._data.ptr()
+            and self._bits.ptr() == other._bits.ptr()
         )
 
     def _check_index(self, index: Int) raises:

@@ -1,4 +1,4 @@
-"""when/then/otherwise: branch selection, nulls, and masked evaluation."""
+"""Conditionals (when/then/otherwise): branch selection, nulls, and masked evaluation."""
 from std.testing import (
     TestSuite,
     assert_equal,

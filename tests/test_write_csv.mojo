@@ -1,4 +1,4 @@
-"""write_csv/to_csv_string round-trip through read_csv, plus dialect options."""
+"""CSV writing: write_csv/to_csv_string round-trip through read_csv, plus dialect options."""
 from std.testing import (
     TestSuite,
     assert_equal,

@@ -1,4 +1,4 @@
-"""unique, n_unique, is_duplicated/is_unique, drop_nulls, and fill_null."""
+"""Deduplication: unique, n_unique, is_duplicated/is_unique, drop_nulls, and fill_null."""
 from std.testing import (
     TestSuite,
     assert_equal,
