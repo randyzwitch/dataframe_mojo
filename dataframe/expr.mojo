@@ -34,6 +34,8 @@ comptime FILL_NULL = 33
 comptime FILL_NAN = 34
 # Right's values where left is valid, null where left is null.
 comptime KEEP_NULLS = 35
+# String concatenation with the separator in `text`; nulls propagate.
+comptime STR_CONCAT = 36
 
 # Unary operations occupy 50..79; ROUND keeps its decimals in `integer`.
 comptime NEG = 50
@@ -51,6 +53,24 @@ comptime IS_NAN = 63
 comptime IS_NOT_NAN = 64
 comptime IS_FINITE = 65
 comptime IS_INFINITE = 66
+
+# String operations (unary, parameters in text/text2/integer/min_count).
+comptime STR_LEN_CHARS = 67
+comptime STR_LEN_BYTES = 68
+comptime STR_UPPER = 69
+comptime STR_LOWER = 70
+# integer: 0 both ends, 1 start, 2 end; text: characters ("" = whitespace).
+comptime STR_STRIP = 71
+comptime STR_STARTS_WITH = 72
+comptime STR_ENDS_WITH = 73
+comptime STR_CONTAINS = 74
+# text: pattern, text2: replacement, integer: 1 replaces every occurrence.
+comptime STR_REPLACE = 75
+# integer: code point offset (negative from end), min_count: length (-1 all).
+comptime STR_SLICE = 76
+comptime STR_REVERSE = 77
+# integer: 0 pad start, 1 pad end, 2 zfill; min_count: width; text: fill.
+comptime STR_PAD = 78
 
 # Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
 comptime MIN = 80
@@ -88,6 +108,10 @@ def is_comparison(op: Int) -> Bool:
     return op == GT or op == EQ or (op >= LT and op <= NE)
 
 
+def is_string_op(op: Int) -> Bool:
+    return op >= STR_LEN_CHARS and op <= STR_PAD
+
+
 def is_conditional(op: Int) -> Bool:
     return op == WHEN
 
@@ -106,6 +130,7 @@ struct Node(Copyable):
     var floating: Float64
     var min_count: Int
     var extra: Int
+    var text2: String
 
 
 def _node(
@@ -117,8 +142,11 @@ def _node(
     floating: Float64 = 0,
     min_count: Int = 0,
     extra: Int = -1,
+    text2: String = "",
 ) -> Node:
-    return Node(op, left, right, text, integer, floating, min_count, extra)
+    return Node(
+        op, left, right, text, integer, floating, min_count, extra, text2
+    )
 
 
 @fieldwise_init
@@ -331,6 +359,10 @@ struct Expr(Copyable):
         """Number of null values, as Int64."""
         return self._unary(NULL_COUNT)
 
+    def str(self) -> StrNamespace:
+        """String operations: col("name").str().to_uppercase()."""
+        return StrNamespace(self.copy())
+
     def min(self) -> Self:
         """Smallest non-null value. NaN sorts above every number, so it is
         the minimum only when every valid value is NaN."""
@@ -525,3 +557,117 @@ def when(condition: Expr) -> When:
     branch. Every branch value must share one dtype.
     """
     return When([condition.copy()], List[Expr]())
+
+
+@fieldwise_init
+struct StrNamespace(Copyable):
+    """String expressions. Character operations work on Unicode code points;
+    there is no grapheme clustering or locale-specific case mapping. Nulls
+    propagate. Patterns are literal text; regular expressions are not
+    supported."""
+
+    var _expr: Expr
+
+    def _op(
+        self,
+        op: Int,
+        text: String = "",
+        integer: Int64 = 0,
+        min_count: Int = 0,
+        text2: String = "",
+    ) -> Expr:
+        var nodes = self._expr._nodes.copy()
+        nodes.append(
+            _node(
+                op,
+                len(nodes) - 1,
+                text=text,
+                integer=integer,
+                min_count=min_count,
+                text2=text2,
+            )
+        )
+        return Expr(nodes^, self._expr._name)
+
+    def len_chars(self) -> Expr:
+        """Number of Unicode code points, as Int64."""
+        return self._op(STR_LEN_CHARS)
+
+    def len_bytes(self) -> Expr:
+        """Number of UTF-8 bytes, as Int64."""
+        return self._op(STR_LEN_BYTES)
+
+    def to_uppercase(self) -> Expr:
+        return self._op(STR_UPPER)
+
+    def to_lowercase(self) -> Expr:
+        return self._op(STR_LOWER)
+
+    def strip_chars(self, characters: String = "") -> Expr:
+        """Strip characters from both ends; empty means ASCII whitespace."""
+        return self._op(STR_STRIP, characters, 0)
+
+    def strip_chars_start(self, characters: String = "") -> Expr:
+        return self._op(STR_STRIP, characters, 1)
+
+    def strip_chars_end(self, characters: String = "") -> Expr:
+        return self._op(STR_STRIP, characters, 2)
+
+    def starts_with(self, prefix: String) -> Expr:
+        return self._op(STR_STARTS_WITH, prefix)
+
+    def ends_with(self, suffix: String) -> Expr:
+        return self._op(STR_ENDS_WITH, suffix)
+
+    def contains(self, literal: String) -> Expr:
+        """Literal substring test; regular expressions are not supported."""
+        return self._op(STR_CONTAINS, literal)
+
+    def replace(self, pattern: String, value: String) -> Expr:
+        """Replace the first occurrence of a literal pattern."""
+        return self._op(STR_REPLACE, pattern, 0, text2=value)
+
+    def replace_all(self, pattern: String, value: String) -> Expr:
+        return self._op(STR_REPLACE, pattern, 1, text2=value)
+
+    def slice(self, offset: Int, length: Int = -1) -> Expr:
+        """Code points [offset, offset + length); a negative offset counts
+        from the end and length=-1 takes the rest. Out-of-range parts clip."""
+        return self._op(STR_SLICE, "", Int64(offset), length)
+
+    def head(self, n: Int) -> Expr:
+        return self.slice(0, n)
+
+    def tail(self, n: Int) -> Expr:
+        return self.slice(-n) if n > 0 else self.slice(0, 0)
+
+    def reverse(self) -> Expr:
+        """Reverse code point order."""
+        return self._op(STR_REVERSE)
+
+    def pad_start(self, width: Int, fill_char: String = " ") -> Expr:
+        """Left-pad to width code points; longer strings are unchanged."""
+        return self._op(STR_PAD, fill_char, 0, width)
+
+    def pad_end(self, width: Int, fill_char: String = " ") -> Expr:
+        return self._op(STR_PAD, fill_char, 1, width)
+
+    def zfill(self, width: Int) -> Expr:
+        """Left-pad with zeros, after a leading + or - sign."""
+        return self._op(STR_PAD, "0", 2, width)
+
+
+def concat_str(exprs: List[Expr], separator: String = "") raises -> Expr:
+    """Join String expressions row-wise; any null input makes the row null."""
+    if len(exprs) == 0:
+        raise Error("concat_str requires at least one expression")
+    var result = exprs[0].copy()
+    for i in range(1, len(exprs)):
+        var nodes = result._nodes.copy()
+        var offset = len(nodes)
+        _append_shifted(nodes, exprs[i]._nodes, offset)
+        nodes.append(
+            _node(STR_CONCAT, offset - 1, len(nodes) - 1, text=separator)
+        )
+        result = Expr(nodes^, result._name)
+    return result^
