@@ -15,6 +15,7 @@ With [Pixi](https://pixi.sh) installed, from this directory:
 pixi run test
 pixi run example
 pixi run build
+pixi run bench-csv
 ./build/sales
 ```
 
@@ -55,7 +56,38 @@ def main() raises:
 ```
 
 Run `pixi run example` to see both the original column-kernel example and the
-expression pipeline. `build/expressions` is the compiled expression example.
+expression and CSV pipelines. `build/expressions` and `build/read_csv` are the
+compiled examples.
+
+## CSV ingestion
+
+`read_csv` reads local UTF-8 CSV files without Python or another dataframe
+runtime. The first API requires an explicit schema so identifiers and large
+integers cannot be silently inferred as another type:
+
+```mojo
+from dataframe import CsvField, CsvSchema, read_csv
+
+var frame = read_csv(
+    "sales.csv",
+    CsvSchema([
+        CsvField.string("region", False),
+        CsvField.float64("amount"),
+    ]),
+)
+```
+
+It accepts LF or CRLF records, an optional UTF-8 BOM, quoted commas/newlines,
+and doubled quotes. Empty unquoted fields are null; quoted empty strings are
+values. Headers must exactly match the schema. Whitespace is preserved and
+typed fields do not trim it. Boolean values are exactly `true` or `false`.
+Float64 accepts the standard parser's values, including `nan`, and only explicit
+`inf`, `+inf`, `-inf`, `Infinity`, `+Infinity`, and `-Infinity` may be infinite.
+
+The reader consumes bounded file buffers and retains tokenizer state across
+them. Its scalar structural scanner is the correctness reference for later SIMD
+scanning and record-boundary-aware parallel decoding. See the complete
+[CSV contract](docs/csv.md).
 
 Use typed literals: there is no implicit Int64/Float64 promotion. Expressions
 support `+`, `-`, `*`, `>`, `.eq(...)`, `.alias(...)`, `.sum(min_count=0)`, and
