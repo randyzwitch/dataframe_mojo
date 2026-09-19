@@ -142,6 +142,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def dtypes(self) -> List[String]`
 - `def column(self, name: String) -> Series`
   Return an owned copy. Column lookup is linear in the schema width.
+- `def lazy(self) -> LazyFrame`
+  Start a lazy query over this frame; see LazyFrame.
 - `def get_column(self, name: String) -> Series`
 - `def null_count(self) -> Self`
   One row holding each column's null count as Int64.
@@ -401,6 +403,46 @@ The last column in the schema.
 def last() -> Expr
 ```
 
+## `LazyFrame`
+
+A deferred query; build it with DataFrame.lazy() or scan_csv().
+
+- `def __init__(out self, frame: DataFrame)`
+- `def __init__(out self, var nodes: List[PlanNode], var frames: List[DataFrame], var schemas: List[Optional[CsvSchema]])`
+- `def filter(self, predicate: Expr) -> Self`
+- `def select(self, expr: Expr) -> Self`
+- `def select(self, names: List[String]) -> Self`
+- `def select_exprs(self, exprs: List[Expr]) -> Self`
+- `def with_columns(self, expr: Expr) -> Self`
+- `def with_columns(self, exprs: List[Expr]) -> Self`
+- `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> LazyGroupBy`
+- `def group_by(self, key: String, *, maintain_order: Bool = False) -> LazyGroupBy`
+- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> Self`
+- `def sort(self, by: String, descending: Bool = False) -> Self`
+- `def slice(self, offset: Int, length: Int = Int(-1)) -> Self`
+- `def head(self, n: Int = Int(5)) -> Self`
+- `def limit(self, n: Int = Int(5)) -> Self`
+- `def unique(self, subset: List[String] = List(), *, keep: String = "any", maintain_order: Bool = False) -> Self`
+- `def drop(self, names: List[String]) -> Self`
+- `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right") -> Self`
+  Join with another lazy plan; see DataFrame.join.
+- `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right") -> Self`
+- `def collect(self, *, optimize: Bool = True) -> DataFrame`
+  Optimize (unless disabled) and execute the plan.
+- `def fetch(self, n: Int = Int(5)) -> DataFrame`
+  Collect only the first n rows of the result.
+- `def collect_schema(self) -> List[String]`
+  Output names and dtypes as "name: dtype", computed without reading rows: every scan yields zero rows, then the plan runs as usual, so binding validates each expression exactly as collect would.
+- `def explain(self, *, optimize: Bool = True) -> String`
+  The (optimized) plan, one operator per line, root first.
+
+## `LazyGroupBy`
+
+A pending lazy grouping; finish it with agg.
+
+- `def agg(self, exprs: List[Expr]) -> LazyFrame`
+- `def agg(self, expr: Expr) -> LazyFrame`
+
 ## `lit`
 
 A typed scalar literal; there is no implicit numeric promotion.
@@ -447,6 +489,18 @@ def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separa
 
 ```mojo
 def read_csv(path: String, *, infer_schema_length: Int = Int(10000), schema_overrides: Dict[String, String] = Dict(), has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+## `scan_csv`
+
+Lazily read a CSV file with an inferred schema. Nothing is read until collect; projection and head() are pushed into the reader.
+
+```mojo
+def scan_csv(path: String) -> LazyFrame
+```
+
+```mojo
+def scan_csv(path: String, schema: CsvSchema) -> LazyFrame
 ```
 
 ## `Series`

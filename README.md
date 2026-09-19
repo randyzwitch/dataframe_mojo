@@ -153,6 +153,8 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 - `pivot` and `unpivot` reshaping.
 - A `Series` API (operators, reductions, `value_counts`, `unique`, `sort`)
   backed by the same expression kernels.
+- Lazy queries (`frame.lazy()`, `scan_csv`) with predicate, projection, and
+  slice pushdown and `explain()`; see [lazy queries](docs/lazy.md).
 - Bounded table display for `DataFrame` and `Series` (`print(frame)`,
   `to_string(max_rows=..., ...)`, `glimpse()`).
 - `head`/`tail`/`slice`/`reverse`, `drop`/`rename`/`with_row_index`, row and
@@ -193,7 +195,7 @@ columns per operation; intermediates are still materialized per batch. Strings u
 buffers. There are no performance claims yet, and there is no Arrow export.
 The underscore-prefixed fields are internal and must not be mutated by callers.
 
-There is no lazy query planner, thread scheduler, CSV/Parquet reader, GPU execution, index
+There is no thread scheduler, Parquet reader, GPU execution, index
 alignment, implicit dtype coercion, or dataframe backend
 adapter. Build input columns in memory for this first version.
 
