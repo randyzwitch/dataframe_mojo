@@ -125,7 +125,10 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
             var needed = (start + count + 7) // 8
             while len(self._validity) > needed:
                 _ = self._validity.pop()
-        self._values.reserve(start + count)
+        # Grow geometrically: batch reassembly appends many small chunks, and
+        # an exact reservation would copy the whole column on every append.
+        if self._values.capacity() < start + count:
+            self._values.reserve(max(start + count, 2 * self._values.capacity()))
         for i in range(count):
             self._values.append(other._values[i].copy())
 

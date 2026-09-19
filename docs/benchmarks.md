@@ -72,6 +72,24 @@ Other focused benchmarks: `bench-csv`, `bench-concat`, `bench-sort`,
 | grouped_sum_count | 1,000,000 | 10pct | scalar | high | 55.54 | 18.0 |
 | grouped_sum_count | 1,000,000 | 10pct | scalar | skewed | 53.84 | 18.6 |
 
+## After fixing quadratic batch reassembly
+
+The baseline exposed a bug: appending each evaluated batch to the output
+reserved exactly the new length, so every append reallocated and copied the
+whole column, making reassembly quadratic in the number of batches. With
+geometric growth, the 1,000,000-row workloads became:
+
+| workload | nulls | before ms | after ms |
+|---|---|---|---|
+| arithmetic_chain (simd4) | none | 191.9 | 58.3 |
+| arithmetic_chain (scalar) | none | 183.3 | 61.8 |
+| nullable_compare | none | 37.1 | 26.7 |
+| filter | none | 46.0 | 36.1 |
+| global_sum / global_count | none | 11.7 / 8.8 | 11.8 / 9.0 |
+
+The analysis below still holds: per-node materialization and copying dominate
+the remaining arithmetic time, and SIMD is only slightly faster than scalar.
+
 ## What the baseline shows
 
 - The five-node Float64 arithmetic chain runs at about 5 million rows/s, and the
