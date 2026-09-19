@@ -8,6 +8,7 @@ from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows
+from .expr_kernels import choose
 from .display import render_frame, render_glimpse
 
 
@@ -479,69 +480,230 @@ struct DataFrame(Copyable, Sized, Writable):
         on: String,
         how: String = "inner",
         suffix: String = "_right",
+        coalesce: Bool = True,
     ) raises -> Self:
-        """Hash join on one shared string column; 'inner' and 'left' supported.
+        return self.join(
+            right,
+            left_on=[on],
+            right_on=[on],
+            how=how,
+            suffix=suffix,
+            coalesce=coalesce,
+        )
 
-        Null keys never match. Emit left rows in input order and each row's
-        right matches in right input order. Duplicate keys produce all pairs.
-        Overlapping right names gain suffix; remaining collisions raise.
+    def join(
+        self,
+        right: Self,
+        on: List[String],
+        how: String = "inner",
+        suffix: String = "_right",
+        coalesce: Bool = True,
+    ) raises -> Self:
+        return self.join(
+            right,
+            left_on=on,
+            right_on=on,
+            how=how,
+            suffix=suffix,
+            coalesce=coalesce,
+        )
+
+    def join(
+        self,
+        right: Self,
+        *,
+        left_on: List[String],
+        right_on: List[String],
+        how: String = "inner",
+        suffix: String = "_right",
+        coalesce: Bool = True,
+    ) raises -> Self:
+        """Hash join on key columns of any dtype; null keys never match.
+
+        how: inner, left, right, full, semi, anti. Row order: inner, left,
+        semi, and anti follow left rows (each left row's matches in right
+        order); right follows right rows (matches in left order); full is the
+        left join followed by unmatched right rows in right order.
+        Output: left columns, then right non-key columns, with suffix on
+        names that collide with left names. Key columns keep left names and
+        take whichever side is present; with how="full" and coalesce=False,
+        right keys are kept as separate columns instead.
         """
-        if how != "inner" and how != "left":
-            raise Error("Join how must be 'inner' or 'left'")
-        var left_key_index = self._index(on)
-        var right_key_index = right._index(on)
-        var left_keys = self._columns[left_key_index].string()
-        var right_keys = right._columns[right_key_index].string()
+        if how == "cross":
+            raise Error(
+                "A cross join takes no keys; use join(right, how='cross')"
+            )
+        if (
+            how != "inner"
+            and how != "left"
+            and how != "right"
+            and how != "full"
+            and how != "semi"
+            and how != "anti"
+        ):
+            raise Error(
+                "Join how must be inner, left, right, full, semi, anti, or cross"
+            )
+        if len(left_on) == 0 or len(left_on) != len(right_on):
+            raise Error(
+                "Join requires the same nonzero number of left and right keys"
+            )
+        var left_keys = List[Int]()
+        var right_keys = List[Int]()
+        var seen = Dict[String, Bool]()
+        for i in range(len(left_on)):
+            if left_on[i] in seen:
+                raise Error("Duplicate join key: " + left_on[i])
+            seen[left_on[i]] = True
+            left_keys.append(self._index(left_on[i]))
+            right_keys.append(right._index(right_on[i]))
+            var ltype = self._columns[left_keys[i]].dtype()
+            var rtype = right._columns[right_keys[i]].dtype()
+            if ltype != rtype:
+                raise Error(
+                    "Join key dtypes differ: "
+                    + left_on[i]
+                    + " is "
+                    + ltype
+                    + " but "
+                    + right_on[i]
+                    + " is "
+                    + rtype
+                )
+        var keep_right_keys = how == "full" and not coalesce
+        var right_output = List[Int]()
+        var right_names = List[String]()
+        if how != "semi" and how != "anti":
+            var names = Dict[String, Bool]()
+            for column in self._columns:
+                names[column.name()] = True
+            var left_names = names.copy()
+            for i in range(right.width()):
+                if not keep_right_keys and i in right_keys:
+                    continue
+                var name = right._columns[i].name()
+                if name in left_names:
+                    name += suffix
+                if name in names:
+                    raise Error("Join output name collision: " + name)
+                names[name] = True
+                right_output.append(i)
+                right_names.append(name)
+        var ids = _joint_key_ids(self, right, left_keys, right_keys)
+        var left_ids = ids[0].copy()
+        var right_ids = ids[1].copy()
+        var count = ids[2]
+        var right_buckets = List[List[Int]](length=count, fill=List[Int]())
+        for j in range(len(right_ids)):
+            if right_ids[j] >= 0:
+                right_buckets[right_ids[j]].append(j)
+        var left_rows = List[Int]()
+        var right_rows = List[Int]()
+        if how == "semi" or how == "anti":
+            for i in range(len(left_ids)):
+                var matched = (
+                    left_ids[i] >= 0 and len(right_buckets[left_ids[i]]) > 0
+                )
+                if matched == (how == "semi"):
+                    left_rows.append(i)
+            return self.take(left_rows)
+        if how == "right":
+            var left_buckets = List[List[Int]](length=count, fill=List[Int]())
+            for i in range(len(left_ids)):
+                if left_ids[i] >= 0:
+                    left_buckets[left_ids[i]].append(i)
+            for j in range(len(right_ids)):
+                var id = right_ids[j]
+                if id >= 0 and len(left_buckets[id]) > 0:
+                    for i in left_buckets[id]:
+                        left_rows.append(i)
+                        right_rows.append(j)
+                else:
+                    left_rows.append(-1)
+                    right_rows.append(j)
+        else:
+            var right_matched = List[Bool](length=len(right_ids), fill=False)
+            for i in range(len(left_ids)):
+                var id = left_ids[i]
+                if id >= 0 and len(right_buckets[id]) > 0:
+                    for j in right_buckets[id]:
+                        left_rows.append(i)
+                        right_rows.append(j)
+                        right_matched[j] = True
+                elif how != "inner":
+                    left_rows.append(i)
+                    right_rows.append(-1)
+            if how == "full":
+                for j in range(len(right_ids)):
+                    if not right_matched[j]:
+                        left_rows.append(-1)
+                        right_rows.append(j)
+        var columns = List[Series]()
+        var sides_mixed = how == "right" or how == "full"
+        for c in range(self.width()):
+            var column = self._columns[c].take_or_null(left_rows)
+            var key = -1
+            for k in range(len(left_keys)):
+                if left_keys[k] == c:
+                    key = k
+            if key >= 0 and sides_mixed and not keep_right_keys:
+                var from_right = right._columns[right_keys[key]].take_or_null(
+                    right_rows
+                )
+                var use_left = List[Bool](capacity=len(left_rows))
+                for i in left_rows:
+                    use_left.append(i >= 0)
+                column = choose(use_left, column, from_right).renamed(
+                    self._columns[c].name()
+                )
+            columns.append(column^)
+        for k in range(len(right_output)):
+            columns.append(
+                right._columns[right_output[k]]
+                .take_or_null(right_rows)
+                .renamed(right_names[k])
+            )
+        return Self(columns^, height=len(left_rows))
+
+    def join(
+        self, right: Self, *, how: String, suffix: String = "_right"
+    ) raises -> Self:
+        """Cross join: every left row paired with every right row, left-major.
+
+        Right names that collide with left names gain the suffix.
+        """
+        if how != "cross":
+            raise Error("Join how='" + how + "' requires key columns")
+        var total = self._height * right._height
+        if right._height != 0 and total // right._height != self._height:
+            raise Error("Cross join row count overflows")
         var names = Dict[String, Bool]()
         for column in self._columns:
             names[column.name()] = True
         var left_names = names.copy()
         var right_names = List[String]()
-        for i in range(right.width()):
-            if i == right_key_index:
-                continue
-            var name = right._columns[i].name()
+        for column in right._columns:
+            var name = column.name()
             if name in left_names:
                 name += suffix
-            # Validate against both original left and preceding output names.
             if name in names:
                 raise Error("Join output name collision: " + name)
             names[name] = True
             right_names.append(name)
-        var lookup = Dict[String, List[Int]]()
-        for i in range(right.height()):
-            if not right_keys.is_null(i):
-                var key = right_keys.value(i)
-                if key not in lookup:
-                    lookup[key] = List[Int]()
-                lookup[key].append(i)
-        var left_rows = List[Int]()
-        var right_rows = List[Int]()
-        for i in range(self.height()):
-            var matched = False
-            if not left_keys.is_null(i):
-                var key = left_keys.value(i)
-                if key in lookup:
-                    for j in lookup[key]:
-                        left_rows.append(i)
-                        right_rows.append(j)
-                    matched = True
-            if not matched and how == "left":
+        var left_rows = List[Int](capacity=total)
+        var right_rows = List[Int](capacity=total)
+        for i in range(self._height):
+            for j in range(right._height):
                 left_rows.append(i)
-                right_rows.append(-1)
+                right_rows.append(j)
         var columns = List[Series]()
         for column in self._columns:
             columns.append(column.take(left_rows))
-        var name_index = 0
-        for i in range(right.width()):
-            if i != right_key_index:
-                columns.append(
-                    right._columns[i]
-                    .take_or_null(right_rows)
-                    .renamed(right_names[name_index])
-                )
-                name_index += 1
-        return Self(columns^, height=len(left_rows))
+        for k in range(right.width()):
+            columns.append(
+                right._columns[k].take(right_rows).renamed(right_names[k])
+            )
+        return Self(columns^, height=total)
 
     def select(
         self, expression: Expr, *, batch_size: Int = 1024
@@ -661,6 +823,30 @@ struct DataFrame(Copyable, Sized, Writable):
                 result = result._broadcast(self._height)
             columns.append(result^)
         return GroupBy(self.copy(), columns^, maintain_order)
+
+
+def _joint_key_ids(
+    left: DataFrame,
+    right: DataFrame,
+    left_keys: List[Int],
+    right_keys: List[Int],
+) raises -> Tuple[List[Int], List[Int], Int]:
+    """Encode both sides' keys in one id space; null keys get id -1."""
+    var stacked = List[Series](capacity=len(left_keys))
+    for k in range(len(left_keys)):
+        stacked.append(
+            left._columns[left_keys[k]].append(right._columns[right_keys[k]])
+        )
+    var keys = encode_rows(stacked, nulls_equal=False)
+    var n = left.height()
+    var left_ids = List[Int](capacity=n)
+    var right_ids = List[Int](capacity=right.height())
+    for i in range(len(keys.ids)):
+        if i < n:
+            left_ids.append(keys.ids[i])
+        else:
+            right_ids.append(keys.ids[i])
+    return (left_ids^, right_ids^, keys.count())
 
 
 def concat(

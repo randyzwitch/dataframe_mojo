@@ -149,7 +149,8 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 - Hash grouping by any number of columns or key expressions of any dtype.
 - Stable multi-column sorting with per-column direction and null placement,
   plus `arg_sort`, `top_k`, and `bottom_k`.
-- Inner/left hash joins on one String key, including many-to-many matches.
+- Hash joins on any number of keys of any dtype: inner, left, right, full,
+  semi, anti, and cross, with `left_on`/`right_on`.
 - Expression IR, schema binding, scalar broadcasting, and grouped aggregates.
 - Explicit SIMD Float64 arithmetic/comparison kernels and mergeable reduction states.
 - Contract tests for validation, nulls, overflow, ordering, joins, empty shapes,
@@ -182,7 +183,7 @@ buffers. There are no performance claims yet, and there is no Arrow export.
 The underscore-prefixed fields are internal and must not be mutated by callers.
 
 There is no lazy query planner, thread scheduler, CSV/Parquet reader, GPU execution, index
-alignment, implicit dtype coercion, multi-key joins, or dataframe backend
+alignment, implicit dtype coercion, or dataframe backend
 adapter. Build input columns in memory for this first version.
 
 See [semantics](docs/semantics.md) for the behavior the tests promise and

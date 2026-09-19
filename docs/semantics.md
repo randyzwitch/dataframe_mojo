@@ -142,16 +142,38 @@ rank-based sort with the previous per-comparison comparator (kept as
 
 ## Joins
 
-Only inner and left joins on one shared String column are supported. Null keys
-never match, including another null. Empty strings are ordinary matching keys.
-Duplicate keys emit all matching pairs. Output traverses left rows in order;
-for each left row it traverses right matches in right input order.
+`join(right, on, how="inner", suffix="_right", coalesce=True)` takes one key
+name or a list; `join(right, left_on=[...], right_on=[...], ...)` pairs keys
+with different names. Keys may be any dtype, but each pair must have the same
+dtype, key lists must be nonempty and equally long, and a left key may appear
+once. Null keys never match, including another null. Empty strings are ordinary
+keys. Float64 keys match structurally: every NaN matches every NaN, and `-0.0`
+matches `0.0`. Duplicate keys emit every matching pair.
 
-The shared key appears once, using the left column. Other left columns come first,
-followed by right non-key columns in schema order. Right column names that overlap
-left names gain the suffix (default `_right`). Any remaining output collision
-raises. Unmatched left rows have null right-side values. Empty inputs retain the
-joined output schema. Unsupported join modes or key types raise explicitly.
+| `how` | Rows | Row order |
+|---|---|---|
+| `inner` | matching pairs | left order; each left row's matches in right order |
+| `left` | every left row; unmatched right side null | as inner |
+| `right` | every right row; unmatched left side null | right order; each right row's matches in left order |
+| `full` | left join plus unmatched right rows | left join order, then unmatched right rows in right order |
+| `semi` | left rows with at least one match, once each | left order |
+| `anti` | left rows with no match (including null keys) | left order |
+| `cross` | every pair, via `join(right, how="cross")` | left-major |
+
+Output columns are the left columns, then the right non-key columns in right
+schema order. Right names that collide with left names gain `suffix`; any
+remaining collision raises before any work is done. Key columns keep their left
+names and positions. For `right` and `full` joins their values come from
+whichever side is present, so a right-only row still shows its key. With
+`how="full", coalesce=False`, left keys are null for right-only rows and the
+right key columns are kept as ordinary right columns. `semi` and `anti` return
+only left columns. Empty inputs keep the joined schema; `cross` checks that the
+output row count does not overflow.
+
+Both sides' keys are encoded together by the shared row-key layer
+(`dataframe/hashing.mojo`) and right rows are bucketed by dense key id, so the
+probe does no dictionary lookup. `pixi run bench-join` compares side sizes and
+key skew. Unsupported join modes or key dtype mismatches raise explicitly.
 
 ## Ownership and errors
 
