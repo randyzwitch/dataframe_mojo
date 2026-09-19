@@ -146,7 +146,7 @@ not guaranteed. See [the expression contract](docs/expressions.md).
   cell access through the tagged `AnyValue`, null counts, and structural `equals`.
 - Nullable greater-than comparisons, Float64 scalar multiplication, and
   Int64/Float64 sums.
-- Hash grouping by one String column, summing one Int64 or Float64 column.
+- Hash grouping by any number of columns or key expressions of any dtype.
 - Stable multi-column sorting with per-column direction and null placement,
   plus `arg_sort`, `top_k`, and `bottom_k`.
 - Inner/left hash joins on one String key, including many-to-many matches.
@@ -182,7 +182,7 @@ buffers. There are no performance claims yet, and there is no Arrow export.
 The underscore-prefixed fields are internal and must not be mutated by callers.
 
 There is no lazy query planner, thread scheduler, CSV/Parquet reader, GPU execution, index
-alignment, implicit dtype coercion, multi-key grouping/join, or dataframe backend
+alignment, implicit dtype coercion, multi-key joins, or dataframe backend
 adapter. Build input columns in memory for this first version.
 
 See [semantics](docs/semantics.md) for the behavior the tests promise and

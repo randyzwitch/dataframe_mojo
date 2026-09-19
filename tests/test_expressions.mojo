@@ -312,8 +312,8 @@ def test_group_validation() raises:
         _ = grouped.agg(col("x").sum().alias("key"))
     with assert_raises():
         _ = grouped.agg([col("x").sum(), col("x").count()])
-    with assert_raises():
-        _ = fixture().group_by("n")
+    with assert_raises(contains="Unknown column"):
+        _ = fixture().group_by("missing")
     with assert_raises():
         _ = grouped.agg(col("x").sum(), batch_size=0)
 

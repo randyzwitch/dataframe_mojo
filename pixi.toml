@@ -17,3 +17,4 @@ build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales &&
 bench-csv = "mojo run -I . benchmarks/bench_csv.mojo"
 bench-concat = "mojo run -I . benchmarks/bench_concat.mojo"
 bench-sort = "mojo run -I . benchmarks/bench_sort.mojo"
+bench-group-by = "mojo run -I . benchmarks/bench_group_by.mojo"
