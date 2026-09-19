@@ -50,9 +50,9 @@ def main() raises:
         )),
     ])
     var result = sales.filter(
-        col("amount") > lit(Float64(0))
+        col("amount") > 0
     ).with_columns(
-        (col("amount") * lit(Float64(0.9))).alias("net")
+        (col("amount") * 0.9).alias("net")
     ).group_by("region", maintain_order=True).agg([
         col("net").sum().alias("revenue"),
         col("net").count().alias("sales"),

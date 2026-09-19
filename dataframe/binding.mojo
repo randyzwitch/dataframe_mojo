@@ -3,6 +3,8 @@ from .expr import (
     Expr,
     COL,
     LIT_INT,
+    UNTYPED,
+    Node,
     LIT_FLOAT,
     LIT_BOOL,
     LIT_STRING,
@@ -101,7 +103,7 @@ from .expr import (
     is_comparison,
 )
 from .series import Series
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .temporal import parse_every
 
 comptime SCALAR = 0
@@ -480,6 +482,120 @@ def _dt_dtype(node: Node, input: DataType) raises -> DataType:
     return DataType.INT64
 
 
+def _literal_text(node: Node) -> String:
+    if node.op == LIT_INT:
+        return String(node.integer)
+    return String(node.floating)
+
+
+def _check_adoption(node: Node, target: DataType) raises:
+    """Raise unless an untyped literal can take `target` exactly."""
+    var kind = "integer" if node.op == LIT_INT else "float"
+    var hint = (
+        "; write lit(...) with an explicit type, or cast the other operand"
+    )
+    if not target.is_numeric():
+        raise Error(
+            kind
+            + " literal "
+            + _literal_text(node)
+            + " cannot be used with "
+            + target.name()
+            + hint
+        )
+    if node.op == LIT_FLOAT and not target.is_float():
+        raise Error(
+            "float literal "
+            + _literal_text(node)
+            + " cannot adopt "
+            + target.name()
+            + " (no implicit float-to-integer conversion)"
+            + hint
+        )
+    if node.op == LIT_INT and target.is_integer():
+        var value = node.integer.cast[DType.int128]()
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            comptime if D.is_integral():
+                if target == DataType.of(D) and (
+                    value < Scalar[D].MIN.cast[DType.int128]()
+                    or value > Scalar[D].MAX.cast[DType.int128]()
+                ):
+                    raise Error(
+                        "integer literal "
+                        + _literal_text(node)
+                        + " does not fit "
+                        + target.name()
+                        + hint
+                    )
+
+
+def _adopt(
+    mut nodes: List[Node],
+    mut types: List[DataType],
+    root: Int,
+    target: DataType,
+) raises:
+    """Give every untyped node under `root` the dtype `target`.
+
+    Literal leaves are range-checked and rewritten to typed literals; an
+    integer adopting a float type becomes a float literal (so Float64
+    expressions stay fusible).
+    """
+    if root < 0 or not types[root].is_untyped():
+        return
+    types[root] = target
+    var op = nodes[root].op
+    if (op == LIT_INT or op == LIT_FLOAT) and nodes[root].text == UNTYPED:
+        _check_adoption(nodes[root], target)
+        if op == LIT_INT and target.is_float():
+            nodes[root].op = LIT_FLOAT
+            nodes[root].floating = Float64(nodes[root].integer)
+        nodes[root].text = target.name()
+        return
+    var left = nodes[root].left
+    var right = nodes[root].right
+    var extra = nodes[root].extra
+    _adopt(nodes, types, left, target)
+    _adopt(nodes, types, right, target)
+    _adopt(nodes, types, extra, target)
+
+
+def _default(
+    mut nodes: List[Node], mut types: List[DataType], root: Int
+) raises:
+    """Give an untyped subexpression its standalone type (Int64/Float64)."""
+    if root >= 0 and types[root].is_untyped():
+        _adopt(nodes, types, root, types[root].default())
+
+
+def _join_untyped(a: DataType, b: DataType) -> DataType:
+    """The untyped result of combining two untyped operands."""
+    if a == DataType.UNTYPED_FLOAT or b == DataType.UNTYPED_FLOAT:
+        return DataType.UNTYPED_FLOAT
+    return DataType.UNTYPED_INT
+
+
+def _stays_untyped(op: Int) -> Bool:
+    """Binary operations whose untyped operands keep the result untyped."""
+    return (
+        op == ADD
+        or op == SUB
+        or op == MUL
+        or op == FLOORDIV
+        or op == MOD
+        or op == POW
+        or op == CLIP_LOW
+        or op == CLIP_HIGH
+    )
+
+
+def _target(other: DataType) -> DataType:
+    """What an untyped operand adopts next to `other`: Int64 beside temporal
+    types (for duration * n), otherwise `other` itself."""
+    return DataType.INT64 if other.is_temporal() else other
+
+
 def bind(
     expr: Expr, columns: List[Series], fuse: Bool = True
 ) raises -> BoundExpr:
@@ -489,8 +605,18 @@ def bind(
     var shapes = List[Int]()
     var aggregated = List[Bool]()
     var sources = List[Int]()
-    for i in range(len(expr._nodes)):
-        var node = expr._nodes[i].copy()
+    # Untyped literals are resolved in place, so bind works on a copy.
+    var nodes = expr._nodes.copy()
+    for i in range(len(nodes)):
+        var node = nodes[i].copy()
+        # Operations other than binary arithmetic/comparison, negation, and
+        # when/then branches give untyped inputs their default types first.
+        if not (
+            is_binary(node.op) or is_conditional(node.op) or node.op == NEG
+        ):
+            _default(nodes, types, node.left)
+            _default(nodes, types, node.right)
+            _default(nodes, types, node.extra)
         var dtype: DataType
         var shape = SCALAR
         var has_aggregate = False
@@ -505,13 +631,19 @@ def bind(
             dtype = columns[source].dtype()
             shape = ROWS
         elif node.op == LIT_INT:
-            dtype = DataType.INT64 if node.text == "" else DataType.parse(
-                node.text
-            )
+            if node.text == UNTYPED:
+                dtype = DataType.UNTYPED_INT
+            else:
+                dtype = DataType.INT64 if node.text == "" else DataType.parse(
+                    node.text
+                )
         elif node.op == LIT_FLOAT:
-            dtype = DataType.FLOAT64 if node.text == "" else DataType.parse(
-                node.text
-            )
+            if node.text == UNTYPED:
+                dtype = DataType.UNTYPED_FLOAT
+            else:
+                dtype = DataType.FLOAT64 if node.text == "" else DataType.parse(
+                    node.text
+                )
         elif node.op == LIT_BOOL:
             dtype = DataType.BOOL
         elif node.op == LIT_STRING:
@@ -546,6 +678,20 @@ def bind(
                 or node.extra >= i
             ):
                 raise Error("Invalid conditional expression inputs")
+            # An untyped branch adopts the other branch's type.
+            var then_type = types[node.right]
+            var else_type = types[node.extra] if node.extra >= 0 else then_type
+            if then_type.is_untyped() and not else_type.is_untyped():
+                _adopt(nodes, types, node.right, _target(else_type))
+            elif else_type.is_untyped() and not then_type.is_untyped():
+                _adopt(nodes, types, node.extra, _target(then_type))
+            else:
+                var joined = _join_untyped(
+                    then_type, else_type
+                ).default() if then_type.is_untyped() else then_type
+                if then_type.is_untyped():
+                    _adopt(nodes, types, node.right, joined)
+                    _adopt(nodes, types, node.extra, joined)
             if types[node.left] != DataType.BOOL:
                 raise Error(
                     "when requires a bool predicate, found "
@@ -678,7 +824,11 @@ def bind(
         elif is_unary(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid unary expression input")
-            dtype = _unary_dtype(node.op, types[node.left])
+            if node.op == NEG and types[node.left].is_untyped():
+                dtype = types[node.left]  # -(untyped) stays untyped
+            else:
+                _default(nodes, types, node.left)
+                dtype = _unary_dtype(node.op, types[node.left])
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif is_binary(node.op):
@@ -689,7 +839,26 @@ def bind(
                 or node.right >= i
             ):
                 raise Error("Invalid binary expression inputs")
-            dtype = _binary_dtype(node.op, types[node.left], types[node.right])
+            var left = types[node.left]
+            var right = types[node.right]
+            if left.is_untyped() and right.is_untyped():
+                if _stays_untyped(node.op):
+                    dtype = _join_untyped(left, right)
+                else:
+                    var joined = _join_untyped(left, right).default()
+                    _adopt(nodes, types, node.left, joined)
+                    _adopt(nodes, types, node.right, joined)
+                    dtype = _binary_dtype(
+                        node.op, types[node.left], types[node.right]
+                    )
+            else:
+                if left.is_untyped():
+                    _adopt(nodes, types, node.left, _target(right))
+                elif right.is_untyped():
+                    _adopt(nodes, types, node.right, _target(left))
+                dtype = _binary_dtype(
+                    node.op, types[node.left], types[node.right]
+                )
             has_aggregate = aggregated[node.left] or aggregated[node.right]
             if shapes[node.left] == ROWS or shapes[node.right] == ROWS:
                 shape = ROWS
@@ -701,7 +870,10 @@ def bind(
         shapes.append(shape)
         aggregated.append(has_aggregate)
         sources.append(source)
-    var fusible = _fusible(expr, types, fuse)
+    # A standalone untyped result takes its default type.
+    _default(nodes, types, len(nodes) - 1)
+    var resolved = Expr(nodes^, expr._name)
+    var fusible = _fusible(resolved, types, fuse)
     return BoundExpr(
-        expr.copy(), types^, shapes^, aggregated^, sources^, fusible^
+        resolved^, types^, shapes^, aggregated^, sources^, fusible^
     )

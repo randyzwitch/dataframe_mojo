@@ -1,5 +1,5 @@
 """Read typed CSV data and execute a native expression pipeline."""
-from dataframe import CsvField, CsvSchema, col, lit, read_csv
+from dataframe import CsvField, CsvSchema, col, read_csv
 
 
 def main() raises:
@@ -13,8 +13,8 @@ def main() raises:
         ),
     )
     var result = (
-        sales.filter(col("amount") > lit(Float64(0)))
-        .with_columns((col("amount") * lit(Float64(0.9))).alias("net"))
+        sales.filter(col("amount") > 0)
+        .with_columns((col("amount") * 0.9).alias("net"))
         .group_by("region", maintain_order=True)
         .agg(
             [

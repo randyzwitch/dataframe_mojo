@@ -2,6 +2,9 @@
 from std.collections import Optional
 from .dtype import DataType
 
+# Node text of an untyped numeric literal; the binder replaces it with the
+# adopted dtype name.
+comptime UNTYPED = "?"
 comptime COL = 0
 comptime LIT_INT = 1
 comptime LIT_FLOAT = 2
@@ -215,6 +218,30 @@ struct Expr(Copyable):
         """A when/then chain without otherwise yields null for unmatched rows."""
         self = then.end()
 
+    # Bare numbers and Bools convert to literals wherever an Expr is expected:
+    # `col("x") > 0`, `col("x") * 2.5`, `.fill_null(0)`, `when(...).then(1)`,
+    # `1 + col("x")`. Strings are not implicit (a list literal of strings
+    # would be ambiguous between List[String] and List[Expr] overloads); the
+    # comparison, fill_null, is_in, and then/otherwise methods take String
+    # overloads instead, so `col("k") == "a"` still works. Numbers are *untyped*: at bind time
+    # an integer adopts the other operand's numeric dtype (range-checked) and
+    # a float adopts Float32/Float64; alone they default to Int64/Float64.
+    # Use lit(...) to fix a type explicitly.
+
+    @implicit
+    def __init__(out self, value: Int):
+        self = Expr(
+            [_node(LIT_INT, integer=Int64(value), text=UNTYPED)], "literal"
+        )
+
+    @implicit
+    def __init__(out self, value: Float64):
+        self = Expr([_node(LIT_FLOAT, floating=value, text=UNTYPED)], "literal")
+
+    @implicit
+    def __init__(out self, value: Bool):
+        self = lit(value)
+
     def alias(self, name: String) -> Self:
         var result = self.copy()
         result._name = name
@@ -282,6 +309,39 @@ struct Expr(Copyable):
     def __pow__(self, other: Self) -> Self:
         return self._binary(other, POW)
 
+    # Reflected forms, so a bare number can come first: `1 + col("x")`,
+    # `10 - col("x")`, `2 ** col("n")`. The literal is the left operand.
+
+    def __radd__(self, other: Self) -> Self:
+        return other._binary(self, ADD)
+
+    def __rsub__(self, other: Self) -> Self:
+        return other._binary(self, SUB)
+
+    def __rmul__(self, other: Self) -> Self:
+        return other._binary(self, MUL)
+
+    def __rtruediv__(self, other: Self) -> Self:
+        return other._binary(self, DIV)
+
+    def __rfloordiv__(self, other: Self) -> Self:
+        return other._binary(self, FLOORDIV)
+
+    def __rmod__(self, other: Self) -> Self:
+        return other._binary(self, MOD)
+
+    def __rpow__(self, other: Self) -> Self:
+        return other._binary(self, POW)
+
+    def __rand__(self, other: Self) -> Self:
+        return other._binary(self, AND)
+
+    def __ror__(self, other: Self) -> Self:
+        return other._binary(self, OR)
+
+    def __rxor__(self, other: Self) -> Self:
+        return other._binary(self, XOR)
+
     def pow(self, exponent: Self) -> Self:
         return self._binary(exponent, POW)
 
@@ -299,6 +359,47 @@ struct Expr(Copyable):
 
     def __le__(self, other: Self) -> Self:
         return self._binary(other, LE)
+
+    def __eq__(self, other: Self) -> Self:
+        """Elementwise equality (an expression, not a Bool); same as eq."""
+        return self.eq(other)
+
+    def __ne__(self, other: Self) -> Self:
+        """Elementwise inequality (an expression, not a Bool); same as ne."""
+        return self.ne(other)
+
+    def __eq__(self, other: String) -> Self:
+        return self.eq(lit(other))
+
+    def __ne__(self, other: String) -> Self:
+        return self.ne(lit(other))
+
+    def __lt__(self, other: String) -> Self:
+        return self < lit(other)
+
+    def __le__(self, other: String) -> Self:
+        return self <= lit(other)
+
+    def __gt__(self, other: String) -> Self:
+        return self > lit(other)
+
+    def __ge__(self, other: String) -> Self:
+        return self >= lit(other)
+
+    def eq(self, other: String) -> Self:
+        return self.eq(lit(other))
+
+    def ne(self, other: String) -> Self:
+        return self.ne(lit(other))
+
+    def fill_null(self, value: String) -> Self:
+        return self.fill_null(lit(value))
+
+    def is_in(self, values: List[String]) -> Self:
+        var literals = List[Expr](capacity=len(values))
+        for value in values:
+            literals.append(lit(value))
+        return self.is_in(literals)
 
     def eq(self, other: Self) -> Self:
         return self._binary(other, EQ)
@@ -831,6 +932,9 @@ struct When(Copyable):
     var _conditions: List[Expr]
     var _values: List[Expr]
 
+    def then(self, value: String) -> Then:
+        return self.then(lit(value))
+
     def then(self, value: Expr) -> Then:
         var values = self._values.copy()
         values.append(value.copy())
@@ -851,6 +955,9 @@ struct Then(Copyable):
         var conditions = self._conditions.copy()
         conditions.append(condition.copy())
         return When(conditions^, self._values.copy())
+
+    def otherwise(self, value: String) -> Expr:
+        return self.otherwise(lit(value))
 
     def otherwise(self, value: Expr) -> Expr:
         return self._build(Optional[Expr](value.copy()))
