@@ -115,8 +115,9 @@ def test_schema_formats_and_offsets() raises:
         offsets.append(child_array.offset)
         assert_equal(child_array.length, 10)
     assert_equal(formats, ["l", "g", "b", "U", "tdD", "tsu:", "tDn", "ttn"])
-    # Shared buffers keep the window offset; converted ones start at 0.
-    assert_equal(offsets, [Int64(3), 3, 0, 3, 0, 3, 3, 3])
+    # Shared buffers keep the window offset; only Date converts (to Int32),
+    # so it starts at 0. Bool is zero-copy now that values are bit-packed.
+    assert_equal(offsets, [Int64(3), 3, 3, 3, 0, 3, 3, 3])
     _ = import_arrow(array, schema)
 
 

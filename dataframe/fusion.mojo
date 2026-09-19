@@ -11,6 +11,7 @@ unfused kernels, which remain available with bind(..., fuse=False).
 """
 from .dtype import DataType
 from .binding import BoundExpr
+from .bool_column import BoolColumn
 from .column import Column
 from .expr import COL, LIT_FLOAT, ADD, SUB, MUL, DIV, GT, LT, GE, LE, EQ, NE
 from .series import Series
@@ -171,5 +172,5 @@ def fused[
             else:
                 values[i] = 0
     if predicate:
-        return Series("", Column[Bool](flags^, valid))
+        return Series("", BoolColumn(flags^, valid))
     return Series("", Column[Float64](values^, valid))

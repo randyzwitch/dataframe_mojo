@@ -1,6 +1,7 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
 from .dtype import DataType
 from std.collections import Dict
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
@@ -319,6 +320,10 @@ struct DataFrame(Copyable, Sized, Writable):
         return Self(columns^, height=len(indices))
 
     def filter(self, mask: Column[Bool]) raises -> Self:
+        """Filter with a byte-per-value Boolean column (packed first)."""
+        return self.filter(BoolColumn(mask))
+
+    def filter(self, mask: BoolColumn) raises -> Self:
         """Keep true rows, dropping false and null mask entries, in input order."""
         if len(mask) != self._height:
             raise Error("Filter mask must match dataframe height")
@@ -746,7 +751,7 @@ struct DataFrame(Copyable, Sized, Writable):
         )
         if bound.shape() != ROWS:
             result = result._broadcast(self._height)
-        return self.filter(result._data[Column[Bool]])
+        return self.filter(result._data[BoolColumn])
 
     def unpivot(
         self,
@@ -1032,7 +1037,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var flags = List[Bool](capacity=self._height)
         for id in keyed[0]:
             flags.append(keyed[1][id] > 1)
-        return Series("is_duplicated", Column[Bool](flags^))
+        return Series("is_duplicated", BoolColumn(flags^))
 
     def is_unique(self, subset: List[String] = List[String]()) raises -> Series:
         """True for every row whose key occurs exactly once."""
@@ -1040,7 +1045,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var flags = List[Bool](capacity=self._height)
         for id in keyed[0]:
             flags.append(keyed[1][id] == 1)
-        return Series("is_unique", Column[Bool](flags^))
+        return Series("is_unique", BoolColumn(flags^))
 
     def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
         """Keep rows with no null in subset (default: every column)."""

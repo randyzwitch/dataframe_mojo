@@ -1,5 +1,6 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
+from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
 from .string_column import StringColumn, StringBuilder
@@ -203,7 +204,7 @@ def _numeric_float[
                 if start + lane < n:
                     values[start + lane] = result[lane]
     comptime if predicate:
-        return Series("", Column[Bool](predicates^, valid))
+        return Series("", BoolColumn(predicates^, valid))
     else:
         return Series("", Column[Scalar[D]](values^, valid))
 
@@ -340,7 +341,7 @@ def _numeric_int[
         else:
             predicates[i] = x != y
     comptime if predicate:
-        return Series("", Column[Bool](predicates^, valid))
+        return Series("", BoolColumn(predicates^, valid))
     elif floating:
         return Series("", Column[Float64](floats^, valid))
     else:
@@ -372,7 +373,81 @@ def _compare[
                 values[i] = x == y
             else:
                 values[i] = x != y
-    return Series("", Column[Bool](values^, valid))
+    return Series("", BoolColumn(values^, valid))
+
+
+def _compare_bools[
+    op: Int
+](left: BoolColumn, right: BoolColumn) raises -> Series:
+    var n = _length(len(left), len(right))
+    var values = List[Bool](length=n, fill=False)
+    var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        var a = 0 if len(left) == 1 else i
+        var b = 0 if len(right) == 1 else i
+        valid[i] = left._valid(a) and right._valid(b)
+        if valid[i]:
+            var x = Int(left._get(a))
+            var y = Int(right._get(b))
+            comptime if op == GT:
+                values[i] = x > y
+            elif op == LT:
+                values[i] = x < y
+            elif op == GE:
+                values[i] = x >= y
+            elif op == LE:
+                values[i] = x <= y
+            elif op == EQ:
+                values[i] = x == y
+            else:
+                values[i] = x != y
+    return Series("", BoolColumn(values^, valid))
+
+
+def _fill_null_bools(left: BoolColumn, right: BoolColumn) raises -> BoolColumn:
+    var n = _length(len(left), len(right))
+    var values = List[Bool](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        var a = 0 if len(left) == 1 else i
+        var b = 0 if len(right) == 1 else i
+        if left._valid(a):
+            values.append(left._get(a))
+            valid.append(True)
+        else:
+            values.append(right._get(b))
+            valid.append(right._valid(b))
+    return BoolColumn(values^, valid)
+
+
+def _keep_nulls_bools(mask: List[Bool], right: BoolColumn) raises -> BoolColumn:
+    var n = _length(len(mask), len(right))
+    var values = List[Bool](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        var a = 0 if len(mask) == 1 else i
+        var b = 0 if len(right) == 1 else i
+        values.append(right._get(b))
+        valid.append(mask[a] and right._valid(b))
+    return BoolColumn(values^, valid)
+
+
+def _choose_bools(
+    selected: List[Bool], then: BoolColumn, other: BoolColumn
+) raises -> BoolColumn:
+    var n = len(selected)
+    var values = List[Bool](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        if selected[i]:
+            var a = 0 if len(then) == 1 else i
+            values.append(then._get(a))
+            valid.append(then._valid(a))
+        else:
+            var b = 0 if len(other) == 1 else i
+            values.append(other._get(b))
+            valid.append(other._valid(b))
+    return BoolColumn(values^, valid)
 
 
 def _compare_strings[
@@ -402,7 +477,7 @@ def _compare_strings[
                 values[i] = x == y
             else:
                 values[i] = x != y
-    return Series("", Column[Bool](values^, valid))
+    return Series("", BoolColumn(values^, valid))
 
 
 def _arithmetic[
@@ -423,9 +498,9 @@ def _arithmetic[
                     mask,
                 )
     comptime if is_comparison(op):
-        if left._data.isa[Column[Bool]]():
-            return _compare[op](
-                left._data[Column[Bool]], right._data[Column[Bool]]
+        if left._data.isa[BoolColumn]():
+            return _compare_bools[op](
+                left._data[BoolColumn], right._data[BoolColumn]
             )
         if left._data.isa[StringColumn]():
             return _compare_strings[op](
@@ -537,7 +612,7 @@ def _math[
     raise Error("Unsupported unary kernel")
 
 
-def _logical[op: Int](left: Column[Bool], right: Column[Bool]) raises -> Series:
+def _logical[op: Int](left: BoolColumn, right: BoolColumn) raises -> Series:
     """Kleene logic: a dominant operand decides even when the other is null."""
     var n = _length(len(left), len(right))
     var values = List[Bool](length=n, fill=False)
@@ -564,7 +639,7 @@ def _logical[op: Int](left: Column[Bool], right: Column[Bool]) raises -> Series:
         else:
             valid[i] = p and q
             values[i] = x != y
-    return Series("", Column[Bool](values^, valid))
+    return Series("", BoolColumn(values^, valid))
 
 
 def _fill_null[
@@ -613,9 +688,9 @@ def validity(series: Series) -> List[Bool]:
             for i in range(n):
                 valid.append(column._valid(i))
             return valid^
-    if series._data.isa[Column[Bool]]():
+    if series._data.isa[BoolColumn]():
         for i in range(n):
-            valid.append(series._data[Column[Bool]]._valid(i))
+            valid.append(series._data[BoolColumn]._valid(i))
     else:
         for i in range(n):
             valid.append(series._data[StringColumn]._valid(i))
@@ -642,7 +717,7 @@ def binary[
     left: Series, right: Series, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
     comptime if is_logical(op):
-        return _logical[op](left._data[Column[Bool]], right._data[Column[Bool]])
+        return _logical[op](left._data[BoolColumn], right._data[BoolColumn])
     elif op == FILL_NAN:
         if left._data.isa[Column[Float32]]():
             return _fill_nan(
@@ -662,10 +737,12 @@ def binary[
                         right._data[Column[Scalar[D]]],
                     ),
                 )
-        if left._data.isa[Column[Bool]]():
+        if left._data.isa[BoolColumn]():
             return Series(
                 "",
-                _fill_null(left._data[Column[Bool]], right._data[Column[Bool]]),
+                _fill_null_bools(
+                    left._data[BoolColumn], right._data[BoolColumn]
+                ),
             )
         ref a = left._data[StringColumn]
         ref b = right._data[StringColumn]
@@ -686,8 +763,8 @@ def binary[
                 return Series(
                     "", _keep_nulls(mask, right._data[Column[Scalar[D]]])
                 )
-        if right._data.isa[Column[Bool]]():
-            return Series("", _keep_nulls(mask, right._data[Column[Bool]]))
+        if right._data.isa[BoolColumn]():
+            return Series("", _keep_nulls_bools(mask, right._data[BoolColumn]))
         ref column = right._data[StringColumn]
         var n = _length(len(mask), len(column))
         var out = StringBuilder(n)
@@ -720,7 +797,7 @@ def _float_predicate[
                 values[i] = not isnan(x) and not isinf(x)
             else:
                 values[i] = isinf(x)
-    return Series("", Column[Bool](values^, valid))
+    return Series("", BoolColumn(values^, valid))
 
 
 def unary[
@@ -733,15 +810,15 @@ def unary[
         var values = List[Bool](capacity=len(valid))
         for v in valid:
             values.append(v if op == IS_NOT_NULL else not v)
-        return Series("", Column[Bool](values^))
+        return Series("", BoolColumn(values^))
     elif op == NOT:
-        ref column = input._data[Column[Bool]]
+        ref column = input._data[BoolColumn]
         var values = List[Bool](capacity=len(column))
         var valid = List[Bool](capacity=len(column))
         for i in range(len(column)):
             valid.append(column._valid(i))
             values.append(column._valid(i) and not column._get(i))
-        return Series("", Column[Bool](values^, valid))
+        return Series("", BoolColumn(values^, valid))
     elif op >= IS_NAN and op <= IS_INFINITE:
         if input._data.isa[Column[Float32]]():
             return _float_predicate[op](input._data[Column[Float32]])
@@ -781,11 +858,11 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
                     other._data[Column[Scalar[D]]],
                 ),
             )
-    if then._data.isa[Column[Bool]]():
+    if then._data.isa[BoolColumn]():
         return Series(
             "",
-            _choose(
-                selected, then._data[Column[Bool]], other._data[Column[Bool]]
+            _choose_bools(
+                selected, then._data[BoolColumn], other._data[BoolColumn]
             ),
         )
     ref a = then._data[StringColumn]

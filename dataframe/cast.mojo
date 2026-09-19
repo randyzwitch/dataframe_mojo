@@ -7,6 +7,7 @@ infinities, and out-of-range values.
 """
 from std.math import isinf, isnan, trunc
 from std.sys import size_of
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
@@ -24,8 +25,8 @@ def _text(series: Series, row: Int) -> String:
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
             return String(series._data[Column[Scalar[D]]]._get(row))
-    if series._data.isa[Column[Bool]]():
-        return "true" if series._data[Column[Bool]]._get(row) else "false"
+    if series._data.isa[BoolColumn]():
+        return "true" if series._data[BoolColumn]._get(row) else "false"
     return String(series._data[StringColumn]._get(row))
 
 
@@ -34,8 +35,8 @@ def _valid(series: Series, row: Int) -> Bool:
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
             return series._data[Column[Scalar[D]]]._valid(row)
-    if series._data.isa[Column[Bool]]():
-        return series._data[Column[Bool]]._valid(row)
+    if series._data.isa[BoolColumn]():
+        return series._data[BoolColumn]._valid(row)
     return series._data[StringColumn]._valid(row)
 
 
@@ -100,7 +101,7 @@ def _read_source(
             ]()
         return
     if source == DataType.BOOL:
-        var bit = Int(input._data[Column[Bool]]._get(i))
+        var bit = Int(input._data[BoolColumn]._get(i))
         if values.is_float:
             values.floats[i] = Float64(bit)
         else:
@@ -185,7 +186,7 @@ def cast_series(
                     + String(e)
                 )
     if target == DataType.BOOL:
-        return Series(input.name(), Column[Bool](targets^, valid))
+        return Series(input.name(), BoolColumn(targets^, valid))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if target == DataType.of(D):
