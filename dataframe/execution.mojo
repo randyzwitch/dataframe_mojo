@@ -57,6 +57,7 @@ from .expr import (
     STR_CONCAT,
     CAST,
     OVER,
+    is_dt_op,
     SEP,
     subtree,
     is_window,
@@ -69,6 +70,7 @@ from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows
 from .window import window_op
 from .fusion import fused
+from .temporal_kernels import dt_op, temporal_binary
 from .column import Column
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
@@ -211,7 +213,12 @@ def _eval[
     var left = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
+    if is_dt_op(node.op):
+        return dt_op(node, left, bound.dtypes[node.left])
     if node.op == CAST:
+        # Kernel outputs carry physical tags; restore the bound logical type.
+        if bound.dtypes[node.left] != left.dtype():
+            left = left.with_dtype(bound.dtypes[node.left])
         var observed = fit_mask(mask, len(left))
         # A scalar input is observed if any row is; its offset is not a row.
         return cast_series(
@@ -230,6 +237,17 @@ def _eval[
     )
     if node.op == STR_CONCAT:
         return concat_strings(left, right, node.text)
+    var left_type = bound.dtypes[node.left]
+    var right_type = bound.dtypes[node.right]
+    if (left_type.is_temporal() or right_type.is_temporal()) and (
+        node.op == ADD
+        or node.op == SUB
+        or node.op == MUL
+        or node.op == FLOORDIV
+    ):
+        return temporal_binary(
+            node.op, left, right, left_type, right_type, bound.dtypes[index]
+        )
     return _binary_op[width](node.op, left, right, mask)
 
 
@@ -438,7 +456,7 @@ def evaluate[
         if is_reduction(node.op):
             var reducer = Reducer(
                 node.op,
-                bound.dtypes[node.left],
+                bound.dtypes[node.left].physical(),
                 group_count,
                 node.min_count,
                 node.integer,

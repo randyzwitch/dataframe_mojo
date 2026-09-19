@@ -12,6 +12,7 @@ from .dtype import DataType
 from .frame import DataFrame
 from .series import Series
 from .parse import parse_int64, parse_float64
+from .temporal import format as format_temporal, parse as parse_temporal
 
 
 comptime CSV_INT64 = DataType.INT64
@@ -20,13 +21,29 @@ comptime CSV_BOOL = DataType.BOOL
 comptime CSV_STRING = DataType.STRING
 
 
-@fieldwise_init
 struct CsvField(Copyable):
-    """One CSV output field. Names and dtypes are always explicit."""
+    """One CSV output field. Names and dtypes are always explicit.
+
+    Temporal fields take an optional strftime-style format; an empty format
+    means ISO 8601 (see dataframe/temporal.mojo).
+    """
 
     var name: String
     var dtype: DataType
     var nullable: Bool
+    var format: String
+
+    def __init__(
+        out self,
+        name: String,
+        dtype: DataType,
+        nullable: Bool = True,
+        format: String = "",
+    ):
+        self.name = name
+        self.dtype = dtype
+        self.nullable = nullable
+        self.format = format
 
     @staticmethod
     def int64(name: String, nullable: Bool = True) -> CsvField:
@@ -43,6 +60,27 @@ struct CsvField(Copyable):
     @staticmethod
     def string(name: String, nullable: Bool = True) -> CsvField:
         return CsvField(name, CSV_STRING, nullable)
+
+    @staticmethod
+    def date(
+        name: String, format: String = "", nullable: Bool = True
+    ) -> CsvField:
+        return CsvField(name, DataType.DATE, nullable, format)
+
+    @staticmethod
+    def datetime(
+        name: String,
+        unit: String = "us",
+        format: String = "",
+        nullable: Bool = True,
+    ) raises -> CsvField:
+        return CsvField(name, DataType.datetime(unit), nullable, format)
+
+    @staticmethod
+    def time(
+        name: String, format: String = "", nullable: Bool = True
+    ) -> CsvField:
+        return CsvField(name, DataType.TIME, nullable, format)
 
 
 struct CsvSchema(Copyable, Sized):
@@ -114,7 +152,7 @@ struct _CsvColumn(Copyable):
     def __init__(out self, field: CsvField, keep: Bool = True):
         self.field = field.copy()
         self.keep = keep
-        if field.dtype == CSV_INT64:
+        if field.dtype.physical() == CSV_INT64:
             self.builder = _Builder(_IntBuilder([], []))
         elif field.dtype == CSV_FLOAT64:
             self.builder = _Builder(_FloatBuilder([], []))
@@ -186,7 +224,15 @@ struct _CsvColumn(Copyable):
                 self.builder[_StringBuilder].valid.append(False)
             return
 
-        if self.builder.isa[_IntBuilder]():
+        if self.builder.isa[_IntBuilder]() and self.field.dtype.is_temporal():
+            try:
+                self.builder[_IntBuilder].values.append(
+                    parse_temporal(text, self.field.dtype, self.field.format)
+                )
+            except e:
+                raise self._error(record, String(e))
+            self.builder[_IntBuilder].valid.append(True)
+        elif self.builder.isa[_IntBuilder]():
             try:
                 self.builder[_IntBuilder].values.append(parse_int64(text))
             except:
@@ -217,7 +263,7 @@ struct _CsvColumn(Copyable):
                     self.builder[_IntBuilder].values.copy(),
                     self.builder[_IntBuilder].valid.copy(),
                 ),
-            )
+            ).with_dtype(self.field.dtype)
         if self.builder.isa[_FloatBuilder]():
             return Series(
                 self.field.name,
@@ -751,8 +797,9 @@ def _has_leading_zero(text: String) -> Bool:
 
 def infer_dtype(
     values: List[String], quoted: List[Bool], null_values: List[String]
-) -> DataType:
-    """Narrowest of Bool, Int64, Float64, String that reads every sample value.
+) raises -> DataType:
+    """Narrowest of Bool, Int64, Float64, Date, Datetime[us], String that
+    reads every sample value (dates and datetimes in ISO 8601 form).
 
     Nulls (empty unquoted fields and null tokens) are ignored; a column with
     no values is String. Integers with leading zeros, such as identifiers
@@ -794,8 +841,6 @@ def infer_dtype(
                 _ = parse_float64(text)
             except:
                 floating = False
-        if not boolean and not integer and not floating:
-            return CSV_STRING
     if not seen:
         return CSV_STRING
     if boolean:
@@ -804,6 +849,19 @@ def infer_dtype(
         return CSV_INT64
     if floating:
         return CSV_FLOAT64
+    # Temporal candidates follow the numeric ones: ISO dates, then datetimes.
+    for candidate in [DataType.DATE, DataType.datetime("us")]:
+        var fits = True
+        for i in range(len(values)):
+            if not quoted[i] and (values[i] == "" or values[i] in null_values):
+                continue
+            try:
+                _ = parse_temporal(values[i], candidate)
+            except:
+                fits = False
+                break
+        if fits:
+            return candidate
     return CSV_STRING
 
 
@@ -973,6 +1031,10 @@ def _render_field(
 def _cell_text(series: Series, row: Int) -> String:
     """Canonical text for a valid cell; floats use the round-trip form."""
     if series._data.isa[Column[Int64]]():
+        if series.dtype().is_temporal():
+            return format_temporal(
+                series._data[Column[Int64]]._values[row], series.dtype()
+            )
         return String(series._data[Column[Int64]]._values[row])
     if series._data.isa[Column[Float64]]():
         return String(series._data[Column[Float64]]._values[row])

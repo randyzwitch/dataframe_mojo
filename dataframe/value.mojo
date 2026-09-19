@@ -1,5 +1,6 @@
 """A runtime-tagged scalar for row access and single-cell results."""
 from .dtype import DataType
+from .temporal import format as format_temporal
 
 
 struct AnyValue(Copyable, Equatable, Writable):
@@ -52,6 +53,23 @@ struct AnyValue(Copyable, Equatable, Writable):
     def null(dtype: String) raises -> Self:
         return Self(DataType.parse(dtype), False, 0, 0, False, "")
 
+    @staticmethod
+    def temporal(dtype: DataType, value: Int64) raises -> Self:
+        """A date, datetime, duration, or time from its stored Int64."""
+        if not dtype.is_temporal():
+            raise Error("AnyValue.temporal requires a temporal dtype")
+        return Self(dtype, True, value, 0, False, "")
+
+    def to_physical(self) raises -> Int64:
+        """The stored Int64 of an Int64 or temporal value."""
+        if self._dtype.physical() != DataType.INT64:
+            raise Error(
+                "Expected an integer-backed value, found " + self._dtype.name()
+            )
+        if not self._valid:
+            raise Error("Cannot read a null value")
+        return self._int
+
     def dtype(self) -> DataType:
         return self._dtype
 
@@ -90,7 +108,7 @@ struct AnyValue(Copyable, Equatable, Writable):
             return False
         if not self._valid:
             return True
-        if self._dtype == DataType.INT64:
+        if self._dtype.physical() == DataType.INT64:
             return self._int == other._int
         if self._dtype == DataType.FLOAT64:
             var both_nan = (
@@ -106,6 +124,8 @@ struct AnyValue(Copyable, Equatable, Writable):
             writer.write("null")
         elif self._dtype == DataType.INT64:
             writer.write(self._int)
+        elif self._dtype.is_temporal():
+            writer.write(format_temporal(self._int, self._dtype))
         elif self._dtype == DataType.FLOAT64:
             writer.write(self._float)
         elif self._dtype == DataType.BOOL:

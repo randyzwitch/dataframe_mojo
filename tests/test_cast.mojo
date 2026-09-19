@@ -170,6 +170,41 @@ def test_string_parsing_matches_csv_rules() raises:
     )
 
 
+def test_float_grammar_is_strict() raises:
+    # Mojo's Float64(String) accepts these; the shared parser must not.
+    var bad: List[String] = [
+        "2024-02-28",
+        "1-2",
+        "1.5.5",
+        "1e",
+        ".",
+        "+",
+        "e5",
+        "-nan",
+        "INF",
+    ]
+    var good: List[String] = [
+        "1",
+        "-2.5",
+        ".5",
+        "5.",
+        "+.5e-3",
+        "1E10",
+        "nan",
+        "NaN",
+        "-inf",
+        "+Infinity",
+    ]
+    var frame = DataFrame(
+        [Series("s", Column[String](bad.copy() + good.copy()))]
+    )
+    var result = one(frame, col("s").cast("float64", strict=False))
+    for i in range(len(bad)):
+        assert_equal(result[i], "null", msg=bad[i])
+    for i in range(len(good)):
+        assert_true(result[len(bad) + i] != "null", msg=good[i])
+
+
 def test_round_trips_through_string() raises:
     var frame = DataFrame(
         [
@@ -197,8 +232,8 @@ def test_series_cast_masks_and_validation() raises:
     with assert_raises(contains="Unknown cast dtype"):
         _ = series.cast("int32")
     var frame = DataFrame([series.copy()])
-    with assert_raises(contains="Unknown cast dtype: date"):
-        _ = frame.select(col("s").cast("date"))
+    with assert_raises(contains="Unknown cast dtype: decimal"):
+        _ = frame.select(col("s").cast("decimal"))
     with assert_raises(contains="Unknown column"):
         _ = frame.cast({"zzz": "int64"})
     # A strict cast only fails for rows its branch can select.

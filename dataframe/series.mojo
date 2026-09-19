@@ -22,22 +22,28 @@ struct Series(Copyable, Sized, Writable):
 
     var _name: String
     var _data: Storage
+    # The logical type. Temporal types are stored in Column[Int64].
+    var _dtype: DataType
 
     def __init__(out self, var name: String, var column: Column[Int64]):
         self._name = name^
         self._data = Storage(column^)
+        self._dtype = DataType.INT64
 
     def __init__(out self, var name: String, var column: Column[Float64]):
         self._name = name^
         self._data = Storage(column^)
+        self._dtype = DataType.FLOAT64
 
     def __init__(out self, var name: String, var column: Column[Bool]):
         self._name = name^
         self._data = Storage(column^)
+        self._dtype = DataType.BOOL
 
     def __init__(out self, var name: String, var column: Column[String]):
         self._name = name^
         self._data = Storage(column^)
+        self._dtype = DataType.STRING
 
     @staticmethod
     def _wrap[
@@ -46,6 +52,24 @@ struct Series(Copyable, Sized, Writable):
         """Build a series from any storable column type."""
         var result = Self(name^, Column[Int64]([]))
         result._data = Storage(column^)
+        comptime for i in range(len(Elements.Ts)):
+            comptime T: Copyable & Deinitable = Elements.Ts[i]
+            if result._data.isa[Column[T]]():
+                result._dtype = DataType(i, 0)
+        return result^
+
+    def with_dtype(self, dtype: DataType) raises -> Self:
+        """The same values tagged with another logical type that shares their
+        storage (temporal types and INT64)."""
+        if dtype.physical() != self._dtype.physical():
+            raise Error(
+                "cannot tag "
+                + self._dtype.name()
+                + " storage as "
+                + dtype.name()
+            )
+        var result = self.copy()
+        result._dtype = dtype
         return result^
 
     def name(self) -> String:
@@ -75,11 +99,7 @@ struct Series(Copyable, Sized, Writable):
         return result^
 
     def dtype(self) -> DataType:
-        comptime for i in range(len(Elements.Ts)):
-            comptime E: Copyable & Deinitable = Elements.Ts[i]
-            if self._data.isa[Column[E]]():
-                return DataType(i, 0)
-        return DataType.STRING
+        return self._dtype
 
     def __len__(self) -> Int:
         comptime for i in range(len(Elements.Ts)):
@@ -99,8 +119,15 @@ struct Series(Copyable, Sized, Writable):
         """Return one cell as a tagged value; raises when out of bounds."""
         if self._data.isa[Column[Int64]]():
             if self._data[Column[Int64]].is_null(index):
-                return AnyValue.null(DataType.INT64)
-            return AnyValue(self._data[Column[Int64]]._values[index])
+                return AnyValue.null(self._dtype)
+            return AnyValue(
+                self._dtype,
+                True,
+                self._data[Column[Int64]]._values[index],
+                0,
+                False,
+                "",
+            )
         if self._data.isa[Column[Float64]]():
             if self._data[Column[Float64]].is_null(index):
                 return AnyValue.null(DataType.FLOAT64)
@@ -432,6 +459,11 @@ struct Series(Copyable, Sized, Writable):
         return self._data[Column[String]].copy()
 
     def take(self, indices: List[Int]) raises -> Self:
+        var result = self._take_storage(indices)
+        result._dtype = self._dtype
+        return result^
+
+    def _take_storage(self, indices: List[Int]) raises -> Self:
         comptime for i in range(len(Elements.Ts)):
             comptime E: Copyable & Deinitable = Elements.Ts[i]
             if self._data.isa[Column[E]]():
@@ -441,6 +473,11 @@ struct Series(Copyable, Sized, Writable):
         raise Error("Unknown column type")
 
     def take_or_null(self, indices: List[Int]) raises -> Self:
+        var result = self._take_or_null_storage(indices)
+        result._dtype = self._dtype
+        return result^
+
+    def _take_or_null_storage(self, indices: List[Int]) raises -> Self:
         if self._data.isa[Column[Int64]]():
             return Self(
                 self._name,
@@ -595,6 +632,11 @@ struct Series(Copyable, Sized, Writable):
         return indices^
 
     def slice(self, offset: Int, length: Int) raises -> Self:
+        var result = self._slice_storage(offset, length)
+        result._dtype = self._dtype
+        return result^
+
+    def _slice_storage(self, offset: Int, length: Int) raises -> Self:
         comptime for i in range(len(Elements.Ts)):
             comptime E: Copyable & Deinitable = Elements.Ts[i]
             if self._data.isa[Column[E]]():
@@ -604,6 +646,11 @@ struct Series(Copyable, Sized, Writable):
         raise Error("Unknown column type")
 
     def _broadcast(self, length: Int) raises -> Self:
+        var result = self._broadcast_storage(length)
+        result._dtype = self._dtype
+        return result^
+
+    def _broadcast_storage(self, length: Int) raises -> Self:
         comptime for i in range(len(Elements.Ts)):
             comptime E: Copyable & Deinitable = Elements.Ts[i]
             if self._data.isa[Column[E]]():
@@ -621,6 +668,10 @@ struct Series(Copyable, Sized, Writable):
         var name: String, dtype: DataType, length: Int
     ) raises -> Self:
         """A column of `length` nulls with the requested dtype."""
+        if dtype.is_temporal():
+            return Self(name^, Column[Int64]._nulls(length, 0)).with_dtype(
+                dtype
+            )
         if dtype == DataType.INT64:
             return Self(name^, Column[Int64]._nulls(length, 0))
         if dtype == DataType.FLOAT64:
@@ -652,7 +703,7 @@ struct Series(Copyable, Sized, Writable):
         return self.take(indices)
 
     def _append_series(mut self, other: Self) raises:
-        if self.dtype() != other.dtype():
+        if self._dtype.physical() != other._dtype.physical():
             raise Error("Cannot append different dtypes")
         comptime for i in range(len(Elements.Ts)):
             comptime E: Copyable & Deinitable = Elements.Ts[i]

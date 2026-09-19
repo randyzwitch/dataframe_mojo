@@ -105,7 +105,7 @@ def _run[
                 columns[step.source]
                 ._data[Column[Float64]]
                 ._values.unsafe_ptr()
-                .load[width=width](row)
+                .unsafe_load[width=width](row)
             )
         elif step.op == LIT_FLOAT:
             registers[k] = SIMD[DType.float64, width](step.literal)
@@ -153,7 +153,7 @@ def fused[
             comptime for lane in range(width):
                 flags[start + lane] = result[lane]
         else:
-            (values.unsafe_ptr() + start).store(wide[last])
+            values.unsafe_ptr().unsafe_offset(start).unsafe_store(wide[last])
     for i in range(main, length):
         _run[1](steps, columns, offset + i, narrow)
         if predicate:

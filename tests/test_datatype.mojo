@@ -37,8 +37,8 @@ def test_equality_names_and_parse() raises:
             assert_equal(all[i] == all[j], i == j)
             assert_equal(all[i] != all[j], i != j)
     assert_false(DataType.is_known("int32"))
-    with assert_raises(contains="Unknown dtype: date"):
-        _ = DataType.parse("date")
+    with assert_raises(contains="Unknown dtype: decimal"):
+        _ = DataType.parse("decimal")
 
 
 def test_predicates() raises:
