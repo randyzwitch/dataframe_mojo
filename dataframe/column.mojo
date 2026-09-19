@@ -1,4 +1,5 @@
 """Owned typed columns with bit-packed validity, independent of payload values."""
+from std.sys.info import is_little_endian
 
 
 struct Column[T: Copyable & Deinitable](Copyable, Sized):
@@ -12,6 +13,9 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     var _validity: List[UInt8]
 
     def __init__(out self, var values: List[Self.T]):
+        # Bitmaps use in-byte shifts, but planned Arrow interchange shares
+        # buffers as little-endian bytes; fail the build elsewhere.
+        comptime assert is_little_endian(), "dataframe requires little-endian"
         self._values = values^
         self._validity = List[UInt8](
             length=(len(self._values) + 7) // 8, fill=255

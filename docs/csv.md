@@ -55,7 +55,7 @@ are incorrect for multiline fields.
 `pixi run bench-csv` generates a deterministic 100,000-row mixed dataset outside
 the timed region, performs one warmup, verifies every result height, and prints
 machine-readable timing and throughput metrics. For peak resident memory on
-Linux, run `/usr/bin/time -v pixi run bench-csv`; this intentionally remains an
+Linux, run `/usr/bin/time -v pixi run bench-csv` (on macOS, `/usr/bin/time -l`); this intentionally remains an
 external measurement so the parser has no platform-specific runtime dependency.
 
 ## Schema inference
