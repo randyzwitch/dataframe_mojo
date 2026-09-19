@@ -26,7 +26,21 @@ from .expr import (
     FLOOR,
     CEIL,
     ROUND,
+    AND,
+    OR,
+    XOR,
+    FILL_NULL,
+    FILL_NAN,
+    KEEP_NULLS,
+    NOT,
+    IS_NULL,
+    IS_NOT_NULL,
+    IS_NAN,
+    IS_NOT_NAN,
+    IS_FINITE,
+    IS_INFINITE,
     is_comparison,
+    is_logical,
 )
 from .kernels import checked_add
 
@@ -268,8 +282,8 @@ def _compare[
     return Series("", Column[Bool](values^, valid))
 
 
-def binary[
-    op: Int, width: Int = 4
+def _arithmetic[
+    op: Int, width: Int
 ](left: Series, right: Series) raises -> Series:
     if left._data.isa[Column[Float64]]():
         return _numeric_float[op, width](
@@ -366,9 +380,7 @@ def _unary_int[op: Int](input: Column[Int64]) raises -> Series:
         return Series("", Column[Int64](values^, valid))
 
 
-def unary[
-    op: Int, width: Int = 4
-](input: Series, integer: Int64) raises -> Series:
+def _math[op: Int, width: Int](input: Series, integer: Int64) raises -> Series:
     if input._data.isa[Column[Float64]]():
         return _unary_float[op, width](
             input._data[Column[Float64]], Int(integer)
@@ -376,3 +388,187 @@ def unary[
     if input._data.isa[Column[Int64]]():
         return _unary_int[op](input._data[Column[Int64]])
     raise Error("Unsupported unary kernel")
+
+
+def _logical[op: Int](left: Column[Bool], right: Column[Bool]) raises -> Series:
+    """Kleene logic: a dominant operand decides even when the other is null."""
+    var n = _length(len(left), len(right))
+    var values = List[Bool](length=n, fill=False)
+    var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        var a = 0 if len(left) == 1 else i
+        var b = 0 if len(right) == 1 else i
+        var p = left._valid(a)
+        var q = right._valid(b)
+        var x = p and left._values[a]
+        var y = q and right._values[b]
+        comptime if op == AND:
+            if (p and not x) or (q and not y):
+                valid[i] = True
+            elif p and q:
+                valid[i] = True
+                values[i] = True
+        elif op == OR:
+            if x or y:
+                valid[i] = True
+                values[i] = True
+            elif p and q:
+                valid[i] = True
+        else:
+            valid[i] = p and q
+            values[i] = x != y
+    return Series("", Column[Bool](values^, valid))
+
+
+def _fill_null[
+    T: Copyable & Deinitable
+](left: Column[T], right: Column[T]) raises -> Column[T]:
+    var n = _length(len(left), len(right))
+    var values = List[T](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        var a = 0 if len(left) == 1 else i
+        var b = 0 if len(right) == 1 else i
+        if left._valid(a):
+            values.append(left._values[a].copy())
+            valid.append(True)
+        else:
+            values.append(right._values[b].copy())
+            valid.append(right._valid(b))
+    return Column[T](values^, valid)
+
+
+def _fill_nan(left: Column[Float64], right: Column[Float64]) raises -> Series:
+    var n = _length(len(left), len(right))
+    var values = List[Float64](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        var a = 0 if len(left) == 1 else i
+        var b = 0 if len(right) == 1 else i
+        if left._valid(a) and isnan(left._values[a]):
+            values[i] = right._values[b]
+            valid[i] = right._valid(b)
+        else:
+            values[i] = left._values[a]
+            valid[i] = left._valid(a)
+    return Series("", Column[Float64](values^, valid))
+
+
+def validity(series: Series) -> List[Bool]:
+    var n = len(series)
+    var valid = List[Bool](capacity=n)
+    if series._data.isa[Column[Int64]]():
+        for i in range(n):
+            valid.append(series._data[Column[Int64]]._valid(i))
+    elif series._data.isa[Column[Float64]]():
+        for i in range(n):
+            valid.append(series._data[Column[Float64]]._valid(i))
+    elif series._data.isa[Column[Bool]]():
+        for i in range(n):
+            valid.append(series._data[Column[Bool]]._valid(i))
+    else:
+        for i in range(n):
+            valid.append(series._data[Column[String]]._valid(i))
+    return valid^
+
+
+def _keep_nulls[
+    T: Copyable & Deinitable
+](mask: List[Bool], right: Column[T]) raises -> Column[T]:
+    var n = _length(len(mask), len(right))
+    var values = List[T](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        var a = 0 if len(mask) == 1 else i
+        var b = 0 if len(right) == 1 else i
+        values.append(right._values[b].copy())
+        valid.append(mask[a] and right._valid(b))
+    return Column[T](values^, valid)
+
+
+def binary[
+    op: Int, width: Int = 4
+](left: Series, right: Series) raises -> Series:
+    comptime if is_logical(op):
+        return _logical[op](left._data[Column[Bool]], right._data[Column[Bool]])
+    elif op == FILL_NAN:
+        return _fill_nan(
+            left._data[Column[Float64]], right._data[Column[Float64]]
+        )
+    elif op == FILL_NULL:
+        if left._data.isa[Column[Int64]]():
+            return Series(
+                "",
+                _fill_null(
+                    left._data[Column[Int64]], right._data[Column[Int64]]
+                ),
+            )
+        if left._data.isa[Column[Float64]]():
+            return Series(
+                "",
+                _fill_null(
+                    left._data[Column[Float64]], right._data[Column[Float64]]
+                ),
+            )
+        if left._data.isa[Column[Bool]]():
+            return Series(
+                "",
+                _fill_null(left._data[Column[Bool]], right._data[Column[Bool]]),
+            )
+        return Series(
+            "",
+            _fill_null(left._data[Column[String]], right._data[Column[String]]),
+        )
+    elif op == KEEP_NULLS:
+        var mask = validity(left)
+        if right._data.isa[Column[Int64]]():
+            return Series("", _keep_nulls(mask, right._data[Column[Int64]]))
+        if right._data.isa[Column[Float64]]():
+            return Series("", _keep_nulls(mask, right._data[Column[Float64]]))
+        if right._data.isa[Column[Bool]]():
+            return Series("", _keep_nulls(mask, right._data[Column[Bool]]))
+        return Series("", _keep_nulls(mask, right._data[Column[String]]))
+    else:
+        return _arithmetic[op, width](left, right)
+
+
+def _float_predicate[op: Int](input: Column[Float64]) raises -> Series:
+    var n = len(input)
+    var values = List[Bool](length=n, fill=False)
+    var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        valid[i] = input._valid(i)
+        if valid[i]:
+            var x = input._values[i]
+            comptime if op == IS_NAN:
+                values[i] = isnan(x)
+            elif op == IS_NOT_NAN:
+                values[i] = not isnan(x)
+            elif op == IS_FINITE:
+                values[i] = not isnan(x) and not isinf(x)
+            else:
+                values[i] = isinf(x)
+    return Series("", Column[Bool](values^, valid))
+
+
+def unary[
+    op: Int, width: Int = 4
+](input: Series, integer: Int64) raises -> Series:
+    comptime if op == IS_NULL or op == IS_NOT_NULL:
+        var valid = validity(input)
+        var values = List[Bool](capacity=len(valid))
+        for v in valid:
+            values.append(v if op == IS_NOT_NULL else not v)
+        return Series("", Column[Bool](values^))
+    elif op == NOT:
+        ref column = input._data[Column[Bool]]
+        var values = List[Bool](capacity=len(column))
+        var valid = List[Bool](capacity=len(column))
+        for i in range(len(column)):
+            valid.append(column._valid(i))
+            values.append(column._valid(i) and not column._values[i])
+        return Series("", Column[Bool](values^, valid))
+    elif op >= IS_NAN and op <= IS_INFINITE:
+        return _float_predicate[op](input._data[Column[Float64]])
+    else:
+        return _math[op, width](input, integer)

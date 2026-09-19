@@ -105,7 +105,9 @@ scanning and record-boundary-aware parallel decoding. See the complete
 Use typed literals: there is no implicit Int64/Float64 promotion. Expressions
 support `+ - * / // % **`, comparisons `< <= > >=` plus `.eq()`/`.ne()`, unary
 `-`, `abs`, `sqrt`, `exp`, `log`, `floor`, `ceil`, `round`, `clip`, `.alias()`,
-`.sum(min_count=0)`, and `.count()`. Equality is `.eq()` rather than
+Kleene `& | ^ ~`, `is_null`, `is_nan`, `fill_null`, `fill_nan`, `coalesce`,
+`is_in`, `is_between`, `.sum(min_count=0)`, `.count()`, `.null_count()`,
+`.any()`, and `.all()`. Equality is `.eq()` rather than
 Python-style `==`. See the operator table in [expressions](docs/expressions.md).
 
 `select(expr)` selects one expression; `select_exprs([expr, ...])` selects several.

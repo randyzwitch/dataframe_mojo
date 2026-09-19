@@ -49,6 +49,26 @@ about 1e-12 relative; tests compare them with a tolerance. Binder errors name
 the operator and dtypes, for example `/ requires matching dtypes, found int64
 and float64; use typed literals`.
 
+### Boolean logic and nulls
+
+`&`, `|`, `^`, and `~` (also `and_`, `or_`, `xor`, `not_`) require Bool
+operands and use three-valued Kleene logic: `false & null` is false,
+`true | null` is true, and otherwise a null operand yields null. `^` and `~`
+propagate nulls. Mojo cannot overload `and`/`or`/`not`, so use the operators.
+`filter` keeps only true rows, so Kleene nulls are dropped.
+
+`null(dtype)` is a typed null literal. `is_null()`/`is_not_null()` accept any
+dtype and never return null. `is_nan`, `is_not_nan`, `is_finite`, and
+`is_infinite` require Float64 and propagate nulls.
+
+`fill_null(value)` replaces nulls with a matching-dtype value or column;
+`fill_nan(value)` replaces valid NaNs in Float64 input. `coalesce([a, b, ...])`
+takes the first non-null value per row. `is_in([values])` is true when the input
+equals any candidate; a null candidate never matches, a null input stays null,
+and an empty list yields false. `is_between(lower, upper, closed="both")`
+accepts `both`, `left`, `right`, or `none` and combines the two comparisons with
+Kleene AND, so a null bound yields null unless the other side is false.
+
 `select(expr)` returns one row for a scalar/aggregate expression or input height
 for a row-valued expression. `select_exprs` broadcasts scalar/aggregate results
 when any expression is row-valued. An empty expression list preserves height and
@@ -66,6 +86,12 @@ null predicates. `batch_size` must be positive and defaults to 1024.
 `sum(min_count=1)` returns null when no values are valid. Larger thresholds are
 supported. A result below its threshold is null, with no final integer narrowing.
 `count()` returns the number of non-null rows as Int64, including valid NaNs.
+`null_count()` returns the number of nulls. `any()` and `all()` require Bool
+input. With the default `ignore_nulls=True`, nulls are skipped: an empty or
+all-null input gives `any` false and `all` true. With `ignore_nulls=False` they
+follow Kleene logic: `any` is null when nothing is true and some value is null,
+and `all` is null when nothing is false and some value is null. Their states
+(`LogicState`) merge in any order.
 Aggregate inputs must be row-valued and contain no aggregates. Arithmetic on
 aggregate outputs is supported, as is broadcasting aggregates against ordinary
 columns outside grouping.
