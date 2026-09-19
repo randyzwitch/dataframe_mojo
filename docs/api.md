@@ -284,6 +284,10 @@ unit "ns", "us", or "ms". Temporal types are stored as Int64.
 
 - `def __eq__(self, other: Self) -> Bool`
 - `def __ne__(self, other: Self) -> Bool`
+- `def is_untyped(self) -> Bool`
+  Whether this is an untyped literal awaiting a dtype (binder only).
+- `def default(self) -> Self`
+  The dtype an untyped literal takes on its own: Int64 or Float64.
 - `def of(dtype: DType) -> Self`
   The DataType stored as Scalar[dtype] (numeric types only).
 - `def storage(self) -> Optional[DType]`
@@ -413,12 +417,25 @@ A flat, topologically ordered tree; composition never evaluates data.
 
 - `def __init__(out self, then: Then)`
   A when/then chain without otherwise yields null for unmatched rows.
+- `def __init__(out self, value: Int)`
+- `def __init__(out self, value: Float64)`
+- `def __init__(out self, value: Bool)`
 - `def __neg__(self) -> Self`
 - `def __invert__(self) -> Self`
 - `def __lt__(self, other: Self) -> Self`
+- `def __lt__(self, other: String) -> Self`
 - `def __le__(self, other: Self) -> Self`
+- `def __le__(self, other: String) -> Self`
+- `def __eq__(self, other: Self) -> Self`
+  Elementwise equality (an expression, not a Bool); same as eq.
+- `def __eq__(self, other: String) -> Self`
+- `def __ne__(self, other: Self) -> Self`
+  Elementwise inequality (an expression, not a Bool); same as ne.
+- `def __ne__(self, other: String) -> Self`
 - `def __gt__(self, other: Self) -> Self`
+- `def __gt__(self, other: String) -> Self`
 - `def __ge__(self, other: Self) -> Self`
+- `def __ge__(self, other: String) -> Self`
 - `def __add__(self, other: Self) -> Self`
 - `def __sub__(self, other: Self) -> Self`
 - `def __mul__(self, other: Self) -> Self`
@@ -434,14 +451,32 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def __or__(self, other: Self) -> Self`
   Kleene OR: true wins over null; otherwise null propagates.
 - `def __xor__(self, other: Self) -> Self`
+- `def __radd__(self, other: Self) -> Self`
+- `def __rsub__(self, other: Self) -> Self`
+- `def __rmul__(self, other: Self) -> Self`
+- `def __rtruediv__(self, other: Self) -> Self`
+- `def __rfloordiv__(self, other: Self) -> Self`
+- `def __rmod__(self, other: Self) -> Self`
+- `def __rpow__(self, other: Self) -> Self`
+- `def __rand__(self, other: Self) -> Self`
+- `def __ror__(self, other: Self) -> Self`
+- `def __rxor__(self, other: Self) -> Self`
 - `def alias(self, name: String) -> Self`
 - `def name_prefix(self, prefix: String) -> Self`
   Prefix the output name; for selectors, every expanded name.
 - `def name_suffix(self, suffix: String) -> Self`
   Suffix the output name; for selectors, every expanded name.
 - `def pow(self, exponent: Self) -> Self`
+- `def eq(self, other: String) -> Self`
 - `def eq(self, other: Self) -> Self`
+- `def ne(self, other: String) -> Self`
 - `def ne(self, other: Self) -> Self`
+- `def fill_null(self, value: String) -> Self`
+- `def fill_null(self, value: Self) -> Self`
+  Replace nulls with value; the dtypes must match.
+- `def is_in(self, values: List[String]) -> Self`
+- `def is_in(self, values: List[Self]) -> Self`
+  True when equal to any value; null input stays null.
 - `def abs(self) -> Self`
 - `def sqrt(self) -> Self`
 - `def exp(self) -> Self`
@@ -465,12 +500,8 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def is_not_nan(self) -> Self`
 - `def is_finite(self) -> Self`
 - `def is_infinite(self) -> Self`
-- `def fill_null(self, value: Self) -> Self`
-  Replace nulls with value; the dtypes must match.
 - `def fill_nan(self, value: Self) -> Self`
   Replace valid NaNs in a Float64 expression with value.
-- `def is_in(self, values: List[Self]) -> Self`
-  True when equal to any value; null input stays null.
 - `def is_between(self, lower: Self, upper: Self, closed: String = "both") -> Self`
   True when lower <= x <= upper; `closed` is both, left, right, or none.
 - `def any(self, ignore_nulls: Bool = True) -> Self`
@@ -926,6 +957,7 @@ A when/then chain; add branches with `when` or finish with `otherwise`.
 It converts implicitly to an Expr whose unmatched rows are null.
 
 - `def when(self, condition: Expr) -> When`
+- `def otherwise(self, value: String) -> Expr`
 - `def otherwise(self, value: Expr) -> Expr`
 - `def end(self) -> Expr`
 - `def alias(self, name: String) -> Expr`
@@ -942,6 +974,7 @@ def to_csv_string(frame: DataFrame, *, has_header: Bool = True, separator: Strin
 
 A pending condition; call `then` to supply its value.
 
+- `def then(self, value: String) -> Then`
 - `def then(self, value: Expr) -> Then`
 
 ## `when`

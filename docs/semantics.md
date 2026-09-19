@@ -153,7 +153,8 @@ Every one of these evaluates the matching expression over a one-column frame,
 so it shares the expression kernels and contracts exactly: typed literals, no
 promotion, the same null, NaN, and overflow rules. A binary operation between
 two series pairs rows by position, requires equal lengths, and keeps the left
-name; the other operand may also be a scalar expression such as `lit(...)`.
+name; the other operand may also be a scalar expression such as `lit(...)` or
+a bare number.
 The cost is a small constant for building the frame and binding the
 expression, plus the usual copies.
 

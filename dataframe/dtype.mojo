@@ -24,6 +24,10 @@ comptime _UINT16 = 12
 comptime _UINT32 = 13
 comptime _UINT64 = 14
 comptime _FLOAT32 = 15
+# Binder-only types of untyped numeric literals (`col("x") > 0`) before they
+# adopt the dtype of the operand they meet. Never stored in a column.
+comptime _UNTYPED_INT = 100
+comptime _UNTYPED_FLOAT = 101
 
 # Numeric storage types. Dispatch loops over this list at compile time, so
 # each iteration sees a concrete Scalar[D] with arithmetic, ordering, and
@@ -74,6 +78,20 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
     comptime UINT32 = DataType(_UINT32, 0)
     comptime UINT64 = DataType(_UINT64, 0)
     comptime FLOAT32 = DataType(_FLOAT32, 0)
+    comptime UNTYPED_INT = DataType(_UNTYPED_INT, 0)
+    comptime UNTYPED_FLOAT = DataType(_UNTYPED_FLOAT, 0)
+
+    def is_untyped(self) -> Bool:
+        """Whether this is an untyped literal awaiting a dtype (binder only)."""
+        return self._code == _UNTYPED_INT or self._code == _UNTYPED_FLOAT
+
+    def default(self) -> DataType:
+        """The dtype an untyped literal takes on its own: Int64 or Float64."""
+        if self._code == _UNTYPED_INT:
+            return DataType.INT64
+        if self._code == _UNTYPED_FLOAT:
+            return DataType.FLOAT64
+        return self
 
     @staticmethod
     def of(dtype: DType) -> DataType:
@@ -178,6 +196,10 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
             return "datetime[" + self.unit() + "]"
         if self._code == _DURATION:
             return "duration[" + self.unit() + "]"
+        if self._code == _UNTYPED_INT:
+            return "integer literal"
+        if self._code == _UNTYPED_FLOAT:
+            return "float literal"
         if self._code >= _INT8:
             return String(self.storage().value())
         return "string"

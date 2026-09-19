@@ -1,5 +1,5 @@
 """Native expression pipeline with SIMD Float64 arithmetic."""
-from dataframe import Column, Series, DataFrame, col, lit
+from dataframe import Column, Series, DataFrame, col
 
 
 def main() raises:
@@ -18,8 +18,8 @@ def main() raises:
         ]
     )
     var result = (
-        sales.filter(col("amount") > lit(Float64(0)))
-        .with_columns((col("amount") * lit(Float64(0.9))).alias("net"))
+        sales.filter(col("amount") > 0)
+        .with_columns((col("amount") * 0.9).alias("net"))
         .group_by("region", maintain_order=True)
         .agg(
             [

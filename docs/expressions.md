@@ -13,7 +13,20 @@ References:
 ## Binding and shape
 
 `col(name)` refers to a column; `lit(value)` holds a scalar of any numeric
-type (`lit(Int32(1))`, `lit(Float32(0.5))`, ...), Bool, or String. `Expr` owns a flat topological node list. Building an expression
+type (`lit(Int32(1))`, `lit(Float32(0.5))`, ...), Bool, or String.
+
+Bare values work wherever an expression is expected: `col("x") > 0`,
+`col("x") * 2.5`, `1 + col("x")`, `col("k") == "a"`, `col("k").is_in(["a",
+"b"])`, `col("x").fill_null(0)`, `when(c).then(1).otherwise(0)`. Bare numbers
+are *untyped*: an integer adopts the numeric dtype of the operand it meets
+(range-checked, so `col("u8") + 300` is a bind error), and becomes a float
+next to a float column; a float adopts Float32 or Float64 and is an error next
+to an integer column. Adoption follows arithmetic between untyped values
+(`col("x") * (2 + 3)`), and an untyped expression on its own is Int64 or
+Float64. `lit(...)` fixes a type and never adopts. Two Mojo limits: a string
+or number on the *left* of `==` does not compile (write `col("k") == "a"`),
+and strings convert only in the comparison, `is_in`, `fill_null`, and
+`then`/`otherwise` methods (elsewhere use `lit("a")`). `Expr` owns a flat topological node list. Building an expression
 never reads data. `alias` changes the output name, not column resolution.
 Without an alias, binary operations retain the left expression's output name;
 literals are named `literal`, and reductions retain their input expression name.

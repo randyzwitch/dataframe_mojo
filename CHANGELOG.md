@@ -45,6 +45,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Expression sugar: bare numbers and Bools work wherever an `Expr` is
+  expected (`col("x") > 0`, `col("x") * 2.5`, `1 + col("x")`,
+  `.fill_null(0)`, `when(...).then(1)`), `==` / `!=` build expressions, and
+  strings are accepted by comparisons, `is_in`, `fill_null`, and
+  `then`/`otherwise`. Bare numbers are untyped and adopt the other operand's
+  dtype at bind time (range-checked), keeping the no-implicit-promotion
+  rule (#75).
+
 - Numeric dtypes Int8, Int16, Int32, UInt8, UInt16, UInt32, UInt64, and
   Float32 alongside Int64 and Float64, through every operation: checked
   arithmetic at each width, Float32 SIMD kernels, exact 128-bit sums (8/16-bit
