@@ -6,6 +6,7 @@ from .kernels import checked_add
 from .expr import Expr
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
+from .value import AnyValue
 
 
 @fieldwise_init
@@ -14,7 +15,7 @@ struct Field(Copyable):
     var dtype: String
 
 
-struct DataFrame(Copyable):
+struct DataFrame(Copyable, Sized):
     """Own equal-length, uniquely named columns; transformations copy storage."""
 
     var _columns: List[Series]
@@ -55,6 +56,27 @@ struct DataFrame(Copyable):
             fields.append(Field(column.name(), column.dtype()))
         return fields^
 
+    def shape(self) -> Tuple[Int, Int]:
+        return (self._height, self.width())
+
+    def __len__(self) -> Int:
+        return self._height
+
+    def is_empty(self) -> Bool:
+        return self._height == 0
+
+    def columns(self) -> List[String]:
+        var names = List[String](capacity=self.width())
+        for column in self._columns:
+            names.append(column.name())
+        return names^
+
+    def dtypes(self) -> List[String]:
+        var types = List[String](capacity=self.width())
+        for column in self._columns:
+            types.append(column.dtype())
+        return types^
+
     def _index(self, name: String) raises -> Int:
         for i in range(self.width()):
             if self._columns[i].name() == name:
@@ -64,6 +86,149 @@ struct DataFrame(Copyable):
     def column(self, name: String) raises -> Series:
         """Return an owned copy. Column lookup is linear in the schema width."""
         return self._columns[self._index(name)].copy()
+
+    def get_column(self, name: String) raises -> Series:
+        return self.column(name)
+
+    def null_count(self) raises -> Self:
+        """One row holding each column's null count as Int64."""
+        var columns = List[Series](capacity=self.width())
+        for column in self._columns:
+            columns.append(
+                Series(
+                    column.name(), Column[Int64]([Int64(column.null_count())])
+                )
+            )
+        return Self(columns^, height=1)
+
+    def row(self, index: Int) raises -> List[AnyValue]:
+        """Return one row as tagged values, in schema order."""
+        if index < 0 or index >= self._height:
+            raise Error("Row index out of bounds")
+        var values = List[AnyValue](capacity=self.width())
+        for column in self._columns:
+            values.append(column.get(index))
+        return values^
+
+    def rows(self) raises -> List[List[AnyValue]]:
+        """Materialize every row; intended for small frames and tests."""
+        var result = List[List[AnyValue]](capacity=self._height)
+        for i in range(self._height):
+            result.append(self.row(i))
+        return result^
+
+    def item(self) raises -> AnyValue:
+        """Return the only cell of a 1x1 dataframe."""
+        if self._height != 1 or self.width() != 1:
+            raise Error("item() requires a dataframe with exactly one cell")
+        return self._columns[0].get(0)
+
+    def item(self, row: Int, column: String) raises -> AnyValue:
+        return self._columns[self._index(column)].get(row)
+
+    def equals(self, other: Self, *, null_equal: Bool = True) -> Bool:
+        """Same names, dtypes, order, height, and cells (NaN equals NaN)."""
+        if self._height != other._height or self.width() != other.width():
+            return False
+        for i in range(self.width()):
+            if not self._columns[i].equals(
+                other._columns[i], null_equal=null_equal, check_names=True
+            ):
+                return False
+        return True
+
+    def slice(self, offset: Int, length: Int = -1) raises -> Self:
+        """Rows [offset, offset + length), clipped to the frame.
+
+        A negative offset counts from the end. length=-1 takes all remaining
+        rows; other negative lengths raise.
+        """
+        if length < -1:
+            raise Error("Slice length must be nonnegative")
+        var start = offset
+        if start < 0:
+            start = max(self._height + start, 0)
+        start = min(start, self._height)
+        var available = self._height - start
+        var count = available if length == -1 else min(length, available)
+        var columns = List[Series](capacity=self.width())
+        for column in self._columns:
+            columns.append(column.slice(start, count))
+        return Self(columns^, height=count)
+
+    def head(self, n: Int = 5) raises -> Self:
+        """First n rows; a negative n drops the last -n rows."""
+        if n < 0:
+            return self.slice(0, max(self._height + n, 0))
+        return self.slice(0, n)
+
+    def tail(self, n: Int = 5) raises -> Self:
+        """Last n rows; a negative n drops the first -n rows."""
+        if n < 0:
+            return self.slice(min(-n, self._height))
+        return self.slice(self._height - min(n, self._height))
+
+    def limit(self, n: Int = 5) raises -> Self:
+        return self.head(n)
+
+    def reverse(self) raises -> Self:
+        var columns = List[Series](capacity=self.width())
+        for column in self._columns:
+            columns.append(column.reverse())
+        return Self(columns^, height=self._height)
+
+    def clear(self) raises -> Self:
+        """Zero rows with the same schema."""
+        return self.slice(0, 0)
+
+    def drop(self, name: String) raises -> Self:
+        return self.drop([name])
+
+    def drop(self, names: List[String]) raises -> Self:
+        """Remove columns; every name must exist and appear once."""
+        var dropped = Dict[String, Bool]()
+        for name in names:
+            _ = self._index(name)
+            if name in dropped:
+                raise Error("Column listed twice in drop: " + name)
+            dropped[name] = True
+        var columns = List[Series]()
+        for column in self._columns:
+            if column.name() not in dropped:
+                columns.append(column.copy())
+        return Self(columns^, height=self._height)
+
+    def rename(self, mapping: Dict[String, String]) raises -> Self:
+        """Rename columns by old name; all names are validated first."""
+        for item in mapping.items():
+            _ = self._index(item.key)
+        var columns = List[Series](capacity=self.width())
+        var seen = Dict[String, Bool]()
+        for column in self._columns:
+            var name = column.name()
+            if name in mapping:
+                name = mapping[name]
+            if name in seen:
+                raise Error("Rename produces duplicate column name: " + name)
+            seen[name] = True
+            columns.append(column.renamed(name))
+        return Self(columns^, height=self._height)
+
+    def with_row_index(
+        self, name: String = "index", offset: Int64 = 0
+    ) raises -> Self:
+        """Prepend an Int64 row index starting at offset."""
+        for column in self._columns:
+            if column.name() == name:
+                raise Error("Row index name collides with column: " + name)
+        var values = List[Int64](capacity=self._height)
+        for i in range(self._height):
+            values.append(offset + Int64(i))
+        var columns = List[Series](capacity=self.width() + 1)
+        columns.append(Series(name, Column[Int64](values^)))
+        for column in self._columns:
+            columns.append(column.copy())
+        return Self(columns^, height=self._height)
 
     def select(self, names: List[String]) raises -> Self:
         var columns = List[Series](capacity=len(names))

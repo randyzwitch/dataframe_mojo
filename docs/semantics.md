@@ -23,6 +23,33 @@ supported. `take` preserves the supplied order, including duplicates; it raises
 on invalid indices. `take_or_null` additionally accepts -1 for an absent row and
 is used by left joins. Public reads and transformations return owned copies.
 
+## Slicing, inspection, and rows
+
+`slice(offset, length=-1)` returns rows `[offset, offset + length)` clipped to
+the frame. A negative offset counts from the end and clips at zero; an offset
+past the end returns zero rows. `length=-1` means all remaining rows, and any
+other negative length raises. `head(n)` and `tail(n)` default to five rows; a
+negative `n` drops `-n` rows from the other end, as in Polars. `limit` is
+`head`. `reverse` reverses row order and `clear` keeps the schema with zero rows.
+Zero-column frames keep a correctly clipped height through all of these.
+
+`drop` and `rename` validate every name before building output: unknown names
+raise, `drop` rejects a name listed twice, and `rename` raises if the result
+would contain duplicate names. Renames apply simultaneously, so swapping two
+names works. `with_row_index(name="index", offset=0)` prepends an Int64 column
+and raises if the name already exists.
+
+`shape()` is `(height, width)`. `null_count()` returns a one-row frame of Int64
+counts per column. `row(i)` returns a `List[AnyValue]` in schema order;
+`AnyValue` carries a dtype tag and validity, and its typed accessors raise on a
+dtype mismatch or null. `item()` requires exactly one cell; `item(row, column)`
+reads one cell. `rows()` materializes every row and is meant for small frames.
+
+`equals(other, null_equal=True)` compares names, dtypes, column order, height,
+and cells. Floats compare structurally: NaN equals NaN and `-0.0` equals `0.0`.
+Null payloads never participate. With `null_equal=False`, any null in either
+frame makes them unequal. `DataFrame` deliberately has no `==` operator.
+
 ## Filtering and arithmetic
 
 Filter masks must match the frame's height. Only valid true entries retain rows;

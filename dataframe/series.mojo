@@ -1,6 +1,7 @@
 """Runtime-tagged, named columns without per-element type erasure."""
 from std.utils import Variant
 from .column import Column
+from .value import AnyValue
 
 comptime Storage = Variant[
     Column[Int64], Column[Float64], Column[Bool], Column[String]
@@ -67,6 +68,61 @@ struct Series(Copyable, Sized):
         if self._data.isa[Column[String]]():
             return self._data[Column[String]].null_count()
         return 0
+
+    def get(self, index: Int) raises -> AnyValue:
+        """Return one cell as a tagged value; raises when out of bounds."""
+        if self._data.isa[Column[Int64]]():
+            if self._data[Column[Int64]].is_null(index):
+                return AnyValue.null("int64")
+            return AnyValue(self._data[Column[Int64]]._values[index])
+        if self._data.isa[Column[Float64]]():
+            if self._data[Column[Float64]].is_null(index):
+                return AnyValue.null("float64")
+            return AnyValue(self._data[Column[Float64]]._values[index])
+        if self._data.isa[Column[Bool]]():
+            if self._data[Column[Bool]].is_null(index):
+                return AnyValue.null("bool")
+            return AnyValue(self._data[Column[Bool]]._values[index])
+        if self._data[Column[String]].is_null(index):
+            return AnyValue.null("string")
+        return AnyValue(self._data[Column[String]]._values[index])
+
+    def equals(
+        self, other: Self, *, null_equal: Bool = True, check_names: Bool = False
+    ) -> Bool:
+        """Structural equality: NaN equals NaN and -0.0 equals 0.0.
+
+        With null_equal=False, any null in either input makes them unequal.
+        """
+        if self.dtype() != other.dtype() or len(self) != len(other):
+            return False
+        if check_names and self._name != other._name:
+            return False
+        if not null_equal and (self.null_count() > 0 or other.null_count() > 0):
+            return False
+        if self._data.isa[Column[Int64]]():
+            return _equal_columns(
+                self._data[Column[Int64]], other._data[Column[Int64]]
+            )
+        if self._data.isa[Column[Float64]]():
+            ref a = self._data[Column[Float64]]
+            ref b = other._data[Column[Float64]]
+            for i in range(len(a)):
+                if a._valid(i) != b._valid(i):
+                    return False
+                if a._valid(i):
+                    var x = a._values[i]
+                    var y = b._values[i]
+                    if x != y and not (x != x and y != y):
+                        return False
+            return True
+        if self._data.isa[Column[Bool]]():
+            return _equal_columns(
+                self._data[Column[Bool]], other._data[Column[Bool]]
+            )
+        return _equal_columns(
+            self._data[Column[String]], other._data[Column[String]]
+        )
 
     def int64(self) raises -> Column[Int64]:
         """Return an owned typed copy, raising on a dtype mismatch."""
@@ -240,6 +296,12 @@ struct Series(Copyable, Sized):
             )
         raise Error("Unknown column type")
 
+    def reverse(self) raises -> Self:
+        var indices = List[Int](capacity=len(self))
+        for i in range(len(self)):
+            indices.append(len(self) - 1 - i)
+        return self.take(indices)
+
     def _append_series(mut self, other: Self) raises:
         if self.dtype() != other.dtype():
             raise Error("Cannot append different dtypes")
@@ -255,3 +317,14 @@ struct Series(Copyable, Sized):
             self._data[Column[String]]._append_column(
                 other._data[Column[String]]
             )
+
+
+def _equal_columns[
+    T: Copyable & Deinitable & Equatable
+](a: Column[T], b: Column[T]) -> Bool:
+    for i in range(len(a)):
+        if a._valid(i) != b._valid(i):
+            return False
+        if a._valid(i) and not (a._values[i] == b._values[i]):
+            return False
+    return True
