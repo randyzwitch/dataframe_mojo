@@ -35,6 +35,10 @@ jobs:
       - name: Build examples
         run: pixi run build
 
+      - name: Benchmark smoke test
+        if: runner.os == 'Linux'
+        run: pixi run bench-smoke
+
       - name: Package smoke test
         if: runner.os == 'Linux'
         run: pixi run package-smoke

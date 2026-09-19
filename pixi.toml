@@ -15,6 +15,8 @@ format = "mblack --target-version mojo --line-length 80 dataframe tests examples
 format-check = "mblack --check --target-version mojo --line-length 80 dataframe tests examples benchmarks"
 build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales && mojo build -I . examples/expressions.mojo -o build/expressions && mojo build -I . examples/read_csv.mojo -o build/read_csv"
 bench-csv = "mojo run -I . benchmarks/bench_csv.mojo"
+bench = "mojo run -I . benchmarks/bench_suite.mojo"
+bench-smoke = "BENCH_SMOKE=1 mojo run -I . benchmarks/bench_suite.mojo"
 package = "mkdir -p dist && mojo precompile dataframe -o dist/dataframe.mojoc"
 package-smoke = "bash scripts/package_smoke.sh"
 docs = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json docs/api.md"
