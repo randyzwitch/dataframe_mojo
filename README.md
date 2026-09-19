@@ -12,7 +12,7 @@ backend facade. The API is provisional.
 With [Pixi](https://pixi.sh) installed, from this directory:
 
 ```bash
-pixi run test          # runs every tests/test_*.mojo
+pixi run test          # runs every tests/test_*.mojo, in parallel
 pixi run example
 pixi run build
 pixi run bench          # CPU benchmark suite; see docs/benchmarks.md
