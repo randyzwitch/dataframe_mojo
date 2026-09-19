@@ -1,6 +1,7 @@
 """Runtime-tagged, named columns without per-element type erasure."""
 from .dtype import DataType, NUMERIC_DTYPES
 from std.utils import Variant
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn
 from .value import AnyValue
@@ -9,7 +10,8 @@ from .cast import cast_series
 from .expr import Expr, col, lit
 from .frame import DataFrame
 
-# Storage holds Column[Scalar[D]] for each D in NUMERIC_DTYPES, Column[Bool],
+# Storage holds Column[Scalar[D]] for each D in NUMERIC_DTYPES, BoolColumn
+# (bit-packed values),
 # and StringColumn (Arrow large_utf8). Type-agnostic methods (length, take,
 # slice, append) loop over FixedElements; numeric kernels loop over
 # NUMERIC_DTYPES so each iteration sees a concrete Scalar[D]. Adding a
@@ -17,7 +19,6 @@ from .frame import DataFrame
 comptime FixedElements = Variant[
     Int64,
     Float64,
-    Bool,
     Int8,
     Int16,
     Int32,
@@ -30,7 +31,7 @@ comptime FixedElements = Variant[
 comptime Storage = Variant[
     Column[Int64],
     Column[Float64],
-    Column[Bool],
+    BoolColumn,
     StringColumn,
     Column[Int8],
     Column[Int16],
@@ -58,10 +59,14 @@ struct Series(Copyable, Sized, Writable):
         self._data = Storage(column^)
         self._dtype = DataType.of(D)
 
-    def __init__(out self, var name: String, var column: Column[Bool]):
+    def __init__(out self, var name: String, var column: BoolColumn):
         self._name = name^
         self._data = Storage(column^)
         self._dtype = DataType.BOOL
+
+    def __init__(out self, var name: String, column: Column[Bool]) raises:
+        """Pack a byte-per-value Boolean column into bits."""
+        self = Self(name^, BoolColumn(column))
 
     def __init__(out self, var name: String, var column: StringColumn):
         self._name = name^
@@ -88,7 +93,7 @@ struct Series(Copyable, Sized, Writable):
             comptime D = NUMERIC_DTYPES[i]
             if self._data.isa[Column[Scalar[D]]]():
                 return DataType.of(D)
-        if self._data.isa[Column[Bool]]():
+        if self._data.isa[BoolColumn]():
             return DataType.BOOL
         return DataType.STRING
 
@@ -140,6 +145,8 @@ struct Series(Copyable, Sized, Writable):
             comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 return len(self._data[Column[E]])
+        if self._data.isa[BoolColumn]():
+            return len(self._data[BoolColumn])
         return len(self._data[StringColumn])
 
     def null_count(self) -> Int:
@@ -147,6 +154,8 @@ struct Series(Copyable, Sized, Writable):
             comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 return self._data[Column[E]].null_count()
+        if self._data.isa[BoolColumn]():
+            return self._data[BoolColumn].null_count()
         return self._data[StringColumn].null_count()
 
     def get(self, index: Int) raises -> AnyValue:
@@ -163,10 +172,10 @@ struct Series(Copyable, Sized, Writable):
                 if column.is_null(index):
                     return AnyValue.null(self._dtype)
                 return AnyValue(column._get(index))
-        if self._data.isa[Column[Bool]]():
-            if self._data[Column[Bool]].is_null(index):
+        if self._data.isa[BoolColumn]():
+            if self._data[BoolColumn].is_null(index):
                 return AnyValue.null(DataType.BOOL)
-            return AnyValue(self._data[Column[Bool]]._get(index))
+            return AnyValue(self._data[BoolColumn]._get(index))
         if self._data[StringColumn].is_null(index):
             return AnyValue.null(DataType.STRING)
         return AnyValue(String(self._data[StringColumn]._get(index)))
@@ -198,10 +207,15 @@ struct Series(Copyable, Sized, Writable):
                         if x != y and not (x != x and y != y):
                             return False
                 return True
-        if self._data.isa[Column[Bool]]():
-            return _equal_columns(
-                self._data[Column[Bool]], other._data[Column[Bool]]
-            )
+        if self._data.isa[BoolColumn]():
+            ref a = self._data[BoolColumn]
+            ref b = other._data[BoolColumn]
+            for i in range(len(a)):
+                if a._valid(i) != b._valid(i):
+                    return False
+                if a._valid(i) and a._get(i) != b._get(i):
+                    return False
+            return True
         ref a = self._data[StringColumn]
         ref b = other._data[StringColumn]
         for i in range(len(a)):
@@ -511,11 +525,11 @@ struct Series(Copyable, Sized, Writable):
     def float32(self) raises -> Column[Float32]:
         return self.numeric[DType.float32]()
 
-    def bool(self) raises -> Column[Bool]:
+    def bool(self) raises -> BoolColumn:
         """Return an owned typed copy, raising on a dtype mismatch."""
-        if not self._data.isa[Column[Bool]]():
+        if not self._data.isa[BoolColumn]():
             raise Error("Expected bool column")
-        return self._data[Column[Bool]].copy()
+        return self._data[BoolColumn].copy()
 
     def string(self) raises -> StringColumn:
         """Return the (shared, immutable) column, raising on a dtype mismatch."""
@@ -535,6 +549,8 @@ struct Series(Copyable, Sized, Writable):
                 return Self._wrap(
                     self._name, self._data[Column[E]].take(indices)
                 )
+        if self._data.isa[BoolColumn]():
+            return Self(self._name, self._data[BoolColumn].take(indices))
         return Self(self._name, self._data[StringColumn].take(indices))
 
     def take_or_null(self, indices: List[Int]) raises -> Self:
@@ -552,10 +568,10 @@ struct Series(Copyable, Sized, Writable):
                         indices, Scalar[D](0)
                     ),
                 )
-        if self._data.isa[Column[Bool]]():
+        if self._data.isa[BoolColumn]():
             return Self(
                 self._name,
-                self._data[Column[Bool]].take_or_null(indices, False),
+                self._data[BoolColumn].take_or_null(indices, False),
             )
         return Self(
             self._name,
@@ -581,13 +597,13 @@ struct Series(Copyable, Sized, Writable):
                 if x != x or y != y:
                     return x == x and y != y
                 return y < x if descending else x < y
-        if self._data.isa[Column[Bool]]():
-            var a_null = self._data[Column[Bool]].is_null(a)
-            var b_null = self._data[Column[Bool]].is_null(b)
+        if self._data.isa[BoolColumn]():
+            var a_null = self._data[BoolColumn].is_null(a)
+            var b_null = self._data[BoolColumn].is_null(b)
             if a_null or b_null:
                 return a_null != b_null and (b_null if nulls_last else a_null)
-            var x = self._data[Column[Bool]].value(a)
-            var y = self._data[Column[Bool]].value(b)
+            var x = self._data[BoolColumn].value(a)
+            var y = self._data[BoolColumn].value(b)
             return Int(y) < Int(x) if descending else Int(x) < Int(y)
         ref column = self._data[StringColumn]
         var a_null = column.is_null(a)
@@ -631,8 +647,8 @@ struct Series(Copyable, Sized, Writable):
                 distinct = _dense_ranks(column._to_list(), usable, ranks)
         if distinct >= 0:
             pass
-        elif self._data.isa[Column[Bool]]():
-            ref column = self._data[Column[Bool]]
+        elif self._data.isa[BoolColumn]():
+            ref column = self._data[BoolColumn]
             for i in range(n):
                 valid[i] = column._valid(i)
                 ranks[i] = Int(column._get(i))
@@ -701,6 +717,10 @@ struct Series(Copyable, Sized, Writable):
                 return Self._wrap(
                     self._name, self._data[Column[E]].slice(offset, length)
                 )
+        if self._data.isa[BoolColumn]():
+            return Self(
+                self._name, self._data[BoolColumn].slice(offset, length)
+            )
         return Self(self._name, self._data[StringColumn].slice(offset, length))
 
     def _broadcast(self, length: Int) raises -> Self:
@@ -715,6 +735,8 @@ struct Series(Copyable, Sized, Writable):
                 return Self._wrap(
                     self._name, self._data[Column[E]]._broadcast(length)
                 )
+        if self._data.isa[BoolColumn]():
+            return Self(self._name, self._data[BoolColumn]._broadcast(length))
         return Self(self._name, self._data[StringColumn]._broadcast(length))
 
     @staticmethod
@@ -735,7 +757,7 @@ struct Series(Copyable, Sized, Writable):
             if dtype == DataType.of(D):
                 return Self(name^, Column[Scalar[D]]._nulls(length, 0))
         if dtype == DataType.BOOL:
-            return Self(name^, Column[Bool]._nulls(length, False))
+            return Self(name^, BoolColumn._nulls(length, False))
         return Self(name^, StringColumn._nulls(length))
 
     def append(self, other: Self) raises -> Self:
@@ -767,6 +789,8 @@ struct Series(Copyable, Sized, Writable):
             comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 self._data[Column[E]]._append_column(other._data[Column[E]])
+        if self._data.isa[BoolColumn]():
+            self._data[BoolColumn]._append_column(other._data[BoolColumn])
         if self._data.isa[StringColumn]():
             self._data[StringColumn]._append_column(other._data[StringColumn])
 

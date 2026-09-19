@@ -1,6 +1,7 @@
 """Bounded text rendering. Only displayed cells are ever formatted."""
 from .dtype import DataType, NUMERIC_DTYPES
 from .temporal import format as format_temporal
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .series import Series
@@ -74,8 +75,8 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
                         column._get(row).cast[DType.int64](), series.dtype()
                     )
             return String(column._get(row))
-    if series._data.isa[Column[Bool]]():
-        ref column = series._data[Column[Bool]]
+    if series._data.isa[BoolColumn]():
+        ref column = series._data[BoolColumn]
         if not column._valid(row):
             return "null"
         return "true" if column._get(row) else "false"

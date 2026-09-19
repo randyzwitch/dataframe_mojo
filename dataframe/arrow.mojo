@@ -30,6 +30,7 @@ Pointers in the C structs are held as `Int` addresses: C pointer fields are
 nullable and Mojo `Pointer`s are not.
 """
 from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
+from .bool_column import BoolColumn
 from .column import Column, _copy_bits
 from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
@@ -304,23 +305,13 @@ def _fill_array(
         state.buffers.append(Int(column._bits[].unsafe_ptr()))
         state.buffers.append(Int(column._offsets[].unsafe_ptr()))
         state.buffers.append(Int(column._bytes[].unsafe_ptr()))
-    elif kept._data.isa[Column[Bool]]():
-        # Arrow Booleans are bits; pack values and rebase validity to 0.
-        ref column = kept._data[Column[Bool]]
-        var values = List[UInt8](capacity=(length + 7) // 8)
-        var source = column._ptr()
-        var i = 0
-        while i < length:
-            var byte = UInt8(0)
-            for bit in range(min(8, length - i)):
-                byte |= UInt8(Int(source[unsafe_offset=i + bit])) << UInt8(bit)
-            values.append(byte)
-            i += 8
-        state.owned.append(_copy_bits(column._bits[], column._offset, length))
-        state.owned.append(values^)
-        array.offset = 0
-        state.buffers.append(Int(state.owned[0].unsafe_ptr()))
-        state.buffers.append(Int(state.owned[1].unsafe_ptr()))
+    elif kept._data.isa[BoolColumn]():
+        # Values are already an Arrow bitmap: zero-copy, like every other
+        # fixed-width type.
+        ref column = kept._data[BoolColumn]
+        array.offset = Int64(column._offset)
+        state.buffers.append(Int(column._bits[].unsafe_ptr()))
+        state.buffers.append(Int(column._data[].unsafe_ptr()))
     elif dtype == DataType.DATE:
         # Arrow date32 holds Int32 days; narrow (range-checked) at export.
         ref column = kept._data[Column[Int64]]
@@ -529,16 +520,14 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
             column._bits = ArcPointer(bits^)
             return Series(name, column^)
     if format == "b":
-        var values = List[Bool](capacity=length)
-        var data = _buffer(array, 1)
-        for i in range(length):
-            var bit = offset + i
-            values.append(
-                (_read[UInt8](data, bit // 8) >> UInt8(bit % 8)) & 1 == 1
-            )
-        var column = Column[Bool](values^)
-        column._bits = ArcPointer(bits^)
-        return Series(name, column^)
+        return Series(
+            name,
+            BoolColumn(
+                values=_import_bits(_buffer(array, 1), offset, length),
+                bits=bits^,
+                length=length,
+            ),
+        )
     if format == "U" or format == "u":
         var large = format == "U"
         var offsets_address = _buffer(array, 1)

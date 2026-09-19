@@ -63,6 +63,28 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
 - `def __init__(out self)`
   A released (empty) struct, ready to be filled by a producer.
 
+## `BoolColumn`
+
+A window onto shared, bit-packed values and validity.
+
+- `def __init__(out self, values: List[Bool])`
+- `def __init__(out self, values: List[Bool], valid: List[Bool])`
+- `def __init__(out self, column: Column[Bool])`
+  Pack a byte-per-value Boolean column.
+- `def __init__(out self, *, var values: List[UInt8], var bits: List[UInt8], length: Int)`
+  Adopt finished value and validity bitmaps.
+- `def __len__(self) -> Int`
+- `def is_null(self, index: Int) -> Bool`
+- `def value(self, index: Int) -> Bool`
+- `def null_count(self) -> Int`
+- `def true_count(self) -> Int`
+  Rows whose value bit is set (including null rows).
+- `def take(self, indices: List[Int]) -> Self`
+- `def take_or_null(self, indices: List[Int], fill: Bool) -> Self`
+  Gather rows, treating only -1 as a missing row (for outer joins).
+- `def slice(self, offset: Int, length: Int) -> Self`
+  A zero-copy window sharing this column's buffers.
+
 ## `by_dtype`
 
 Columns whose dtype is listed, in schema order.
@@ -219,6 +241,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def select(self, expression: Expr, *, batch_size: Int = Int(1024)) -> Self`
 - `def take(self, indices: List[Int]) -> Self`
 - `def filter(self, mask: Column[Bool]) -> Self`
+  Filter with a byte-per-value Boolean column (packed first).
+- `def filter(self, mask: BoolColumn) -> Self`
   Keep true rows, dropping false and null mask entries, in input order.
 - `def filter(self, predicate: Expr, *, batch_size: Int = Int(1024)) -> Self`
 - `def with_column(self, var column: Series) -> Self`
@@ -768,7 +792,9 @@ def scan_csv(path: String, schema: CsvSchema) -> LazyFrame
 A named column of one supported dtype, plus expression-backed methods.
 
 - `def __init__[D: DType](out self, var name: String, var column: Column[Scalar[D]])`
-- `def __init__(out self, var name: String, var column: Column[Bool])`
+- `def __init__(out self, var name: String, var column: BoolColumn)`
+- `def __init__(out self, var name: String, column: Column[Bool])`
+  Pack a byte-per-value Boolean column into bits.
 - `def __init__(out self, var name: String, var column: StringColumn)`
 - `def __init__(out self, var name: String, column: Column[String])`
   Convert list-backed strings to the contiguous UTF-8 layout.
@@ -865,7 +891,7 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def uint32(self) -> Column[UInt32]`
 - `def uint64(self) -> Column[UInt64]`
 - `def float32(self) -> Column[Float32]`
-- `def bool(self) -> Column[Bool]`
+- `def bool(self) -> BoolColumn`
   Return an owned typed copy, raising on a dtype mismatch.
 - `def string(self) -> StringColumn`
   Return the (shared, immutable) column, raising on a dtype mismatch.

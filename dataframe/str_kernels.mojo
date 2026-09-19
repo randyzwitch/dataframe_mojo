@@ -1,5 +1,6 @@
 """String kernels over code points. Nulls propagate; payloads of null rows
 are never read."""
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .expr import (
@@ -135,7 +136,7 @@ def string_op(node: Node, input: Series) raises -> Series:
                     flags[i] = text.endswith(node.text)
                 else:
                     flags[i] = node.text in text
-        return Series("", Column[Bool](flags^, valid))
+        return Series("", BoolColumn(flags^, valid))
     var out = StringBuilder(n, column._value_bytes())
     for i in range(n):
         if not valid[i]:

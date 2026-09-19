@@ -16,6 +16,7 @@ published after every worker succeeds, so a failure never exposes a
 partially built column.
 """
 from std.memory import ArcPointer, Pointer
+from .bool_column import BoolColumn
 from .column import Column, _bit
 from .dtype import DataType, NUMERIC_DTYPES
 from .parallel import Job, partitions, run_jobs, worker_count
@@ -24,12 +25,12 @@ from .string_column import StringColumn
 
 
 struct _MaskJob(Job):
-    var mask: Column[Bool]
+    var mask: BoolColumn
     var start: Int
     var end: Int
     var rows: List[Int]
 
-    def __init__(out self, mask: Column[Bool], start: Int, end: Int):
+    def __init__(out self, mask: BoolColumn, start: Int, end: Int):
         self.mask = mask.copy()
         self.start = start
         self.end = end
@@ -41,14 +42,15 @@ struct _MaskJob(Job):
         var base = self.mask._offset
         for i in range(self.start, self.end):
             var row = base + i
-            if values[row] and _bit(bits, row):
+            # Values and validity are both LSB-first bitmaps.
+            if _bit(values, row) and _bit(bits, row):
                 self.rows.append(i)
 
     def into_rows(deinit self) -> List[Int]:
         return self.rows^
 
 
-def true_rows(mask: Column[Bool]) raises -> List[Int]:
+def true_rows(mask: BoolColumn) raises -> List[Int]:
     """Indices of valid true entries, in order."""
     var n = len(mask)
     var workers = worker_count(n)
@@ -106,16 +108,19 @@ struct _GatherJob(Job):
         var out_bits = Pointer[UInt8, MutAnyOrigin](
             unsafe_from_address=self.bits
         )
-        if self.source._data.isa[Column[Bool]]():
-            ref column = self.source._data[Column[Bool]]
-            var out = Pointer[Bool, MutAnyOrigin](
+        if self.source._data.isa[BoolColumn]():
+            # Values are bits too; output ranges start on byte boundaries.
+            ref column = self.source._data[BoolColumn]
+            var out = Pointer[UInt8, MutAnyOrigin](
                 unsafe_from_address=self.values
             )
             for k in range(self.start, self.end):
                 var row = rows[k]
-                out.unsafe_offset(k)[] = column._get(row)
+                var mask = UInt8(1) << UInt8(k % 8)
+                if column._get(row):
+                    out.unsafe_offset(k // 8)[] |= mask
                 if column._valid(row):
-                    out_bits.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(k % 8)
+                    out_bits.unsafe_offset(k // 8)[] |= mask
             return
         comptime for d in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[d]
@@ -188,8 +193,8 @@ def _allocate(column: Series, m: Int) raises -> Series:
 
 
 def _payload_address(series: Series) -> Int:
-    if series._data.isa[Column[Bool]]():
-        return Int(series._data[Column[Bool]]._ptr())
+    if series._data.isa[BoolColumn]():
+        return Int(series._data[BoolColumn]._data[].unsafe_ptr())
     comptime for d in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[d]
         if series._data.isa[Column[Scalar[D]]]():
@@ -198,8 +203,8 @@ def _payload_address(series: Series) -> Int:
 
 
 def _set_bits(mut series: Series, var bits: List[UInt8]):
-    if series._data.isa[Column[Bool]]():
-        series._data[Column[Bool]]._bits = ArcPointer(bits^)
+    if series._data.isa[BoolColumn]():
+        series._data[BoolColumn]._bits = ArcPointer(bits^)
         return
     comptime for d in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[d]
