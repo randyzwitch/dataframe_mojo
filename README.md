@@ -97,6 +97,9 @@ typed fields do not trim it. Boolean values are exactly `true` or `false`.
 Float64 accepts the standard parser's values, including `nan`, and only explicit
 `inf`, `+inf`, `-inf`, `Infinity`, `+Infinity`, and `-Infinity` may be infinite.
 
+`write_csv(frame, path)` writes the inverse format: reading it back with
+`CsvSchema.of(frame)` reproduces the frame exactly.
+
 The reader consumes bounded file buffers and retains tokenizer state across
 them. Its scalar structural scanner is the correctness reference for later SIMD
 scanning and record-boundary-aware parallel decoding. See the complete

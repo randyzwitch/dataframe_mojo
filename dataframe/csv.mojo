@@ -112,6 +112,21 @@ struct CsvSchema(Copyable, Sized):
     def __len__(self) -> Int:
         return len(self._fields)
 
+    @staticmethod
+    def of(frame: DataFrame) raises -> CsvSchema:
+        """A nullable schema matching a frame's names and dtypes."""
+        var fields = List[CsvField](capacity=frame.width())
+        for field in frame.schema():
+            if field.dtype == "int64":
+                fields.append(CsvField.int64(field.name))
+            elif field.dtype == "float64":
+                fields.append(CsvField.float64(field.name))
+            elif field.dtype == "bool":
+                fields.append(CsvField.bool(field.name))
+            else:
+                fields.append(CsvField.string(field.name))
+        return CsvSchema(fields^)
+
     def field(self, index: Int) raises -> CsvField:
         if index < 0 or index >= len(self):
             raise Error("CSV schema index out of bounds")
@@ -483,3 +498,184 @@ def read_csv(
                 break
             reader.feed(bytes^)
     return reader.finish()
+
+
+def _needs_quotes(text: String, separator: UInt8, null_value: String) -> Bool:
+    """Quote when unquoted output would re-read differently."""
+    if text.byte_length() == 0 or text == null_value:
+        return True
+    for b in text.as_bytes():
+        if b == separator or b == 34 or b == 10 or b == 13:
+            return True
+    return False
+
+
+def _quoted(text: String) -> String:
+    return '"' + text.replace('"', '""') + '"'
+
+
+def _render_field(
+    text: String,
+    is_string: Bool,
+    style: String,
+    separator: UInt8,
+    null_value: String,
+) -> String:
+    if style == "always" or (style == "non_numeric" and is_string):
+        return _quoted(text)
+    if style == "never":
+        return text
+    if _needs_quotes(text, separator, null_value):
+        return _quoted(text)
+    return text
+
+
+def _cell_text(series: Series, row: Int) -> String:
+    """Canonical text for a valid cell; floats use the round-trip form."""
+    if series._data.isa[Column[Int64]]():
+        return String(series._data[Column[Int64]]._values[row])
+    if series._data.isa[Column[Float64]]():
+        return String(series._data[Column[Float64]]._values[row])
+    if series._data.isa[Column[Bool]]():
+        return "true" if series._data[Column[Bool]]._values[row] else "false"
+    return series._data[Column[String]]._values[row]
+
+
+def _cell_valid(series: Series, row: Int) -> Bool:
+    if series._data.isa[Column[Int64]]():
+        return series._data[Column[Int64]]._valid(row)
+    if series._data.isa[Column[Float64]]():
+        return series._data[Column[Float64]]._valid(row)
+    if series._data.isa[Column[Bool]]():
+        return series._data[Column[Bool]]._valid(row)
+    return series._data[Column[String]]._valid(row)
+
+
+struct _CsvWriter:
+    var separator: String
+    var separator_byte: UInt8
+    var quote_style: String
+    var null_value: String
+    var line_terminator: String
+
+    def __init__(
+        out self,
+        separator: String,
+        quote_style: String,
+        null_value: String,
+        line_terminator: String,
+    ) raises:
+        if separator.byte_length() != 1:
+            raise Error("CSV separator must be a single byte")
+        var byte = separator.as_bytes()[0]
+        if byte == 34 or byte == 10 or byte == 13:
+            raise Error("CSV separator cannot be a quote, CR, or LF")
+        if (
+            quote_style != "necessary"
+            and quote_style != "always"
+            and quote_style != "non_numeric"
+            and quote_style != "never"
+        ):
+            raise Error(
+                "quote_style must be necessary, always, non_numeric, or never"
+            )
+        if line_terminator != "\n" and line_terminator != "\r\n":
+            raise Error("line_terminator must be LF or CRLF")
+        for b in null_value.as_bytes():
+            if b == byte or b == 34 or b == 10 or b == 13:
+                raise Error(
+                    "null_value cannot contain the separator, quotes, or"
+                    " line breaks"
+                )
+        self.separator = separator
+        self.separator_byte = byte
+        self.quote_style = quote_style
+        self.null_value = null_value
+        self.line_terminator = line_terminator
+
+    def header(self, frame: DataFrame) -> String:
+        var line = String()
+        for c in range(frame.width()):
+            if c > 0:
+                line += self.separator
+            line += _render_field(
+                frame._columns[c].name(),
+                True,
+                self.quote_style,
+                self.separator_byte,
+                self.null_value,
+            )
+        return line + self.line_terminator
+
+    def row(self, frame: DataFrame, row: Int) -> String:
+        var line = String()
+        for c in range(frame.width()):
+            if c > 0:
+                line += self.separator
+            ref column = frame._columns[c]
+            if not _cell_valid(column, row):
+                line += self.null_value
+                continue
+            var is_string = (
+                column.dtype() == "string" or column.dtype() == "bool"
+            )
+            line += _render_field(
+                _cell_text(column, row),
+                is_string,
+                self.quote_style,
+                self.separator_byte,
+                self.null_value,
+            )
+        return line + self.line_terminator
+
+
+def to_csv_string(
+    frame: DataFrame,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_style: String = "necessary",
+    null_value: String = "",
+    line_terminator: String = "\n",
+) raises -> String:
+    """Render the whole frame as CSV text; use write_csv for large frames."""
+    var writer = _CsvWriter(separator, quote_style, null_value, line_terminator)
+    var out = String()
+    if has_header:
+        out += writer.header(frame)
+    for row in range(frame.height()):
+        out += writer.row(frame, row)
+    return out^
+
+
+def write_csv(
+    frame: DataFrame,
+    path: String,
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_style: String = "necessary",
+    null_value: String = "",
+    line_terminator: String = "\n",
+    buffer_size: Int = 65536,
+) raises:
+    """Stream a frame to a UTF-8 CSV file that read_csv reads back exactly.
+
+    With the defaults, nulls are empty unquoted fields and empty strings are
+    written as "" so they stay distinct. Output is flushed in chunks of about
+    buffer_size bytes, so memory does not grow with the frame.
+    """
+    if buffer_size <= 0:
+        raise Error("CSV buffer_size must be positive")
+    var writer = _CsvWriter(separator, quote_style, null_value, line_terminator)
+    with open(path, "w") as file:
+        var chunk = String()
+        if has_header:
+            chunk += writer.header(frame)
+        for row in range(frame.height()):
+            chunk += writer.row(frame, row)
+            if chunk.byte_length() >= buffer_size:
+                file.write(chunk)
+                chunk = String()
+        if chunk.byte_length() > 0:
+            file.write(chunk)
