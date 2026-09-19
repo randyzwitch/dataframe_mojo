@@ -57,6 +57,8 @@ from .expr import (
     QUANTILE,
     LEN,
     Node,
+    WHEN,
+    is_conditional,
     is_logical,
     is_binary,
     is_unary,
@@ -327,6 +329,36 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
             dtype = _reduction_dtype(node, types[node.left])
             shape = AGGREGATE
             has_aggregate = True
+        elif is_conditional(node.op):
+            if (
+                node.left < 0
+                or node.right < 0
+                or node.left >= i
+                or node.right >= i
+                or node.extra >= i
+            ):
+                raise Error("Invalid conditional expression inputs")
+            if types[node.left] != "bool":
+                raise Error(
+                    "when requires a bool predicate, found " + types[node.left]
+                )
+            dtype = types[node.right]
+            var children = List[Int]()
+            children.append(node.left)
+            children.append(node.right)
+            if node.extra >= 0:
+                if types[node.extra] != dtype:
+                    raise Error(
+                        "when/then/otherwise branches require matching dtypes,"
+                        " found " + dtype + " and " + types[node.extra]
+                    )
+                children.append(node.extra)
+            for child in children:
+                has_aggregate = has_aggregate or aggregated[child]
+                if shapes[child] == ROWS:
+                    shape = ROWS
+            if shape != ROWS and has_aggregate:
+                shape = AGGREGATE
         elif is_unary(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid unary expression input")

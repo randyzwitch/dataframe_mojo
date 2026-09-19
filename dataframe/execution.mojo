@@ -52,12 +52,13 @@ from .expr import (
     ANY,
     ALL,
     NULL_COUNT,
+    WHEN,
     is_reduction,
 )
-from .binding import BoundExpr, ROWS
+from .binding import BoundExpr, ROWS, AGGREGATE
 from .column import Column
 from .series import Series
-from .expr_kernels import binary, unary
+from .expr_kernels import binary, unary, choose, fit_mask
 from .aggregate import Reducer
 
 
@@ -75,86 +76,86 @@ def _empty(dtype: String) raises -> Series:
 
 def _binary_op[
     width: Int
-](op: Int, left: Series, right: Series) raises -> Series:
+](op: Int, left: Series, right: Series, mask: List[Bool]) raises -> Series:
     """Map a runtime opcode to its compile-time specialized kernel."""
     if op == ADD:
-        return binary[ADD, width](left, right)
+        return binary[ADD, width](left, right, mask)
     if op == SUB:
-        return binary[SUB, width](left, right)
+        return binary[SUB, width](left, right, mask)
     if op == MUL:
-        return binary[MUL, width](left, right)
+        return binary[MUL, width](left, right, mask)
     if op == DIV:
-        return binary[DIV, width](left, right)
+        return binary[DIV, width](left, right, mask)
     if op == FLOORDIV:
-        return binary[FLOORDIV, width](left, right)
+        return binary[FLOORDIV, width](left, right, mask)
     if op == MOD:
-        return binary[MOD, width](left, right)
+        return binary[MOD, width](left, right, mask)
     if op == POW:
-        return binary[POW, width](left, right)
+        return binary[POW, width](left, right, mask)
     if op == CLIP_LOW:
-        return binary[CLIP_LOW, width](left, right)
+        return binary[CLIP_LOW, width](left, right, mask)
     if op == CLIP_HIGH:
-        return binary[CLIP_HIGH, width](left, right)
+        return binary[CLIP_HIGH, width](left, right, mask)
     if op == GT:
-        return binary[GT, width](left, right)
+        return binary[GT, width](left, right, mask)
     if op == LT:
-        return binary[LT, width](left, right)
+        return binary[LT, width](left, right, mask)
     if op == GE:
-        return binary[GE, width](left, right)
+        return binary[GE, width](left, right, mask)
     if op == LE:
-        return binary[LE, width](left, right)
+        return binary[LE, width](left, right, mask)
     if op == EQ:
-        return binary[EQ, width](left, right)
+        return binary[EQ, width](left, right, mask)
     if op == NE:
-        return binary[NE, width](left, right)
+        return binary[NE, width](left, right, mask)
     if op == AND:
-        return binary[AND, width](left, right)
+        return binary[AND, width](left, right, mask)
     if op == OR:
-        return binary[OR, width](left, right)
+        return binary[OR, width](left, right, mask)
     if op == XOR:
-        return binary[XOR, width](left, right)
+        return binary[XOR, width](left, right, mask)
     if op == FILL_NULL:
-        return binary[FILL_NULL, width](left, right)
+        return binary[FILL_NULL, width](left, right, mask)
     if op == FILL_NAN:
-        return binary[FILL_NAN, width](left, right)
+        return binary[FILL_NAN, width](left, right, mask)
     if op == KEEP_NULLS:
-        return binary[KEEP_NULLS, width](left, right)
+        return binary[KEEP_NULLS, width](left, right, mask)
     raise Error("Unsupported binary expression node")
 
 
 def _unary_op[
     width: Int
-](op: Int, input: Series, integer: Int64) raises -> Series:
+](op: Int, input: Series, integer: Int64, mask: List[Bool]) raises -> Series:
     if op == NEG:
-        return unary[NEG, width](input, integer)
+        return unary[NEG, width](input, integer, mask)
     if op == ABS:
-        return unary[ABS, width](input, integer)
+        return unary[ABS, width](input, integer, mask)
     if op == SQRT:
-        return unary[SQRT, width](input, integer)
+        return unary[SQRT, width](input, integer, mask)
     if op == EXP:
-        return unary[EXP, width](input, integer)
+        return unary[EXP, width](input, integer, mask)
     if op == LOG:
-        return unary[LOG, width](input, integer)
+        return unary[LOG, width](input, integer, mask)
     if op == FLOOR:
-        return unary[FLOOR, width](input, integer)
+        return unary[FLOOR, width](input, integer, mask)
     if op == CEIL:
-        return unary[CEIL, width](input, integer)
+        return unary[CEIL, width](input, integer, mask)
     if op == ROUND:
-        return unary[ROUND, width](input, integer)
+        return unary[ROUND, width](input, integer, mask)
     if op == NOT:
-        return unary[NOT, width](input, integer)
+        return unary[NOT, width](input, integer, mask)
     if op == IS_NULL:
-        return unary[IS_NULL, width](input, integer)
+        return unary[IS_NULL, width](input, integer, mask)
     if op == IS_NOT_NULL:
-        return unary[IS_NOT_NULL, width](input, integer)
+        return unary[IS_NOT_NULL, width](input, integer, mask)
     if op == IS_NAN:
-        return unary[IS_NAN, width](input, integer)
+        return unary[IS_NAN, width](input, integer, mask)
     if op == IS_NOT_NAN:
-        return unary[IS_NOT_NAN, width](input, integer)
+        return unary[IS_NOT_NAN, width](input, integer, mask)
     if op == IS_FINITE:
-        return unary[IS_FINITE, width](input, integer)
+        return unary[IS_FINITE, width](input, integer, mask)
     if op == IS_INFINITE:
-        return unary[IS_INFINITE, width](input, integer)
+        return unary[IS_INFINITE, width](input, integer, mask)
     raise Error("Unsupported unary expression node")
 
 
@@ -168,11 +169,14 @@ def _eval[
     offset: Int,
     length: Int,
     grouped: Bool,
+    mask: List[Bool],
 ) raises -> Series:
     """Evaluate one node for rows [offset, offset + length).
 
     Returns `length` values, or one value for scalar results that callers
     broadcast. Aggregate nodes read precomputed states instead of recursing.
+    `mask` (empty means all rows) marks rows whose result can be observed;
+    conditional branches narrow it so unselected rows never raise.
     """
     ref node = bound.expr._nodes[index]
     if node.op == COL:
@@ -191,15 +195,78 @@ def _eval[
         if grouped:
             return aggregates[index].slice(offset, length)
         return aggregates[index].copy()
+    if node.op == WHEN:
+        return _conditional[width](
+            bound, columns, aggregates, index, offset, length, grouped, mask
+        )
     var left = _eval[width](
-        bound, columns, aggregates, node.left, offset, length, grouped
+        bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
     if node.right < 0:
-        return _unary_op[width](node.op, left, node.integer)
+        return _unary_op[width](node.op, left, node.integer, mask)
     var right = _eval[width](
-        bound, columns, aggregates, node.right, offset, length, grouped
+        bound, columns, aggregates, node.right, offset, length, grouped, mask
     )
-    return _binary_op[width](node.op, left, right)
+    return _binary_op[width](node.op, left, right, mask)
+
+
+def _conditional[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    aggregates: List[Series],
+    index: Int,
+    offset: Int,
+    length: Int,
+    grouped: Bool,
+    mask: List[Bool],
+) raises -> Series:
+    ref node = bound.expr._nodes[index]
+    var shape = bound.shapes[index]
+    var size = (
+        length if shape == ROWS or (grouped and shape == AGGREGATE) else 1
+    )
+    var active = fit_mask(mask, size)
+    var predicate = _eval[width](
+        bound, columns, aggregates, node.left, offset, length, grouped, mask
+    )
+    ref flags = predicate._data[Column[Bool]]
+    var selected = List[Bool](capacity=size)
+    var then_mask = List[Bool](capacity=size)
+    var other_mask = List[Bool](capacity=size)
+    for i in range(size):
+        var p = 0 if len(flags) == 1 else i
+        var take = flags._valid(p) and flags._values[p]
+        var observed = len(active) == 0 or active[i]
+        selected.append(take)
+        then_mask.append(observed and take)
+        other_mask.append(observed and not take)
+    var then = _eval[width](
+        bound,
+        columns,
+        aggregates,
+        node.right,
+        offset,
+        length,
+        grouped,
+        then_mask,
+    )
+    var other: Series
+    if node.extra >= 0:
+        other = _eval[width](
+            bound,
+            columns,
+            aggregates,
+            node.extra,
+            offset,
+            length,
+            grouped,
+            other_mask,
+        )
+    else:
+        other = Series.full_null("", bound.dtypes[index], 1)
+    return choose(selected, then, other)
 
 
 def _batch[
@@ -214,7 +281,14 @@ def _batch[
     grouped: Bool,
 ) raises -> Series:
     return _eval[width](
-        bound, columns, aggregates, target, offset, length, grouped
+        bound,
+        columns,
+        aggregates,
+        target,
+        offset,
+        length,
+        grouped,
+        List[Bool](),
     )
 
 
