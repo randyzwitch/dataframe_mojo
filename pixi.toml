@@ -25,3 +25,13 @@ bench-concat = "mojo run -I . benchmarks/bench_concat.mojo"
 bench-sort = "mojo run -I . benchmarks/bench_sort.mojo"
 bench-group-by = "mojo run -I . benchmarks/bench_group_by.mojo"
 bench-join = "mojo run -I . benchmarks/bench_join.mojo"
+
+[feature.oracle.dependencies]
+polars = ">=1.0"
+python = ">=3.11"
+
+[feature.oracle.tasks]
+oracle = "python3 scripts/oracle.py"
+
+[environments]
+oracle = { features = ["oracle"], solve-group = "default" }

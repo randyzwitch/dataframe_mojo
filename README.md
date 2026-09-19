@@ -204,7 +204,7 @@ adapter. Build input columns in memory for this first version.
 `pixi run package` precompiles `dist/dataframe.mojoc`; put its directory on the
 import path (`mojo run -I dist app.mojo`). Tagged releases attach the package
 and a generated [API reference](docs/api.md) (`pixi run docs`). See the
-[changelog](CHANGELOG.md), the [stability policy](docs/stability.md), and the
+[testing guide](docs/testing.md), the [changelog](CHANGELOG.md), the [stability policy](docs/stability.md), and the
 [pandas/Polars migration guide](docs/migration.md).
 
 See [semantics](docs/semantics.md) for the behavior the tests promise and
