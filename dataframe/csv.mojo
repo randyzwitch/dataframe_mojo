@@ -117,9 +117,11 @@ comptime _Builder = Variant[
 struct _CsvColumn(Copyable):
     var field: CsvField
     var builder: _Builder
+    var keep: Bool
 
-    def __init__(out self, field: CsvField):
+    def __init__(out self, field: CsvField, keep: Bool = True):
         self.field = field.copy()
+        self.keep = keep
         if field.dtype == CSV_INT64:
             self.builder = _Builder(_IntBuilder([], []))
         elif field.dtype == CSV_FLOAT64:
@@ -141,10 +143,41 @@ struct _CsvColumn(Copyable):
             )
         )
 
-    def append(mut self, text: String, quoted: Bool, record: Int) raises:
+    def pop(mut self):
+        """Remove the last appended value (record rollback)."""
+        if not self.keep:
+            return
+        if self.builder.isa[_IntBuilder]():
+            _ = self.builder[_IntBuilder].values.pop()
+            _ = self.builder[_IntBuilder].valid.pop()
+        elif self.builder.isa[_FloatBuilder]():
+            _ = self.builder[_FloatBuilder].values.pop()
+            _ = self.builder[_FloatBuilder].valid.pop()
+        elif self.builder.isa[_BoolBuilder]():
+            _ = self.builder[_BoolBuilder].values.pop()
+            _ = self.builder[_BoolBuilder].valid.pop()
+        else:
+            _ = self.builder[_StringBuilder].values.pop()
+            _ = self.builder[_StringBuilder].valid.pop()
+
+    def append(
+        mut self,
+        text: String,
+        quoted: Bool,
+        record: Int,
+        null_values: List[String] = List[String](),
+    ) raises:
         # Null markers only match unquoted fields. Consequently `,"",` is a
         # valid empty string while `,,` is null with the default marker.
-        if not quoted and text == "":
+        if not self.keep:
+            return
+        var is_null = not quoted and text == ""
+        if not quoted and not is_null:
+            for token in null_values:
+                if text == token:
+                    is_null = True
+                    break
+        if is_null:
             if not self.field.nullable:
                 raise self._error(record, "null in a non-nullable field")
             if self.builder.isa[_IntBuilder]():
@@ -226,6 +259,8 @@ struct _CsvReader:
     var prefix_done: Bool
     var field_bytes: List[UInt8]
     var header_fields: List[String]
+    var fields: List[String]
+    var quoted: List[Bool]
     var field_index: Int
     var record: Int
     var physical_line: Int
@@ -235,17 +270,40 @@ struct _CsvReader:
     var field_started: Bool
     var record_open: Bool
     var pending_cr: Bool
+    var separator: UInt8
+    var quote: UInt8
+    var quoting: Bool
+    var comment: List[UInt8]
+    var comment_match: List[UInt8]
+    var in_comment: Bool
+    var skip_lines: Int
+    var n_rows: Int
+    var rows: Int
+    var done: Bool
+    var null_values: List[String]
+    var ignore_errors: Bool
+    var truncate_ragged: Bool
+    var lossy: Bool
+    var skipped: Int
 
-    def __init__(out self, schema: CsvSchema, has_header: Bool):
+    def __init__(
+        out self,
+        schema: CsvSchema,
+        has_header: Bool,
+        options: CsvOptions,
+        keep: List[Bool],
+    ) raises:
         self.schema = schema.copy()
         self.columns = List[_CsvColumn](capacity=len(schema))
         for i in range(len(schema)):
-            self.columns.append(_CsvColumn(schema._fields[i]))
+            self.columns.append(_CsvColumn(schema._fields[i], keep[i]))
         self.has_header = has_header
         self.prefix = List[UInt8](capacity=3)
         self.prefix_done = False
         self.field_bytes = List[UInt8]()
         self.header_fields = List[String]()
+        self.fields = List[String]()
+        self.quoted = List[Bool]()
         self.field_index = 0
         self.record = 1
         self.physical_line = 1
@@ -255,6 +313,23 @@ struct _CsvReader:
         self.field_started = False
         self.record_open = False
         self.pending_cr = False
+        self.separator = options.separator.as_bytes()[0]
+        self.quoting = options.quote_char.byte_length() == 1
+        self.quote = options.quote_char.as_bytes()[0] if self.quoting else 0
+        self.comment = List[UInt8]()
+        for b in options.comment_prefix.as_bytes():
+            self.comment.append(b)
+        self.comment_match = List[UInt8]()
+        self.in_comment = False
+        self.skip_lines = options.skip_rows
+        self.n_rows = options.n_rows
+        self.rows = 0
+        self.done = options.n_rows == 0
+        self.null_values = options.null_values.copy()
+        self.ignore_errors = options.ignore_errors
+        self.truncate_ragged = options.truncate_ragged_lines
+        self.lossy = options.encoding == "utf8-lossy"
+        self.skipped = 0
 
     def _location(self, text: String) -> Error:
         return Error(
@@ -271,19 +346,19 @@ struct _CsvReader:
         )
 
     def _finish_field(mut self) raises:
-        if self.field_index >= len(self.schema):
-            raise self._location("too many fields")
         var text: String
-        try:
-            text = String(from_utf8=self.field_bytes)
-        except:
-            raise self._location("field is not valid UTF-8")
-        if self.has_header and self.record == 1:
-            self.header_fields.append(text^)
+        if self.lossy:
+            text = String(from_utf8_lossy=self.field_bytes)
         else:
-            self.columns[self.field_index].append(
-                text^, self.field_quoted, self.record
-            )
+            try:
+                text = String(from_utf8=self.field_bytes)
+            except:
+                raise self._location("field is not valid UTF-8")
+        if self.field_index >= len(self.schema) and not self.truncate_ragged:
+            if not self.ignore_errors or (self.has_header and self.record == 1):
+                raise self._location("too many fields")
+        self.fields.append(text^)
+        self.quoted.append(self.field_quoted)
         self.field_bytes.clear()
         self.field_index += 1
         self.field_quoted = False
@@ -292,34 +367,108 @@ struct _CsvReader:
 
     def _finish_record(mut self) raises:
         self._finish_field()
-        if self.field_index != len(self.schema):
-            raise self._location(
-                String(
-                    "expected ",
-                    len(self.schema),
-                    " fields, found ",
-                    self.field_index,
+        var header = self.has_header and self.record == 1
+        var count = len(self.fields)
+        if header:
+            if count != len(self.schema):
+                raise self._location(
+                    String(
+                        "expected ",
+                        len(self.schema),
+                        " fields, found ",
+                        count,
+                    )
                 )
-            )
-        if self.has_header and self.record == 1:
             for i in range(len(self.schema)):
-                if self.header_fields[i] != self.schema._fields[i].name:
+                if self.fields[i] != self.schema._fields[i].name:
                     raise Error(
                         String(
                             "CSV header field ",
                             i + 1,
                             " is '",
-                            self.header_fields[i],
+                            self.fields[i],
                             "'; expected '",
                             self.schema._fields[i].name,
                             "'",
                         )
                     )
+        elif count != len(self.schema) and not self.truncate_ragged:
+            if not self.ignore_errors:
+                raise self._location(
+                    String(
+                        "expected ",
+                        len(self.schema),
+                        " fields, found ",
+                        count,
+                    )
+                )
+            self.skipped += 1
+        else:
+            var appended = 0
+            try:
+                for i in range(len(self.schema)):
+                    if i < count:
+                        self.columns[i].append(
+                            self.fields[i],
+                            self.quoted[i],
+                            self.record,
+                            self.null_values,
+                        )
+                    else:
+                        self.columns[i].append(
+                            "", False, self.record, self.null_values
+                        )
+                    appended += 1
+                self.rows += 1
+                if self.n_rows >= 0 and self.rows >= self.n_rows:
+                    self.done = True
+            except e:
+                if not self.ignore_errors:
+                    raise e^
+                for i in range(appended):
+                    self.columns[i].pop()
+                self.skipped += 1
+        self.fields.clear()
+        self.quoted.clear()
         self.field_index = 0
         self.record += 1
         self.record_open = False
 
     def _consume(mut self, byte: UInt8) raises:
+        if self.done:
+            return
+        if self.skip_lines > 0:
+            if byte == 10:
+                self.skip_lines -= 1
+                self.physical_line += 1
+            return
+        if self.in_comment:
+            if byte == 10:
+                self.in_comment = False
+                self.physical_line += 1
+            return
+        # A comment prefix only counts at the start of a record.
+        if (
+            len(self.comment) > 0
+            and not self.record_open
+            and not self.pending_cr
+        ):
+            if byte == self.comment[len(self.comment_match)]:
+                self.comment_match.append(byte)
+                if len(self.comment_match) == len(self.comment):
+                    self.comment_match.clear()
+                    self.in_comment = True
+                return
+            if len(self.comment_match) > 0:
+                var replay = self.comment_match.copy()
+                self.comment_match.clear()
+                for b in replay:
+                    self._consume_record_byte(b)
+        self._consume_record_byte(byte)
+
+    def _consume_record_byte(mut self, byte: UInt8) raises:
+        if self.done:
+            return
         if self.pending_cr:
             if byte != 10:
                 raise self._location(
@@ -333,10 +482,10 @@ struct _CsvReader:
         self.record_open = True
         if self.in_quotes:
             if self.after_quote:
-                if byte == 34:
-                    self.field_bytes.append(34)
+                if byte == self.quote:
+                    self.field_bytes.append(self.quote)
                     self.after_quote = False
-                elif byte == 44:
+                elif byte == self.separator:
                     self.in_quotes = False
                     self._finish_field()
                 elif byte == 10:
@@ -348,7 +497,7 @@ struct _CsvReader:
                     self.pending_cr = True
                 else:
                     raise self._location("unexpected byte after closing quote")
-            elif byte == 34:
+            elif byte == self.quote:
                 self.after_quote = True
             else:
                 self.field_bytes.append(byte)
@@ -356,13 +505,13 @@ struct _CsvReader:
                     self.physical_line += 1
             return
 
-        if byte == 34:
+        if self.quoting and byte == self.quote:
             if self.field_started:
                 raise self._location("quote inside an unquoted field")
             self.in_quotes = True
             self.field_quoted = True
             self.field_started = True
-        elif byte == 44:
+        elif byte == self.separator:
             self._finish_field()
         elif byte == 10:
             self._finish_record()
@@ -396,6 +545,13 @@ struct _CsvReader:
             self._consume(byte)
         self.prefix.clear()
         self.prefix_done = True
+        if len(self.comment_match) > 0:
+            var replay = self.comment_match.copy()
+            self.comment_match.clear()
+            for b in replay:
+                self._consume_record_byte(b)
+        if self.done:
+            return self._frame()
         if self.pending_cr:
             raise self._location("bare carriage return at end of file")
         if self.in_quotes:
@@ -403,12 +559,51 @@ struct _CsvReader:
                 self.in_quotes = False
             else:
                 raise self._location("unterminated quoted field")
-        if self.record_open:
+        if self.record_open and not self.in_comment:
             self._finish_record()
+        return self._frame()
+
+    def _frame(self) raises -> DataFrame:
         var output = List[Series](capacity=len(self.columns))
         for column in self.columns:
-            output.append(column.finish())
-        return DataFrame(output^)
+            if column.keep:
+                output.append(column.finish())
+        return DataFrame(output^, height=self.rows)
+
+
+@fieldwise_init
+struct CsvOptions(Copyable):
+    var separator: String
+    var quote_char: String
+    var comment_prefix: String
+    var skip_rows: Int
+    var n_rows: Int
+    var null_values: List[String]
+    var ignore_errors: Bool
+    var truncate_ragged_lines: Bool
+    var encoding: String
+
+    def validate(self) raises:
+        if self.separator.byte_length() != 1:
+            raise Error("CSV separator must be a single byte")
+        var sep = self.separator.as_bytes()[0]
+        if sep == 10 or sep == 13:
+            raise Error("CSV separator cannot be CR or LF")
+        if self.quote_char.byte_length() > 1:
+            raise Error("CSV quote_char must be one byte or empty")
+        if self.quote_char.byte_length() == 1:
+            var q = self.quote_char.as_bytes()[0]
+            if q == sep or q == 10 or q == 13:
+                raise Error("CSV quote_char cannot be the separator, CR, or LF")
+        for b in self.comment_prefix.as_bytes():
+            if b == 10 or b == 13:
+                raise Error("comment_prefix cannot contain CR or LF")
+        if self.skip_rows < 0:
+            raise Error("skip_rows must be nonnegative")
+        if self.n_rows < -1:
+            raise Error("n_rows must be nonnegative or -1")
+        if self.encoding != "utf8" and self.encoding != "utf8-lossy":
+            raise Error("encoding must be 'utf8' or 'utf8-lossy'")
 
 
 def read_csv(
@@ -416,18 +611,56 @@ def read_csv(
     schema: CsvSchema,
     *,
     has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
     buffer_size: Int = 65536,
 ) raises -> DataFrame:
     """Read a strict UTF-8 CSV file into typed, nullable columns.
 
-    Empty unquoted fields are null. Quoted empty strings are values, which are
-    therefore only valid in String columns. Whitespace is never trimmed.
+    Empty unquoted fields are null, as are unquoted fields equal to one of
+    null_values. Quoted empty strings are values, which are therefore only
+    valid in String columns. Whitespace is never trimmed. Every option is
+    applied by the streaming tokenizer, so results do not depend on buffer
+    boundaries. See docs/csv.md for the option contract.
     """
     if buffer_size <= 0:
         raise Error("CSV buffer_size must be positive")
-    var reader = _CsvReader(schema, has_header)
+    var options = CsvOptions(
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        n_rows,
+        null_values.copy(),
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+    )
+    options.validate()
+    var keep = List[Bool](length=len(schema), fill=len(columns) == 0)
+    var requested = Dict[String, Bool]()
+    for name in columns:
+        if name in requested:
+            raise Error("CSV column listed twice: " + name)
+        requested[name] = True
+        var found = False
+        for i in range(len(schema)):
+            if schema._fields[i].name == name:
+                keep[i] = True
+                found = True
+        if not found:
+            raise Error("Unknown CSV column: " + name)
+    var reader = _CsvReader(schema, has_header, options, keep)
     with open(path, "r") as file:
-        while True:
+        while not reader.done:
             var bytes = file.read_bytes(buffer_size)
             if len(bytes) == 0:
                 break

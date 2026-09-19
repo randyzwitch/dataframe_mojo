@@ -58,6 +58,33 @@ machine-readable timing and throughput metrics. For peak resident memory on
 Linux, run `/usr/bin/time -v pixi run bench-csv`; this intentionally remains an
 external measurement so the parser has no platform-specific runtime dependency.
 
+## Reader options
+
+All options are applied by the streaming tokenizer, one byte at a time, so
+results never depend on buffer boundaries; tests read every scenario with every
+buffer size from one byte to the whole file.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `separator` | `","` | one byte other than CR or LF |
+| `quote_char` | `'"'` | one byte, or `""` to treat quote bytes as data |
+| `comment_prefix` | `""` | records starting with this text (outside quotes) are skipped to the end of the line; a partial match is ordinary data |
+| `skip_rows` | `0` | raw physical lines skipped before parsing (and before the header), ignoring quotes |
+| `n_rows` | `-1` | stop after this many data records; the rest of the file is not read |
+| `columns` | all | decode and return only these fields, in schema order; other fields are tokenized but never converted |
+| `null_values` | none | extra unquoted tokens read as null in every column; quoted text never matches |
+| `ignore_errors` | `False` | drop data records with a conversion error or the wrong field count instead of raising; header errors still raise |
+| `truncate_ragged_lines` | `False` | pad short records with nulls and drop extra fields |
+| `encoding` | `"utf8"` | `"utf8-lossy"` replaces invalid sequences with U+FFFD instead of raising |
+
+A dropped record is removed atomically: fields already converted are rolled
+back, so column lengths stay aligned. Records are buffered as field text until
+they end, which keeps parser memory bounded by the current record. Projection
+cut ingestion time of the 100,000-row benchmark from 86 ms to 58 ms when
+reading one of four columns (`pixi run bench-csv`, Linux x86-64).
+Per-column null tokens, dropped-record counts, and partial schema overrides are
+not yet available.
+
 ## Writing
 
 `write_csv(frame, path, has_header=True, separator=",",
@@ -83,5 +110,5 @@ strings, nulls, embedded quotes, separators, and line breaks.
   `line_terminator` is LF or CRLF; `null_value` cannot contain the separator,
   quotes, or line breaks.
 
-Deferred features include schema inference, custom null tokens/dialects, dates,
-compression, remote URLs, permissive error skipping, and lazy `scan_csv`.
+Deferred features include schema inference, dates, compression, remote URLs,
+and lazy `scan_csv`.
