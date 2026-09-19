@@ -147,7 +147,8 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 - Nullable greater-than comparisons, Float64 scalar multiplication, and
   Int64/Float64 sums.
 - Hash grouping by one String column, summing one Int64 or Float64 column.
-- Stable single-column sorting for all four dataframe types.
+- Stable multi-column sorting with per-column direction and null placement,
+  plus `arg_sort`, `top_k`, and `bottom_k`.
 - Inner/left hash joins on one String key, including many-to-many matches.
 - Expression IR, schema binding, scalar broadcasting, and grouped aggregates.
 - Explicit SIMD Float64 arithmetic/comparison kernels and mergeable reduction states.
@@ -162,7 +163,7 @@ var first = frame.head(3)
 var cleaned = frame.drop("notes").rename({"amount": "revenue"})
 var cell = frame.item(0, "region").string()
 var sampled = frame.take([3, 0, 3])
-var sorted = frame.sort("amount", descending=True, nulls_last=True)
+var sorted = frame.sort(["region", "amount"], descending=[False, True], nulls_last=[True, True])
 var joined = frame.join(regions, on="region", how="left")
 ```
 

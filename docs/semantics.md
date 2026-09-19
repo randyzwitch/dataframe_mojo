@@ -118,12 +118,27 @@ The aggregate output name must differ from the key name.
 
 ## Sorting
 
-Sorting is stable, on one column, ascending by default. Equal keys preserve input
-order in either direction. Null placement is independent of direction and defaults
-to last. NaNs follow all non-null non-NaN numeric values in either direction;
-nulls remain first or last according to the explicit option. Strings use Mojo's
-ordinary lexicographic comparison, without locale collation. Boolean false sorts
-before true in ascending order. The implementation is bottom-up mergesort.
+`sort(by)` accepts one name or a list of names and orders rows
+lexicographically by those columns, ascending by default. `descending` and
+`nulls_last` are either one Bool for every key or, passed together as
+keywords, one list entry per key: `sort(["a", "b"], descending=[False, True],
+nulls_last=[True, False])`. An empty key list or a length mismatch raises.
+
+Sorting is stable: rows with equal keys keep input order, in either direction.
+Null placement is independent of direction and defaults to last. NaNs follow
+all non-null non-NaN numeric values in either direction; nulls remain first or
+last according to the option. `-0.0` and `0.0` are equal keys. Strings use
+Mojo's byte-lexicographic comparison, without locale collation. Boolean false
+sorts before true in ascending order.
+
+Each key column is converted once into dense integer ranks that already encode
+direction, NaN, and null placement; a bottom-up mergesort then compares rank
+tuples. `arg_sort` returns the row order. `top_k(k, by)` returns exactly the
+first `k` rows of `sort(by, descending=True)` with nulls last, and `bottom_k`
+the first `k` rows of `sort(by)`; both select with a bounded heap in
+O(n log k) instead of sorting every row. `pixi run bench-sort` compares the
+rank-based sort with the previous per-comparison comparator (kept as
+`Series._argsort_reference` for tests).
 
 ## Joins
 

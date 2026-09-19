@@ -1,7 +1,7 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
 from std.collections import Dict
 from .column import Column
-from .series import Series
+from .series import Series, sort_indices, smallest_indices
 from .kernels import checked_add
 from .expr import Expr
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
@@ -369,9 +369,108 @@ struct DataFrame(Copyable, Sized, Writable):
         self, by: String, descending: Bool = False, nulls_last: Bool = True
     ) raises -> Self:
         """Stable single-column sort. NaNs follow non-null numbers."""
+        return self.sort([by], descending, nulls_last)
+
+    def sort(
+        self,
+        by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = True,
+    ) raises -> Self:
+        """Stable lexicographic sort by several columns, one direction."""
+        return self.take(self.arg_sort(by, descending, nulls_last))
+
+    def sort(
+        self,
+        by: List[String],
+        *,
+        descending: List[Bool],
+        nulls_last: List[Bool],
+    ) raises -> Self:
+        """Per-column direction and null placement; list lengths match by."""
         return self.take(
-            self._columns[self._index(by)].argsort(descending, nulls_last)
+            self.arg_sort(by, descending=descending, nulls_last=nulls_last)
         )
+
+    def arg_sort(
+        self,
+        by: List[String],
+        descending: Bool = False,
+        nulls_last: Bool = True,
+    ) raises -> List[Int]:
+        return self.arg_sort(
+            by,
+            descending=List[Bool](length=len(by), fill=descending),
+            nulls_last=List[Bool](length=len(by), fill=nulls_last),
+        )
+
+    def arg_sort(
+        self,
+        by: List[String],
+        *,
+        descending: List[Bool],
+        nulls_last: List[Bool],
+    ) raises -> List[Int]:
+        """Row order of a stable sort; equal keys keep input order."""
+        return sort_indices(self._sort_ranks(by, descending, nulls_last))
+
+    def top_k(self, k: Int, by: List[String]) raises -> Self:
+        """The k rows that sort(by, descending=True) would put first.
+
+        Nulls rank last. Selection is O(n log k) rather than a full sort.
+        """
+        var n = len(by)
+        return self.take(
+            smallest_indices(
+                self._sort_ranks(
+                    by,
+                    List[Bool](length=n, fill=True),
+                    List[Bool](length=n, fill=True),
+                ),
+                k,
+            )
+        )
+
+    def top_k(self, k: Int, by: String) raises -> Self:
+        return self.top_k(k, [by])
+
+    def bottom_k(self, k: Int, by: List[String]) raises -> Self:
+        """The k rows that sort(by) would put first; nulls rank last."""
+        var n = len(by)
+        return self.take(
+            smallest_indices(
+                self._sort_ranks(
+                    by,
+                    List[Bool](length=n, fill=False),
+                    List[Bool](length=n, fill=True),
+                ),
+                k,
+            )
+        )
+
+    def bottom_k(self, k: Int, by: String) raises -> Self:
+        return self.bottom_k(k, [by])
+
+    def _sort_ranks(
+        self,
+        by: List[String],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+    ) raises -> List[List[Int]]:
+        if len(by) == 0:
+            raise Error("sort requires at least one column")
+        if len(descending) != len(by) or len(nulls_last) != len(by):
+            raise Error(
+                "descending and nulls_last must have one entry per sort column"
+            )
+        var ranks = List[List[Int]](capacity=len(by))
+        for i in range(len(by)):
+            ranks.append(
+                self._columns[self._index(by[i])]._sort_ranks(
+                    descending[i], nulls_last[i]
+                )
+            )
+        return ranks^
 
     def join(
         self,
