@@ -13,6 +13,8 @@ comptime Storage = Variant[
 
 
 struct Series(Copyable, Sized, Writable):
+    """A named column of one supported dtype, plus expression-backed methods."""
+
     var _name: String
     var _data: Storage
 

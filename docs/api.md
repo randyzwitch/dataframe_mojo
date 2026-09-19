@@ -1,0 +1,627 @@
+# API reference
+
+Generated from `mojo doc` by `scripts/api_docs.py`; covers every name
+exported by `dataframe/__init__.mojo`. Contracts live in the guides:
+[semantics](semantics.md), [expressions](expressions.md), [csv](csv.md).
+
+## `all`
+
+Every column, in schema order.
+
+```mojo
+def all() -> Expr
+```
+
+## `AnyValue`
+
+One nullable cell of a supported dtype.
+
+Only the payload field matching `dtype` is meaningful. Equality is
+structural: nulls equal nulls of the same dtype and NaN equals NaN.
+
+- `def __init__(out self, value: Int64)`
+- `def __init__(out self, value: Float64)`
+- `def __init__(out self, value: Bool)`
+- `def __init__(out self, value: String)`
+- `def __init__(out self, dtype: String, valid: Bool, integer: Int64, floating: Float64, boolean: Bool, var string: String)`
+- `def __eq__(self, other: Self) -> Bool`
+- `def null(dtype: String) -> Self`
+- `def dtype(self) -> String`
+- `def is_null(self) -> Bool`
+- `def int64(self) -> Int64`
+- `def float64(self) -> Float64`
+- `def bool(self) -> Bool`
+- `def string(self) -> String`
+- `def write_to(self, mut writer: T)`
+
+## `by_dtype`
+
+Columns whose dtype is listed, in schema order.
+
+```mojo
+def by_dtype(dtypes: List[String]) -> Expr
+```
+
+## `coalesce`
+
+First non-null value per row, left to right; dtypes must match.
+
+```mojo
+def coalesce(exprs: List[Expr]) -> Expr
+```
+
+## `col`
+
+Select several columns; operations apply to each one.
+
+```mojo
+def col(name: String) -> Expr
+```
+
+```mojo
+def col(names: List[String]) -> Expr
+```
+
+## `Column`
+
+A contiguous payload and an LSB-first validity bitmap.
+
+Underscored storage is internal. Public operations return owned copies;
+no borrowed mutable buffers or implicit negative indexing are exposed.
+
+- `def __init__(out self, var values: List[T])`
+- `def __init__(out self, var values: List[T], valid: List[Bool])`
+- `def __len__(self) -> Int`
+- `def is_null(self, index: Int) -> Bool`
+- `def value(self, index: Int) -> T`
+- `def null_count(self) -> Int`
+- `def take(self, indices: List[Int]) -> Self`
+- `def take_or_null(self, indices: List[Int], fill: T) -> Self`
+  Gather rows, treating only -1 as a missing row (for outer joins).
+- `def slice(self, offset: Int, length: Int) -> Self`
+
+## `concat`
+
+Combine frames: 'vertical', 'diagonal', or 'horizontal'.
+
+```mojo
+def concat(frames: List[DataFrame], how: String = "vertical") -> DataFrame
+```
+
+## `concat_str`
+
+Join String expressions row-wise; any null input makes the row null.
+
+```mojo
+def concat_str(exprs: List[Expr], separator: String = "") -> Expr
+```
+
+## `CsvField`
+
+One CSV output field. Names and dtypes are always explicit.
+
+- `def int64(name: String, nullable: Bool = True) -> Self`
+- `def float64(name: String, nullable: Bool = True) -> Self`
+- `def bool(name: String, nullable: Bool = True) -> Self`
+- `def string(name: String, nullable: Bool = True) -> Self`
+
+## `CsvOptions`
+
+Validated reader options; see read_csv for their meaning.
+
+- `def validate(self)`
+
+## `CsvSchema`
+
+An ordered, non-empty set of uniquely named CSV fields.
+
+- `def __init__(out self, var fields: List[CsvField])`
+- `def __len__(self) -> Int`
+- `def of(frame: DataFrame) -> Self`
+  A nullable schema matching a frame's names and dtypes.
+- `def field(self, index: Int) -> CsvField`
+
+## `DataFrame`
+
+Own equal-length, uniquely named columns; transformations copy storage.
+
+- `def __init__(out self, var columns: List[Series], *, height: Int = Int(-1))`
+- `def __getitem__(self, name: String) -> Series`
+- `def height(self) -> Int`
+- `def write_to(self, mut writer: T)`
+- `def to_string(self, *, max_rows: Int = Int(10), max_columns: Int = Int(12), max_string_length: Int = Int(32)) -> String`
+  Render a bounded table. Negative limits mean unlimited.
+- `def glimpse(self, *, max_width: Int = Int(100), max_string_length: Int = Int(32)) -> String`
+  Transposed summary: one line per column with leading values.
+- `def width(self) -> Int`
+- `def schema(self) -> List[Field]`
+- `def shape(self) -> Tuple[Int, Int]`
+- `def __len__(self) -> Int`
+- `def is_empty(self) -> Bool`
+- `def columns(self) -> List[String]`
+- `def dtypes(self) -> List[String]`
+- `def column(self, name: String) -> Series`
+  Return an owned copy. Column lookup is linear in the schema width.
+- `def get_column(self, name: String) -> Series`
+- `def null_count(self) -> Self`
+  One row holding each column's null count as Int64.
+- `def row(self, index: Int) -> List[AnyValue]`
+  Return one row as tagged values, in schema order.
+- `def rows(self) -> List[List[AnyValue]]`
+  Materialize every row; intended for small frames and tests.
+- `def item(self) -> AnyValue`
+  Return the only cell of a 1x1 dataframe.
+- `def item(self, row: Int, column: String) -> AnyValue`
+- `def equals(self, other: Self, *, null_equal: Bool = True) -> Bool`
+  Same names, dtypes, order, height, and cells (NaN equals NaN).
+- `def slice(self, offset: Int, length: Int = Int(-1)) -> Self`
+  Rows [offset, offset + length), clipped to the frame.
+- `def head(self, n: Int = Int(5)) -> Self`
+  First n rows; a negative n drops the last -n rows.
+- `def tail(self, n: Int = Int(5)) -> Self`
+  Last n rows; a negative n drops the first -n rows.
+- `def limit(self, n: Int = Int(5)) -> Self`
+- `def reverse(self) -> Self`
+- `def vstack(self, other: Self) -> Self`
+  Append other's rows; schemas must match exactly.
+- `def hstack(self, other: Self) -> Self`
+  Append other's columns; heights must match, names stay unique.
+- `def hstack(self, columns: List[Series]) -> Self`
+- `def clear(self) -> Self`
+  Zero rows with the same schema.
+- `def drop(self, name: String) -> Self`
+- `def drop(self, names: List[String]) -> Self`
+  Remove columns; every name must exist and appear once.
+- `def rename(self, mapping: Dict[String, String]) -> Self`
+  Rename columns by old name; all names are validated first.
+- `def with_row_index(self, name: String = "index", offset: Int64 = Int64(0)) -> Self`
+  Prepend an Int64 row index starting at offset.
+- `def select(self, names: List[String]) -> Self`
+- `def select(self, expression: Expr, *, batch_size: Int = Int(1024)) -> Self`
+- `def take(self, indices: List[Int]) -> Self`
+- `def filter(self, mask: Column[Bool]) -> Self`
+  Keep true rows, dropping false and null mask entries, in input order.
+- `def filter(self, predicate: Expr, *, batch_size: Int = Int(1024)) -> Self`
+- `def with_column(self, var column: Series) -> Self`
+  Replace by name or append; the input dataframe is unchanged.
+- `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True) -> Self`
+  Stable single-column sort. NaNs follow non-null numbers.
+- `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> Self`
+  Stable lexicographic sort by several columns, one direction.
+- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> Self`
+  Per-column direction and null placement; list lengths match by.
+- `def arg_sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
+- `def arg_sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> List[Int]`
+  Row order of a stable sort; equal keys keep input order.
+- `def top_k(self, k: Int, by: List[String]) -> Self`
+  The k rows that sort(by, descending=True) would put first.
+- `def top_k(self, k: Int, by: String) -> Self`
+- `def bottom_k(self, k: Int, by: List[String]) -> Self`
+  The k rows that sort(by) would put first; nulls rank last.
+- `def bottom_k(self, k: Int, by: String) -> Self`
+- `def join(self, right: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+- `def join(self, right: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+- `def join(self, right: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+  Hash join on key columns of any dtype; null keys never match.
+- `def join(self, right: Self, *, how: String, suffix: String = "_right") -> Self`
+  Cross join: every left row paired with every right row, left-major.
+- `def select_exprs(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> Self`
+  Evaluate against the original frame. Scalar-only output has one row.
+- `def with_columns(self, expression: Expr, *, batch_size: Int = Int(1024)) -> Self`
+- `def with_columns(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> Self`
+  All siblings see the original schema and data; aliases are outputs.
+- `def unpivot(self, on: List[String] = List(), index: List[String] = List(), *, variable_name: String = "variable", value_name: String = "value") -> Self`
+  Wide to long: one row per (input row, `on` column).
+- `def pivot(self, on: String, *, index: List[String], values: String, aggregate_function: String = "", sort_columns: Bool = False, batch_size: Int = Int(1024)) -> Self`
+  Long to wide: one row per distinct index key, one column per distinct `on` value (first-occurrence order unless sort_columns).
+- `def cast(self, dtypes: Dict[String, String], *, strict: Bool = True) -> Self`
+  Cast named columns in place of the originals; order is kept.
+- `def unique(self, subset: List[String] = List(), *, keep: String = "any", maintain_order: Bool = False) -> Self`
+  Drop duplicate rows compared on subset (default: every column).
+- `def n_unique(self, subset: List[String] = List()) -> Int`
+  Number of distinct rows on subset (default: every column).
+- `def is_duplicated(self, subset: List[String] = List()) -> Series`
+  True for every row whose key occurs more than once.
+- `def is_unique(self, subset: List[String] = List()) -> Series`
+  True for every row whose key occurs exactly once.
+- `def drop_nulls(self, subset: List[String] = List()) -> Self`
+  Keep rows with no null in subset (default: every column).
+- `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
+  Fill nulls with a scalar value.
+- `def group_by(self, key: String, *, maintain_order: Bool = False) -> GroupBy`
+- `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> GroupBy`
+  Group by one or more columns of any dtype.
+- `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False, batch_size: Int = Int(1024)) -> GroupBy`
+  Group by computed keys; each key is evaluated once and named by its output name. Aggregations still see the original columns.
+
+## `exclude`
+
+Every column except the listed ones, in schema order.
+
+```mojo
+def exclude(names: List[String]) -> Expr
+```
+
+## `Expr`
+
+A flat, topologically ordered tree; composition never evaluates data.
+
+- `def __init__(out self, then: Then)`
+  A when/then chain without otherwise yields null for unmatched rows.
+- `def __neg__(self) -> Self`
+- `def __invert__(self) -> Self`
+- `def __lt__(self, other: Self) -> Self`
+- `def __le__(self, other: Self) -> Self`
+- `def __gt__(self, other: Self) -> Self`
+- `def __ge__(self, other: Self) -> Self`
+- `def __add__(self, other: Self) -> Self`
+- `def __sub__(self, other: Self) -> Self`
+- `def __mul__(self, other: Self) -> Self`
+- `def __truediv__(self, other: Self) -> Self`
+  True division; always Float64, including for Int64 operands.
+- `def __floordiv__(self, other: Self) -> Self`
+  Floor division; Int64 division by zero yields null.
+- `def __mod__(self, other: Self) -> Self`
+  Remainder with the divisor's sign; Int64 modulo zero yields null.
+- `def __pow__(self, other: Self) -> Self`
+- `def __and__(self, other: Self) -> Self`
+  Kleene AND: false wins over null; otherwise null propagates.
+- `def __or__(self, other: Self) -> Self`
+  Kleene OR: true wins over null; otherwise null propagates.
+- `def __xor__(self, other: Self) -> Self`
+- `def alias(self, name: String) -> Self`
+- `def name_prefix(self, prefix: String) -> Self`
+  Prefix the output name; for selectors, every expanded name.
+- `def name_suffix(self, suffix: String) -> Self`
+  Suffix the output name; for selectors, every expanded name.
+- `def pow(self, exponent: Self) -> Self`
+- `def eq(self, other: Self) -> Self`
+- `def ne(self, other: Self) -> Self`
+- `def abs(self) -> Self`
+- `def sqrt(self) -> Self`
+- `def exp(self) -> Self`
+- `def log(self) -> Self`
+  Natural logarithm.
+- `def floor(self) -> Self`
+- `def ceil(self) -> Self`
+- `def round(self, decimals: Int = Int(0)) -> Self`
+  Round half away from zero to `decimals` places.
+- `def clip(self, lower: Self, upper: Self) -> Self`
+  Bound values to [lower, upper]; nulls and NaN pass through.
+- `def clip_min(self, lower: Self) -> Self`
+- `def clip_max(self, upper: Self) -> Self`
+- `def and_(self, other: Self) -> Self`
+- `def or_(self, other: Self) -> Self`
+- `def xor(self, other: Self) -> Self`
+- `def not_(self) -> Self`
+- `def is_null(self) -> Self`
+- `def is_not_null(self) -> Self`
+- `def is_nan(self) -> Self`
+- `def is_not_nan(self) -> Self`
+- `def is_finite(self) -> Self`
+- `def is_infinite(self) -> Self`
+- `def fill_null(self, value: Self) -> Self`
+  Replace nulls with value; the dtypes must match.
+- `def fill_nan(self, value: Self) -> Self`
+  Replace valid NaNs in a Float64 expression with value.
+- `def is_in(self, values: List[Self]) -> Self`
+  True when equal to any value; null input stays null.
+- `def is_between(self, lower: Self, upper: Self, closed: String = "both") -> Self`
+  True when lower <= x <= upper; `closed` is both, left, right, or none.
+- `def any(self, ignore_nulls: Bool = True) -> Self`
+  Any true value. With ignore_nulls=False, Kleene: null if no true and some null.
+- `def all(self, ignore_nulls: Bool = True) -> Self`
+  All values true; empty is true. With ignore_nulls=False, Kleene: null if no false and some null.
+- `def null_count(self) -> Self`
+  Number of null values, as Int64.
+- `def cast(self, dtype: String, strict: Bool = True) -> Self`
+  Convert to int64, float64, bool, or string.
+- `def cum_sum(self, reverse: Bool = False) -> Self`
+  Running sum of non-null values; null rows stay null. Int64 is checked for overflow.
+- `def cum_min(self, reverse: Bool = False) -> Self`
+- `def cum_max(self, reverse: Bool = False) -> Self`
+- `def cum_count(self, reverse: Bool = False) -> Self`
+  Running count of non-null values, as Int64 (never null).
+- `def shift(self, n: Int = Int(1)) -> Self`
+  Move values n rows later (earlier when negative); vacated rows are null.
+- `def diff(self, n: Int = Int(1)) -> Self`
+  Difference from the value n rows earlier.
+- `def pct_change(self, n: Int = Int(1)) -> Self`
+  Relative change from the value n rows earlier, as Float64.
+- `def rank(self, method: String = "average", descending: Bool = False) -> Self`
+  Rank non-null values: average, min, max, dense, or ordinal.
+- `def rolling_sum(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
+  Sum over the current row and the window_size - 1 rows before it.
+- `def rolling_mean(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
+- `def rolling_min(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
+- `def rolling_max(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
+- `def forward_fill(self, limit: Int = Int(-1)) -> Self`
+  Fill nulls with the last valid value, at most limit rows ahead (-1 means unlimited).
+- `def backward_fill(self, limit: Int = Int(-1)) -> Self`
+- `def over(self, partition_by: String) -> Self`
+- `def over(self, partition_by: List[String]) -> Self`
+  Evaluate within partitions of the key columns, keeping row order.
+- `def str(self) -> StrNamespace`
+  String operations: col("name").str().to_uppercase().
+- `def min(self) -> Self`
+  Smallest non-null value. NaN sorts above every number, so it is the minimum only when every valid value is NaN.
+- `def max(self) -> Self`
+  Largest non-null value; any valid NaN makes the maximum NaN.
+- `def mean(self) -> Self`
+  Arithmetic mean of non-null values as Float64; null when empty.
+- `def first(self) -> Self`
+  The first row's value, which may be null. Order-dependent.
+- `def last(self) -> Self`
+  The last row's value, which may be null. Order-dependent.
+- `def n_unique(self) -> Self`
+  Distinct values, counting null once. NaNs are one value and -0.0 equals 0.0.
+- `def std(self, ddof: Int = Int(1)) -> Self`
+  Standard deviation; null when fewer than ddof + 1 values.
+- `def var(self, ddof: Int = Int(1)) -> Self`
+  Variance; null when fewer than ddof + 1 values.
+- `def median(self) -> Self`
+- `def quantile(self, quantile: Float64, interpolation: String = "linear") -> Self`
+  Interpolation: nearest, lower, higher, midpoint, or linear.
+- `def len(self) -> Self`
+  Number of rows including nulls, as Int64.
+- `def sum(self, min_count: Int = Int(0)) -> Self`
+  Skip nulls; zero when empty unless fewer than min_count are valid.
+- `def count(self) -> Self`
+  Number of non-null values, as Int64.
+
+## `Field`
+
+One schema entry: a column name and its dtype name.
+
+
+## `first`
+
+The first column in the schema.
+
+```mojo
+def first() -> Expr
+```
+
+## `GroupBy`
+
+An eager grouping request. No per-group dataframe materialization.
+
+It owns a snapshot of the input and the evaluated key columns.
+
+- `def agg(self, expression: Expr, *, batch_size: Int = Int(1024)) -> DataFrame`
+- `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
+- `def len(self, name: String = "len") -> DataFrame`
+  Row count per group, including rows with null values.
+
+## `last`
+
+The last column in the schema.
+
+```mojo
+def last() -> Expr
+```
+
+## `lit`
+
+A typed scalar literal; there is no implicit numeric promotion.
+
+```mojo
+def lit(value: Int64) -> Expr
+```
+
+```mojo
+def lit(value: Float64) -> Expr
+```
+
+```mojo
+def lit(value: Bool) -> Expr
+```
+
+```mojo
+def lit(value: String) -> Expr
+```
+
+## `nth`
+
+The column at a position; negative positions count from the end.
+
+```mojo
+def nth(index: Int) -> Expr
+```
+
+## `null`
+
+A typed null literal: int64, float64, bool, or string.
+
+```mojo
+def null(dtype: String) -> Expr
+```
+
+## `read_csv`
+
+Read a strict UTF-8 CSV file into typed, nullable columns.
+
+```mojo
+def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
+def read_csv(path: String, *, infer_schema_length: Int = Int(10000), schema_overrides: Dict[String, String] = Dict(), has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+## `Series`
+
+A named column of one supported dtype, plus expression-backed methods.
+
+- `def __init__(out self, var name: String, var column: Column[Int64])`
+- `def __init__(out self, var name: String, var column: Column[Float64])`
+- `def __init__(out self, var name: String, var column: Column[Bool])`
+- `def __init__(out self, var name: String, var column: Column[String])`
+- `def __getitem__(self, index: Int) -> AnyValue`
+  One cell; raises when out of bounds. Negative indices count from the end.
+- `def __neg__(self) -> Self`
+- `def __invert__(self) -> Self`
+- `def __lt__(self, other: Self) -> Self`
+- `def __lt__(self, other: Expr) -> Self`
+- `def __le__(self, other: Self) -> Self`
+- `def __le__(self, other: Expr) -> Self`
+- `def __gt__(self, other: Self) -> Self`
+- `def __gt__(self, other: Expr) -> Self`
+- `def __ge__(self, other: Self) -> Self`
+- `def __ge__(self, other: Expr) -> Self`
+- `def __add__(self, other: Self) -> Self`
+- `def __add__(self, other: Expr) -> Self`
+- `def __sub__(self, other: Self) -> Self`
+- `def __sub__(self, other: Expr) -> Self`
+- `def __mul__(self, other: Self) -> Self`
+- `def __mul__(self, other: Expr) -> Self`
+- `def __truediv__(self, other: Self) -> Self`
+- `def __truediv__(self, other: Expr) -> Self`
+- `def __floordiv__(self, other: Self) -> Self`
+- `def __floordiv__(self, other: Expr) -> Self`
+- `def __mod__(self, other: Self) -> Self`
+- `def __mod__(self, other: Expr) -> Self`
+- `def __pow__(self, other: Self) -> Self`
+- `def __pow__(self, other: Expr) -> Self`
+- `def __and__(self, other: Self) -> Self`
+- `def __or__(self, other: Self) -> Self`
+- `def __xor__(self, other: Self) -> Self`
+- `def name(self) -> String`
+- `def write_to(self, mut writer: T)`
+- `def to_string(self, *, max_rows: Int = Int(10), max_string_length: Int = Int(32)) -> String`
+  Render at most max_rows values; negative means unlimited.
+- `def cast(self, dtype: String, strict: Bool = True) -> Self`
+  Convert to int64, float64, bool, or string; see Expr.cast.
+- `def renamed(self, var name: String) -> Self`
+- `def dtype(self) -> String`
+- `def __len__(self) -> Int`
+- `def null_count(self) -> Int`
+- `def get(self, index: Int) -> AnyValue`
+  Return one cell as a tagged value; raises when out of bounds.
+- `def equals(self, other: Self, *, null_equal: Bool = True, check_names: Bool = False) -> Bool`
+  Structural equality: NaN equals NaN and -0.0 equals 0.0.
+- `def eq(self, other: Self) -> Self`
+- `def eq(self, other: Expr) -> Self`
+- `def ne(self, other: Self) -> Self`
+- `def ne(self, other: Expr) -> Self`
+- `def apply(self, expr: Expr) -> Self`
+  Evaluate any expression written against this series' name.
+- `def is_null(self) -> Self`
+- `def is_not_null(self) -> Self`
+- `def fill_null(self, value: Expr) -> Self`
+- `def abs(self) -> Self`
+- `def round(self, decimals: Int = Int(0)) -> Self`
+- `def sum(self) -> AnyValue`
+- `def mean(self) -> AnyValue`
+- `def min(self) -> AnyValue`
+- `def max(self) -> AnyValue`
+- `def median(self) -> AnyValue`
+- `def quantile(self, quantile: Float64, interpolation: String = "linear") -> AnyValue`
+- `def std(self, ddof: Int = Int(1)) -> AnyValue`
+- `def var(self, ddof: Int = Int(1)) -> AnyValue`
+- `def count(self) -> Int`
+- `def n_unique(self) -> Int`
+- `def first(self) -> AnyValue`
+- `def last(self) -> AnyValue`
+- `def any(self, ignore_nulls: Bool = True) -> AnyValue`
+- `def all(self, ignore_nulls: Bool = True) -> AnyValue`
+- `def head(self, n: Int = Int(5)) -> Self`
+- `def tail(self, n: Int = Int(5)) -> Self`
+- `def sort(self, descending: Bool = False, nulls_last: Bool = True) -> Self`
+- `def unique(self, maintain_order: Bool = False) -> Self`
+  Distinct values, null counted once.
+- `def value_counts(self, sort: Bool = True, name: String = "count") -> DataFrame`
+  Distinct values and their row counts (nulls included), most frequent first when sort=True; ties keep first-occurrence order.
+- `def to_values(self) -> List[AnyValue]`
+- `def int64(self) -> Column[Int64]`
+  Return an owned typed copy, raising on a dtype mismatch.
+- `def float64(self) -> Column[Float64]`
+  Return an owned typed copy, raising on a dtype mismatch.
+- `def bool(self) -> Column[Bool]`
+  Return an owned typed copy, raising on a dtype mismatch.
+- `def string(self) -> Column[String]`
+  Return an owned typed copy, raising on a dtype mismatch.
+- `def take(self, indices: List[Int]) -> Self`
+- `def take_or_null(self, indices: List[Int]) -> Self`
+- `def argsort(self, descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
+  Stable sort order: ranks are resolved once, then merged by Int.
+- `def slice(self, offset: Int, length: Int) -> Self`
+- `def full_null(var name: String, dtype: String, length: Int) -> Self`
+  A column of `length` nulls with the requested dtype.
+- `def append(self, other: Self) -> Self`
+  Return a new series with other's rows after this one's.
+- `def reverse(self) -> Self`
+
+## `StrNamespace`
+
+String expressions. Character operations work on Unicode code points; there is no grapheme clustering or locale-specific case mapping. Nulls propagate. Patterns are literal text; regular expressions are not supported.
+
+- `def len_chars(self) -> Expr`
+  Number of Unicode code points, as Int64.
+- `def len_bytes(self) -> Expr`
+  Number of UTF-8 bytes, as Int64.
+- `def to_uppercase(self) -> Expr`
+- `def to_lowercase(self) -> Expr`
+- `def strip_chars(self, characters: String = "") -> Expr`
+  Strip characters from both ends; empty means ASCII whitespace.
+- `def strip_chars_start(self, characters: String = "") -> Expr`
+- `def strip_chars_end(self, characters: String = "") -> Expr`
+- `def starts_with(self, prefix: String) -> Expr`
+- `def ends_with(self, suffix: String) -> Expr`
+- `def contains(self, literal: String) -> Expr`
+  Literal substring test; regular expressions are not supported.
+- `def replace(self, pattern: String, value: String) -> Expr`
+  Replace the first occurrence of a literal pattern.
+- `def replace_all(self, pattern: String, value: String) -> Expr`
+- `def slice(self, offset: Int, length: Int = Int(-1)) -> Expr`
+  Code points [offset, offset + length); a negative offset counts from the end and length=-1 takes the rest. Out-of-range parts clip.
+- `def head(self, n: Int) -> Expr`
+- `def tail(self, n: Int) -> Expr`
+- `def reverse(self) -> Expr`
+  Reverse code point order.
+- `def pad_start(self, width: Int, fill_char: String = " ") -> Expr`
+  Left-pad to width code points; longer strings are unchanged.
+- `def pad_end(self, width: Int, fill_char: String = " ") -> Expr`
+- `def zfill(self, width: Int) -> Expr`
+  Left-pad with zeros, after a leading + or - sign.
+
+## `Then`
+
+A when/then chain; add branches with `when` or finish with `otherwise`.
+
+It converts implicitly to an Expr whose unmatched rows are null.
+
+- `def when(self, condition: Expr) -> When`
+- `def otherwise(self, value: Expr) -> Expr`
+- `def end(self) -> Expr`
+- `def alias(self, name: String) -> Expr`
+
+## `to_csv_string`
+
+Render the whole frame as CSV text; use write_csv for large frames.
+
+```mojo
+def to_csv_string(frame: DataFrame, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n") -> String
+```
+
+## `When`
+
+A pending condition; call `then` to supply its value.
+
+- `def then(self, value: Expr) -> Then`
+
+## `when`
+
+Start a conditional: when(p).then(a).when(q).then(b).otherwise(c).
+
+```mojo
+def when(condition: Expr) -> When
+```
+
+## `write_csv`
+
+Stream a frame to a UTF-8 CSV file that read_csv reads back exactly.
+
+```mojo
+def write_csv(frame: DataFrame, path: String, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n", buffer_size: Int = Int(65536))
+```

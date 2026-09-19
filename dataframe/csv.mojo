@@ -600,6 +600,8 @@ struct _CsvReader:
 
 @fieldwise_init
 struct CsvOptions(Copyable):
+    """Validated reader options; see read_csv for their meaning."""
+
     var separator: String
     var quote_char: String
     var comment_prefix: String

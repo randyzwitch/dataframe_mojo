@@ -23,8 +23,18 @@ jobs:
         if: runner.os == 'Linux'
         run: pixi run format-check
 
+      - name: Check public docstrings and API reference
+        if: runner.os == 'Linux'
+        run: |
+          pixi run docs
+          git diff --exit-code docs/api.md
+
       - name: Run tests
         run: pixi run test
 
       - name: Build examples
         run: pixi run build
+
+      - name: Package smoke test
+        if: runner.os == 'Linux'
+        run: pixi run package-smoke

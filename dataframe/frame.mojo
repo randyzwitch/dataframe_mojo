@@ -14,6 +14,8 @@ from .display import render_frame, render_glimpse
 
 @fieldwise_init
 struct Field(Copyable):
+    """One schema entry: a column name and its dtype name."""
+
     var name: String
     var dtype: String
 

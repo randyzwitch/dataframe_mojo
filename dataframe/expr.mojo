@@ -382,7 +382,7 @@ struct Expr(Copyable):
     def is_between(
         self, lower: Self, upper: Self, closed: String = "both"
     ) raises -> Self:
-        """lower <= x <= upper; `closed` is both, left, right, or none."""
+        """True when lower <= x <= upper; `closed` is both, left, right, or none."""
         var low: Self
         var high: Self
         if closed == "both":
@@ -675,14 +675,17 @@ def nth(index: Int) -> Expr:
 
 
 def first() -> Expr:
+    """The first column in the schema."""
     return nth(0)
 
 
 def last() -> Expr:
+    """The last column in the schema."""
     return nth(-1)
 
 
 def lit(value: Int64) -> Expr:
+    """A typed scalar literal; there is no implicit numeric promotion."""
     return Expr([_node(LIT_INT, integer=value)], "literal")
 
 
