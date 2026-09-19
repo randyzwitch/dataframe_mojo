@@ -73,6 +73,23 @@ wide characters therefore misalign in a terminal; display width is not computed.
 many leading values as fit in `max_width` code points, then `…`. Typed `Column`
 values are displayed by wrapping them in a `Series`.
 
+## Duplicates and nulls
+
+`unique(subset=[], keep="any", maintain_order=False)` drops duplicate rows,
+comparing the subset columns (every column by default) with the grouping key
+rules: nulls equal nulls, every NaN is one value, and `-0.0` equals `0.0`.
+`keep="any"` and `"first"` keep each key's first row, `"last"` its last row,
+and `"none"` drops every row whose key repeats. Output order is unspecified
+unless `maintain_order=True`, which keeps surviving rows in input order (the
+current implementation always does). `n_unique(subset)` counts distinct keys;
+`is_duplicated(subset)` and `is_unique(subset)` return Bool series. A subset
+naming a column twice raises, and a zero-column frame cannot be deduplicated.
+
+`drop_nulls(subset=[])` keeps rows with no null in the subset (default every
+column). `fill_null(value, subset=[])` replaces nulls with a scalar expression:
+without a subset only columns of the value's dtype change; every listed subset
+column must match it. NaN is a value and is never filled.
+
 ## Concatenation
 
 `concat(frames, how="vertical")` raises on an empty list because no schema is

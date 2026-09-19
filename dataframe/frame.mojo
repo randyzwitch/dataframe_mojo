@@ -3,12 +3,12 @@ from std.collections import Dict
 from .column import Column
 from .series import Series, sort_indices, smallest_indices
 from .kernels import checked_add
-from .expr import Expr
+from .expr import Expr, col
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows
-from .expr_kernels import choose
+from .expr_kernels import choose, validity
 from .display import render_frame, render_glimpse
 
 
@@ -775,6 +775,149 @@ struct DataFrame(Copyable, Sized, Writable):
         if bound.shape() != ROWS:
             result = result._broadcast(self._height)
         return self.filter(result._data[Column[Bool]])
+
+    def _subset_keys(self, subset: List[String]) raises -> List[Series]:
+        var names = subset.copy() if len(subset) > 0 else self.columns()
+        if len(names) == 0:
+            raise Error("Row uniqueness requires at least one column")
+        var seen = Dict[String, Bool]()
+        var keys = List[Series](capacity=len(names))
+        for name in names:
+            if name in seen:
+                raise Error("Column listed twice in subset: " + name)
+            seen[name] = True
+            keys.append(self._columns[self._index(name)].copy())
+        return keys^
+
+    def _key_counts(
+        self, subset: List[String]
+    ) raises -> Tuple[List[Int], List[Int]]:
+        var keys = encode_rows(self._subset_keys(subset), nulls_equal=True)
+        var counts = List[Int](length=keys.count(), fill=0)
+        for id in keys.ids:
+            counts[id] += 1
+        return (keys.ids.copy(), counts^)
+
+    def unique(
+        self,
+        subset: List[String] = List[String](),
+        *,
+        keep: String = "any",
+        maintain_order: Bool = False,
+    ) raises -> Self:
+        """Drop duplicate rows compared on subset (default: every column).
+
+        keep: any or first (first occurrence), last, or none (drop every
+        duplicated row). Nulls equal nulls; NaN equals NaN; -0.0 equals 0.0.
+        Output order is unspecified unless maintain_order=True, which keeps
+        surviving rows in input order.
+        """
+        if (
+            keep != "any"
+            and keep != "first"
+            and keep != "last"
+            and keep != "none"
+        ):
+            raise Error("keep must be 'any', 'first', 'last', or 'none'")
+        var keyed = self._key_counts(subset)
+        ref ids = keyed[0]
+        ref counts = keyed[1]
+        var rows = List[Int]()
+        if keep == "none":
+            for i in range(len(ids)):
+                if counts[ids[i]] == 1:
+                    rows.append(i)
+        elif keep == "last":
+            var last = List[Int](length=len(counts), fill=-1)
+            for i in range(len(ids)):
+                last[ids[i]] = i
+            var chosen = List[Bool](length=len(ids), fill=False)
+            for row in last:
+                chosen[row] = True
+            for i in range(len(ids)):
+                if chosen[i]:
+                    rows.append(i)
+        else:
+            var seen = List[Bool](length=len(counts), fill=False)
+            for i in range(len(ids)):
+                if not seen[ids[i]]:
+                    seen[ids[i]] = True
+                    rows.append(i)
+        return self.take(rows)
+
+    def n_unique(self, subset: List[String] = List[String]()) raises -> Int:
+        """Number of distinct rows on subset (default: every column)."""
+        if self._height == 0:
+            return 0
+        return len(self._key_counts(subset)[1])
+
+    def is_duplicated(
+        self, subset: List[String] = List[String]()
+    ) raises -> Series:
+        """True for every row whose key occurs more than once."""
+        var keyed = self._key_counts(subset)
+        var flags = List[Bool](capacity=self._height)
+        for id in keyed[0]:
+            flags.append(keyed[1][id] > 1)
+        return Series("is_duplicated", Column[Bool](flags^))
+
+    def is_unique(self, subset: List[String] = List[String]()) raises -> Series:
+        """True for every row whose key occurs exactly once."""
+        var keyed = self._key_counts(subset)
+        var flags = List[Bool](capacity=self._height)
+        for id in keyed[0]:
+            flags.append(keyed[1][id] == 1)
+        return Series("is_unique", Column[Bool](flags^))
+
+    def drop_nulls(self, subset: List[String] = List[String]()) raises -> Self:
+        """Keep rows with no null in subset (default: every column)."""
+        var names = subset.copy() if len(subset) > 0 else self.columns()
+        var keep = List[Bool](length=self._height, fill=True)
+        for name in names:
+            ref column = self._columns[self._index(name)]
+            var valid = validity(column)
+            for i in range(self._height):
+                keep[i] = keep[i] and valid[i]
+        var rows = List[Int]()
+        for i in range(self._height):
+            if keep[i]:
+                rows.append(i)
+        return self.take(rows)
+
+    def fill_null(
+        self, value: Expr, subset: List[String] = List[String]()
+    ) raises -> Self:
+        """Fill nulls with a scalar value.
+
+        Without subset, only columns whose dtype matches the value change.
+        Every listed subset column must match the value's dtype.
+        """
+        var bound = bind(value, self._columns)
+        if bound.shape() == ROWS:
+            raise Error("fill_null on a dataframe requires a scalar value")
+        var dtype = bound.dtypes[len(bound.dtypes) - 1]
+        var names = List[String]()
+        if len(subset) > 0:
+            for name in subset:
+                var actual = self._columns[self._index(name)].dtype()
+                if actual != dtype:
+                    raise Error(
+                        "fill_null value is "
+                        + dtype
+                        + " but column "
+                        + name
+                        + " is "
+                        + actual
+                    )
+                names.append(name)
+        else:
+            for column in self._columns:
+                if column.dtype() == dtype:
+                    names.append(column.name())
+        var fills = List[Expr]()
+        for name in names:
+            fills.append(col(name).fill_null(value))
+        return self.with_columns(fills)
 
     def group_by(
         self, key: String, *, maintain_order: Bool = False

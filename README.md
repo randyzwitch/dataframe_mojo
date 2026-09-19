@@ -140,6 +140,7 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 - Schema inspection, projection, indexed gathering, nullable Boolean filtering,
   and adding/replacing columns.
 - Vertical, diagonal, and horizontal `concat`, plus `vstack`/`hstack`.
+- `unique`, `n_unique`, `is_duplicated`, `drop_nulls`, and frame `fill_null`.
 - Bounded table display for `DataFrame` and `Series` (`print(frame)`,
   `to_string(max_rows=..., ...)`, `glimpse()`).
 - `head`/`tail`/`slice`/`reverse`, `drop`/`rename`/`with_row_index`, row and
