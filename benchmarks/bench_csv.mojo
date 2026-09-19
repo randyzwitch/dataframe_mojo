@@ -61,3 +61,14 @@ def main() raises:
         Int(Float64(bytes) * 1e9 / Float64(best)),
         sep="",
     )
+
+    # Projection skips typed decoding of unrequested fields.
+    var projected_best = Int(9223372036854775807)
+    for _ in range(ITERATIONS):
+        var start = monotonic()
+        var frame = read_csv(PATH, schema, columns=["id"])
+        var elapsed = monotonic() - start
+        if frame.height() != ROWS or frame.width() != 1:
+            raise Error("CSV projection benchmark produced the wrong shape")
+        projected_best = min(projected_best, elapsed)
+    print("projected_id_best_ns,", projected_best, sep="")

@@ -22,4 +22,11 @@ from .expr import (
     null,
     when,
 )
-from .csv import CsvField, CsvSchema, read_csv, to_csv_string, write_csv
+from .csv import (
+    CsvField,
+    CsvOptions,
+    CsvSchema,
+    read_csv,
+    to_csv_string,
+    write_csv,
+)
