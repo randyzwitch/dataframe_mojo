@@ -177,6 +177,17 @@ struct DataFrame(Copyable, Sized):
             columns.append(column.reverse())
         return Self(columns^, height=self._height)
 
+    def vstack(self, other: Self) raises -> Self:
+        """Append other's rows; schemas must match exactly."""
+        return concat([self.copy(), other.copy()], "vertical")
+
+    def hstack(self, other: Self) raises -> Self:
+        """Append other's columns; heights must match, names stay unique."""
+        return concat([self.copy(), other.copy()], "horizontal")
+
+    def hstack(self, columns: List[Series]) raises -> Self:
+        return self.hstack(Self(columns.copy(), height=self._height))
+
     def clear(self) raises -> Self:
         """Zero rows with the same schema."""
         return self.slice(0, 0)
@@ -482,6 +493,125 @@ struct DataFrame(Copyable, Sized):
         if self._columns[self._index(key)].dtype() != "string":
             raise Error("group_by currently requires one String key")
         return GroupBy(self.copy(), key, maintain_order)
+
+
+def concat(
+    frames: List[DataFrame], how: String = "vertical"
+) raises -> DataFrame:
+    """Combine frames: 'vertical', 'diagonal', or 'horizontal'.
+
+    Vertical requires identical names, order, and dtypes. Diagonal unions
+    columns by name in first-seen order and fills missing columns with nulls;
+    shared names must share a dtype. Horizontal requires equal heights and
+    unique names. All inputs are validated before any column is built.
+    """
+    if len(frames) == 0:
+        raise Error("concat requires at least one dataframe")
+    if how == "vertical":
+        var first = frames[0].schema()
+        var height = 0
+        for f in range(len(frames)):
+            var schema = frames[f].schema()
+            if len(schema) != len(first):
+                raise Error(
+                    "concat vertical: frame "
+                    + String(f)
+                    + " has "
+                    + String(len(schema))
+                    + " columns, expected "
+                    + String(len(first))
+                )
+            for c in range(len(first)):
+                if (
+                    schema[c].name != first[c].name
+                    or schema[c].dtype != first[c].dtype
+                ):
+                    raise Error(
+                        "concat vertical: frame "
+                        + String(f)
+                        + " column "
+                        + String(c)
+                        + " is "
+                        + schema[c].name
+                        + ":"
+                        + schema[c].dtype
+                        + ", expected "
+                        + first[c].name
+                        + ":"
+                        + first[c].dtype
+                    )
+            height += frames[f].height()
+        var columns = List[Series](capacity=len(first))
+        for c in range(len(first)):
+            var column = frames[0]._columns[c].copy()
+            for f in range(1, len(frames)):
+                column._append_series(frames[f]._columns[c])
+            columns.append(column^)
+        return DataFrame(columns^, height=height)
+    if how == "diagonal":
+        var names = List[String]()
+        var dtypes = Dict[String, String]()
+        for f in range(len(frames)):
+            for field in frames[f].schema():
+                if field.name not in dtypes:
+                    dtypes[field.name] = field.dtype
+                    names.append(field.name)
+                elif dtypes[field.name] != field.dtype:
+                    raise Error(
+                        "concat diagonal: column "
+                        + field.name
+                        + " is "
+                        + field.dtype
+                        + " in frame "
+                        + String(f)
+                        + ", expected "
+                        + dtypes[field.name]
+                    )
+        var aligned = List[DataFrame](capacity=len(frames))
+        for frame in frames:
+            var columns = List[Series](capacity=len(names))
+            for name in names:
+                var found = -1
+                for i in range(frame.width()):
+                    if frame._columns[i].name() == name:
+                        found = i
+                        break
+                if found >= 0:
+                    columns.append(frame._columns[found].copy())
+                else:
+                    columns.append(
+                        Series.full_null(name, dtypes[name], frame.height())
+                    )
+            aligned.append(DataFrame(columns^, height=frame.height()))
+        return concat(aligned, "vertical")
+    if how == "horizontal":
+        var height = frames[0].height()
+        var seen = Dict[String, Bool]()
+        for f in range(len(frames)):
+            if frames[f].height() != height:
+                raise Error(
+                    "concat horizontal: frame "
+                    + String(f)
+                    + " has height "
+                    + String(frames[f].height())
+                    + ", expected "
+                    + String(height)
+                )
+            for column in frames[f]._columns:
+                if column.name() in seen:
+                    raise Error(
+                        "concat horizontal: duplicate column "
+                        + column.name()
+                        + " in frame "
+                        + String(f)
+                    )
+                seen[column.name()] = True
+        var columns = List[Series]()
+        for frame in frames:
+            for column in frame._columns:
+                columns.append(column.copy())
+        return DataFrame(columns^, height=height)
+    raise Error("concat how must be 'vertical', 'diagonal', or 'horizontal'")
 
 
 def _bind_all(

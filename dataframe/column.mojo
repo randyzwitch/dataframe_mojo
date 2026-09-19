@@ -95,15 +95,42 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         return Self(values^, valid)
 
     def _append_column(mut self, other: Self):
-        for i in range(len(other)):
-            var dest = len(self)
-            if dest % 8 == 0:
-                self._validity.append(0)
-            elif dest % 8 != 0:
-                self._validity[dest // 8] &= ~(UInt8(1) << UInt8(dest % 8))
-            if other._valid(i):
-                self._validity[dest // 8] |= UInt8(1) << UInt8(dest % 8)
+        """Append payloads and validity bytewise, shifting when unaligned."""
+        var start = len(self)
+        var shift = start % 8
+        var count = len(other)
+        var full_bytes = count // 8
+        var tail_bits = count % 8
+        if shift == 0:
+            for b in range(full_bytes):
+                self._validity.append(other._validity[b])
+            if tail_bits > 0:
+                var mask = (UInt8(1) << UInt8(tail_bits)) - 1
+                self._validity.append(other._validity[full_bytes] & mask)
+        elif count > 0:
+            # Clear stale bits above the current length before merging.
+            var last = len(self._validity) - 1
+            self._validity[last] &= (UInt8(1) << UInt8(shift)) - 1
+            var source_bytes = (count + 7) // 8
+            for b in range(source_bytes):
+                var byte = other._validity[b]
+                if b == source_bytes - 1 and tail_bits > 0:
+                    byte &= (UInt8(1) << UInt8(tail_bits)) - 1
+                self._validity[len(self._validity) - 1] |= byte << UInt8(shift)
+                self._validity.append(byte >> UInt8(8 - shift))
+            var needed = (start + count + 7) // 8
+            while len(self._validity) > needed:
+                _ = self._validity.pop()
+        self._values.reserve(start + count)
+        for i in range(count):
             self._values.append(other._values[i].copy())
+
+    @staticmethod
+    def _nulls(length: Int, fill: Self.T) -> Self:
+        var result = Self(List[Self.T](length=length, fill=fill.copy()))
+        for i in range(len(result._validity)):
+            result._validity[i] = 0
+        return result^
 
     def _broadcast(self, length: Int) raises -> Self:
         if len(self) != 1 or length < 0:

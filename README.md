@@ -121,6 +121,7 @@ not guaranteed. See [the expression contract](docs/expressions.md).
   and String. The runtime tag is per column, not per cell.
 - Schema inspection, projection, indexed gathering, nullable Boolean filtering,
   and adding/replacing columns.
+- Vertical, diagonal, and horizontal `concat`, plus `vstack`/`hstack`.
 - `head`/`tail`/`slice`/`reverse`, `drop`/`rename`/`with_row_index`, row and
   cell access through the tagged `AnyValue`, null counts, and structural `equals`.
 - Nullable greater-than comparisons, Float64 scalar multiplication, and
