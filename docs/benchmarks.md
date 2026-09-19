@@ -90,6 +90,14 @@ geometric growth, the 1,000,000-row workloads became:
 The analysis below still holds: per-node materialization and copying dominate
 the remaining arithmetic time, and SIMD is only slightly faster than scalar.
 
+## After elementwise fusion (#4)
+
+Fused Float64 subtrees evaluate in one SIMD pass reading source buffers
+directly. At 1,000,000 rows the 4-lane arithmetic chain fell from 58.3 ms to
+22.3 ms (183 ms at the original baseline), and the nullable comparison from
+26.7 ms to 18.8 ms; checksums are unchanged. The 1-lane path gains nothing,
+since per-row program interpretation replaces per-node materialization.
+
 ## What the baseline shows
 
 - The five-node Float64 arithmetic chain runs at about 5 million rows/s, and the

@@ -102,6 +102,8 @@ struct BoundExpr(Copyable):
     var shapes: List[Int]
     var aggregated: List[Bool]
     var sources: List[Int]
+    # True where the node's whole subtree can run in one fused Float64 kernel.
+    var fusible: List[Bool]
 
     def shape(self) -> Int:
         return self.shapes[len(self.shapes) - 1]
@@ -311,7 +313,31 @@ def _reduction_dtype(node: Node, input: String) raises -> String:
     raise Error("Unsupported reduction: " + op_name(op))
 
 
-def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
+def _fusible(expr: Expr, types: List[String], fuse: Bool) -> List[Bool]:
+    """Float64 columns and literals, and + - * / or comparisons over them."""
+    var n = len(expr._nodes)
+    var result = List[Bool](length=n, fill=False)
+    if not fuse:
+        return result^
+    for i in range(n):
+        ref node = expr._nodes[i]
+        if node.op == COL or node.op == LIT_FLOAT:
+            result[i] = types[i] == "float64"
+        elif (
+            node.op == ADD or node.op == SUB or node.op == MUL or node.op == DIV
+        ) or is_comparison(node.op):
+            result[i] = (
+                result[node.left]
+                and result[node.right]
+                and types[node.left] == "float64"
+                and types[node.right] == "float64"
+            )
+    return result^
+
+
+def bind(
+    expr: Expr, columns: List[Series], fuse: Bool = True
+) raises -> BoundExpr:
     if len(expr._nodes) == 0:
         raise Error("An expression must contain at least one node")
     var types = List[String]()
@@ -518,4 +544,7 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
         shapes.append(shape)
         aggregated.append(has_aggregate)
         sources.append(source)
-    return BoundExpr(expr.copy(), types^, shapes^, aggregated^, sources^)
+    var fusible = _fusible(expr, types, fuse)
+    return BoundExpr(
+        expr.copy(), types^, shapes^, aggregated^, sources^, fusible^
+    )

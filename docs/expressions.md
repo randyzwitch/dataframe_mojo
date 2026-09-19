@@ -293,9 +293,20 @@ that snapshot copy in a future storage revision.
   followed by a merge; disjoint rows can still share a validity byte. No worker
   threads are launched by this version.
 
-The current evaluator still allocates/copies intermediate batch columns, keeps
+Float64 elementwise subtrees are fused: the binder marks Float64 columns and
+literals combined with `+ - * /`, with at most one comparison at the root, and
+the evaluator runs each such subtree as one small register program over SIMD
+vectors loaded directly from the source column buffers. No inner node
+materializes a column and source values are not copied into batch slices.
+Validity is the AND of the leaf columns' validity, which is exactly how nulls
+propagate through those operations, and results are bit-identical to the
+unfused kernels (`bind(expr, columns, fuse=False)`), which tests compare across
+special values, nulls, SIMD widths, and batch sizes. Integer arithmetic is not
+fused, because its checked overflow and branch masks need the per-row kernels;
+reductions, windows, strings, and conditionals are fusion boundaries.
+
+Outside fused subtrees the evaluator still allocates/copies intermediate batch columns, keeps
 node outputs until the batch ends, and scans separately for each aggregate.
 SIMD loads/stores are assembled by lane rather than a zero-copy buffer view.
-There is no kernel fusion, shared-expression elimination, lazy relational planner,
-parallel scheduler, or measured end-to-end speedup claim yet. Those are execution
+There is no shared-expression elimination, parallel scheduler, or measured end-to-end speedup claim yet. Those are execution
 improvements to pursue with benchmarks, not reasons to change expression semantics.
