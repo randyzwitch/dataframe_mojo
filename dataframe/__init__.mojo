@@ -8,6 +8,12 @@ from .kernels import greater_than, multiply, sum_float64, sum_int64
 from .expr import (
     Expr,
     StrNamespace,
+    all,
+    by_dtype,
+    exclude,
+    first,
+    last,
+    nth,
     Then,
     When,
     coalesce,

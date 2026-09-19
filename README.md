@@ -109,7 +109,8 @@ Use typed literals: there is no implicit Int64/Float64 promotion. Expressions
 support `+ - * / // % **`, comparisons `< <= > >=` plus `.eq()`/`.ne()`, unary
 `-`, `abs`, `sqrt`, `exp`, `log`, `floor`, `ceil`, `round`, `clip`, `.alias()`,
 Kleene `& | ^ ~`, `is_null`, `is_nan`, `fill_null`, `fill_nan`, `coalesce`,
-`is_in`, `is_between`, `cast`, `when(...).then(...).otherwise(...)`, a `.str()`
+selectors (`all`, `col([...])`, `exclude`, `by_dtype`, `nth`), `is_in`,
+`is_between`, `cast`, `when(...).then(...).otherwise(...)`, a `.str()`
 namespace with `concat_str`, and the reductions `sum(min_count=0)`, `count`,
 `null_count`, `len`, `min`, `max`, `mean`, `first`, `last`, `n_unique`, `var`,
 `std`, `median`, `quantile`, `any`, and `all`. Equality is `.eq()` rather than

@@ -58,6 +58,7 @@ from .expr import (
     LEN,
     Node,
     WHEN,
+    SELECTOR,
     STR_CONCAT,
     CAST,
     STR_LEN_CHARS,
@@ -328,6 +329,11 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
             dtype = "bool"
         elif node.op == LIT_STRING:
             dtype = "string"
+        elif node.op == SELECTOR:
+            raise Error(
+                "Selectors must be expanded before binding; use select,"
+                " with_columns, agg, or filter"
+            )
         elif node.op == LIT_NULL:
             if not (
                 _numeric(node.text)

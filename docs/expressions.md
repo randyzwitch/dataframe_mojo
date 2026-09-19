@@ -49,6 +49,25 @@ about 1e-12 relative; tests compare them with a tolerance. Binder errors name
 the operator and dtypes, for example `/ requires matching dtypes, found int64
 and float64; use typed literals`.
 
+### Selectors
+
+`all()`, `col([names])`, `exclude([names])`, `by_dtype([dtypes])`, `nth(i)`
+(negative counts from the end), `first()`, and `last()` select columns. Any
+operation on a selector applies to each matched column: before binding, the
+expression expands into one expression per match, in schema order for `all`,
+`exclude`, and `by_dtype`, and in the listed order for `col([...])`. Expansion
+happens for `select`, `select_exprs`, `with_columns`, `agg`, and `group_by`
+key expressions; `filter` requires exactly one match. An empty expansion adds
+no columns.
+
+Each expanded output is named after its column. `name_prefix(p)` and
+`name_suffix(s)` transform those names (or, on ordinary expressions, the one
+output name). An `alias` gives every expansion the same name, so it only works
+when one column matches; duplicate output names raise. An expression may hold
+at most one selector. Unknown names, unknown dtypes, and out-of-range `nth`
+positions raise at bind time, even on empty frames. Sibling expressions in one
+`with_columns` still see the original input, not each other's outputs.
+
 ### Casts
 
 `cast(dtype, strict=True)` converts between the four dtypes; `Series.cast` and
