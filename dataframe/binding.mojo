@@ -45,6 +45,18 @@ from .expr import (
     ANY,
     ALL,
     NULL_COUNT,
+    MIN,
+    MAX,
+    MEAN,
+    FIRST,
+    LAST,
+    N_UNIQUE,
+    STD,
+    VAR,
+    MEDIAN,
+    QUANTILE,
+    LEN,
+    Node,
     is_logical,
     is_binary,
     is_unary,
@@ -135,6 +147,28 @@ def op_name(op: Int) -> String:
         return "all"
     if op == NULL_COUNT:
         return "null_count"
+    if op == MIN:
+        return "min"
+    if op == MAX:
+        return "max"
+    if op == MEAN:
+        return "mean"
+    if op == FIRST:
+        return "first"
+    if op == LAST:
+        return "last"
+    if op == N_UNIQUE:
+        return "n_unique"
+    if op == STD:
+        return "std"
+    if op == VAR:
+        return "var"
+    if op == MEDIAN:
+        return "median"
+    if op == QUANTILE:
+        return "quantile"
+    if op == LEN:
+        return "len"
     if op == SUM:
         return "sum"
     if op == COUNT:
@@ -201,12 +235,13 @@ def _unary_dtype(op: Int, input: String) raises -> String:
     return input
 
 
-def _reduction_dtype(op: Int, input: String) raises -> String:
+def _reduction_dtype(node: Node, input: String) raises -> String:
+    var op = node.op
     if op == SUM:
         if not _numeric(input):
             raise Error("sum requires a numeric expression, found " + input)
         return input
-    if op == COUNT or op == NULL_COUNT:
+    if op == COUNT or op == NULL_COUNT or op == N_UNIQUE or op == LEN:
         return "int64"
     if op == ANY or op == ALL:
         if input != "bool":
@@ -214,6 +249,31 @@ def _reduction_dtype(op: Int, input: String) raises -> String:
                 op_name(op) + " requires a bool expression, found " + input
             )
         return "bool"
+    if op == MIN or op == MAX or op == FIRST or op == LAST:
+        return input
+    if op == MEAN or op == STD or op == VAR or op == MEDIAN or op == QUANTILE:
+        if not _numeric(input):
+            raise Error(
+                op_name(op) + " requires a numeric expression, found " + input
+            )
+        if (op == STD or op == VAR) and node.integer < 0:
+            raise Error("ddof must be nonnegative")
+        if op == QUANTILE:
+            if not (node.floating >= 0 and node.floating <= 1):
+                raise Error("quantile must be between 0 and 1")
+            var method = node.text
+            if (
+                method != "linear"
+                and method != "nearest"
+                and method != "lower"
+                and method != "higher"
+                and method != "midpoint"
+            ):
+                raise Error(
+                    "interpolation must be nearest, lower, higher, midpoint,"
+                    " or linear"
+                )
+        return "float64"
     raise Error("Unsupported reduction: " + op_name(op))
 
 
@@ -264,7 +324,7 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
                 )
             if node.min_count < 0:
                 raise Error("min_count must be nonnegative")
-            dtype = _reduction_dtype(node.op, types[node.left])
+            dtype = _reduction_dtype(node, types[node.left])
             shape = AGGREGATE
             has_aggregate = True
         elif is_unary(node.op):

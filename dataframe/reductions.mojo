@@ -92,3 +92,47 @@ struct LogicState(Copyable):
         if not ignore_nulls and self.saw_null:
             return None
         return True
+
+
+@fieldwise_init
+struct VarState(Copyable):
+    """Welford running moments; `merge` uses Chan's parallel update.
+
+    Merging partitions in any order gives results equal up to rounding.
+    """
+
+    var count: Int64
+    var mean: Float64
+    var m2: Float64
+
+    def __init__(out self):
+        self.count = 0
+        self.mean = 0
+        self.m2 = 0
+
+    def add(mut self, value: Float64):
+        self.count += 1
+        var delta = value - self.mean
+        self.mean += delta / Float64(self.count)
+        self.m2 += delta * (value - self.mean)
+
+    def merge(mut self, other: Self):
+        if other.count == 0:
+            return
+        if self.count == 0:
+            self = other.copy()
+            return
+        var total = self.count + other.count
+        var delta = other.mean - self.mean
+        var weight = Float64(other.count) / Float64(total)
+        self.mean += delta * weight
+        self.m2 += other.m2 + delta * delta * Float64(self.count) * Float64(
+            other.count
+        ) / Float64(total)
+        self.count = total
+
+    def variance(self, ddof: Int) -> Optional[Float64]:
+        """Null when fewer than ddof + 1 values were seen."""
+        if self.count - Int64(ddof) <= 0:
+            return None
+        return self.m2 / Float64(self.count - Int64(ddof))

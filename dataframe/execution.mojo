@@ -253,6 +253,8 @@ def evaluate[
             group_count,
             node.min_count,
             node.integer,
+            node.floating,
+            node.text,
         )
         for offset in range(0, height, batch_size):
             var chunk = _batch[width](
