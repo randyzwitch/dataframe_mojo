@@ -1,4 +1,5 @@
 """Selector expansion: one bound expression per matched column."""
+from .dtype import DataType
 from .expr import COL, SELECTOR, SEP, Expr, _node
 from .series import Series
 
@@ -40,15 +41,11 @@ def _matches(
                 result.append(name)
         return result^
     if kind == "dtype":
-        var dtypes = _split(items)
-        for dtype in dtypes:
-            if (
-                dtype != "int64"
-                and dtype != "float64"
-                and dtype != "bool"
-                and dtype != "string"
-            ):
-                raise Error("Unknown selector dtype: " + dtype)
+        var dtypes = List[DataType]()
+        for name in _split(items):
+            if not DataType.is_known(name):
+                raise Error("Unknown selector dtype: " + name)
+            dtypes.append(DataType.parse(name))
         for column in columns:
             for dtype in dtypes:
                 if column.dtype() == dtype:

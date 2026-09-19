@@ -8,7 +8,7 @@ from std.testing import (
     assert_true,
 )
 
-from dataframe import CsvField, CsvSchema, col, lit, read_csv
+from dataframe import DataType, CsvField, CsvSchema, col, lit, read_csv
 
 comptime CSV_PATH = "/tmp/dataframe_mojo_test.csv"
 
@@ -108,7 +108,7 @@ def test_headerless_empty_and_header_only_files() raises:
     _write("id,value,active,label\n")
     var header_only = read_csv(CSV_PATH, _schema())
     assert_equal(header_only.height(), 0)
-    assert_equal(header_only.schema()[0].dtype, "int64")
+    assert_equal(header_only.schema()[0].dtype, DataType.INT64)
 
 
 def test_quoted_empty_is_value_but_unquoted_empty_is_null() raises:
@@ -127,8 +127,6 @@ def test_schema_and_option_validation() raises:
         _ = CsvSchema([])
     with assert_raises():
         _ = CsvSchema([CsvField.int64("x"), CsvField.string("x")])
-    with assert_raises():
-        _ = CsvSchema([CsvField("x", 99, True)])
     _write("id,value,active,label\n")
     with assert_raises():
         _ = read_csv(CSV_PATH, _schema(), buffer_size=0)

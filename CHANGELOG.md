@@ -7,6 +7,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Breaking
 
+- Dtypes are structured `DataType` values instead of strings:
+  `Series.dtype()`, `DataFrame.dtypes()`, `Field.dtype`, `AnyValue.dtype()`,
+  and `CsvField.dtype` return `DataType`. Compare with constants
+  (`s.dtype() == DataType.INT64`) or use `String(dtype)` / `dtype.name()`
+  for the old string. Name-taking APIs still accept strings.
+
 - Removed the legacy column kernels `sum_int64`, `sum_float64`,
   `greater_than`, and `multiply`, and `DataFrame.group_by_sum`. Use
   expressions instead: `col("x").sum(min_count=1)` for a null-for-empty sum,

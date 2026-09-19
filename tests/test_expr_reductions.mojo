@@ -8,7 +8,7 @@ from std.testing import (
     assert_raises,
     assert_almost_equal,
 )
-from dataframe import Column, DataFrame, Expr, Series, col, lit
+from dataframe import DataType, Column, DataFrame, Expr, Series, col, lit
 from dataframe.reductions import VarState
 
 comptime MIN = Int64(-9223372036854775807) - 1
@@ -88,7 +88,7 @@ def test_min_max_all_dtypes() raises:
 
 def test_mean() raises:
     var df = frame()
-    assert_equal(one(df, col("i").mean()).dtype(), "float64")
+    assert_equal(one(df, col("i").mean()).dtype(), DataType.FLOAT64)
     assert_almost_equal(
         one(df, col("i").mean()).float64().value(0), 18.0 / 5.0, rtol=1e-15
     )

@@ -1,6 +1,6 @@
 """Fused Float64 kernels match the unfused evaluator exactly."""
 from std.testing import TestSuite, assert_equal, assert_true, assert_false
-from dataframe import Column, DataFrame, Expr, Series, col, lit
+from dataframe import DataType, Column, DataFrame, Expr, Series, col, lit
 from dataframe.binding import bind
 from dataframe.execution import evaluate
 
@@ -59,7 +59,7 @@ def bitwise_equal(a: Series, b: Series) raises -> Bool:
     0.0 are distinguished)."""
     if not a.equals(b):
         return False
-    if a.dtype() == "float64":
+    if a.dtype() == DataType.FLOAT64:
         var x = a.float64()
         var y = b.float64()
         for i in range(len(x)):

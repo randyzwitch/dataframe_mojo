@@ -7,7 +7,14 @@ case-sensitive. Empty names are allowed. Its row count is retained by projection
 even when no columns are selected. Explicit constructor height must match the
 columns. An unspecified height on a zero-column frame is zero.
 
-Supported dataframe logical types are `int64`, `float64`, `bool`, and `string`.
+Supported dataframe logical types are `DataType.INT64`, `FLOAT64`, `BOOL`, and
+`STRING`. `Series.dtype()`, `DataFrame.dtypes()`, `Field.dtype`,
+`AnyValue.dtype()`, and `CsvField.dtype` return `DataType` values, which compare
+with `==` and print their canonical names (`int64`, `float64`, `bool`,
+`string`); `DataType.parse(name)` is the inverse, and `is_numeric`,
+`is_integer`, `is_float`, `is_signed`, and `bit_width` describe a type. APIs
+that name a dtype (`cast("int64")`, `by_dtype([...])`, `null("int64")`,
+`schema_overrides`) accept either form.
 There is no implicit numeric promotion. Typed extraction raises on a mismatch.
 `Column[T]` is more general, but `Series` accepts only the four listed types.
 

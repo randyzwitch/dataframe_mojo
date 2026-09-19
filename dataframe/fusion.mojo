@@ -9,6 +9,7 @@ leaf columns' validity, which matches null propagation through every fused
 operation; null rows get a zero payload. Results are identical to the
 unfused kernels, which remain available with bind(..., fuse=False).
 """
+from .dtype import DataType
 from .binding import BoundExpr
 from .column import Column
 from .expr import COL, LIT_FLOAT, ADD, SUB, MUL, DIV, GT, LT, GE, LE, EQ, NE
@@ -126,7 +127,7 @@ def fused[
     length: Int,
 ) raises -> Series:
     var steps = _program(bound, root)
-    var predicate = bound.dtypes[root] == "bool"
+    var predicate = bound.dtypes[root] == DataType.BOOL
     var valid = List[Bool](length=length, fill=True)
     for step in steps:
         if step.op == COL:

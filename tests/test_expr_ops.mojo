@@ -8,7 +8,7 @@ from std.testing import (
     assert_raises,
     assert_almost_equal,
 )
-from dataframe import Column, DataFrame, Expr, Series, col, lit
+from dataframe import DataType, Column, DataFrame, Expr, Series, col, lit
 from dataframe.binding import bind
 from dataframe.execution import evaluate
 
@@ -103,7 +103,7 @@ def test_int_division_modulo_follow_floor_semantics() raises:
     with assert_raises(contains="floor division overflow"):
         _ = run(edge, col("a") // col("b"))
     var truediv = run(frame, col("a") / col("b")).float64()
-    assert_equal(run(frame, col("a") / col("b")).dtype(), "float64")
+    assert_equal(run(frame, col("a") / col("b")).dtype(), DataType.FLOAT64)
     assert_equal(truediv.value(0), Float64(3.5))
     assert_equal(truediv.value(1), Float64(-3.5))
     assert_equal(truediv.value(4), Float64(0))
@@ -266,7 +266,7 @@ def test_unary_math() raises:
     with assert_raises(contains="abs overflow"):
         _ = run(i, col("a").abs())
     var int_roots = run(i.head(1), col("b").sqrt())
-    assert_equal(int_roots.dtype(), "float64")
+    assert_equal(int_roots.dtype(), DataType.FLOAT64)
     assert_equal(run(i, col("a").floor()).int64().value(5), MIN)
     assert_equal(run(i, col("a").round(2)).int64().value(0), Int64(7))
 

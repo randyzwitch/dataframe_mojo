@@ -7,6 +7,7 @@ from std.testing import (
     assert_raises,
 )
 from dataframe import (
+    DataType,
     Column,
     Series,
     DataFrame,
@@ -70,8 +71,8 @@ def test_schema_and_constructor_validation() raises:
     assert_equal(frame.width(), 2)
     var schema = frame.schema()
     assert_equal(schema[0].name, "n")
-    assert_equal(schema[0].dtype, "int64")
-    assert_equal(schema[1].dtype, "string")
+    assert_equal(schema[0].dtype, DataType.INT64)
+    assert_equal(schema[1].dtype, DataType.STRING)
     with assert_raises():
         _ = DataFrame([ints("a", [1]), ints("b", [1, 2])])
     with assert_raises():
@@ -279,7 +280,7 @@ def test_grouped_float_sum_and_empty_input() raises:
     var empty = frame.take([]).group_by("k").agg(col("v").sum().alias("sum"))
     assert_equal(empty.height(), 0)
     assert_equal(empty.width(), 2)
-    assert_equal(empty.column("sum").dtype(), "float64")
+    assert_equal(empty.column("sum").dtype(), DataType.FLOAT64)
 
 
 def test_grouped_sum_validation_and_overflow() raises:

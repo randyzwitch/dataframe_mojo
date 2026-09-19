@@ -6,7 +6,7 @@ from std.testing import (
     assert_false,
     assert_raises,
 )
-from dataframe import AnyValue, Column, DataFrame, Series
+from dataframe import DataType, AnyValue, Column, DataFrame, Series
 
 
 def fixture() raises -> DataFrame:
@@ -42,7 +42,7 @@ def test_inspection() raises:
     assert_true(frame.clear().is_empty())
     assert_equal(frame.clear().width(), 4)
     assert_equal(frame.columns()[3], "name")
-    assert_equal(frame.dtypes()[1], "float64")
+    assert_equal(frame.dtypes()[1], DataType.FLOAT64)
     var nulls = frame.null_count()
     assert_equal(nulls.height(), 1)
     assert_equal(nulls.column("x").int64().value(0), Int64(1))
@@ -123,7 +123,7 @@ def test_rows_and_items() raises:
     assert_equal(len(row), 4)
     assert_equal(row[0].int64(), Int64(2))
     assert_true(row[1].is_null())
-    assert_equal(row[1].dtype(), "float64")
+    assert_equal(row[1].dtype(), DataType.FLOAT64)
     assert_false(row[2].bool())
     assert_equal(row[3].string(), "b")
     with assert_raises(contains="null"):

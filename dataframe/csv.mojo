@@ -8,15 +8,16 @@ from std.collections import Dict
 from std.utils import Variant
 
 from .column import Column
+from .dtype import DataType
 from .frame import DataFrame
 from .series import Series
 from .parse import parse_int64, parse_float64
 
 
-comptime CSV_INT64 = 0
-comptime CSV_FLOAT64 = 1
-comptime CSV_BOOL = 2
-comptime CSV_STRING = 3
+comptime CSV_INT64 = DataType.INT64
+comptime CSV_FLOAT64 = DataType.FLOAT64
+comptime CSV_BOOL = DataType.BOOL
+comptime CSV_STRING = DataType.STRING
 
 
 @fieldwise_init
@@ -24,7 +25,7 @@ struct CsvField(Copyable):
     """One CSV output field. Names and dtypes are always explicit."""
 
     var name: String
-    var dtype: Int
+    var dtype: DataType
     var nullable: Bool
 
     @staticmethod
@@ -56,8 +57,6 @@ struct CsvSchema(Copyable, Sized):
         for field in fields:
             if field.name in names:
                 raise Error("Duplicate CSV field name: " + field.name)
-            if field.dtype < CSV_INT64 or field.dtype > CSV_STRING:
-                raise Error("Unknown CSV dtype for field: " + field.name)
             names[field.name] = True
         self._fields = fields^
 
@@ -69,14 +68,7 @@ struct CsvSchema(Copyable, Sized):
         """A nullable schema matching a frame's names and dtypes."""
         var fields = List[CsvField](capacity=frame.width())
         for field in frame.schema():
-            if field.dtype == "int64":
-                fields.append(CsvField.int64(field.name))
-            elif field.dtype == "float64":
-                fields.append(CsvField.float64(field.name))
-            elif field.dtype == "bool":
-                fields.append(CsvField.bool(field.name))
-            else:
-                fields.append(CsvField.string(field.name))
+            fields.append(CsvField(field.name, field.dtype, True))
         return CsvSchema(fields^)
 
     def field(self, index: Int) raises -> CsvField:
@@ -759,7 +751,7 @@ def _has_leading_zero(text: String) -> Bool:
 
 def infer_dtype(
     values: List[String], quoted: List[Bool], null_values: List[String]
-) -> Int:
+) -> DataType:
     """Narrowest of Bool, Int64, Float64, String that reads every sample value.
 
     Nulls (empty unquoted fields and null tokens) are ignored; a column with
@@ -907,19 +899,12 @@ def read_csv(
             raise Error("schema_overrides names unknown column: " + item.key)
     var fields = List[CsvField]()
     for i in range(width):
-        var dtype: Int
+        var dtype: DataType
         if names[i] in schema_overrides:
             var requested = schema_overrides[names[i]]
-            if requested == "int64":
-                dtype = CSV_INT64
-            elif requested == "float64":
-                dtype = CSV_FLOAT64
-            elif requested == "bool":
-                dtype = CSV_BOOL
-            elif requested == "string":
-                dtype = CSV_STRING
-            else:
+            if not DataType.is_known(requested):
                 raise Error("Unknown dtype in schema_overrides: " + requested)
+            dtype = DataType.parse(requested)
         else:
             var values = List[String]()
             var flags = List[Bool]()
@@ -1072,7 +1057,8 @@ struct _CsvWriter:
                 line += self.null_value
                 continue
             var is_string = (
-                column.dtype() == "string" or column.dtype() == "bool"
+                column.dtype() == DataType.STRING
+                or column.dtype() == DataType.BOOL
             )
             line += _render_field(
                 _cell_text(column, row),

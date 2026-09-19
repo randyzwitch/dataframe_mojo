@@ -4,6 +4,7 @@ Reductions are separate passes, not per-row callbacks or per-group dataframes.
 The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
+from .dtype import DataType
 from .expr import (
     COL,
     LIT_INT,
@@ -74,16 +75,8 @@ from .expr_kernels import binary, unary, choose, fit_mask
 from .aggregate import Reducer
 
 
-def _empty(dtype: String) raises -> Series:
-    if dtype == "int64":
-        return Series("", Column[Int64]([]))
-    if dtype == "float64":
-        return Series("", Column[Float64]([]))
-    if dtype == "bool":
-        return Series("", Column[Bool]([]))
-    if dtype == "string":
-        return Series("", Column[String]([]))
-    raise Error("Unknown expression dtype")
+def _empty(dtype: DataType) raises -> Series:
+    return Series.full_null("", dtype, 0)
 
 
 def _binary_op[
@@ -202,7 +195,7 @@ def _eval[
     if node.op == LIT_STRING:
         return Series("", Column[String]([node.text]))
     if node.op == LIT_NULL:
-        return Series.full_null("", node.text, 1)
+        return Series.full_null("", DataType.parse(node.text), 1)
     if is_window(node.op) or node.op == OVER:
         return aggregates[index].slice(offset, length)
     if is_reduction(node.op):
@@ -223,7 +216,7 @@ def _eval[
         # A scalar input is observed if any row is; its offset is not a row.
         return cast_series(
             left,
-            node.text,
+            DataType.parse(node.text),
             node.integer == 1,
             offset if len(left) == length else 0,
             observed.copy() if len(observed) == len(left) else List[Bool](),

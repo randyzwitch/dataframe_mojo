@@ -10,6 +10,7 @@ from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
 from .column import Column
+from .dtype import DataType
 from .series import Series
 from .expr import (
     SUM,
@@ -160,7 +161,7 @@ def quantile_of(
 
 struct Reducer(Movable):
     var op: Int
-    var dtype: String
+    var dtype: DataType
     var group_count: Int
     var min_count: Int
     var integer: Int64
@@ -186,7 +187,7 @@ struct Reducer(Movable):
     def __init__(
         out self,
         op: Int,
-        input_dtype: String,
+        input_dtype: DataType,
         group_count: Int,
         min_count: Int,
         integer: Int64,
@@ -201,8 +202,8 @@ struct Reducer(Movable):
         self.floating = floating
         self.text = text
         var n = group_count
-        var is_int = input_dtype == "int64"
-        var is_float = input_dtype == "float64"
+        var is_int = input_dtype == DataType.INT64
+        var is_float = input_dtype == DataType.FLOAT64
         var summing = op == SUM or op == MEAN
         var picking = op == MIN or op == MAX or op == FIRST or op == LAST
         var distinct = op == N_UNIQUE
@@ -216,7 +217,7 @@ struct Reducer(Movable):
         self.logic = List[LogicState](
             length=n if op == ANY
             or op == ALL
-            or (distinct and input_dtype == "bool") else 0,
+            or (distinct and input_dtype == DataType.BOOL) else 0,
             fill=LogicState(),
         )
         self.moments = List[VarState](
@@ -236,10 +237,12 @@ struct Reducer(Movable):
             length=n if picking and is_float else 0, fill=0
         )
         self.bools = List[Bool](
-            length=n if picking and input_dtype == "bool" else 0, fill=False
+            length=n if picking and input_dtype == DataType.BOOL else 0,
+            fill=False,
         )
         self.strings = List[String](
-            length=n if picking and input_dtype == "string" else 0, fill=""
+            length=n if picking and input_dtype == DataType.STRING else 0,
+            fill="",
         )
         self.int_sets = List[Dict[Int64, Bool]](
             length=n if distinct and is_int else 0, fill=Dict[Int64, Bool]()
@@ -249,7 +252,7 @@ struct Reducer(Movable):
             fill=Dict[UInt64, Bool](),
         )
         self.string_sets = List[Dict[String, Bool]](
-            length=n if distinct and input_dtype == "string" else 0,
+            length=n if distinct and input_dtype == DataType.STRING else 0,
             fill=Dict[String, Bool](),
         )
 
@@ -298,7 +301,7 @@ struct Reducer(Movable):
         elif op == LEN:
             for i in range(len(chunk)):
                 self.counts[_group(grouped, groups, offset + i)] += 1
-        elif (op == SUM or op == MEAN) and self.dtype == "int64":
+        elif (op == SUM or op == MEAN) and self.dtype == DataType.INT64:
             ref column = chunk._data[Column[Int64]]
             for i in range(len(column)):
                 if column._valid(i):
@@ -470,7 +473,7 @@ struct Reducer(Movable):
         var valid = List[Bool](length=n, fill=True)
         if op == COUNT or op == NULL_COUNT or op == LEN:
             return Series("", Column[Int64](self.counts.copy()))
-        if op == SUM and self.dtype == "int64":
+        if op == SUM and self.dtype == DataType.INT64:
             var output = List[Int64](length=n, fill=0)
             for g in range(n):
                 valid[g] = self.int_sums[g].count >= Int64(self.min_count)
@@ -487,7 +490,7 @@ struct Reducer(Movable):
         if op == MEAN:
             var output = List[Float64](length=n, fill=0)
             for g in range(n):
-                if self.dtype == "int64":
+                if self.dtype == DataType.INT64:
                     ref state = self.int_sums[g]
                     valid[g] = state.count > 0
                     if valid[g]:
@@ -525,11 +528,11 @@ struct Reducer(Movable):
             var output = List[Int64](length=n, fill=0)
             for g in range(n):
                 var count: Int
-                if self.dtype == "int64":
+                if self.dtype == DataType.INT64:
                     count = len(self.int_sets[g]) + Int(self.picked_valid[g])
-                elif self.dtype == "float64":
+                elif self.dtype == DataType.FLOAT64:
                     count = len(self.float_sets[g]) + Int(self.picked_valid[g])
-                elif self.dtype == "bool":
+                elif self.dtype == DataType.BOOL:
                     ref state = self.logic[g]
                     count = (
                         Int(state.saw_true)
@@ -544,9 +547,9 @@ struct Reducer(Movable):
             var picked = op == FIRST or op == LAST
             for g in range(n):
                 valid[g] = self.seen[g] and (not picked or self.picked_valid[g])
-            if self.dtype == "int64":
+            if self.dtype == DataType.INT64:
                 return Series("", Column[Int64](self.ints.copy(), valid))
-            if self.dtype == "float64":
+            if self.dtype == DataType.FLOAT64:
                 var output = self.floats.copy()
                 if not picked:
                     for g in range(n):
@@ -557,7 +560,7 @@ struct Reducer(Movable):
                             output[g] = Float64(0) / Float64(0)
                             valid[g] = True
                 return Series("", Column[Float64](output^, valid))
-            if self.dtype == "bool":
+            if self.dtype == DataType.BOOL:
                 return Series("", Column[Bool](self.bools.copy(), valid))
             return Series("", Column[String](self.strings.copy(), valid))
         var output = List[Bool](length=n, fill=False)
