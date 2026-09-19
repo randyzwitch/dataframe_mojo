@@ -45,10 +45,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Parallel reductions: global and grouped reductions over large inputs run
+  on worker threads (POSIX threads through the C FFI; no new dependency) with
+  worker-private states merged in row order. `DATAFRAME_THREADS` caps the
+  thread count (1 disables). Global sums are ~3.7x faster at 1M rows
+  (#6, #8).
 - Unfused float kernels read contiguous SIMD vectors directly from shared
   column buffers (about 1.45x faster for Float32 arithmetic, `%`, and math
   functions) (#3).
-
 - `DataFrame.fill_null(0)` / `fill_null(0.5)`: a bare number fills every
   column it can adopt (integers: all numeric columns; floats: float
   columns), each in its own dtype; `fill_null("x")` fills string columns.
