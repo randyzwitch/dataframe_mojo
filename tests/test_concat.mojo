@@ -6,7 +6,7 @@ from std.testing import (
     assert_false,
     assert_raises,
 )
-from dataframe import Column, DataFrame, Series, concat
+from dataframe import DataType, Column, DataFrame, Series, concat
 
 
 def pattern(length: Int, seed: Int) -> List[Bool]:
@@ -136,7 +136,7 @@ def test_series_append() raises:
         _ = a.append(Series("z", Column[Float64]([1])))
     var nulls = Series.full_null("n", "string", 10)
     assert_equal(nulls.null_count(), 10)
-    assert_equal(nulls.dtype(), "string")
+    assert_equal(nulls.dtype(), DataType.STRING)
     with assert_raises(contains="Unknown dtype"):
         _ = Series.full_null("n", "int32", 1)
 

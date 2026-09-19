@@ -1,4 +1,5 @@
 """Runtime-tagged, named columns without per-element type erasure."""
+from .dtype import DataType
 from std.utils import Variant
 from .column import Column
 from .value import AnyValue
@@ -7,6 +8,10 @@ from .cast import cast_series
 from .expr import Expr, col, lit
 from .frame import DataFrame
 
+# Element types in DataType code order. Storage holds Column[E] for each, and
+# methods dispatch with one compile-time loop over Elements instead of an
+# if-chain per type; adding a dtype means extending both lists.
+comptime Elements = Variant[Int64, Float64, Bool, String]
 comptime Storage = Variant[
     Column[Int64], Column[Float64], Column[Bool], Column[String]
 ]
@@ -34,6 +39,15 @@ struct Series(Copyable, Sized, Writable):
         self._name = name^
         self._data = Storage(column^)
 
+    @staticmethod
+    def _wrap[
+        E: Copyable & Deinitable
+    ](var name: String, var column: Column[E]) -> Self:
+        """Build a series from any storable column type."""
+        var result = Self(name^, Column[Int64]([]))
+        result._data = Storage(column^)
+        return result^
+
     def name(self) -> String:
         return self._name
 
@@ -46,71 +60,57 @@ struct Series(Copyable, Sized, Writable):
         """Render at most max_rows values; negative means unlimited."""
         return render_series(self, max_rows, max_string_length)
 
-    def cast(self, dtype: String, strict: Bool = True) raises -> Self:
-        """Convert to int64, float64, bool, or string; see Expr.cast."""
-        if not (
-            dtype == "int64"
-            or dtype == "float64"
-            or dtype == "bool"
-            or dtype == "string"
-        ):
-            raise Error("Unknown cast dtype: " + dtype)
+    def cast(self, dtype: DataType, strict: Bool = True) raises -> Self:
+        """Convert to another dtype; see Expr.cast."""
         return cast_series(self, dtype, strict, 0, List[Bool]())
+
+    def cast(self, dtype: String, strict: Bool = True) raises -> Self:
+        if not DataType.is_known(dtype):
+            raise Error("Unknown cast dtype: " + dtype)
+        return self.cast(DataType.parse(dtype), strict)
 
     def renamed(self, var name: String) -> Self:
         var result = self.copy()
         result._name = name^
         return result^
 
-    def dtype(self) -> String:
-        if self._data.isa[Column[Int64]]():
-            return "int64"
-        if self._data.isa[Column[Float64]]():
-            return "float64"
-        if self._data.isa[Column[Bool]]():
-            return "bool"
-        if self._data.isa[Column[String]]():
-            return "string"
-        return "unreachable"
+    def dtype(self) -> DataType:
+        comptime for i in range(len(Elements.Ts)):
+            comptime E: Copyable & Deinitable = Elements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return DataType(i, 0)
+        return DataType.STRING
 
     def __len__(self) -> Int:
-        if self._data.isa[Column[Int64]]():
-            return len(self._data[Column[Int64]])
-        if self._data.isa[Column[Float64]]():
-            return len(self._data[Column[Float64]])
-        if self._data.isa[Column[Bool]]():
-            return len(self._data[Column[Bool]])
-        if self._data.isa[Column[String]]():
-            return len(self._data[Column[String]])
+        comptime for i in range(len(Elements.Ts)):
+            comptime E: Copyable & Deinitable = Elements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return len(self._data[Column[E]])
         return 0
 
     def null_count(self) -> Int:
-        if self._data.isa[Column[Int64]]():
-            return self._data[Column[Int64]].null_count()
-        if self._data.isa[Column[Float64]]():
-            return self._data[Column[Float64]].null_count()
-        if self._data.isa[Column[Bool]]():
-            return self._data[Column[Bool]].null_count()
-        if self._data.isa[Column[String]]():
-            return self._data[Column[String]].null_count()
+        comptime for i in range(len(Elements.Ts)):
+            comptime E: Copyable & Deinitable = Elements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return self._data[Column[E]].null_count()
         return 0
 
     def get(self, index: Int) raises -> AnyValue:
         """Return one cell as a tagged value; raises when out of bounds."""
         if self._data.isa[Column[Int64]]():
             if self._data[Column[Int64]].is_null(index):
-                return AnyValue.null("int64")
+                return AnyValue.null(DataType.INT64)
             return AnyValue(self._data[Column[Int64]]._values[index])
         if self._data.isa[Column[Float64]]():
             if self._data[Column[Float64]].is_null(index):
-                return AnyValue.null("float64")
+                return AnyValue.null(DataType.FLOAT64)
             return AnyValue(self._data[Column[Float64]]._values[index])
         if self._data.isa[Column[Bool]]():
             if self._data[Column[Bool]].is_null(index):
-                return AnyValue.null("bool")
+                return AnyValue.null(DataType.BOOL)
             return AnyValue(self._data[Column[Bool]]._values[index])
         if self._data[Column[String]].is_null(index):
-            return AnyValue.null("string")
+            return AnyValue.null(DataType.STRING)
         return AnyValue(self._data[Column[String]]._values[index])
 
     def equals(
@@ -432,14 +432,12 @@ struct Series(Copyable, Sized, Writable):
         return self._data[Column[String]].copy()
 
     def take(self, indices: List[Int]) raises -> Self:
-        if self._data.isa[Column[Int64]]():
-            return Self(self._name, self._data[Column[Int64]].take(indices))
-        if self._data.isa[Column[Float64]]():
-            return Self(self._name, self._data[Column[Float64]].take(indices))
-        if self._data.isa[Column[Bool]]():
-            return Self(self._name, self._data[Column[Bool]].take(indices))
-        if self._data.isa[Column[String]]():
-            return Self(self._name, self._data[Column[String]].take(indices))
+        comptime for i in range(len(Elements.Ts)):
+            comptime E: Copyable & Deinitable = Elements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return Self._wrap(
+                    self._name, self._data[Column[E]].take(indices)
+                )
         raise Error("Unknown column type")
 
     def take_or_null(self, indices: List[Int]) raises -> Self:
@@ -597,62 +595,48 @@ struct Series(Copyable, Sized, Writable):
         return indices^
 
     def slice(self, offset: Int, length: Int) raises -> Self:
-        if self._data.isa[Column[Int64]]():
-            return Self(
-                self._name, self._data[Column[Int64]].slice(offset, length)
-            )
-        if self._data.isa[Column[Float64]]():
-            return Self(
-                self._name, self._data[Column[Float64]].slice(offset, length)
-            )
-        if self._data.isa[Column[Bool]]():
-            return Self(
-                self._name, self._data[Column[Bool]].slice(offset, length)
-            )
-        if self._data.isa[Column[String]]():
-            return Self(
-                self._name, self._data[Column[String]].slice(offset, length)
-            )
+        comptime for i in range(len(Elements.Ts)):
+            comptime E: Copyable & Deinitable = Elements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return Self._wrap(
+                    self._name, self._data[Column[E]].slice(offset, length)
+                )
         raise Error("Unknown column type")
 
     def _broadcast(self, length: Int) raises -> Self:
-        if self._data.isa[Column[Int64]]():
-            return Self(
-                self._name, self._data[Column[Int64]]._broadcast(length)
-            )
-        if self._data.isa[Column[Float64]]():
-            return Self(
-                self._name, self._data[Column[Float64]]._broadcast(length)
-            )
-        if self._data.isa[Column[Bool]]():
-            return Self(self._name, self._data[Column[Bool]]._broadcast(length))
-        if self._data.isa[Column[String]]():
-            return Self(
-                self._name, self._data[Column[String]]._broadcast(length)
-            )
+        comptime for i in range(len(Elements.Ts)):
+            comptime E: Copyable & Deinitable = Elements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return Self._wrap(
+                    self._name, self._data[Column[E]]._broadcast(length)
+                )
         raise Error("Unknown column type")
 
     @staticmethod
     def full_null(var name: String, dtype: String, length: Int) raises -> Self:
+        return Self.full_null(name^, DataType.parse(dtype), length)
+
+    @staticmethod
+    def full_null(
+        var name: String, dtype: DataType, length: Int
+    ) raises -> Self:
         """A column of `length` nulls with the requested dtype."""
-        if dtype == "int64":
+        if dtype == DataType.INT64:
             return Self(name^, Column[Int64]._nulls(length, 0))
-        if dtype == "float64":
+        if dtype == DataType.FLOAT64:
             return Self(name^, Column[Float64]._nulls(length, 0))
-        if dtype == "bool":
+        if dtype == DataType.BOOL:
             return Self(name^, Column[Bool]._nulls(length, False))
-        if dtype == "string":
-            return Self(name^, Column[String]._nulls(length, ""))
-        raise Error("Unknown dtype: " + dtype)
+        return Self(name^, Column[String]._nulls(length, ""))
 
     def append(self, other: Self) raises -> Self:
         """Return a new series with other's rows after this one's."""
         if self.dtype() != other.dtype():
             raise Error(
                 "Cannot append "
-                + other.dtype()
+                + other.dtype().name()
                 + " to "
-                + self.dtype()
+                + self.dtype().name()
                 + " series '"
                 + self._name
                 + "'"
@@ -670,18 +654,10 @@ struct Series(Copyable, Sized, Writable):
     def _append_series(mut self, other: Self) raises:
         if self.dtype() != other.dtype():
             raise Error("Cannot append different dtypes")
-        if self._data.isa[Column[Int64]]():
-            self._data[Column[Int64]]._append_column(other._data[Column[Int64]])
-        if self._data.isa[Column[Float64]]():
-            self._data[Column[Float64]]._append_column(
-                other._data[Column[Float64]]
-            )
-        if self._data.isa[Column[Bool]]():
-            self._data[Column[Bool]]._append_column(other._data[Column[Bool]])
-        if self._data.isa[Column[String]]():
-            self._data[Column[String]]._append_column(
-                other._data[Column[String]]
-            )
+        comptime for i in range(len(Elements.Ts)):
+            comptime E: Copyable & Deinitable = Elements.Ts[i]
+            if self._data.isa[Column[E]]():
+                self._data[Column[E]]._append_column(other._data[Column[E]])
 
 
 def _equal_columns[

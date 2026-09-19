@@ -3,6 +3,7 @@ from .column import Column
 from .series import Series
 from .frame import DataFrame, Field, GroupBy, concat
 from .value import AnyValue
+from .dtype import DataType
 from .lazy import LazyFrame, LazyGroupBy, scan_csv
 
 from .expr import (

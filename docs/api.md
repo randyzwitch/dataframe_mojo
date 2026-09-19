@@ -23,10 +23,11 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
 - `def __init__(out self, value: Float64)`
 - `def __init__(out self, value: Bool)`
 - `def __init__(out self, value: String)`
-- `def __init__(out self, dtype: String, valid: Bool, integer: Int64, floating: Float64, boolean: Bool, var string: String)`
+- `def __init__(out self, dtype: DataType, valid: Bool, integer: Int64, floating: Float64, boolean: Bool, var string: String)`
 - `def __eq__(self, other: Self) -> Bool`
+- `def null(dtype: DataType) -> Self`
 - `def null(dtype: String) -> Self`
-- `def dtype(self) -> String`
+- `def dtype(self) -> DataType`
 - `def is_null(self) -> Bool`
 - `def int64(self) -> Int64`
 - `def float64(self) -> Float64`
@@ -139,7 +140,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def __len__(self) -> Int`
 - `def is_empty(self) -> Bool`
 - `def columns(self) -> List[String]`
-- `def dtypes(self) -> List[String]`
+- `def dtypes(self) -> List[DataType]`
 - `def column(self, name: String) -> Series`
   Return an owned copy. Column lookup is linear in the schema width.
 - `def lazy(self) -> LazyFrame`
@@ -235,6 +236,28 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Group by one or more columns of any dtype.
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False, batch_size: Int = Int(1024)) -> GroupBy`
   Group by computed keys; each key is evaluated once and named by its output name. Aggregations still see the original columns.
+
+## `DataType`
+
+A logical column type: INT64, FLOAT64, BOOL, or STRING.
+
+- `def __eq__(self, other: Self) -> Bool`
+- `def __ne__(self, other: Self) -> Bool`
+- `def parse(name: String) -> Self`
+  The type with this canonical name; raises for unknown names.
+- `def is_known(name: String) -> Bool`
+- `def name(self) -> String`
+  The canonical name, as accepted by parse.
+- `def short_name(self) -> String`
+  The compact name used in table headers (i64, f64, bool, str).
+- `def is_numeric(self) -> Bool`
+- `def is_integer(self) -> Bool`
+- `def is_float(self) -> Bool`
+- `def is_signed(self) -> Bool`
+  Whether values can be negative (numeric types only).
+- `def bit_width(self) -> Int`
+  Bits per value for fixed-width types; 0 for variable-width.
+- `def write_to(self, mut writer: T)`
 
 ## `exclude`
 
@@ -373,7 +396,7 @@ A flat, topologically ordered tree; composition never evaluates data.
 
 ## `Field`
 
-One schema entry: a column name and its dtype name.
+One schema entry: a column name and its dtype.
 
 
 ## `first`
@@ -544,10 +567,11 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def write_to(self, mut writer: T)`
 - `def to_string(self, *, max_rows: Int = Int(10), max_string_length: Int = Int(32)) -> String`
   Render at most max_rows values; negative means unlimited.
+- `def cast(self, dtype: DataType, strict: Bool = True) -> Self`
+  Convert to another dtype; see Expr.cast.
 - `def cast(self, dtype: String, strict: Bool = True) -> Self`
-  Convert to int64, float64, bool, or string; see Expr.cast.
 - `def renamed(self, var name: String) -> Self`
-- `def dtype(self) -> String`
+- `def dtype(self) -> DataType`
 - `def __len__(self) -> Int`
 - `def null_count(self) -> Int`
 - `def get(self, index: Int) -> AnyValue`
@@ -601,6 +625,7 @@ A named column of one supported dtype, plus expression-backed methods.
   Stable sort order: ranks are resolved once, then merged by Int.
 - `def slice(self, offset: Int, length: Int) -> Self`
 - `def full_null(var name: String, dtype: String, length: Int) -> Self`
+- `def full_null(var name: String, dtype: DataType, length: Int) -> Self`
   A column of `length` nulls with the requested dtype.
 - `def append(self, other: Self) -> Self`
   Return a new series with other's rows after this one's.

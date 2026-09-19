@@ -268,7 +268,7 @@ struct LazyFrame(Copyable):
         var frame = plan._execute(len(plan._nodes) - 1, True)
         var out = List[String]()
         for field in frame.schema():
-            out.append(field.name + ": " + field.dtype)
+            out.append(field.name + ": " + field.dtype.name())
         return out^
 
     def explain(self, *, optimize: Bool = True) raises -> String:

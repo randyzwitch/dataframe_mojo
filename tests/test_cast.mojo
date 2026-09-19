@@ -6,7 +6,7 @@ from std.testing import (
     assert_false,
     assert_raises,
 )
-from dataframe import Column, DataFrame, Expr, Series, col, lit, when
+from dataframe import DataType, Column, DataFrame, Expr, Series, col, lit, when
 
 comptime MIN = Int64(-9223372036854775807) - 1
 comptime MAX = Int64(9223372036854775807)
@@ -179,7 +179,9 @@ def test_round_trips_through_string() raises:
         ]
     )
     var text = frame.cast({"i": "string", "f": "string", "b": "string"})
-    assert_equal(text.dtypes(), [String("string"), "string", "string"])
+    assert_equal(
+        text.dtypes(), [DataType.STRING, DataType.STRING, DataType.STRING]
+    )
     var back = text.cast({"i": "int64", "f": "float64", "b": "bool"})
     assert_true(back.equals(frame))
     assert_equal(

@@ -6,7 +6,7 @@ from std.testing import (
     assert_false,
     assert_raises,
 )
-from dataframe import AnyValue, Column, DataFrame, Series
+from dataframe import AnyValue, DataType, Column, DataFrame, Series
 
 
 def nan() -> Float64:
@@ -119,7 +119,7 @@ def reference_rows(
 
 
 def cell(
-    frame: DataFrame, row: Int, name: String, dtype: String
+    frame: DataFrame, row: Int, name: String, dtype: DataType
 ) raises -> AnyValue:
     if row < 0:
         return AnyValue.null(dtype)

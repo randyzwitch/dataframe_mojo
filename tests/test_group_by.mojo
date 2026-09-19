@@ -6,7 +6,16 @@ from std.testing import (
     assert_false,
     assert_raises,
 )
-from dataframe import AnyValue, Column, DataFrame, Expr, Series, col, lit
+from dataframe import (
+    DataType,
+    AnyValue,
+    Column,
+    DataFrame,
+    Expr,
+    Series,
+    col,
+    lit,
+)
 from dataframe.hashing import encode_rows
 
 
@@ -226,7 +235,10 @@ def test_validation_and_empty_input() raises:
     )
     assert_equal(empty.height(), 0)
     assert_equal(empty.columns(), [String("f"), "s", "v", "any"])
-    assert_equal(empty.dtypes(), [String("float64"), "string", "int64", "bool"])
+    assert_equal(
+        empty.dtypes(),
+        [DataType.FLOAT64, DataType.STRING, DataType.INT64, DataType.BOOL],
+    )
     var keys_only = frame.group_by(["b"], maintain_order=True).agg(List[Expr]())
     assert_equal(keys_only.width(), 1)
 

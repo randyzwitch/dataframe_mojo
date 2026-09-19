@@ -89,6 +89,7 @@ from .expr import (
     is_comparison,
 )
 from .series import Series
+from .dtype import DataType
 
 comptime SCALAR = 0
 comptime ROWS = 1
@@ -98,7 +99,7 @@ comptime AGGREGATE = 2
 @fieldwise_init
 struct BoundExpr(Copyable):
     var expr: Expr
-    var dtypes: List[String]
+    var dtypes: List[DataType]
     var shapes: List[Int]
     var aggregated: List[Bool]
     var sources: List[Int]
@@ -205,92 +206,108 @@ def op_name(op: Int) -> String:
     return "operation " + String(op)
 
 
-def _numeric(dtype: String) -> Bool:
-    return dtype == "int64" or dtype == "float64"
+def _numeric(dtype: DataType) -> Bool:
+    return dtype.is_numeric()
 
 
-def _binary_dtype(op: Int, left: String, right: String) raises -> String:
+def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
     if op == KEEP_NULLS:
         return right
     if op == STR_CONCAT:
-        if left != "string" or right != "string":
+        if left != DataType.STRING or right != DataType.STRING:
             raise Error(
                 "concat_str requires string operands, found "
-                + left
+                + left.name()
                 + " and "
-                + right
+                + right.name()
             )
-        return "string"
+        return DataType.STRING
     if left != right:
         raise Error(
             op_name(op)
             + " requires matching dtypes, found "
-            + left
+            + left.name()
             + " and "
-            + right
+            + right.name()
             + "; use typed literals"
         )
     if op == EQ or op == NE:
-        return "bool"
+        return DataType.BOOL
     if is_comparison(op):
-        return "bool"
+        return DataType.BOOL
     if is_logical(op):
-        if left != "bool":
-            raise Error(op_name(op) + " requires bool operands, found " + left)
-        return "bool"
+        if left != DataType.BOOL:
+            raise Error(
+                op_name(op) + " requires bool operands, found " + left.name()
+            )
+        return DataType.BOOL
     if op == FILL_NULL:
         return left
     if op == FILL_NAN:
-        if left != "float64":
-            raise Error("fill_nan requires float64 operands, found " + left)
+        if left != DataType.FLOAT64:
+            raise Error(
+                "fill_nan requires float64 operands, found " + left.name()
+            )
         return left
     if not _numeric(left):
-        raise Error(op_name(op) + " requires numeric operands, found " + left)
+        raise Error(
+            op_name(op) + " requires numeric operands, found " + left.name()
+        )
     if op == DIV:
-        return "float64"
+        return DataType.FLOAT64
     return left
 
 
-def _unary_dtype(op: Int, input: String) raises -> String:
+def _unary_dtype(op: Int, input: DataType) raises -> DataType:
     if op == IS_NULL or op == IS_NOT_NULL:
-        return "bool"
+        return DataType.BOOL
     if op == NOT:
-        if input != "bool":
-            raise Error("not requires a bool operand, found " + input)
-        return "bool"
+        if input != DataType.BOOL:
+            raise Error("not requires a bool operand, found " + input.name())
+        return DataType.BOOL
     if op >= IS_NAN and op <= IS_INFINITE:
-        if input != "float64":
+        if input != DataType.FLOAT64:
             raise Error(
-                op_name(op) + " requires a float64 operand, found " + input
+                op_name(op)
+                + " requires a float64 operand, found "
+                + input.name()
             )
-        return "bool"
+        return DataType.BOOL
     if not _numeric(input):
-        raise Error(op_name(op) + " requires a numeric operand, found " + input)
+        raise Error(
+            op_name(op) + " requires a numeric operand, found " + input.name()
+        )
     if op == SQRT or op == EXP or op == LOG:
-        return "float64"
+        return DataType.FLOAT64
     return input
 
 
-def _reduction_dtype(node: Node, input: String) raises -> String:
+def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     var op = node.op
     if op == SUM:
         if not _numeric(input):
-            raise Error("sum requires a numeric expression, found " + input)
+            raise Error(
+                "sum requires a numeric expression, found " + input.name()
+            )
         return input
     if op == COUNT or op == NULL_COUNT or op == N_UNIQUE or op == LEN:
-        return "int64"
+        return DataType.INT64
     if op == ANY or op == ALL:
-        if input != "bool":
+        if input != DataType.BOOL:
             raise Error(
-                op_name(op) + " requires a bool expression, found " + input
+                op_name(op)
+                + " requires a bool expression, found "
+                + input.name()
             )
-        return "bool"
+        return DataType.BOOL
     if op == MIN or op == MAX or op == FIRST or op == LAST:
         return input
     if op == MEAN or op == STD or op == VAR or op == MEDIAN or op == QUANTILE:
         if not _numeric(input):
             raise Error(
-                op_name(op) + " requires a numeric expression, found " + input
+                op_name(op)
+                + " requires a numeric expression, found "
+                + input.name()
             )
         if (op == STD or op == VAR) and node.integer < 0:
             raise Error("ddof must be nonnegative")
@@ -309,11 +326,11 @@ def _reduction_dtype(node: Node, input: String) raises -> String:
                     "interpolation must be nearest, lower, higher, midpoint,"
                     " or linear"
                 )
-        return "float64"
+        return DataType.FLOAT64
     raise Error("Unsupported reduction: " + op_name(op))
 
 
-def _fusible(expr: Expr, types: List[String], fuse: Bool) -> List[Bool]:
+def _fusible(expr: Expr, types: List[DataType], fuse: Bool) -> List[Bool]:
     """Float64 columns and literals, and + - * / or comparisons over them."""
     var n = len(expr._nodes)
     var result = List[Bool](length=n, fill=False)
@@ -322,15 +339,15 @@ def _fusible(expr: Expr, types: List[String], fuse: Bool) -> List[Bool]:
     for i in range(n):
         ref node = expr._nodes[i]
         if node.op == COL or node.op == LIT_FLOAT:
-            result[i] = types[i] == "float64"
+            result[i] = types[i] == DataType.FLOAT64
         elif (
             node.op == ADD or node.op == SUB or node.op == MUL or node.op == DIV
         ) or is_comparison(node.op):
             result[i] = (
                 result[node.left]
                 and result[node.right]
-                and types[node.left] == "float64"
-                and types[node.right] == "float64"
+                and types[node.left] == DataType.FLOAT64
+                and types[node.right] == DataType.FLOAT64
             )
     return result^
 
@@ -340,13 +357,13 @@ def bind(
 ) raises -> BoundExpr:
     if len(expr._nodes) == 0:
         raise Error("An expression must contain at least one node")
-    var types = List[String]()
+    var types = List[DataType]()
     var shapes = List[Int]()
     var aggregated = List[Bool]()
     var sources = List[Int]()
     for i in range(len(expr._nodes)):
         var node = expr._nodes[i].copy()
-        var dtype: String
+        var dtype: DataType
         var shape = SCALAR
         var has_aggregate = False
         var source = -1
@@ -360,26 +377,22 @@ def bind(
             dtype = columns[source].dtype()
             shape = ROWS
         elif node.op == LIT_INT:
-            dtype = "int64"
+            dtype = DataType.INT64
         elif node.op == LIT_FLOAT:
-            dtype = "float64"
+            dtype = DataType.FLOAT64
         elif node.op == LIT_BOOL:
-            dtype = "bool"
+            dtype = DataType.BOOL
         elif node.op == LIT_STRING:
-            dtype = "string"
+            dtype = DataType.STRING
         elif node.op == SELECTOR:
             raise Error(
                 "Selectors must be expanded before binding; use select,"
                 " with_columns, agg, or filter"
             )
         elif node.op == LIT_NULL:
-            if not (
-                _numeric(node.text)
-                or node.text == "bool"
-                or node.text == "string"
-            ):
+            if not DataType.is_known(node.text):
                 raise Error("Unknown null literal dtype: " + node.text)
-            dtype = node.text
+            dtype = DataType.parse(node.text)
         elif is_reduction(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid aggregate input")
@@ -401,9 +414,10 @@ def bind(
                 or node.extra >= i
             ):
                 raise Error("Invalid conditional expression inputs")
-            if types[node.left] != "bool":
+            if types[node.left] != DataType.BOOL:
                 raise Error(
-                    "when requires a bool predicate, found " + types[node.left]
+                    "when requires a bool predicate, found "
+                    + types[node.left].name()
                 )
             dtype = types[node.right]
             var children = List[Int]()
@@ -413,7 +427,10 @@ def bind(
                 if types[node.extra] != dtype:
                     raise Error(
                         "when/then/otherwise branches require matching dtypes,"
-                        " found " + dtype + " and " + types[node.extra]
+                        " found "
+                        + dtype.name()
+                        + " and "
+                        + types[node.extra].name()
                     )
                 children.append(node.extra)
             for child in children:
@@ -433,17 +450,17 @@ def bind(
                 if not _numeric(input):
                     raise Error(
                         "cum_sum and rolling_sum require a numeric expression,"
-                        " found " + input
+                        " found " + input.name()
                     )
             elif node.op == ROLLING_MEAN:
                 if not _numeric(input):
                     raise Error(
                         "rolling_mean requires a numeric expression, found "
-                        + input
+                        + input.name()
                     )
-                dtype = "float64"
+                dtype = DataType.FLOAT64
             elif node.op == CUM_COUNT:
-                dtype = "int64"
+                dtype = DataType.INT64
             elif node.op == RANK:
                 var method = node.text
                 if (
@@ -457,7 +474,9 @@ def bind(
                         "rank method must be average, min, max, dense, or"
                         " ordinal"
                     )
-                dtype = "float64" if method == "average" else "int64"
+                dtype = (
+                    DataType.FLOAT64 if method == "average" else DataType.INT64
+                )
             if node.op >= ROLLING_SUM and node.op <= ROLLING_MAX:
                 if node.integer < 1:
                     raise Error("window_size must be at least 1")
@@ -485,19 +504,18 @@ def bind(
         elif node.op == CAST:
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid cast input")
-            var target = node.text
-            if not (_numeric(target) or target == "bool" or target == "string"):
-                raise Error("Unknown cast dtype: " + target)
-            dtype = target
+            if not DataType.is_known(node.text):
+                raise Error("Unknown cast dtype: " + node.text)
+            dtype = DataType.parse(node.text)
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif is_string_op(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid string expression input")
-            if types[node.left] != "string":
+            if types[node.left] != DataType.STRING:
                 raise Error(
                     "str operations require a string expression, found "
-                    + types[node.left]
+                    + types[node.left].name()
                 )
             if node.op == STR_SLICE and node.min_count < -1:
                 raise Error("str.slice length must be nonnegative")
@@ -507,15 +525,15 @@ def bind(
                 if len(node.text.codepoints()) != 1:
                     raise Error("pad fill_char must be one character")
             if node.op == STR_LEN_CHARS or node.op == STR_LEN_BYTES:
-                dtype = "int64"
+                dtype = DataType.INT64
             elif (
                 node.op == STR_STARTS_WITH
                 or node.op == STR_ENDS_WITH
                 or node.op == STR_CONTAINS
             ):
-                dtype = "bool"
+                dtype = DataType.BOOL
             else:
-                dtype = "string"
+                dtype = DataType.STRING
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif is_unary(node.op):

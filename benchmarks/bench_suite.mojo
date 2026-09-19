@@ -17,7 +17,7 @@ from std.os import getenv
 from std.sys.info import num_physical_cores, simd_width_of
 from std.time import monotonic
 
-from dataframe import Column, DataFrame, Expr, Series, col, lit
+from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.binding import bind
 from dataframe.execution import evaluate
 
@@ -72,9 +72,9 @@ def checksum(series: Series) raises -> Float64:
         var value = series.get(i)
         if value.is_null():
             total += Float64(i % 7) * 0.5
-        elif value.dtype() == "float64":
+        elif value.dtype() == DataType.FLOAT64:
             total += value.float64() * Float64(i % 13 + 1)
-        elif value.dtype() == "int64":
+        elif value.dtype() == DataType.INT64:
             total += Float64(value.int64()) * Float64(i % 13 + 1)
         else:
             total += Float64(Int(value.bool())) * Float64(i % 13 + 1)

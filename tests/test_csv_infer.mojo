@@ -6,7 +6,7 @@ from std.testing import (
     assert_false,
     assert_raises,
 )
-from dataframe import CsvField, CsvSchema, read_csv
+from dataframe import DataType, CsvField, CsvSchema, read_csv
 
 comptime PATH = "/tmp/dataframe_mojo_infer_test.csv"
 
@@ -27,15 +27,15 @@ def test_candidate_order_and_identifiers() raises:
     assert_equal(
         frame.dtypes(),
         [
-            String("bool"),
-            "int64",
-            "float64",
-            "float64",
-            "string",
-            "string",
-            "string",
-            "string",
-            "string",
+            DataType.BOOL,
+            DataType.INT64,
+            DataType.FLOAT64,
+            DataType.FLOAT64,
+            DataType.STRING,
+            DataType.STRING,
+            DataType.STRING,
+            DataType.STRING,
+            DataType.STRING,
         ],
     )
     assert_equal(frame.item(0, "zip").string(), "007")
@@ -69,8 +69,12 @@ def test_sample_limits_and_conflicts() raises:
         _ = read_csv(PATH, infer_schema_length=2)
     with assert_raises(contains="pass schema_overrides"):
         _ = read_csv(PATH, infer_schema_length=3)
-    assert_equal(read_csv(PATH, infer_schema_length=-1).dtypes()[0], "string")
-    assert_equal(read_csv(PATH, infer_schema_length=4).dtypes()[0], "string")
+    assert_equal(
+        read_csv(PATH, infer_schema_length=-1).dtypes()[0], DataType.STRING
+    )
+    assert_equal(
+        read_csv(PATH, infer_schema_length=4).dtypes()[0], DataType.STRING
+    )
     # A sample longer than the file is fine.
     assert_equal(read_csv(PATH, infer_schema_length=1000).height(), 4)
     # Overrides win over inference, and the sample can be empty.
@@ -78,7 +82,9 @@ def test_sample_limits_and_conflicts() raises:
         PATH, infer_schema_length=0, schema_overrides={"v": "string"}
     )
     assert_equal(overridden.item(3, "v").string(), "x")
-    assert_equal(read_csv(PATH, infer_schema_length=0).dtypes()[0], "string")
+    assert_equal(
+        read_csv(PATH, infer_schema_length=0).dtypes()[0], DataType.STRING
+    )
     with assert_raises(contains="schema_overrides names unknown column: w"):
         _ = read_csv(PATH, schema_overrides={"w": "int64"})
     with assert_raises(contains="Unknown dtype in schema_overrides"):
@@ -93,13 +99,13 @@ def test_names_headers_and_empty_files() raises:
     write("1,x\n2,y\n")
     var headerless = read_csv(PATH, has_header=False)
     assert_equal(headerless.columns(), [String("column_1"), "column_2"])
-    assert_equal(headerless.dtypes(), [String("int64"), "string"])
+    assert_equal(headerless.dtypes(), [DataType.INT64, DataType.STRING])
     assert_equal(headerless.height(), 2)
     write("a,b\n")
     var header_only = read_csv(PATH)
     assert_equal(header_only.columns(), [String("a"), "b"])
     assert_equal(header_only.height(), 0)
-    assert_equal(header_only.dtypes()[0], "string")
+    assert_equal(header_only.dtypes()[0], DataType.STRING)
     write("")
     assert_equal(read_csv(PATH).width(), 0)
     write("a,b\n1,2\n3\n")
@@ -112,7 +118,7 @@ def test_inference_uses_reader_options() raises:
     var frame = read_csv(
         PATH, separator=";", comment_prefix="#", null_values=["NA"]
     )
-    assert_equal(frame.dtypes(), [String("int64"), "bool"])
+    assert_equal(frame.dtypes(), [DataType.INT64, DataType.BOOL])
     assert_true(frame.item(0, "flag").is_null())
     assert_equal(
         read_csv(PATH, separator=";", comment_prefix="#", n_rows=1).height(), 1

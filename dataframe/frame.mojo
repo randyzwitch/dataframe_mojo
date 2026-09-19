@@ -1,4 +1,5 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
+from .dtype import DataType
 from std.collections import Dict
 from .column import Column
 from .series import Series, sort_indices, smallest_indices
@@ -15,10 +16,10 @@ from .display import render_frame, render_glimpse
 
 @fieldwise_init
 struct Field(Copyable):
-    """One schema entry: a column name and its dtype name."""
+    """One schema entry: a column name and its dtype."""
 
     var name: String
-    var dtype: String
+    var dtype: DataType
 
 
 struct DataFrame(Copyable, Sized, Writable):
@@ -104,8 +105,8 @@ struct DataFrame(Copyable, Sized, Writable):
             names.append(column.name())
         return names^
 
-    def dtypes(self) -> List[String]:
-        var types = List[String](capacity=self.width())
+    def dtypes(self) -> List[DataType]:
+        var types = List[DataType](capacity=self.width())
         for column in self._columns:
             types.append(column.dtype())
         return types^
@@ -515,11 +516,11 @@ struct DataFrame(Copyable, Sized, Writable):
                     "Join key dtypes differ: "
                     + left_on[i]
                     + " is "
-                    + ltype
+                    + ltype.name()
                     + " but "
                     + right_on[i]
                     + " is "
-                    + rtype
+                    + rtype.name()
                 )
         var keep_right_keys = how == "full" and not coalesce
         var right_output = List[Int]()
@@ -721,7 +722,7 @@ struct DataFrame(Copyable, Sized, Writable):
         if len(predicates) != 1:
             raise Error("A filter selector must match exactly one column")
         var bound = bind(predicates[0], self._columns)
-        if bound.dtypes[len(bound.dtypes) - 1] != "bool":
+        if bound.dtypes[len(bound.dtypes) - 1] != DataType.BOOL:
             raise Error("Filter expression must return Boolean values")
         var result = evaluate(
             bound, self._columns, self._height, batch_size=batch_size
@@ -766,9 +767,9 @@ struct DataFrame(Copyable, Sized, Writable):
                     "unpivot columns must share one dtype; "
                     + name
                     + " is "
-                    + actual
+                    + actual.name()
                     + ", expected "
-                    + dtype
+                    + dtype.name()
                 )
         if (
             variable_name == value_name
@@ -1058,11 +1059,11 @@ struct DataFrame(Copyable, Sized, Writable):
                 if actual != dtype:
                     raise Error(
                         "fill_null value is "
-                        + dtype
+                        + dtype.name()
                         + " but column "
                         + name
                         + " is "
-                        + actual
+                        + actual.name()
                     )
                 names.append(name)
         else:
@@ -1193,11 +1194,11 @@ def concat(
                         + " is "
                         + schema[c].name
                         + ":"
-                        + schema[c].dtype
+                        + schema[c].dtype.name()
                         + ", expected "
                         + first[c].name
                         + ":"
-                        + first[c].dtype
+                        + first[c].dtype.name()
                     )
             height += frames[f].height()
         var columns = List[Series](capacity=len(first))
@@ -1209,7 +1210,7 @@ def concat(
         return DataFrame(columns^, height=height)
     if how == "diagonal":
         var names = List[String]()
-        var dtypes = Dict[String, String]()
+        var dtypes = Dict[String, DataType]()
         for f in range(len(frames)):
             for field in frames[f].schema():
                 if field.name not in dtypes:
@@ -1220,11 +1221,11 @@ def concat(
                         "concat diagonal: column "
                         + field.name
                         + " is "
-                        + field.dtype
+                        + field.dtype.name()
                         + " in frame "
                         + String(f)
                         + ", expected "
-                        + dtypes[field.name]
+                        + dtypes[field.name].name()
                     )
         var aligned = List[DataFrame](capacity=len(frames))
         for frame in frames:

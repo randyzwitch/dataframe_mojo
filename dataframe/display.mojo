@@ -1,18 +1,13 @@
 """Bounded text rendering. Only displayed cells are ever formatted."""
+from .dtype import DataType
 from .column import Column
 from .series import Series
 
 comptime ELLIPSIS = "…"
 
 
-def short_dtype(dtype: String) -> String:
-    if dtype == "int64":
-        return "i64"
-    if dtype == "float64":
-        return "f64"
-    if dtype == "string":
-        return "str"
-    return dtype
+def short_dtype(dtype: DataType) -> String:
+    return dtype.short_name()
 
 
 def _codepoints(text: String) -> Int:

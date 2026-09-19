@@ -1,11 +1,12 @@
 """Explicit dtype conversion. String parsing matches read_csv exactly."""
 from std.math import isinf, isnan
 from .column import Column
+from .dtype import DataType
 from .parse import parse_bool, parse_float64, parse_int64
 from .series import Series
 
 
-def _dtype(series: Series) -> String:
+def _dtype(series: Series) -> DataType:
     return series.dtype()
 
 
@@ -42,7 +43,7 @@ def _float_to_int(value: Float64) raises -> Int64:
 
 
 def cast_series(
-    input: Series, target: String, strict: Bool, offset: Int, mask: List[Bool]
+    input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
     """Convert every valid, observed row; others become null."""
     var source = _dtype(input)
@@ -50,35 +51,41 @@ def cast_series(
         return input.copy()
     var n = len(input)
     var valid = List[Bool](length=n, fill=False)
-    var ints = List[Int64](length=n if target == "int64" else 0, fill=0)
-    var floats = List[Float64](length=n if target == "float64" else 0, fill=0)
-    var bools = List[Bool](length=n if target == "bool" else 0, fill=False)
-    var strings = List[String](length=n if target == "string" else 0, fill="")
+    var ints = List[Int64](length=n if target == DataType.INT64 else 0, fill=0)
+    var floats = List[Float64](
+        length=n if target == DataType.FLOAT64 else 0, fill=0
+    )
+    var bools = List[Bool](
+        length=n if target == DataType.BOOL else 0, fill=False
+    )
+    var strings = List[String](
+        length=n if target == DataType.STRING else 0, fill=""
+    )
     for i in range(n):
         if not _valid(input, i):
             continue
         if len(mask) == n and not mask[i]:
             continue
         try:
-            if target == "string":
+            if target == DataType.STRING:
                 strings[i] = _text(input, i)
-            elif source == "string":
+            elif source == DataType.STRING:
                 ref text = input._data[Column[String]]._values[i]
-                if target == "int64":
+                if target == DataType.INT64:
                     ints[i] = parse_int64(text)
-                elif target == "float64":
+                elif target == DataType.FLOAT64:
                     floats[i] = parse_float64(text)
                 else:
                     bools[i] = parse_bool(text)
-            elif source == "int64":
+            elif source == DataType.INT64:
                 var x = input._data[Column[Int64]]._values[i]
-                if target == "float64":
+                if target == DataType.FLOAT64:
                     floats[i] = Float64(x)
                 else:
                     bools[i] = x != 0
-            elif source == "float64":
+            elif source == DataType.FLOAT64:
                 var x = input._data[Column[Float64]]._values[i]
-                if target == "int64":
+                if target == DataType.INT64:
                     ints[i] = _float_to_int(x)
                 else:
                     if isnan(x):
@@ -86,7 +93,7 @@ def cast_series(
                     bools[i] = x != 0
             else:
                 var x = input._data[Column[Bool]]._values[i]
-                if target == "int64":
+                if target == DataType.INT64:
                     ints[i] = Int64(x)
                 else:
                     floats[i] = Float64(Int(x))
@@ -95,9 +102,9 @@ def cast_series(
             if strict:
                 raise Error(
                     "cast from "
-                    + source
+                    + source.name()
                     + " to "
-                    + target
+                    + target.name()
                     + " failed at row "
                     + String(offset + i)
                     + " for value '"
@@ -105,10 +112,10 @@ def cast_series(
                     + "': "
                     + String(e)
                 )
-    if target == "int64":
+    if target == DataType.INT64:
         return Series(input.name(), Column[Int64](ints^, valid))
-    if target == "float64":
+    if target == DataType.FLOAT64:
         return Series(input.name(), Column[Float64](floats^, valid))
-    if target == "bool":
+    if target == DataType.BOOL:
         return Series(input.name(), Column[Bool](bools^, valid))
     return Series(input.name(), Column[String](strings^, valid))
