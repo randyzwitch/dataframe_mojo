@@ -190,7 +190,9 @@ An empty dataframe can retain its row count: `DataFrame([], height=10)`.
 
 ## Deliberate limits
 
-Execution is eager and currently single-threaded. Float64 expression arithmetic
+Execution is eager. Reductions (global and grouped) run on worker threads for
+large inputs (`DATAFRAME_THREADS` sets the limit; 1 disables); other operations
+are single-threaded for now. Float64 expression arithmetic
 and comparisons use SIMD; checked integer arithmetic and reductions are currently
 scalar. Projections, slices, and column extraction share immutable buffers
 (zero-copy); computed results allocate new buffers, and unfused intermediates

@@ -45,6 +45,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Parallel reductions: global and grouped reductions over large inputs run
+  on worker threads (POSIX threads through the C FFI; no new dependency) with
+  worker-private states merged in row order. `DATAFRAME_THREADS` caps the
+  thread count (1 disables). Global sums are ~3.7x faster at 1M rows
+  (#6, #8).
+
 - Expression sugar: bare numbers and Bools work wherever an `Expr` is
   expected (`col("x") > 0`, `col("x") * 2.5`, `1 + col("x")`,
   `.fill_null(0)`, `when(...).then(1)`), `==` / `!=` build expressions, and

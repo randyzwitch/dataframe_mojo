@@ -14,8 +14,9 @@ the timed region (scalar and SIMD arithmetic must produce identical checksums).
 - Peak memory is measured externally: `/usr/bin/time -v pixi run bench` on
   Linux, `/usr/bin/time -l` on macOS. The suite does not count allocations; that
   needs an allocator hook Mojo does not expose, and timing is not used as a proxy.
-- The header line records the configuration. Thread count is reported for later
-  comparisons; execution is single-threaded today.
+- The header line records the configuration, including the worker-thread
+  limit (`DATAFRAME_THREADS`, default: physical cores). Run with
+  `DATAFRAME_THREADS=1` for single-threaded numbers.
 
 Other focused benchmarks: `bench-csv`, `bench-concat`, `bench-sort`,
 `bench-group-by`, and `bench-join`.
@@ -156,3 +157,22 @@ and 231 → 156 MB for ~30-byte strings, since each row costs its bytes plus an
 
 No workload here claims a speedup; these numbers are the reference for the
 execution changes in #3-#8.
+
+## Parallel reductions (#6, #8)
+
+Reductions split rows into one contiguous partition per worker thread; each
+worker reduces its partition into private state, and states merge in
+partition order. At 1,000,000 rows (32-core Threadripper; default workers =
+min(physical cores, rows / 65536) = 15):
+
+| workload | 1 thread | default | |
+|---|---|---|---|
+| global_sum | 5.2 ms | 1.4 ms | 3.7x |
+| global_count | 3.3 ms | 1.7 ms | 1.9x |
+| grouped_sum_count, 16 groups | 26.8 ms | 22.0 ms | hashing (serial) dominates |
+| grouped_sum_count, ~100k groups | 40.2 ms | 38.2 ms | workers capped by group count |
+
+Grouped reductions give each worker state for every group, so the worker
+count is capped at rows / (4 x groups). Hash grouping itself, row-wise
+expressions, and filters are still single-threaded (#5, #7).
+

@@ -17,6 +17,7 @@ from std.os import getenv
 from std.sys.info import num_physical_cores, simd_width_of
 from std.time import monotonic
 
+from dataframe.parallel import worker_count
 from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 from dataframe.binding import bind
 from dataframe.execution import evaluate
@@ -206,7 +207,9 @@ def main() raises:
         num_physical_cores(),
         " native_f64_simd_width=",
         simd_width_of[DType.float64](),
-        " threads=1 batch_size=",
+        " threads=",
+        worker_count(1 << 40),
+        " batch_size=",
         BATCH,
         sep="",
     )
