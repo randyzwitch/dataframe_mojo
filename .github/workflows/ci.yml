@@ -39,6 +39,12 @@ jobs:
         if: runner.os == 'Linux'
         run: pixi run bench-smoke
 
+      - name: Differential tests against Polars
+        if: runner.os == 'Linux'
+        run: |
+          pixi run -e oracle oracle --cases 150 --seed ${{ github.run_number }}
+          pixi run -e oracle oracle --mutation-check --cases 20
+
       - name: Package smoke test
         if: runner.os == 'Linux'
         run: pixi run package-smoke
