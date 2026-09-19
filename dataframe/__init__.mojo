@@ -5,3 +5,4 @@ from .frame import DataFrame, Field, GroupBy
 from .kernels import greater_than, multiply, sum_float64, sum_int64
 
 from .expr import Expr, col, lit
+from .csv import CsvField, CsvSchema, read_csv
