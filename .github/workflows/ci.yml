@@ -48,6 +48,7 @@ jobs:
         run: |
           pixi run -e oracle oracle --cases 150 --seed ${{ github.run_number }}
           pixi run -e oracle oracle --mutation-check --cases 20
+          pixi run -e oracle oracle-arrow
 
       - name: Package smoke test
         if: runner.os == 'Linux'

@@ -27,6 +27,14 @@ from .expr import (
     null,
     when,
 )
+from .arrow import (
+    ArrowArray,
+    ArrowSchema,
+    export_arrow,
+    export_arrow_series,
+    import_arrow,
+    import_arrow_series,
+)
 from .csv import (
     CsvField,
     CsvOptions,

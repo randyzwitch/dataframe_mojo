@@ -8,6 +8,7 @@ values. Buffers are never mutated while shared: the only mutating operation,
 batch reassembly in `_append_column`, first takes a private copy unless the
 column already owns its buffers outright.
 """
+from std.bit import pop_count
 from std.memory import ArcPointer, Pointer
 from std.sys.info import is_little_endian
 
@@ -90,10 +91,9 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         return self._get(index).copy()
 
     def null_count(self) -> Int:
-        var count = 0
-        for i in range(self._length):
-            count += Int(not self._valid(i))
-        return count
+        return self._length - _count_set(
+            self._bits[], self._offset, self._length
+        )
 
     def take(self, indices: List[Int]) raises -> Self:
         for i in indices:
@@ -206,6 +206,24 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 
 def _bit(bits: List[UInt8], i: Int) -> Bool:
     return (bits[i // 8] >> UInt8(i % 8)) & 1 == 1
+
+
+def _count_set(bits: List[UInt8], offset: Int, length: Int) -> Int:
+    """Set bits in [offset, offset + length): popcount over whole bytes."""
+    var count = 0
+    var i = 0
+    while i < length and (offset + i) % 8 != 0:
+        count += Int(_bit(bits, offset + i))
+        i += 1
+    var byte = (offset + i) // 8
+    while length - i >= 8:
+        count += Int(pop_count(bits[byte]))
+        byte += 1
+        i += 8
+    while i < length:
+        count += Int(_bit(bits, offset + i))
+        i += 1
+    return count
 
 
 def _pack_bits(valid: List[Bool]) -> List[UInt8]:

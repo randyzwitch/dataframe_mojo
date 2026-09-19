@@ -28,10 +28,12 @@ bench-join = "mojo run -I . benchmarks/bench_join.mojo"
 
 [feature.oracle.dependencies]
 polars = ">=1.0"
+pyarrow = ">=15"
 python = ">=3.11"
 
 [feature.oracle.tasks]
 oracle = "python3 scripts/oracle.py"
+oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo"
 
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }

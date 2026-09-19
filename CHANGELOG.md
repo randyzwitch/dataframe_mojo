@@ -43,6 +43,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Arrow C Data Interface: `export_arrow` / `import_arrow` (frames as struct
+  arrays) and `export_arrow_series` / `import_arrow_series`, with
+  `ArrowArray` / `ArrowSchema` structs. Int64, Float64, String, Datetime,
+  Duration, and Time export zero-copy; Bool and Date convert. Import copies
+  and accepts narrower integer, float32, utf8, date64, and time32 inputs.
+  See docs/arrow.md (#35).
+
 - Date, Datetime, Duration, and Time types with a `.dt()` namespace, temporal
   arithmetic and casts, strptime/strftime-style formats, CSV support,
   inference, and `date_range`/`datetime_range`.

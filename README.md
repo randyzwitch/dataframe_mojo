@@ -194,8 +194,9 @@ and comparisons use SIMD; checked integer arithmetic and reductions are currentl
 scalar. Projections, slices, and column extraction share immutable buffers
 (zero-copy); computed results allocate new buffers, and unfused intermediates
 are still materialized per batch. String columns use the Arrow `large_utf8`
-layout (one UTF-8 buffer plus Int64 offsets). There are no performance claims
-yet, and there is no Arrow export.
+layout (one UTF-8 buffer plus Int64 offsets). Frames export to and import from
+the Arrow C Data Interface (see [Arrow interchange](docs/arrow.md)); most
+dtypes export zero-copy. There are no performance claims yet.
 The underscore-prefixed fields are internal and must not be mutated by callers.
 
 There is no thread scheduler, Parquet reader, GPU execution, index
