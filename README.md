@@ -19,7 +19,10 @@ pixi run bench-csv
 ./build/sales
 ```
 
-The manifest currently targets Linux x86-64, the platform tested locally.
+Supported platforms are Linux x86-64 and macOS arm64 (both tested in CI) and
+Linux aarch64 (resolved in `pixi.lock`, not yet tested in CI). Windows waits on
+Mojo support. The library requires a little-endian target and checks this at
+compile time.
 The original sales example prints:
 
 ```text
