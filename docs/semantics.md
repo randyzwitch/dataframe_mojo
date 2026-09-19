@@ -90,6 +90,25 @@ column). `fill_null(value, subset=[])` replaces nulls with a scalar expression:
 without a subset only columns of the value's dtype change; every listed subset
 column must match it. NaN is a value and is never filled.
 
+## Reshaping
+
+`unpivot(on=[], index=[], variable_name="variable", value_name="value")` turns
+columns into rows: one output row per input row and `on` column, ordered by
+`on` column and then input row. `on` defaults to every non-index column, and all
+`on` columns must share one dtype because there is no promotion. The variable
+column holds the source column names as strings.
+
+`pivot(on, index=[...], values=..., aggregate_function="", sort_columns=False)`
+turns rows into columns: one row per distinct index key (first-occurrence
+order) and one column per distinct `on` value (first-occurrence order, or sort
+order with `sort_columns=True`). Without `aggregate_function`, a cell with
+several rows raises; otherwise use `first`, `last`, `sum`, `mean`, `min`,
+`max`, `count`, `len`, or `median`, computed with the ordinary grouped
+reductions. Missing cells are null. New column names are the `on` values' text
+(`null` for a null key) and must not collide with index names. An empty index
+list yields a single row. `pivot` followed by `unpivot` on the same names
+restores the original rows up to order.
+
 ## Concatenation
 
 `concat(frames, how="vertical")` raises on an empty list because no schema is

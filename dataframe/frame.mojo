@@ -780,6 +780,197 @@ struct DataFrame(Copyable, Sized, Writable):
             result = result._broadcast(self._height)
         return self.filter(result._data[Column[Bool]])
 
+    def unpivot(
+        self,
+        on: List[String] = List[String](),
+        index: List[String] = List[String](),
+        *,
+        variable_name: String = "variable",
+        value_name: String = "value",
+    ) raises -> Self:
+        """Wide to long: one row per (input row, `on` column).
+
+        `on` defaults to every non-index column; all `on` columns must share
+        one dtype. Output rows follow `on` order, then input row order.
+        """
+        var index_set = Dict[String, Bool]()
+        for name in index:
+            _ = self._index(name)
+            if name in index_set:
+                raise Error("Column listed twice in index: " + name)
+            index_set[name] = True
+        var columns_on = on.copy()
+        if len(columns_on) == 0:
+            for column in self._columns:
+                if column.name() not in index_set:
+                    columns_on.append(column.name())
+        if len(columns_on) == 0:
+            raise Error("unpivot requires at least one value column")
+        var dtype = self._columns[self._index(columns_on[0])].dtype()
+        for name in columns_on:
+            if name in index_set:
+                raise Error("Column is both index and on: " + name)
+            var actual = self._columns[self._index(name)].dtype()
+            if actual != dtype:
+                raise Error(
+                    "unpivot columns must share one dtype; "
+                    + name
+                    + " is "
+                    + actual
+                    + ", expected "
+                    + dtype
+                )
+        if (
+            variable_name == value_name
+            or variable_name in index_set
+            or value_name in index_set
+        ):
+            raise Error(
+                "unpivot output names must be distinct from each other and the index"
+            )
+        var repeated = List[Int](capacity=self._height * len(columns_on))
+        for _ in range(len(columns_on)):
+            for row in range(self._height):
+                repeated.append(row)
+        var output = List[Series]()
+        for name in index:
+            output.append(self._columns[self._index(name)].take(repeated))
+        var labels = List[String](capacity=len(repeated))
+        for name in columns_on:
+            for _ in range(self._height):
+                labels.append(name)
+        output.append(Series(variable_name, Column[String](labels^)))
+        var values = self._columns[self._index(columns_on[0])].renamed(
+            value_name
+        )
+        for k in range(1, len(columns_on)):
+            values._append_series(self._columns[self._index(columns_on[k])])
+        output.append(values^)
+        return Self(output^, height=len(repeated))
+
+    def pivot(
+        self,
+        on: String,
+        *,
+        index: List[String],
+        values: String,
+        aggregate_function: String = "",
+        sort_columns: Bool = False,
+        batch_size: Int = 1024,
+    ) raises -> Self:
+        """Long to wide: one row per distinct index key, one column per
+        distinct `on` value (first-occurrence order unless sort_columns).
+
+        Without aggregate_function, each (index, on) cell must hold at most
+        one row. Otherwise it is one of first, last, sum, mean, min, max,
+        count, len, or median. Missing cells are null. New column names are
+        the `on` values' text, with null rendered as "null".
+        """
+        var agg: Expr
+        var value = col(values)
+        var function = (
+            aggregate_function if aggregate_function.byte_length()
+            > 0 else "first"
+        )
+        if function == "first":
+            agg = value.first()
+        elif function == "last":
+            agg = value.last()
+        elif function == "sum":
+            agg = value.sum()
+        elif function == "mean":
+            agg = value.mean()
+        elif function == "min":
+            agg = value.min()
+        elif function == "max":
+            agg = value.max()
+        elif function == "count":
+            agg = value.count()
+        elif function == "len":
+            agg = value.len()
+        elif function == "median":
+            agg = value.median()
+        else:
+            raise Error(
+                "aggregate_function must be first, last, sum, mean, min, max,"
+                " count, len, or median"
+            )
+        var seen = Dict[String, Bool]()
+        for name in index:
+            _ = self._index(name)
+            if name in seen:
+                raise Error("Column listed twice in index: " + name)
+            seen[name] = True
+        if on in seen or values in seen:
+            raise Error("pivot on/values columns cannot also be index columns")
+        var on_column = self._columns[self._index(on)].copy()
+        _ = self._index(values)
+        var bound = bind(agg, self._columns)
+        # Row keys, column keys, and (row, column) cells.
+        var row_ids = List[Int](length=self._height, fill=0)
+        var row_reps = List[Int]()
+        if len(index) > 0:
+            var keys = List[Series]()
+            for name in index:
+                keys.append(self._columns[self._index(name)].copy())
+            var encoded = encode_rows(keys, nulls_equal=True)
+            row_ids = encoded.ids.copy()
+            row_reps = encoded.representatives.copy()
+        elif self._height > 0:
+            row_reps.append(0)
+        var column_keys = encode_rows([on_column.copy()], nulls_equal=True)
+        var cell_keys = List[Series]()
+        cell_keys.append(Series("row", Column[Int64](_as_int64(row_ids))))
+        cell_keys.append(
+            Series("column", Column[Int64](_as_int64(column_keys.ids)))
+        )
+        var cells = encode_rows(cell_keys, nulls_equal=True)
+        if aggregate_function.byte_length() == 0:
+            var counts = List[Int](length=cells.count(), fill=0)
+            for id in cells.ids:
+                counts[id] += 1
+            for c in counts:
+                if c > 1:
+                    raise Error(
+                        "pivot found several rows for one cell; pass an"
+                        " aggregate_function"
+                    )
+        var aggregated = evaluate(
+            bound,
+            self._columns,
+            self._height,
+            batch_size=batch_size,
+            grouped=True,
+            groups=cells.ids,
+            group_count=cells.count(),
+        )
+        var n_rows = len(row_reps)
+        var n_cols = column_keys.count()
+        var matrix = List[Int](length=n_rows * n_cols, fill=-1)
+        for c in range(cells.count()):
+            var rep = cells.representatives[c]
+            matrix[row_ids[rep] * n_cols + column_keys.ids[rep]] = c
+        var order = List[Int]()
+        for k in range(n_cols):
+            order.append(k)
+        if sort_columns:
+            order = on_column.take(column_keys.representatives).argsort()
+        var output = List[Series]()
+        var names = Dict[String, Bool]()
+        for name in index:
+            output.append(self._columns[self._index(name)].take(row_reps))
+            names[name] = True
+        for k in order:
+            var label = String(on_column.get(column_keys.representatives[k]))
+            if label in names:
+                raise Error("pivot column name collides: " + label)
+            names[label] = True
+            var picks = List[Int](capacity=n_rows)
+            for r in range(n_rows):
+                picks.append(matrix[r * n_cols + k])
+            output.append(aggregated.take_or_null(picks).renamed(label))
+        return Self(output^, height=n_rows)
+
     def cast(
         self, dtypes: Dict[String, String], *, strict: Bool = True
     ) raises -> Self:
@@ -980,6 +1171,13 @@ struct DataFrame(Copyable, Sized, Writable):
                 result = result._broadcast(self._height)
             columns.append(result^)
         return GroupBy(self.copy(), columns^, maintain_order)
+
+
+def _as_int64(values: List[Int]) -> List[Int64]:
+    var out = List[Int64](capacity=len(values))
+    for v in values:
+        out.append(Int64(v))
+    return out^
 
 
 def _joint_key_ids(
