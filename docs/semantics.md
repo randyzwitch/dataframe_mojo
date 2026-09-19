@@ -50,6 +50,27 @@ and cells. Floats compare structurally: NaN equals NaN and `-0.0` equals `0.0`.
 Null payloads never participate. With `null_equal=False`, any null in either
 frame makes them unequal. `DataFrame` deliberately has no `==` operator.
 
+## Concatenation
+
+`concat(frames, how="vertical")` raises on an empty list because no schema is
+known. Every input is validated before any column is built, and errors name the
+frame position and column.
+
+- `vertical` requires identical names, order, and dtypes. Rows appear frame by
+  frame in input order. Zero-column frames sum their heights. `vstack` is the
+  two-frame form.
+- `diagonal` unions columns by name in first-seen order. A name shared by
+  several frames must have one dtype; there is no promotion. Frames lacking a
+  column contribute nulls.
+- `horizontal` requires equal heights and globally unique names. `hstack`
+  accepts a dataframe or a list of series.
+
+`Series.append` returns a new series and requires matching dtypes; the result
+keeps the left name. `Series.full_null(name, dtype, length)` builds an all-null
+column. Validity bitmaps are appended bytewise, with a shifted merge when the
+destination length is not a multiple of eight, so concatenation is linear in the
+output size (`pixi run bench-concat`).
+
 ## Filtering and arithmetic
 
 Filter masks must match the frame's height. Only valid true entries retain rows;

@@ -296,6 +296,35 @@ struct Series(Copyable, Sized):
             )
         raise Error("Unknown column type")
 
+    @staticmethod
+    def full_null(var name: String, dtype: String, length: Int) raises -> Self:
+        """A column of `length` nulls with the requested dtype."""
+        if dtype == "int64":
+            return Self(name^, Column[Int64]._nulls(length, 0))
+        if dtype == "float64":
+            return Self(name^, Column[Float64]._nulls(length, 0))
+        if dtype == "bool":
+            return Self(name^, Column[Bool]._nulls(length, False))
+        if dtype == "string":
+            return Self(name^, Column[String]._nulls(length, ""))
+        raise Error("Unknown dtype: " + dtype)
+
+    def append(self, other: Self) raises -> Self:
+        """Return a new series with other's rows after this one's."""
+        if self.dtype() != other.dtype():
+            raise Error(
+                "Cannot append "
+                + other.dtype()
+                + " to "
+                + self.dtype()
+                + " series '"
+                + self._name
+                + "'"
+            )
+        var result = self.copy()
+        result._append_series(other)
+        return result^
+
     def reverse(self) raises -> Self:
         var indices = List[Int](capacity=len(self))
         for i in range(len(self)):

@@ -15,3 +15,4 @@ format = "mblack --target-version mojo --line-length 80 dataframe tests examples
 format-check = "mblack --check --target-version mojo --line-length 80 dataframe tests examples benchmarks"
 build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales && mojo build -I . examples/expressions.mojo -o build/expressions && mojo build -I . examples/read_csv.mojo -o build/read_csv"
 bench-csv = "mojo run -I . benchmarks/bench_csv.mojo"
+bench-concat = "mojo run -I . benchmarks/bench_concat.mojo"
