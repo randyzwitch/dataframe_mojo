@@ -285,6 +285,11 @@ struct _CsvReader:
     var truncate_ragged: Bool
     var lossy: Bool
     var skipped: Int
+    var sampling: Bool
+    var sample_limit: Int
+    var sample: List[List[String]]
+    var sample_quoted: List[List[Bool]]
+    var check_header: Bool
 
     def __init__(
         out self,
@@ -330,6 +335,11 @@ struct _CsvReader:
         self.truncate_ragged = options.truncate_ragged_lines
         self.lossy = options.encoding == "utf8-lossy"
         self.skipped = 0
+        self.sampling = False
+        self.sample_limit = -1
+        self.sample = List[List[String]]()
+        self.sample_quoted = List[List[Bool]]()
+        self.check_header = True
 
     def _location(self, text: String) -> Error:
         return Error(
@@ -354,7 +364,11 @@ struct _CsvReader:
                 text = String(from_utf8=self.field_bytes)
             except:
                 raise self._location("field is not valid UTF-8")
-        if self.field_index >= len(self.schema) and not self.truncate_ragged:
+        if (
+            not self.sampling
+            and self.field_index >= len(self.schema)
+            and not self.truncate_ragged
+        ):
             if not self.ignore_errors or (self.has_header and self.record == 1):
                 raise self._location("too many fields")
         self.fields.append(text^)
@@ -367,9 +381,22 @@ struct _CsvReader:
 
     def _finish_record(mut self) raises:
         self._finish_field()
+        if self.sampling:
+            self.sample.append(self.fields.copy())
+            self.sample_quoted.append(self.quoted.copy())
+            self.fields.clear()
+            self.quoted.clear()
+            self.field_index = 0
+            self.record += 1
+            self.record_open = False
+            if self.sample_limit >= 0 and len(self.sample) >= self.sample_limit:
+                self.done = True
+            return
         var header = self.has_header and self.record == 1
         var count = len(self.fields)
-        if header:
+        if header and not self.check_header:
+            pass
+        elif header:
             if count != len(self.schema):
                 raise self._location(
                     String(
@@ -606,6 +633,64 @@ struct CsvOptions(Copyable):
             raise Error("encoding must be 'utf8' or 'utf8-lossy'")
 
 
+def _options(
+    separator: String,
+    quote_char: String,
+    comment_prefix: String,
+    skip_rows: Int,
+    n_rows: Int,
+    null_values: List[String],
+    ignore_errors: Bool,
+    truncate_ragged_lines: Bool,
+    encoding: String,
+    buffer_size: Int,
+) raises -> CsvOptions:
+    if buffer_size <= 0:
+        raise Error("CSV buffer_size must be positive")
+    var options = CsvOptions(
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        n_rows,
+        null_values.copy(),
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+    )
+    options.validate()
+    return options^
+
+
+def _projection(schema: CsvSchema, columns: List[String]) raises -> List[Bool]:
+    var keep = List[Bool](length=len(schema), fill=len(columns) == 0)
+    var requested = Dict[String, Bool]()
+    for name in columns:
+        if name in requested:
+            raise Error("CSV column listed twice: " + name)
+        requested[name] = True
+        var found = False
+        for i in range(len(schema)):
+            if schema._fields[i].name == name:
+                keep[i] = True
+                found = True
+        if not found:
+            raise Error("Unknown CSV column: " + name)
+    return keep^
+
+
+def _stream(
+    path: String, mut reader: _CsvReader, buffer_size: Int
+) raises -> DataFrame:
+    with open(path, "r") as file:
+        while not reader.done:
+            var bytes = file.read_bytes(buffer_size)
+            if len(bytes) == 0:
+                break
+            reader.feed(bytes^)
+    return reader.finish()
+
+
 def read_csv(
     path: String,
     schema: CsvSchema,
@@ -631,41 +716,241 @@ def read_csv(
     applied by the streaming tokenizer, so results do not depend on buffer
     boundaries. See docs/csv.md for the option contract.
     """
-    if buffer_size <= 0:
-        raise Error("CSV buffer_size must be positive")
-    var options = CsvOptions(
+    var options = _options(
         separator,
         quote_char,
         comment_prefix,
         skip_rows,
         n_rows,
-        null_values.copy(),
+        null_values,
         ignore_errors,
         truncate_ragged_lines,
         encoding,
+        buffer_size,
     )
-    options.validate()
-    var keep = List[Bool](length=len(schema), fill=len(columns) == 0)
-    var requested = Dict[String, Bool]()
-    for name in columns:
-        if name in requested:
-            raise Error("CSV column listed twice: " + name)
-        requested[name] = True
-        var found = False
-        for i in range(len(schema)):
-            if schema._fields[i].name == name:
-                keep[i] = True
-                found = True
-        if not found:
-            raise Error("Unknown CSV column: " + name)
-    var reader = _CsvReader(schema, has_header, options, keep)
-    with open(path, "r") as file:
-        while not reader.done:
-            var bytes = file.read_bytes(buffer_size)
-            if len(bytes) == 0:
-                break
-            reader.feed(bytes^)
-    return reader.finish()
+    var reader = _CsvReader(
+        schema, has_header, options, _projection(schema, columns)
+    )
+    return _stream(path, reader, buffer_size)
+
+
+def _is_integer_text(text: String) -> Bool:
+    var bytes = text.as_bytes()
+    var start = (
+        1 if len(bytes) > 0 and (bytes[0] == 43 or bytes[0] == 45) else 0
+    )
+    if len(bytes) == start:
+        return False
+    for i in range(start, len(bytes)):
+        if bytes[i] < 48 or bytes[i] > 57:
+            return False
+    return True
+
+
+def _has_leading_zero(text: String) -> Bool:
+    var bytes = text.as_bytes()
+    var start = (
+        1 if len(bytes) > 0 and (bytes[0] == 43 or bytes[0] == 45) else 0
+    )
+    return len(bytes) - start > 1 and bytes[start] == 48
+
+
+def infer_dtype(
+    values: List[String], quoted: List[Bool], null_values: List[String]
+) -> Int:
+    """Narrowest of Bool, Int64, Float64, String that reads every sample value.
+
+    Nulls (empty unquoted fields and null tokens) are ignored; a column with
+    no values is String. Integers with leading zeros, such as identifiers
+    like 007, and integers outside Int64 infer as String rather than losing
+    information.
+    """
+    var boolean = True
+    var integer = True
+    var floating = True
+    var seen = False
+    for i in range(len(values)):
+        ref text = values[i]
+        if not quoted[i]:
+            if text == "":
+                continue
+            var is_null = False
+            for token in null_values:
+                is_null = is_null or text == token
+            if is_null:
+                continue
+        elif text == "":
+            return CSV_STRING
+        seen = True
+        if boolean and text != "true" and text != "false":
+            boolean = False
+        if _is_integer_text(text):
+            # Leading zeros and values outside Int64 would lose information
+            # as numbers, so they are text.
+            if _has_leading_zero(text):
+                return CSV_STRING
+            try:
+                _ = parse_int64(text)
+            except:
+                return CSV_STRING
+        else:
+            integer = False
+        if floating and not integer:
+            try:
+                _ = parse_float64(text)
+            except:
+                floating = False
+        if not boolean and not integer and not floating:
+            return CSV_STRING
+    if not seen:
+        return CSV_STRING
+    if boolean:
+        return CSV_BOOL
+    if integer:
+        return CSV_INT64
+    if floating:
+        return CSV_FLOAT64
+    return CSV_STRING
+
+
+def read_csv(
+    path: String,
+    *,
+    infer_schema_length: Int = 10000,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+) raises -> DataFrame:
+    """Read a CSV file, inferring a nullable schema from a sample.
+
+    The first infer_schema_length data records (-1 means every record) are
+    tokenized and each column takes the narrowest type of Bool, Int64,
+    Float64, or String that reads every sampled value. schema_overrides maps
+    column names to int64, float64, bool, or string and wins over inference.
+    The whole file is then read strictly with that schema: a later value that
+    does not fit raises with its record and field instead of changing type.
+    Header names are kept, with repeats renamed name_1, name_2, ...; without
+    a header, columns are column_1, column_2, ...
+    """
+    if infer_schema_length < -1:
+        raise Error("infer_schema_length must be nonnegative or -1")
+    var options = _options(
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        -1,
+        null_values,
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        buffer_size,
+    )
+    var sampler = _CsvReader(
+        CsvSchema([CsvField.string("_")]), False, options, [False]
+    )
+    sampler.sampling = True
+    var header_rows = 1 if has_header else 0
+    sampler.sample_limit = (
+        -1 if infer_schema_length < 0 else infer_schema_length + header_rows
+    )
+    _ = _stream(path, sampler, buffer_size)
+    var sample = sampler.sample.copy()
+    var quoted = sampler.sample_quoted.copy()
+    var width = 0
+    if len(sample) > 0:
+        width = len(sample[0])
+    for row in sample:
+        if (
+            len(row) != width
+            and not truncate_ragged_lines
+            and not ignore_errors
+        ):
+            raise Error(
+                "CSV records have different field counts; expected "
+                + String(width)
+                + ", found "
+                + String(len(row))
+            )
+    if width == 0:
+        return DataFrame([])
+    var names = List[String]()
+    var used = Dict[String, Int]()
+    for i in range(width):
+        var name = sample[0][i] if has_header else "column_" + String(i + 1)
+        if name in used:
+            used[name] += 1
+            var candidate = name + "_" + String(used[name])
+            while candidate in used:
+                used[name] += 1
+                candidate = name + "_" + String(used[name])
+            name = candidate
+        used[name] = 0
+        names.append(name)
+    for item in schema_overrides.items():
+        var known = False
+        for name in names:
+            known = known or name == item.key
+        if not known:
+            raise Error("schema_overrides names unknown column: " + item.key)
+    var fields = List[CsvField]()
+    for i in range(width):
+        var dtype: Int
+        if names[i] in schema_overrides:
+            var requested = schema_overrides[names[i]]
+            if requested == "int64":
+                dtype = CSV_INT64
+            elif requested == "float64":
+                dtype = CSV_FLOAT64
+            elif requested == "bool":
+                dtype = CSV_BOOL
+            elif requested == "string":
+                dtype = CSV_STRING
+            else:
+                raise Error("Unknown dtype in schema_overrides: " + requested)
+        else:
+            var values = List[String]()
+            var flags = List[Bool]()
+            for r in range(header_rows, len(sample)):
+                if i < len(sample[r]):
+                    values.append(sample[r][i])
+                    flags.append(quoted[r][i])
+            dtype = infer_dtype(values, flags, null_values)
+        fields.append(CsvField(names[i], dtype, True))
+    var schema = CsvSchema(fields^)
+    var strict = options.copy()
+    strict.n_rows = n_rows
+    var reader = _CsvReader(
+        schema, has_header, strict, _projection(schema, columns)
+    )
+    reader.check_header = False
+    try:
+        return _stream(path, reader, buffer_size)
+    except e:
+        var message = String(e)
+        if (
+            message.find("invalid") >= 0
+            or message.find("overflow") >= 0
+            or message.find("Boolean") >= 0
+        ):
+            raise Error(
+                message
+                + " (the schema was inferred from the first "
+                + String(infer_schema_length)
+                + " records; pass schema_overrides or a larger"
+                + " infer_schema_length)"
+            )
+        raise e^
 
 
 def _needs_quotes(text: String, separator: UInt8, null_value: String) -> Bool:
