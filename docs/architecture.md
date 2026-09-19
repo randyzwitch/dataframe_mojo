@@ -10,7 +10,6 @@
 - `expr_kernels.mojo`: specialized binary kernels, including explicit Float64 SIMD.
 - `reductions.mojo`: mergeable exact-integer and reassociable floating-point states.
 - `frame.mojo`: validated eager dataframe operations and expression entry points.
-- `kernels.mojo`: original scalar reference/legacy operations.
 
 The only runtime dependency is the Mojo standard library. This is an eager CPU
 implementation, not a production query engine. All public extraction APIs copy;

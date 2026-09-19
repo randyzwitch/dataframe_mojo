@@ -148,27 +148,15 @@ name; the other operand may also be a scalar expression such as `lit(...)`.
 The cost is a small constant for building the frame and binding the
 expression, plus the usual copies.
 
-## Filtering and arithmetic
+## Filtering, arithmetic, and grouping
 
-Filter masks must match the frame's height. Only valid true entries retain rows;
-false and null entries are dropped. Retained rows preserve input order.
-Comparisons and multiplication propagate nulls. NaN comparisons follow IEEE
-behavior (NaN is never greater than a threshold).
-
-Sums skip nulls. Empty/all-null inputs return an empty `Optional`, or a null
-aggregate cell for a group. Zero is a valid sum. Int64 sums preserve their dtype
-and raise before each overflowing addition. Consequently an intermediate overflow
-raises even if later cancellation would make the final mathematical result fit.
-Float64 sums accumulate left to right and retain IEEE NaN/infinity behavior;
-there is no compensated summation or cross-platform bitwise guarantee.
-
-## Grouping
-
-`group_by_sum` supports one String key and one Int64/Float64 value. Groups appear
-in order of first occurrence. Null keys form one group, distinct from every
-string, including the empty string. Groups with no non-null values have null
-sums. Empty input returns zero rows with both output columns and their dtypes.
-The aggregate output name must differ from the key name.
+Filtering, arithmetic, reductions, and grouping go through expressions; see
+[expressions](expressions.md) for their full contract. `filter` keeps only
+rows whose predicate is true (false and null are dropped) and preserves input
+order. Sums skip nulls, return zero for empty or all-null input unless
+`min_count` is set, accumulate Int64 exactly in 128 bits, and raise only when
+the final result overflows. Grouped output order is unspecified unless
+`maintain_order=True`.
 
 ## Sorting
 
@@ -240,11 +228,3 @@ Invalid shape, names, indices, masks, dtype requests, join modes, and integer
 sum overflow raise Mojo `Error`. Allocation failure behavior follows Mojo's
 standard containers. Underscored storage fields are implementation details;
 mutating them directly is outside this contract.
-
-## Expression API
-
-The reduction and grouping rules above describe the original column-kernel and
-`group_by_sum` APIs. The new expression API has a separate, deliberately more
-parallel-friendly contract: zero-for-empty sums with `min_count`, wide integer
-accumulation with final overflow checking, floating-point reassociation, and
-explicit `maintain_order` for grouped output. See [expressions](expressions.md).

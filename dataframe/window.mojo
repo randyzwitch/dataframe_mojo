@@ -20,8 +20,7 @@ from .expr import (
     FORWARD_FILL,
     BACKWARD_FILL,
 )
-from .expr_kernels import validity
-from .kernels import checked_add
+from .expr_kernels import checked_add, validity
 from .reductions import WideInt
 from .series import Series, sort_indices
 

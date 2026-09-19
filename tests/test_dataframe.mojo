@@ -10,10 +10,9 @@ from dataframe import (
     Column,
     Series,
     DataFrame,
-    greater_than,
-    multiply,
-    sum_int64,
-    sum_float64,
+    Expr,
+    col,
+    lit,
 )
 
 
@@ -144,50 +143,86 @@ def test_with_column_replacement_and_independence() raises:
     assert_equal(empty_columns.with_column(ints("n", [1, 2])).height(), 2)
 
 
-def test_numeric_kernels_propagate_null_and_preserve_int_precision() raises:
-    var integers = Column[Int64](
-        [9007199254740993, 2, 999], [True, True, False]
+def one(frame: DataFrame, expr: Expr) raises -> Series:
+    return frame.select(expr.alias("r")).column("r")
+
+
+def test_numeric_expressions_propagate_null_and_preserve_int_precision() raises:
+    var frame = DataFrame(
+        [
+            Series(
+                "i",
+                Column[Int64]([9007199254740993, 2, 999], [True, True, False]),
+            ),
+            Series("f", Column[Float64]([2.5, 123, -1.0], [True, False, True])),
+        ]
     )
-    assert_equal(sum_int64(integers).value(), Int64(9007199254740995))
-    var mask = greater_than(integers, Int64(2))
+    assert_equal(
+        one(frame, col("i").sum()).int64().value(0), Int64(9007199254740995)
+    )
+    var mask = one(frame, col("i") > lit(Int64(2))).bool()
     assert_true(mask.value(0))
     assert_false(mask.value(1))
     assert_true(mask.is_null(2))
-    var floats = Column[Float64]([2.5, 123, -1.0], [True, False, True])
-    var scaled = multiply(floats, 2.0)
-    assert_equal(scaled.value(0), Float64(5))
-    assert_equal(scaled.value(2), Float64(-2))
-    assert_true(scaled.is_null(1))
-    assert_equal(sum_float64(scaled).value(), Float64(3))
-    assert_equal(sum_float64(floats).value(), Float64(1.5))
+    var scaled = one(frame, col("f") * lit(Float64(2)))
+    assert_equal(scaled.float64().value(0), Float64(5))
+    assert_equal(scaled.float64().value(2), Float64(-2))
+    assert_true(scaled.float64().is_null(1))
+    assert_equal(
+        one(frame, (col("f") * lit(Float64(2))).sum()).float64().value(0),
+        Float64(3),
+    )
+    assert_equal(one(frame, col("f").sum()).float64().value(0), Float64(1.5))
 
 
 def test_empty_and_all_null_reductions() raises:
-    assert_false(Bool(sum_int64(Column[Int64]([]))))
-    assert_false(Bool(sum_float64(Column[Float64]([]))))
-    assert_false(Bool(sum_int64(Column[Int64]([99], [False]))))
-    assert_false(Bool(sum_float64(Column[Float64]([99], [False]))))
-    assert_true(Bool(sum_int64(Column[Int64]([0]))))
+    var empty = DataFrame(
+        [
+            Series("i", Column[Int64]([])),
+            Series("f", Column[Float64]([])),
+        ]
+    )
+    var nulls = DataFrame(
+        [
+            Series("i", Column[Int64]([99], [False])),
+            Series("f", Column[Float64]([99], [False])),
+        ]
+    )
+    for frame in [empty.copy(), nulls.copy()]:
+        assert_true(one(frame, col("i").sum(min_count=1)).int64().is_null(0))
+        assert_true(one(frame, col("f").sum(min_count=1)).float64().is_null(0))
+        assert_equal(one(frame, col("i").sum()).int64().value(0), Int64(0))
+    var zero = DataFrame([Series("i", Column[Int64]([0]))])
+    assert_equal(
+        one(zero, col("i").sum(min_count=1)).int64().value(0), Int64(0)
+    )
 
 
 def test_checked_sum_both_overflow_directions() raises:
-    with assert_raises():
-        _ = sum_int64(Column[Int64]([9223372036854775807, 1]))
-    with assert_raises():
-        _ = sum_int64(Column[Int64]([-9223372036854775808, -1]))
+    comptime MAX = Int64(9223372036854775807)
+    comptime MIN = Int64(-9223372036854775807) - 1
+    with assert_raises(contains="overflow"):
+        _ = DataFrame([ints("v", [MAX, 1])]).select(col("v").sum())
+    with assert_raises(contains="overflow"):
+        _ = DataFrame([ints("v", [MIN, -1])]).select(col("v").sum())
     assert_equal(
-        sum_int64(
-            Column[Int64]([-9223372036854775808, 9223372036854775807])
-        ).value(),
+        one(DataFrame([ints("v", [MIN, MAX])]), col("v").sum())
+        .int64()
+        .value(0),
         Int64(-1),
     )
-    # Invalid payloads cannot cause overflow.
+    # Totals are exact, so an intermediate overflow that cancels is fine.
     assert_equal(
-        sum_int64(
-            Column[Int64]([9223372036854775807, 1], [True, False])
-        ).value(),
-        Int64(9223372036854775807),
+        one(DataFrame([ints("v", [MAX, 1, -1])]), col("v").sum())
+        .int64()
+        .value(0),
+        MAX,
     )
+    # Invalid payloads cannot cause overflow.
+    var masked = DataFrame(
+        [Series("v", Column[Int64]([MAX, 1], [True, False]))]
+    )
+    assert_equal(one(masked, col("v").sum()).int64().value(0), MAX)
 
 
 def test_grouped_int_sum_null_keys_and_all_null_values() raises:
@@ -209,7 +244,9 @@ def test_grouped_int_sum_null_keys_and_all_null_values() raises:
             ),
         ]
     )
-    var result = frame.group_by_sum("key", "value", "total")
+    var result = frame.group_by("key", maintain_order=True).agg(
+        col("value").sum(min_count=1).alias("total")
+    )
     assert_equal(result.height(), 4)
     var keys = result.column("key").string()
     var totals = result.column("total").int64()
@@ -232,11 +269,14 @@ def test_grouped_float_sum_and_empty_input() raises:
             ),
         ]
     )
-    var totals = frame.group_by_sum("k", "v").column("sum").float64()
+    var grouped = frame.group_by("k", maintain_order=True).agg(
+        col("v").sum(min_count=1).alias("sum")
+    )
+    var totals = grouped.column("sum").float64()
     assert_equal(totals.value(0), Float64(4))
     assert_true(totals.is_null(1))
     assert_equal(totals.value(2), Float64(0))
-    var empty = frame.take([]).group_by_sum("k", "v")
+    var empty = frame.take([]).group_by("k").agg(col("v").sum().alias("sum"))
     assert_equal(empty.height(), 0)
     assert_equal(empty.width(), 2)
     assert_equal(empty.column("sum").dtype(), "float64")
@@ -246,16 +286,14 @@ def test_grouped_sum_validation_and_overflow() raises:
     var frame = DataFrame(
         [strings("k", ["a", "a"]), ints("v", [9223372036854775807, 1])]
     )
-    with assert_raises():
-        _ = frame.group_by_sum("k", "v")
-    with assert_raises():
-        _ = frame.group_by_sum("k", "v", "k")
-    with assert_raises():
-        _ = frame.group_by_sum("v", "v")
-    with assert_raises():
-        _ = frame.group_by_sum("k", "k")
-    with assert_raises():
-        _ = frame.group_by_sum("missing", "v")
+    with assert_raises(contains="overflow"):
+        _ = frame.group_by("k").agg(col("v").sum())
+    with assert_raises(contains="collides with grouping key"):
+        _ = frame.group_by("k").agg(col("v").sum().alias("k"))
+    with assert_raises(contains="sum requires a numeric expression"):
+        _ = frame.group_by("v").agg(col("k").sum())
+    with assert_raises(contains="Unknown column"):
+        _ = frame.group_by("missing").agg(col("v").sum())
 
 
 def test_sort_is_stable_in_both_directions_and_places_nulls() raises:
@@ -314,7 +352,7 @@ def test_sort_strings_bool_and_nan() raises:
     assert_equal(
         floats.sort("f", True, False).column("id").int64().value(0), Int64(2)
     )
-    var total = sum_float64(floats.column("f").float64()).value()
+    var total = one(floats, col("f").sum()).float64().value(0)
     assert_true(total != total)
 
 
@@ -422,12 +460,12 @@ def test_sales_pipeline() raises:
             ),
         ]
     )
-    var positive = sales.filter(
-        greater_than(sales.column("amount").float64(), Float64(0))
+    var result = (
+        sales.filter(col("amount") > lit(Float64(0)))
+        .with_columns((col("amount") * lit(Float64(0.9))).alias("net"))
+        .group_by("region", maintain_order=True)
+        .agg(col("net").sum().alias("revenue"))
     )
-    var result = positive.with_column(
-        Series("net", multiply(positive.column("amount").float64(), 0.9))
-    ).group_by_sum("region", "net", "revenue")
     assert_equal(result.height(), 2)
     assert_equal(result.column("region").string().value(0), "east")
     assert_equal(result.column("revenue").float64().value(0), Float64(90))
