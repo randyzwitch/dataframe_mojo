@@ -9,6 +9,7 @@ from .value import AnyValue
 from .hashing import RowKeys, encode_rows
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
+from .lazy import LazyFrame
 from .display import render_frame, render_glimpse
 
 
@@ -118,6 +119,10 @@ struct DataFrame(Copyable, Sized, Writable):
     def column(self, name: String) raises -> Series:
         """Return an owned copy. Column lookup is linear in the schema width."""
         return self._columns[self._index(name)].copy()
+
+    def lazy(self) -> LazyFrame:
+        """Start a lazy query over this frame; see LazyFrame."""
+        return LazyFrame(self)
 
     def get_column(self, name: String) raises -> Series:
         return self.column(name)
