@@ -102,6 +102,22 @@ def _length(left: Int, right: Int) raises -> Int:
     return max(left, right)
 
 
+def fit_mask(mask: List[Bool], n: Int) -> List[Bool]:
+    """Resize an evaluation mask to a kernel's output length.
+
+    Empty means every row is active. A scalar result is active when any row
+    that could observe it is active.
+    """
+    if len(mask) == 0 or len(mask) == n:
+        return mask.copy()
+    if n == 1:
+        var any_active = False
+        for active in mask:
+            any_active = any_active or active
+        return [any_active]
+    return List[Bool](length=n, fill=mask[0])
+
+
 def _float_scalar[op: Int](x: Float64, y: Float64) -> Float64:
     comptime if op == FLOORDIV:
         return floor(x / y)
@@ -186,8 +202,9 @@ def _numeric_float[
 
 def _numeric_int[
     op: Int
-](left: Column[Int64], right: Column[Int64]) raises -> Series:
+](left: Column[Int64], right: Column[Int64], mask: List[Bool]) raises -> Series:
     var n = _length(len(left), len(right))
+    var active = fit_mask(mask, n)
     var valid = List[Bool](length=n, fill=False)
     comptime predicate = is_comparison(op)
     comptime floating = op == DIV
@@ -200,6 +217,9 @@ def _numeric_int[
         var a = 0 if len(left) == 1 else i
         var b = 0 if len(right) == 1 else i
         valid[i] = left._valid(a) and right._valid(b)
+        # Rows outside the mask are never selected, so they must not raise.
+        if len(active) > 0 and not active[i]:
+            valid[i] = False
         if not valid[i]:
             continue
         var x = left._values[a]
@@ -284,14 +304,14 @@ def _compare[
 
 def _arithmetic[
     op: Int, width: Int
-](left: Series, right: Series) raises -> Series:
+](left: Series, right: Series, mask: List[Bool]) raises -> Series:
     if left._data.isa[Column[Float64]]():
         return _numeric_float[op, width](
             left._data[Column[Float64]], right._data[Column[Float64]]
         )
     if left._data.isa[Column[Int64]]():
         return _numeric_int[op](
-            left._data[Column[Int64]], right._data[Column[Int64]]
+            left._data[Column[Int64]], right._data[Column[Int64]], mask
         )
     comptime if is_comparison(op):
         if left._data.isa[Column[Bool]]():
@@ -344,14 +364,17 @@ def _unary_float[
     return Series("", Column[Float64](values^, valid))
 
 
-def _unary_int[op: Int](input: Column[Int64]) raises -> Series:
+def _unary_int[
+    op: Int
+](input: Column[Int64], mask: List[Bool]) raises -> Series:
     var n = len(input)
+    var active = fit_mask(mask, n)
     var valid = List[Bool](length=n, fill=False)
     comptime floating = op == SQRT or op == EXP or op == LOG
     var values = List[Int64](length=0 if floating else n, fill=0)
     var floats = List[Float64](length=n if floating else 0, fill=0)
     for i in range(n):
-        valid[i] = input._valid(i)
+        valid[i] = input._valid(i) and (len(active) == 0 or active[i])
         if not valid[i]:
             continue
         var x = input._values[i]
@@ -380,13 +403,15 @@ def _unary_int[op: Int](input: Column[Int64]) raises -> Series:
         return Series("", Column[Int64](values^, valid))
 
 
-def _math[op: Int, width: Int](input: Series, integer: Int64) raises -> Series:
+def _math[
+    op: Int, width: Int
+](input: Series, integer: Int64, mask: List[Bool]) raises -> Series:
     if input._data.isa[Column[Float64]]():
         return _unary_float[op, width](
             input._data[Column[Float64]], Int(integer)
         )
     if input._data.isa[Column[Int64]]():
-        return _unary_int[op](input._data[Column[Int64]])
+        return _unary_int[op](input._data[Column[Int64]], mask)
     raise Error("Unsupported unary kernel")
 
 
@@ -488,7 +513,9 @@ def _keep_nulls[
 
 def binary[
     op: Int, width: Int = 4
-](left: Series, right: Series) raises -> Series:
+](
+    left: Series, right: Series, mask: List[Bool] = List[Bool]()
+) raises -> Series:
     comptime if is_logical(op):
         return _logical[op](left._data[Column[Bool]], right._data[Column[Bool]])
     elif op == FILL_NAN:
@@ -529,7 +556,7 @@ def binary[
             return Series("", _keep_nulls(mask, right._data[Column[Bool]]))
         return Series("", _keep_nulls(mask, right._data[Column[String]]))
     else:
-        return _arithmetic[op, width](left, right)
+        return _arithmetic[op, width](left, right, mask)
 
 
 def _float_predicate[op: Int](input: Column[Float64]) raises -> Series:
@@ -553,7 +580,9 @@ def _float_predicate[op: Int](input: Column[Float64]) raises -> Series:
 
 def unary[
     op: Int, width: Int = 4
-](input: Series, integer: Int64) raises -> Series:
+](
+    input: Series, integer: Int64, mask: List[Bool] = List[Bool]()
+) raises -> Series:
     comptime if op == IS_NULL or op == IS_NOT_NULL:
         var valid = validity(input)
         var values = List[Bool](capacity=len(valid))
@@ -571,4 +600,55 @@ def unary[
     elif op >= IS_NAN and op <= IS_INFINITE:
         return _float_predicate[op](input._data[Column[Float64]])
     else:
-        return _math[op, width](input, integer)
+        return _math[op, width](input, integer, mask)
+
+
+def _choose[
+    T: Copyable & Deinitable
+](selected: List[Bool], then: Column[T], other: Column[T]) raises -> Column[T]:
+    var n = len(selected)
+    var values = List[T](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        if selected[i]:
+            var a = 0 if len(then) == 1 else i
+            values.append(then._values[a].copy())
+            valid.append(then._valid(a))
+        else:
+            var b = 0 if len(other) == 1 else i
+            values.append(other._values[b].copy())
+            valid.append(other._valid(b))
+    return Column[T](values^, valid)
+
+
+def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
+    """Row-wise pick between branch results, broadcasting scalar branches."""
+    if then._data.isa[Column[Int64]]():
+        return Series(
+            "",
+            _choose(
+                selected, then._data[Column[Int64]], other._data[Column[Int64]]
+            ),
+        )
+    if then._data.isa[Column[Float64]]():
+        return Series(
+            "",
+            _choose(
+                selected,
+                then._data[Column[Float64]],
+                other._data[Column[Float64]],
+            ),
+        )
+    if then._data.isa[Column[Bool]]():
+        return Series(
+            "",
+            _choose(
+                selected, then._data[Column[Bool]], other._data[Column[Bool]]
+            ),
+        )
+    return Series(
+        "",
+        _choose(
+            selected, then._data[Column[String]], other._data[Column[String]]
+        ),
+    )

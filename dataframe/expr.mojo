@@ -1,4 +1,5 @@
 """Immutable-by-convention expression IR. No data access or execution here."""
+from std.collections import Optional
 
 comptime COL = 0
 comptime LIT_INT = 1
@@ -67,6 +68,9 @@ comptime ANY = 91
 comptime ALL = 92
 comptime NULL_COUNT = 93
 
+# Conditional: left=predicate, right=then, extra=otherwise (-1 means null).
+comptime WHEN = 100
+
 
 def is_binary(op: Int) -> Bool:
     return (op >= ADD and op <= EQ) or (op >= 20 and op < 50)
@@ -82,6 +86,10 @@ def is_reduction(op: Int) -> Bool:
 
 def is_comparison(op: Int) -> Bool:
     return op == GT or op == EQ or (op >= LT and op <= NE)
+
+
+def is_conditional(op: Int) -> Bool:
+    return op == WHEN
 
 
 def is_logical(op: Int) -> Bool:
@@ -119,6 +127,11 @@ struct Expr(Copyable):
 
     var _nodes: List[Node]
     var _name: String
+
+    @implicit
+    def __init__(out self, then: Then):
+        """A when/then chain without otherwise yields null for unmatched rows."""
+        self = then.end()
 
     def alias(self, name: String) -> Self:
         var result = self.copy()
@@ -435,3 +448,80 @@ def coalesce(exprs: List[Expr]) raises -> Expr:
     for i in range(1, len(exprs)):
         result = result.fill_null(exprs[i])
     return result^
+
+
+def _conditional(
+    condition: Expr, value: Expr, otherwise: Optional[Expr]
+) -> Expr:
+    var nodes = condition._nodes.copy()
+    var predicate = len(nodes) - 1
+    _append_shifted(nodes, value._nodes, len(nodes))
+    var then = len(nodes) - 1
+    var other = -1
+    if otherwise:
+        _append_shifted(nodes, otherwise.value()._nodes, len(nodes))
+        other = len(nodes) - 1
+    nodes.append(_node(WHEN, predicate, then, extra=other))
+    return Expr(nodes^, value._name)
+
+
+@fieldwise_init
+struct When(Copyable):
+    """A pending condition; call `then` to supply its value."""
+
+    var _conditions: List[Expr]
+    var _values: List[Expr]
+
+    def then(self, value: Expr) -> Then:
+        var values = self._values.copy()
+        values.append(value.copy())
+        return Then(self._conditions.copy(), values^)
+
+
+@fieldwise_init
+struct Then(Copyable):
+    """A when/then chain; add branches with `when` or finish with `otherwise`.
+
+    It converts implicitly to an Expr whose unmatched rows are null.
+    """
+
+    var _conditions: List[Expr]
+    var _values: List[Expr]
+
+    def when(self, condition: Expr) -> When:
+        var conditions = self._conditions.copy()
+        conditions.append(condition.copy())
+        return When(conditions^, self._values.copy())
+
+    def otherwise(self, value: Expr) -> Expr:
+        return self._build(Optional[Expr](value.copy()))
+
+    def end(self) -> Expr:
+        return self._build(Optional[Expr]())
+
+    def alias(self, name: String) -> Expr:
+        return self.end().alias(name)
+
+    def _build(self, otherwise: Optional[Expr]) -> Expr:
+        var last = len(self._conditions) - 1
+        var result = _conditional(
+            self._conditions[last], self._values[last], otherwise
+        )
+        for i in range(last - 1, -1, -1):
+            result = _conditional(
+                self._conditions[i],
+                self._values[i],
+                Optional[Expr](result^),
+            )
+        # The chain is named after its first value, as in Polars.
+        result._name = self._values[0]._name
+        return result^
+
+
+def when(condition: Expr) -> When:
+    """Start a conditional: when(p).then(a).when(q).then(b).otherwise(c).
+
+    Predicates must be Bool; a null predicate falls through to the next
+    branch. Every branch value must share one dtype.
+    """
+    return When([condition.copy()], List[Expr]())

@@ -69,6 +69,26 @@ and an empty list yields false. `is_between(lower, upper, closed="both")`
 accepts `both`, `left`, `right`, or `none` and combines the two comparisons with
 Kleene AND, so a null bound yields null unless the other side is false.
 
+### Conditionals
+
+`when(p).then(a).when(q).then(b).otherwise(c)` picks, per row, the value of the
+first branch whose predicate is true. Predicates must be Bool; a null predicate
+is not true and falls through to the next branch. Without `otherwise`, unmatched
+rows are null. A chain without `otherwise` converts implicitly to `Expr`, and
+`.alias()` works at either stage. Every branch must have the same dtype: there
+is no promotion, so use typed literals or `null(dtype)`. The result is named
+after the first `then` value. Scalars and aggregates broadcast as elsewhere; an
+all-scalar chain is scalar, and conditions on aggregates work inside `agg`.
+
+Branches are evaluated under a row mask. A kernel that can raise (checked Int64
+arithmetic, negation, `abs`, `//`, `pow`) only evaluates rows whose result can
+be selected, so `when(x <= 0).then(lit(MAX) + x).otherwise(x)` does not raise
+for positive `x`, while an overflow in a selected row still raises. Masks narrow
+through nested conditionals. A scalar branch is evaluated only if some row
+selects it. Aggregates inside a branch (for example `col("x").sum()`) are still
+computed over the whole input before the conditional runs, so their own errors
+are not masked.
+
 `select(expr)` returns one row for a scalar/aggregate expression or input height
 for a row-valued expression. `select_exprs` broadcasts scalar/aggregate results
 when any expression is row-valued. An empty expression list preserves height and
