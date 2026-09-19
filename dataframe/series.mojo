@@ -3,6 +3,7 @@ from std.utils import Variant
 from .column import Column
 from .value import AnyValue
 from .display import render_series
+from .cast import cast_series
 
 comptime Storage = Variant[
     Column[Int64], Column[Float64], Column[Bool], Column[String]
@@ -40,6 +41,17 @@ struct Series(Copyable, Sized, Writable):
     ) -> String:
         """Render at most max_rows values; negative means unlimited."""
         return render_series(self, max_rows, max_string_length)
+
+    def cast(self, dtype: String, strict: Bool = True) raises -> Self:
+        """Convert to int64, float64, bool, or string; see Expr.cast."""
+        if not (
+            dtype == "int64"
+            or dtype == "float64"
+            or dtype == "bool"
+            or dtype == "string"
+        ):
+            raise Error("Unknown cast dtype: " + dtype)
+        return cast_series(self, dtype, strict, 0, List[Bool]())
 
     def renamed(self, var name: String) -> Self:
         var result = self.copy()

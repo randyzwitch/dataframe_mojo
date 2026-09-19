@@ -6,65 +6,17 @@ structural scanning or parallel decoding can replace one stage at a time.
 """
 from std.collections import Dict
 from std.utils import Variant
-from std.utils.numerics import isinf
 
 from .column import Column
 from .frame import DataFrame
 from .series import Series
+from .parse import parse_int64, parse_float64
 
 
 comptime CSV_INT64 = 0
 comptime CSV_FLOAT64 = 1
 comptime CSV_BOOL = 2
 comptime CSV_STRING = 3
-
-
-def _parse_int64(text: String) raises -> Int64:
-    """Parse strict decimal Int64 without a floating-point round trip."""
-    var bytes = text.as_bytes()
-    if len(bytes) == 0:
-        raise Error("empty integer")
-    var index = 0
-    var negative = False
-    if bytes[0] == 45 or bytes[0] == 43:
-        negative = bytes[0] == 45
-        index = 1
-    if index == len(bytes):
-        raise Error("integer sign without digits")
-    var limit = UInt64(9223372036854775807) + UInt64(negative)
-    var magnitude = UInt64(0)
-    while index < len(bytes):
-        var byte = bytes[index]
-        if byte < 48 or byte > 57:
-            raise Error("non-decimal integer byte")
-        var digit = UInt64(byte - 48)
-        if magnitude > (limit - digit) // 10:
-            raise Error("Int64 overflow")
-        magnitude = magnitude * 10 + digit
-        index += 1
-    if negative:
-        if magnitude == UInt64(9223372036854775808):
-            return Int64(-9223372036854775807) - 1
-        return -Int64(magnitude)
-    return Int64(magnitude)
-
-
-def _edge_ascii_whitespace(text: String) -> Bool:
-    var bytes = text.as_bytes()
-    if len(bytes) == 0:
-        return False
-    var first = bytes[0]
-    var last = bytes[len(bytes) - 1]
-    return (
-        first == 32
-        or first == 9
-        or first == 10
-        or first == 13
-        or last == 32
-        or last == 9
-        or last == 10
-        or last == 13
-    )
 
 
 @fieldwise_init
@@ -211,32 +163,15 @@ struct _CsvColumn(Copyable):
 
         if self.builder.isa[_IntBuilder]():
             try:
-                self.builder[_IntBuilder].values.append(_parse_int64(text))
+                self.builder[_IntBuilder].values.append(parse_int64(text))
             except:
                 raise self._error(record, "invalid Int64 value '" + text + "'")
             self.builder[_IntBuilder].valid.append(True)
         elif self.builder.isa[_FloatBuilder]():
-            var value: Float64
-            if _edge_ascii_whitespace(text):
-                raise self._error(
-                    record, "Float64 fields cannot have surrounding whitespace"
-                )
             try:
-                value = Float64(text)
-            except:
-                raise self._error(
-                    record, "invalid Float64 value '" + text + "'"
-                )
-            if isinf(value) and (
-                text != "inf"
-                and text != "+inf"
-                and text != "-inf"
-                and text != "Infinity"
-                and text != "+Infinity"
-                and text != "-Infinity"
-            ):
-                raise self._error(record, "Float64 overflow for '" + text + "'")
-            self.builder[_FloatBuilder].values.append(value)
+                self.builder[_FloatBuilder].values.append(parse_float64(text))
+            except e:
+                raise self._error(record, String(e))
             self.builder[_FloatBuilder].valid.append(True)
         elif self.builder.isa[_BoolBuilder]():
             if text != "true" and text != "false":

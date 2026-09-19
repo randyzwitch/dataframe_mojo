@@ -49,6 +49,26 @@ about 1e-12 relative; tests compare them with a tolerance. Binder errors name
 the operator and dtypes, for example `/ requires matching dtypes, found int64
 and float64; use typed literals`.
 
+### Casts
+
+`cast(dtype, strict=True)` converts between the four dtypes; `Series.cast` and
+`DataFrame.cast({"name": "dtype"})` are shorthands. Nulls stay null. A value
+that cannot convert raises `cast from <a> to <b> failed at row <n> for value
+'<v>': <reason>` when strict, or becomes null when `strict=False`. Inside a
+`when` branch, only rows that branch can select are checked.
+
+| From \ To | int64 | float64 | bool | string |
+|---|---|---|---|---|
+| int64 | identity | exact below 2^53, rounded above | `x != 0` | decimal digits |
+| float64 | truncate toward zero; NaN, ±inf, and values outside [-2^63, 2^63) fail | identity | `x != 0`; NaN fails | shortest round-trip form |
+| bool | 0 / 1 | 0.0 / 1.0 | identity | `true` / `false` |
+| string | `read_csv` Int64 rules | `read_csv` Float64 rules | exactly `true` or `false` | identity |
+
+String parsing shares `dataframe/parse.mojo` with `read_csv`, so a string casts
+exactly when the same text would load from CSV: no surrounding whitespace, an
+optional sign, and only explicit infinity spellings. Casting numbers and
+Booleans to string and back reproduces them exactly, including `-0.0` and NaN.
+
 ### Boolean logic and nulls
 
 `&`, `|`, `^`, and `~` (also `and_`, `or_`, `xor`, `not_`) require Bool

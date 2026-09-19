@@ -71,6 +71,8 @@ comptime STR_SLICE = 76
 comptime STR_REVERSE = 77
 # integer: 0 pad start, 1 pad end, 2 zfill; min_count: width; text: fill.
 comptime STR_PAD = 78
+# Cast: text holds the target dtype, integer is 1 for strict.
+comptime CAST = 79
 
 # Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
 comptime MIN = 80
@@ -358,6 +360,18 @@ struct Expr(Copyable):
     def null_count(self) -> Self:
         """Number of null values, as Int64."""
         return self._unary(NULL_COUNT)
+
+    def cast(self, dtype: String, strict: Bool = True) -> Self:
+        """Convert to int64, float64, bool, or string.
+
+        Values that cannot convert raise (with the row and value) when
+        strict, or become null otherwise. Nulls stay null.
+        """
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(CAST, len(nodes) - 1, text=dtype, integer=Int64(strict))
+        )
+        return Self(nodes^, self._name)
 
     def str(self) -> StrNamespace:
         """String operations: col("name").str().to_uppercase()."""

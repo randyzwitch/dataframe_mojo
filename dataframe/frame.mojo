@@ -776,6 +776,16 @@ struct DataFrame(Copyable, Sized, Writable):
             result = result._broadcast(self._height)
         return self.filter(result._data[Column[Bool]])
 
+    def cast(
+        self, dtypes: Dict[String, String], *, strict: Bool = True
+    ) raises -> Self:
+        """Cast named columns in place of the originals; order is kept."""
+        var casts = List[Expr]()
+        for item in dtypes.items():
+            _ = self._index(item.key)
+            casts.append(col(item.key).cast(item.value, strict))
+        return self.with_columns(casts)
+
     def _subset_keys(self, subset: List[String]) raises -> List[Series]:
         var names = subset.copy() if len(subset) > 0 else self.columns()
         if len(names) == 0:
