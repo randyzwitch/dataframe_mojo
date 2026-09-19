@@ -68,7 +68,7 @@ def _extreme[
         if not column._valid(i):
             continue
         var g = _group(grouped, groups, offset + i)
-        ref value = column._values[i]
+        ref value = column._get(i)
         if (
             not seen[g]
             or (is_max and value > best[g])
@@ -95,7 +95,7 @@ def _pick[
         if last or not seen[g]:
             seen[g] = True
             valid[g] = column._valid(i)
-            best[g] = column._values[i].copy()
+            best[g] = column._get(i).copy()
 
 
 def _distinct[
@@ -111,7 +111,7 @@ def _distinct[
     for i in range(len(column)):
         var g = _group(grouped, groups, offset + i)
         if column._valid(i):
-            sets[g][column._values[i].copy()] = True
+            sets[g][column._get(i).copy()] = True
         else:
             nulls[g] = True
 
@@ -306,20 +306,20 @@ struct Reducer(Movable):
             for i in range(len(column)):
                 if column._valid(i):
                     self.int_sums[_group(grouped, groups, offset + i)].add(
-                        column._values[i]
+                        column._get(i)
                     )
         elif op == SUM or op == MEAN:
             ref column = chunk._data[Column[Float64]]
             for i in range(len(column)):
                 if column._valid(i):
                     self.float_sums[_group(grouped, groups, offset + i)].add(
-                        column._values[i]
+                        column._get(i)
                     )
         elif op == ANY or op == ALL:
             ref column = chunk._data[Column[Bool]]
             for i in range(len(column)):
                 self.logic[_group(grouped, groups, offset + i)].add(
-                    column._valid(i), column._values[i]
+                    column._valid(i), column._get(i)
                 )
         elif op == STD or op == VAR or op == MEDIAN or op == QUANTILE:
             for i in range(len(chunk)):
@@ -327,11 +327,11 @@ struct Reducer(Movable):
                 if chunk._data.isa[Column[Int64]]():
                     if not chunk._data[Column[Int64]]._valid(i):
                         continue
-                    value = Float64(chunk._data[Column[Int64]]._values[i])
+                    value = Float64(chunk._data[Column[Int64]]._get(i))
                 else:
                     if not chunk._data[Column[Float64]]._valid(i):
                         continue
-                    value = chunk._data[Column[Float64]]._values[i]
+                    value = chunk._data[Column[Float64]]._get(i)
                 var g = _group(grouped, groups, offset + i)
                 if op == STD or op == VAR:
                     self.moments[g].add(value)
@@ -355,7 +355,7 @@ struct Reducer(Movable):
                     if not column._valid(i):
                         continue
                     var g = _group(grouped, groups, offset + i)
-                    var value = column._values[i]
+                    var value = column._get(i)
                     if isnan(value):
                         self.nan_seen[g] = True
                     elif (
@@ -446,14 +446,14 @@ struct Reducer(Movable):
                 for i in range(len(column)):
                     var g = _group(grouped, groups, offset + i)
                     if column._valid(i):
-                        self.float_sets[g][float_key(column._values[i])] = True
+                        self.float_sets[g][float_key(column._get(i))] = True
                     else:
                         self.picked_valid[g] = True
             elif chunk._data.isa[Column[Bool]]():
                 ref column = chunk._data[Column[Bool]]
                 for i in range(len(column)):
                     self.logic[_group(grouped, groups, offset + i)].add(
-                        column._valid(i), column._values[i]
+                        column._valid(i), column._get(i)
                     )
             else:
                 _distinct(

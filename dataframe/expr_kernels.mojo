@@ -163,8 +163,8 @@ def _numeric_float[
                 var b = 0 if len(right) == 1 else i
                 valid[i] = left._valid(a) and right._valid(b)
                 if valid[i]:
-                    x[lane] = left._values[a]
-                    y[lane] = right._values[b]
+                    x[lane] = left._get(a)
+                    y[lane] = right._get(b)
         comptime if predicate:
             var result: SIMD[DType.bool, width]
             comptime if op == GT:
@@ -228,8 +228,8 @@ def _numeric_int[
             valid[i] = False
         if not valid[i]:
             continue
-        var x = left._values[a]
-        var y = right._values[b]
+        var x = left._get(a)
+        var y = right._get(b)
         comptime if op == ADD:
             values[i] = checked_add(x, y)
         elif op == SUB:
@@ -291,8 +291,8 @@ def _compare[
         var b = 0 if len(right) == 1 else i
         valid[i] = left._valid(a) and right._valid(b)
         if valid[i]:
-            ref x = left._values[a]
-            ref y = right._values[b]
+            ref x = left._get(a)
+            ref y = right._get(b)
             comptime if op == GT:
                 values[i] = x > y
             elif op == LT:
@@ -344,7 +344,7 @@ def _unary_float[
             if i < n:
                 valid[i] = input._valid(i)
                 if valid[i]:
-                    x[lane] = input._values[i]
+                    x[lane] = input._get(i)
         var result: SIMD[DType.float64, width]
         comptime if op == NEG:
             result = -x
@@ -383,7 +383,7 @@ def _unary_int[
         valid[i] = input._valid(i) and (len(active) == 0 or active[i])
         if not valid[i]:
             continue
-        var x = input._values[i]
+        var x = input._get(i)
         comptime if op == NEG or op == ABS:
             if op == ABS and x >= 0:
                 values[i] = x
@@ -431,8 +431,8 @@ def _logical[op: Int](left: Column[Bool], right: Column[Bool]) raises -> Series:
         var b = 0 if len(right) == 1 else i
         var p = left._valid(a)
         var q = right._valid(b)
-        var x = p and left._values[a]
-        var y = q and right._values[b]
+        var x = p and left._get(a)
+        var y = q and right._get(b)
         comptime if op == AND:
             if (p and not x) or (q and not y):
                 valid[i] = True
@@ -461,10 +461,10 @@ def _fill_null[
         var a = 0 if len(left) == 1 else i
         var b = 0 if len(right) == 1 else i
         if left._valid(a):
-            values.append(left._values[a].copy())
+            values.append(left._get(a).copy())
             valid.append(True)
         else:
-            values.append(right._values[b].copy())
+            values.append(right._get(b).copy())
             valid.append(right._valid(b))
     return Column[T](values^, valid)
 
@@ -476,11 +476,11 @@ def _fill_nan(left: Column[Float64], right: Column[Float64]) raises -> Series:
     for i in range(n):
         var a = 0 if len(left) == 1 else i
         var b = 0 if len(right) == 1 else i
-        if left._valid(a) and isnan(left._values[a]):
-            values[i] = right._values[b]
+        if left._valid(a) and isnan(left._get(a)):
+            values[i] = right._get(b)
             valid[i] = right._valid(b)
         else:
-            values[i] = left._values[a]
+            values[i] = left._get(a)
             valid[i] = left._valid(a)
     return Series("", Column[Float64](values^, valid))
 
@@ -512,7 +512,7 @@ def _keep_nulls[
     for i in range(n):
         var a = 0 if len(mask) == 1 else i
         var b = 0 if len(right) == 1 else i
-        values.append(right._values[b].copy())
+        values.append(right._get(b).copy())
         valid.append(mask[a] and right._valid(b))
     return Column[T](values^, valid)
 
@@ -572,7 +572,7 @@ def _float_predicate[op: Int](input: Column[Float64]) raises -> Series:
     for i in range(n):
         valid[i] = input._valid(i)
         if valid[i]:
-            var x = input._values[i]
+            var x = input._get(i)
             comptime if op == IS_NAN:
                 values[i] = isnan(x)
             elif op == IS_NOT_NAN:
@@ -601,7 +601,7 @@ def unary[
         var valid = List[Bool](capacity=len(column))
         for i in range(len(column)):
             valid.append(column._valid(i))
-            values.append(column._valid(i) and not column._values[i])
+            values.append(column._valid(i) and not column._get(i))
         return Series("", Column[Bool](values^, valid))
     elif op >= IS_NAN and op <= IS_INFINITE:
         return _float_predicate[op](input._data[Column[Float64]])
@@ -618,11 +618,11 @@ def _choose[
     for i in range(n):
         if selected[i]:
             var a = 0 if len(then) == 1 else i
-            values.append(then._values[a].copy())
+            values.append(then._get(a).copy())
             valid.append(then._valid(a))
         else:
             var b = 0 if len(other) == 1 else i
-            values.append(other._values[b].copy())
+            values.append(other._get(b).copy())
             valid.append(other._valid(b))
     return Column[T](values^, valid)
 

@@ -54,8 +54,8 @@ def _ordered(rows: List[Int], reverse: Bool) -> List[Int]:
 
 def _numeric(input: Series, row: Int) -> Float64:
     if input._data.isa[Column[Int64]]():
-        return Float64(input._data[Column[Int64]]._values[row])
-    return input._data[Column[Float64]]._values[row]
+        return Float64(input._data[Column[Int64]]._get(row))
+    return input._data[Column[Float64]]._get(row)
 
 
 def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
@@ -85,11 +85,11 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                     continue
                 if is_int:
                     int_total = checked_add(
-                        int_total, input._data[Column[Int64]]._values[row]
+                        int_total, input._data[Column[Int64]]._get(row)
                     )
                     ints[row] = int_total
                 else:
-                    float_total += input._data[Column[Float64]]._values[row]
+                    float_total += input._data[Column[Float64]]._get(row)
                     floats[row] = float_total
         if is_int:
             return Series("", Column[Int64](ints^, valid))
@@ -183,7 +183,7 @@ def _rolling_sum(
                 if integer_sum:
                     wide += (
                         input._data[Column[Int64]]
-                        ._values[row]
+                        ._get(row)
                         .cast[DType.int128]()
                     )
                 else:

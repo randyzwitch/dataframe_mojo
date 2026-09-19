@@ -67,8 +67,8 @@ def temporal_binary(
         var q = 0 if len(b) == 1 else i
         if not (a._valid(p) and b._valid(q)):
             continue
-        var x = a._values[p]
-        var y = b._values[q]
+        var x = a._get(p)
+        var y = b._get(q)
         valid[i] = True
         if op == MUL:
             values[i] = checked_mul(x, y)
@@ -188,14 +188,14 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
         for i in range(n):
             valid[i] = column._valid(i)
             if valid[i]:
-                texts[i] = format(column._values[i], dtype, node.text)
+                texts[i] = format(column._get(i), dtype, node.text)
         return Series("", Column[String](texts^, valid))
     var values = List[Int64](length=n, fill=0)
     for i in range(n):
         valid[i] = column._valid(i)
         if not valid[i]:
             continue
-        var v = column._values[i]
+        var v = column._get(i)
         if op == DT_TRUNCATE:
             values[i] = _truncate(v, dtype, node.text)
         elif op == DT_OFFSET_BY:
@@ -250,7 +250,7 @@ def _strptime(node: Node, input: Series) raises -> Series:
         if not column._valid(i):
             continue
         try:
-            values[i] = parse(column._values[i], target, node.text)
+            values[i] = parse(column._get(i), target, node.text)
             valid[i] = True
         except e:
             if strict:
@@ -272,7 +272,7 @@ def cast_temporal(
         for i in range(n):
             valid[i] = column._valid(i)
             if valid[i]:
-                texts[i] = format(column._values[i], source)
+                texts[i] = format(column._get(i), source)
         return Series(input.name(), Column[String](texts^, valid))
     if source == DataType.STRING:
         var node = Node(0, -1, -1, "", Int64(strict), 0, 0, -1, target.name())
@@ -288,7 +288,7 @@ def cast_temporal(
     for i in range(n):
         if not column._valid(i):
             continue
-        var v = column._values[i]
+        var v = column._get(i)
         try:
             if (
                 target == DataType.INT64

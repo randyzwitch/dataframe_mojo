@@ -117,7 +117,7 @@ def string_op(node: Node, input: Series) raises -> Series:
         var lengths = List[Int64](length=n, fill=0)
         for i in range(n):
             if valid[i]:
-                ref text = column._values[i]
+                ref text = column._get(i)
                 lengths[i] = Int64(
                     len(text.codepoints()) if op
                     == STR_LEN_CHARS else text.byte_length()
@@ -127,7 +127,7 @@ def string_op(node: Node, input: Series) raises -> Series:
         var flags = List[Bool](length=n, fill=False)
         for i in range(n):
             if valid[i]:
-                ref text = column._values[i]
+                ref text = column._get(i)
                 if op == STR_STARTS_WITH:
                     flags[i] = text.startswith(node.text)
                 elif op == STR_ENDS_WITH:
@@ -139,7 +139,7 @@ def string_op(node: Node, input: Series) raises -> Series:
     for i in range(n):
         if not valid[i]:
             continue
-        ref text = column._values[i]
+        ref text = column._get(i)
         if op == STR_UPPER:
             values[i] = text.upper()
         elif op == STR_LOWER:
@@ -178,5 +178,5 @@ def concat_strings(
         var y = 0 if len(b) == 1 else i
         valid[i] = a._valid(x) and b._valid(y)
         if valid[i]:
-            values[i] = a._values[x] + separator + b._values[y]
+            values[i] = a._get(x) + separator + b._get(y)
     return Series("", Column[String](values^, valid))

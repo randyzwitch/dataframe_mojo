@@ -1033,14 +1033,14 @@ def _cell_text(series: Series, row: Int) -> String:
     if series._data.isa[Column[Int64]]():
         if series.dtype().is_temporal():
             return format_temporal(
-                series._data[Column[Int64]]._values[row], series.dtype()
+                series._data[Column[Int64]]._get(row), series.dtype()
             )
-        return String(series._data[Column[Int64]]._values[row])
+        return String(series._data[Column[Int64]]._get(row))
     if series._data.isa[Column[Float64]]():
-        return String(series._data[Column[Float64]]._values[row])
+        return String(series._data[Column[Float64]]._get(row))
     if series._data.isa[Column[Bool]]():
-        return "true" if series._data[Column[Bool]]._values[row] else "false"
-    return series._data[Column[String]]._values[row]
+        return "true" if series._data[Column[Bool]]._get(row) else "false"
+    return series._data[Column[String]]._get(row)
 
 
 def _cell_valid(series: Series, row: Int) -> Bool:

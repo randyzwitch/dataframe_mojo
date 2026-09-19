@@ -123,7 +123,7 @@ struct Series(Copyable, Sized, Writable):
             return AnyValue(
                 self._dtype,
                 True,
-                self._data[Column[Int64]]._values[index],
+                self._data[Column[Int64]]._get(index),
                 0,
                 False,
                 "",
@@ -131,14 +131,14 @@ struct Series(Copyable, Sized, Writable):
         if self._data.isa[Column[Float64]]():
             if self._data[Column[Float64]].is_null(index):
                 return AnyValue.null(DataType.FLOAT64)
-            return AnyValue(self._data[Column[Float64]]._values[index])
+            return AnyValue(self._data[Column[Float64]]._get(index))
         if self._data.isa[Column[Bool]]():
             if self._data[Column[Bool]].is_null(index):
                 return AnyValue.null(DataType.BOOL)
-            return AnyValue(self._data[Column[Bool]]._values[index])
+            return AnyValue(self._data[Column[Bool]]._get(index))
         if self._data[Column[String]].is_null(index):
             return AnyValue.null(DataType.STRING)
-        return AnyValue(self._data[Column[String]]._values[index])
+        return AnyValue(self._data[Column[String]]._get(index))
 
     def equals(
         self, other: Self, *, null_equal: Bool = True, check_names: Bool = False
@@ -164,8 +164,8 @@ struct Series(Copyable, Sized, Writable):
                 if a._valid(i) != b._valid(i):
                     return False
                 if a._valid(i):
-                    var x = a._values[i]
-                    var y = b._values[i]
+                    var x = a._get(i)
+                    var y = b._get(i)
                     if x != y and not (x != x and y != y):
                         return False
             return True
@@ -563,27 +563,27 @@ struct Series(Copyable, Sized, Writable):
             ref column = self._data[Column[Int64]]
             for i in range(n):
                 valid[i] = column._valid(i)
-            distinct = _dense_ranks(column._values, valid, ranks)
+            distinct = _dense_ranks(column._to_list(), valid, ranks)
         elif self._data.isa[Column[Float64]]():
             ref column = self._data[Column[Float64]]
             var usable = List[Bool](length=n, fill=False)
             for i in range(n):
                 valid[i] = column._valid(i)
-                var x = column._values[i]
+                var x = column._get(i)
                 nan[i] = valid[i] and x != x
                 usable[i] = valid[i] and not nan[i]
-            distinct = _dense_ranks(column._values, usable, ranks)
+            distinct = _dense_ranks(column._to_list(), usable, ranks)
         elif self._data.isa[Column[Bool]]():
             ref column = self._data[Column[Bool]]
             for i in range(n):
                 valid[i] = column._valid(i)
-                ranks[i] = Int(column._values[i])
+                ranks[i] = Int(column._get(i))
             distinct = 2
         else:
             ref column = self._data[Column[String]]
             for i in range(n):
                 valid[i] = column._valid(i)
-            distinct = _dense_ranks(column._values, valid, ranks)
+            distinct = _dense_ranks(column._to_list(), valid, ranks)
         for i in range(n):
             if not valid[i]:
                 ranks[i] = distinct + 1 if nulls_last else -1
@@ -717,7 +717,7 @@ def _equal_columns[
     for i in range(len(a)):
         if a._valid(i) != b._valid(i):
             return False
-        if a._valid(i) and not (a._values[i] == b._values[i]):
+        if a._valid(i) and not (a._get(i) == b._get(i)):
             return False
     return True
 

@@ -64,8 +64,8 @@ def bitwise_equal(a: Series, b: Series) raises -> Bool:
         var y = b.float64()
         for i in range(len(x)):
             if x._valid(i):
-                var p = x._values[i]
-                var q = y._values[i]
+                var p = x._get(i)
+                var q = y._get(i)
                 if p == 0 and q == 0 and String(p) != String(q):
                     return False
     return True
@@ -121,7 +121,7 @@ def test_fusible_analysis() raises:
     # Null payloads are zero in fused output, as in the unfused kernels.
     var out = run[4](df, col("x") + col("y"), True, 64).float64()
     assert_true(out.is_null(1))
-    assert_equal(out._values[1], 0.0)
+    assert_equal(out._get(1), 0.0)
 
 
 def main() raises:

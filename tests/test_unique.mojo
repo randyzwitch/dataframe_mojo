@@ -36,7 +36,7 @@ def frame() raises -> DataFrame:
 
 
 def ids(df: DataFrame) raises -> List[Int64]:
-    return df.column("id").int64()._values.copy()
+    return df.column("id").int64()._to_list()
 
 
 def test_unique_keep_policies() raises:
@@ -85,9 +85,9 @@ def test_n_unique_and_duplicate_masks() raises:
     assert_equal(df.n_unique(["f"]), 4)
     assert_equal(df.n_unique(), 7)
     assert_equal(df.clear().n_unique(), 0)
-    var dup = df.is_duplicated(["k", "f"]).bool()._values.copy()
+    var dup = df.is_duplicated(["k", "f"]).bool()._to_list()
     assert_equal(dup, [True, True, True, False, True, False, False])
-    var uniq = df.is_unique(["k", "f"]).bool()._values.copy()
+    var uniq = df.is_unique(["k", "f"]).bool()._to_list()
     for i in range(len(dup)):
         assert_equal(uniq[i], not dup[i])
     assert_equal(df.is_duplicated().name(), "is_duplicated")
@@ -104,9 +104,7 @@ def test_drop_nulls() raises:
             ),
         ]
     )
-    assert_equal(
-        df.drop_nulls().column("a").int64()._values.copy(), [Int64(1), 4]
-    )
+    assert_equal(df.drop_nulls().column("a").int64()._to_list(), [Int64(1), 4])
     assert_equal(df.drop_nulls(["a"]).height(), 3)
     assert_equal(df.drop_nulls(["b"]).height(), 3)
     with assert_raises(contains="Unknown column"):
@@ -124,7 +122,7 @@ def test_frame_fill_null() raises:
         ]
     )
     var filled = df.fill_null(lit(Int64(-1)))
-    assert_equal(filled.column("a").int64()._values.copy(), [Int64(1), -1, 3])
+    assert_equal(filled.column("a").int64()._to_list(), [Int64(1), -1, 3])
     assert_equal(filled.column("b").null_count(), 0)
     assert_equal(filled.column("s").null_count(), 1)
     assert_equal(filled.columns(), df.columns())

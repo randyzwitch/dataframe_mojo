@@ -66,22 +66,22 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
         if not column._valid(row):
             return "null"
         if series.dtype().is_temporal():
-            return format_temporal(column._values[row], series.dtype())
-        return String(column._values[row])
+            return format_temporal(column._get(row), series.dtype())
+        return String(column._get(row))
     if series._data.isa[Column[Float64]]():
         ref column = series._data[Column[Float64]]
         if not column._valid(row):
             return "null"
-        return String(column._values[row])
+        return String(column._get(row))
     if series._data.isa[Column[Bool]]():
         ref column = series._data[Column[Bool]]
         if not column._valid(row):
             return "null"
-        return "true" if column._values[row] else "false"
+        return "true" if column._get(row) else "false"
     ref column = series._data[Column[String]]
     if not column._valid(row):
         return "null"
-    return format_string(column._values[row], max_string_length)
+    return format_string(column._get(row), max_string_length)
 
 
 def _visible(count: Int, limit: Int) -> List[Int]:

@@ -2,7 +2,8 @@
 
 ## Current layers
 
-- `column.mojo`: typed storage and validity bitmaps.
+- `column.mojo`: typed windows (offset, length) onto reference-counted value
+  buffers and LSB-first validity bitmaps, as in Arrow arrays.
 - `series.mojo`: named, runtime-tagged columns and batch slicing/concatenation.
 - `expr.mojo`: flat expression nodes and composition, independent of data.
 - `binding.mojo`: schema resolution, dtypes, shape, and aggregate dependencies.
@@ -12,9 +13,11 @@
 - `frame.mojo`: validated eager dataframe operations and expression entry points.
 
 The only runtime dependency is the Mojo standard library. This is an eager CPU
-implementation, not a production query engine. All public extraction APIs copy;
-expression execution reads bounded slices rather than repeatedly copying complete
-source columns. GroupBy currently owns a copied snapshot. Column lookup at binding
+implementation, not a production query engine. Buffers are immutable once
+shared, so copying a column, `select`, `rename`, `drop`, `head`, `slice`,
+`column()`, typed extraction, GroupBy snapshots, and expression batch slices are
+O(1) per column and share storage. The only in-place growth (batch reassembly)
+copies first unless the column owns its buffers outright. Column lookup at binding
 is O(schema width), but execution uses resolved source indices.
 
 Sorting is O(n log n) with O(n) index workspace. Hash grouping is expected O(n).
@@ -28,9 +31,9 @@ No universal dataframe trait or foreign-backend abstraction is imposed.
 ## Next milestones, with CPU performance central
 
 1. **Measurements and copies:** benchmark representative expressions, scans,
-   grouping, joins, and sorting across row counts/null densities. Add read-only
-   buffer views and immutable shared storage. Measure allocations and peak memory,
-   not just kernel throughput.
+   grouping, joins, and sorting across row counts/null densities. (Immutable
+   shared buffers with zero-copy windows are done.) Measure allocations and peak
+   memory, not just kernel throughput.
 2. **Fusion and SIMD:** fuse compatible elementwise nodes within a batch, release
    dead intermediates, share subexpressions, load contiguous SIMD vectors directly,
    and optimize validity handling. Add vector overflow detection for Int64 kernels.
