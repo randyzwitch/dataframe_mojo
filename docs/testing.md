@@ -1,6 +1,10 @@
 # Testing
 
-`pixi run test` runs every `tests/test_*.mojo` module. Beyond hand-written
+`pixi run test` runs every `tests/test_*.mojo` module, several at once:
+`TEST_JOBS` sets the concurrency (default: CPU count; `TEST_JOBS=1` is serial),
+and `bash scripts/run_tests.sh tests/test_x.mojo ...` runs chosen modules.
+Output is printed per module in a stable order, followed by a summary naming
+every failed module. Modules must not share temporary file paths. Beyond hand-written
 contract tests, three generative layers look for interaction bugs.
 
 ## Differential testing against Polars
