@@ -192,3 +192,23 @@ validity as a vector mask. Single-threaded, 1,000,000 rows:
 Remaining allocations per batch are the output values, the validity list,
 and one intermediate per unfused node; source windows allocate nothing.
 
+## Row-parallel expressions and filters (#5, #7)
+
+Row-shaped expressions evaluate one contiguous, batch-aligned partition per
+worker and join the pieces in order. Filters compact in parallel: workers
+collect true-row indices per partition, then gather rows into disjoint output
+ranges aligned to 8 rows (no shared validity bytes). 1,000,000 rows, no
+nulls:
+
+| workload | 1 thread | default (15 workers) |
+|---|---|---|
+| arithmetic_chain (fused SIMD) | 23.5 ms | 6.3 ms |
+| arithmetic_chain (scalar) | 63.7 ms | 15.0 ms |
+| nullable_compare | 19.9 ms | 4.7 ms |
+| filter (end to end) | 37.8-42.4 ms | 10.7 ms |
+
+Crossover: below 2 x 65,536 rows everything stays single-threaded, which
+avoids thread startup (~20-50 us per worker) on small frames. Joining the
+per-worker pieces is a serial O(n) copy and is the main remaining cost at
+high worker counts.
+

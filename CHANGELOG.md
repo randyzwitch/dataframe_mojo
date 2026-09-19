@@ -45,6 +45,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Row-wise expressions and filters run on worker threads for large inputs:
+  arithmetic and comparisons ~4x faster and filter ~3.5x faster at 1M rows,
+  with identical row order and results (#5, #7).
+
 - Parallel reductions: global and grouped reductions over large inputs run
   on worker threads (POSIX threads through the C FFI; no new dependency) with
   worker-private states merged in row order. `DATAFRAME_THREADS` caps the

@@ -241,7 +241,8 @@ mutating them directly is outside this contract.
 
 ## Threads
 
-Reductions over at least 2 x 65,536 rows run on worker threads (POSIX
+Reductions, row-wise expressions, and filters over at least 2 x 65,536 rows
+run on worker threads (POSIX
 threads; `DATAFRAME_THREADS` caps the count, default the physical core count,
 and `1` disables). Results do not depend on the thread count except for the
 last bits of floating-point sums, means, and variances, which reassociate.
