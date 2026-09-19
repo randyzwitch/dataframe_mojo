@@ -58,6 +58,32 @@ machine-readable timing and throughput metrics. For peak resident memory on
 Linux, run `/usr/bin/time -v pixi run bench-csv`; this intentionally remains an
 external measurement so the parser has no platform-specific runtime dependency.
 
+## Schema inference
+
+`read_csv(path)` without a schema infers one. It tokenizes the header and the
+first `infer_schema_length` data records (default 10,000; `-1` reads every
+record) with the same options, and keeps those fields in memory as text. Each
+column takes the first type in Bool, Int64, Float64, String that reads every
+sampled value:
+
+- Nulls (empty unquoted fields and `null_values` tokens) are ignored; a column
+  with no values is String, and a quoted empty string makes the column String.
+- Integer-shaped text with a leading zero (`007`) or outside the Int64 range
+  infers as String, so identifiers and huge numbers are never altered.
+- Int64 and Float64 values together infer Float64.
+
+`schema_overrides={"name": "int64"}` fixes a column's dtype and wins over
+inference; unknown names or dtypes raise. The file is then read strictly with
+the resulting nullable schema. A value after the sample that does not fit
+raises with its record and field, plus a hint to pass `schema_overrides` or a
+larger `infer_schema_length`; types never change mid-file.
+
+Header names are kept, with repeats renamed `name_1`, `name_2`, and so on.
+Without a header, columns are `column_1`, `column_2`, .... Rows in the sample
+must have one field count unless `truncate_ragged_lines` or `ignore_errors` is
+set. An empty file returns a frame with no columns, and a header-only file
+returns String columns with zero rows.
+
 ## Reader options
 
 All options are applied by the streaming tokenizer, one byte at a time, so
@@ -82,8 +108,7 @@ back, so column lengths stay aligned. Records are buffered as field text until
 they end, which keeps parser memory bounded by the current record. Projection
 cut ingestion time of the 100,000-row benchmark from 86 ms to 58 ms when
 reading one of four columns (`pixi run bench-csv`, Linux x86-64).
-Per-column null tokens, dropped-record counts, and partial schema overrides are
-not yet available.
+Per-column null tokens and dropped-record counts are not yet available.
 
 ## Writing
 
@@ -110,5 +135,5 @@ strings, nulls, embedded quotes, separators, and line breaks.
   `line_terminator` is LF or CRLF; `null_value` cannot contain the separator,
   quotes, or line breaks.
 
-Deferred features include schema inference, dates, compression, remote URLs,
-and lazy `scan_csv`.
+Deferred features include dates, compression, remote URLs, and lazy
+`scan_csv`.

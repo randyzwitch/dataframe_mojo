@@ -74,8 +74,9 @@ compiled examples.
 ## CSV ingestion
 
 `read_csv` reads local UTF-8 CSV files without Python or another dataframe
-runtime. The first API requires an explicit schema so identifiers and large
-integers cannot be silently inferred as another type:
+runtime. `read_csv(path)` infers a schema from a sample (identifiers such as
+`007` and integers beyond Int64 stay strings); an explicit schema pins every
+type:
 
 ```mojo
 from dataframe import CsvField, CsvSchema, read_csv
