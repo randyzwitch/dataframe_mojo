@@ -103,8 +103,10 @@ scanning and record-boundary-aware parallel decoding. See the complete
 [CSV contract](docs/csv.md).
 
 Use typed literals: there is no implicit Int64/Float64 promotion. Expressions
-support `+`, `-`, `*`, `>`, `.eq(...)`, `.alias(...)`, `.sum(min_count=0)`, and
-`.count()`. Equality is `.eq()` rather than Python-style `==`.
+support `+ - * / // % **`, comparisons `< <= > >=` plus `.eq()`/`.ne()`, unary
+`-`, `abs`, `sqrt`, `exp`, `log`, `floor`, `ceil`, `round`, `clip`, `.alias()`,
+`.sum(min_count=0)`, and `.count()`. Equality is `.eq()` rather than
+Python-style `==`. See the operator table in [expressions](docs/expressions.md).
 
 `select(expr)` selects one expression; `select_exprs([expr, ...])` selects several.
 `select(["name", ...])` remains the name-only projection API, with no ambiguous

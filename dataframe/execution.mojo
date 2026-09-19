@@ -17,11 +17,30 @@ from .expr import (
     EQ,
     SUM,
     COUNT,
+    LT,
+    GE,
+    LE,
+    NE,
+    DIV,
+    FLOORDIV,
+    MOD,
+    POW,
+    CLIP_LOW,
+    CLIP_HIGH,
+    NEG,
+    ABS,
+    SQRT,
+    EXP,
+    LOG,
+    FLOOR,
+    CEIL,
+    ROUND,
+    is_reduction,
 )
 from .binding import BoundExpr, ROWS
 from .column import Column
 from .series import Series
-from .expr_kernels import binary
+from .expr_kernels import binary, unary
 from .reductions import IntSumState, FloatSumState
 
 
@@ -37,6 +56,107 @@ def _empty(dtype: String) raises -> Series:
     raise Error("Unknown expression dtype")
 
 
+def _binary_op[
+    width: Int
+](op: Int, left: Series, right: Series) raises -> Series:
+    """Map a runtime opcode to its compile-time specialized kernel."""
+    if op == ADD:
+        return binary[ADD, width](left, right)
+    if op == SUB:
+        return binary[SUB, width](left, right)
+    if op == MUL:
+        return binary[MUL, width](left, right)
+    if op == DIV:
+        return binary[DIV, width](left, right)
+    if op == FLOORDIV:
+        return binary[FLOORDIV, width](left, right)
+    if op == MOD:
+        return binary[MOD, width](left, right)
+    if op == POW:
+        return binary[POW, width](left, right)
+    if op == CLIP_LOW:
+        return binary[CLIP_LOW, width](left, right)
+    if op == CLIP_HIGH:
+        return binary[CLIP_HIGH, width](left, right)
+    if op == GT:
+        return binary[GT, width](left, right)
+    if op == LT:
+        return binary[LT, width](left, right)
+    if op == GE:
+        return binary[GE, width](left, right)
+    if op == LE:
+        return binary[LE, width](left, right)
+    if op == EQ:
+        return binary[EQ, width](left, right)
+    if op == NE:
+        return binary[NE, width](left, right)
+    raise Error("Unsupported binary expression node")
+
+
+def _unary_op[
+    width: Int
+](op: Int, input: Series, integer: Int64) raises -> Series:
+    if op == NEG:
+        return unary[NEG, width](input, integer)
+    if op == ABS:
+        return unary[ABS, width](input, integer)
+    if op == SQRT:
+        return unary[SQRT, width](input, integer)
+    if op == EXP:
+        return unary[EXP, width](input, integer)
+    if op == LOG:
+        return unary[LOG, width](input, integer)
+    if op == FLOOR:
+        return unary[FLOOR, width](input, integer)
+    if op == CEIL:
+        return unary[CEIL, width](input, integer)
+    if op == ROUND:
+        return unary[ROUND, width](input, integer)
+    raise Error("Unsupported unary expression node")
+
+
+def _eval[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    aggregates: List[Series],
+    index: Int,
+    offset: Int,
+    length: Int,
+    grouped: Bool,
+) raises -> Series:
+    """Evaluate one node for rows [offset, offset + length).
+
+    Returns `length` values, or one value for scalar results that callers
+    broadcast. Aggregate nodes read precomputed states instead of recursing.
+    """
+    ref node = bound.expr._nodes[index]
+    if node.op == COL:
+        return columns[bound.sources[index]].slice(offset, length)
+    if node.op == LIT_INT:
+        return Series("", Column[Int64]([node.integer]))
+    if node.op == LIT_FLOAT:
+        return Series("", Column[Float64]([node.floating]))
+    if node.op == LIT_BOOL:
+        return Series("", Column[Bool]([Bool(node.integer)]))
+    if node.op == LIT_STRING:
+        return Series("", Column[String]([node.text]))
+    if is_reduction(node.op):
+        if grouped:
+            return aggregates[index].slice(offset, length)
+        return aggregates[index].copy()
+    var left = _eval[width](
+        bound, columns, aggregates, node.left, offset, length, grouped
+    )
+    if node.right < 0:
+        return _unary_op[width](node.op, left, node.integer)
+    var right = _eval[width](
+        bound, columns, aggregates, node.right, offset, length, grouped
+    )
+    return _binary_op[width](node.op, left, right)
+
+
 def _batch[
     width: Int
 ](
@@ -48,61 +168,9 @@ def _batch[
     length: Int,
     grouped: Bool,
 ) raises -> Series:
-    var needed = List[Bool](length=target + 1, fill=False)
-    needed[target] = True
-    for reverse in range(target + 1):
-        var i = target - reverse
-        if needed[i]:
-            var node = bound.expr._nodes[i].copy()
-            if node.op != SUM and node.op != COUNT:
-                if node.left >= 0:
-                    needed[node.left] = True
-                if node.right >= 0:
-                    needed[node.right] = True
-    var results = List[Series](capacity=target + 1)
-    for i in range(target + 1):
-        if not needed[i]:
-            results.append(_empty("bool"))
-            continue
-        var node = bound.expr._nodes[i].copy()
-        if node.op == COL:
-            results.append(columns[bound.sources[i]].slice(offset, length))
-        elif node.op == LIT_INT:
-            results.append(Series("", Column[Int64]([node.integer])))
-        elif node.op == LIT_FLOAT:
-            results.append(Series("", Column[Float64]([node.floating])))
-        elif node.op == LIT_BOOL:
-            results.append(Series("", Column[Bool]([Bool(node.integer)])))
-        elif node.op == LIT_STRING:
-            results.append(Series("", Column[String]([node.text])))
-        elif node.op == SUM or node.op == COUNT:
-            if grouped:
-                results.append(aggregates[i].slice(offset, length))
-            else:
-                results.append(aggregates[i].copy())
-        elif node.op == ADD:
-            results.append(
-                binary[ADD, width](results[node.left], results[node.right])
-            )
-        elif node.op == SUB:
-            results.append(
-                binary[SUB, width](results[node.left], results[node.right])
-            )
-        elif node.op == MUL:
-            results.append(
-                binary[MUL, width](results[node.left], results[node.right])
-            )
-        elif node.op == GT:
-            results.append(
-                binary[GT, width](results[node.left], results[node.right])
-            )
-        elif node.op == EQ:
-            results.append(
-                binary[EQ, width](results[node.left], results[node.right])
-            )
-        else:
-            raise Error("Unsupported expression node")
-    return results[target].copy()
+    return _eval[width](
+        bound, columns, aggregates, target, offset, length, grouped
+    )
 
 
 def _accumulate_int(
@@ -173,7 +241,7 @@ def evaluate[
         states.append(_empty(bound.dtypes[i]))
     for node_index in range(len(bound.expr._nodes)):
         var node = bound.expr._nodes[node_index].copy()
-        if node.op != SUM and node.op != COUNT:
+        if not is_reduction(node.op):
             continue
         var counts = List[Int64](length=group_count, fill=0)
         var integers = List[IntSumState](length=group_count, fill=IntSumState())
