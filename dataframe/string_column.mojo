@@ -12,7 +12,14 @@ Internal kernels read rows as borrowed `StringSlice`s via `_get`; public
 accessors return owned `String`s.
 """
 from std.memory import ArcPointer, Pointer
-from .column import Column, _append_bits, _bit, _copy_bits, _pack_bits
+from .column import (
+    Column,
+    _append_bits,
+    _bit,
+    _copy_bits,
+    _count_set,
+    _pack_bits,
+)
 
 
 struct StringColumn(Copyable, Sized):
@@ -126,10 +133,9 @@ struct StringColumn(Copyable, Sized):
         return String(self._get(index))
 
     def null_count(self) -> Int:
-        var count = 0
-        for i in range(self._length):
-            count += Int(not self._valid(i))
-        return count
+        return self._length - _count_set(
+            self._bits[], self._offset, self._length
+        )
 
     def _value_bytes(self) -> Int:
         """Bytes of text in this window."""

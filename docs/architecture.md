@@ -7,6 +7,8 @@
 - `string_column.mojo`: string columns in the Arrow `large_utf8` layout (one
   UTF-8 byte buffer, Int64 offsets, validity), read as borrowed `StringSlice`s
   and built with `StringBuilder`.
+- `arrow.mojo`: Arrow C Data Interface export (zero-copy where layouts
+  agree) and import.
 - `series.mojo`: named, runtime-tagged columns and batch slicing/concatenation.
 - `expr.mojo`: flat expression nodes and composition, independent of data.
 - `binding.mojo`: schema resolution, dtypes, shape, and aggregate dependencies.
@@ -47,9 +49,9 @@ No universal dataframe trait or foreign-backend abstraction is imposed.
 4. **Planning:** add a lazy relational plan using the same expressions, predicate
    and projection pushdown, multi-aggregate scans, and an explicit logical-type
    representation. Keep runtime schemas supported.
-5. **Storage and interchange:** (contiguous UTF-8 string buffers are done.)
-   Bit-packed Boolean values, chunked arrays, Arrow C Data import/export with
-   ownership/release/offset tests. Boolean values are not yet Arrow-compatible.
+5. **Storage and interchange:** (contiguous UTF-8 strings and Arrow C Data
+   import/export are done.) Bit-packed Boolean storage, chunked arrays, and
+   zero-copy import that retains foreign buffers.
 6. **Broader operations and input:** additional expressions/reductions, multiple
    and numeric grouping/join keys, casts, multi-column sorting, and CSV input.
    Parquet remains a separate integration project.

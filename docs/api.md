@@ -39,6 +39,20 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
 - `def string(self) -> String`
 - `def write_to(self, mut writer: T)`
 
+## `ArrowArray`
+
+`struct ArrowArray` from the C Data Interface (80 bytes).
+
+- `def __init__(out self)`
+  A released (empty) struct, ready to be filled by a producer.
+
+## `ArrowSchema`
+
+`struct ArrowSchema` from the C Data Interface (72 bytes).
+
+- `def __init__(out self)`
+  A released (empty) struct, ready to be filled by a producer.
+
 ## `by_dtype`
 
 Columns whose dtype is listed, in schema order.
@@ -351,6 +365,30 @@ Every column except the listed ones, in schema order.
 def exclude(names: List[String]) -> Expr
 ```
 
+## `export_arrow`
+
+Export a frame as an Arrow struct array (format `+s`), the shape pyarrow and Polars import as a RecordBatch.
+
+```mojo
+def export_arrow(frame: DataFrame, mut array: ArrowArray, mut schema: ArrowSchema)
+```
+
+```mojo
+def export_arrow(frame: DataFrame, array_address: Int, schema_address: Int)
+```
+
+## `export_arrow_series`
+
+Fill consumer-allocated ArrowArray and ArrowSchema structs.
+
+```mojo
+def export_arrow_series(series: Series, mut array: ArrowArray, mut schema: ArrowSchema)
+```
+
+```mojo
+def export_arrow_series(series: Series, array_address: Int, schema_address: Int)
+```
+
 ## `Expr`
 
 A flat, topologically ordered tree; composition never evaluates data.
@@ -503,6 +541,30 @@ It owns a snapshot of the input and the evaluated key columns.
 - `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def len(self, name: String = "len") -> DataFrame`
   Row count per group, including rows with null values.
+
+## `import_arrow`
+
+Copy an exported Arrow struct array (a record batch) into a frame, then release it. The input structs are consumed even when import fails.
+
+```mojo
+def import_arrow(mut array: ArrowArray, mut schema: ArrowSchema) -> DataFrame
+```
+
+```mojo
+def import_arrow(array_address: Int, schema_address: Int) -> DataFrame
+```
+
+## `import_arrow_series`
+
+Copy an exported Arrow array into a Series, then release it.
+
+```mojo
+def import_arrow_series(mut array: ArrowArray, mut schema: ArrowSchema) -> Series
+```
+
+```mojo
+def import_arrow_series(array_address: Int, schema_address: Int) -> Series
+```
 
 ## `last`
 
