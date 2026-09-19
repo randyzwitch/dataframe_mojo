@@ -156,3 +156,20 @@ and 231 → 156 MB for ~30-byte strings, since each row costs its bytes plus an
 
 No workload here claims a speedup; these numbers are the reference for the
 execution changes in #3-#8.
+
+## Direct SIMD loads in unfused float kernels (#3)
+
+Unfused float kernels (Float32, `%`, `//`, `**`, clip, unary math, and any
+expression fusion does not cover) now load contiguous vectors straight from
+the shared column buffers instead of gathering lane by lane, and apply
+validity as a vector mask. Single-threaded, 1,000,000 rows:
+
+| expression | before | after |
+|---|---|---|
+| Float64 `x % 7` | 20.0 ms | 13.8 ms |
+| Float32 `y * 2 + 1` | 32.6 ms | 22.0 ms |
+| Float64 `sqrt(x)` | 15.5 ms | 10.6 ms |
+
+Remaining allocations per batch are the output values, the validity list,
+and one intermediate per unfused node; source windows allocate nothing.
+
