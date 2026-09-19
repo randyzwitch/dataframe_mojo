@@ -68,8 +68,7 @@ shape: (2, 3)
 └────────┴─────────┴───────┘
 ```
 
-Run `pixi run example` to see both the original column-kernel example and the
-expression and CSV pipelines. `build/expressions` and `build/read_csv` are the
+Run `pixi run example` to see the sales, expression, and CSV pipelines. `build/expressions` and `build/read_csv` are the
 compiled examples.
 
 ## CSV ingestion
@@ -132,9 +131,7 @@ var deviations = sales.select(col("amount") - col("amount").sum())
 ```
 
 Expression sums return zero for empty/all-null input, or null when the valid
-count is below `min_count`. This follows Narwhals' default and differs from the
-older `sum_int64`, `sum_float64`, and `group_by_sum` helpers, which retain their
-original null-for-empty behavior. Integer expression sums accumulate exactly in
+count is below `min_count`, following Narwhals' default. Integer sums accumulate exactly in
 128 bits and check the final Int64 result, allowing parallel partial-state merging.
 Floating-point expression sums permit reassociation; bitwise reproducibility is
 not guaranteed. See [the expression contract](docs/expressions.md).
@@ -155,8 +152,6 @@ not guaranteed. See [the expression contract](docs/expressions.md).
   `to_string(max_rows=..., ...)`, `glimpse()`).
 - `head`/`tail`/`slice`/`reverse`, `drop`/`rename`/`with_row_index`, row and
   cell access through the tagged `AnyValue`, null counts, and structural `equals`.
-- Nullable greater-than comparisons, Float64 scalar multiplication, and
-  Int64/Float64 sums.
 - Hash grouping by any number of columns or key expressions of any dtype.
 - Stable multi-column sorting with per-column direction and null placement,
   plus `arg_sort`, `top_k`, and `bottom_k`.

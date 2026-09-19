@@ -1,22 +1,27 @@
 """Filter sales, derive net revenue, and sum by region without Python."""
-from dataframe import Column, Series, DataFrame, greater_than, multiply
+from dataframe import Column, DataFrame, Series, col, lit
 
 
 def main() raises:
-    var regions: List[String] = ["east", "west", "east", "west", "north"]
-    var amounts: List[Float64] = [100, 80, -20, 120, 999]
-    var valid: List[Bool] = [True, True, True, True, False]
-    var columns: List[Series] = [
-        Series("region", Column[String](regions^)),
-        Series("amount", Column[Float64](amounts^, valid)),
-    ]
-    var sales = DataFrame(columns^)
-    var positive = sales.filter(
-        greater_than(sales.column("amount").float64(), Float64(0))
+    var sales = DataFrame(
+        [
+            Series(
+                "region",
+                Column[String](["east", "west", "east", "west", "north"]),
+            ),
+            Series(
+                "amount",
+                Column[Float64](
+                    [100, 80, -20, 120, 999], [True, True, True, True, False]
+                ),
+            ),
+        ]
     )
-    var net = multiply(positive.column("amount").float64(), 0.9)
-    var result = positive.with_column(Series("net", net^)).group_by_sum(
-        "region", "net", "revenue"
+    var result = (
+        sales.filter(col("amount") > lit(Float64(0)))
+        .with_columns((col("amount") * lit(Float64(0.9))).alias("net"))
+        .group_by("region", maintain_order=True)
+        .agg(col("net").sum().alias("revenue"))
     )
     var region = result.column("region").string()
     var revenue = result.column("revenue").float64()

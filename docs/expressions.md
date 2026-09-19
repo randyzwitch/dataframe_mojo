@@ -241,10 +241,6 @@ tolerances, not a promise of bitwise reproducibility. SIMD and parallel reductio
 scheduling can evolve without changing the public expression API. NaNs and
 infinities retain IEEE behavior, subject to reassociation.
 
-The original column sum functions and `group_by_sum` preserve their earlier
-contracts: null for empty/all-null input and input-order prefix overflow checks.
-They are reference/legacy APIs, not implementations of expression reductions.
-
 ## Grouping and ordering
 
 `group_by` accepts one column name, a list of names, or a list of key

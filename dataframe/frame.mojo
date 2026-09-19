@@ -2,7 +2,6 @@
 from std.collections import Dict
 from .column import Column
 from .series import Series, sort_indices, smallest_indices
-from .kernels import checked_add
 from .expr import Expr, col
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
@@ -311,65 +310,6 @@ struct DataFrame(Copyable, Sized, Writable):
                 return Self(columns^, height=self._height)
         columns.append(column^)
         return Self(columns^, height=self._height)
-
-    def group_by_sum(
-        self, key: String, value: String, output: String = "sum"
-    ) raises -> Self:
-        """Sum one numeric column by one string key, in first-seen order.
-
-        Null keys form a group. Empty/all-null groups produce null sums.
-        Int64 sums are checked, Float64 sums accumulate in input order.
-        """
-        if output == key:
-            raise Error(
-                "Aggregate output name must differ from the grouping key"
-            )
-        var key_index = self._index(key)
-        var value_index = self._index(value)
-        var keys = self._columns[key_index].string()
-        var dtype = self._columns[value_index].dtype()
-        if dtype != "int64" and dtype != "float64":
-            raise Error("Grouped sum requires an int64 or float64 value column")
-        var lookup = Dict[String, Int]()
-        var representatives = List[Int]()
-        var groups = List[Int](capacity=self._height)
-        var null_group = -1
-        for i in range(self._height):
-            var group: Int
-            if keys.is_null(i):
-                if null_group == -1:
-                    null_group = len(representatives)
-                    representatives.append(i)
-                group = null_group
-            else:
-                var label = keys.value(i)
-                if label not in lookup:
-                    lookup[label] = len(representatives)
-                    representatives.append(i)
-                group = lookup[label]
-            groups.append(group)
-        var result = List[Series]()
-        result.append(Series(key, keys.take(representatives)))
-        var valid = List[Bool](length=len(representatives), fill=False)
-        if dtype == "int64":
-            var values = self._columns[value_index].int64()
-            var totals = List[Int64](length=len(representatives), fill=0)
-            for i in range(self._height):
-                if not values.is_null(i):
-                    var g = groups[i]
-                    totals[g] = checked_add(totals[g], values.value(i))
-                    valid[g] = True
-            result.append(Series(output, Column[Int64](totals^, valid)))
-        else:
-            var values = self._columns[value_index].float64()
-            var totals = List[Float64](length=len(representatives), fill=0)
-            for i in range(self._height):
-                if not values.is_null(i):
-                    var g = groups[i]
-                    totals[g] += values.value(i)
-                    valid[g] = True
-            result.append(Series(output, Column[Float64](totals^, valid)))
-        return Self(result^)
 
     def sort(
         self, by: String, descending: Bool = False, nulls_last: Bool = True

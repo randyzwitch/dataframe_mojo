@@ -42,10 +42,16 @@ from .expr import (
     is_comparison,
     is_logical,
 )
-from .kernels import checked_add
 
 comptime INT64_MIN = Int64(-9223372036854775807) - 1
 comptime INT64_MAX = Int64(9223372036854775807)
+
+
+def checked_add(a: Int64, b: Int64) raises -> Int64:
+    """Raise before signed 64-bit overflow; never silently promote to float."""
+    if (b > 0 and a > INT64_MAX - b) or (b < 0 and a < INT64_MIN - b):
+        raise Error("Int64 sum overflow")
+    return a + b
 
 
 def _checked_sub(a: Int64, b: Int64) raises -> Int64:
