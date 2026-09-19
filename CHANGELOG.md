@@ -54,6 +54,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
   worker-private states merged in row order. `DATAFRAME_THREADS` caps the
   thread count (1 disables). Global sums are ~3.7x faster at 1M rows
   (#6, #8).
+- `DataFrame.fill_null(0)` / `fill_null(0.5)`: a bare number fills every
+  column it can adopt (integers: all numeric columns; floats: float
+  columns), each in its own dtype; `fill_null("x")` fills string columns.
 
 - Expression sugar: bare numbers and Bools work wherever an `Expr` is
   expected (`col("x") > 0`, `col("x") * 2.5`, `1 + col("x")`,

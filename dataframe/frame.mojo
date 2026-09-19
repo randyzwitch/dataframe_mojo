@@ -4,7 +4,19 @@ from std.collections import Dict
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
-from .expr import Expr, col
+from .expr import (
+    Expr,
+    col,
+    lit,
+    COL,
+    SELECTOR,
+    LIT_INT,
+    LIT_FLOAT,
+    LIT_BOOL,
+    LIT_STRING,
+    LIT_NULL,
+    UNTYPED,
+)
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
 from .gather import take_parallel, true_rows
@@ -1046,19 +1058,41 @@ struct DataFrame(Copyable, Sized, Writable):
         return self.take(rows)
 
     def fill_null(
+        self, value: String, subset: List[String] = List[String]()
+    ) raises -> Self:
+        """Fill nulls in string columns with a string."""
+        return self.fill_null(lit(value), subset)
+
+    def fill_null(
         self, value: Expr, subset: List[String] = List[String]()
     ) raises -> Self:
         """Fill nulls with a scalar value.
 
         Without subset, only columns whose dtype matches the value change.
-        Every listed subset column must match the value's dtype.
+        Every listed subset column must match the value's dtype. A bare
+        number (`fill_null(0)`) is untyped: it fills every column it can
+        adopt (an integer: every numeric column; a float: every float
+        column), range-checked per column.
         """
         var bound = bind(value, self._columns)
         if bound.shape() == ROWS:
             raise Error("fill_null on a dataframe requires a scalar value")
         var dtype = bound.dtypes[len(bound.dtypes) - 1]
         var names = List[String]()
-        if len(subset) > 0:
+        if _is_untyped(value):
+            for column in self._columns:
+                var name = column.name()
+                if len(subset) > 0 and name not in subset:
+                    continue
+                if len(subset) > 0:
+                    names.append(name)  # binding reports a failed adoption
+                    continue
+                try:
+                    _ = bind(col(name).fill_null(value), self._columns)
+                    names.append(name)
+                except:
+                    pass
+        elif len(subset) > 0:
             for name in subset:
                 var actual = self._columns[self._index(name)].dtype()
                 if actual != dtype:
@@ -1075,6 +1109,8 @@ struct DataFrame(Copyable, Sized, Writable):
             for column in self._columns:
                 if column.dtype() == dtype:
                     names.append(column.name())
+        for name in subset:
+            _ = self._index(name)  # unknown subset names raise
         var fills = List[Expr]()
         for name in names:
             fills.append(col(name).fill_null(value))
@@ -1368,3 +1404,17 @@ struct GroupBy(Copyable):
         var columns = self._key_columns(groups)
         columns.append(Series(name, Column[Int64](counts^)))
         return DataFrame(columns^, height=groups.count())
+
+
+def _is_untyped(value: Expr) -> Bool:
+    """Whether an expression is built only from untyped numeric literals."""
+    for node in value._nodes:
+        if node.op == COL or node.op == SELECTOR:
+            return False
+        if (
+            node.op == LIT_INT or node.op == LIT_FLOAT
+        ) and node.text != UNTYPED:
+            return False
+        if node.op == LIT_BOOL or node.op == LIT_STRING or node.op == LIT_NULL:
+            return False
+    return True

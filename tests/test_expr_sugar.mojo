@@ -198,5 +198,41 @@ def test_lists_of_names_are_not_ambiguous() raises:
     assert_equal(df.sort(["s", "i"]).item(0, "s").string(), "a")
 
 
+def test_frame_fill_null_with_bare_numbers() raises:
+    var df = DataFrame(
+        [
+            Series("i", Column[Int64]([1, 0], [True, False])),
+            Series("u8", Column[UInt8]([1, 0], [True, False])),
+            Series("f32", Column[Float32]([1, 0], [True, False])),
+            Series("s", StringColumn(["a", ""], [True, False])),
+        ]
+    )
+    # An untyped integer fills every numeric column, each in its own dtype.
+    var filled = df.fill_null(7)
+    assert_equal(filled.item(1, "i").int64(), 7)
+    assert_equal(filled.item(1, "u8").uint8(), 7)
+    assert_equal(filled.item(1, "f32").float32(), 7)
+    assert_true(filled.item(1, "s").is_null())
+    # An untyped float fills only float columns.
+    var floats = df.fill_null(0.5)
+    assert_equal(floats.item(1, "f32").float32(), 0.5)
+    assert_true(floats.item(1, "i").is_null())
+    # Out-of-range values skip columns they cannot adopt, or raise for subset.
+    var wide = df.fill_null(300)
+    assert_equal(wide.item(1, "i").int64(), 300)
+    assert_true(wide.item(1, "u8").is_null())
+    var message = String()
+    try:
+        _ = df.fill_null(300, subset=["u8"])
+    except e:
+        message = String(e)
+    assert_true("integer literal 300 does not fit uint8" in message, message)
+    # Typed literals keep exact-dtype matching.
+    var typed = df.fill_null(lit(Int64(5)))
+    assert_equal(typed.item(1, "i").int64(), 5)
+    assert_true(typed.item(1, "u8").is_null())
+    assert_equal(df.fill_null("x").item(1, "s").string(), "x")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -265,6 +265,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
   True for every row whose key occurs exactly once.
 - `def drop_nulls(self, subset: List[String] = List()) -> Self`
   Keep rows with no null in subset (default: every column).
+- `def fill_null(self, value: String, subset: List[String] = List()) -> Self`
+  Fill nulls in string columns with a string.
 - `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
   Fill nulls with a scalar value.
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> GroupBy`
