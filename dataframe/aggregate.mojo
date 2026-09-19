@@ -663,6 +663,94 @@ struct Reducer(Movable):
         else:
             raise Error("Unsupported reduction")
 
+    def merge(mut self, other: Self):
+        """Fold in the state of the next, disjoint row partition.
+
+        Partitions are merged in row order, so first/last and tie-breaking
+        (ties keep the earlier value) match a single-threaded pass.
+        """
+        var op = self.op
+        var is_max = op == MAX
+        for g in range(self.group_count):
+            if op == COUNT or op == NULL_COUNT or op == LEN:
+                self.counts[g] += other.counts[g]
+            elif op == SUM or op == MEAN:
+                if self.dtype == DataType.INT64:
+                    self.int_sums[g].merge(other.int_sums[g])
+                else:
+                    self.float_sums[g].merge(other.float_sums[g])
+            elif op == STD or op == VAR:
+                self.moments[g].merge(other.moments[g])
+            elif op == MEDIAN or op == QUANTILE:
+                for value in other.samples[g]:
+                    self.samples[g].append(value)
+            elif op == ANY or op == ALL:
+                self.logic[g].merge(other.logic[g])
+            elif op == N_UNIQUE:
+                if self.dtype == DataType.BOOL:
+                    self.logic[g].merge(other.logic[g])
+                    continue
+                self.picked_valid[g] = (
+                    self.picked_valid[g] or other.picked_valid[g]
+                )
+                if self.dtype == DataType.INT64:
+                    for key in other.int_sets[g].keys():
+                        self.int_sets[g][key] = True
+                elif self.dtype == DataType.FLOAT64:
+                    for key in other.float_sets[g].keys():
+                        self.float_sets[g][key] = True
+                else:
+                    for key in other.string_sets[g].keys():
+                        self.string_sets[g][key] = True
+            elif op == MIN or op == MAX:
+                if self.dtype == DataType.FLOAT64:
+                    self.nan_seen[g] = self.nan_seen[g] or other.nan_seen[g]
+                if not other.seen[g]:
+                    continue
+                var take = not self.seen[g]
+                if not take:
+                    if self.dtype == DataType.INT64:
+                        take = (
+                            other.ints[g]
+                            > self.ints[g] if is_max else other.ints[g]
+                            < self.ints[g]
+                        )
+                    elif self.dtype == DataType.FLOAT64:
+                        take = (
+                            other.floats[g]
+                            > self.floats[g] if is_max else other.floats[g]
+                            < self.floats[g]
+                        )
+                    elif self.dtype == DataType.BOOL:
+                        take = (
+                            other.bools[g]
+                            > self.bools[g] if is_max else other.bools[g]
+                            < self.bools[g]
+                        )
+                    else:
+                        take = (
+                            other.strings[g]
+                            > self.strings[g] if is_max else other.strings[g]
+                            < self.strings[g]
+                        )
+                if take:
+                    self._take_value(other, g)
+            elif op == FIRST or op == LAST:
+                if other.seen[g] and (op == LAST or not self.seen[g]):
+                    self._take_value(other, g)
+                    self.picked_valid[g] = other.picked_valid[g]
+
+    def _take_value(mut self, other: Self, g: Int):
+        self.seen[g] = True
+        if self.dtype == DataType.INT64:
+            self.ints[g] = other.ints[g]
+        elif self.dtype == DataType.FLOAT64:
+            self.floats[g] = other.floats[g]
+        elif self.dtype == DataType.BOOL:
+            self.bools[g] = other.bools[g]
+        else:
+            self.strings[g] = other.strings[g]
+
     def finish(self) raises -> Series:
         if self.input == self.dtype:
             return self._finish()

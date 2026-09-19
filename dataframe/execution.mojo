@@ -77,6 +77,8 @@ from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
 from .aggregate import Reducer
+from .parallel import Job, partitions, run_jobs, worker_count
+from std.memory import ArcPointer
 
 
 def _numeric_literal(node: Node) raises -> Series:
@@ -327,6 +329,133 @@ def _conditional[
     return choose(selected, then, other)
 
 
+def _new_reducer(bound: BoundExpr, node: Node, group_count: Int) -> Reducer:
+    return Reducer(
+        node.op,
+        bound.dtypes[node.left].physical(),
+        group_count,
+        node.min_count,
+        node.integer,
+        node.floating,
+        node.text,
+    )
+
+
+struct _ReduceJob[width: Int](Job):
+    """Reduce rows [start, end) of one reduction input into a local state."""
+
+    var bound: BoundExpr
+    var columns: List[Series]
+    var states: List[Series]
+    var node: Node
+    var start: Int
+    var end: Int
+    var batch_size: Int
+    var grouped: Bool
+    var groups: ArcPointer[List[Int]]
+    var reducer: Reducer
+
+    def __init__(
+        out self,
+        bound: BoundExpr,
+        columns: List[Series],
+        states: List[Series],
+        node: Node,
+        start: Int,
+        end: Int,
+        batch_size: Int,
+        grouped: Bool,
+        groups: ArcPointer[List[Int]],
+        group_count: Int,
+    ):
+        self.bound = bound.copy()
+        self.columns = columns.copy()
+        self.states = states.copy()
+        self.node = node.copy()
+        self.start = start
+        self.end = end
+        self.batch_size = batch_size
+        self.grouped = grouped
+        self.groups = groups
+        self.reducer = _new_reducer(bound, node, group_count)
+
+    def into_reducer(deinit self) -> Reducer:
+        return self.reducer^
+
+    def run(mut self) raises:
+        for offset in range(self.start, self.end, self.batch_size):
+            var chunk = _batch[Self.width](
+                self.bound,
+                self.columns,
+                self.states,
+                self.node.left,
+                offset,
+                min(self.batch_size, self.end - offset),
+                False,
+            )
+            self.reducer.update(chunk, offset, self.grouped, self.groups[])
+
+
+def _reduce[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    node: Node,
+    height: Int,
+    batch_size: Int,
+    grouped: Bool,
+    groups: List[Int],
+    group_count: Int,
+) raises -> Reducer:
+    """Reduce every row of `node.left`: one pass, or one worker per row
+    partition with states merged in partition order (#6, #8)."""
+    var workers = worker_count(height)
+    if grouped:
+        # Each worker holds state for every group and merges it afterwards;
+        # with many groups that costs more than it saves, so require an
+        # average of at least four rows per group per worker.
+        workers = min(workers, max(1, height // max(1, 4 * group_count)))
+    if workers <= 1:
+        var reducer = _new_reducer(bound, node, group_count)
+        for offset in range(0, height, batch_size):
+            var chunk = _batch[width](
+                bound,
+                columns,
+                states,
+                node.left,
+                offset,
+                min(batch_size, height - offset),
+                False,
+            )
+            reducer.update(chunk, offset, grouped, groups)
+        return reducer^
+    var shared_groups = ArcPointer(groups.copy())
+    var bounds = partitions(height, workers, batch_size)
+    var jobs = List[_ReduceJob[width]](capacity=workers)
+    for w in range(workers):
+        jobs.append(
+            _ReduceJob[width](
+                bound,
+                columns,
+                states,
+                node,
+                bounds[w],
+                bounds[w + 1],
+                batch_size,
+                grouped,
+                shared_groups,
+                group_count,
+            )
+        )
+    run_jobs(jobs)
+    var reducer = jobs.pop(0).into_reducer()
+    while len(jobs) > 0:
+        reducer.merge(jobs.pop(0).into_reducer())
+    return reducer^
+
+
 def _batch[
     width: Int
 ](
@@ -471,26 +600,17 @@ def evaluate[
             continue
         var node = bound.expr._nodes[node_index].copy()
         if is_reduction(node.op):
-            var reducer = Reducer(
-                node.op,
-                bound.dtypes[node.left].physical(),
+            var reducer = _reduce[width](
+                bound,
+                columns,
+                states,
+                node,
+                height,
+                batch_size,
+                grouped,
+                groups,
                 group_count,
-                node.min_count,
-                node.integer,
-                node.floating,
-                node.text,
             )
-            for offset in range(0, height, batch_size):
-                var chunk = _batch[width](
-                    bound,
-                    columns,
-                    states,
-                    node.left,
-                    offset,
-                    min(batch_size, height - offset),
-                    False,
-                )
-                reducer.update(chunk, offset, grouped, groups)
             var state = reducer.finish()
             if row_mode:
                 state = state.take(groups)
