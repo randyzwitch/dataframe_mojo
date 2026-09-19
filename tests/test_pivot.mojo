@@ -1,4 +1,4 @@
-"""pivot and unpivot reshaping."""
+"""Pivot and unpivot reshaping."""
 from std.testing import (
     TestSuite,
     assert_equal,

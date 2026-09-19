@@ -292,7 +292,7 @@ def _fill_array(
         while i < length:
             var byte = UInt8(0)
             for bit in range(min(8, length - i)):
-                byte |= UInt8(Int(source[i + bit])) << UInt8(bit)
+                byte |= UInt8(Int(source[unsafe_offset=i + bit])) << UInt8(bit)
             values.append(byte)
             i += 8
         state.owned.append(_copy_bits(column._bits[], column._offset, length))

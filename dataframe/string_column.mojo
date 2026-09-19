@@ -110,9 +110,9 @@ struct StringColumn(Copyable, Sized):
 
     def _shares_buffers_with(self, other: Self) -> Bool:
         return (
-            self._bytes.unsafe_ptr() == other._bytes.unsafe_ptr()
-            and self._offsets.unsafe_ptr() == other._offsets.unsafe_ptr()
-            and self._bits.unsafe_ptr() == other._bits.unsafe_ptr()
+            self._bytes.ptr() == other._bytes.ptr()
+            and self._offsets.ptr() == other._offsets.ptr()
+            and self._bits.ptr() == other._bits.ptr()
         )
 
     def _check_index(self, index: Int) raises:

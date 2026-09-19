@@ -1,4 +1,4 @@
-"""min/max/mean/first/last/n_unique/std/var/median/quantile/len reductions."""
+"""Reductions: min/max/mean/first/last/n_unique/std/var/median/quantile/len."""
 from std.math import isnan, sqrt
 from std.testing import (
     TestSuite,

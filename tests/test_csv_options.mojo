@@ -1,4 +1,4 @@
-"""read_csv options: dialect, skipping, projection, nulls, permissive modes.
+"""Options for read_csv: dialect, skipping, projection, nulls, permissive modes.
 
 Every scenario is read with every buffer size from 1 byte to the whole file,
 so results cannot depend on where the input is split.

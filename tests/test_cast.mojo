@@ -1,4 +1,4 @@
-"""cast: full source/target matrix, strict vs non-strict, and round trips."""
+"""Cast: full source/target matrix, strict vs non-strict, and round trips."""
 from std.testing import (
     TestSuite,
     assert_equal,
