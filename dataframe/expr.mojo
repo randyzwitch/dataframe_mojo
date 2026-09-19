@@ -318,6 +318,67 @@ struct Expr(Copyable):
         """Number of null values, as Int64."""
         return self._unary(NULL_COUNT)
 
+    def min(self) -> Self:
+        """Smallest non-null value. NaN sorts above every number, so it is
+        the minimum only when every valid value is NaN."""
+        return self._unary(MIN)
+
+    def max(self) -> Self:
+        """Largest non-null value; any valid NaN makes the maximum NaN."""
+        return self._unary(MAX)
+
+    def mean(self) -> Self:
+        """Arithmetic mean of non-null values as Float64; null when empty."""
+        return self._unary(MEAN)
+
+    def first(self) -> Self:
+        """The first row's value, which may be null. Order-dependent."""
+        return self._unary(FIRST)
+
+    def last(self) -> Self:
+        """The last row's value, which may be null. Order-dependent."""
+        return self._unary(LAST)
+
+    def n_unique(self) -> Self:
+        """Distinct values, counting null once. NaNs are one value and
+        -0.0 equals 0.0."""
+        return self._unary(N_UNIQUE)
+
+    def std(self, ddof: Int = 1) -> Self:
+        """Standard deviation; null when fewer than ddof + 1 values."""
+        return self._unary(STD, Int64(ddof))
+
+    def var(self, ddof: Int = 1) -> Self:
+        """Variance; null when fewer than ddof + 1 values."""
+        return self._unary(VAR, Int64(ddof))
+
+    def median(self) -> Self:
+        return self._quantile(MEDIAN, 0.5, "linear")
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "linear"
+    ) -> Self:
+        """Interpolation: nearest, lower, higher, midpoint, or linear."""
+        return self._quantile(QUANTILE, quantile, interpolation)
+
+    def _quantile(
+        self, op: Int, quantile: Float64, interpolation: String
+    ) -> Self:
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                op,
+                len(nodes) - 1,
+                text=interpolation,
+                floating=quantile,
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def len(self) -> Self:
+        """Number of rows including nulls, as Int64."""
+        return self._unary(LEN)
+
     def sum(self, min_count: Int = 0) -> Self:
         """Skip nulls; zero when empty unless fewer than min_count are valid."""
         var nodes = self._nodes.copy()

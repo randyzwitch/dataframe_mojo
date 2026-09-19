@@ -96,6 +96,33 @@ Aggregate inputs must be row-valued and contain no aggregates. Arithmetic on
 aggregate outputs is supported, as is broadcasting aggregates against ordinary
 columns outside grouping.
 
+| Reduction | Input | Result | Empty or all-null | Mergeable state |
+|---|---|---|---|---|
+| `sum(min_count=0)` | Int64, Float64 | same | 0, or null below `min_count` | yes |
+| `count()`, `null_count()`, `len()` | any | Int64 | 0 | yes |
+| `min()`, `max()` | any | same | null | yes |
+| `mean()` | Int64, Float64 | Float64 | null | yes (sum + count) |
+| `first()`, `last()` | any | same | null | needs partition order |
+| `n_unique()` | any | Int64 | 0, or 1 for all-null | yes (distinct set) |
+| `var(ddof=1)`, `std(ddof=1)` | Int64, Float64 | Float64 | null when fewer than `ddof + 1` values | yes (Welford/Chan) |
+| `median()`, `quantile(q, interpolation)` | Int64, Float64 | Float64 | null | no: keeps every valid value |
+| `any()`, `all()` | Bool | Bool | false / true | yes |
+
+`min` and `max` order strings byte-lexicographically and `false < true`. Float
+NaN sorts above every number, as in `sort`: `max` is NaN if any valid value is
+NaN, and `min` is NaN only when every valid value is. Ties keep the first value.
+`mean` of Int64 input divides the exact 128-bit total, so it cannot overflow.
+`first` and `last` return the first or last row's value even when it is null.
+`n_unique` counts null as one value, treats every NaN as one value, and treats
+`-0.0` as equal to `0.0`. `var` and `std` convert Int64 to Float64; infinities
+produce NaN. `median` is `quantile(0.5, "linear")`. For `quantile`, `q` must be
+in [0, 1] and the position is `q * (n - 1)` over sorted valid values (NaN last);
+`linear` interpolates, `lower`/`higher` take the neighbouring value, `midpoint`
+averages them, and `nearest` rounds the position half up. Int64 values above
+2^53 lose precision in `var`, `std`, `median`, and `quantile`. Every reduction
+works globally and inside `group_by(...).agg(...)`, and arithmetic on
+reduction outputs (for example `col("x").max() - col("x").min()`) is allowed.
+
 Integer sums use signed 128-bit totals plus valid counts. Every possible Int64
 column with length representable by Int fits this accumulator. Partial states
 for disjoint partitions can therefore merge in any order, and overflow is checked
