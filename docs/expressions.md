@@ -68,6 +68,32 @@ at most one selector. Unknown names, unknown dtypes, and out-of-range `nth`
 positions raise at bind time, even on empty frames. Sibling expressions in one
 `with_columns` still see the original input, not each other's outputs.
 
+### Order-dependent and window expressions
+
+These depend on row order, so they are computed over the whole input column
+(and per partition) before batches are evaluated. Their input must be
+row-valued. See the Narwhals order-dependence notes cited above.
+
+| Method | Result | Nulls |
+|---|---|---|
+| `cum_sum(reverse=False)` | numeric, same dtype; Int64 checked | null rows stay null and are skipped |
+| `cum_min`, `cum_max` | same dtype; NaN sorts above numbers | as `cum_sum` |
+| `cum_count(reverse=False)` | Int64, never null | counts non-null values |
+| `shift(n=1)` | same dtype; negative `n` shifts earlier | vacated rows are null |
+| `diff(n=1)`, `pct_change(n=1)` | `x - x.shift(n)`; `pct_change` is Float64 | null when either side is null |
+| `rank(method="average", descending=False)` | `average` Float64; `min`, `max`, `dense`, `ordinal` Int64 | nulls get null; ranks start at 1; `ordinal` breaks ties by row order; NaN ranks after numbers |
+| `rolling_sum/mean/min/max(window_size, min_samples=window_size)` | sum/min/max same dtype, mean Float64 | the window is the current row and the `window_size - 1` before it; nulls are skipped; fewer than `min_samples` valid values give null |
+| `forward_fill(limit=-1)`, `backward_fill(limit=-1)` | same dtype | fill from the nearest valid value at most `limit` rows away |
+
+`expr.over(partition_by)` evaluates `expr` separately in each partition of the
+key columns (one name or a list; null is its own key value) and keeps row
+order: aggregates broadcast back to their partition's rows
+(`col("x").sum().over("k")`), and window operations restart in each partition
+(`col("x").cum_sum().over("k")`). Inside `group_by(...).agg(...)`, window
+operations likewise run per group, so `col("x").cum_sum().max()` is each
+group's running peak. Rolling min/max are O(n x window); other kernels are
+linear apart from `rank`, which sorts each partition.
+
 ### Casts
 
 `cast(dtype, strict=True)` converts between the four dtypes; `Series.cast` and

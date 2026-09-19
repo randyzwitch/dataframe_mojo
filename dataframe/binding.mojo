@@ -59,6 +59,18 @@ from .expr import (
     Node,
     WHEN,
     SELECTOR,
+    SEP,
+    CUM_SUM,
+    CUM_COUNT,
+    RANK,
+    ROLLING_SUM,
+    ROLLING_MEAN,
+    ROLLING_MIN,
+    ROLLING_MAX,
+    FORWARD_FILL,
+    BACKWARD_FILL,
+    OVER,
+    is_window,
     STR_CONCAT,
     CAST,
     STR_LEN_CHARS,
@@ -384,6 +396,66 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
                     shape = ROWS
             if shape != ROWS and has_aggregate:
                 shape = AGGREGATE
+        elif is_window(node.op):
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid window input")
+            if shapes[node.left] != ROWS:
+                raise Error("Window operations require a row-valued input")
+            var input = types[node.left]
+            dtype = input
+            if node.op == CUM_SUM or node.op == ROLLING_SUM:
+                if not _numeric(input):
+                    raise Error(
+                        "cum_sum and rolling_sum require a numeric expression,"
+                        " found " + input
+                    )
+            elif node.op == ROLLING_MEAN:
+                if not _numeric(input):
+                    raise Error(
+                        "rolling_mean requires a numeric expression, found "
+                        + input
+                    )
+                dtype = "float64"
+            elif node.op == CUM_COUNT:
+                dtype = "int64"
+            elif node.op == RANK:
+                var method = node.text
+                if (
+                    method != "average"
+                    and method != "min"
+                    and method != "max"
+                    and method != "dense"
+                    and method != "ordinal"
+                ):
+                    raise Error(
+                        "rank method must be average, min, max, dense, or"
+                        " ordinal"
+                    )
+                dtype = "float64" if method == "average" else "int64"
+            if node.op >= ROLLING_SUM and node.op <= ROLLING_MAX:
+                if node.integer < 1:
+                    raise Error("window_size must be at least 1")
+                if node.floating < -1:
+                    raise Error("min_samples must be nonnegative")
+            if (
+                node.op == FORWARD_FILL or node.op == BACKWARD_FILL
+            ) and node.integer < -1:
+                raise Error("fill limit must be nonnegative")
+            shape = ROWS
+            has_aggregate = aggregated[node.left]
+        elif node.op == OVER:
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid over input")
+            if node.text2.byte_length() == 0:
+                raise Error("over requires at least one partition column")
+            for part in node.text2.split(SEP):
+                var found = False
+                for column in columns:
+                    found = found or column.name() == String(part)
+                if not found:
+                    raise Error("Unknown partition column: " + String(part))
+            dtype = types[node.left]
+            shape = ROWS
         elif node.op == CAST:
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid cast input")

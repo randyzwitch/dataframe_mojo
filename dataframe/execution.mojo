@@ -55,12 +55,18 @@ from .expr import (
     WHEN,
     STR_CONCAT,
     CAST,
+    OVER,
+    SEP,
+    subtree,
+    is_window,
     is_reduction,
     is_string_op,
 )
 from .str_kernels import string_op, concat_strings
 from .cast import cast_series
-from .binding import BoundExpr, ROWS, AGGREGATE
+from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
+from .hashing import encode_rows
+from .window import window_op
 from .column import Column
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
@@ -196,6 +202,8 @@ def _eval[
         return Series("", Column[String]([node.text]))
     if node.op == LIT_NULL:
         return Series.full_null("", node.text, 1)
+    if is_window(node.op) or node.op == OVER:
+        return aggregates[index].slice(offset, length)
     if is_reduction(node.op):
         if grouped:
             return aggregates[index].slice(offset, length)
@@ -311,6 +319,72 @@ def _batch[
     )
 
 
+def _full[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    index: Int,
+    height: Int,
+    batch_size: Int,
+    grouped: Bool,
+) raises -> Series:
+    """Materialize a row-valued node over every row, batch by batch."""
+    var result = _empty(bound.dtypes[index])
+    for offset in range(0, height, batch_size):
+        var chunk = _batch[width](
+            bound,
+            columns,
+            states,
+            index,
+            offset,
+            min(batch_size, height - offset),
+            grouped,
+        )
+        if len(chunk) == 1 and min(batch_size, height - offset) != 1:
+            chunk = chunk._broadcast(min(batch_size, height - offset))
+        result._append_series(chunk)
+    return result^
+
+
+def _over[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    index: Int,
+    height: Int,
+    batch_size: Int,
+) raises -> Series:
+    """Evaluate a node's child per partition and align results to rows."""
+    ref node = bound.expr._nodes[index]
+    var inner = bind(subtree(bound.expr, node.left), columns)
+    if inner.shape() == SCALAR:
+        var scalar = evaluate[width](
+            inner, columns, height, batch_size=batch_size
+        )
+        return scalar._broadcast(height)
+    var keys = List[Series]()
+    for part in node.text2.split(SEP):
+        for column in columns:
+            if column.name() == String(part):
+                keys.append(column.copy())
+    var partitions = encode_rows(keys, nulls_equal=True)
+    var result = evaluate[width](
+        inner,
+        columns,
+        height,
+        batch_size=batch_size,
+        grouped=True,
+        groups=partitions.ids,
+        group_count=partitions.count(),
+    )
+    if inner.shape() == ROWS:
+        return result^
+    return result.take(partitions.ids)
+
+
 def evaluate[
     width: Int = 4
 ](
@@ -325,47 +399,86 @@ def evaluate[
 ) raises -> Series:
     """Evaluate a bound expression; temporary vectors are bounded by batch_size.
 
-    Full output and O(groups * aggregates) states are materialized. Each
-    aggregate currently scans its own input; shared-subexpression fusion and
-    parallel state merging are future execution changes, not API changes.
+    Reductions, window operations, and over() partitions are computed first,
+    in node order, and then read per batch. Full output and
+    O(groups * aggregates) states are materialized. With grouped=True, an
+    aggregate-shaped expression yields one value per group; a row-shaped one
+    (inside over()) yields one value per row, with windows restarting and
+    aggregates broadcasting per group.
     """
     if batch_size <= 0:
         raise Error("batch_size must be positive")
     if grouped and (len(groups) != height or group_count < 0):
         raise Error("Invalid group mapping")
-    var states = List[Series]()
-    for i in range(len(bound.expr._nodes)):
-        states.append(_empty(bound.dtypes[i]))
-    for node_index in range(len(bound.expr._nodes)):
-        var node = bound.expr._nodes[node_index].copy()
-        if not is_reduction(node.op):
+    var count = len(bound.expr._nodes)
+    var root = count - 1
+    var row_mode = grouped and bound.shape() == ROWS
+    # Nodes under over() are evaluated by that over() in its own partitions.
+    var inside_over = List[Bool](length=count, fill=False)
+    for i in range(count):
+        if bound.expr._nodes[i].op != OVER:
             continue
-        var reducer = Reducer(
-            node.op,
-            bound.dtypes[node.left],
-            group_count,
-            node.min_count,
-            node.integer,
-            node.floating,
-            node.text,
-        )
-        for offset in range(0, height, batch_size):
-            var chunk = _batch[width](
-                bound,
-                columns,
-                states,
-                node.left,
-                offset,
-                min(batch_size, height - offset),
-                False,
+        var reachable = List[Bool](length=count, fill=False)
+        reachable[bound.expr._nodes[i].left] = True
+        for reverse in range(i):
+            var j = i - 1 - reverse
+            if not reachable[j]:
+                continue
+            inside_over[j] = True
+            ref child = bound.expr._nodes[j]
+            if child.left >= 0:
+                reachable[child.left] = True
+            if child.right >= 0:
+                reachable[child.right] = True
+            if child.extra >= 0:
+                reachable[child.extra] = True
+    var states = List[Series]()
+    for i in range(count):
+        states.append(_empty(bound.dtypes[i]))
+    for node_index in range(count):
+        if inside_over[node_index]:
+            continue
+        var node = bound.expr._nodes[node_index].copy()
+        if is_reduction(node.op):
+            var reducer = Reducer(
+                node.op,
+                bound.dtypes[node.left],
+                group_count,
+                node.min_count,
+                node.integer,
+                node.floating,
+                node.text,
             )
-            reducer.update(chunk, offset, grouped, groups)
-        states[node_index] = reducer.finish()
-    var root = len(bound.expr._nodes) - 1
+            for offset in range(0, height, batch_size):
+                var chunk = _batch[width](
+                    bound,
+                    columns,
+                    states,
+                    node.left,
+                    offset,
+                    min(batch_size, height - offset),
+                    False,
+                )
+                reducer.update(chunk, offset, grouped, groups)
+            var state = reducer.finish()
+            if row_mode:
+                state = state.take(groups)
+            states[node_index] = state^
+        elif is_window(node.op):
+            var input = _full[width](
+                bound, columns, states, node.left, height, batch_size, row_mode
+            )
+            states[node_index] = window_op(
+                node, input, groups.copy() if grouped else List[Int]()
+            )
+        elif node.op == OVER:
+            states[node_index] = _over[width](
+                bound, columns, node_index, height, batch_size
+            )
     var result = _empty(bound.dtypes[root])
-    var size = height if bound.shape() == ROWS else 1
-    if grouped:
-        size = group_count
+    var size = height if bound.shape() == ROWS else (
+        group_count if grouped else 1
+    )
     for offset in range(0, size, batch_size):
         var chunk = _batch[width](
             bound,

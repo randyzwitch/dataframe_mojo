@@ -98,6 +98,25 @@ comptime NULL_COUNT = 93
 # Conditional: left=predicate, right=then, extra=otherwise (-1 means null).
 comptime WHEN = 100
 
+# Order-dependent window operations occupy 110..121. They are computed over
+# the whole input column (per partition) before batches are evaluated.
+# min_count: 1 reverses cumulative ops; integer: shift/limit/window size;
+# floating: rolling min_samples; text: rank method.
+comptime CUM_SUM = 110
+comptime CUM_MIN = 111
+comptime CUM_MAX = 112
+comptime CUM_COUNT = 113
+comptime SHIFT = 114
+comptime RANK = 115
+comptime ROLLING_SUM = 116
+comptime ROLLING_MEAN = 117
+comptime ROLLING_MIN = 118
+comptime ROLLING_MAX = 119
+comptime FORWARD_FILL = 120
+comptime BACKWARD_FILL = 121
+# Evaluate the child per partition of the SEP-joined key names in text2.
+comptime OVER = 122
+
 
 def is_binary(op: Int) -> Bool:
     return (op >= ADD and op <= EQ) or (op >= 20 and op < 50)
@@ -117,6 +136,10 @@ def is_comparison(op: Int) -> Bool:
 
 def is_string_op(op: Int) -> Bool:
     return op >= STR_LEN_CHARS and op <= STR_PAD
+
+
+def is_window(op: Int) -> Bool:
+    return op >= CUM_SUM and op <= BACKWARD_FILL
 
 
 def is_conditional(op: Int) -> Bool:
@@ -402,6 +425,112 @@ struct Expr(Copyable):
         nodes.append(
             _node(CAST, len(nodes) - 1, text=dtype, integer=Int64(strict))
         )
+        return Self(nodes^, self._name)
+
+    def _window(
+        self,
+        op: Int,
+        integer: Int64 = 0,
+        reverse: Bool = False,
+        text: String = "",
+        floating: Float64 = 0,
+    ) -> Self:
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                op,
+                len(nodes) - 1,
+                text=text,
+                integer=integer,
+                floating=floating,
+                min_count=Int(reverse),
+            )
+        )
+        return Self(nodes^, self._name)
+
+    def cum_sum(self, reverse: Bool = False) -> Self:
+        """Running sum of non-null values; null rows stay null. Int64 is
+        checked for overflow."""
+        return self._window(CUM_SUM, reverse=reverse)
+
+    def cum_min(self, reverse: Bool = False) -> Self:
+        return self._window(CUM_MIN, reverse=reverse)
+
+    def cum_max(self, reverse: Bool = False) -> Self:
+        return self._window(CUM_MAX, reverse=reverse)
+
+    def cum_count(self, reverse: Bool = False) -> Self:
+        """Running count of non-null values, as Int64 (never null)."""
+        return self._window(CUM_COUNT, reverse=reverse)
+
+    def shift(self, n: Int = 1) -> Self:
+        """Move values n rows later (earlier when negative); vacated rows
+        are null."""
+        return self._window(SHIFT, Int64(n))
+
+    def diff(self, n: Int = 1) -> Self:
+        """Difference from the value n rows earlier."""
+        return self - self.shift(n)
+
+    def pct_change(self, n: Int = 1) -> Self:
+        """Relative change from the value n rows earlier, as Float64."""
+        var previous = self.shift(n)
+        return (self - previous) / previous
+
+    def rank(
+        self, method: String = "average", descending: Bool = False
+    ) -> Self:
+        """Rank non-null values: average, min, max, dense, or ordinal.
+
+        Ranks start at 1; average gives Float64, the rest Int64. Ordinal
+        breaks ties by row order. NaN ranks after numbers, as in sort.
+        """
+        return self._window(RANK, reverse=descending, text=method)
+
+    def rolling_sum(self, window_size: Int, min_samples: Int = -1) -> Self:
+        """Sum over the current row and the window_size - 1 rows before it.
+
+        Nulls are skipped; fewer than min_samples valid values (default
+        window_size) give null.
+        """
+        return self._window(
+            ROLLING_SUM, Int64(window_size), floating=Float64(min_samples)
+        )
+
+    def rolling_mean(self, window_size: Int, min_samples: Int = -1) -> Self:
+        return self._window(
+            ROLLING_MEAN, Int64(window_size), floating=Float64(min_samples)
+        )
+
+    def rolling_min(self, window_size: Int, min_samples: Int = -1) -> Self:
+        return self._window(
+            ROLLING_MIN, Int64(window_size), floating=Float64(min_samples)
+        )
+
+    def rolling_max(self, window_size: Int, min_samples: Int = -1) -> Self:
+        return self._window(
+            ROLLING_MAX, Int64(window_size), floating=Float64(min_samples)
+        )
+
+    def forward_fill(self, limit: Int = -1) -> Self:
+        """Fill nulls with the last valid value, at most limit rows ahead
+        (-1 means unlimited)."""
+        return self._window(FORWARD_FILL, Int64(limit))
+
+    def backward_fill(self, limit: Int = -1) -> Self:
+        return self._window(BACKWARD_FILL, Int64(limit))
+
+    def over(self, partition_by: String) -> Self:
+        return self.over([partition_by])
+
+    def over(self, partition_by: List[String]) -> Self:
+        """Evaluate within partitions of the key columns, keeping row order.
+
+        Aggregates broadcast back to every row of their partition; window
+        operations restart in each partition. Nulls form their own key.
+        """
+        var nodes = self._nodes.copy()
+        nodes.append(_node(OVER, len(nodes) - 1, text2=_joined(partition_by)))
         return Self(nodes^, self._name)
 
     def str(self) -> StrNamespace:
@@ -773,3 +902,34 @@ def concat_str(exprs: List[Expr], separator: String = "") raises -> Expr:
         )
         result = Expr(nodes^, result._name)
     return result^
+
+
+def subtree(expr: Expr, root: Int) -> Expr:
+    """The nodes reachable from root, renumbered, as a standalone Expr."""
+    var keep = List[Bool](length=root + 1, fill=False)
+    keep[root] = True
+    for reverse in range(root + 1):
+        var i = root - reverse
+        if not keep[i]:
+            continue
+        ref node = expr._nodes[i]
+        if node.left >= 0:
+            keep[node.left] = True
+        if node.right >= 0:
+            keep[node.right] = True
+        if node.extra >= 0:
+            keep[node.extra] = True
+    var position = List[Int](length=root + 1, fill=-1)
+    var nodes = List[Node]()
+    for i in range(root + 1):
+        if keep[i]:
+            position[i] = len(nodes)
+            var copied = expr._nodes[i].copy()
+            if copied.left >= 0:
+                copied.left = position[copied.left]
+            if copied.right >= 0:
+                copied.right = position[copied.right]
+            if copied.extra >= 0:
+                copied.extra = position[copied.extra]
+            nodes.append(copied^)
+    return Expr(nodes^, expr._name)
