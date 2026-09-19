@@ -235,7 +235,60 @@ struct Series(Copyable, Sized, Writable):
     def argsort(
         self, descending: Bool = False, nulls_last: Bool = True
     ) raises -> List[Int]:
-        """Stable bottom-up mergesort, O(n log n) time and O(n) workspace."""
+        """Stable sort order: ranks are resolved once, then merged by Int."""
+        return sort_indices([self._sort_ranks(descending, nulls_last)])
+
+    def _sort_ranks(
+        self, descending: Bool, nulls_last: Bool
+    ) raises -> List[Int]:
+        """Dense per-row ranks encoding direction, NaN, and null placement.
+
+        Non-null, non-NaN values rank 0..d-1 (reversed when descending).
+        NaN ranks d in either direction; null ranks -1 or d + 1.
+        """
+        var n = len(self)
+        var ranks = List[Int](length=n, fill=0)
+        var valid = List[Bool](length=n, fill=False)
+        var nan = List[Bool](length=n, fill=False)
+        var distinct: Int
+        if self._data.isa[Column[Int64]]():
+            ref column = self._data[Column[Int64]]
+            for i in range(n):
+                valid[i] = column._valid(i)
+            distinct = _dense_ranks(column._values, valid, ranks)
+        elif self._data.isa[Column[Float64]]():
+            ref column = self._data[Column[Float64]]
+            var usable = List[Bool](length=n, fill=False)
+            for i in range(n):
+                valid[i] = column._valid(i)
+                var x = column._values[i]
+                nan[i] = valid[i] and x != x
+                usable[i] = valid[i] and not nan[i]
+            distinct = _dense_ranks(column._values, usable, ranks)
+        elif self._data.isa[Column[Bool]]():
+            ref column = self._data[Column[Bool]]
+            for i in range(n):
+                valid[i] = column._valid(i)
+                ranks[i] = Int(column._values[i])
+            distinct = 2
+        else:
+            ref column = self._data[Column[String]]
+            for i in range(n):
+                valid[i] = column._valid(i)
+            distinct = _dense_ranks(column._values, valid, ranks)
+        for i in range(n):
+            if not valid[i]:
+                ranks[i] = distinct + 1 if nulls_last else -1
+            elif nan[i]:
+                ranks[i] = distinct
+            elif descending:
+                ranks[i] = distinct - 1 - ranks[i]
+        return ranks^
+
+    def _argsort_reference(
+        self, descending: Bool = False, nulls_last: Bool = True
+    ) raises -> List[Int]:
+        """Comparator mergesort kept as a test oracle and benchmark baseline."""
         var indices = List[Int](capacity=len(self))
         for i in range(len(self)):
             indices.append(i)
@@ -367,3 +420,137 @@ def _equal_columns[
         if a._valid(i) and not (a._values[i] == b._values[i]):
             return False
     return True
+
+
+def _dense_ranks[
+    T: Copyable & Deinitable & Comparable
+](values: List[T], usable: List[Bool], mut ranks: List[Int]) -> Int:
+    """Rank usable values densely by sorted order; returns the rank count."""
+    var ordered = List[T]()
+    for i in range(len(values)):
+        if usable[i]:
+            ordered.append(values[i].copy())
+    sort(ordered)
+    var distinct = List[T]()
+    for value in ordered:
+        if len(distinct) == 0 or not (distinct[len(distinct) - 1] == value):
+            distinct.append(value.copy())
+    for i in range(len(values)):
+        if not usable[i]:
+            continue
+        var low = 0
+        var high = len(distinct)
+        while low < high:
+            var mid = (low + high) // 2
+            if distinct[mid] < values[i]:
+                low = mid + 1
+            else:
+                high = mid
+        ranks[i] = low
+    return len(distinct)
+
+
+def _rank_less(ranks: List[List[Int]], a: Int, b: Int) -> Bool:
+    """Lexicographic rank order with the row index as the final tie-break."""
+    for key in ranks:
+        if key[a] != key[b]:
+            return key[a] < key[b]
+    return a < b
+
+
+def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
+    """Stable bottom-up mergesort of row indices by lexicographic ranks."""
+    if len(ranks) == 0:
+        raise Error("Sorting requires at least one key")
+    var n = len(ranks[0])
+    var indices = List[Int](capacity=n)
+    for i in range(n):
+        indices.append(i)
+    var scratch = indices.copy()
+    var width = 1
+    while width < n:
+        var start = 0
+        while start < n:
+            var mid = min(start + width, n)
+            var end = min(start + 2 * width, n)
+            var left = start
+            var right = mid
+            for dest in range(start, end):
+                if left < mid and (
+                    right >= end
+                    or not _rank_less(ranks, indices[right], indices[left])
+                ):
+                    scratch[dest] = indices[left]
+                    left += 1
+                else:
+                    scratch[dest] = indices[right]
+                    right += 1
+            start = end
+        var old = indices^
+        indices = scratch^
+        scratch = old^
+        width *= 2
+    return indices^
+
+
+def smallest_indices(ranks: List[List[Int]], k: Int) raises -> List[Int]:
+    """The k first rows of sort_indices(ranks), in order, in O(n log k).
+
+    A max-heap holds the best k rows seen so far under the same total order
+    (ranks, then row index), so ties resolve exactly as a stable sort would.
+    """
+    if len(ranks) == 0:
+        raise Error("Sorting requires at least one key")
+    if k < 0:
+        raise Error("k must be nonnegative")
+    var n = len(ranks[0])
+    var heap = List[Int](capacity=min(k, n))
+    for row in range(n):
+        if len(heap) < k:
+            heap.append(row)
+            var child = len(heap) - 1
+            while child > 0:
+                var parent = (child - 1) // 2
+                if not _rank_less(ranks, heap[parent], heap[child]):
+                    break
+                var tmp = heap[parent]
+                heap[parent] = heap[child]
+                heap[child] = tmp
+                child = parent
+        elif k > 0 and _rank_less(ranks, row, heap[0]):
+            heap[0] = row
+            var parent = 0
+            while True:
+                var largest = parent
+                var left = 2 * parent + 1
+                var right = left + 1
+                if left < len(heap) and _rank_less(
+                    ranks, heap[largest], heap[left]
+                ):
+                    largest = left
+                if right < len(heap) and _rank_less(
+                    ranks, heap[largest], heap[right]
+                ):
+                    largest = right
+                if largest == parent:
+                    break
+                var tmp = heap[parent]
+                heap[parent] = heap[largest]
+                heap[largest] = tmp
+                parent = largest
+    var selected = List[List[Int]]()
+    for key in ranks:
+        var subset = List[Int](capacity=len(heap))
+        for row in heap:
+            subset.append(key[row])
+        selected.append(subset^)
+    # Ranks alone may tie; re-sort by (ranks, original row) to keep stability.
+    var positions = List[Int](capacity=len(heap))
+    for row in heap:
+        positions.append(row)
+    selected.append(positions^)
+    var order = sort_indices(selected)
+    var result = List[Int](capacity=len(heap))
+    for i in order:
+        result.append(heap[i])
+    return result^
