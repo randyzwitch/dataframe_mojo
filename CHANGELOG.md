@@ -45,6 +45,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- `DataFrame.fill_null(0)` / `fill_null(0.5)`: a bare number fills every
+  column it can adopt (integers: all numeric columns; floats: float
+  columns), each in its own dtype; `fill_null("x")` fills string columns.
+
 - Expression sugar: bare numbers and Bools work wherever an `Expr` is
   expected (`col("x") > 0`, `col("x") * 2.5`, `1 + col("x")`,
   `.fill_null(0)`, `when(...).then(1)`), `==` / `!=` build expressions, and
