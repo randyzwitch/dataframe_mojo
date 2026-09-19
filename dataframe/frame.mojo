@@ -7,6 +7,7 @@ from .expr import Expr
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
 from .value import AnyValue
+from .hashing import RowKeys, encode_rows
 from .display import render_frame, render_glimpse
 
 
@@ -616,10 +617,50 @@ struct DataFrame(Copyable, Sized, Writable):
     def group_by(
         self, key: String, *, maintain_order: Bool = False
     ) raises -> GroupBy:
-        """Create an owned eager snapshot; unordered group output by default."""
-        if self._columns[self._index(key)].dtype() != "string":
-            raise Error("group_by currently requires one String key")
-        return GroupBy(self.copy(), key, maintain_order)
+        return self.group_by([key], maintain_order=maintain_order)
+
+    def group_by(
+        self, keys: List[String], *, maintain_order: Bool = False
+    ) raises -> GroupBy:
+        """Group by one or more columns of any dtype.
+
+        Group output order is unspecified unless maintain_order=True, which
+        guarantees first-occurrence order. Null keys form their own groups.
+        """
+        if len(keys) == 0:
+            raise Error("group_by requires at least one key")
+        var seen = Dict[String, Bool]()
+        var columns = List[Series](capacity=len(keys))
+        for key in keys:
+            if key in seen:
+                raise Error("Duplicate group_by key: " + key)
+            seen[key] = True
+            columns.append(self._columns[self._index(key)].copy())
+        return GroupBy(self.copy(), columns^, maintain_order)
+
+    def group_by(
+        self,
+        keys: List[Expr],
+        *,
+        maintain_order: Bool = False,
+        batch_size: Int = 1024,
+    ) raises -> GroupBy:
+        """Group by computed keys; each key is evaluated once and named by
+        its output name. Aggregations still see the original columns."""
+        if len(keys) == 0:
+            raise Error("group_by requires at least one key")
+        var bound = _bind_all(keys, self._columns)
+        var columns = List[Series](capacity=len(keys))
+        for expression in bound:
+            if expression.shape() == AGGREGATE:
+                raise Error("group_by keys must not be aggregates")
+            var result = evaluate(
+                expression, self._columns, self._height, batch_size=batch_size
+            )
+            if expression.shape() != ROWS:
+                result = result._broadcast(self._height)
+            columns.append(result^)
+        return GroupBy(self.copy(), columns^, maintain_order)
 
 
 def concat(
@@ -756,11 +797,26 @@ def _bind_all(
 
 @fieldwise_init
 struct GroupBy(Copyable):
-    """An eager grouping request. No per-group dataframe materialization."""
+    """An eager grouping request. No per-group dataframe materialization.
+
+    It owns a snapshot of the input and the evaluated key columns.
+    """
 
     var _frame: DataFrame
-    var _key: String
+    var _keys: List[Series]
     var _maintain_order: Bool
+
+    def _key_names(self) -> Dict[String, Bool]:
+        var names = Dict[String, Bool]()
+        for key in self._keys:
+            names[key.name()] = True
+        return names^
+
+    def _key_columns(self, groups: RowKeys) raises -> List[Series]:
+        var columns = List[Series](capacity=len(self._keys))
+        for key in self._keys:
+            columns.append(key.take(groups.representatives))
+        return columns^
 
     def agg(
         self, expression: Expr, *, batch_size: Int = 1024
@@ -773,39 +829,19 @@ struct GroupBy(Copyable):
         var bound = _bind_all(expressions, self._frame._columns)
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        var key_names = self._key_names()
         for expression in bound:
             if expression.shape() != AGGREGATE:
                 raise Error(
                     "Group aggregation requires scalar aggregate expressions"
                 )
-            if expression.expr._name == self._key:
-                raise Error("Aggregate output name collides with grouping key")
-        var key_index = self._frame._index(self._key)
-        # Borrow the variant's column in the loops; don't use copying extraction.
-        var lookup = Dict[String, Int]()
-        var representatives = List[Int]()
-        var groups = List[Int](capacity=self._frame.height())
-        var null_group = -1
-        for i in range(self._frame.height()):
-            var group: Int
-            if self._frame._columns[key_index]._data[Column[String]].is_null(i):
-                if null_group < 0:
-                    null_group = len(representatives)
-                    representatives.append(i)
-                group = null_group
-            else:
-                var key = (
-                    self._frame._columns[key_index]
-                    ._data[Column[String]]
-                    .value(i)
+            if expression.expr._name in key_names:
+                raise Error(
+                    "Aggregate output name collides with grouping key: "
+                    + expression.expr._name
                 )
-                if key not in lookup:
-                    lookup[key] = len(representatives)
-                    representatives.append(i)
-                group = lookup[key]
-            groups.append(group)
-        var columns = List[Series]()
-        columns.append(self._frame._columns[key_index].take(representatives))
+        var groups = encode_rows(self._keys, nulls_equal=True)
+        var columns = self._key_columns(groups)
         for expression in bound:
             columns.append(
                 evaluate(
@@ -814,8 +850,22 @@ struct GroupBy(Copyable):
                     self._frame.height(),
                     batch_size=batch_size,
                     grouped=True,
-                    groups=groups,
-                    group_count=len(representatives),
+                    groups=groups.ids,
+                    group_count=groups.count(),
                 )
             )
-        return DataFrame(columns^, height=len(representatives))
+        return DataFrame(columns^, height=groups.count())
+
+    def len(self, name: String = "len") raises -> DataFrame:
+        """Row count per group, including rows with null values."""
+        if name in self._key_names():
+            raise Error(
+                "Aggregate output name collides with grouping key: " + name
+            )
+        var groups = encode_rows(self._keys, nulls_equal=True)
+        var counts = List[Int64](length=groups.count(), fill=0)
+        for id in groups.ids:
+            counts[id] += 1
+        var columns = self._key_columns(groups)
+        columns.append(Series(name, Column[Int64](counts^)))
+        return DataFrame(columns^, height=groups.count())

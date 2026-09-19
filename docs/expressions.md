@@ -161,7 +161,22 @@ They are reference/legacy APIs, not implementations of expression reductions.
 
 ## Grouping and ordering
 
-`group_by` currently accepts one String key. Null keys form one group.
+`group_by` accepts one column name, a list of names, or a list of key
+expressions, and keys may have any dtype. Expression keys are evaluated once and
+named by their output names; they may be row-valued or scalar (scalars form one
+group) but not aggregates. Aggregations always see the original columns, even
+when a key expression reuses a column's name. Output columns are the keys in the
+order given, then the aggregates.
+
+Keys compare exactly per column through a shared row-key layer
+(`dataframe/hashing.mojo`): each column is mapped to dense codes and the codes
+are combined column by column, so there is no string concatenation and no
+reliance on hash uniqueness. A null is a key value of its own column: rows group
+together only when their nulls fall in the same key columns. Float64 keys treat
+every NaN as one value and `-0.0` as equal to `0.0`. The same layer, with nulls
+never matching, is used for joins. `GroupBy.len(name="len")` counts rows per
+group. `pixi run bench-group-by` reports cost by key count and cardinality.
+
 `agg` accepts aggregate-shaped expressions, including arithmetic on reductions;
 bare columns, literals alone, and mixed row/aggregate outputs are rejected.
 Output names must be unique and must not collide with the key.
