@@ -35,13 +35,30 @@ from .expr import (
     FLOOR,
     CEIL,
     ROUND,
+    LIT_NULL,
+    AND,
+    OR,
+    XOR,
+    FILL_NULL,
+    FILL_NAN,
+    KEEP_NULLS,
+    NOT,
+    IS_NULL,
+    IS_NOT_NULL,
+    IS_NAN,
+    IS_NOT_NAN,
+    IS_FINITE,
+    IS_INFINITE,
+    ANY,
+    ALL,
+    NULL_COUNT,
     is_reduction,
 )
 from .binding import BoundExpr, ROWS
 from .column import Column
 from .series import Series
 from .expr_kernels import binary, unary
-from .reductions import IntSumState, FloatSumState
+from .aggregate import Reducer
 
 
 def _empty(dtype: String) raises -> Series:
@@ -90,6 +107,18 @@ def _binary_op[
         return binary[EQ, width](left, right)
     if op == NE:
         return binary[NE, width](left, right)
+    if op == AND:
+        return binary[AND, width](left, right)
+    if op == OR:
+        return binary[OR, width](left, right)
+    if op == XOR:
+        return binary[XOR, width](left, right)
+    if op == FILL_NULL:
+        return binary[FILL_NULL, width](left, right)
+    if op == FILL_NAN:
+        return binary[FILL_NAN, width](left, right)
+    if op == KEEP_NULLS:
+        return binary[KEEP_NULLS, width](left, right)
     raise Error("Unsupported binary expression node")
 
 
@@ -112,6 +141,20 @@ def _unary_op[
         return unary[CEIL, width](input, integer)
     if op == ROUND:
         return unary[ROUND, width](input, integer)
+    if op == NOT:
+        return unary[NOT, width](input, integer)
+    if op == IS_NULL:
+        return unary[IS_NULL, width](input, integer)
+    if op == IS_NOT_NULL:
+        return unary[IS_NOT_NULL, width](input, integer)
+    if op == IS_NAN:
+        return unary[IS_NAN, width](input, integer)
+    if op == IS_NOT_NAN:
+        return unary[IS_NOT_NAN, width](input, integer)
+    if op == IS_FINITE:
+        return unary[IS_FINITE, width](input, integer)
+    if op == IS_INFINITE:
+        return unary[IS_INFINITE, width](input, integer)
     raise Error("Unsupported unary expression node")
 
 
@@ -142,6 +185,8 @@ def _eval[
         return Series("", Column[Bool]([Bool(node.integer)]))
     if node.op == LIT_STRING:
         return Series("", Column[String]([node.text]))
+    if node.op == LIT_NULL:
+        return Series.full_null("", node.text, 1)
     if is_reduction(node.op):
         if grouped:
             return aggregates[index].slice(offset, length)
@@ -173,47 +218,6 @@ def _batch[
     )
 
 
-def _accumulate_int(
-    values: Column[Int64],
-    offset: Int,
-    grouped: Bool,
-    groups: List[Int],
-    mut states: List[IntSumState],
-):
-    for i in range(len(values)):
-        if values._valid(i):
-            var g = groups[offset + i] if grouped else 0
-            states[g].add(values._values[i])
-
-
-def _accumulate_float(
-    values: Column[Float64],
-    offset: Int,
-    grouped: Bool,
-    groups: List[Int],
-    mut states: List[FloatSumState],
-):
-    for i in range(len(values)):
-        if values._valid(i):
-            var g = groups[offset + i] if grouped else 0
-            states[g].add(values._values[i])
-
-
-def _count[
-    T: Copyable & Deinitable
-](
-    values: Column[T],
-    offset: Int,
-    grouped: Bool,
-    groups: List[Int],
-    mut counts: List[Int64],
-):
-    for i in range(len(values)):
-        if values._valid(i):
-            var g = groups[offset + i] if grouped else 0
-            counts[g] += 1
-
-
 def evaluate[
     width: Int = 4
 ](
@@ -243,10 +247,12 @@ def evaluate[
         var node = bound.expr._nodes[node_index].copy()
         if not is_reduction(node.op):
             continue
-        var counts = List[Int64](length=group_count, fill=0)
-        var integers = List[IntSumState](length=group_count, fill=IntSumState())
-        var floats = List[FloatSumState](
-            length=group_count, fill=FloatSumState()
+        var reducer = Reducer(
+            node.op,
+            bound.dtypes[node.left],
+            group_count,
+            node.min_count,
+            node.integer,
         )
         for offset in range(0, height, batch_size):
             var chunk = _batch[width](
@@ -258,72 +264,8 @@ def evaluate[
                 min(batch_size, height - offset),
                 False,
             )
-            if node.op == COUNT:
-                if chunk._data.isa[Column[Int64]]():
-                    _count(
-                        chunk._data[Column[Int64]],
-                        offset,
-                        grouped,
-                        groups,
-                        counts,
-                    )
-                elif chunk._data.isa[Column[Float64]]():
-                    _count(
-                        chunk._data[Column[Float64]],
-                        offset,
-                        grouped,
-                        groups,
-                        counts,
-                    )
-                elif chunk._data.isa[Column[Bool]]():
-                    _count(
-                        chunk._data[Column[Bool]],
-                        offset,
-                        grouped,
-                        groups,
-                        counts,
-                    )
-                else:
-                    _count(
-                        chunk._data[Column[String]],
-                        offset,
-                        grouped,
-                        groups,
-                        counts,
-                    )
-            elif bound.dtypes[node_index] == "int64":
-                _accumulate_int(
-                    chunk._data[Column[Int64]],
-                    offset,
-                    grouped,
-                    groups,
-                    integers,
-                )
-            else:
-                _accumulate_float(
-                    chunk._data[Column[Float64]],
-                    offset,
-                    grouped,
-                    groups,
-                    floats,
-                )
-        var valid = List[Bool](length=group_count, fill=True)
-        if node.op == COUNT:
-            states[node_index] = Series("", Column[Int64](counts^))
-        elif bound.dtypes[node_index] == "int64":
-            var output = List[Int64](length=group_count, fill=0)
-            for g in range(group_count):
-                valid[g] = integers[g].count >= Int64(node.min_count)
-                if valid[g]:
-                    output[g] = integers[g].value()
-            states[node_index] = Series("", Column[Int64](output^, valid))
-        else:
-            var output = List[Float64](length=group_count, fill=0)
-            for g in range(group_count):
-                valid[g] = floats[g].count >= Int64(node.min_count)
-                if valid[g]:
-                    output[g] = floats[g].total
-            states[node_index] = Series("", Column[Float64](output^, valid))
+            reducer.update(chunk, offset, grouped, groups)
+        states[node_index] = reducer.finish()
     var root = len(bound.expr._nodes) - 1
     var result = _empty(bound.dtypes[root])
     var size = height if bound.shape() == ROWS else 1

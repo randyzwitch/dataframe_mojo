@@ -28,6 +28,24 @@ from .expr import (
     FLOOR,
     CEIL,
     ROUND,
+    LIT_NULL,
+    AND,
+    OR,
+    XOR,
+    FILL_NULL,
+    FILL_NAN,
+    KEEP_NULLS,
+    NOT,
+    IS_NULL,
+    IS_NOT_NULL,
+    IS_NAN,
+    IS_NOT_NAN,
+    IS_FINITE,
+    IS_INFINITE,
+    ANY,
+    ALL,
+    NULL_COUNT,
+    is_logical,
     is_binary,
     is_unary,
     is_reduction,
@@ -91,6 +109,32 @@ def op_name(op: Int) -> String:
         return "ceil"
     if op == ROUND:
         return "round"
+    if op == AND:
+        return "and"
+    if op == OR:
+        return "or"
+    if op == XOR:
+        return "xor"
+    if op == NOT:
+        return "not"
+    if op == FILL_NULL:
+        return "fill_null"
+    if op == FILL_NAN:
+        return "fill_nan"
+    if op == IS_NAN:
+        return "is_nan"
+    if op == IS_NOT_NAN:
+        return "is_not_nan"
+    if op == IS_FINITE:
+        return "is_finite"
+    if op == IS_INFINITE:
+        return "is_infinite"
+    if op == ANY:
+        return "any"
+    if op == ALL:
+        return "all"
+    if op == NULL_COUNT:
+        return "null_count"
     if op == SUM:
         return "sum"
     if op == COUNT:
@@ -105,6 +149,8 @@ def _numeric(dtype: String) -> Bool:
 
 
 def _binary_dtype(op: Int, left: String, right: String) raises -> String:
+    if op == KEEP_NULLS:
+        return right
     if left != right:
         raise Error(
             op_name(op)
@@ -118,6 +164,16 @@ def _binary_dtype(op: Int, left: String, right: String) raises -> String:
         return "bool"
     if is_comparison(op):
         return "bool"
+    if is_logical(op):
+        if left != "bool":
+            raise Error(op_name(op) + " requires bool operands, found " + left)
+        return "bool"
+    if op == FILL_NULL:
+        return left
+    if op == FILL_NAN:
+        if left != "float64":
+            raise Error("fill_nan requires float64 operands, found " + left)
+        return left
     if not _numeric(left):
         raise Error(op_name(op) + " requires numeric operands, found " + left)
     if op == DIV:
@@ -126,11 +182,39 @@ def _binary_dtype(op: Int, left: String, right: String) raises -> String:
 
 
 def _unary_dtype(op: Int, input: String) raises -> String:
+    if op == IS_NULL or op == IS_NOT_NULL:
+        return "bool"
+    if op == NOT:
+        if input != "bool":
+            raise Error("not requires a bool operand, found " + input)
+        return "bool"
+    if op >= IS_NAN and op <= IS_INFINITE:
+        if input != "float64":
+            raise Error(
+                op_name(op) + " requires a float64 operand, found " + input
+            )
+        return "bool"
     if not _numeric(input):
         raise Error(op_name(op) + " requires a numeric operand, found " + input)
     if op == SQRT or op == EXP or op == LOG:
         return "float64"
     return input
+
+
+def _reduction_dtype(op: Int, input: String) raises -> String:
+    if op == SUM:
+        if not _numeric(input):
+            raise Error("sum requires a numeric expression, found " + input)
+        return input
+    if op == COUNT or op == NULL_COUNT:
+        return "int64"
+    if op == ANY or op == ALL:
+        if input != "bool":
+            raise Error(
+                op_name(op) + " requires a bool expression, found " + input
+            )
+        return "bool"
+    raise Error("Unsupported reduction: " + op_name(op))
 
 
 def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
@@ -163,6 +247,14 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
             dtype = "bool"
         elif node.op == LIT_STRING:
             dtype = "string"
+        elif node.op == LIT_NULL:
+            if not (
+                _numeric(node.text)
+                or node.text == "bool"
+                or node.text == "string"
+            ):
+                raise Error("Unknown null literal dtype: " + node.text)
+            dtype = node.text
         elif is_reduction(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid aggregate input")
@@ -172,11 +264,7 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
                 )
             if node.min_count < 0:
                 raise Error("min_count must be nonnegative")
-            dtype = types[node.left]
-            if node.op == SUM and not _numeric(dtype):
-                raise Error("sum requires a numeric expression")
-            if node.op == COUNT:
-                dtype = "int64"
+            dtype = _reduction_dtype(node.op, types[node.left])
             shape = AGGREGATE
             has_aggregate = True
         elif is_unary(node.op):

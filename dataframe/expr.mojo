@@ -12,6 +12,8 @@ comptime GT = 8
 comptime EQ = 9
 comptime SUM = 10
 comptime COUNT = 11
+# A typed null literal; the dtype name is kept in `text`.
+comptime LIT_NULL = 12
 
 # Binary operations occupy 20..49.
 comptime LT = 20
@@ -24,6 +26,13 @@ comptime MOD = 26
 comptime POW = 27
 comptime CLIP_LOW = 28
 comptime CLIP_HIGH = 29
+comptime AND = 30
+comptime OR = 31
+comptime XOR = 32
+comptime FILL_NULL = 33
+comptime FILL_NAN = 34
+# Right's values where left is valid, null where left is null.
+comptime KEEP_NULLS = 35
 
 # Unary operations occupy 50..79; ROUND keeps its decimals in `integer`.
 comptime NEG = 50
@@ -34,6 +43,29 @@ comptime LOG = 54
 comptime FLOOR = 55
 comptime CEIL = 56
 comptime ROUND = 57
+comptime NOT = 60
+comptime IS_NULL = 61
+comptime IS_NOT_NULL = 62
+comptime IS_NAN = 63
+comptime IS_NOT_NAN = 64
+comptime IS_FINITE = 65
+comptime IS_INFINITE = 66
+
+# Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
+comptime MIN = 80
+comptime MAX = 81
+comptime MEAN = 82
+comptime FIRST = 83
+comptime LAST = 84
+comptime N_UNIQUE = 85
+comptime STD = 86
+comptime VAR = 87
+comptime MEDIAN = 88
+comptime QUANTILE = 89
+comptime LEN = 90
+comptime ANY = 91
+comptime ALL = 92
+comptime NULL_COUNT = 93
 
 
 def is_binary(op: Int) -> Bool:
@@ -50,6 +82,10 @@ def is_reduction(op: Int) -> Bool:
 
 def is_comparison(op: Int) -> Bool:
     return op == GT or op == EQ or (op >= LT and op <= NE)
+
+
+def is_logical(op: Int) -> Bool:
+    return op == AND or op == OR or op == XOR
 
 
 @fieldwise_init
@@ -182,6 +218,106 @@ struct Expr(Copyable):
     def clip_max(self, upper: Self) -> Self:
         return self._binary(upper, CLIP_HIGH)
 
+    def __and__(self, other: Self) -> Self:
+        """Kleene AND: false wins over null; otherwise null propagates."""
+        return self._binary(other, AND)
+
+    def __or__(self, other: Self) -> Self:
+        """Kleene OR: true wins over null; otherwise null propagates."""
+        return self._binary(other, OR)
+
+    def __xor__(self, other: Self) -> Self:
+        return self._binary(other, XOR)
+
+    def __invert__(self) -> Self:
+        return self._unary(NOT)
+
+    def and_(self, other: Self) -> Self:
+        return self._binary(other, AND)
+
+    def or_(self, other: Self) -> Self:
+        return self._binary(other, OR)
+
+    def xor(self, other: Self) -> Self:
+        return self._binary(other, XOR)
+
+    def not_(self) -> Self:
+        return self._unary(NOT)
+
+    def is_null(self) -> Self:
+        return self._unary(IS_NULL)
+
+    def is_not_null(self) -> Self:
+        return self._unary(IS_NOT_NULL)
+
+    def is_nan(self) -> Self:
+        return self._unary(IS_NAN)
+
+    def is_not_nan(self) -> Self:
+        return self._unary(IS_NOT_NAN)
+
+    def is_finite(self) -> Self:
+        return self._unary(IS_FINITE)
+
+    def is_infinite(self) -> Self:
+        return self._unary(IS_INFINITE)
+
+    def fill_null(self, value: Self) -> Self:
+        """Replace nulls with value; the dtypes must match."""
+        return self._binary(value, FILL_NULL)
+
+    def fill_nan(self, value: Self) -> Self:
+        """Replace valid NaNs in a Float64 expression with value."""
+        return self._binary(value, FILL_NAN)
+
+    def is_in(self, values: List[Self]) -> Self:
+        """True when equal to any value; null input stays null.
+
+        A null in `values` never matches. An empty list yields false.
+        """
+        var found = lit(False)
+        for value in values:
+            found = found._binary(
+                self._binary(value, EQ)._binary(lit(False), FILL_NULL), OR
+            )
+        return self._binary(found, KEEP_NULLS)
+
+    def is_between(
+        self, lower: Self, upper: Self, closed: String = "both"
+    ) raises -> Self:
+        """lower <= x <= upper; `closed` is both, left, right, or none."""
+        var low: Self
+        var high: Self
+        if closed == "both":
+            low = self._binary(lower, GE)
+            high = self._binary(upper, LE)
+        elif closed == "left":
+            low = self._binary(lower, GE)
+            high = self._binary(upper, LT)
+        elif closed == "right":
+            low = self._binary(lower, GT)
+            high = self._binary(upper, LE)
+        elif closed == "none":
+            low = self._binary(lower, GT)
+            high = self._binary(upper, LT)
+        else:
+            raise Error("closed must be 'both', 'left', 'right', or 'none'")
+        return low._binary(high, AND)
+
+    def any(self, ignore_nulls: Bool = True) -> Self:
+        """Any true value. With ignore_nulls=False, Kleene: null if no true
+        and some null."""
+        return self._unary(ANY, Int64(ignore_nulls))
+
+    def all(self, ignore_nulls: Bool = True) -> Self:
+        """All values true; empty is true. With ignore_nulls=False, Kleene:
+        null if no false and some null."""
+        return self._unary(ALL, Int64(ignore_nulls))
+
+    def null_count(self) -> Self:
+        """Number of null values, as Int64."""
+        return self._unary(NULL_COUNT)
+
     def sum(self, min_count: Int = 0) -> Self:
         """Skip nulls; zero when empty unless fewer than min_count are valid."""
         var nodes = self._nodes.copy()
@@ -223,3 +359,18 @@ def lit(value: Bool) -> Expr:
 
 def lit(value: String) -> Expr:
     return Expr([_node(LIT_STRING, text=value)], "literal")
+
+
+def null(dtype: String) -> Expr:
+    """A typed null literal: int64, float64, bool, or string."""
+    return Expr([_node(LIT_NULL, text=dtype)], "literal")
+
+
+def coalesce(exprs: List[Expr]) raises -> Expr:
+    """First non-null value per row, left to right; dtypes must match."""
+    if len(exprs) == 0:
+        raise Error("coalesce requires at least one expression")
+    var result = exprs[0].copy()
+    for i in range(1, len(exprs)):
+        result = result.fill_null(exprs[i])
+    return result^
