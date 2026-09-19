@@ -230,7 +230,7 @@ def test_series_cast_masks_and_validation() raises:
         values(series.cast("int64", strict=False)), [String("5"), "null"]
     )
     with assert_raises(contains="Unknown cast dtype"):
-        _ = series.cast("int32")
+        _ = series.cast("int128")
     var frame = DataFrame([series.copy()])
     with assert_raises(contains="Unknown cast dtype: decimal"):
         _ = frame.select(col("s").cast("decimal"))

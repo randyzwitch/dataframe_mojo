@@ -1,5 +1,5 @@
 """Bounded text rendering. Only displayed cells are ever formatted."""
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .temporal import format as format_temporal
 from .column import Column
 from .string_column import StringColumn, StringBuilder
@@ -62,18 +62,18 @@ def format_string(text: String, max_length: Int) -> String:
 
 def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
     """Format one cell; assumes the row index is in bounds."""
-    if series._data.isa[Column[Int64]]():
-        ref column = series._data[Column[Int64]]
-        if not column._valid(row):
-            return "null"
-        if series.dtype().is_temporal():
-            return format_temporal(column._get(row), series.dtype())
-        return String(column._get(row))
-    if series._data.isa[Column[Float64]]():
-        ref column = series._data[Column[Float64]]
-        if not column._valid(row):
-            return "null"
-        return String(column._get(row))
+    comptime for i in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[i]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            if not column._valid(row):
+                return "null"
+            comptime if D == DType.int64:
+                if series.dtype().is_temporal():
+                    return format_temporal(
+                        column._get(row).cast[DType.int64](), series.dtype()
+                    )
+            return String(column._get(row))
     if series._data.isa[Column[Bool]]():
         ref column = series._data[Column[Bool]]
         if not column._valid(row):

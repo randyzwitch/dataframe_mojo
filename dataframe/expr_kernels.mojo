@@ -1,6 +1,7 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from .column import Column
+from .dtype import NUMERIC_DTYPES
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr import (
@@ -125,12 +126,12 @@ def fit_mask(mask: List[Bool], n: Int) -> List[Bool]:
     return List[Bool](length=n, fill=mask[0])
 
 
-def _float_scalar[op: Int](x: Float64, y: Float64) -> Float64:
+def _float_scalar[op: Int, D: DType](x: Scalar[D], y: Scalar[D]) -> Scalar[D]:
     comptime if op == FLOORDIV:
         return floor(x / y)
     elif op == MOD:
         if y == 0 or isnan(x) or isnan(y) or isinf(x):
-            return Float64(0) / Float64(0)
+            return Scalar[D](0) / Scalar[D](0)
         return x % y
     elif op == POW:
         return pow(x, y)
@@ -145,18 +146,18 @@ def _float_scalar[op: Int](x: Float64, y: Float64) -> Float64:
 
 
 def _numeric_float[
-    op: Int, width: Int
-](left: Column[Float64], right: Column[Float64]) raises -> Series:
+    op: Int, width: Int, D: DType
+](left: Column[Scalar[D]], right: Column[Scalar[D]]) raises -> Series:
     var n = _length(len(left), len(right))
     var valid = List[Bool](length=n, fill=False)
     comptime predicate = is_comparison(op)
-    var values = List[Float64](length=0 if predicate else n, fill=0)
+    var values = List[Scalar[D]](length=0 if predicate else n, fill=0)
     var predicates = List[Bool](length=n if predicate else 0, fill=False)
     # Gather/load valid lanes into vectors. A future buffer-view layer can
     # replace these lane loads without altering the IR or public API.
     for start in range(0, n, width):
-        var x = SIMD[DType.float64, width](0)
-        var y = SIMD[DType.float64, width](0)
+        var x = SIMD[D, width](0)
+        var y = SIMD[D, width](0)
         comptime for lane in range(width):
             var i = start + lane
             if i < n:
@@ -185,7 +186,7 @@ def _numeric_float[
                 if start + lane < n:
                     predicates[start + lane] = result[lane]
         else:
-            var result: SIMD[DType.float64, width]
+            var result: SIMD[D, width]
             comptime if op == ADD:
                 result = x + y
             elif op == SUB:
@@ -195,27 +196,109 @@ def _numeric_float[
             elif op == DIV:
                 result = x / y
             else:
-                result = SIMD[DType.float64, width](0)
+                result = SIMD[D, width](0)
                 comptime for lane in range(width):
-                    result[lane] = _float_scalar[op](x[lane], y[lane])
+                    result[lane] = _float_scalar[op, D](x[lane], y[lane])
             comptime for lane in range(width):
                 if start + lane < n:
                     values[start + lane] = result[lane]
     comptime if predicate:
         return Series("", Column[Bool](predicates^, valid))
     else:
-        return Series("", Column[Float64](values^, valid))
+        return Series("", Column[Scalar[D]](values^, valid))
+
+
+# Integer widths other than Int64 compute in 128 bits (signed or unsigned to
+# match the operand) and range-check the result, which covers MIN // -1,
+# unsigned underflow, and every product of two 64-bit magnitudes.
+
+
+def _wide_type(D: DType) -> DType:
+    return DType.int128 if D.is_signed() else DType.uint128
+
+
+def _narrow[
+    D: DType, W: DType
+](value: Scalar[W], what: String) raises -> Scalar[D]:
+    if value > Scalar[D].MAX.cast[W]() or value < Scalar[D].MIN.cast[W]():
+        raise Error(String(D) + " " + what + " overflow")
+    return value.cast[D]()
+
+
+def _int_binary[
+    op: Int, D: DType
+](x: Scalar[D], y: Scalar[D]) raises -> Scalar[D]:
+    """Checked + - * ** // % for one integer width; // and % assume y != 0."""
+    comptime if D == DType.int64:
+        var a = rebind[Int64](x)
+        var b = rebind[Int64](y)
+        var r: Int64
+        comptime if op == ADD:
+            r = checked_add(a, b)
+        elif op == SUB:
+            r = _checked_sub(a, b)
+        elif op == MUL:
+            r = _checked_mul(a, b)
+        elif op == POW:
+            r = _checked_pow(a, b)
+        elif op == FLOORDIV:
+            if b == -1:
+                if a == INT64_MIN:
+                    raise Error("Int64 floor division overflow")
+                r = -a
+            else:
+                r = a // b
+        else:
+            r = 0 if b == -1 else a % b
+        return rebind[Scalar[D]](r)
+    else:
+        comptime W = _wide_type(D)
+        var a = x.cast[W]()
+        var b = y.cast[W]()
+        comptime if op == ADD:
+            return _narrow[D, W](a + b, "addition")
+        elif op == SUB:
+            comptime if not D.is_signed():
+                if b > a:
+                    raise Error(String(D) + " subtraction overflow")
+            return _narrow[D, W](a - b, "subtraction")
+        elif op == MUL:
+            return _narrow[D, W](a * b, "multiplication")
+        elif op == FLOORDIV:
+            return _narrow[D, W](a // b, "floor division")
+        elif op == MOD:
+            return (a % b).cast[D]()
+        else:
+            comptime if D.is_signed():
+                if b < 0:
+                    raise Error(
+                        String(D) + " pow requires a nonnegative exponent"
+                    )
+            var result = Scalar[W](1)
+            var factor = a
+            var remaining = b
+            while remaining > 0:
+                if remaining & 1 == 1:
+                    result = _narrow[D, W](result * factor, "pow").cast[W]()
+                remaining >>= 1
+                if remaining > 0:
+                    factor = _narrow[D, W](factor * factor, "pow").cast[W]()
+            return result.cast[D]()
 
 
 def _numeric_int[
-    op: Int
-](left: Column[Int64], right: Column[Int64], mask: List[Bool]) raises -> Series:
+    op: Int, D: DType
+](
+    left: Column[Scalar[D]], right: Column[Scalar[D]], mask: List[Bool]
+) raises -> Series:
     var n = _length(len(left), len(right))
     var active = fit_mask(mask, n)
     var valid = List[Bool](length=n, fill=False)
     comptime predicate = is_comparison(op)
     comptime floating = op == DIV
-    var values = List[Int64](length=0 if predicate or floating else n, fill=0)
+    var values = List[Scalar[D]](
+        length=0 if predicate or floating else n, fill=0
+    )
     var floats = List[Float64](length=n if floating else 0, fill=0)
     var predicates = List[Bool](length=n if predicate else 0, fill=False)
     # Checked integer arithmetic stays scalar until a vector overflow path
@@ -231,32 +314,15 @@ def _numeric_int[
             continue
         var x = left._get(a)
         var y = right._get(b)
-        comptime if op == ADD:
-            values[i] = checked_add(x, y)
-        elif op == SUB:
-            values[i] = _checked_sub(x, y)
-        elif op == MUL:
-            values[i] = _checked_mul(x, y)
+        comptime if op == ADD or op == SUB or op == MUL or op == POW:
+            values[i] = _int_binary[op, D](x, y)
         elif op == DIV:
-            floats[i] = Float64(x) / Float64(y)
-        elif op == FLOORDIV:
+            floats[i] = x.cast[DType.float64]() / y.cast[DType.float64]()
+        elif op == FLOORDIV or op == MOD:
             if y == 0:
                 valid[i] = False
-            elif y == -1:
-                if x == INT64_MIN:
-                    raise Error("Int64 floor division overflow")
-                values[i] = -x
             else:
-                values[i] = x // y
-        elif op == MOD:
-            if y == 0:
-                valid[i] = False
-            elif y == -1:
-                values[i] = 0
-            else:
-                values[i] = x % y
-        elif op == POW:
-            values[i] = _checked_pow(x, y)
+                values[i] = _int_binary[op, D](x, y)
         elif op == CLIP_LOW:
             values[i] = max(x, y)
         elif op == CLIP_HIGH:
@@ -278,7 +344,7 @@ def _numeric_int[
     elif floating:
         return Series("", Column[Float64](floats^, valid))
     else:
-        return Series("", Column[Int64](values^, valid))
+        return Series("", Column[Scalar[D]](values^, valid))
 
 
 def _compare[
@@ -342,14 +408,20 @@ def _compare_strings[
 def _arithmetic[
     op: Int, width: Int
 ](left: Series, right: Series, mask: List[Bool]) raises -> Series:
-    if left._data.isa[Column[Float64]]():
-        return _numeric_float[op, width](
-            left._data[Column[Float64]], right._data[Column[Float64]]
-        )
-    if left._data.isa[Column[Int64]]():
-        return _numeric_int[op](
-            left._data[Column[Int64]], right._data[Column[Int64]], mask
-        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if left._data.isa[Column[Scalar[D]]]():
+            comptime if D.is_floating_point():
+                return _numeric_float[op, width, D](
+                    left._data[Column[Scalar[D]]],
+                    right._data[Column[Scalar[D]]],
+                )
+            else:
+                return _numeric_int[op, D](
+                    left._data[Column[Scalar[D]]],
+                    right._data[Column[Scalar[D]]],
+                    mask,
+                )
     comptime if is_comparison(op):
         if left._data.isa[Column[Bool]]():
             return _compare[op](
@@ -363,20 +435,22 @@ def _arithmetic[
 
 
 def _unary_float[
-    op: Int, width: Int
-](input: Column[Float64], decimals: Int) raises -> Series:
+    op: Int, width: Int, D: DType
+](
+    input: Column[Scalar[D]], decimals: Int
+) raises -> Series where D.is_floating_point():
     var n = len(input)
     var valid = List[Bool](length=n, fill=False)
-    var values = List[Float64](length=n, fill=0)
+    var values = List[Scalar[D]](length=n, fill=0)
     for start in range(0, n, width):
-        var x = SIMD[DType.float64, width](0)
+        var x = SIMD[D, width](0)
         comptime for lane in range(width):
             var i = start + lane
             if i < n:
                 valid[i] = input._valid(i)
                 if valid[i]:
                     x[lane] = input._get(i)
-        var result: SIMD[DType.float64, width]
+        var result: SIMD[D, width]
         comptime if op == NEG:
             result = -x
         elif op == ABS:
@@ -392,23 +466,25 @@ def _unary_float[
         elif op == CEIL:
             result = ceil(x)
         else:
-            result = SIMD[DType.float64, width](0)
+            result = SIMD[D, width](0)
             comptime for lane in range(width):
-                result[lane] = _round_half_away(x[lane], decimals)
+                result[lane] = _round_half_away(
+                    x[lane].cast[DType.float64](), decimals
+                ).cast[D]()
         comptime for lane in range(width):
             if start + lane < n:
                 values[start + lane] = result[lane]
-    return Series("", Column[Float64](values^, valid))
+    return Series("", Column[Scalar[D]](values^, valid))
 
 
 def _unary_int[
-    op: Int
-](input: Column[Int64], mask: List[Bool]) raises -> Series:
+    op: Int, D: DType
+](input: Column[Scalar[D]], mask: List[Bool]) raises -> Series:
     var n = len(input)
     var active = fit_mask(mask, n)
     var valid = List[Bool](length=n, fill=False)
     comptime floating = op == SQRT or op == EXP or op == LOG
-    var values = List[Int64](length=0 if floating else n, fill=0)
+    var values = List[Scalar[D]](length=0 if floating else n, fill=0)
     var floats = List[Float64](length=n if floating else 0, fill=0)
     for i in range(n):
         valid[i] = input._valid(i) and (len(active) == 0 or active[i])
@@ -416,39 +492,48 @@ def _unary_int[
             continue
         var x = input._get(i)
         comptime if op == NEG or op == ABS:
-            if op == ABS and x >= 0:
-                values[i] = x
+            comptime if D.is_signed():
+                if op == ABS and x >= 0:
+                    values[i] = x
+                else:
+                    if x == Scalar[D].MIN:
+                        raise Error(
+                            ("Int64" if D == DType.int64 else String(D))
+                            + " "
+                            + ("abs" if op == ABS else "negation")
+                            + " overflow"
+                        )
+                    values[i] = -x
             else:
-                if x == INT64_MIN:
-                    raise Error(
-                        "Int64 "
-                        + ("abs" if op == ABS else "negation")
-                        + " overflow"
-                    )
-                values[i] = -x
+                if op == NEG and x != 0:
+                    raise Error(String(D) + " negation overflow")
+                values[i] = x
         elif op == SQRT:
-            floats[i] = sqrt(Float64(x))
+            floats[i] = sqrt(x.cast[DType.float64]())
         elif op == EXP:
-            floats[i] = exp(Float64(x))
+            floats[i] = exp(x.cast[DType.float64]())
         elif op == LOG:
-            floats[i] = log(Float64(x))
+            floats[i] = log(x.cast[DType.float64]())
         else:
             values[i] = x
     comptime if floating:
         return Series("", Column[Float64](floats^, valid))
     else:
-        return Series("", Column[Int64](values^, valid))
+        return Series("", Column[Scalar[D]](values^, valid))
 
 
 def _math[
     op: Int, width: Int
 ](input: Series, integer: Int64, mask: List[Bool]) raises -> Series:
-    if input._data.isa[Column[Float64]]():
-        return _unary_float[op, width](
-            input._data[Column[Float64]], Int(integer)
-        )
-    if input._data.isa[Column[Int64]]():
-        return _unary_int[op](input._data[Column[Int64]], mask)
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if input._data.isa[Column[Scalar[D]]]():
+            comptime if D.is_floating_point():
+                return _unary_float[op, width, D](
+                    input._data[Column[Scalar[D]]], Int(integer)
+                )
+            else:
+                return _unary_int[op, D](input._data[Column[Scalar[D]]], mask)
     raise Error("Unsupported unary kernel")
 
 
@@ -500,9 +585,11 @@ def _fill_null[
     return Column[T](values^, valid)
 
 
-def _fill_nan(left: Column[Float64], right: Column[Float64]) raises -> Series:
+def _fill_nan[
+    D: DType
+](left: Column[Scalar[D]], right: Column[Scalar[D]]) raises -> Series:
     var n = _length(len(left), len(right))
-    var values = List[Float64](length=n, fill=0)
+    var values = List[Scalar[D]](length=n, fill=0)
     var valid = List[Bool](length=n, fill=False)
     for i in range(n):
         var a = 0 if len(left) == 1 else i
@@ -513,19 +600,20 @@ def _fill_nan(left: Column[Float64], right: Column[Float64]) raises -> Series:
         else:
             values[i] = left._get(a)
             valid[i] = left._valid(a)
-    return Series("", Column[Float64](values^, valid))
+    return Series("", Column[Scalar[D]](values^, valid))
 
 
 def validity(series: Series) -> List[Bool]:
     var n = len(series)
     var valid = List[Bool](capacity=n)
-    if series._data.isa[Column[Int64]]():
-        for i in range(n):
-            valid.append(series._data[Column[Int64]]._valid(i))
-    elif series._data.isa[Column[Float64]]():
-        for i in range(n):
-            valid.append(series._data[Column[Float64]]._valid(i))
-    elif series._data.isa[Column[Bool]]():
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            for i in range(n):
+                valid.append(column._valid(i))
+            return valid^
+    if series._data.isa[Column[Bool]]():
         for i in range(n):
             valid.append(series._data[Column[Bool]]._valid(i))
     else:
@@ -556,24 +644,24 @@ def binary[
     comptime if is_logical(op):
         return _logical[op](left._data[Column[Bool]], right._data[Column[Bool]])
     elif op == FILL_NAN:
+        if left._data.isa[Column[Float32]]():
+            return _fill_nan(
+                left._data[Column[Float32]], right._data[Column[Float32]]
+            )
         return _fill_nan(
             left._data[Column[Float64]], right._data[Column[Float64]]
         )
     elif op == FILL_NULL:
-        if left._data.isa[Column[Int64]]():
-            return Series(
-                "",
-                _fill_null(
-                    left._data[Column[Int64]], right._data[Column[Int64]]
-                ),
-            )
-        if left._data.isa[Column[Float64]]():
-            return Series(
-                "",
-                _fill_null(
-                    left._data[Column[Float64]], right._data[Column[Float64]]
-                ),
-            )
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if left._data.isa[Column[Scalar[D]]]():
+                return Series(
+                    "",
+                    _fill_null(
+                        left._data[Column[Scalar[D]]],
+                        right._data[Column[Scalar[D]]],
+                    ),
+                )
         if left._data.isa[Column[Bool]]():
             return Series(
                 "",
@@ -592,10 +680,12 @@ def binary[
         return Series("", out^.finish())
     elif op == KEEP_NULLS:
         var mask = validity(left)
-        if right._data.isa[Column[Int64]]():
-            return Series("", _keep_nulls(mask, right._data[Column[Int64]]))
-        if right._data.isa[Column[Float64]]():
-            return Series("", _keep_nulls(mask, right._data[Column[Float64]]))
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if right._data.isa[Column[Scalar[D]]]():
+                return Series(
+                    "", _keep_nulls(mask, right._data[Column[Scalar[D]]])
+                )
         if right._data.isa[Column[Bool]]():
             return Series("", _keep_nulls(mask, right._data[Column[Bool]]))
         ref column = right._data[StringColumn]
@@ -612,7 +702,9 @@ def binary[
         return _arithmetic[op, width](left, right, mask)
 
 
-def _float_predicate[op: Int](input: Column[Float64]) raises -> Series:
+def _float_predicate[
+    op: Int, D: DType
+](input: Column[Scalar[D]]) raises -> Series:
     var n = len(input)
     var values = List[Bool](length=n, fill=False)
     var valid = List[Bool](length=n, fill=False)
@@ -651,6 +743,8 @@ def unary[
             values.append(column._valid(i) and not column._get(i))
         return Series("", Column[Bool](values^, valid))
     elif op >= IS_NAN and op <= IS_INFINITE:
+        if input._data.isa[Column[Float32]]():
+            return _float_predicate[op](input._data[Column[Float32]])
         return _float_predicate[op](input._data[Column[Float64]])
     else:
         return _math[op, width](input, integer, mask)
@@ -676,22 +770,17 @@ def _choose[
 
 def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     """Row-wise pick between branch results, broadcasting scalar branches."""
-    if then._data.isa[Column[Int64]]():
-        return Series(
-            "",
-            _choose(
-                selected, then._data[Column[Int64]], other._data[Column[Int64]]
-            ),
-        )
-    if then._data.isa[Column[Float64]]():
-        return Series(
-            "",
-            _choose(
-                selected,
-                then._data[Column[Float64]],
-                other._data[Column[Float64]],
-            ),
-        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if then._data.isa[Column[Scalar[D]]]():
+            return Series(
+                "",
+                _choose(
+                    selected,
+                    then._data[Column[Scalar[D]]],
+                    other._data[Column[Scalar[D]]],
+                ),
+            )
     if then._data.isa[Column[Bool]]():
         return Series(
             "",

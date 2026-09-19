@@ -6,6 +6,7 @@ canonical name used in schemas, casts, and error messages, and
 `DataType.parse(name)` is its inverse. Parameterized types (such as datetime
 units) keep their parameter in `_unit`.
 """
+from std.sys import size_of
 
 comptime _INT64 = 0
 comptime _FLOAT64 = 1
@@ -15,6 +16,30 @@ comptime _DATE = 4
 comptime _DATETIME = 5
 comptime _DURATION = 6
 comptime _TIME = 7
+comptime _INT8 = 8
+comptime _INT16 = 9
+comptime _INT32 = 10
+comptime _UINT8 = 11
+comptime _UINT16 = 12
+comptime _UINT32 = 13
+comptime _UINT64 = 14
+comptime _FLOAT32 = 15
+
+# Numeric storage types. Dispatch loops over this list at compile time, so
+# each iteration sees a concrete Scalar[D] with arithmetic, ordering, and
+# hashing; adding a numeric type means extending this list and DataType.
+comptime NUMERIC_DTYPES: Array[DType, 10] = [
+    DType.int64,
+    DType.float64,
+    DType.int8,
+    DType.int16,
+    DType.int32,
+    DType.uint8,
+    DType.uint16,
+    DType.uint32,
+    DType.uint64,
+    DType.float32,
+]
 
 # Time units for datetime and duration, kept in DataType._unit.
 comptime NS = 1
@@ -26,7 +51,8 @@ comptime MS = 3
 struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
     """A logical column type.
 
-    INT64, FLOAT64, BOOL, STRING, DATE (days since 1970-01-01), TIME
+    Numeric: INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
+    FLOAT32, FLOAT64. Also BOOL, STRING, DATE (days since 1970-01-01), TIME
     (nanoseconds since midnight), and datetime(unit) / duration(unit) with
     unit "ns", "us", or "ms". Temporal types are stored as Int64.
     """
@@ -40,6 +66,47 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
     comptime STRING = DataType(_STRING, 0)
     comptime DATE = DataType(_DATE, 0)
     comptime TIME = DataType(_TIME, 0)
+    comptime INT8 = DataType(_INT8, 0)
+    comptime INT16 = DataType(_INT16, 0)
+    comptime INT32 = DataType(_INT32, 0)
+    comptime UINT8 = DataType(_UINT8, 0)
+    comptime UINT16 = DataType(_UINT16, 0)
+    comptime UINT32 = DataType(_UINT32, 0)
+    comptime UINT64 = DataType(_UINT64, 0)
+    comptime FLOAT32 = DataType(_FLOAT32, 0)
+
+    @staticmethod
+    def of(dtype: DType) -> DataType:
+        """The DataType stored as Scalar[dtype] (numeric types only)."""
+        if dtype == DType.int64:
+            return DataType.INT64
+        if dtype == DType.float64:
+            return DataType.FLOAT64
+        if dtype == DType.int8:
+            return DataType.INT8
+        if dtype == DType.int16:
+            return DataType.INT16
+        if dtype == DType.int32:
+            return DataType.INT32
+        if dtype == DType.uint8:
+            return DataType.UINT8
+        if dtype == DType.uint16:
+            return DataType.UINT16
+        if dtype == DType.uint32:
+            return DataType.UINT32
+        if dtype == DType.uint64:
+            return DataType.UINT64
+        return DataType.FLOAT32
+
+    def storage(self) -> Optional[DType]:
+        """The numeric storage DType (int64 for temporal types); None for
+        bool and string."""
+        var physical = self.physical()
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if physical == DataType.of(D):
+                return D
+        return None
 
     @staticmethod
     def datetime(unit: String = "us") raises -> DataType:
@@ -62,6 +129,10 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
             return DataType.BOOL
         if name == "string":
             return DataType.STRING
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if name == String(D):
+                return DataType.of(D)
         if name == "date":
             return DataType.DATE
         if name == "time":
@@ -107,6 +178,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
             return "datetime[" + self.unit() + "]"
         if self._code == _DURATION:
             return "duration[" + self.unit() + "]"
+        if self._code >= _INT8:
+            return String(self.storage().value())
         return "string"
 
     def short_name(self) -> String:
@@ -119,6 +192,13 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
             return "bool"
         if self._code == _STRING:
             return "str"
+        if self._code >= _INT8:
+            var name = self.name()
+            if name.startswith("uint"):
+                return "u" + String(name[byte=4:])
+            if name.startswith("int"):
+                return "i" + String(name[byte=3:])
+            return "f" + String(name[byte=5:])
         return self.name()
 
     def unit(self) -> String:
@@ -167,22 +247,42 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
         return self.is_integer() or self.is_float()
 
     def is_integer(self) -> Bool:
-        return self._code == _INT64
+        return self._code == _INT64 or (
+            self._code >= _INT8 and self._code <= _UINT64
+        )
 
     def is_float(self) -> Bool:
-        return self._code == _FLOAT64
+        return self._code == _FLOAT64 or self._code == _FLOAT32
+
+    def is_unsigned(self) -> Bool:
+        return self._code >= _UINT8 and self._code <= _UINT64
 
     def is_signed(self) -> Bool:
         """Whether values can be negative (numeric types only)."""
-        return self.is_numeric()
+        return self.is_numeric() and not self.is_unsigned()
 
     def bit_width(self) -> Int:
         """Bits per value for fixed-width types; 0 for variable-width."""
-        if self._code == _INT64 or self._code == _FLOAT64 or self.is_temporal():
-            return 64
         if self._code == _BOOL:
             return 1
+        var physical = self.physical()
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if physical == DataType.of(D):
+                return size_of[Scalar[D]]() * 8
         return 0
+
+    def sum_type(self) -> DataType:
+        """The result type of sum and cumulative sums (as in Polars): 8-
+        and 16-bit integers widen to INT64; other types keep their type."""
+        if (
+            self._code == _INT8
+            or self._code == _INT16
+            or self._code == _UINT8
+            or self._code == _UINT16
+        ):
+            return DataType.INT64
+        return self
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(self.name())

@@ -31,7 +31,7 @@ nullable and Mojo `Pointer`s are not.
 """
 from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
 from .column import Column, _copy_bits
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
 from .series import Series
 from .string_column import StringColumn
@@ -229,11 +229,32 @@ def _call_array_release(array: Pointer[ArrowArray, MutAnyOrigin]):
     Pointer(to=address).unsafe_bitcast[_ArrayRelease]()[](array)
 
 
-def _format(dtype: DataType) raises -> String:
-    if dtype == DataType.INT64:
+def _numeric_format(dtype: DType) -> String:
+    """Arrow format characters for the numeric storage types."""
+    if dtype == DType.int8:
+        return "c"
+    if dtype == DType.uint8:
+        return "C"
+    if dtype == DType.int16:
+        return "s"
+    if dtype == DType.uint16:
+        return "S"
+    if dtype == DType.int32:
+        return "i"
+    if dtype == DType.uint32:
+        return "I"
+    if dtype == DType.int64:
         return "l"
-    if dtype == DataType.FLOAT64:
-        return "g"
+    if dtype == DType.uint64:
+        return "L"
+    if dtype == DType.float32:
+        return "f"
+    return "g"
+
+
+def _format(dtype: DataType) raises -> String:
+    if dtype.is_numeric():
+        return _numeric_format(dtype.storage().value())
     if dtype == DataType.BOOL:
         return "b"
     if dtype == DataType.STRING:
@@ -315,16 +336,15 @@ def _fill_array(
         array.offset = 0
         state.buffers.append(Int(state.owned[0].unsafe_ptr()))
         state.buffers.append(Int(state.owned[1].unsafe_ptr()))
-    elif kept._data.isa[Column[Int64]]():
-        ref column = kept._data[Column[Int64]]
-        array.offset = Int64(column._offset)
-        state.buffers.append(Int(column._bits[].unsafe_ptr()))
-        state.buffers.append(Int(column._data[].unsafe_ptr()))
     else:
-        ref column = kept._data[Column[Float64]]
-        array.offset = Int64(column._offset)
-        state.buffers.append(Int(column._bits[].unsafe_ptr()))
-        state.buffers.append(Int(column._data[].unsafe_ptr()))
+        # Every numeric (and remaining temporal) type is zero-copy.
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if kept._data.isa[Column[Scalar[D]]]():
+                ref column = kept._data[Column[Scalar[D]]]
+                array.offset = Int64(column._offset)
+                state.buffers.append(Int(column._bits[].unsafe_ptr()))
+                state.buffers.append(Int(column._data[].unsafe_ptr()))
     array.n_buffers = Int64(len(state.buffers))
     array.buffers = Int(state.buffers.unsafe_ptr())
     array.private_data = _leak(state^)
@@ -500,48 +520,14 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     if array.dictionary != 0 or schema.dictionary != 0:
         raise Error("Arrow dictionary arrays are not supported")
     var bits = _import_bits(_buffer(array, 0), offset, length)
-    if format == "l":
-        return Series(
-            name,
-            _int64_column(_import_fixed[Int64](array, length, offset), bits^),
-        )
-    if format == "g" or format == "f":
-        var values: List[Float64]
-        if format == "g":
-            values = _import_fixed[Float64](array, length, offset)
-        else:
-            values = List[Float64](capacity=length)
-            var data = _buffer(array, 1)
-            for i in range(length):
-                values.append(Float64(_read[Float32](data, offset + i)))
-        var column = Column[Float64](values^)
-        column._bits = ArcPointer(bits^)
-        return Series(name, column^)
-    # Narrower signed and unsigned integers widen losslessly to Int64.
-    if format == "c":
-        return Series(
-            name, _int64_column(_as_int64[Int8](array, length, offset), bits^)
-        )
-    if format == "s":
-        return Series(
-            name, _int64_column(_as_int64[Int16](array, length, offset), bits^)
-        )
-    if format == "i":
-        return Series(
-            name, _int64_column(_as_int64[Int32](array, length, offset), bits^)
-        )
-    if format == "C":
-        return Series(
-            name, _int64_column(_as_int64[UInt8](array, length, offset), bits^)
-        )
-    if format == "S":
-        return Series(
-            name, _int64_column(_as_int64[UInt16](array, length, offset), bits^)
-        )
-    if format == "I":
-        return Series(
-            name, _int64_column(_as_int64[UInt32](array, length, offset), bits^)
-        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if format == _numeric_format(D):
+            var column = Column[Scalar[D]](
+                _import_fixed[Scalar[D]](array, length, offset)
+            )
+            column._bits = ArcPointer(bits^)
+            return Series(name, column^)
     if format == "b":
         var values = List[Bool](capacity=length)
         var data = _buffer(array, 1)

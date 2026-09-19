@@ -9,10 +9,10 @@ from std.utils import Variant
 
 from .column import Column
 from .string_column import StringColumn, StringBuilder
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
 from .series import Series
-from .parse import parse_int64, parse_float64
+from .parse import parse_int64, parse_float64, parse_integer
 from .temporal import format as format_temporal, parse as parse_temporal
 
 
@@ -147,9 +147,11 @@ struct _CsvColumn(Copyable):
     def __init__(out self, field: CsvField, keep: Bool = True):
         self.field = field.copy()
         self.keep = keep
-        if field.dtype.physical() == CSV_INT64:
+        # Every integer width parses into Int64 slots (UInt64 by bit
+        # pattern) and every float into Float64; finish() narrows exactly.
+        if field.dtype.physical() == CSV_INT64 or field.dtype.is_integer():
             self.builder = _Builder(_IntBuilder([], []))
-        elif field.dtype == CSV_FLOAT64:
+        elif field.dtype.is_float():
             self.builder = _Builder(_FloatBuilder([], []))
         elif field.dtype == CSV_BOOL:
             self.builder = _Builder(_BoolBuilder([], []))
@@ -227,9 +229,18 @@ struct _CsvColumn(Copyable):
             self.builder[_IntBuilder].valid.append(True)
         elif self.builder.isa[_IntBuilder]():
             try:
-                self.builder[_IntBuilder].values.append(parse_int64(text))
+                self.builder[_IntBuilder].values.append(
+                    _parse_int_slot(text, self.field.dtype)
+                )
             except:
-                raise self._error(record, "invalid Int64 value '" + text + "'")
+                raise self._error(
+                    record,
+                    "invalid "
+                    + _display_name(self.field.dtype)
+                    + " value '"
+                    + text
+                    + "'",
+                )
             self.builder[_IntBuilder].valid.append(True)
         elif self.builder.isa[_FloatBuilder]():
             try:
@@ -248,6 +259,28 @@ struct _CsvColumn(Copyable):
             self.builder[StringBuilder].append(text)
 
     def finish(self) raises -> Series:
+        var dtype = self.field.dtype
+        if dtype.is_numeric() and dtype != CSV_INT64 and dtype != CSV_FLOAT64:
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                if dtype == DataType.of(D):
+                    var values = List[Scalar[D]]()
+                    var valid: List[Bool]
+                    comptime if D.is_floating_point():
+                        ref builder = self.builder[_FloatBuilder]
+                        valid = builder.valid.copy()
+                        values.reserve(len(builder.values))
+                        for x in builder.values:
+                            values.append(x.cast[D]())
+                    else:
+                        ref builder = self.builder[_IntBuilder]
+                        valid = builder.valid.copy()
+                        values.reserve(len(builder.values))
+                        for x in builder.values:
+                            values.append(x.cast[D]())
+                    return Series(
+                        self.field.name, Column[Scalar[D]](values^, valid)
+                    )
         if self.builder.isa[_IntBuilder]():
             return Series(
                 self.field.name,
@@ -1016,26 +1049,45 @@ def _render_field(
     return text
 
 
+def _parse_int_slot(text: String, dtype: DataType) raises -> Int64:
+    """Parse an integer field range-checked for dtype into an Int64 slot
+    (UInt64 keeps its bit pattern)."""
+    if dtype == CSV_INT64 or dtype.is_temporal():
+        return parse_int64(text)
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D.is_integral():
+            if dtype == DataType.of(D):
+                return parse_integer[D](text).cast[DType.int64]()
+    raise Error("not an integer dtype")
+
+
+def _display_name(dtype: DataType) -> String:
+    if dtype == CSV_INT64:
+        return "Int64"
+    return dtype.name()
+
+
 def _cell_text(series: Series, row: Int) -> String:
     """Canonical text for a valid cell; floats use the round-trip form."""
-    if series._data.isa[Column[Int64]]():
-        if series.dtype().is_temporal():
-            return format_temporal(
-                series._data[Column[Int64]]._get(row), series.dtype()
-            )
-        return String(series._data[Column[Int64]]._get(row))
-    if series._data.isa[Column[Float64]]():
-        return String(series._data[Column[Float64]]._get(row))
+    if series.dtype().is_temporal():
+        return format_temporal(
+            series._data[Column[Int64]]._get(row), series.dtype()
+        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            return String(series._data[Column[Scalar[D]]]._get(row))
     if series._data.isa[Column[Bool]]():
         return "true" if series._data[Column[Bool]]._get(row) else "false"
     return String(series._data[StringColumn]._get(row))
 
 
 def _cell_valid(series: Series, row: Int) -> Bool:
-    if series._data.isa[Column[Int64]]():
-        return series._data[Column[Int64]]._valid(row)
-    if series._data.isa[Column[Float64]]():
-        return series._data[Column[Float64]]._valid(row)
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            return series._data[Column[Scalar[D]]]._valid(row)
     if series._data.isa[Column[Bool]]():
         return series._data[Column[Bool]]._valid(row)
     return series._data[StringColumn]._valid(row)

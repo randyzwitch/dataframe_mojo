@@ -38,4 +38,6 @@ Behavioral differences worth knowing:
 - NaN is a value, distinct from null; `fill_null` does not touch NaN (use
   `fill_nan`).
 - Group output order is unspecified unless `maintain_order=True`.
-- Dtypes are Int64, Float64, Bool, and String for now.
+- Numeric dtypes are Int8–Int64, UInt8–UInt64, Float32, and Float64, with
+  no implicit promotion: mixed widths need an explicit `cast`. Sums of 8- and
+  16-bit integers produce Int64, as in Polars.

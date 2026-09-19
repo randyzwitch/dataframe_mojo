@@ -103,8 +103,8 @@ def test_validation() raises:
         _ = df.select(col(["x", "zzz"]))
     with assert_raises(contains="Unknown selector column: zzz"):
         _ = df.select(exclude(["zzz"]))
-    with assert_raises(contains="Unknown selector dtype: int32"):
-        _ = df.select(by_dtype(["int32"]))
+    with assert_raises(contains="Unknown selector dtype: int128"):
+        _ = df.select(by_dtype(["int128"]))
     with assert_raises(contains="nth selector index 9 is out of range"):
         _ = df.select(nth(9))
     with assert_raises(contains="at most one selector"):

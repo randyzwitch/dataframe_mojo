@@ -29,8 +29,9 @@ the shape pyarrow imports with `RecordBatch._import_from_c` and Polars with
 
 | dtype | Arrow format | export | import also accepts |
 |---|---|---|---|
-| Int64 | `l` int64 | zero-copy | `c` `s` `i` `C` `S` `I` (widened) |
-| Float64 | `g` float64 | zero-copy | `f` float32 (widened) |
+| Int8–Int64 | `c` `s` `i` `l` | zero-copy | |
+| UInt8–UInt64 | `C` `S` `I` `L` | zero-copy | |
+| Float32, Float64 | `f` `g` | zero-copy | |
 | String | `U` large_utf8 | zero-copy | `u` utf8 (offsets widened) |
 | Bool | `b` bool | values packed to bits | |
 | Date | `tdD` date32 | days narrowed to Int32 | `tdm` date64 |
@@ -42,8 +43,7 @@ Validity bitmaps are always shared. A sliced column exports its window offset
 as the ArrowArray `offset` instead of copying. Bool and Date export build new
 value buffers (Bool values are stored one byte per value internally).
 
-Import rejects, with an error naming the format: UInt64 (`L`, not
-representable in Int64), timestamps with a time zone, dictionary-encoded
+Import rejects, with an error naming the format: timestamps with a time zone, dictionary-encoded
 arrays, nested types other than the top-level struct, and struct arrays with
 null rows.
 

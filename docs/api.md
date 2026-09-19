@@ -19,8 +19,8 @@ One nullable cell of a supported dtype.
 Only the payload field matching `dtype` is meaningful. Equality is
 structural: nulls equal nulls of the same dtype and NaN equals NaN.
 
-- `def __init__(out self, value: Int64)`
-- `def __init__(out self, value: Float64)`
+- `def __init__[D: DType](out self, value: Scalar[D])`
+  A numeric value. Integers are held in an Int64 slot (UInt64 by bit pattern) and floats in a Float64 slot; both are exact.
 - `def __init__(out self, value: Bool)`
 - `def __init__(out self, value: String)`
 - `def __init__(out self, dtype: DataType, valid: Bool, integer: Int64, floating: Float64, boolean: Bool, var string: String)`
@@ -33,8 +33,18 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
   The stored Int64 of an Int64 or temporal value.
 - `def dtype(self) -> DataType`
 - `def is_null(self) -> Bool`
+- `def numeric[D: DType](self) -> Scalar[D]`
+  The value as Scalar[D]; the dtype must match exactly.
 - `def int64(self) -> Int64`
 - `def float64(self) -> Float64`
+- `def int8(self) -> Int8`
+- `def int16(self) -> Int16`
+- `def int32(self) -> Int32`
+- `def uint8(self) -> UInt8`
+- `def uint16(self) -> UInt16`
+- `def uint32(self) -> UInt32`
+- `def uint64(self) -> UInt64`
+- `def float32(self) -> Float32`
 - `def bool(self) -> Bool`
 - `def string(self) -> String`
 - `def write_to(self, mut writer: T)`
@@ -267,12 +277,17 @@ Own equal-length, uniquely named columns; transformations copy storage.
 
 A logical column type.
 
-INT64, FLOAT64, BOOL, STRING, DATE (days since 1970-01-01), TIME
+Numeric: INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
+FLOAT32, FLOAT64. Also BOOL, STRING, DATE (days since 1970-01-01), TIME
 (nanoseconds since midnight), and datetime(unit) / duration(unit) with
 unit "ns", "us", or "ms". Temporal types are stored as Int64.
 
 - `def __eq__(self, other: Self) -> Bool`
 - `def __ne__(self, other: Self) -> Bool`
+- `def of(dtype: DType) -> Self`
+  The DataType stored as Scalar[dtype] (numeric types only).
+- `def storage(self) -> Optional[DType]`
+  The numeric storage DType (int64 for temporal types); None for bool and string.
 - `def datetime(unit: String = "us") -> Self`
   A time-zone-naive instant counted in unit since the epoch.
 - `def duration(unit: String = "us") -> Self`
@@ -298,10 +313,13 @@ unit "ns", "us", or "ms". Temporal types are stored as Int64.
 - `def is_numeric(self) -> Bool`
 - `def is_integer(self) -> Bool`
 - `def is_float(self) -> Bool`
+- `def is_unsigned(self) -> Bool`
 - `def is_signed(self) -> Bool`
   Whether values can be negative (numeric types only).
 - `def bit_width(self) -> Int`
   Bits per value for fixed-width types; 0 for variable-width.
+- `def sum_type(self) -> Self`
+  The result type of sum and cumulative sums (as in Polars): 8- and 16-bit integers widen to INT64; other types keep their type.
 - `def write_to(self, mut writer: T)`
 
 ## `date_range`
@@ -461,8 +479,10 @@ A flat, topologically ordered tree; composition never evaluates data.
   All values true; empty is true. With ignore_nulls=False, Kleene: null if no false and some null.
 - `def null_count(self) -> Self`
   Number of null values, as Int64.
+- `def cast(self, dtype: DataType, strict: Bool = True) -> Self`
+  Convert to dtype; see the String overload.
 - `def cast(self, dtype: String, strict: Bool = True) -> Self`
-  Convert to int64, float64, bool, or string.
+  Convert to any dtype by name (numeric, bool, string, temporal).
 - `def cum_sum(self, reverse: Bool = False) -> Self`
   Running sum of non-null values; null rows stay null. Int64 is checked for overflow.
 - `def cum_min(self, reverse: Bool = False) -> Self`
@@ -627,6 +647,42 @@ def lit(value: Float64) -> Expr
 ```
 
 ```mojo
+def lit[D: DType](value: Scalar[D]) -> Expr
+```
+
+```mojo
+def lit(value: Int8) -> Expr
+```
+
+```mojo
+def lit(value: Int16) -> Expr
+```
+
+```mojo
+def lit(value: Int32) -> Expr
+```
+
+```mojo
+def lit(value: UInt8) -> Expr
+```
+
+```mojo
+def lit(value: UInt16) -> Expr
+```
+
+```mojo
+def lit(value: UInt32) -> Expr
+```
+
+```mojo
+def lit(value: UInt64) -> Expr
+```
+
+```mojo
+def lit(value: Float32) -> Expr
+```
+
+```mojo
 def lit(value: Bool) -> Expr
 ```
 
@@ -644,7 +700,7 @@ def nth(index: Int) -> Expr
 
 ## `null`
 
-A typed null literal: int64, float64, bool, or string.
+A typed null literal of any dtype name (see DataType.parse).
 
 ```mojo
 def null(dtype: String) -> Expr
@@ -678,8 +734,7 @@ def scan_csv(path: String, schema: CsvSchema) -> LazyFrame
 
 A named column of one supported dtype, plus expression-backed methods.
 
-- `def __init__(out self, var name: String, var column: Column[Int64])`
-- `def __init__(out self, var name: String, var column: Column[Float64])`
+- `def __init__[D: DType](out self, var name: String, var column: Column[Scalar[D]])`
 - `def __init__(out self, var name: String, var column: Column[Bool])`
 - `def __init__(out self, var name: String, var column: StringColumn)`
 - `def __init__(out self, var name: String, column: Column[String])`
@@ -767,6 +822,16 @@ A named column of one supported dtype, plus expression-backed methods.
   Return an owned typed copy, raising on a dtype mismatch.
 - `def float64(self) -> Column[Float64]`
   Return an owned typed copy, raising on a dtype mismatch.
+- `def numeric[D: DType](self) -> Column[Scalar[D]]`
+  The (shared, immutable) column as Scalar[D], raising on a dtype mismatch. Temporal columns read as their Int64 storage.
+- `def int8(self) -> Column[Int8]`
+- `def int16(self) -> Column[Int16]`
+- `def int32(self) -> Column[Int32]`
+- `def uint8(self) -> Column[UInt8]`
+- `def uint16(self) -> Column[UInt16]`
+- `def uint32(self) -> Column[UInt32]`
+- `def uint64(self) -> Column[UInt64]`
+- `def float32(self) -> Column[Float32]`
 - `def bool(self) -> Column[Bool]`
   Return an owned typed copy, raising on a dtype mismatch.
 - `def string(self) -> StringColumn`
