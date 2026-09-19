@@ -58,5 +58,30 @@ machine-readable timing and throughput metrics. For peak resident memory on
 Linux, run `/usr/bin/time -v pixi run bench-csv`; this intentionally remains an
 external measurement so the parser has no platform-specific runtime dependency.
 
+## Writing
+
+`write_csv(frame, path, has_header=True, separator=",",
+quote_style="necessary", null_value="", line_terminator="\n",
+buffer_size=65536)` streams a frame to UTF-8 CSV in chunks of about
+`buffer_size` bytes; `to_csv_string(frame, ...)` returns the same text.
+`CsvSchema.of(frame)` builds a nullable schema from a frame's names and dtypes.
+
+With the defaults the writer is the inverse of `read_csv`: for every supported
+dtype, `read_csv(path, CsvSchema.of(frame))` after `write_csv(frame, path)`
+equals the frame, including NaN, infinities, `-0.0`, Int64 extremes, empty
+strings, nulls, embedded quotes, separators, and line breaks.
+
+- Nulls are written as `null_value`, unquoted (empty by default).
+- `necessary` quotes a field (and header name) when it contains the separator,
+  a double quote, CR, or LF, is empty, or equals `null_value`, so empty strings
+  and literal null tokens stay distinct from nulls. Embedded quotes are doubled.
+- `always` quotes every non-null field; `non_numeric` quotes strings, Booleans,
+  and header names; `never` writes raw text and may not re-read correctly.
+- Int64 uses exact decimal digits, Float64 the shortest round-trippable form
+  (`nan`, `inf`, `-inf`, `-0.0`, `1e+300`), and Bool `true`/`false`.
+- `separator` must be one byte other than a quote, CR, or LF;
+  `line_terminator` is LF or CRLF; `null_value` cannot contain the separator,
+  quotes, or line breaks.
+
 Deferred features include schema inference, custom null tokens/dialects, dates,
 compression, remote URLs, permissive error skipping, and lazy `scan_csv`.
