@@ -67,6 +67,7 @@ from .cast import cast_series
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows
 from .window import window_op
+from .fusion import fused
 from .column import Column
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
@@ -212,6 +213,8 @@ def _eval[
         return _conditional[width](
             bound, columns, aggregates, index, offset, length, grouped, mask
         )
+    if bound.fusible[index] and node.left >= 0:
+        return fused[width](bound, columns, index, offset, length)
     var left = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
