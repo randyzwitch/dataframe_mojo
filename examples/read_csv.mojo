@@ -23,8 +23,4 @@ def main() raises:
             ]
         )
     )
-    var regions = result.column("region").string()
-    var revenue = result.column("revenue").float64()
-    var counts = result.column("sales").int64()
-    for i in range(result.height()):
-        print(regions.value(i), revenue.value(i), counts.value(i))
+    print(result)

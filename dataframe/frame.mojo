@@ -7,6 +7,7 @@ from .expr import Expr
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
 from .value import AnyValue
+from .display import render_frame, render_glimpse
 
 
 @fieldwise_init
@@ -15,7 +16,7 @@ struct Field(Copyable):
     var dtype: String
 
 
-struct DataFrame(Copyable, Sized):
+struct DataFrame(Copyable, Sized, Writable):
     """Own equal-length, uniquely named columns; transformations copy storage."""
 
     var _columns: List[Series]
@@ -46,6 +47,33 @@ struct DataFrame(Copyable, Sized):
 
     def height(self) -> Int:
         return self._height
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(render_frame(self._columns, self._height, 10, 12, 32))
+
+    def to_string(
+        self,
+        *,
+        max_rows: Int = 10,
+        max_columns: Int = 12,
+        max_string_length: Int = 32,
+    ) -> String:
+        """Render a bounded table. Negative limits mean unlimited."""
+        return render_frame(
+            self._columns,
+            self._height,
+            max_rows,
+            max_columns,
+            max_string_length,
+        )
+
+    def glimpse(
+        self, *, max_width: Int = 100, max_string_length: Int = 32
+    ) -> String:
+        """Transposed summary: one line per column with leading values."""
+        return render_glimpse(
+            self._columns, self._height, max_width, max_string_length
+        )
 
     def width(self) -> Int:
         return len(self._columns)

@@ -2,13 +2,14 @@
 from std.utils import Variant
 from .column import Column
 from .value import AnyValue
+from .display import render_series
 
 comptime Storage = Variant[
     Column[Int64], Column[Float64], Column[Bool], Column[String]
 ]
 
 
-struct Series(Copyable, Sized):
+struct Series(Copyable, Sized, Writable):
     var _name: String
     var _data: Storage
 
@@ -30,6 +31,15 @@ struct Series(Copyable, Sized):
 
     def name(self) -> String:
         return self._name
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(render_series(self, 10, 32))
+
+    def to_string(
+        self, *, max_rows: Int = 10, max_string_length: Int = 32
+    ) -> String:
+        """Render at most max_rows values; negative means unlimited."""
+        return render_series(self, max_rows, max_string_length)
 
     def renamed(self, var name: String) -> Self:
         var result = self.copy()
