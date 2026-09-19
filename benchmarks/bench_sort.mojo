@@ -56,7 +56,7 @@ def main() raises:
         if series.argsort() != series._argsort_reference():
             raise Error("sort results differ")
         print(
-            "single_" + series.dtype(),
+            "single_" + series.dtype().name(),
             ",",
             ROWS,
             ",",

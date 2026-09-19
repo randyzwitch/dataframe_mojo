@@ -22,6 +22,7 @@ from dataframe import (
     CsvField,
     CsvSchema,
     DataFrame,
+    DataType,
     Expr,
     col,
     lit,
@@ -49,11 +50,11 @@ def right_schema() raises -> CsvSchema:
 
 def literal(frame: DataFrame, name: String, text: String) raises -> Expr:
     var dtype = frame.column(name).dtype()
-    if dtype == "int64":
+    if dtype == DataType.INT64:
         return lit(Int64(Int(text)))
-    if dtype == "float64":
+    if dtype == DataType.FLOAT64:
         return lit(Float64(text))
-    if dtype == "bool":
+    if dtype == DataType.BOOL:
         return lit(text == "true")
     return lit(text)
 
