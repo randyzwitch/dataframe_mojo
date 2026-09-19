@@ -377,15 +377,15 @@ def test_join_empty_inputs_and_name_collisions() raises:
     assert_equal(outer.height(), 1)
     assert_true(outer.column("v_right").int64().is_null(0))
     assert_equal(left.take([]).join(right, "k", "left").height(), 0)
-    with assert_raises():
-        _ = left.join(right, "k", "full")
+    with assert_raises(contains="Join how must be"):
+        _ = left.join(right, "k", "outer")
     with assert_raises():
         _ = left.join(right, "k", "inner", "")
     var collision = left.with_column(ints("v_right", [2]))
     with assert_raises():
         _ = collision.join(right, "k")
-    with assert_raises():
-        _ = left.join(right, "v")
+    with assert_raises(contains="Unknown column"):
+        _ = left.join(right, "missing")
     var right_collision = DataFrame(
         [strings("k", ["a"]), ints("v", [1]), ints("v_right", [2])]
     )
