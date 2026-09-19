@@ -6,9 +6,12 @@ Arrow, pandas, or Polars runtime dependency.
 
 ## Schema and records
 
-The schema is non-empty, ordered, and uniquely named. Supported fields are
-`CsvField.int64`, `.float64`, `.bool`, and `.string`; each is nullable by
-default. With a header, names and order must match exactly. Without one, schema
+The schema is non-empty, ordered, and uniquely named. Fields are built with
+`CsvField.int64`, `.float64`, `.bool`, `.string`, `.date`, `.datetime`, and
+`.time`, or `CsvField(name, dtype)` for any dtype, including every numeric
+width (`CsvField("n", DataType.UINT16)`); each is nullable by default. Integer
+fields are range-checked at their width while parsing the digits (no float
+round trip). Inference only produces Int64 and Float64. With a header, names and order must match exactly. Without one, schema
 names are assigned positionally. Empty and header-only files produce zero rows
 with the requested schema. Every data record must have exactly the schema width.
 

@@ -133,16 +133,14 @@ def test_null_and_nan_predicates() raises:
     assert_equal(run(frame, lit(Int64(1)).is_null()).bool().value(0), False)
     assert_true(run(frame, null("string").is_null()).bool().value(0))
     var ints = DataFrame([Series("i", Column[Int64]([1]))])
-    with assert_raises(
-        contains="is_nan requires a float64 operand, found int64"
-    ):
+    with assert_raises(contains="is_nan requires a float operand, found int64"):
         _ = ints.select(col("i").is_nan())
     with assert_raises(contains="not requires a bool operand"):
         _ = ints.select(~col("i"))
     with assert_raises(contains="and requires bool operands, found int64"):
         _ = ints.select(col("i") & col("i"))
     with assert_raises(contains="Unknown null literal dtype"):
-        _ = ints.select(null("int32"))
+        _ = ints.select(null("int128"))
 
 
 def test_fill_null_fill_nan_and_coalesce() raises:
@@ -190,7 +188,7 @@ def test_fill_null_fill_nan_and_coalesce() raises:
         _ = coalesce(List[Expr]())
     with assert_raises(contains="fill_null requires matching dtypes"):
         _ = frame.select(col("a").fill_null(lit(Float64(0))))
-    with assert_raises(contains="fill_nan requires float64 operands"):
+    with assert_raises(contains="fill_nan requires float operands"):
         _ = frame.select(col("a").fill_nan(lit(Int64(0))))
 
 

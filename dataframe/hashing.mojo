@@ -8,6 +8,7 @@ Float64 keys treat every NaN as one value and -0.0 as equal to 0.0.
 from std.collections import Dict
 from .aggregate import float_key
 from .column import Column
+from .dtype import NUMERIC_DTYPES
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 
@@ -48,22 +49,26 @@ def column_codes(
     series: Series, mut codes: List[Int], mut nulls: List[Bool]
 ) -> Int:
     """Fill per-row dense codes and null flags; return the distinct count."""
-    if series._data.isa[Column[Int64]]():
-        return _codes_by_value(series._data[Column[Int64]], codes, nulls)
-    if series._data.isa[Column[Float64]]():
-        ref column = series._data[Column[Float64]]
-        var lookup = Dict[UInt64, Int]()
-        for i in range(len(column)):
-            if not column._valid(i):
-                nulls[i] = True
-                continue
-            var key = float_key(column._get(i))
-            var code = lookup.get(key, -1)
-            if code < 0:
-                code = len(lookup)
-                lookup[key] = code
-            codes[i] = code
-        return len(lookup)
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            comptime if D.is_floating_point():
+                # Every NaN is one key and -0.0 equals 0.0 (exact widening).
+                var lookup = Dict[UInt64, Int]()
+                for i in range(len(column)):
+                    if not column._valid(i):
+                        nulls[i] = True
+                        continue
+                    var key = float_key(Float64(column._get(i)))
+                    var code = lookup.get(key, -1)
+                    if code < 0:
+                        code = len(lookup)
+                        lookup[key] = code
+                    codes[i] = code
+                return len(lookup)
+            else:
+                return _codes_by_value(column, codes, nulls)
     if series._data.isa[Column[Bool]]():
         ref column = series._data[Column[Bool]]
         for i in range(len(column)):

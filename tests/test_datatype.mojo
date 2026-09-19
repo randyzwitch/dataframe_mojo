@@ -36,7 +36,8 @@ def test_equality_names_and_parse() raises:
         for j in range(len(all)):
             assert_equal(all[i] == all[j], i == j)
             assert_equal(all[i] != all[j], i != j)
-    assert_false(DataType.is_known("int32"))
+    assert_true(DataType.is_known("int32"))
+    assert_false(DataType.is_known("int128"))
     with assert_raises(contains="Unknown dtype: decimal"):
         _ = DataType.parse("decimal")
 

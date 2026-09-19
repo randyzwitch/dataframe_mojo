@@ -7,6 +7,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Breaking
 
+- Arrow import keeps narrow integer and float32 types instead of widening
+  them to Int64 / Float64, and accepts UInt64.
 - `Series.string()` returns a `StringColumn` (Arrow `large_utf8`: one UTF-8
   buffer plus Int64 offsets) instead of `Column[String]`. It has the same
   `value`, `is_null`, `null_count`, `take`, and `slice` methods.
@@ -42,6 +44,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
   2024002028.0), `1-2`, or `1.5.5`.
 
 ### Added
+
+- Numeric dtypes Int8, Int16, Int32, UInt8, UInt16, UInt32, UInt64, and
+  Float32 alongside Int64 and Float64, through every operation: checked
+  arithmetic at each width, Float32 SIMD kernels, exact 128-bit sums (8/16-bit
+  sums produce Int64, as in Polars), sorting, grouping and join keys, casts
+  with exact range checks, CSV fields, display, Arrow (zero-copy, native
+  formats), and typed literals (`lit(Int32(1))`, generic `lit[D](Scalar[D])`).
+  `Series.numeric[D]()` / `.int8()` ... `.float32()` and matching `AnyValue`
+  accessors; `Expr.cast` also takes a `DataType` (#30).
 
 - Arrow C Data Interface: `export_arrow` / `import_arrow` (frames as struct
   arrays) and `export_arrow_series` / `import_arrow_series`, with

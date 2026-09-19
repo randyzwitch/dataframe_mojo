@@ -32,6 +32,48 @@ def parse_int64(text: String) raises -> Int64:
     return Int64(magnitude)
 
 
+def parse_integer[D: DType](text: String) raises -> Scalar[D]:
+    """Parse a strict decimal integer, range-checked for Scalar[D] on the
+    digits themselves (no floating-point round trip). "-0" is 0 for
+    unsigned types."""
+    comptime assert D.is_integral(), "parse_integer needs an integer dtype"
+    comptime if D == DType.int64:
+        return rebind[Scalar[D]](parse_int64(text))
+    var bytes = text.as_bytes()
+    if len(bytes) == 0:
+        raise Error("empty integer")
+    var index = 0
+    var negative = False
+    if bytes[0] == 45 or bytes[0] == 43:
+        negative = bytes[0] == 45
+        index = 1
+    if index == len(bytes):
+        raise Error("integer sign without digits")
+    var high = Scalar[D].MAX.cast[DType.uint64]()
+    var limit = high
+    comptime if D.is_signed():
+        limit = high + UInt64(negative)
+    else:
+        if negative:
+            limit = 0
+    var magnitude = UInt64(0)
+    while index < len(bytes):
+        var byte = bytes[index]
+        if byte < 48 or byte > 57:
+            raise Error("non-decimal integer byte")
+        var digit = UInt64(byte - 48)
+        if magnitude > (limit - min(digit, limit)) // 10 or (
+            digit > limit - magnitude * 10
+        ):
+            raise Error(String(D) + " overflow")
+        magnitude = magnitude * 10 + digit
+        index += 1
+    comptime if D.is_signed():
+        if negative:
+            return (-magnitude.cast[DType.int64]()).cast[D]()
+    return magnitude.cast[D]()
+
+
 def edge_ascii_whitespace(text: String) -> Bool:
     var bytes = text.as_bytes()
     if len(bytes) == 0:

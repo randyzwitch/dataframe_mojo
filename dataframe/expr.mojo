@@ -1,5 +1,6 @@
 """Immutable-by-convention expression IR. No data access or execution here."""
 from std.collections import Optional
+from .dtype import DataType
 
 comptime COL = 0
 comptime LIT_INT = 1
@@ -438,8 +439,14 @@ struct Expr(Copyable):
         """Number of null values, as Int64."""
         return self._unary(NULL_COUNT)
 
+    def cast(self, dtype: DataType, strict: Bool = True) -> Self:
+        """Convert to dtype; see the String overload."""
+        return self.cast(dtype.name(), strict)
+
     def cast(self, dtype: String, strict: Bool = True) -> Self:
-        """Convert to int64, float64, bool, or string.
+        """Convert to any dtype by name (numeric, bool, string, temporal).
+
+        Integer targets are range-checked and floats truncate toward zero.
 
         Values that cannot convert raise (with the row and value) when
         strict, or become null otherwise. Nulls stay null.
@@ -720,6 +727,65 @@ def lit(value: Float64) -> Expr:
     return Expr([_node(LIT_FLOAT, floating=value)], "literal")
 
 
+def _numeric_lit[D: DType](value: Scalar[D]) -> Expr:
+    """A literal of a non-default numeric type. The node's text names the
+    type; integers are held in `integer` (UInt64 by bit pattern) and floats
+    in `floating` (exactly)."""
+    comptime if D.is_floating_point():
+        return Expr(
+            [
+                _node(
+                    LIT_FLOAT,
+                    floating=value.cast[DType.float64](),
+                    text=String(D),
+                )
+            ],
+            "literal",
+        )
+    else:
+        return Expr(
+            [_node(LIT_INT, integer=value.cast[DType.int64](), text=String(D))],
+            "literal",
+        )
+
+
+def lit[D: DType](value: Scalar[D]) -> Expr:
+    """A literal of any numeric type, for code generic over DType."""
+    return _numeric_lit(value)
+
+
+def lit(value: Int8) -> Expr:
+    return _numeric_lit(value)
+
+
+def lit(value: Int16) -> Expr:
+    return _numeric_lit(value)
+
+
+def lit(value: Int32) -> Expr:
+    return _numeric_lit(value)
+
+
+def lit(value: UInt8) -> Expr:
+    return _numeric_lit(value)
+
+
+def lit(value: UInt16) -> Expr:
+    return _numeric_lit(value)
+
+
+def lit(value: UInt32) -> Expr:
+    return _numeric_lit(value)
+
+
+def lit(value: UInt64) -> Expr:
+    return _numeric_lit(value)
+
+
+def lit(value: Float32) -> Expr:
+    return _numeric_lit(value)
+
+
 def lit(value: Bool) -> Expr:
     return Expr([_node(LIT_BOOL, integer=Int64(value))], "literal")
 
@@ -729,7 +795,7 @@ def lit(value: String) -> Expr:
 
 
 def null(dtype: String) -> Expr:
-    """A typed null literal: int64, float64, bool, or string."""
+    """A typed null literal of any dtype name (see DataType.parse)."""
     return Expr([_node(LIT_NULL, text=dtype)], "literal")
 
 

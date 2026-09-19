@@ -5,6 +5,7 @@ none). Ordering uses the same dense sort ranks as `sort`, so NaN sorts above
 every number and ties keep the earlier row.
 """
 from .column import Column
+from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
     Node,
     CUM_SUM,
@@ -53,12 +54,82 @@ def _ordered(rows: List[Int], reverse: Bool) -> List[Int]:
 
 
 def _numeric(input: Series, row: Int) -> Float64:
+    """Int64 or Float64 input (narrow types are widened first)."""
     if input._data.isa[Column[Int64]]():
         return Float64(input._data[Column[Int64]]._get(row))
     return input._data[Column[Float64]]._get(row)
 
 
+def _is_narrow(dtype: DataType) -> Bool:
+    return (
+        dtype.is_numeric()
+        and dtype != DataType.INT64
+        and (dtype != DataType.FLOAT64)
+    )
+
+
+def _widen(input: Series) raises -> Series:
+    """Narrow numeric input as Int64 or Float64 (exact; UInt64 values above
+    Int64 range raise)."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if input._data.isa[Column[Scalar[D]]]():
+            ref column = input._data[Column[Scalar[D]]]
+            var valid = validity(input)
+            comptime if D.is_floating_point():
+                var values = List[Float64](capacity=len(column))
+                for i in range(len(column)):
+                    values.append(column._get(i).cast[DType.float64]())
+                return Series("", Column[Float64](values^, valid))
+            else:
+                var values = List[Int64](capacity=len(column))
+                for i in range(len(column)):
+                    var x = column._get(i)
+                    comptime if D == DType.uint64:
+                        if valid[i] and x > Int64.MAX.cast[D]():
+                            raise Error("uint64 window sum overflow")
+                    values.append(x.cast[DType.int64]())
+                return Series("", Column[Int64](values^, valid))
+    return input.copy()
+
+
+def _narrow_sum(result: Series, target: DataType) raises -> Series:
+    """An Int64/Float64 window result in its sum type, range-checked."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D != DType.int64 and D != DType.float64:
+            if target == DataType.of(D):
+                var valid = validity(result)
+                var values = List[Scalar[D]](capacity=len(result))
+                comptime if D.is_floating_point():
+                    ref column = result._data[Column[Float64]]
+                    for i in range(len(column)):
+                        values.append(column._get(i).cast[D]())
+                else:
+                    ref column = result._data[Column[Int64]]
+                    for i in range(len(column)):
+                        var x = column._get(i)
+                        if valid[i] and (
+                            x.cast[DType.int128]()
+                            > Scalar[D].MAX.cast[DType.int128]()
+                            or x.cast[DType.int128]()
+                            < Scalar[D].MIN.cast[DType.int128]()
+                        ):
+                            raise Error(target.name() + " window sum overflow")
+                        values.append(x.cast[D]())
+                return Series("", Column[Scalar[D]](values^, valid))
+    return result.copy()
+
+
 def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
+    var op_code = node.op
+    if (
+        op_code == CUM_SUM or op_code == ROLLING_SUM or op_code == ROLLING_MEAN
+    ) and _is_narrow(input.dtype()):
+        var result = window_op(node, _widen(input), ids)
+        if op_code == ROLLING_MEAN:
+            return result^
+        return _narrow_sum(result, input.dtype().sum_type())
     var n = len(input)
     var valid = validity(input)
     var groups = partitions(n, ids)

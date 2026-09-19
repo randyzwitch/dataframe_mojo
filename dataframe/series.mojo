@@ -1,5 +1,5 @@
 """Runtime-tagged, named columns without per-element type erasure."""
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from std.utils import Variant
 from .column import Column
 from .string_column import StringColumn
@@ -9,13 +9,37 @@ from .cast import cast_series
 from .expr import Expr, col, lit
 from .frame import DataFrame
 
-# Fixed-width element types in DataType code order. Storage holds Column[E]
-# for each, then StringColumn (code 3, Arrow large_utf8). Methods dispatch
-# with one compile-time loop over FixedElements plus a StringColumn branch;
-# adding a fixed-width dtype means extending both lists.
-comptime FixedElements = Variant[Int64, Float64, Bool]
+# Storage holds Column[Scalar[D]] for each D in NUMERIC_DTYPES, Column[Bool],
+# and StringColumn (Arrow large_utf8). Type-agnostic methods (length, take,
+# slice, append) loop over FixedElements; numeric kernels loop over
+# NUMERIC_DTYPES so each iteration sees a concrete Scalar[D]. Adding a
+# numeric type means extending NUMERIC_DTYPES and both lists below.
+comptime FixedElements = Variant[
+    Int64,
+    Float64,
+    Bool,
+    Int8,
+    Int16,
+    Int32,
+    UInt8,
+    UInt16,
+    UInt32,
+    UInt64,
+    Float32,
+]
 comptime Storage = Variant[
-    Column[Int64], Column[Float64], Column[Bool], StringColumn
+    Column[Int64],
+    Column[Float64],
+    Column[Bool],
+    StringColumn,
+    Column[Int8],
+    Column[Int16],
+    Column[Int32],
+    Column[UInt8],
+    Column[UInt16],
+    Column[UInt32],
+    Column[UInt64],
+    Column[Float32],
 ]
 
 
@@ -27,15 +51,12 @@ struct Series(Copyable, Sized, Writable):
     # The logical type. Temporal types are stored in Column[Int64].
     var _dtype: DataType
 
-    def __init__(out self, var name: String, var column: Column[Int64]):
+    def __init__[
+        D: DType
+    ](out self, var name: String, var column: Column[Scalar[D]]):
         self._name = name^
         self._data = Storage(column^)
-        self._dtype = DataType.INT64
-
-    def __init__(out self, var name: String, var column: Column[Float64]):
-        self._name = name^
-        self._data = Storage(column^)
-        self._dtype = DataType.FLOAT64
+        self._dtype = DataType.of(D)
 
     def __init__(out self, var name: String, var column: Column[Bool]):
         self._name = name^
@@ -58,11 +79,18 @@ struct Series(Copyable, Sized, Writable):
         """Build a series from any storable column type."""
         var result = Self(name^, Column[Int64]([]))
         result._data = Storage(column^)
-        comptime for i in range(len(FixedElements.Ts)):
-            comptime T: Copyable & Deinitable = FixedElements.Ts[i]
-            if result._data.isa[Column[T]]():
-                result._dtype = DataType(i, 0)
+        result._dtype = result._storage_dtype()
         return result^
+
+    def _storage_dtype(self) -> DataType:
+        """The physical DataType of the stored column."""
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
+                return DataType.of(D)
+        if self._data.isa[Column[Bool]]():
+            return DataType.BOOL
+        return DataType.STRING
 
     def with_dtype(self, dtype: DataType) raises -> Self:
         """The same values tagged with another logical type that shares their
@@ -123,21 +151,18 @@ struct Series(Copyable, Sized, Writable):
 
     def get(self, index: Int) raises -> AnyValue:
         """Return one cell as a tagged value; raises when out of bounds."""
-        if self._data.isa[Column[Int64]]():
-            if self._data[Column[Int64]].is_null(index):
+        if self._dtype.is_temporal():
+            ref column = self._data[Column[Int64]]
+            if column.is_null(index):
                 return AnyValue.null(self._dtype)
-            return AnyValue(
-                self._dtype,
-                True,
-                self._data[Column[Int64]]._get(index),
-                0,
-                False,
-                "",
-            )
-        if self._data.isa[Column[Float64]]():
-            if self._data[Column[Float64]].is_null(index):
-                return AnyValue.null(DataType.FLOAT64)
-            return AnyValue(self._data[Column[Float64]]._get(index))
+            return AnyValue(self._dtype, True, column._get(index), 0, False, "")
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
+                ref column = self._data[Column[Scalar[D]]]
+                if column.is_null(index):
+                    return AnyValue.null(self._dtype)
+                return AnyValue(column._get(index))
         if self._data.isa[Column[Bool]]():
             if self._data[Column[Bool]].is_null(index):
                 return AnyValue.null(DataType.BOOL)
@@ -159,22 +184,20 @@ struct Series(Copyable, Sized, Writable):
             return False
         if not null_equal and (self.null_count() > 0 or other.null_count() > 0):
             return False
-        if self._data.isa[Column[Int64]]():
-            return _equal_columns(
-                self._data[Column[Int64]], other._data[Column[Int64]]
-            )
-        if self._data.isa[Column[Float64]]():
-            ref a = self._data[Column[Float64]]
-            ref b = other._data[Column[Float64]]
-            for i in range(len(a)):
-                if a._valid(i) != b._valid(i):
-                    return False
-                if a._valid(i):
-                    var x = a._get(i)
-                    var y = b._get(i)
-                    if x != y and not (x != x and y != y):
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
+                ref a = self._data[Column[Scalar[D]]]
+                ref b = other._data[Column[Scalar[D]]]
+                for i in range(len(a)):
+                    if a._valid(i) != b._valid(i):
                         return False
-            return True
+                    if a._valid(i):
+                        var x = a._get(i)
+                        var y = b._get(i)
+                        if x != y and not (x != x and y != y):
+                            return False
+                return True
         if self._data.isa[Column[Bool]]():
             return _equal_columns(
                 self._data[Column[Bool]], other._data[Column[Bool]]
@@ -457,6 +480,37 @@ struct Series(Copyable, Sized, Writable):
             raise Error("Expected float64 column")
         return self._data[Column[Float64]].copy()
 
+    def numeric[D: DType](self) raises -> Column[Scalar[D]]:
+        """The (shared, immutable) column as Scalar[D], raising on a dtype
+        mismatch. Temporal columns read as their Int64 storage."""
+        if not self._data.isa[Column[Scalar[D]]]():
+            raise Error("Expected " + String(D) + " column")
+        return self._data[Column[Scalar[D]]].copy()
+
+    def int8(self) raises -> Column[Int8]:
+        return self.numeric[DType.int8]()
+
+    def int16(self) raises -> Column[Int16]:
+        return self.numeric[DType.int16]()
+
+    def int32(self) raises -> Column[Int32]:
+        return self.numeric[DType.int32]()
+
+    def uint8(self) raises -> Column[UInt8]:
+        return self.numeric[DType.uint8]()
+
+    def uint16(self) raises -> Column[UInt16]:
+        return self.numeric[DType.uint16]()
+
+    def uint32(self) raises -> Column[UInt32]:
+        return self.numeric[DType.uint32]()
+
+    def uint64(self) raises -> Column[UInt64]:
+        return self.numeric[DType.uint64]()
+
+    def float32(self) raises -> Column[Float32]:
+        return self.numeric[DType.float32]()
+
     def bool(self) raises -> Column[Bool]:
         """Return an owned typed copy, raising on a dtype mismatch."""
         if not self._data.isa[Column[Bool]]():
@@ -489,16 +543,15 @@ struct Series(Copyable, Sized, Writable):
         return result^
 
     def _take_or_null_storage(self, indices: List[Int]) raises -> Self:
-        if self._data.isa[Column[Int64]]():
-            return Self(
-                self._name,
-                self._data[Column[Int64]].take_or_null(indices, Int64(0)),
-            )
-        if self._data.isa[Column[Float64]]():
-            return Self(
-                self._name,
-                self._data[Column[Float64]].take_or_null(indices, Float64(0)),
-            )
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
+                return Self(
+                    self._name,
+                    self._data[Column[Scalar[D]]].take_or_null(
+                        indices, Scalar[D](0)
+                    ),
+                )
         if self._data.isa[Column[Bool]]():
             return Self(
                 self._name,
@@ -512,25 +565,22 @@ struct Series(Copyable, Sized, Writable):
     def _less(
         self, a: Int, b: Int, descending: Bool, nulls_last: Bool
     ) raises -> Bool:
-        if self._data.isa[Column[Int64]]():
-            var a_null = self._data[Column[Int64]].is_null(a)
-            var b_null = self._data[Column[Int64]].is_null(b)
-            if a_null or b_null:
-                return a_null != b_null and (b_null if nulls_last else a_null)
-            var x = self._data[Column[Int64]].value(a)
-            var y = self._data[Column[Int64]].value(b)
-            return y < x if descending else x < y
-        if self._data.isa[Column[Float64]]():
-            var a_null = self._data[Column[Float64]].is_null(a)
-            var b_null = self._data[Column[Float64]].is_null(b)
-            if a_null or b_null:
-                return a_null != b_null and (b_null if nulls_last else a_null)
-            var x = self._data[Column[Float64]].value(a)
-            var y = self._data[Column[Float64]].value(b)
-            # NaNs follow finite/infinite values in either direction.
-            if x != x or y != y:
-                return x == x and y != y
-            return y < x if descending else x < y
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
+                ref column = self._data[Column[Scalar[D]]]
+                var a_null = column.is_null(a)
+                var b_null = column.is_null(b)
+                if a_null or b_null:
+                    return a_null != b_null and (
+                        b_null if nulls_last else a_null
+                    )
+                var x = column.value(a)
+                var y = column.value(b)
+                # NaNs follow finite/infinite values in either direction.
+                if x != x or y != y:
+                    return x == x and y != y
+                return y < x if descending else x < y
         if self._data.isa[Column[Bool]]():
             var a_null = self._data[Column[Bool]].is_null(a)
             var b_null = self._data[Column[Bool]].is_null(b)
@@ -567,20 +617,20 @@ struct Series(Copyable, Sized, Writable):
         var valid = List[Bool](length=n, fill=False)
         var nan = List[Bool](length=n, fill=False)
         var distinct: Int
-        if self._data.isa[Column[Int64]]():
-            ref column = self._data[Column[Int64]]
-            for i in range(n):
-                valid[i] = column._valid(i)
-            distinct = _dense_ranks(column._to_list(), valid, ranks)
-        elif self._data.isa[Column[Float64]]():
-            ref column = self._data[Column[Float64]]
-            var usable = List[Bool](length=n, fill=False)
-            for i in range(n):
-                valid[i] = column._valid(i)
-                var x = column._get(i)
-                nan[i] = valid[i] and x != x
-                usable[i] = valid[i] and not nan[i]
-            distinct = _dense_ranks(column._to_list(), usable, ranks)
+        distinct = -1
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if self._data.isa[Column[Scalar[D]]]():
+                ref column = self._data[Column[Scalar[D]]]
+                var usable = List[Bool](length=n, fill=False)
+                for i in range(n):
+                    valid[i] = column._valid(i)
+                    var x = column._get(i)
+                    nan[i] = valid[i] and x != x
+                    usable[i] = valid[i] and not nan[i]
+                distinct = _dense_ranks(column._to_list(), usable, ranks)
+        if distinct >= 0:
+            pass
         elif self._data.isa[Column[Bool]]():
             ref column = self._data[Column[Bool]]
             for i in range(n):
@@ -680,10 +730,10 @@ struct Series(Copyable, Sized, Writable):
             return Self(name^, Column[Int64]._nulls(length, 0)).with_dtype(
                 dtype
             )
-        if dtype == DataType.INT64:
-            return Self(name^, Column[Int64]._nulls(length, 0))
-        if dtype == DataType.FLOAT64:
-            return Self(name^, Column[Float64]._nulls(length, 0))
+        comptime for i in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[i]
+            if dtype == DataType.of(D):
+                return Self(name^, Column[Scalar[D]]._nulls(length, 0))
         if dtype == DataType.BOOL:
             return Self(name^, Column[Bool]._nulls(length, False))
         return Self(name^, StringColumn._nulls(length))

@@ -198,9 +198,10 @@ def check_pyarrow_produced_types() raises:
     var frame = from_pyarrow(batch)
     assert_equal(frame.height(), 3)
     assert_true(frame.item(0, "i8").is_null())
-    assert_equal(frame.item(1, "i8").int64(), -3)
-    assert_equal(frame.item(0, "u32").int64(), 1)
-    assert_equal(frame.item(1, "f32").float64(), -2.25)
+    # Narrow types import natively (no widening).
+    assert_equal(frame.item(1, "i8").int8(), -3)
+    assert_equal(frame.item(0, "u32").uint32(), 1)
+    assert_equal(frame.item(1, "f32").float32(), -2.25)
     assert_equal(frame.item(0, "s").string(), "")
     assert_true(frame.item(1, "s").is_null())
     assert_equal(frame.item(2, "s").string(), "ß")
@@ -219,7 +220,6 @@ def check_pyarrow_produced_types() raises:
 def check_unsupported_types_are_rejected() raises:
     var pa = Python.import_module("pyarrow")
     var cases = Python.list(
-        pa.array(Python.list(1, 2), type=pa.uint64()),
         pa.array(Python.list(1, 2), type=pa.timestamp("us", tz="UTC")),
         pa.array(Python.list("a", "b")).dictionary_encode(),
         pa.array(Python.list(Python.list(1), Python.list(2))),

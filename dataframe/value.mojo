@@ -1,5 +1,5 @@
 """A runtime-tagged scalar for row access and single-cell results."""
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .temporal import format as format_temporal
 
 
@@ -17,11 +17,22 @@ struct AnyValue(Copyable, Equatable, Writable):
     var _bool: Bool
     var _string: String
 
-    def __init__(out self, value: Int64):
-        self = Self(DataType.INT64, True, value, 0, False, "")
-
-    def __init__(out self, value: Float64):
-        self = Self(DataType.FLOAT64, True, 0, value, False, "")
+    def __init__[D: DType](out self, value: Scalar[D]):
+        """A numeric value. Integers are held in an Int64 slot (UInt64 by
+        bit pattern) and floats in a Float64 slot; both are exact."""
+        comptime if D.is_floating_point():
+            self = Self(DataType.of(D), True, 0, Float64(value), False, "")
+        elif D == DType.uint64:
+            self = Self(
+                DataType.of(D),
+                True,
+                Int64(value.cast[DType.int64]()),
+                0,
+                False,
+                "",
+            )
+        else:
+            self = Self(DataType.of(D), True, Int64(value), 0, False, "")
 
     def __init__(out self, value: Bool):
         self = Self(DataType.BOOL, True, 0, 0, value, "")
@@ -87,13 +98,43 @@ struct AnyValue(Copyable, Equatable, Writable):
         if not self._valid:
             raise Error("Cannot read a null value")
 
+    def numeric[D: DType](self) raises -> Scalar[D]:
+        """The value as Scalar[D]; the dtype must match exactly."""
+        self._check(DataType.of(D))
+        comptime if D.is_floating_point():
+            return self._float.cast[D]()
+        else:
+            return self._int.cast[D]()
+
     def int64(self) raises -> Int64:
-        self._check(DataType.INT64)
-        return self._int
+        return self.numeric[DType.int64]()
 
     def float64(self) raises -> Float64:
-        self._check(DataType.FLOAT64)
-        return self._float
+        return self.numeric[DType.float64]()
+
+    def int8(self) raises -> Int8:
+        return self.numeric[DType.int8]()
+
+    def int16(self) raises -> Int16:
+        return self.numeric[DType.int16]()
+
+    def int32(self) raises -> Int32:
+        return self.numeric[DType.int32]()
+
+    def uint8(self) raises -> UInt8:
+        return self.numeric[DType.uint8]()
+
+    def uint16(self) raises -> UInt16:
+        return self.numeric[DType.uint16]()
+
+    def uint32(self) raises -> UInt32:
+        return self.numeric[DType.uint32]()
+
+    def uint64(self) raises -> UInt64:
+        return self.numeric[DType.uint64]()
+
+    def float32(self) raises -> Float32:
+        return self.numeric[DType.float32]()
 
     def bool(self) raises -> Bool:
         self._check(DataType.BOOL)
@@ -108,9 +149,9 @@ struct AnyValue(Copyable, Equatable, Writable):
             return False
         if not self._valid:
             return True
-        if self._dtype.physical() == DataType.INT64:
+        if self._dtype.physical() == DataType.INT64 or self._dtype.is_integer():
             return self._int == other._int
-        if self._dtype == DataType.FLOAT64:
+        if self._dtype.is_float():
             var both_nan = (
                 self._float != self._float and other._float != other._float
             )
@@ -122,10 +163,14 @@ struct AnyValue(Copyable, Equatable, Writable):
     def write_to(self, mut writer: Some[Writer]):
         if not self._valid:
             writer.write("null")
-        elif self._dtype == DataType.INT64:
+        elif self._dtype == DataType.UINT64:
+            writer.write(self._int.cast[DType.uint64]())
+        elif self._dtype.is_integer():
             writer.write(self._int)
         elif self._dtype.is_temporal():
             writer.write(format_temporal(self._int, self._dtype))
+        elif self._dtype == DataType.FLOAT32:
+            writer.write(self._float.cast[DType.float32]())
         elif self._dtype == DataType.FLOAT64:
             writer.write(self._float)
         elif self._dtype == DataType.BOOL:

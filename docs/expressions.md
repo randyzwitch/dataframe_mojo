@@ -12,8 +12,8 @@ References:
 
 ## Binding and shape
 
-`col(name)` refers to a column; `lit(value)` holds an Int64, Float64, Bool, or
-String scalar. `Expr` owns a flat topological node list. Building an expression
+`col(name)` refers to a column; `lit(value)` holds a scalar of any numeric
+type (`lit(Int32(1))`, `lit(Float32(0.5))`, ...), Bool, or String. `Expr` owns a flat topological node list. Building an expression
 never reads data. `alias` changes the output name, not column resolution.
 Without an alias, binary operations retain the left expression's output name;
 literals are named `literal`, and reductions retain their input expression name.
@@ -25,25 +25,30 @@ Duplicate output names, unknown columns, invalid types, negative `min_count`,
 and nested aggregates raise even on empty dataframes.
 
 Operands must have matching dtypes; there is no implicit promotion or index
-alignment. Nulls propagate through every operator below; NaN is distinct from
-null. Int64 arithmetic checks overflow per valid element and raises.
+alignment (`cast` mixed widths explicitly). Nulls propagate through every
+operator below; NaN is distinct from null. Numeric types are Int8, Int16,
+Int32, Int64, UInt8, UInt16, UInt32, UInt64 ("integers") and Float32, Float64
+("floats"). Integer arithmetic checks overflow per valid element at the
+operand's width and raises (`int8 addition overflow`); widths below 64 bits
+and UInt64 compute in 128 bits and range-check the result.
 
 | Operation | Operands | Result | Notes |
 |---|---|---|---|
-| `+`, `-`, `*` | Int64, Float64 | same | checked for Int64 |
-| `/` | Int64, Float64 | Float64 | the one operator where Int64 input yields Float64; IEEE division by zero |
-| `//` | Int64, Float64 | same | floor division; Int64 by zero is null; `Int64.MIN // -1` raises |
-| `%` | Int64, Float64 | same | remainder takes the divisor's sign; Int64 modulo zero is null; Float64 `x % 0`, `inf % y`, and NaN operands give NaN |
-| `**`, `.pow()` | Int64, Float64 | same | Int64 is checked and raises on a negative exponent |
-| `<`, `<=`, `>`, `>=` | all four | Bool | IEEE for floats (NaN compares false); strings byte-lexicographic, as in sort; `false < true` |
-| `.eq()`, `.ne()` | all four | Bool | IEEE: NaN `.ne()` NaN is true |
-| unary `-`, `.abs()` | Int64, Float64 | same | `Int64.MIN` raises |
-| `.sqrt()`, `.exp()`, `.log()` | Int64, Float64 | Float64 | natural log; IEEE results for negative inputs and zero |
-| `.floor()`, `.ceil()`, `.round(decimals=0)` | Int64, Float64 | same | identity for Int64; `round` is half away from zero and accepts negative decimals |
-| `.clip(lower, upper)`, `.clip_min`, `.clip_max` | Int64, Float64 | same | NaN inputs and NaN bounds leave the value unchanged |
+| `+`, `-`, `*` | numeric | same | checked for integers; unsigned `0 - 1` raises |
+| `/` | numeric | Float64 (Float32 for Float32) | integers yield Float64; IEEE division by zero |
+| `//` | numeric | same | floor division; integer by zero is null; signed `MIN // -1` raises |
+| `%` | numeric | same | remainder takes the divisor's sign; integer modulo zero is null; float `x % 0`, `inf % y`, and NaN operands give NaN |
+| `**`, `.pow()` | numeric | same | integers are checked and raise on a negative exponent |
+| `<`, `<=`, `>`, `>=` | any | Bool | IEEE for floats (NaN compares false); strings byte-lexicographic, as in sort; `false < true` |
+| `.eq()`, `.ne()` | any | Bool | IEEE: NaN `.ne()` NaN is true |
+| unary `-`, `.abs()` | numeric | same | signed `MIN` raises; unsigned negation raises unless zero |
+| `.sqrt()`, `.exp()`, `.log()` | numeric | Float64 (Float32 for Float32) | natural log; IEEE results for negative inputs and zero |
+| `.floor()`, `.ceil()`, `.round(decimals=0)` | numeric | same | identity for integers; `round` is half away from zero and accepts negative decimals |
+| `.clip(lower, upper)`, `.clip_min`, `.clip_max` | numeric | same | NaN inputs and NaN bounds leave the value unchanged |
 
-Float64 `+ - * /` and all Float64 comparisons use explicit SIMD kernels; the
-other Float64 operations run per lane. `sqrt`, `exp`, `log`, and `pow` use
+Float `+ - * /` and all float comparisons use explicit SIMD kernels (Float64
+and Float32 alike); the other float operations run per lane. Fusion covers
+Float64 only. `sqrt`, `exp`, `log`, and `pow` use
 Mojo's `std.math`, whose results can differ from the correctly rounded value by
 about 1e-12 relative; tests compare them with a tolerance. Binder errors name
 the operator and dtypes, for example `/ requires matching dtypes, found int64
@@ -138,7 +143,10 @@ steps are measured from the start, so `2024-01-31` stepping `1mo` gives
 
 ### Casts
 
-`cast(dtype, strict=True)` converts between the four dtypes; `Series.cast` and
+`cast(dtype, strict=True)` converts between any two dtypes (a `DataType` or
+its name). Integer targets are range-checked exactly (text is parsed at the
+target width, never through a float); float to integer truncates toward zero
+and rejects NaN and infinities. `Series.cast` and
 `DataFrame.cast({"name": "dtype"})` are shorthands. Nulls stay null. A value
 that cannot convert raises `cast from <a> to <b> failed at row <n> for value
 '<v>': <reason>` when strict, or becomes null when `strict=False`. Inside a
@@ -251,14 +259,14 @@ columns outside grouping.
 
 | Reduction | Input | Result | Empty or all-null | Mergeable state |
 |---|---|---|---|---|
-| `sum(min_count=0)` | Int64, Float64 | same | 0, or null below `min_count` | yes |
+| `sum(min_count=0)` | numeric | same; 8/16-bit integers give Int64 | 0, or null below `min_count` | yes (128-bit exact for integers) |
 | `count()`, `null_count()`, `len()` | any | Int64 | 0 | yes |
 | `min()`, `max()` | any | same | null | yes |
-| `mean()` | Int64, Float64 | Float64 | null | yes (sum + count) |
+| `mean()` | numeric | Float64 | null | yes (sum + count) |
 | `first()`, `last()` | any | same | null | needs partition order |
 | `n_unique()` | any | Int64 | 0, or 1 for all-null | yes (distinct set) |
-| `var(ddof=1)`, `std(ddof=1)` | Int64, Float64 | Float64 | null when fewer than `ddof + 1` values | yes (Welford/Chan) |
-| `median()`, `quantile(q, interpolation)` | Int64, Float64 | Float64 | null | no: keeps every valid value |
+| `var(ddof=1)`, `std(ddof=1)` | numeric | Float64 | null when fewer than `ddof + 1` values | yes (Welford/Chan) |
+| `median()`, `quantile(q, interpolation)` | numeric | Float64 | null | no: keeps every valid value |
 | `any()`, `all()` | Bool | Bool | false / true | yes |
 
 `min` and `max` order strings byte-lexicographically and `false < true`. Float

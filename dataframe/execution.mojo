@@ -4,8 +4,9 @@ Reductions are separate passes, not per-row callbacks or per-group dataframes.
 The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
+    Node,
     COL,
     LIT_INT,
     LIT_FLOAT,
@@ -76,6 +77,23 @@ from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
 from .aggregate import Reducer
+
+
+def _numeric_literal(node: Node) raises -> Series:
+    """A one-row column for an Int/Float literal of its tagged type."""
+    if node.text == "":
+        if node.op == LIT_INT:
+            return Series("", Column[Int64]([node.integer]))
+        return Series("", Column[Float64]([node.floating]))
+    var dtype = DataType.parse(node.text)
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if dtype == DataType.of(D):
+            comptime if D.is_floating_point():
+                return Series("", Column[Scalar[D]]([node.floating.cast[D]()]))
+            else:
+                return Series("", Column[Scalar[D]]([node.integer.cast[D]()]))
+    raise Error("Unsupported literal dtype " + node.text)
 
 
 def _empty(dtype: DataType) raises -> Series:
@@ -189,10 +207,8 @@ def _eval[
     ref node = bound.expr._nodes[index]
     if node.op == COL:
         return columns[bound.sources[index]].slice(offset, length)
-    if node.op == LIT_INT:
-        return Series("", Column[Int64]([node.integer]))
-    if node.op == LIT_FLOAT:
-        return Series("", Column[Float64]([node.floating]))
+    if node.op == LIT_INT or node.op == LIT_FLOAT:
+        return _numeric_literal(node)
     if node.op == LIT_BOOL:
         return Series("", Column[Bool]([Bool(node.integer)]))
     if node.op == LIT_STRING:

@@ -312,9 +312,9 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
     if op == FILL_NULL:
         return left
     if op == FILL_NAN:
-        if left != DataType.FLOAT64:
+        if not left.is_float():
             raise Error(
-                "fill_nan requires float64 operands, found " + left.name()
+                "fill_nan requires float operands, found " + left.name()
             )
         return left
     if not _numeric(left):
@@ -322,7 +322,10 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
             op_name(op) + " requires numeric operands, found " + left.name()
         )
     if op == DIV:
-        return DataType.FLOAT64
+        # Integer division yields float64; float32 stays float32.
+        return (
+            DataType.FLOAT32 if left == DataType.FLOAT32 else DataType.FLOAT64
+        )
     return left
 
 
@@ -336,11 +339,9 @@ def _unary_dtype(op: Int, input: DataType) raises -> DataType:
             raise Error("not requires a bool operand, found " + input.name())
         return DataType.BOOL
     if op >= IS_NAN and op <= IS_INFINITE:
-        if input != DataType.FLOAT64:
+        if not input.is_float():
             raise Error(
-                op_name(op)
-                + " requires a float64 operand, found "
-                + input.name()
+                op_name(op) + " requires a float operand, found " + input.name()
             )
         return DataType.BOOL
     if not _numeric(input):
@@ -348,7 +349,9 @@ def _unary_dtype(op: Int, input: DataType) raises -> DataType:
             op_name(op) + " requires a numeric operand, found " + input.name()
         )
     if op == SQRT or op == EXP or op == LOG:
-        return DataType.FLOAT64
+        return (
+            DataType.FLOAT32 if input == DataType.FLOAT32 else DataType.FLOAT64
+        )
     return input
 
 
@@ -361,7 +364,7 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
             raise Error(
                 "sum requires a numeric expression, found " + input.name()
             )
-        return input
+        return input.sum_type()
     if op == COUNT or op == NULL_COUNT or op == N_UNIQUE or op == LEN:
         return DataType.INT64
     if op == ANY or op == ALL:
@@ -502,9 +505,13 @@ def bind(
             dtype = columns[source].dtype()
             shape = ROWS
         elif node.op == LIT_INT:
-            dtype = DataType.INT64
+            dtype = DataType.INT64 if node.text == "" else DataType.parse(
+                node.text
+            )
         elif node.op == LIT_FLOAT:
-            dtype = DataType.FLOAT64
+            dtype = DataType.FLOAT64 if node.text == "" else DataType.parse(
+                node.text
+            )
         elif node.op == LIT_BOOL:
             dtype = DataType.BOOL
         elif node.op == LIT_STRING:
@@ -577,6 +584,7 @@ def bind(
                         "cum_sum and rolling_sum require a numeric expression,"
                         " found " + input.name()
                     )
+                dtype = input.sum_type()
             elif node.op == ROLLING_MEAN:
                 if not _numeric(input):
                     raise Error(

@@ -11,7 +11,7 @@ from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
 from .column import Column
 from .string_column import StringColumn, StringBuilder
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .series import Series
 from .expr import (
     SUM,
@@ -203,6 +203,87 @@ def _distinct(
             nulls[g] = True
 
 
+comptime _UINT64_BIAS = UInt64(1) << 63
+
+
+def _state_type(dtype: DataType) -> DataType:
+    if dtype.is_integer():
+        return DataType.INT64
+    if dtype.is_float():
+        return DataType.FLOAT64
+    return dtype
+
+
+def _canonical(chunk: Series) raises -> Series:
+    """Narrow integers as Int64 (UInt64 biased to keep order), Float32 as
+    Float64; exact in every case."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D != DType.int64 and D != DType.float64:
+            if chunk._data.isa[Column[Scalar[D]]]():
+                ref column = chunk._data[Column[Scalar[D]]]
+                var valid = List[Bool](capacity=len(column))
+                comptime if D.is_floating_point():
+                    var values = List[Float64](capacity=len(column))
+                    for i in range(len(column)):
+                        values.append(column._get(i).cast[DType.float64]())
+                        valid.append(column._valid(i))
+                    return Series("", Column[Float64](values^, valid))
+                else:
+                    var values = List[Int64](capacity=len(column))
+                    for i in range(len(column)):
+                        comptime if D == DType.uint64:
+                            values.append(
+                                (
+                                    column._get(i).cast[DType.uint64]()
+                                    ^ _UINT64_BIAS
+                                ).cast[DType.int64]()
+                            )
+                        else:
+                            values.append(column._get(i).cast[DType.int64]())
+                        valid.append(column._valid(i))
+                    return Series("", Column[Int64](values^, valid))
+    return chunk.copy()
+
+
+def _from_canonical(result: Series, dtype: DataType) raises -> Series:
+    """Undo _canonical for min/max/first/last/sum results."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if dtype == DataType.of(D):
+            var valid = validity_of(result)
+            var values = List[Scalar[D]](capacity=len(result))
+            comptime if D.is_floating_point():
+                ref column = result._data[Column[Float64]]
+                for i in range(len(column)):
+                    values.append(column._get(i).cast[D]())
+            else:
+                ref column = result._data[Column[Int64]]
+                for i in range(len(column)):
+                    comptime if D == DType.uint64:
+                        values.append(
+                            (
+                                column._get(i).cast[DType.uint64]()
+                                ^ _UINT64_BIAS
+                            ).cast[D]()
+                        )
+                    else:
+                        values.append(column._get(i).cast[D]())
+            return Series("", Column[Scalar[D]](values^, valid))
+    return result.copy()
+
+
+def validity_of(series: Series) -> List[Bool]:
+    var valid = List[Bool](capacity=len(series))
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            for i in range(len(column)):
+                valid.append(column._valid(i))
+    return valid^
+
+
 def float_key(value: Float64) -> UInt64:
     """Equality key where every NaN is one value and -0.0 equals 0.0."""
     if isnan(value):
@@ -247,8 +328,17 @@ def quantile_of(
 
 
 struct Reducer(Movable):
+    """Per-group reduction state for one expression.
+
+    State is kept in a canonical type: every integer width as Int64 (UInt64
+    re-encoded order-preservingly, or summed exactly in 128 bits) and Float32
+    as Float64. `update` converts input batches and `finish` converts the
+    result back to the output type.
+    """
+
     var op: Int
-    var dtype: DataType
+    var input: DataType  # the physical input type
+    var dtype: DataType  # the canonical state type
     var group_count: Int
     var min_count: Int
     var integer: Int64
@@ -282,15 +372,16 @@ struct Reducer(Movable):
         text: String = "",
     ):
         self.op = op
-        self.dtype = input_dtype
+        self.input = input_dtype
+        self.dtype = _state_type(input_dtype)
         self.group_count = group_count
         self.min_count = min_count
         self.integer = integer
         self.floating = floating
         self.text = text
         var n = group_count
-        var is_int = input_dtype == DataType.INT64
-        var is_float = input_dtype == DataType.FLOAT64
+        var is_int = self.dtype == DataType.INT64
+        var is_float = self.dtype == DataType.FLOAT64
         var summing = op == SUM or op == MEAN
         var picking = op == MIN or op == MAX or op == FIRST or op == LAST
         var distinct = op == N_UNIQUE
@@ -344,6 +435,24 @@ struct Reducer(Movable):
         )
 
     def update(
+        mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
+    ) raises:
+        if self.input == self.dtype:
+            self._update(chunk, offset, grouped, groups)
+            return
+        if self.input == DataType.UINT64 and (
+            self.op == SUM or self.op == MEAN
+        ):
+            ref column = chunk._data[Column[UInt64]]
+            for i in range(len(column)):
+                if column._valid(i):
+                    self.int_sums[_group(grouped, groups, offset + i)].add_wide(
+                        column._get(i).cast[DType.int128]()
+                    )
+            return
+        self._update(_canonical(chunk), offset, grouped, groups)
+
+    def _update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
     ) raises:
         var op = self.op
@@ -555,6 +664,44 @@ struct Reducer(Movable):
             raise Error("Unsupported reduction")
 
     def finish(self) raises -> Series:
+        if self.input == self.dtype:
+            return self._finish()
+        var op = self.op
+        if op == SUM and self.input.is_integer():
+            return self._integer_sum()
+        var result = self._finish()
+        if op == SUM or op == MIN or op == MAX or op == FIRST or op == LAST:
+            return _from_canonical(result, self.input)
+        return result^
+
+    def _integer_sum(self) raises -> Series:
+        """Exact sums of narrow or unsigned integers in their sum type."""
+        var n = self.group_count
+        var target = self.input.sum_type()
+        var valid = List[Bool](length=n, fill=False)
+        for g in range(n):
+            valid[g] = self.int_sums[g].count >= Int64(self.min_count)
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            comptime if D.is_integral():
+                if target == DataType.of(D):
+                    var output = List[Scalar[D]](length=n, fill=0)
+                    for g in range(n):
+                        if not valid[g]:
+                            continue
+                        var total = self.int_sums[g].total
+                        if (
+                            total > Scalar[D].MAX.cast[DType.int128]()
+                            or total < Scalar[D].MIN.cast[DType.int128]()
+                        ):
+                            raise Error(
+                                target.name() + " expression sum overflow"
+                            )
+                        output[g] = total.cast[D]()
+                    return Series("", Column[Scalar[D]](output^, valid))
+        raise Error("Unsupported sum type " + target.name())
+
+    def _finish(self) raises -> Series:
         var op = self.op
         var n = self.group_count
         var valid = List[Bool](length=n, fill=True)

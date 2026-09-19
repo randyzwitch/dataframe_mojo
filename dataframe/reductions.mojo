@@ -21,6 +21,11 @@ struct IntSumState(Copyable):
         self.total += value.cast[DType.int128]()
         self.count += 1
 
+    def add_wide(mut self, value: WideInt):
+        """Add a value outside Int64 (UInt64 inputs)."""
+        self.total += value
+        self.count += 1
+
     def merge(mut self, other: Self):
         """Combine states for disjoint partitions of one input."""
         self.total += other.total

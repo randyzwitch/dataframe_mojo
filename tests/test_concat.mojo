@@ -138,7 +138,7 @@ def test_series_append() raises:
     assert_equal(nulls.null_count(), 10)
     assert_equal(nulls.dtype(), DataType.STRING)
     with assert_raises(contains="Unknown dtype"):
-        _ = Series.full_null("n", "int32", 1)
+        _ = Series.full_null("n", "int128", 1)
 
 
 def main() raises:
