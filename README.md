@@ -12,7 +12,7 @@ backend facade. The API is provisional.
 With [Pixi](https://pixi.sh) installed, from this directory:
 
 ```bash
-pixi run test
+pixi run test          # runs every tests/test_*.mojo
 pixi run example
 pixi run build
 pixi run bench-csv
@@ -121,6 +121,8 @@ not guaranteed. See [the expression contract](docs/expressions.md).
   and String. The runtime tag is per column, not per cell.
 - Schema inspection, projection, indexed gathering, nullable Boolean filtering,
   and adding/replacing columns.
+- `head`/`tail`/`slice`/`reverse`, `drop`/`rename`/`with_row_index`, row and
+  cell access through the tagged `AnyValue`, null counts, and structural `equals`.
 - Nullable greater-than comparisons, Float64 scalar multiplication, and
   Int64/Float64 sums.
 - Hash grouping by one String column, summing one Int64 or Float64 column.
@@ -135,6 +137,9 @@ Useful calls:
 
 ```mojo
 var selected = frame.select(["region", "amount"])
+var first = frame.head(3)
+var cleaned = frame.drop("notes").rename({"amount": "revenue"})
+var cell = frame.item(0, "region").string()
 var sampled = frame.take([3, 0, 3])
 var sorted = frame.sort("amount", descending=True, nulls_last=True)
 var joined = frame.join(regions, on="region", how="left")
