@@ -149,6 +149,8 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 - Vertical, diagonal, and horizontal `concat`, plus `vstack`/`hstack`.
 - `unique`, `n_unique`, `is_duplicated`, `drop_nulls`, and frame `fill_null`.
 - `pivot` and `unpivot` reshaping.
+- A `Series` API (operators, reductions, `value_counts`, `unique`, `sort`)
+  backed by the same expression kernels.
 - Bounded table display for `DataFrame` and `Series` (`print(frame)`,
   `to_string(max_rows=..., ...)`, `glimpse()`).
 - `head`/`tail`/`slice`/`reverse`, `drop`/`rename`/`with_row_index`, row and
