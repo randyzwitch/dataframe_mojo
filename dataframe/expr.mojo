@@ -15,6 +15,11 @@ comptime SUM = 10
 comptime COUNT = 11
 # A typed null literal; the dtype name is kept in `text`.
 comptime LIT_NULL = 12
+# A column selector leaf, expanded into one expression per matched column
+# before binding. text: kind, prefix, suffix joined by SEP; text2: SEP-joined
+# names or dtypes; integer: nth index.
+comptime SELECTOR = 13
+comptime SEP = "\x1f"
 
 # Binary operations occupy 20..49.
 comptime LT = 20
@@ -167,6 +172,32 @@ struct Expr(Copyable):
         var result = self.copy()
         result._name = name
         return result^
+
+    def _rename_selector(self, prefix: String, suffix: String) -> Self:
+        var result = self.copy()
+        for i in range(len(result._nodes)):
+            if result._nodes[i].op == SELECTOR:
+                var parts = result._nodes[i].text.split(SEP)
+                result._nodes[i].text = (
+                    String(parts[0])
+                    + SEP
+                    + prefix
+                    + String(parts[1])
+                    + SEP
+                    + String(parts[2])
+                    + suffix
+                )
+                return result^
+        result._name = prefix + result._name + suffix
+        return result^
+
+    def name_prefix(self, prefix: String) -> Self:
+        """Prefix the output name; for selectors, every expanded name."""
+        return self._rename_selector(prefix, "")
+
+    def name_suffix(self, suffix: String) -> Self:
+        """Suffix the output name; for selectors, every expanded name."""
+        return self._rename_selector("", suffix)
 
     def _binary(self, other: Self, op: Int) -> Self:
         var nodes = self._nodes.copy()
@@ -463,6 +494,63 @@ def _append_shifted(mut nodes: List[Node], other: List[Node], offset: Int):
 
 def col(name: String) -> Expr:
     return Expr([_node(COL, text=name)], name)
+
+
+def _selector(kind: String, items: String = "", index: Int = 0) -> Expr:
+    """Selector expressions start unnamed; expansion names each output."""
+    return Expr(
+        [
+            _node(
+                SELECTOR,
+                text=kind + SEP + SEP,
+                text2=items,
+                integer=Int64(index),
+            )
+        ],
+        "",
+    )
+
+
+def _joined(items: List[String]) -> String:
+    var out = String()
+    for i in range(len(items)):
+        if i > 0:
+            out += SEP
+        out += items[i]
+    return out^
+
+
+def col(names: List[String]) -> Expr:
+    """Select several columns; operations apply to each one."""
+    return _selector("cols", _joined(names))
+
+
+def all() -> Expr:
+    """Every column, in schema order."""
+    return _selector("all")
+
+
+def exclude(names: List[String]) -> Expr:
+    """Every column except the listed ones, in schema order."""
+    return _selector("exclude", _joined(names))
+
+
+def by_dtype(dtypes: List[String]) -> Expr:
+    """Columns whose dtype is listed, in schema order."""
+    return _selector("dtype", _joined(dtypes))
+
+
+def nth(index: Int) -> Expr:
+    """The column at a position; negative positions count from the end."""
+    return _selector("nth", "", index)
+
+
+def first() -> Expr:
+    return nth(0)
+
+
+def last() -> Expr:
+    return nth(-1)
 
 
 def lit(value: Int64) -> Expr:

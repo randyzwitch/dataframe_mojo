@@ -9,6 +9,7 @@ from .execution import evaluate
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows
 from .expr_kernels import choose, validity
+from .selectors import expand, expand_all
 from .display import render_frame, render_glimpse
 
 
@@ -766,7 +767,10 @@ struct DataFrame(Copyable, Sized, Writable):
         return Self(columns^, height=self._height)
 
     def filter(self, predicate: Expr, *, batch_size: Int = 1024) raises -> Self:
-        var bound = bind(predicate, self._columns)
+        var predicates = expand(predicate, self._columns)
+        if len(predicates) != 1:
+            raise Error("A filter selector must match exactly one column")
+        var bound = bind(predicates[0], self._columns)
         if bound.dtypes[len(bound.dtypes) - 1] != "bool":
             raise Error("Filter expression must return Boolean values")
         var result = evaluate(
@@ -1124,9 +1128,11 @@ def concat(
 def _bind_all(
     expressions: List[Expr], columns: List[Series]
 ) raises -> List[BoundExpr]:
+    """Expand selectors, reject duplicate output names, then bind all."""
+    var expanded = expand_all(expressions, columns)
     var bound = List[BoundExpr]()
     var names = Dict[String, Bool]()
-    for expression in expressions:
+    for expression in expanded:
         if expression._name in names:
             raise Error("Duplicate expression output name: " + expression._name)
         names[expression._name] = True
