@@ -176,6 +176,22 @@ Grouped reductions give each worker state for every group, so the worker
 count is capped at rows / (4 x groups). Hash grouping itself, row-wise
 expressions, and filters are still single-threaded (#5, #7).
 
+## Direct SIMD loads in unfused float kernels (#3)
+
+Unfused float kernels (Float32, `%`, `//`, `**`, clip, unary math, and any
+expression fusion does not cover) now load contiguous vectors straight from
+the shared column buffers instead of gathering lane by lane, and apply
+validity as a vector mask. Single-threaded, 1,000,000 rows:
+
+| expression | before | after |
+|---|---|---|
+| Float64 `x % 7` | 20.0 ms | 13.8 ms |
+| Float32 `y * 2 + 1` | 32.6 ms | 22.0 ms |
+| Float64 `sqrt(x)` | 15.5 ms | 10.6 ms |
+
+Remaining allocations per batch are the output values, the validity list,
+and one intermediate per unfused node; source windows allocate nothing.
+
 ## Row-parallel expressions and filters (#5, #7)
 
 Row-shaped expressions evaluate one contiguous, batch-aligned partition per

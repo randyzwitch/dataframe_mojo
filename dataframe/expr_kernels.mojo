@@ -145,67 +145,103 @@ def _float_scalar[op: Int, D: DType](x: Scalar[D], y: Scalar[D]) -> Scalar[D]:
         return y if x > y else x
 
 
+def _lanes[
+    D: DType, width: Int
+](column: Column[Scalar[D]], start: Int) -> SIMD[D, width]:
+    """`width` payloads from row `start` read straight from the buffer, or a
+    splat of the single value of a broadcast (one-row) operand."""
+    if len(column) == 1:
+        return SIMD[D, width](column._get(0))
+    return column._ptr().unsafe_load[width=width](start)
+
+
+def _mask[width: Int](valid: List[Bool], start: Int) -> SIMD[DType.bool, width]:
+    """Validity flags for rows [start, start + width) as a vector mask."""
+    return (
+        valid.unsafe_ptr()
+        .unsafe_offset(start)
+        .unsafe_bitcast[Scalar[DType.bool]]()
+        .unsafe_load[width=width]()
+    )
+
+
 def _numeric_float[
     op: Int, width: Int, D: DType
 ](left: Column[Scalar[D]], right: Column[Scalar[D]]) raises -> Series:
+    """Float binary kernel with contiguous SIMD loads from the source
+    buffers (no gather or copy). Null lanes are computed on their payload
+    slots (harmless for floats) and zeroed in the output; the final
+    `n % width` rows run one lane at a time, so no load passes the end."""
     var n = _length(len(left), len(right))
     var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        valid[i] = left._valid(0 if len(left) == 1 else i) and right._valid(
+            0 if len(right) == 1 else i
+        )
     comptime predicate = is_comparison(op)
     var values = List[Scalar[D]](length=0 if predicate else n, fill=0)
     var predicates = List[Bool](length=n if predicate else 0, fill=False)
-    # Gather/load valid lanes into vectors. A future buffer-view layer can
-    # replace these lane loads without altering the IR or public API.
-    for start in range(0, n, width):
-        var x = SIMD[D, width](0)
-        var y = SIMD[D, width](0)
-        comptime for lane in range(width):
-            var i = start + lane
-            if i < n:
-                var a = 0 if len(left) == 1 else i
-                var b = 0 if len(right) == 1 else i
-                valid[i] = left._valid(a) and right._valid(b)
-                if valid[i]:
-                    x[lane] = left._get(a)
-                    y[lane] = right._get(b)
-        comptime if predicate:
-            var result: SIMD[DType.bool, width]
-            comptime if op == GT:
-                result = x.gt(y)
-            elif op == LT:
-                result = x.lt(y)
-            elif op == GE:
-                result = x.ge(y)
-            elif op == LE:
-                result = x.le(y)
-            elif op == EQ:
-                result = x.eq(y)
-            else:
-                # SIMD ne is an ordered comparison; IEEE requires NaN != NaN.
-                result = ~x.eq(y)
-            comptime for lane in range(width):
-                if start + lane < n:
-                    predicates[start + lane] = result[lane]
-        else:
-            var result: SIMD[D, width]
-            comptime if op == ADD:
-                result = x + y
-            elif op == SUB:
-                result = x - y
-            elif op == MUL:
-                result = x * y
-            elif op == DIV:
-                result = x / y
-            else:
-                result = SIMD[D, width](0)
-                comptime for lane in range(width):
-                    result[lane] = _float_scalar[op, D](x[lane], y[lane])
-            comptime for lane in range(width):
-                if start + lane < n:
-                    values[start + lane] = result[lane]
+    var main = n - n % width
+    for start in range(0, main, width):
+        _float_block[op, width, D](
+            left, right, start, valid, values, predicates
+        )
+    for start in range(main, n):
+        _float_block[op, 1, D](left, right, start, valid, values, predicates)
     comptime if predicate:
         return Series("", Column[Bool](predicates^, valid))
     else:
         return Series("", Column[Scalar[D]](values^, valid))
+
+
+def _float_block[
+    op: Int, width: Int, D: DType
+](
+    left: Column[Scalar[D]],
+    right: Column[Scalar[D]],
+    start: Int,
+    valid: List[Bool],
+    mut values: List[Scalar[D]],
+    mut predicates: List[Bool],
+):
+    var x = _lanes[D, width](left, start)
+    var y = _lanes[D, width](right, start)
+    comptime if is_comparison(op):
+        var result: SIMD[DType.bool, width]
+        comptime if op == GT:
+            result = x.gt(y)
+        elif op == LT:
+            result = x.lt(y)
+        elif op == GE:
+            result = x.ge(y)
+        elif op == LE:
+            result = x.le(y)
+        elif op == EQ:
+            result = x.eq(y)
+        else:
+            # SIMD ne is an ordered comparison; IEEE requires NaN != NaN.
+            result = ~x.eq(y)
+        var mask = _mask[width](valid, start)
+        predicates.unsafe_ptr().unsafe_offset(start).unsafe_bitcast[
+            Scalar[DType.bool]
+        ]().unsafe_store(result & mask)
+    else:
+        var result: SIMD[D, width]
+        comptime if op == ADD:
+            result = x + y
+        elif op == SUB:
+            result = x - y
+        elif op == MUL:
+            result = x * y
+        elif op == DIV:
+            result = x / y
+        else:
+            result = SIMD[D, width](0)
+            comptime for lane in range(width):
+                result[lane] = _float_scalar[op, D](x[lane], y[lane])
+        values.unsafe_ptr().unsafe_offset(start).unsafe_store(
+            _mask[width](valid, start).select(result, SIMD[D, width](0))
+        )
 
 
 # Integer widths other than Int64 compute in 128 bits (signed or unsigned to
@@ -439,42 +475,54 @@ def _unary_float[
 ](
     input: Column[Scalar[D]], decimals: Int
 ) raises -> Series where D.is_floating_point():
+    """Float unary kernel with contiguous SIMD loads (see _numeric_float)."""
     var n = len(input)
     var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        valid[i] = input._valid(i)
     var values = List[Scalar[D]](length=n, fill=0)
-    for start in range(0, n, width):
-        var x = SIMD[D, width](0)
-        comptime for lane in range(width):
-            var i = start + lane
-            if i < n:
-                valid[i] = input._valid(i)
-                if valid[i]:
-                    x[lane] = input._get(i)
-        var result: SIMD[D, width]
-        comptime if op == NEG:
-            result = -x
-        elif op == ABS:
-            result = abs(x)
-        elif op == SQRT:
-            result = sqrt(x)
-        elif op == EXP:
-            result = exp(x)
-        elif op == LOG:
-            result = log(x)
-        elif op == FLOOR:
-            result = floor(x)
-        elif op == CEIL:
-            result = ceil(x)
-        else:
-            result = SIMD[D, width](0)
-            comptime for lane in range(width):
-                result[lane] = _round_half_away(
-                    x[lane].cast[DType.float64](), decimals
-                ).cast[D]()
-        comptime for lane in range(width):
-            if start + lane < n:
-                values[start + lane] = result[lane]
+    var main = n - n % width
+    for start in range(0, main, width):
+        _unary_block[op, width, D](input, start, decimals, valid, values)
+    for start in range(main, n):
+        _unary_block[op, 1, D](input, start, decimals, valid, values)
     return Series("", Column[Scalar[D]](values^, valid))
+
+
+def _unary_block[
+    op: Int, width: Int, D: DType
+](
+    input: Column[Scalar[D]],
+    start: Int,
+    decimals: Int,
+    valid: List[Bool],
+    mut values: List[Scalar[D]],
+) where D.is_floating_point():
+    var x = input._ptr().unsafe_load[width=width](start)
+    var result: SIMD[D, width]
+    comptime if op == NEG:
+        result = -x
+    elif op == ABS:
+        result = abs(x)
+    elif op == SQRT:
+        result = sqrt(x)
+    elif op == EXP:
+        result = exp(x)
+    elif op == LOG:
+        result = log(x)
+    elif op == FLOOR:
+        result = floor(x)
+    elif op == CEIL:
+        result = ceil(x)
+    else:
+        result = SIMD[D, width](0)
+        comptime for lane in range(width):
+            result[lane] = _round_half_away(
+                x[lane].cast[DType.float64](), decimals
+            ).cast[D]()
+    values.unsafe_ptr().unsafe_offset(start).unsafe_store(
+        _mask[width](valid, start).select(result, SIMD[D, width](0))
+    )
 
 
 def _unary_int[
