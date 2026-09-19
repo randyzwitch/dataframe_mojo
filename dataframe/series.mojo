@@ -4,6 +4,8 @@ from .column import Column
 from .value import AnyValue
 from .display import render_series
 from .cast import cast_series
+from .expr import Expr, col, lit
+from .frame import DataFrame
 
 comptime Storage = Variant[
     Column[Int64], Column[Float64], Column[Bool], Column[String]
@@ -145,6 +147,263 @@ struct Series(Copyable, Sized, Writable):
         return _equal_columns(
             self._data[Column[String]], other._data[Column[String]]
         )
+
+    # Expression-backed operations. Each evaluates the matching expression
+    # over a one-column frame, so Series and expressions share every kernel
+    # and contract. Binary operations pair rows positionally.
+
+    def _frame(self) raises -> DataFrame:
+        return DataFrame([self.copy()])
+
+    def _apply(self, expr: Expr) raises -> Self:
+        return self._frame().select(expr.alias(self._name)).column(self._name)
+
+    def _pair(self, other: Self, op: String) raises -> Self:
+        if len(self) != len(other):
+            raise Error(
+                "Series lengths differ: "
+                + String(len(self))
+                + " and "
+                + String(len(other))
+            )
+        var frame = DataFrame([self.copy(), other.renamed("__right")])
+        var left = col(self._name)
+        var right = col("__right")
+        var e: Expr
+        if op == "+":
+            e = left + right
+        elif op == "-":
+            e = left - right
+        elif op == "*":
+            e = left * right
+        elif op == "/":
+            e = left / right
+        elif op == "//":
+            e = left // right
+        elif op == "%":
+            e = left % right
+        elif op == "**":
+            e = left**right
+        elif op == "<":
+            e = left < right
+        elif op == "<=":
+            e = left <= right
+        elif op == ">":
+            e = left > right
+        elif op == ">=":
+            e = left >= right
+        elif op == "eq":
+            e = left.eq(right)
+        elif op == "ne":
+            e = left.ne(right)
+        elif op == "&":
+            e = left & right
+        elif op == "|":
+            e = left | right
+        else:
+            e = left ^ right
+        return frame.select(e.alias(self._name)).column(self._name)
+
+    def _scalar(self, expr: Expr) raises -> AnyValue:
+        return self._frame().select(expr.alias(self._name)).item()
+
+    def __add__(self, other: Self) raises -> Self:
+        return self._pair(other, "+")
+
+    def __add__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) + other)
+
+    def __sub__(self, other: Self) raises -> Self:
+        return self._pair(other, "-")
+
+    def __sub__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) - other)
+
+    def __mul__(self, other: Self) raises -> Self:
+        return self._pair(other, "*")
+
+    def __mul__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) * other)
+
+    def __truediv__(self, other: Self) raises -> Self:
+        return self._pair(other, "/")
+
+    def __truediv__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) / other)
+
+    def __floordiv__(self, other: Self) raises -> Self:
+        return self._pair(other, "//")
+
+    def __floordiv__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) // other)
+
+    def __mod__(self, other: Self) raises -> Self:
+        return self._pair(other, "%")
+
+    def __mod__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) % other)
+
+    def __pow__(self, other: Self) raises -> Self:
+        return self._pair(other, "**")
+
+    def __pow__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) ** other)
+
+    def __neg__(self) raises -> Self:
+        return self._apply(-col(self._name))
+
+    def __lt__(self, other: Self) raises -> Self:
+        return self._pair(other, "<")
+
+    def __lt__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) < other)
+
+    def __le__(self, other: Self) raises -> Self:
+        return self._pair(other, "<=")
+
+    def __le__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) <= other)
+
+    def __gt__(self, other: Self) raises -> Self:
+        return self._pair(other, ">")
+
+    def __gt__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) > other)
+
+    def __ge__(self, other: Self) raises -> Self:
+        return self._pair(other, ">=")
+
+    def __ge__(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name) >= other)
+
+    def eq(self, other: Self) raises -> Self:
+        return self._pair(other, "eq")
+
+    def eq(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name).eq(other))
+
+    def ne(self, other: Self) raises -> Self:
+        return self._pair(other, "ne")
+
+    def ne(self, other: Expr) raises -> Self:
+        return self._apply(col(self._name).ne(other))
+
+    def __and__(self, other: Self) raises -> Self:
+        return self._pair(other, "&")
+
+    def __or__(self, other: Self) raises -> Self:
+        return self._pair(other, "|")
+
+    def __xor__(self, other: Self) raises -> Self:
+        return self._pair(other, "^")
+
+    def __invert__(self) raises -> Self:
+        return self._apply(~col(self._name))
+
+    def __getitem__(self, index: Int) raises -> AnyValue:
+        """One cell; raises when out of bounds. Negative indices count
+        from the end."""
+        return self.get(index + len(self) if index < 0 else index)
+
+    def apply(self, expr: Expr) raises -> Self:
+        """Evaluate any expression written against this series' name."""
+        return self._apply(expr)
+
+    def is_null(self) raises -> Self:
+        return self._apply(col(self._name).is_null())
+
+    def is_not_null(self) raises -> Self:
+        return self._apply(col(self._name).is_not_null())
+
+    def fill_null(self, value: Expr) raises -> Self:
+        return self._apply(col(self._name).fill_null(value))
+
+    def abs(self) raises -> Self:
+        return self._apply(col(self._name).abs())
+
+    def round(self, decimals: Int = 0) raises -> Self:
+        return self._apply(col(self._name).round(decimals))
+
+    def sum(self) raises -> AnyValue:
+        return self._scalar(col(self._name).sum())
+
+    def mean(self) raises -> AnyValue:
+        return self._scalar(col(self._name).mean())
+
+    def min(self) raises -> AnyValue:
+        return self._scalar(col(self._name).min())
+
+    def max(self) raises -> AnyValue:
+        return self._scalar(col(self._name).max())
+
+    def median(self) raises -> AnyValue:
+        return self._scalar(col(self._name).median())
+
+    def quantile(
+        self, quantile: Float64, interpolation: String = "linear"
+    ) raises -> AnyValue:
+        return self._scalar(col(self._name).quantile(quantile, interpolation))
+
+    def std(self, ddof: Int = 1) raises -> AnyValue:
+        return self._scalar(col(self._name).std(ddof))
+
+    def var(self, ddof: Int = 1) raises -> AnyValue:
+        return self._scalar(col(self._name).var(ddof))
+
+    def count(self) raises -> Int:
+        return Int(self._scalar(col(self._name).count()).int64())
+
+    def n_unique(self) raises -> Int:
+        return Int(self._scalar(col(self._name).n_unique()).int64())
+
+    def first(self) raises -> AnyValue:
+        return self._scalar(col(self._name).first())
+
+    def last(self) raises -> AnyValue:
+        return self._scalar(col(self._name).last())
+
+    def any(self, ignore_nulls: Bool = True) raises -> AnyValue:
+        return self._scalar(col(self._name).any(ignore_nulls))
+
+    def all(self, ignore_nulls: Bool = True) raises -> AnyValue:
+        return self._scalar(col(self._name).all(ignore_nulls))
+
+    def head(self, n: Int = 5) raises -> Self:
+        return self._frame().head(n).column(self._name)
+
+    def tail(self, n: Int = 5) raises -> Self:
+        return self._frame().tail(n).column(self._name)
+
+    def sort(
+        self, descending: Bool = False, nulls_last: Bool = True
+    ) raises -> Self:
+        return self.take(self.argsort(descending, nulls_last))
+
+    def unique(self, maintain_order: Bool = False) raises -> Self:
+        """Distinct values, null counted once."""
+        return (
+            self._frame()
+            .unique(keep="first", maintain_order=maintain_order)
+            .column(self._name)
+        )
+
+    def value_counts(
+        self, sort: Bool = True, name: String = "count"
+    ) raises -> DataFrame:
+        """Distinct values and their row counts (nulls included), most
+        frequent first when sort=True; ties keep first-occurrence order."""
+        var counts = (
+            self._frame().group_by(self._name, maintain_order=True).len(name)
+        )
+        if sort:
+            return counts.sort([name], descending=True)
+        return counts^
+
+    def to_values(self) raises -> List[AnyValue]:
+        var values = List[AnyValue](capacity=len(self))
+        for i in range(len(self)):
+            values.append(self.get(i))
+        return values^
 
     def int64(self) raises -> Column[Int64]:
         """Return an owned typed copy, raising on a dtype mismatch."""

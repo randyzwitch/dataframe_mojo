@@ -121,6 +121,9 @@ struct DataFrame(Copyable, Sized, Writable):
     def get_column(self, name: String) raises -> Series:
         return self.column(name)
 
+    def __getitem__(self, name: String) raises -> Series:
+        return self.column(name)
+
     def null_count(self) raises -> Self:
         """One row holding each column's null count as Int64."""
         var columns = List[Series](capacity=self.width())

@@ -130,6 +130,24 @@ column. Validity bitmaps are appended bytewise, with a shifted merge when the
 destination length is not a multiple of eight, so concatenation is linear in the
 output size (`pixi run bench-concat`).
 
+## Series operations
+
+`Series` has operators (`+ - * / // % **`, unary `-`, `< <= > >=`, `.eq()`,
+`.ne()`, `& | ^ ~`), elementwise helpers (`is_null`, `is_not_null`,
+`fill_null`, `abs`, `round`), reductions returning an `AnyValue` (`sum`, `mean`,
+`min`, `max`, `median`, `quantile`, `std`, `var`, `first`, `last`, `any`,
+`all`) or an `Int` (`count`, `n_unique`), `sort`, `unique`, `value_counts`,
+`head`, `tail`, `to_values`, `apply(expr)`, and `series[i]` (negative indices
+count from the end). `frame["name"]` returns a column as a Series.
+
+Every one of these evaluates the matching expression over a one-column frame,
+so it shares the expression kernels and contracts exactly: typed literals, no
+promotion, the same null, NaN, and overflow rules. A binary operation between
+two series pairs rows by position, requires equal lengths, and keeps the left
+name; the other operand may also be a scalar expression such as `lit(...)`.
+The cost is a small constant for building the frame and binding the
+expression, plus the usual copies.
+
 ## Filtering and arithmetic
 
 Filter masks must match the frame's height. Only valid true entries retain rows;
