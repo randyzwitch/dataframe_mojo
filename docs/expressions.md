@@ -24,11 +24,30 @@ expression in an operation is bound before any expression kernel executes.
 Duplicate output names, unknown columns, invalid types, negative `min_count`,
 and nested aggregates raise even on empty dataframes.
 
-Initial arithmetic is `+`, `-`, and `*` for matching Int64 or Float64 operands.
-Greater-than requires matching numeric operands. `.eq()` supports all four
-matching dtypes. There is no implicit type promotion or index alignment.
-Nulls propagate through binary operations; NaN is distinct from null.
-Int64 elementwise arithmetic checks overflow per valid element.
+Operands must have matching dtypes; there is no implicit promotion or index
+alignment. Nulls propagate through every operator below; NaN is distinct from
+null. Int64 arithmetic checks overflow per valid element and raises.
+
+| Operation | Operands | Result | Notes |
+|---|---|---|---|
+| `+`, `-`, `*` | Int64, Float64 | same | checked for Int64 |
+| `/` | Int64, Float64 | Float64 | the one operator where Int64 input yields Float64; IEEE division by zero |
+| `//` | Int64, Float64 | same | floor division; Int64 by zero is null; `Int64.MIN // -1` raises |
+| `%` | Int64, Float64 | same | remainder takes the divisor's sign; Int64 modulo zero is null; Float64 `x % 0`, `inf % y`, and NaN operands give NaN |
+| `**`, `.pow()` | Int64, Float64 | same | Int64 is checked and raises on a negative exponent |
+| `<`, `<=`, `>`, `>=` | all four | Bool | IEEE for floats (NaN compares false); strings byte-lexicographic, as in sort; `false < true` |
+| `.eq()`, `.ne()` | all four | Bool | IEEE: NaN `.ne()` NaN is true |
+| unary `-`, `.abs()` | Int64, Float64 | same | `Int64.MIN` raises |
+| `.sqrt()`, `.exp()`, `.log()` | Int64, Float64 | Float64 | natural log; IEEE results for negative inputs and zero |
+| `.floor()`, `.ceil()`, `.round(decimals=0)` | Int64, Float64 | same | identity for Int64; `round` is half away from zero and accepts negative decimals |
+| `.clip(lower, upper)`, `.clip_min`, `.clip_max` | Int64, Float64 | same | NaN inputs and NaN bounds leave the value unchanged |
+
+Float64 `+ - * /` and all Float64 comparisons use explicit SIMD kernels; the
+other Float64 operations run per lane. `sqrt`, `exp`, `log`, and `pow` use
+Mojo's `std.math`, whose results can differ from the correctly rounded value by
+about 1e-12 relative; tests compare them with a tolerance. Binder errors name
+the operator and dtypes, for example `/ requires matching dtypes, found int64
+and float64; use typed literals`.
 
 `select(expr)` returns one row for a scalar/aggregate expression or input height
 for a row-valued expression. `select_exprs` broadcasts scalar/aggregate results
