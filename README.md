@@ -15,6 +15,7 @@ With [Pixi](https://pixi.sh) installed, from this directory:
 pixi run test          # runs every tests/test_*.mojo
 pixi run example
 pixi run build
+pixi run bench          # CPU benchmark suite; see docs/benchmarks.md
 pixi run bench-csv
 ./build/sales
 ```
