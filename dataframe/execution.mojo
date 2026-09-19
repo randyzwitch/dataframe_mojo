@@ -53,8 +53,11 @@ from .expr import (
     ALL,
     NULL_COUNT,
     WHEN,
+    STR_CONCAT,
     is_reduction,
+    is_string_op,
 )
+from .str_kernels import string_op, concat_strings
 from .binding import BoundExpr, ROWS, AGGREGATE
 from .column import Column
 from .series import Series
@@ -202,11 +205,15 @@ def _eval[
     var left = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
+    if is_string_op(node.op):
+        return string_op(node, left)
     if node.right < 0:
         return _unary_op[width](node.op, left, node.integer, mask)
     var right = _eval[width](
         bound, columns, aggregates, node.right, offset, length, grouped, mask
     )
+    if node.op == STR_CONCAT:
+        return concat_strings(left, right, node.text)
     return _binary_op[width](node.op, left, right, mask)
 
 

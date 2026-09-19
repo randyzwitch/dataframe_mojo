@@ -69,6 +69,27 @@ and an empty list yields false. `is_between(lower, upper, closed="both")`
 accepts `both`, `left`, `right`, or `none` and combines the two comparisons with
 Kleene AND, so a null bound yields null unless the other side is false.
 
+### Strings
+
+`col("s").str()` returns a namespace of String operations; Mojo has no
+attribute-style namespaces, so later namespaces (`dt()` and others) follow the
+same method convention. Inputs must be String and nulls propagate.
+
+| Method | Result | Notes |
+|---|---|---|
+| `len_chars()`, `len_bytes()` | Int64 | Unicode code points / UTF-8 bytes |
+| `to_uppercase()`, `to_lowercase()` | String | Mojo's Unicode case mapping, no locale rules |
+| `strip_chars(chars="")`, `strip_chars_start`, `strip_chars_end` | String | empty `chars` means ASCII whitespace; otherwise any listed code point |
+| `starts_with(p)`, `ends_with(p)`, `contains(p)` | Bool | literal text; no regular expressions |
+| `replace(p, v)`, `replace_all(p, v)` | String | literal; an empty pattern inserts once for `replace` and is a no-op for `replace_all` |
+| `slice(offset, length=-1)`, `head(n)`, `tail(n)` | String | by code point; a negative offset counts from the end; out-of-range parts clip |
+| `reverse()` | String | by code point |
+| `pad_start(w, c=" ")`, `pad_end(w, c)`, `zfill(w)` | String | pad to `w` code points with one fill character; `zfill` keeps a leading sign first |
+
+`concat_str([exprs], separator="")` joins String expressions row-wise and is
+null when any input is null. Character operations work on code points, not
+grapheme clusters: `"e\u0301"` has length 2 and reverses its combining mark.
+
 ### Conditionals
 
 `when(p).then(a).when(q).then(b).otherwise(c)` picks, per row, the value of the

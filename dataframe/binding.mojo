@@ -58,6 +58,15 @@ from .expr import (
     LEN,
     Node,
     WHEN,
+    STR_CONCAT,
+    STR_LEN_CHARS,
+    STR_LEN_BYTES,
+    STR_STARTS_WITH,
+    STR_ENDS_WITH,
+    STR_CONTAINS,
+    STR_SLICE,
+    STR_PAD,
+    is_string_op,
     is_conditional,
     is_logical,
     is_binary,
@@ -187,6 +196,15 @@ def _numeric(dtype: String) -> Bool:
 def _binary_dtype(op: Int, left: String, right: String) raises -> String:
     if op == KEEP_NULLS:
         return right
+    if op == STR_CONCAT:
+        if left != "string" or right != "string":
+            raise Error(
+                "concat_str requires string operands, found "
+                + left
+                + " and "
+                + right
+            )
+        return "string"
     if left != right:
         raise Error(
             op_name(op)
@@ -359,6 +377,33 @@ def bind(expr: Expr, columns: List[Series]) raises -> BoundExpr:
                     shape = ROWS
             if shape != ROWS and has_aggregate:
                 shape = AGGREGATE
+        elif is_string_op(node.op):
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid string expression input")
+            if types[node.left] != "string":
+                raise Error(
+                    "str operations require a string expression, found "
+                    + types[node.left]
+                )
+            if node.op == STR_SLICE and node.min_count < -1:
+                raise Error("str.slice length must be nonnegative")
+            if node.op == STR_PAD:
+                if node.min_count < 0:
+                    raise Error("pad width must be nonnegative")
+                if len(node.text.codepoints()) != 1:
+                    raise Error("pad fill_char must be one character")
+            if node.op == STR_LEN_CHARS or node.op == STR_LEN_BYTES:
+                dtype = "int64"
+            elif (
+                node.op == STR_STARTS_WITH
+                or node.op == STR_ENDS_WITH
+                or node.op == STR_CONTAINS
+            ):
+                dtype = "bool"
+            else:
+                dtype = "string"
+            shape = shapes[node.left]
+            has_aggregate = aggregated[node.left]
         elif is_unary(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid unary expression input")
