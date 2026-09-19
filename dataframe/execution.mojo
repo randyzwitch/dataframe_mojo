@@ -396,6 +396,57 @@ struct _ReduceJob[width: Int](Job):
             self.reducer.update(chunk, offset, self.grouped, self.groups[])
 
 
+struct _RowsJob[width: Int](Job):
+    """Evaluate rows [start, end) of a row-shaped expression."""
+
+    var bound: BoundExpr
+    var columns: List[Series]
+    var states: List[Series]
+    var root: Int
+    var start: Int
+    var end: Int
+    var batch_size: Int
+    var grouped: Bool
+    var result: Series
+
+    def __init__(
+        out self,
+        bound: BoundExpr,
+        columns: List[Series],
+        states: List[Series],
+        root: Int,
+        start: Int,
+        end: Int,
+        batch_size: Int,
+        grouped: Bool,
+    ) raises:
+        self.bound = bound.copy()
+        self.columns = columns.copy()
+        self.states = states.copy()
+        self.root = root
+        self.start = start
+        self.end = end
+        self.batch_size = batch_size
+        self.grouped = grouped
+        self.result = _empty(bound.dtypes[root])
+
+    def into_result(deinit self) -> Series:
+        return self.result^
+
+    def run(mut self) raises:
+        for offset in range(self.start, self.end, self.batch_size):
+            var chunk = _batch[Self.width](
+                self.bound,
+                self.columns,
+                self.states,
+                self.root,
+                offset,
+                min(self.batch_size, self.end - offset),
+                self.grouped,
+            )
+            self.result._append_series(chunk)
+
+
 def _reduce[
     width: Int
 ](
@@ -630,16 +681,42 @@ def evaluate[
     var size = height if bound.shape() == ROWS else (
         group_count if grouped else 1
     )
-    for offset in range(0, size, batch_size):
-        var chunk = _batch[width](
-            bound,
-            columns,
-            states,
-            root,
-            offset,
-            min(batch_size, size - offset),
-            grouped,
-        )
-        result._append_series(chunk)
+    var workers = worker_count(size) if bound.shape() == ROWS else 1
+    if workers <= 1:
+        for offset in range(0, size, batch_size):
+            var chunk = _batch[width](
+                bound,
+                columns,
+                states,
+                root,
+                offset,
+                min(batch_size, size - offset),
+                grouped,
+            )
+            result._append_series(chunk)
+    else:
+        # Row-parallel evaluation (#5): each worker evaluates the batches of
+        # one contiguous partition into a private series; pieces are joined
+        # in partition order. Precomputed states are shared read-only, and a
+        # worker error discards every piece (no partial result escapes).
+        var bounds = partitions(size, workers, batch_size)
+        var jobs = List[_RowsJob[width]](capacity=workers)
+        for w in range(workers):
+            jobs.append(
+                _RowsJob[width](
+                    bound,
+                    columns,
+                    states,
+                    root,
+                    bounds[w],
+                    bounds[w + 1],
+                    batch_size,
+                    grouped,
+                )
+            )
+        run_jobs(jobs)
+        result = jobs.pop(0).into_result()
+        while len(jobs) > 0:
+            result._append_series(jobs.pop(0).into_result())
     result._name = bound.expr._name
     return result^

@@ -1,0 +1,208 @@
+"""Parallel row selection: mask-to-index compaction and row gathers (#7).
+
+Both steps split work into contiguous ranges and preserve row order.
+
+- `true_rows` scans the mask in row partitions; each worker collects the
+  indices of valid true rows, and the per-partition lists are concatenated
+  in order.
+- `take_parallel` gathers rows for every column. Fixed-width columns (every
+  numeric type, Bool, temporal) are preallocated and each worker fills a
+  disjoint range of *output* positions whose bounds are multiples of 8, so
+  no two workers write the same validity byte. String columns gather per
+  range and append the pieces in order (bulk byte copies).
+
+Inputs are shared read-only (reference-counted buffers); outputs are only
+published after every worker succeeds, so a failure never exposes a
+partially built column.
+"""
+from std.memory import ArcPointer, Pointer
+from .column import Column, _bit
+from .dtype import DataType, NUMERIC_DTYPES
+from .parallel import Job, partitions, run_jobs, worker_count
+from .series import Series
+from .string_column import StringColumn
+
+
+struct _MaskJob(Job):
+    var mask: Column[Bool]
+    var start: Int
+    var end: Int
+    var rows: List[Int]
+
+    def __init__(out self, mask: Column[Bool], start: Int, end: Int):
+        self.mask = mask.copy()
+        self.start = start
+        self.end = end
+        self.rows = List[Int]()
+
+    def run(mut self) raises:
+        ref values = self.mask._data[]
+        ref bits = self.mask._bits[]
+        var base = self.mask._offset
+        for i in range(self.start, self.end):
+            var row = base + i
+            if values[row] and _bit(bits, row):
+                self.rows.append(i)
+
+    def into_rows(deinit self) -> List[Int]:
+        return self.rows^
+
+
+def true_rows(mask: Column[Bool]) raises -> List[Int]:
+    """Indices of valid true entries, in order."""
+    var n = len(mask)
+    var workers = worker_count(n)
+    var jobs = List[_MaskJob](capacity=workers)
+    var bounds = partitions(n, workers, 64)
+    for w in range(workers):
+        jobs.append(_MaskJob(mask, bounds[w], bounds[w + 1]))
+    if workers == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    var rows = jobs.pop(0).into_rows()
+    while len(jobs) > 0:
+        rows.extend(Span(jobs.pop(0).into_rows()))
+    return rows^
+
+
+struct _GatherJob(Job):
+    """Rows `indices[start:end]` of one column into output positions
+    [start, end), writing through raw output buffer addresses."""
+
+    var source: Series
+    var indices: ArcPointer[List[Int]]
+    var start: Int
+    var end: Int
+    var values: Int  # address of the output payloads (fixed-width columns)
+    var bits: Int  # address of the output validity bytes
+    var piece: Series  # string columns: the gathered range
+
+    def __init__(
+        out self,
+        source: Series,
+        indices: ArcPointer[List[Int]],
+        start: Int,
+        end: Int,
+        values: Int,
+        bits: Int,
+    ):
+        self.source = source.copy()
+        self.indices = indices
+        self.start = start
+        self.end = end
+        self.values = values
+        self.bits = bits
+        self.piece = source.copy()
+
+    def run(mut self) raises:
+        ref rows = self.indices[]
+        if self.source._data.isa[StringColumn]():
+            var subset = List[Int](capacity=self.end - self.start)
+            for k in range(self.start, self.end):
+                subset.append(rows[k])
+            self.piece = self.source.take(subset)
+            return
+        var out_bits = Pointer[UInt8, MutAnyOrigin](
+            unsafe_from_address=self.bits
+        )
+        if self.source._data.isa[Column[Bool]]():
+            ref column = self.source._data[Column[Bool]]
+            var out = Pointer[Bool, MutAnyOrigin](
+                unsafe_from_address=self.values
+            )
+            for k in range(self.start, self.end):
+                var row = rows[k]
+                out.unsafe_offset(k)[] = column._get(row)
+                if column._valid(row):
+                    out_bits.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(k % 8)
+            return
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            if self.source._data.isa[Column[Scalar[D]]]():
+                ref column = self.source._data[Column[Scalar[D]]]
+                var out = Pointer[Scalar[D], MutAnyOrigin](
+                    unsafe_from_address=self.values
+                )
+                for k in range(self.start, self.end):
+                    var row = rows[k]
+                    out.unsafe_offset(k)[] = column._get(row)
+                    if column._valid(row):
+                        out_bits.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(
+                            k % 8
+                        )
+
+    def into_piece(deinit self) -> Series:
+        return self.piece^
+
+
+def take_parallel(
+    columns: List[Series], var indices: List[Int], workers: Int
+) raises -> List[Series]:
+    """Gather `indices` (already bounds-checked) from every column."""
+    var m = len(indices)
+    var shared = ArcPointer(indices^)
+    var bounds = partitions(m, workers, 8)
+    # Preallocate each fixed-width output; strings are assembled from pieces.
+    var outputs = List[Series](capacity=len(columns))
+    var bits = List[List[UInt8]](capacity=len(columns))
+    for column in columns:
+        bits.append(List[UInt8](length=(m + 7) // 8, fill=0))
+        outputs.append(_allocate(column, m))
+    var jobs = List[_GatherJob](capacity=len(columns) * workers)
+    for c in range(len(columns)):
+        var values = _payload_address(outputs[c])
+        for w in range(workers):
+            jobs.append(
+                _GatherJob(
+                    columns[c],
+                    shared,
+                    bounds[w],
+                    bounds[w + 1],
+                    values,
+                    Int(bits[c].unsafe_ptr()),
+                )
+            )
+    run_jobs(jobs)
+    var result = List[Series](capacity=len(columns))
+    for c in range(len(columns)):
+        if columns[c]._data.isa[StringColumn]():
+            var assembled = jobs[c * workers].piece.copy()
+            for w in range(1, workers):
+                assembled._append_series(jobs[c * workers + w].piece)
+            result.append(assembled^)
+            continue
+        var output = outputs[c].copy()
+        _set_bits(output, bits[c].copy())
+        result.append(output^)
+    _ = bits^
+    _ = outputs^
+    return result^
+
+
+def _allocate(column: Series, m: Int) raises -> Series:
+    """An m-row column of column's dtype whose payloads workers overwrite."""
+    if column._data.isa[StringColumn]():
+        return column.copy()
+    return Series.full_null(column.name(), column.dtype(), m)
+
+
+def _payload_address(series: Series) -> Int:
+    if series._data.isa[Column[Bool]]():
+        return Int(series._data[Column[Bool]]._ptr())
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        if series._data.isa[Column[Scalar[D]]]():
+            return Int(series._data[Column[Scalar[D]]]._ptr())
+    return 0
+
+
+def _set_bits(mut series: Series, var bits: List[UInt8]):
+    if series._data.isa[Column[Bool]]():
+        series._data[Column[Bool]]._bits = ArcPointer(bits^)
+        return
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        if series._data.isa[Column[Scalar[D]]]():
+            series._data[Column[Scalar[D]]]._bits = ArcPointer(bits^)
+            return

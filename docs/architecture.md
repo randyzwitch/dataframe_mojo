@@ -42,10 +42,10 @@ No universal dataframe trait or foreign-backend abstraction is imposed.
 2. **Fusion and SIMD:** fuse compatible elementwise nodes within a batch, release
    dead intermediates, share subexpressions, load contiguous SIMD vectors directly,
    and optimize validity handling. Add vector overflow detection for Int64 kernels.
-3. **Parallel execution:** (reductions are done: worker-private states over
-   contiguous row partitions, merged in partition order, on POSIX threads via
-   `parallel.mojo`.) Schedule row-wise expression batches and filters; hash
-   grouping with worker-local mappings. Apply `maintain_order` as an explicit requirement rather
+3. **Parallel execution:** (reductions, row-wise expressions, and filter
+   compaction are done: contiguous row partitions on POSIX threads via
+   `parallel.mojo`, merged in partition order.) Hash grouping with
+   worker-local mappings remains. Apply `maintain_order` as an explicit requirement rather
    than an accidental default. Validate against scalar and partitioned oracles.
 4. **Planning:** add a lazy relational plan using the same expressions, predicate
    and projection pushdown, multi-aggregate scans, and an explicit logical-type

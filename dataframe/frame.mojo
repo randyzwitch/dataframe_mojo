@@ -7,6 +7,8 @@ from .series import Series, sort_indices, smallest_indices
 from .expr import Expr, col
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
+from .gather import take_parallel, true_rows
+from .parallel import worker_count
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows
 from .expr_kernels import choose, validity
@@ -293,6 +295,12 @@ struct DataFrame(Copyable, Sized, Writable):
         for i in indices:
             if i < 0 or i >= self._height:
                 raise Error("Row index out of bounds")
+        var workers = worker_count(len(indices))
+        if workers > 1 and self.width() > 0:
+            return Self(
+                take_parallel(self._columns, indices.copy(), workers),
+                height=len(indices),
+            )
         var columns = List[Series](capacity=self.width())
         for column in self._columns:
             columns.append(column.take(indices))
@@ -302,11 +310,7 @@ struct DataFrame(Copyable, Sized, Writable):
         """Keep true rows, dropping false and null mask entries, in input order."""
         if len(mask) != self._height:
             raise Error("Filter mask must match dataframe height")
-        var indices = List[Int]()
-        for i in range(self._height):
-            if not mask.is_null(i) and mask.value(i):
-                indices.append(i)
-        return self.take(indices)
+        return self.take(true_rows(mask))
 
     def with_column(self, var column: Series) raises -> Self:
         """Replace by name or append; the input dataframe is unchanged."""
