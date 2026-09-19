@@ -50,6 +50,29 @@ and cells. Floats compare structurally: NaN equals NaN and `-0.0` equals `0.0`.
 Null payloads never participate. With `null_equal=False`, any null in either
 frame makes them unequal. `DataFrame` deliberately has no `==` operator.
 
+## Display
+
+`print(frame)` and `String(frame)` render a box table with the shape, column
+names, short dtypes (`i64`, `f64`, `bool`, `str`), and at most 10 rows and 12
+columns. `to_string(max_rows=10, max_columns=12, max_string_length=32)` sets the
+limits; a negative limit means unlimited. Elided rows and columns show `…`, with
+the extra row or column at the front when the limit is odd. Only displayed cells
+are formatted, so rendering a large frame costs O(displayed cells).
+
+Nulls render as `null`. Strings render unquoted unless they are empty, equal to
+`null`, begin or end with a space or tab, or contain control characters; those
+are double-quoted with `\\`, `"`, `\n`, `\r`, and `\t` escaped. Strings longer
+than `max_string_length` code points are cut and end in `…`. Floats use Mojo's
+shortest round-trippable form (`1.0`, `1e+300`, `nan`, `inf`, `-0.0`).
+
+Column widths count Unicode code points. Combining characters and East Asian
+wide characters therefore misalign in a terminal; display width is not computed.
+
+`Series` renders its shape, name, dtype, and values one per line with the same
+`max_rows` rule. `glimpse(max_width=100)` prints one line per column with as
+many leading values as fit in `max_width` code points, then `…`. Typed `Column`
+values are displayed by wrapping them in a `Series`.
+
 ## Concatenation
 
 `concat(frames, how="vertical")` raises on an empty list because no schema is

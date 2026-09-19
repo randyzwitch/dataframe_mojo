@@ -53,6 +53,19 @@ def main() raises:
         col("net").sum().alias("revenue"),
         col("net").count().alias("sales"),
     ])
+    print(result)
+```
+
+```text
+shape: (2, 3)
+┌────────┬─────────┬───────┐
+│ region ┆ revenue ┆ sales │
+│ ---    ┆ ---     ┆ ---   │
+│ str    ┆ f64     ┆ i64   │
+╞════════╪═════════╪═══════╡
+│ east   ┆ 90.0    ┆ 1     │
+│ west   ┆ 180.0   ┆ 2     │
+└────────┴─────────┴───────┘
 ```
 
 Run `pixi run example` to see both the original column-kernel example and the
@@ -122,6 +135,8 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 - Schema inspection, projection, indexed gathering, nullable Boolean filtering,
   and adding/replacing columns.
 - Vertical, diagonal, and horizontal `concat`, plus `vstack`/`hstack`.
+- Bounded table display for `DataFrame` and `Series` (`print(frame)`,
+  `to_string(max_rows=..., ...)`, `glimpse()`).
 - `head`/`tail`/`slice`/`reverse`, `drop`/`rename`/`with_row_index`, row and
   cell access through the tagged `AnyValue`, null counts, and structural `equals`.
 - Nullable greater-than comparisons, Float64 scalar multiplication, and
