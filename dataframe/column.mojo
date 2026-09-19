@@ -1,149 +1,234 @@
-"""Owned typed columns with bit-packed validity, independent of payload values."""
+"""Typed columns over shared, immutable, Arrow-compatible buffers.
+
+A column is a window (offset, length) onto a reference-counted value buffer
+and an LSB-first validity bitmap, as in an Arrow array. Copying a column,
+slicing it, and every operation that only selects columns (select, rename,
+drop, head, GroupBy snapshots) share buffers in O(1) instead of copying
+values. Buffers are never mutated while shared: the only mutating operation,
+batch reassembly in `_append_column`, first takes a private copy unless the
+column already owns its buffers outright.
+"""
+from std.memory import ArcPointer, Pointer
 from std.sys.info import is_little_endian
 
 
 struct Column[T: Copyable & Deinitable](Copyable, Sized):
-    """A contiguous payload and an LSB-first validity bitmap.
+    """A window onto a shared payload buffer and validity bitmap.
 
-    Underscored storage is internal. Public operations return owned copies;
-    no borrowed mutable buffers or implicit negative indexing are exposed.
+    Underscored storage is internal. Public operations return new columns;
+    no mutable buffers or implicit negative indexing are exposed.
     """
 
-    var _values: List[Self.T]
-    var _validity: List[UInt8]
+    var _data: ArcPointer[List[Self.T]]
+    var _bits: ArcPointer[List[UInt8]]
+    var _offset: Int
+    var _length: Int
 
     def __init__(out self, var values: List[Self.T]):
-        # Bitmaps use in-byte shifts, but planned Arrow interchange shares
-        # buffers as little-endian bytes; fail the build elsewhere.
+        # Bitmaps are shared as little-endian bytes (Arrow layout).
         comptime assert is_little_endian(), "dataframe requires little-endian"
-        self._values = values^
-        self._validity = List[UInt8](
-            length=(len(self._values) + 7) // 8, fill=255
+        self._length = len(values)
+        self._offset = 0
+        self._bits = ArcPointer(
+            List[UInt8](length=(len(values) + 7) // 8, fill=255)
         )
+        self._data = ArcPointer(values^)
 
     def __init__(out self, var values: List[Self.T], valid: List[Bool]) raises:
         if len(values) != len(valid):
             raise Error("Column values and validity must have equal lengths")
-        self._values = values^
-        self._validity = List[UInt8](length=(len(valid) + 7) // 8, fill=0)
+        var bits = List[UInt8](length=(len(valid) + 7) // 8, fill=0)
         for i in range(len(valid)):
             if valid[i]:
-                self._validity[i // 8] |= UInt8(1) << UInt8(i % 8)
+                bits[i // 8] |= UInt8(1) << UInt8(i % 8)
+        self._length = len(values)
+        self._offset = 0
+        self._bits = ArcPointer(bits^)
+        self._data = ArcPointer(values^)
 
     def __len__(self) -> Int:
-        return len(self._values)
+        return self._length
+
+    def _get(self, i: Int) -> ref[ImmutAnyOrigin] Self.T:
+        """Unchecked read of row i; valid while this column is alive."""
+        return self._data[][self._offset + i]
+
+    def _ptr(self) -> Pointer[Self.T, MutAnyOrigin]:
+        """Pointer to row 0 of this window, for SIMD loads (read-only use)."""
+        return (
+            self._data[]
+            .unsafe_ptr()
+            .unsafe_offset(self._offset)
+            .unsafe_origin_cast[MutAnyOrigin]()
+        )
+
+    def _to_list(self) -> List[Self.T]:
+        """An owned copy of this window's payloads (including null slots)."""
+        var values = List[Self.T](capacity=self._length)
+        for i in range(self._length):
+            values.append(self._get(i).copy())
+        return values^
+
+    def _shares_buffers_with(self, other: Self) -> Bool:
+        return (
+            self._data.unsafe_ptr() == other._data.unsafe_ptr()
+            and self._bits.unsafe_ptr() == other._bits.unsafe_ptr()
+        )
 
     def _check_index(self, index: Int) raises:
-        if index < 0 or index >= len(self):
+        if index < 0 or index >= self._length:
             raise Error("Column index out of bounds")
+
+    def _valid(self, i: Int) -> Bool:
+        """Internal unchecked validity read after bounds validation."""
+        var bit = self._offset + i
+        return (self._bits[][bit // 8] & (UInt8(1) << UInt8(bit % 8))) != 0
 
     def is_null(self, index: Int) raises -> Bool:
         self._check_index(index)
-        return (
-            self._validity[index // 8] & (UInt8(1) << UInt8(index % 8))
-        ) == 0
+        return not self._valid(index)
 
     def value(self, index: Int) raises -> Self.T:
         if self.is_null(index):
             raise Error("Cannot read a null value")
-        return self._values[index].copy()
+        return self._get(index).copy()
 
     def null_count(self) -> Int:
         var count = 0
-        for i in range(len(self)):
-            count += Int(
-                (self._validity[i // 8] & (UInt8(1) << UInt8(i % 8))) == 0
-            )
+        for i in range(self._length):
+            count += Int(not self._valid(i))
         return count
 
     def take(self, indices: List[Int]) raises -> Self:
-        var values = List[Self.T](capacity=len(indices))
-        var valid = List[Bool](capacity=len(indices))
         for i in indices:
             self._check_index(i)
-            values.append(self._values[i].copy())
-            valid.append(not self.is_null(i))
-        return Self(values^, valid)
+        ref data = self._data[]
+        ref bits = self._bits[]
+        var base = self._offset
+        var values = List[Self.T](capacity=len(indices))
+        var out_bits = List[UInt8](length=(len(indices) + 7) // 8, fill=0)
+        for k in range(len(indices)):
+            var row = base + indices[k]
+            values.append(data[row].copy())
+            if (bits[row // 8] >> UInt8(row % 8)) & 1 == 1:
+                out_bits[k // 8] |= UInt8(1) << UInt8(k % 8)
+        var result = Self(values^)
+        result._bits = ArcPointer(out_bits^)
+        return result^
 
     def take_or_null(self, indices: List[Int], fill: Self.T) raises -> Self:
         """Gather rows, treating only -1 as a missing row (for outer joins)."""
-        var values = List[Self.T](capacity=len(indices))
-        var valid = List[Bool](capacity=len(indices))
         for i in indices:
+            if i != -1:
+                self._check_index(i)
+        ref data = self._data[]
+        ref bits = self._bits[]
+        var base = self._offset
+        var values = List[Self.T](capacity=len(indices))
+        var out_bits = List[UInt8](length=(len(indices) + 7) // 8, fill=0)
+        for k in range(len(indices)):
+            var i = indices[k]
             if i == -1:
                 values.append(fill.copy())
-                valid.append(False)
-            else:
-                self._check_index(i)
-                values.append(self._values[i].copy())
-                valid.append(not self.is_null(i))
-        return Self(values^, valid)
-
-    def _valid(self, i: Int) -> Bool:
-        """Internal unchecked access after batch bounds validation."""
-        return (self._validity[i // 8] & (UInt8(1) << UInt8(i % 8))) != 0
+                continue
+            var row = base + i
+            values.append(data[row].copy())
+            if (bits[row // 8] >> UInt8(row % 8)) & 1 == 1:
+                out_bits[k // 8] |= UInt8(1) << UInt8(k % 8)
+        var result = Self(values^)
+        result._bits = ArcPointer(out_bits^)
+        return result^
 
     def slice(self, offset: Int, length: Int) raises -> Self:
+        """A zero-copy window sharing this column's buffers."""
         if (
             offset < 0
             or length < 0
-            or offset > len(self)
-            or length > len(self) - offset
+            or offset > self._length
+            or length > self._length - offset
         ):
             raise Error("Invalid column slice")
-        var values = List[Self.T](capacity=length)
-        var valid = List[Bool](capacity=length)
-        for i in range(offset, offset + length):
-            values.append(self._values[i].copy())
-            valid.append(self._valid(i))
-        return Self(values^, valid)
+        var result = self.copy()
+        result._offset = self._offset + offset
+        result._length = length
+        return result^
+
+    def _owned(self) -> Bool:
+        """Whether the buffers are unshared and exactly this window."""
+        return (
+            self._data.count() == 1
+            and self._bits.count() == 1
+            and self._offset == 0
+            and len(self._data[]) == self._length
+        )
+
+    def _compact(self) -> Self:
+        """A private copy of this window with offset 0."""
+        var bits = List[UInt8](length=(self._length + 7) // 8, fill=0)
+        for i in range(self._length):
+            if self._valid(i):
+                bits[i // 8] |= UInt8(1) << UInt8(i % 8)
+        var result = Self(self._to_list())
+        result._bits = ArcPointer(bits^)
+        return result^
 
     def _append_column(mut self, other: Self):
-        """Append payloads and validity bytewise, shifting when unaligned."""
-        var start = len(self)
+        """Append payloads and validity bytewise, shifting when unaligned.
+
+        Copies first unless this column owns its buffers, so values shared
+        with other columns are never modified.
+        """
+        if not self._owned():
+            self = self._compact()
+        var source = (
+            other.copy() if other._offset % 8 == 0 else other._compact()
+        )
+        var first_byte = source._offset // 8
+        var start = self._length
         var shift = start % 8
-        var count = len(other)
+        var count = source._length
         var full_bytes = count // 8
         var tail_bits = count % 8
+        ref bits = self._bits[]
+        ref incoming = source._bits[]
         if shift == 0:
             for b in range(full_bytes):
-                self._validity.append(other._validity[b])
+                bits.append(incoming[first_byte + b])
             if tail_bits > 0:
                 var mask = (UInt8(1) << UInt8(tail_bits)) - 1
-                self._validity.append(other._validity[full_bytes] & mask)
+                bits.append(incoming[first_byte + full_bytes] & mask)
         elif count > 0:
             # Clear stale bits above the current length before merging.
-            var last = len(self._validity) - 1
-            self._validity[last] &= (UInt8(1) << UInt8(shift)) - 1
+            var last = len(bits) - 1
+            bits[last] &= (UInt8(1) << UInt8(shift)) - 1
             var source_bytes = (count + 7) // 8
             for b in range(source_bytes):
-                var byte = other._validity[b]
+                var byte = incoming[first_byte + b]
                 if b == source_bytes - 1 and tail_bits > 0:
                     byte &= (UInt8(1) << UInt8(tail_bits)) - 1
-                self._validity[len(self._validity) - 1] |= byte << UInt8(shift)
-                self._validity.append(byte >> UInt8(8 - shift))
+                bits[len(bits) - 1] |= byte << UInt8(shift)
+                bits.append(byte >> UInt8(8 - shift))
             var needed = (start + count + 7) // 8
-            while len(self._validity) > needed:
-                _ = self._validity.pop()
+            while len(bits) > needed:
+                _ = bits.pop()
+        ref values = self._data[]
         # Grow geometrically: batch reassembly appends many small chunks, and
         # an exact reservation would copy the whole column on every append.
-        if self._values.capacity() < start + count:
-            self._values.reserve(
-                max(start + count, 2 * self._values.capacity())
-            )
+        if values.capacity() < start + count:
+            values.reserve(max(start + count, 2 * values.capacity()))
         for i in range(count):
-            self._values.append(other._values[i].copy())
+            values.append(source._get(i).copy())
+        self._length = start + count
 
     @staticmethod
     def _nulls(length: Int, fill: Self.T) -> Self:
         var result = Self(List[Self.T](length=length, fill=fill.copy()))
-        for i in range(len(result._validity)):
-            result._validity[i] = 0
+        result._bits = ArcPointer(List[UInt8](length=(length + 7) // 8, fill=0))
         return result^
 
     def _broadcast(self, length: Int) raises -> Self:
-        if len(self) != 1 or length < 0:
+        if self._length != 1 or length < 0:
             raise Error("Only a scalar result can broadcast")
-        var values = List[Self.T](length=length, fill=self._values[0].copy())
+        var values = List[Self.T](length=length, fill=self._get(0).copy())
         var valid = List[Bool](length=length, fill=self._valid(0))
         return Self(values^, valid)

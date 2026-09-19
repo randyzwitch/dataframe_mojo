@@ -69,10 +69,10 @@ def col(names: List[String]) -> Expr
 
 ## `Column`
 
-A contiguous payload and an LSB-first validity bitmap.
+A window onto a shared payload buffer and validity bitmap.
 
-Underscored storage is internal. Public operations return owned copies;
-no borrowed mutable buffers or implicit negative indexing are exposed.
+Underscored storage is internal. Public operations return new columns;
+no mutable buffers or implicit negative indexing are exposed.
 
 - `def __init__(out self, var values: List[T])`
 - `def __init__(out self, var values: List[T], valid: List[Bool])`
@@ -84,6 +84,7 @@ no borrowed mutable buffers or implicit negative indexing are exposed.
 - `def take_or_null(self, indices: List[Int], fill: T) -> Self`
   Gather rows, treating only -1 as a missing row (for outer joins).
 - `def slice(self, offset: Int, length: Int) -> Self`
+  A zero-copy window sharing this column's buffers.
 
 ## `concat`
 

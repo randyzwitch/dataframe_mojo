@@ -98,6 +98,25 @@ directly. At 1,000,000 rows the 4-lane arithmetic chain fell from 58.3 ms to
 26.7 ms to 18.8 ms; checksums are unchanged. The 1-lane path gains nothing,
 since per-row program interpretation replaces per-node materialization.
 
+## After shared buffers (#34)
+
+Columns became windows onto reference-counted buffers, so per-batch slices and
+projections no longer copy. At 1,000,000 rows (no nulls):
+
+| workload | before ms | after ms |
+|---|---|---|
+| global_sum | 11.8 | 7.2 |
+| global_count | 9.0 | 4.5 |
+| grouped_sum_count (low cardinality) | 43 | 28 |
+| filter | 36.1 | 38.7 |
+| arithmetic_chain (simd4) | 22.3 | 24.0 |
+| nullable_compare | 18.8 | 20.5 |
+
+Scans that only read slices gain the most. Fused arithmetic, comparisons, and
+filters pay roughly 5-8% for the extra indirection (offset plus shared-pointer
+dereference) on per-row validity reads; hoisting buffer references in those
+kernels, or word-at-a-time validity, is the planned follow-up.
+
 ## What the baseline shows
 
 - The five-node Float64 arithmetic chain runs at about 5 million rows/s, and the

@@ -13,12 +13,12 @@ def _dtype(series: Series) -> DataType:
 
 def _text(series: Series, row: Int) -> String:
     if series._data.isa[Column[Int64]]():
-        return String(series._data[Column[Int64]]._values[row])
+        return String(series._data[Column[Int64]]._get(row))
     if series._data.isa[Column[Float64]]():
-        return String(series._data[Column[Float64]]._values[row])
+        return String(series._data[Column[Float64]]._get(row))
     if series._data.isa[Column[Bool]]():
-        return "true" if series._data[Column[Bool]]._values[row] else "false"
-    return series._data[Column[String]]._values[row]
+        return "true" if series._data[Column[Bool]]._get(row) else "false"
+    return series._data[Column[String]]._get(row)
 
 
 def _valid(series: Series, row: Int) -> Bool:
@@ -74,7 +74,7 @@ def cast_series(
             if target == DataType.STRING:
                 strings[i] = _text(input, i)
             elif source == DataType.STRING:
-                ref text = input._data[Column[String]]._values[i]
+                ref text = input._data[Column[String]]._get(i)
                 if target == DataType.INT64:
                     ints[i] = parse_int64(text)
                 elif target == DataType.FLOAT64:
@@ -82,13 +82,13 @@ def cast_series(
                 else:
                     bools[i] = parse_bool(text)
             elif source == DataType.INT64:
-                var x = input._data[Column[Int64]]._values[i]
+                var x = input._data[Column[Int64]]._get(i)
                 if target == DataType.FLOAT64:
                     floats[i] = Float64(x)
                 else:
                     bools[i] = x != 0
             elif source == DataType.FLOAT64:
-                var x = input._data[Column[Float64]]._values[i]
+                var x = input._data[Column[Float64]]._get(i)
                 if target == DataType.INT64:
                     ints[i] = _float_to_int(x)
                 else:
@@ -96,7 +96,7 @@ def cast_series(
                         raise Error("NaN has no Boolean value")
                     bools[i] = x != 0
             else:
-                var x = input._data[Column[Bool]]._values[i]
+                var x = input._data[Column[Bool]]._get(i)
                 if target == DataType.INT64:
                     ints[i] = Int64(x)
                 else:

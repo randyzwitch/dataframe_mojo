@@ -23,6 +23,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - `group_by` and `join` accept keys of any dtype, and `join` supports `how="full"`;
   code that relied on these raising must be updated.
 
+### Changed
+
+- Columns are windows (offset, length) onto reference-counted, immutable
+  buffers, as in Arrow arrays. `select`, `rename`, `drop`, `head`, `slice`,
+  `column()`, typed extraction, GroupBy snapshots, and expression batch slices
+  share storage in O(1) instead of copying. Global reductions are 1.6-2x and
+  low-cardinality grouping 1.5x faster at 1M rows (#34).
+
 ### Fixed
 
 - Float64 text parsing (CSV, casts, inference) no longer accepts malformed

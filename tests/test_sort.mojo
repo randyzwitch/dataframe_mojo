@@ -136,12 +136,12 @@ def test_uniform_direction_overload_and_stability() raises:
     )
     var ascending = frame.sort(["k"])
     assert_equal(
-        ascending.column("tag").string()._values,
+        ascending.column("tag").string()._to_list(),
         [String("b"), "d", "a", "c", "e"],
     )
     var descending = frame.sort(["k"], descending=True)
     assert_equal(
-        descending.column("tag").string()._values,
+        descending.column("tag").string()._to_list(),
         [String("a"), "c", "e", "b", "d"],
     )
     assert_true(frame.sort("k").equals(ascending))

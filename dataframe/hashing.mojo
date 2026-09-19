@@ -34,7 +34,7 @@ def _codes_by_value[
         if not column._valid(i):
             nulls[i] = True
             continue
-        ref value = column._values[i]
+        ref value = column._get(i)
         var code = lookup.get(value, -1)
         if code < 0:
             code = len(lookup)
@@ -56,7 +56,7 @@ def column_codes(
             if not column._valid(i):
                 nulls[i] = True
                 continue
-            var key = float_key(column._values[i])
+            var key = float_key(column._get(i))
             var code = lookup.get(key, -1)
             if code < 0:
                 code = len(lookup)
@@ -69,7 +69,7 @@ def column_codes(
             if not column._valid(i):
                 nulls[i] = True
             else:
-                codes[i] = Int(column._values[i])
+                codes[i] = Int(column._get(i))
         return 2
     return _codes_by_value(series._data[Column[String]], codes, nulls)
 

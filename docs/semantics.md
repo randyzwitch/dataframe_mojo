@@ -28,7 +28,9 @@ by numeric kernels. NaN is a valid floating-point value, not a null.
 `value(i)` raises on null and on out-of-bounds access. Negative indexing is not
 supported. `take` preserves the supplied order, including duplicates; it raises
 on invalid indices. `take_or_null` additionally accepts -1 for an absent row and
-is used by left joins. Public reads and transformations return owned copies.
+is used by left joins. Results are immutable: slices, projections, and extracted
+columns may share buffers with their source, which is unobservable because no
+public operation mutates a column in place.
 
 ## Slicing, inspection, and rows
 

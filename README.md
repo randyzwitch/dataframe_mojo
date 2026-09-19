@@ -182,16 +182,17 @@ var joined = frame.join(regions, on="region", how="left")
 ```
 
 Operations return new dataframes. `column()` and typed extraction methods
-(`int64()`, `float64()`, `bool()`, `string()`) return owned copies.
+(`int64()`, `float64()`, `bool()`, `string()`) return immutable columns that
+share buffers with the frame; no copy is made.
 An empty dataframe can retain its row count: `DataFrame([], height=10)`.
 
 ## Deliberate limits
 
 Execution is eager and currently single-threaded. Float64 expression arithmetic
 and comparisons use SIMD; checked integer arithmetic and reductions are currently
-scalar. Dataframe transformations and public column extraction copy buffers.
-Expression evaluation copies bounded input slices, rather than extracting whole
-columns per operation; intermediates are still materialized per batch. Strings use `List[String]`, not Arrow UTF-8
+scalar. Projections, slices, and column extraction share immutable buffers
+(zero-copy); computed results allocate new buffers, and unfused intermediates
+are still materialized per batch. Strings use `List[String]`, not Arrow UTF-8
 buffers. There are no performance claims yet, and there is no Arrow export.
 The underscore-prefixed fields are internal and must not be mutated by callers.
 

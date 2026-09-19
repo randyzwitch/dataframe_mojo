@@ -278,7 +278,7 @@ def _conditional[
     var other_mask = List[Bool](capacity=size)
     for i in range(size):
         var p = 0 if len(flags) == 1 else i
-        var take = flags._valid(p) and flags._values[p]
+        var take = flags._valid(p) and flags._get(p)
         var observed = len(active) == 0 or active[i]
         selected.append(take)
         then_mask.append(observed and take)

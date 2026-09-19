@@ -104,7 +104,7 @@ def _run[
             registers[k] = (
                 columns[step.source]
                 ._data[Column[Float64]]
-                ._values.unsafe_ptr()
+                ._ptr()
                 .unsafe_load[width=width](row)
             )
         elif step.op == LIT_FLOAT:
