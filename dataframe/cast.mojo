@@ -1,6 +1,7 @@
 """Explicit dtype conversion. String parsing matches read_csv exactly."""
 from std.math import isinf, isnan
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .dtype import DataType
 from .parse import parse_bool, parse_float64, parse_int64
 from .series import Series
@@ -18,7 +19,7 @@ def _text(series: Series, row: Int) -> String:
         return String(series._data[Column[Float64]]._get(row))
     if series._data.isa[Column[Bool]]():
         return "true" if series._data[Column[Bool]]._get(row) else "false"
-    return series._data[Column[String]]._get(row)
+    return String(series._data[StringColumn]._get(row))
 
 
 def _valid(series: Series, row: Int) -> Bool:
@@ -28,7 +29,7 @@ def _valid(series: Series, row: Int) -> Bool:
         return series._data[Column[Float64]]._valid(row)
     if series._data.isa[Column[Bool]]():
         return series._data[Column[Bool]]._valid(row)
-    return series._data[Column[String]]._valid(row)
+    return series._data[StringColumn]._valid(row)
 
 
 def _float_to_int(value: Float64) raises -> Int64:
@@ -74,7 +75,7 @@ def cast_series(
             if target == DataType.STRING:
                 strings[i] = _text(input, i)
             elif source == DataType.STRING:
-                ref text = input._data[Column[String]]._get(i)
+                var text = String(input._data[StringColumn]._get(i))
                 if target == DataType.INT64:
                     ints[i] = parse_int64(text)
                 elif target == DataType.FLOAT64:
@@ -122,4 +123,4 @@ def cast_series(
         return Series(input.name(), Column[Float64](floats^, valid))
     if target == DataType.BOOL:
         return Series(input.name(), Column[Bool](bools^, valid))
-    return Series(input.name(), Column[String](strings^, valid))
+    return Series(input.name(), StringColumn(strings, valid))

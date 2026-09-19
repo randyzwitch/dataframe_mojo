@@ -1,6 +1,7 @@
 """String kernels over code points. Nulls propagate; payloads of null rows
 are never read."""
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .expr import (
     Node,
     STR_LEN_CHARS,
@@ -107,7 +108,7 @@ def _pad(text: String, fill: String, mode: Int64, width: Int) -> String:
 
 
 def string_op(node: Node, input: Series) raises -> Series:
-    ref column = input._data[Column[String]]
+    ref column = input._data[StringColumn]
     var n = len(column)
     var valid = List[Bool](capacity=n)
     for i in range(n):
@@ -117,7 +118,7 @@ def string_op(node: Node, input: Series) raises -> Series:
         var lengths = List[Int64](length=n, fill=0)
         for i in range(n):
             if valid[i]:
-                ref text = column._get(i)
+                var text = column._get(i)
                 lengths[i] = Int64(
                     len(text.codepoints()) if op
                     == STR_LEN_CHARS else text.byte_length()
@@ -127,7 +128,7 @@ def string_op(node: Node, input: Series) raises -> Series:
         var flags = List[Bool](length=n, fill=False)
         for i in range(n):
             if valid[i]:
-                ref text = column._get(i)
+                var text = column._get(i)
                 if op == STR_STARTS_WITH:
                     flags[i] = text.startswith(node.text)
                 elif op == STR_ENDS_WITH:
@@ -135,48 +136,49 @@ def string_op(node: Node, input: Series) raises -> Series:
                 else:
                     flags[i] = node.text in text
         return Series("", Column[Bool](flags^, valid))
-    var values = List[String](length=n, fill="")
+    var out = StringBuilder(n, column._value_bytes())
     for i in range(n):
         if not valid[i]:
+            out.append_null()
             continue
-        ref text = column._get(i)
+        var text = String(column._get(i))
         if op == STR_UPPER:
-            values[i] = text.upper()
+            out.append(text.upper())
         elif op == STR_LOWER:
-            values[i] = text.lower()
+            out.append(text.lower())
         elif op == STR_STRIP:
-            values[i] = _strip(text, node.text, node.integer)
+            out.append(_strip(text, node.text, node.integer))
         elif op == STR_REPLACE:
-            values[i] = _replace(text, node.text, node.text2, node.integer == 1)
+            out.append(_replace(text, node.text, node.text2, node.integer == 1))
         elif op == STR_SLICE:
-            values[i] = _slice(text, Int(node.integer), node.min_count)
+            out.append(_slice(text, Int(node.integer), node.min_count))
         elif op == STR_REVERSE:
             var parts = _codepoints(text)
-            var out = String()
+            var reversed = String()
             for j in range(len(parts) - 1, -1, -1):
-                out += parts[j]
-            values[i] = out^
+                reversed += parts[j]
+            out.append(reversed)
         elif op == STR_PAD:
-            values[i] = _pad(text, node.text, node.integer, node.min_count)
+            out.append(_pad(text, node.text, node.integer, node.min_count))
         else:
             raise Error("Unsupported string operation")
-    return Series("", Column[String](values^, valid))
+    return Series("", out^.finish())
 
 
 def concat_strings(
     left: Series, right: Series, separator: String
 ) raises -> Series:
-    ref a = left._data[Column[String]]
-    ref b = right._data[Column[String]]
+    ref a = left._data[StringColumn]
+    ref b = right._data[StringColumn]
     if len(a) != len(b) and len(a) != 1 and len(b) != 1:
         raise Error("Incompatible expression lengths")
     var n = 0 if len(a) == 0 or len(b) == 0 else max(len(a), len(b))
-    var values = List[String](length=n, fill="")
-    var valid = List[Bool](length=n, fill=False)
+    var out = StringBuilder(n)
     for i in range(n):
         var x = 0 if len(a) == 1 else i
         var y = 0 if len(b) == 1 else i
-        valid[i] = a._valid(x) and b._valid(y)
-        if valid[i]:
-            values[i] = a._get(x) + separator + b._get(y)
-    return Series("", Column[String](values^, valid))
+        if a._valid(x) and b._valid(y):
+            out.append(String(a._get(x)) + separator + String(b._get(y)))
+        else:
+            out.append_null()
+    return Series("", out^.finish())

@@ -2,18 +2,20 @@
 from .dtype import DataType
 from std.utils import Variant
 from .column import Column
+from .string_column import StringColumn
 from .value import AnyValue
 from .display import render_series
 from .cast import cast_series
 from .expr import Expr, col, lit
 from .frame import DataFrame
 
-# Element types in DataType code order. Storage holds Column[E] for each, and
-# methods dispatch with one compile-time loop over Elements instead of an
-# if-chain per type; adding a dtype means extending both lists.
-comptime Elements = Variant[Int64, Float64, Bool, String]
+# Fixed-width element types in DataType code order. Storage holds Column[E]
+# for each, then StringColumn (code 3, Arrow large_utf8). Methods dispatch
+# with one compile-time loop over FixedElements plus a StringColumn branch;
+# adding a fixed-width dtype means extending both lists.
+comptime FixedElements = Variant[Int64, Float64, Bool]
 comptime Storage = Variant[
-    Column[Int64], Column[Float64], Column[Bool], Column[String]
+    Column[Int64], Column[Float64], Column[Bool], StringColumn
 ]
 
 
@@ -40,10 +42,14 @@ struct Series(Copyable, Sized, Writable):
         self._data = Storage(column^)
         self._dtype = DataType.BOOL
 
-    def __init__(out self, var name: String, var column: Column[String]):
+    def __init__(out self, var name: String, var column: StringColumn):
         self._name = name^
         self._data = Storage(column^)
         self._dtype = DataType.STRING
+
+    def __init__(out self, var name: String, column: Column[String]):
+        """Convert list-backed strings to the contiguous UTF-8 layout."""
+        self = Self(name^, StringColumn(column))
 
     @staticmethod
     def _wrap[
@@ -52,8 +58,8 @@ struct Series(Copyable, Sized, Writable):
         """Build a series from any storable column type."""
         var result = Self(name^, Column[Int64]([]))
         result._data = Storage(column^)
-        comptime for i in range(len(Elements.Ts)):
-            comptime T: Copyable & Deinitable = Elements.Ts[i]
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime T: Copyable & Deinitable = FixedElements.Ts[i]
             if result._data.isa[Column[T]]():
                 result._dtype = DataType(i, 0)
         return result^
@@ -102,18 +108,18 @@ struct Series(Copyable, Sized, Writable):
         return self._dtype
 
     def __len__(self) -> Int:
-        comptime for i in range(len(Elements.Ts)):
-            comptime E: Copyable & Deinitable = Elements.Ts[i]
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 return len(self._data[Column[E]])
-        return 0
+        return len(self._data[StringColumn])
 
     def null_count(self) -> Int:
-        comptime for i in range(len(Elements.Ts)):
-            comptime E: Copyable & Deinitable = Elements.Ts[i]
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 return self._data[Column[E]].null_count()
-        return 0
+        return self._data[StringColumn].null_count()
 
     def get(self, index: Int) raises -> AnyValue:
         """Return one cell as a tagged value; raises when out of bounds."""
@@ -136,9 +142,9 @@ struct Series(Copyable, Sized, Writable):
             if self._data[Column[Bool]].is_null(index):
                 return AnyValue.null(DataType.BOOL)
             return AnyValue(self._data[Column[Bool]]._get(index))
-        if self._data[Column[String]].is_null(index):
+        if self._data[StringColumn].is_null(index):
             return AnyValue.null(DataType.STRING)
-        return AnyValue(self._data[Column[String]]._get(index))
+        return AnyValue(String(self._data[StringColumn]._get(index)))
 
     def equals(
         self, other: Self, *, null_equal: Bool = True, check_names: Bool = False
@@ -173,9 +179,14 @@ struct Series(Copyable, Sized, Writable):
             return _equal_columns(
                 self._data[Column[Bool]], other._data[Column[Bool]]
             )
-        return _equal_columns(
-            self._data[Column[String]], other._data[Column[String]]
-        )
+        ref a = self._data[StringColumn]
+        ref b = other._data[StringColumn]
+        for i in range(len(a)):
+            if a._valid(i) != b._valid(i):
+                return False
+            if a._valid(i) and a._get(i) != b._get(i):
+                return False
+        return True
 
     # Expression-backed operations. Each evaluates the matching expression
     # over a one-column frame, so Series and expressions share every kernel
@@ -452,11 +463,11 @@ struct Series(Copyable, Sized, Writable):
             raise Error("Expected bool column")
         return self._data[Column[Bool]].copy()
 
-    def string(self) raises -> Column[String]:
-        """Return an owned typed copy, raising on a dtype mismatch."""
-        if not self._data.isa[Column[String]]():
+    def string(self) raises -> StringColumn:
+        """Return the (shared, immutable) column, raising on a dtype mismatch."""
+        if not self._data.isa[StringColumn]():
             raise Error("Expected string column")
-        return self._data[Column[String]].copy()
+        return self._data[StringColumn].copy()
 
     def take(self, indices: List[Int]) raises -> Self:
         var result = self._take_storage(indices)
@@ -464,13 +475,13 @@ struct Series(Copyable, Sized, Writable):
         return result^
 
     def _take_storage(self, indices: List[Int]) raises -> Self:
-        comptime for i in range(len(Elements.Ts)):
-            comptime E: Copyable & Deinitable = Elements.Ts[i]
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 return Self._wrap(
                     self._name, self._data[Column[E]].take(indices)
                 )
-        raise Error("Unknown column type")
+        return Self(self._name, self._data[StringColumn].take(indices))
 
     def take_or_null(self, indices: List[Int]) raises -> Self:
         var result = self._take_or_null_storage(indices)
@@ -493,12 +504,10 @@ struct Series(Copyable, Sized, Writable):
                 self._name,
                 self._data[Column[Bool]].take_or_null(indices, False),
             )
-        if self._data.isa[Column[String]]():
-            return Self(
-                self._name,
-                self._data[Column[String]].take_or_null(indices, String("")),
-            )
-        raise Error("Unknown column type")
+        return Self(
+            self._name,
+            self._data[StringColumn].take_or_null(indices, String("")),
+        )
 
     def _less(
         self, a: Int, b: Int, descending: Bool, nulls_last: Bool
@@ -530,15 +539,14 @@ struct Series(Copyable, Sized, Writable):
             var x = self._data[Column[Bool]].value(a)
             var y = self._data[Column[Bool]].value(b)
             return Int(y) < Int(x) if descending else Int(x) < Int(y)
-        if self._data.isa[Column[String]]():
-            var a_null = self._data[Column[String]].is_null(a)
-            var b_null = self._data[Column[String]].is_null(b)
-            if a_null or b_null:
-                return a_null != b_null and (b_null if nulls_last else a_null)
-            var x = self._data[Column[String]].value(a)
-            var y = self._data[Column[String]].value(b)
-            return y < x if descending else x < y
-        raise Error("Unknown column type")
+        ref column = self._data[StringColumn]
+        var a_null = column.is_null(a)
+        var b_null = column.is_null(b)
+        if a_null or b_null:
+            return a_null != b_null and (b_null if nulls_last else a_null)
+        var x = column._get(a)
+        var y = column._get(b)
+        return y < x if descending else x < y
 
     def argsort(
         self, descending: Bool = False, nulls_last: Bool = True
@@ -580,10 +588,10 @@ struct Series(Copyable, Sized, Writable):
                 ranks[i] = Int(column._get(i))
             distinct = 2
         else:
-            ref column = self._data[Column[String]]
+            ref column = self._data[StringColumn]
             for i in range(n):
                 valid[i] = column._valid(i)
-            distinct = _dense_ranks(column._to_list(), valid, ranks)
+            distinct = _dense_string_ranks(column, valid, ranks)
         for i in range(n):
             if not valid[i]:
                 ranks[i] = distinct + 1 if nulls_last else -1
@@ -637,13 +645,13 @@ struct Series(Copyable, Sized, Writable):
         return result^
 
     def _slice_storage(self, offset: Int, length: Int) raises -> Self:
-        comptime for i in range(len(Elements.Ts)):
-            comptime E: Copyable & Deinitable = Elements.Ts[i]
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 return Self._wrap(
                     self._name, self._data[Column[E]].slice(offset, length)
                 )
-        raise Error("Unknown column type")
+        return Self(self._name, self._data[StringColumn].slice(offset, length))
 
     def _broadcast(self, length: Int) raises -> Self:
         var result = self._broadcast_storage(length)
@@ -651,13 +659,13 @@ struct Series(Copyable, Sized, Writable):
         return result^
 
     def _broadcast_storage(self, length: Int) raises -> Self:
-        comptime for i in range(len(Elements.Ts)):
-            comptime E: Copyable & Deinitable = Elements.Ts[i]
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 return Self._wrap(
                     self._name, self._data[Column[E]]._broadcast(length)
                 )
-        raise Error("Unknown column type")
+        return Self(self._name, self._data[StringColumn]._broadcast(length))
 
     @staticmethod
     def full_null(var name: String, dtype: String, length: Int) raises -> Self:
@@ -678,7 +686,7 @@ struct Series(Copyable, Sized, Writable):
             return Self(name^, Column[Float64]._nulls(length, 0))
         if dtype == DataType.BOOL:
             return Self(name^, Column[Bool]._nulls(length, False))
-        return Self(name^, Column[String]._nulls(length, ""))
+        return Self(name^, StringColumn._nulls(length))
 
     def append(self, other: Self) raises -> Self:
         """Return a new series with other's rows after this one's."""
@@ -705,10 +713,12 @@ struct Series(Copyable, Sized, Writable):
     def _append_series(mut self, other: Self) raises:
         if self._dtype.physical() != other._dtype.physical():
             raise Error("Cannot append different dtypes")
-        comptime for i in range(len(Elements.Ts)):
-            comptime E: Copyable & Deinitable = Elements.Ts[i]
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
                 self._data[Column[E]]._append_column(other._data[Column[E]])
+        if self._data.isa[StringColumn]():
+            self._data[StringColumn]._append_column(other._data[StringColumn])
 
 
 def _equal_columns[
@@ -748,6 +758,27 @@ def _dense_ranks[
                 high = mid
         ranks[i] = low
     return len(distinct)
+
+
+def _dense_string_ranks(
+    column: StringColumn, usable: List[Bool], mut ranks: List[Int]
+) -> Int:
+    """Dense ranks over borrowed UTF-8 slices (byte order = code point order)."""
+    var order = List[Int]()
+    for i in range(len(column)):
+        if usable[i]:
+            order.append(i)
+
+    def less(a: Int, b: Int) {imm column} -> Bool:
+        return column._get(a) < column._get(b)
+
+    sort(order, less)
+    var distinct = 0
+    for k in range(len(order)):
+        if k > 0 and column._get(order[k]) != column._get(order[k - 1]):
+            distinct += 1
+        ranks[order[k]] = distinct
+    return distinct + 1 if len(order) > 0 else 0
 
 
 def _rank_less(ranks: List[List[Int]], a: Int, b: Int) -> Bool:

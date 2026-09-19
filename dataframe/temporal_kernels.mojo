@@ -4,6 +4,7 @@ Temporal values are Int64 storage tagged with a DataType; these kernels take
 the logical types from the binder, so their inputs may carry either tag.
 """
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .dtype import DataType
 from .expr import (
     Node,
@@ -189,7 +190,7 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
             valid[i] = column._valid(i)
             if valid[i]:
                 texts[i] = format(column._get(i), dtype, node.text)
-        return Series("", Column[String](texts^, valid))
+        return Series("", StringColumn(texts, valid))
     var values = List[Int64](length=n, fill=0)
     for i in range(n):
         valid[i] = column._valid(i)
@@ -240,7 +241,7 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
 
 
 def _strptime(node: Node, input: Series) raises -> Series:
-    ref column = input._data[Column[String]]
+    ref column = input._data[StringColumn]
     var target = DataType.parse(node.text2)
     var strict = node.integer == 1
     var n = len(column)
@@ -250,7 +251,7 @@ def _strptime(node: Node, input: Series) raises -> Series:
         if not column._valid(i):
             continue
         try:
-            values[i] = parse(column._get(i), target, node.text)
+            values[i] = parse(String(column._get(i)), target, node.text)
             valid[i] = True
         except e:
             if strict:
@@ -273,7 +274,7 @@ def cast_temporal(
             valid[i] = column._valid(i)
             if valid[i]:
                 texts[i] = format(column._get(i), source)
-        return Series(input.name(), Column[String](texts^, valid))
+        return Series(input.name(), StringColumn(texts, valid))
     if source == DataType.STRING:
         var node = Node(0, -1, -1, "", Int64(strict), 0, 0, -1, target.name())
         return _strptime(node, input).renamed(input.name())

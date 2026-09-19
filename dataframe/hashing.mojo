@@ -8,6 +8,7 @@ Float64 keys treat every NaN as one value and -0.0 as equal to 0.0.
 from std.collections import Dict
 from .aggregate import float_key
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .series import Series
 
 
@@ -71,7 +72,20 @@ def column_codes(
             else:
                 codes[i] = Int(column._get(i))
         return 2
-    return _codes_by_value(series._data[Column[String]], codes, nulls)
+    # Keys borrow the column's UTF-8 buffer; no String is allocated per row.
+    ref column = series._data[StringColumn]
+    var lookup = Dict[StringSlice[ImmutAnyOrigin], Int]()
+    for i in range(len(column)):
+        if not column._valid(i):
+            nulls[i] = True
+            continue
+        var value = column._get(i)
+        var code = lookup.get(value, -1)
+        if code < 0:
+            code = len(lookup)
+            lookup[value] = code
+        codes[i] = code
+    return len(lookup)
 
 
 def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:

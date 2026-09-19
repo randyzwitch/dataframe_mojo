@@ -1,6 +1,7 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr import (
     ADD,
@@ -308,6 +309,36 @@ def _compare[
     return Series("", Column[Bool](values^, valid))
 
 
+def _compare_strings[
+    op: Int
+](left: StringColumn, right: StringColumn) raises -> Series:
+    """Byte-wise comparison of borrowed UTF-8 rows (code point order)."""
+    var n = _length(len(left), len(right))
+    var values = List[Bool](length=n, fill=False)
+    var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        var a = 0 if len(left) == 1 else i
+        var b = 0 if len(right) == 1 else i
+        valid[i] = left._valid(a) and right._valid(b)
+        if valid[i]:
+            var x = left._get(a)
+            var y = right._get(b)
+            # StringSlice lacks a slice-to-slice >=, so derive it from <.
+            comptime if op == GT:
+                values[i] = y < x
+            elif op == LT:
+                values[i] = x < y
+            elif op == GE:
+                values[i] = not (x < y)
+            elif op == LE:
+                values[i] = not (y < x)
+            elif op == EQ:
+                values[i] = x == y
+            else:
+                values[i] = x != y
+    return Series("", Column[Bool](values^, valid))
+
+
 def _arithmetic[
     op: Int, width: Int
 ](left: Series, right: Series, mask: List[Bool]) raises -> Series:
@@ -324,9 +355,9 @@ def _arithmetic[
             return _compare[op](
                 left._data[Column[Bool]], right._data[Column[Bool]]
             )
-        if left._data.isa[Column[String]]():
-            return _compare[op](
-                left._data[Column[String]], right._data[Column[String]]
+        if left._data.isa[StringColumn]():
+            return _compare_strings[op](
+                left._data[StringColumn], right._data[StringColumn]
             )
     raise Error("Unsupported binary kernel")
 
@@ -499,7 +530,7 @@ def validity(series: Series) -> List[Bool]:
             valid.append(series._data[Column[Bool]]._valid(i))
     else:
         for i in range(n):
-            valid.append(series._data[Column[String]]._valid(i))
+            valid.append(series._data[StringColumn]._valid(i))
     return valid^
 
 
@@ -548,10 +579,17 @@ def binary[
                 "",
                 _fill_null(left._data[Column[Bool]], right._data[Column[Bool]]),
             )
-        return Series(
-            "",
-            _fill_null(left._data[Column[String]], right._data[Column[String]]),
-        )
+        ref a = left._data[StringColumn]
+        ref b = right._data[StringColumn]
+        var n = _length(len(a), len(b))
+        var out = StringBuilder(n)
+        for i in range(n):
+            var x = 0 if len(a) == 1 else i
+            if a._valid(x):
+                out._append_row(a, x)
+            else:
+                out._append_row(b, 0 if len(b) == 1 else i)
+        return Series("", out^.finish())
     elif op == KEEP_NULLS:
         var mask = validity(left)
         if right._data.isa[Column[Int64]]():
@@ -560,7 +598,16 @@ def binary[
             return Series("", _keep_nulls(mask, right._data[Column[Float64]]))
         if right._data.isa[Column[Bool]]():
             return Series("", _keep_nulls(mask, right._data[Column[Bool]]))
-        return Series("", _keep_nulls(mask, right._data[Column[String]]))
+        ref column = right._data[StringColumn]
+        var n = _length(len(mask), len(column))
+        var out = StringBuilder(n)
+        for i in range(n):
+            var b = 0 if len(column) == 1 else i
+            if mask[0 if len(mask) == 1 else i]:
+                out._append_row(column, b)
+            else:
+                out.append_null()
+        return Series("", out^.finish())
     else:
         return _arithmetic[op, width](left, right, mask)
 
@@ -652,9 +699,12 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
                 selected, then._data[Column[Bool]], other._data[Column[Bool]]
             ),
         )
-    return Series(
-        "",
-        _choose(
-            selected, then._data[Column[String]], other._data[Column[String]]
-        ),
-    )
+    ref a = then._data[StringColumn]
+    ref b = other._data[StringColumn]
+    var out = StringBuilder(len(selected))
+    for i in range(len(selected)):
+        if selected[i]:
+            out._append_row(a, 0 if len(a) == 1 else i)
+        else:
+            out._append_row(b, 0 if len(b) == 1 else i)
+    return Series("", out^.finish())

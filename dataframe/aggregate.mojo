@@ -10,6 +10,7 @@ from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .dtype import DataType
 from .series import Series
 from .expr import (
@@ -112,6 +113,92 @@ def _distinct[
         var g = _group(grouped, groups, offset + i)
         if column._valid(i):
             sets[g][column._get(i).copy()] = True
+        else:
+            nulls[g] = True
+
+
+# StringColumn overloads: rows are borrowed slices; per-group state owns
+# Strings, so copies happen only when a group's value changes.
+
+
+def _count_valid(
+    column: StringColumn,
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    nulls: Bool,
+    mut counts: List[Int64],
+):
+    for i in range(len(column)):
+        if column._valid(i) != nulls:
+            counts[_group(grouped, groups, offset + i)] += 1
+
+
+def _extreme(
+    column: StringColumn,
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    is_max: Bool,
+    mut seen: List[Bool],
+    mut best: List[String],
+):
+    """Track the extreme valid value; ties keep the earlier value."""
+    for i in range(len(column)):
+        if not column._valid(i):
+            continue
+        var g = _group(grouped, groups, offset + i)
+        var value = column._get(i)
+        if (
+            not seen[g]
+            or (is_max and value > best[g])
+            or (not is_max and value < best[g])
+        ):
+            best[g] = String(value)
+            seen[g] = True
+
+
+def _pick(
+    column: StringColumn,
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    last: Bool,
+    mut seen: List[Bool],
+    mut valid: List[Bool],
+    mut best: List[String],
+):
+    # Scan backwards for `last` so each group copies at most once per chunk.
+    var n = len(column)
+    var taken = Dict[Int, Bool]()
+    for k in range(n):
+        var i = n - 1 - k if last else k
+        var g = _group(grouped, groups, offset + i)
+        if last:
+            if g in taken:
+                continue
+            taken[g] = True
+        elif seen[g]:
+            continue
+        seen[g] = True
+        valid[g] = column._valid(i)
+        best[g] = String(column._get(i))
+
+
+def _distinct(
+    column: StringColumn,
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    mut sets: List[Dict[String, Bool]],
+    mut nulls: List[Bool],
+):
+    for i in range(len(column)):
+        var g = _group(grouped, groups, offset + i)
+        if column._valid(i):
+            var value = column._get(i)
+            if String(value) not in sets[g]:
+                sets[g][String(value)] = True
         else:
             nulls[g] = True
 
@@ -291,7 +378,7 @@ struct Reducer(Movable):
                 )
             else:
                 _count_valid(
-                    chunk._data[Column[String]],
+                    chunk._data[StringColumn],
                     offset,
                     grouped,
                     groups,
@@ -377,7 +464,7 @@ struct Reducer(Movable):
                 )
             else:
                 _extreme(
-                    chunk._data[Column[String]],
+                    chunk._data[StringColumn],
                     offset,
                     grouped,
                     groups,
@@ -422,7 +509,7 @@ struct Reducer(Movable):
                 )
             else:
                 _pick(
-                    chunk._data[Column[String]],
+                    chunk._data[StringColumn],
                     offset,
                     grouped,
                     groups,
@@ -457,7 +544,7 @@ struct Reducer(Movable):
                     )
             else:
                 _distinct(
-                    chunk._data[Column[String]],
+                    chunk._data[StringColumn],
                     offset,
                     grouped,
                     groups,
@@ -562,7 +649,7 @@ struct Reducer(Movable):
                 return Series("", Column[Float64](output^, valid))
             if self.dtype == DataType.BOOL:
                 return Series("", Column[Bool](self.bools.copy(), valid))
-            return Series("", Column[String](self.strings.copy(), valid))
+            return Series("", StringColumn(self.strings, valid))
         var output = List[Bool](length=n, fill=False)
         var ignore_nulls = self.integer != 0
         for g in range(n):
