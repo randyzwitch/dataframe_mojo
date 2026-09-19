@@ -37,10 +37,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     def __init__(out self, var values: List[Self.T], valid: List[Bool]) raises:
         if len(values) != len(valid):
             raise Error("Column values and validity must have equal lengths")
-        var bits = List[UInt8](length=(len(valid) + 7) // 8, fill=0)
-        for i in range(len(valid)):
-            if valid[i]:
-                bits[i // 8] |= UInt8(1) << UInt8(i % 8)
+        var bits = _pack_bits(valid)
         self._length = len(values)
         self._offset = 0
         self._bits = ArcPointer(bits^)
@@ -81,8 +78,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 
     def _valid(self, i: Int) -> Bool:
         """Internal unchecked validity read after bounds validation."""
-        var bit = self._offset + i
-        return (self._bits[][bit // 8] & (UInt8(1) << UInt8(bit % 8))) != 0
+        return _bit(self._bits[], self._offset + i)
 
     def is_null(self, index: Int) raises -> Bool:
         self._check_index(index)
@@ -164,12 +160,10 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 
     def _compact(self) -> Self:
         """A private copy of this window with offset 0."""
-        var bits = List[UInt8](length=(self._length + 7) // 8, fill=0)
-        for i in range(self._length):
-            if self._valid(i):
-                bits[i // 8] |= UInt8(1) << UInt8(i % 8)
         var result = Self(self._to_list())
-        result._bits = ArcPointer(bits^)
+        result._bits = ArcPointer(
+            _copy_bits(self._bits[], self._offset, self._length)
+        )
         return result^
 
     def _append_column(mut self, other: Self):
@@ -180,44 +174,16 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         """
         if not self._owned():
             self = self._compact()
-        var source = (
-            other.copy() if other._offset % 8 == 0 else other._compact()
-        )
-        var first_byte = source._offset // 8
         var start = self._length
-        var shift = start % 8
-        var count = source._length
-        var full_bytes = count // 8
-        var tail_bits = count % 8
-        ref bits = self._bits[]
-        ref incoming = source._bits[]
-        if shift == 0:
-            for b in range(full_bytes):
-                bits.append(incoming[first_byte + b])
-            if tail_bits > 0:
-                var mask = (UInt8(1) << UInt8(tail_bits)) - 1
-                bits.append(incoming[first_byte + full_bytes] & mask)
-        elif count > 0:
-            # Clear stale bits above the current length before merging.
-            var last = len(bits) - 1
-            bits[last] &= (UInt8(1) << UInt8(shift)) - 1
-            var source_bytes = (count + 7) // 8
-            for b in range(source_bytes):
-                var byte = incoming[first_byte + b]
-                if b == source_bytes - 1 and tail_bits > 0:
-                    byte &= (UInt8(1) << UInt8(tail_bits)) - 1
-                bits[len(bits) - 1] |= byte << UInt8(shift)
-                bits.append(byte >> UInt8(8 - shift))
-            var needed = (start + count + 7) // 8
-            while len(bits) > needed:
-                _ = bits.pop()
+        var count = other._length
+        _append_bits(self._bits[], start, other._bits[], other._offset, count)
         ref values = self._data[]
         # Grow geometrically: batch reassembly appends many small chunks, and
         # an exact reservation would copy the whole column on every append.
         if values.capacity() < start + count:
             values.reserve(max(start + count, 2 * values.capacity()))
         for i in range(count):
-            values.append(source._get(i).copy())
+            values.append(other._get(i).copy())
         self._length = start + count
 
     @staticmethod
@@ -232,3 +198,76 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         var values = List[Self.T](length=length, fill=self._get(0).copy())
         var valid = List[Bool](length=length, fill=self._valid(0))
         return Self(values^, valid)
+
+
+# Validity bitmaps: LSB-first bytes, 1 = valid, as in Arrow. Bits past a
+# column's length are unspecified; readers never look at them.
+
+
+def _bit(bits: List[UInt8], i: Int) -> Bool:
+    return (bits[i // 8] >> UInt8(i % 8)) & 1 == 1
+
+
+def _pack_bits(valid: List[Bool]) -> List[UInt8]:
+    var bits = List[UInt8](length=(len(valid) + 7) // 8, fill=0)
+    for i in range(len(valid)):
+        if valid[i]:
+            bits[i // 8] |= UInt8(1) << UInt8(i % 8)
+    return bits^
+
+
+def _copy_bits(bits: List[UInt8], offset: Int, length: Int) -> List[UInt8]:
+    """Bits [offset, offset + length) rebased to bit 0."""
+    var out = List[UInt8](capacity=(length + 7) // 8)
+    _append_bits(out, 0, bits, offset, length)
+    return out^
+
+
+def _append_bits(
+    mut bits: List[UInt8],
+    length: Int,
+    incoming: List[UInt8],
+    offset: Int,
+    count: Int,
+):
+    """Append bits [offset, offset + count) of incoming after bit `length`.
+
+    Byte-aligned sources merge bytewise (shifted when the destination is not
+    byte-aligned); unaligned sources fall back to per-bit copies.
+    """
+    if count == 0:
+        return
+    var needed = (length + count + 7) // 8
+    if offset % 8 != 0:
+        # Clear stale bits above the current length, then set bit by bit.
+        if length % 8 != 0:
+            bits[len(bits) - 1] &= (UInt8(1) << UInt8(length % 8)) - 1
+        while len(bits) < needed:
+            bits.append(0)
+        for i in range(count):
+            if _bit(incoming, offset + i):
+                var bit = length + i
+                bits[bit // 8] |= UInt8(1) << UInt8(bit % 8)
+        return
+    var first_byte = offset // 8
+    var shift = length % 8
+    var full_bytes = count // 8
+    var tail_bits = count % 8
+    if shift == 0:
+        for b in range(full_bytes):
+            bits.append(incoming[first_byte + b])
+        if tail_bits > 0:
+            var mask = (UInt8(1) << UInt8(tail_bits)) - 1
+            bits.append(incoming[first_byte + full_bytes] & mask)
+        return
+    var last = len(bits) - 1
+    bits[last] &= (UInt8(1) << UInt8(shift)) - 1
+    var source_bytes = (count + 7) // 8
+    for b in range(source_bytes):
+        var byte = incoming[first_byte + b]
+        if b == source_bytes - 1 and tail_bits > 0:
+            byte &= (UInt8(1) << UInt8(tail_bits)) - 1
+        bits[len(bits) - 1] |= byte << UInt8(shift)
+        bits.append(byte >> UInt8(8 - shift))
+    while len(bits) > needed:
+        _ = bits.pop()

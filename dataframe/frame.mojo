@@ -2,6 +2,7 @@
 from .dtype import DataType
 from std.collections import Dict
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
 from .expr import Expr, col
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
@@ -790,7 +791,7 @@ struct DataFrame(Copyable, Sized, Writable):
         for name in columns_on:
             for _ in range(self._height):
                 labels.append(name)
-        output.append(Series(variable_name, Column[String](labels^)))
+        output.append(Series(variable_name, StringColumn(labels)))
         var values = self._columns[self._index(columns_on[0])].renamed(
             value_name
         )

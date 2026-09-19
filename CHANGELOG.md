@@ -7,6 +7,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Breaking
 
+- `Series.string()` returns a `StringColumn` (Arrow `large_utf8`: one UTF-8
+  buffer plus Int64 offsets) instead of `Column[String]`. It has the same
+  `value`, `is_null`, `null_count`, `take`, and `slice` methods.
+  `Series(name, Column[String](...))` still works and converts (#33).
 - Dtypes are structured `DataType` values instead of strings:
   `Series.dtype()`, `DataFrame.dtypes()`, `Field.dtype`, `AnyValue.dtype()`,
   and `CsvField.dtype` return `DataType`. Compare with constants

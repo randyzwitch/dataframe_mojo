@@ -8,6 +8,7 @@ from std.collections import Dict
 from std.utils import Variant
 
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .dtype import DataType
 from .frame import DataFrame
 from .series import Series
@@ -133,14 +134,8 @@ struct _BoolBuilder(Copyable):
     var valid: List[Bool]
 
 
-@fieldwise_init
-struct _StringBuilder(Copyable):
-    var values: List[String]
-    var valid: List[Bool]
-
-
 comptime _Builder = Variant[
-    _IntBuilder, _FloatBuilder, _BoolBuilder, _StringBuilder
+    _IntBuilder, _FloatBuilder, _BoolBuilder, StringBuilder
 ]
 
 
@@ -159,7 +154,7 @@ struct _CsvColumn(Copyable):
         elif field.dtype == CSV_BOOL:
             self.builder = _Builder(_BoolBuilder([], []))
         else:
-            self.builder = _Builder(_StringBuilder([], []))
+            self.builder = _Builder(StringBuilder())
 
     def _error(self, record: Int, text: String) -> Error:
         return Error(
@@ -187,8 +182,7 @@ struct _CsvColumn(Copyable):
             _ = self.builder[_BoolBuilder].values.pop()
             _ = self.builder[_BoolBuilder].valid.pop()
         else:
-            _ = self.builder[_StringBuilder].values.pop()
-            _ = self.builder[_StringBuilder].valid.pop()
+            self.builder[StringBuilder]._pop()
 
     def append(
         mut self,
@@ -220,8 +214,7 @@ struct _CsvColumn(Copyable):
                 self.builder[_BoolBuilder].values.append(False)
                 self.builder[_BoolBuilder].valid.append(False)
             else:
-                self.builder[_StringBuilder].values.append("")
-                self.builder[_StringBuilder].valid.append(False)
+                self.builder[StringBuilder].append_null()
             return
 
         if self.builder.isa[_IntBuilder]() and self.field.dtype.is_temporal():
@@ -252,8 +245,7 @@ struct _CsvColumn(Copyable):
             self.builder[_BoolBuilder].values.append(text == "true")
             self.builder[_BoolBuilder].valid.append(True)
         else:
-            self.builder[_StringBuilder].values.append(text)
-            self.builder[_StringBuilder].valid.append(True)
+            self.builder[StringBuilder].append(text)
 
     def finish(self) raises -> Series:
         if self.builder.isa[_IntBuilder]():
@@ -281,11 +273,7 @@ struct _CsvColumn(Copyable):
                 ),
             )
         return Series(
-            self.field.name,
-            Column[String](
-                self.builder[_StringBuilder].values.copy(),
-                self.builder[_StringBuilder].valid.copy(),
-            ),
+            self.field.name, self.builder[StringBuilder].copy().finish()
         )
 
 
@@ -1040,7 +1028,7 @@ def _cell_text(series: Series, row: Int) -> String:
         return String(series._data[Column[Float64]]._get(row))
     if series._data.isa[Column[Bool]]():
         return "true" if series._data[Column[Bool]]._get(row) else "false"
-    return series._data[Column[String]]._get(row)
+    return String(series._data[StringColumn]._get(row))
 
 
 def _cell_valid(series: Series, row: Int) -> Bool:
@@ -1050,7 +1038,7 @@ def _cell_valid(series: Series, row: Int) -> Bool:
         return series._data[Column[Float64]]._valid(row)
     if series._data.isa[Column[Bool]]():
         return series._data[Column[Bool]]._valid(row)
-    return series._data[Column[String]]._valid(row)
+    return series._data[StringColumn]._valid(row)
 
 
 struct _CsvWriter:

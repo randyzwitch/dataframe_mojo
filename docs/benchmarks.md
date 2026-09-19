@@ -117,6 +117,26 @@ filters pay roughly 5-8% for the extra indirection (offset plus shared-pointer
 dereference) on per-row validity reads; hoisting buffer references in those
 kernels, or word-at-a-time validity, is the planned follow-up.
 
+## After contiguous UTF-8 strings (#33)
+
+String columns moved from `List[String]` to one UTF-8 buffer with Int64
+offsets (Arrow `large_utf8`). Throughput on the string workloads is unchanged
+within noise; the per-row work (hashing, CSV tokenizing, rank merging) dominates,
+not string storage:
+
+| workload | before ms | after ms |
+|---|---|---|
+| CSV read, 100k rows with a quoted string field | 92.7 | 94.7 |
+| group_by string + int key, 16 / 10k / 111k groups | 10.7 / 12.5 / 27.2 | 10.6 / 12.6 / 28.6 |
+| sort one string key (ranked), 200k rows | 90.0 | 91.5 |
+| sort one string key (comparator reference), 200k rows | 120.9 | 81.8 |
+
+The comparator sort gains because comparisons read borrowed slices instead of
+copying Strings. Memory falls: peak RSS for a 2M-row column plus a 1M-row
+`take` is 104 → 92 MB for ~10-byte keys (which `String` already stores inline)
+and 231 → 156 MB for ~30-byte strings, since each row costs its bytes plus an
+8-byte offset instead of a 24-byte `String` and a separate heap allocation.
+
 ## What the baseline shows
 
 - The five-node Float64 arithmetic chain runs at about 5 million rows/s, and the

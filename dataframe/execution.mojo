@@ -72,6 +72,7 @@ from .window import window_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
 from .aggregate import Reducer
@@ -195,7 +196,7 @@ def _eval[
     if node.op == LIT_BOOL:
         return Series("", Column[Bool]([Bool(node.integer)]))
     if node.op == LIT_STRING:
-        return Series("", Column[String]([node.text]))
+        return Series("", StringColumn([node.text]))
     if node.op == LIT_NULL:
         return Series.full_null("", DataType.parse(node.text), 1)
     if is_window(node.op) or node.op == OVER:

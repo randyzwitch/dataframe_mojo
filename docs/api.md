@@ -619,7 +619,9 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def __init__(out self, var name: String, var column: Column[Int64])`
 - `def __init__(out self, var name: String, var column: Column[Float64])`
 - `def __init__(out self, var name: String, var column: Column[Bool])`
-- `def __init__(out self, var name: String, var column: Column[String])`
+- `def __init__(out self, var name: String, var column: StringColumn)`
+- `def __init__(out self, var name: String, column: Column[String])`
+  Convert list-backed strings to the contiguous UTF-8 layout.
 - `def __getitem__(self, index: Int) -> AnyValue`
   One cell; raises when out of bounds. Negative indices count from the end.
 - `def __neg__(self) -> Self`
@@ -705,8 +707,8 @@ A named column of one supported dtype, plus expression-backed methods.
   Return an owned typed copy, raising on a dtype mismatch.
 - `def bool(self) -> Column[Bool]`
   Return an owned typed copy, raising on a dtype mismatch.
-- `def string(self) -> Column[String]`
-  Return an owned typed copy, raising on a dtype mismatch.
+- `def string(self) -> StringColumn`
+  Return the (shared, immutable) column, raising on a dtype mismatch.
 - `def take(self, indices: List[Int]) -> Self`
 - `def take_or_null(self, indices: List[Int]) -> Self`
 - `def argsort(self, descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
@@ -718,6 +720,40 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def append(self, other: Self) -> Self`
   Return a new series with other's rows after this one's.
 - `def reverse(self) -> Self`
+
+## `StringBuilder`
+
+Appends rows into fresh UTF-8, offset, and validity buffers.
+
+Kernels build string results here instead of collecting `String`s.
+
+- `def __init__(out self, rows: Int = Int(0), bytes: Int = Int(0))`
+  Reserve for about `rows` rows and `bytes` bytes of text.
+- `def __len__(self) -> Int`
+- `def append(mut self, text: StringSpan)`
+- `def append(mut self, text: String)`
+- `def append_null(mut self)`
+- `def finish(deinit self) -> StringColumn`
+
+## `StringColumn`
+
+A window onto shared UTF-8 bytes, Int64 offsets, and validity.
+
+- `def __init__(out self, values: List[String])`
+- `def __init__(out self, values: List[String], valid: List[Bool])`
+- `def __init__(out self, column: Column[String])`
+  Convert a list-backed string column into the UTF-8 layout.
+- `def __init__(out self, *, var bytes: List[UInt8], var offsets: List[Int64], var bits: List[UInt8], length: Int)`
+  Adopt finished buffers; offsets must have length + 1 entries.
+- `def __len__(self) -> Int`
+- `def is_null(self, index: Int) -> Bool`
+- `def value(self, index: Int) -> String`
+- `def null_count(self) -> Int`
+- `def take(self, indices: List[Int]) -> Self`
+- `def take_or_null(self, indices: List[Int], fill: String) -> Self`
+  Gather rows, treating only -1 as a missing row (for outer joins).
+- `def slice(self, offset: Int, length: Int) -> Self`
+  A zero-copy window sharing this column's buffers.
 
 ## `StrNamespace`
 

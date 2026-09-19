@@ -50,9 +50,10 @@ Parsing is strict and never skips malformed records.
 File reads are bounded by `buffer_size`; tokenizer state survives arbitrary
 boundaries, including BOM bytes, CRLF pairs, escaped quotes, UTF-8 sequences, and
 multiline records. Temporary parsing memory is bounded by the input buffer and
-the current field, apart from typed output builders. Final column construction
-currently copies builder storage once; immutable/movable column builders can
-remove that copy later.
+the current field, apart from typed output builders. String fields append their
+bytes straight into a UTF-8 buffer and offsets (no per-field `String`). Final
+column construction currently copies builder storage once; movable column
+builders can remove that copy later.
 
 The scalar tokenizer separates structural scanning from typed decoding. Future
 SIMD scanning must produce the same state transitions. Parallel partitions must

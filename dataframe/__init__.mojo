@@ -1,5 +1,6 @@
 """Native, eager CPU dataframes for Mojo."""
 from .column import Column
+from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .frame import DataFrame, Field, GroupBy, concat
 from .value import AnyValue
