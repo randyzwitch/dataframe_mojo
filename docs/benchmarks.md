@@ -250,3 +250,56 @@ pointer dereference per row, not a copy.
 
 Measure with an optimized build: under `mojo run` the difference largely
 disappears.
+
+## Hash-partitioned grouping (#104)
+
+Grouping encoded keys serially into dense ids (17-22 ms of a 22-57 ms
+group-by at 1M rows), then reduced in parallel with every worker holding
+state for every group, so the worker count collapsed as cardinality rose.
+Two attempts to parallelize the encoding by merging worker dictionaries
+(#8) lost at high cardinality, because that merge costs workers x distinct
+keys.
+
+Rows are now hashed by key and stably partitioned into buckets, the key and
+aggregated columns are gathered into bucket order with `take_parallel`, and
+each bucket runs the existing encode-and-reduce on its own. Equal keys
+always share a bucket, so nothing is merged. `maintain_order=True` costs
+one O(groups) sort by first input row afterwards.
+
+Partitioning is not free: the gather is a full materialization of the
+frame, and it only repays when the serial encode it replaces is expensive.
+`low_cardinality` decides beforehand by hashing a 4,096-row strided sample
+on the calling thread and counting how much of hash space it touches, which
+costs far less than the pass it guards.
+
+1,000,000 rows, `bench-polars`, 32 threads, best of 5, against `main` on
+the same machine back to back:
+
+| workload | main | partitioned | vs Polars, before -> after |
+|---|---|---|---|
+| grouped_high (~100k groups) | 51.72 ms | 24.47 ms | 4.2x -> 2.0x |
+| grouped_low (16 groups) | 23.21 ms | 23.63 ms | 1.8x -> 1.8x |
+| grouped_skew | 23.90 ms | 25.00 ms | 1.6x -> 1.6x |
+| grouped_str (100 groups) | 34.99 ms | 33.85 ms | 2.3x -> 2.2x |
+
+High cardinality is 2.1x faster, which is where the earlier attempts lost,
+and the gate keeps the low-cardinality shapes at parity.
+
+At 200,000 rows (`bench_group_by`, best of 3, three rounds) the picture is
+the same but smaller, because the fixed costs are a larger share:
+
+| keys | groups | main ms | partitioned ms |
+|---|---|---|---|
+| 1 | 16 | 5.0-5.4 | 5.2-5.3 |
+| 3 | 16 | 14.3-14.6 | 14.6-15.0 |
+| 1 | 10,000 | 7.2-7.6 | 6.1-7.0 |
+| 2 | 10,000 | 12.9-13.6 | 14.3-15.3 |
+| 1 | 110,609 | 17.2-17.4 | 12.3-13.0 |
+| 2 | 110,609 | 28.8-28.9 | 20.9-22.7 |
+| 3 | 110,609 | 37.4-37.8 | 23.1-23.9 |
+
+One shape regresses: 10,000 groups on two keys, about 10%, where the sample
+says partition but the gather is not repaid at that cardinality and frame
+size. A reusable thread pool would likely remove it, since the extra hash,
+scatter and gather stages each pay thread creation today; that was measured
+and could not ship (#103).

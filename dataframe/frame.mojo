@@ -21,7 +21,8 @@ from .expr import (
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
 from .gather import take_parallel, true_rows
-from .parallel import worker_count
+from .parallel import Job, partitions, run_jobs, worker_count
+from .partition import Partitioner, low_cardinality
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows
 from .groups import GroupIndices
@@ -1360,6 +1361,123 @@ def _bind_all(
     return bound^
 
 
+struct _EncodeJob(Job):
+    """Encode one row range of a heavy bucket with a private dictionary."""
+
+    var keys: List[Series]
+    var ids: List[Int]
+    var representatives: List[Int]
+
+    def __init__(out self, var keys: List[Series]):
+        self.keys = keys^
+        self.ids = List[Int]()
+        self.representatives = List[Int]()
+
+    def run(mut self) raises:
+        var local = encode_rows(self.keys, nulls_equal=True)
+        self.ids = local.ids.copy()
+        self.representatives = local.representatives.copy()
+
+
+def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
+    """Dense ids in first-occurrence order, encoded per row range and then
+    reconciled through the representative rows.
+
+    Only worth it when distinct keys are few relative to rows, which is
+    what makes a bucket heavy: the reconciliation re-encodes one row per
+    (worker, distinct key), so its cost is workers x distinct keys.
+    """
+    var n = len(keys[0])
+    var bounds = partitions(n, workers, 64)
+    var jobs = List[_EncodeJob](capacity=workers)
+    for w in range(workers):
+        var slices = List[Series](capacity=len(keys))
+        for key in keys:
+            slices.append(key.slice(bounds[w], bounds[w + 1] - bounds[w]))
+        jobs.append(_EncodeJob(slices^))
+    run_jobs(jobs)
+
+    # One row per (worker, local id), in worker order, so encoding those
+    # rows yields each local id's global id at a known position.
+    var rows = List[Int]()
+    var offsets = List[Int](capacity=workers + 1)
+    for w in range(workers):
+        offsets.append(len(rows))
+        for r in jobs[w].representatives:
+            rows.append(bounds[w] + r)
+    offsets.append(len(rows))
+    var samples = List[Series](capacity=len(keys))
+    for key in keys:
+        samples.append(key.take(rows))
+    var merged = encode_rows(samples, nulls_equal=True)
+
+    var ids = List[Int](length=n, fill=0)
+    for w in range(workers):
+        var base = offsets[w]
+        var start = bounds[w]
+        for i in range(len(jobs[w].ids)):
+            ids[start + i] = merged.ids[base + jobs[w].ids[i]]
+    var representatives = List[Int](capacity=merged.count())
+    for r in merged.representatives:
+        representatives.append(rows[r])
+    return RowKeys(ids^, representatives^)
+
+
+struct _BucketJob(Job):
+    """Group one hash bucket on its own: encode its keys, evaluate the
+    aggregates, and remember each group's first row for reordering."""
+
+    var keys: List[Series]
+    var columns: List[Series]
+    var expressions: List[Expr]
+    var batch_size: Int
+    var height: Int
+    # Workers for the encode; 1 inside a batch, more when run on the caller.
+    var encoders: Int
+    var result: List[Series]
+    var firsts: List[Int]
+
+    def __init__(
+        out self,
+        var keys: List[Series],
+        var columns: List[Series],
+        expressions: List[Expr],
+        batch_size: Int,
+        height: Int,
+        encoders: Int = 1,
+    ):
+        self.keys = keys^
+        self.columns = columns^
+        self.expressions = expressions.copy()
+        self.batch_size = batch_size
+        self.height = height
+        self.encoders = encoders
+        self.result = List[Series]()
+        self.firsts = List[Int]()
+
+    def run(mut self) raises:
+        var groups = _encode_parallel(
+            self.keys, self.encoders
+        ) if self.encoders > 1 else encode_rows(self.keys, nulls_equal=True)
+        for key in self.keys:
+            self.result.append(key.take(groups.representatives))
+        # Bind against this bucket's columns so source indices line up.
+        var bound = _bind_all(self.expressions, self.columns)
+        for expression in bound:
+            self.result.append(
+                evaluate(
+                    expression,
+                    self.columns,
+                    self.height,
+                    batch_size=self.batch_size,
+                    grouped=True,
+                    groups=groups.ids,
+                    group_count=groups.count(),
+                )
+            )
+        self.firsts = groups.representatives.copy()
+
+
 @fieldwise_init
 struct GroupBy(Copyable):
     """An eager grouping request. No per-group dataframe materialization.
@@ -1405,6 +1523,119 @@ struct GroupBy(Copyable):
                     "Aggregate output name collides with grouping key: "
                     + expression.expr._name
                 )
+        var workers = worker_count(self._frame.height())
+        if workers > 1:
+            return self._agg_partitioned(
+                expressions, bound, batch_size, workers
+            )
+        return self._agg_whole(bound, batch_size)
+
+    def _referenced(self, bound: List[BoundExpr]) -> List[Series]:
+        """The frame columns the aggregates read, in frame order; every
+        column if a selector is still unexpanded."""
+        var wanted = Dict[String, Bool]()
+        var everything = False
+        for expression in bound:
+            for node in expression.expr._nodes:
+                if node.op == COL:
+                    wanted[node.text] = True
+                elif node.op == SELECTOR:
+                    everything = True
+        var columns = List[Series]()
+        for column in self._frame._columns:
+            if everything or column.name() in wanted:
+                columns.append(column.copy())
+        return columns^
+
+    def _agg_partitioned(
+        self,
+        expressions: List[Expr],
+        bound: List[BoundExpr],
+        batch_size: Int,
+        workers: Int,
+    ) raises -> DataFrame:
+        """Group by hash bucket in parallel; see dataframe/partition.mojo.
+
+        Each bucket holds a disjoint set of keys, so buckets are encoded
+        and reduced independently and their outputs concatenated. Output
+        order is bucket order unless maintain_order, which sorts groups by
+        their first input row afterwards (O(groups), not O(rows)).
+
+        A bucket holding several times its share of rows (a skewed key)
+        would serialize the batch, so such buckets run on the calling
+        thread, where their reduce can use the pool, and only the light
+        buckets are jobs. Low cardinality needs no special case: measured
+        at 16 groups, partitioning still beats the serial encode.
+        """
+        var height = self._frame.height()
+        # A sampled estimate decides whether scattering is worth its gather;
+        # on a low-cardinality key the serial encode it replaces is cheap.
+        if low_cardinality(self._keys):
+            return self._agg_whole(bound, batch_size)
+        var partitioner = Partitioner(self._keys, workers)
+        var parts = partitioner.scatter(workers)
+        var buckets = parts.buckets()
+        var keys = take_parallel(self._keys, parts.order.copy(), workers)
+        var columns = take_parallel(
+            self._referenced(bound), parts.order.copy(), workers
+        )
+        # Heavy: a bucket big enough to serialize the batch on its own. It
+        # must be large relative to the frame, not only to its share, or
+        # low cardinality (few occupied buckets) would count as heavy.
+        var heavy_rows = max(height // 8, 4 * height // buckets)
+        var light = List[_BucketJob]()
+        var light_offsets = List[Int]()
+        var done = List[_BucketJob]()
+        var done_offsets = List[Int]()
+        for b in range(buckets):
+            var lo = parts.bounds[b]
+            var hi = parts.bounds[b + 1]
+            if hi == lo:
+                continue
+            var bucket_keys = List[Series](capacity=len(keys))
+            for key in keys:
+                bucket_keys.append(key.slice(lo, hi - lo))
+            var bucket_columns = List[Series](capacity=len(columns))
+            for column in columns:
+                bucket_columns.append(column.slice(lo, hi - lo))
+            var heavy = hi - lo > heavy_rows
+            var job = _BucketJob(
+                bucket_keys^,
+                bucket_columns^,
+                expressions,
+                batch_size,
+                hi - lo,
+                worker_count(hi - lo) if heavy else 1,
+            )
+            if heavy:
+                # On the caller, so its encode and reduce can use the pool.
+                job.run()
+                done.append(job^)
+                done_offsets.append(lo)
+            else:
+                light.append(job^)
+                light_offsets.append(lo)
+        run_jobs(light)
+        while len(light) > 0:
+            done.append(light.pop(0))
+            done_offsets.append(light_offsets.pop(0))
+
+        var frames = List[DataFrame](capacity=len(done))
+        var firsts = List[Int]()
+        for j in range(len(done)):
+            var groups = len(done[j].firsts)
+            frames.append(DataFrame(done[j].result.copy(), height=groups))
+            for r in done[j].firsts:
+                firsts.append(parts.order[done_offsets[j] + r])
+        var result = concat(frames)
+        if not self._maintain_order:
+            return result^
+        return result.take(sort_indices([firsts^]))
+
+    def _agg_whole(
+        self, bound: List[BoundExpr], batch_size: Int
+    ) raises -> DataFrame:
+        """Serial key encoding, then the parallel per-group reduce."""
         var groups = encode_rows(self._keys, nulls_equal=True)
         var columns = self._key_columns(groups)
         for expression in bound:
