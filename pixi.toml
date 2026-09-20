@@ -1,6 +1,6 @@
 [workspace]
 name = "dataframe_mojo"
-version = "0.1.1"
+version = "0.1.2"
 description = "An experimental dataframe library for Mojo"
 channels = [
     "https://conda.modular.com/max",
@@ -14,7 +14,7 @@ preview = ["pixi-build"]
 # example:
 #
 #     [dependencies]
-#     dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.1.1" }
+#     dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.1.2" }
 #     mojo = ">=1.1.0,<1.2"
 #
 # and then `from dataframe import DataFrame, col`.
@@ -25,7 +25,7 @@ preview = ["pixi-build"]
 # the Mojo version this tag ships for.
 [package]
 name = "dataframe_mojo"
-version = "0.1.1"
+version = "0.1.2"
 description = "An experimental dataframe library for Mojo"
 license = "MIT"
 
