@@ -75,6 +75,7 @@ python = ">=3.11"
 [feature.oracle.tasks]
 oracle = "python3 scripts/oracle.py"
 oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo"
+bench-polars = "python3 scripts/bench_polars.py"
 
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }
