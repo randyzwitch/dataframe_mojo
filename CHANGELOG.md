@@ -3,7 +3,7 @@
 All notable changes are recorded here. The API is pre-1.0 and provisional:
 breaking changes can happen in any release and are listed under **Breaking**.
 
-## Unreleased
+## 0.1.2 - 2026-09-20
 
 ### Added
 

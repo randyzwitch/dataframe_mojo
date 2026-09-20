@@ -23,6 +23,10 @@ jobs:
         if: runner.os == 'Linux'
         run: pixi run format-check
 
+      - name: Check release version consistency
+        if: runner.os == 'Linux'
+        run: pixi run check-version
+
       - name: Check dtype literals
         if: runner.os == 'Linux'
         run: bash scripts/check_dtype_literals.sh
