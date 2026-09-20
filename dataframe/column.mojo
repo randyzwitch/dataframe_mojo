@@ -68,10 +68,11 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         return values^
 
     def _shares_buffers_with(self, other: Self) -> Bool:
-        return (
-            self._data.ptr() == other._data.ptr()
-            and self._bits.ptr() == other._bits.ptr()
-        )
+        """Whether both columns view the same buffers (address identity of the
+        shared lists; works on Mojo 1.0 and 1.1)."""
+        return Int(Pointer(to=self._data[])) == Int(
+            Pointer(to=other._data[])
+        ) and Int(Pointer(to=self._bits[])) == Int(Pointer(to=other._bits[]))
 
     def _check_index(self, index: Int) raises:
         if index < 0 or index >= self._length:

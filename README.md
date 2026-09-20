@@ -1,11 +1,19 @@
 # dataframe_mojo
 
-An experimental, native CPU dataframe library for **Mojo 1.1.0**. Import it as
-`dataframe`. Storage and computation use Mojo and its standard library; there
-is no Python, pandas, Polars, or Arrow runtime dependency.
+An experimental, native CPU dataframe library for **Mojo 1.0 and 1.1**. Import
+it as `dataframe`. Storage and computation use Mojo and its standard library;
+there is no Python, pandas, Polars, or Arrow runtime dependency.
 
 This is a working first implementation, not a production engine or a portable
 backend facade. The API is provisional.
+
+The source compiles on both Mojo versions and CI runs the test suite on each
+(`pixi run -e mojo10 bash scripts/run_tests.sh` for 1.0). Mojo 1.1 is what to
+develop against: on 1.0, a program whose `main` calls into this library does
+not finish compiling in any usable time, while the same calls inside test
+functions compile in about 33 seconds. Keeping 1.0 building means the only
+thing needed, if that upstream compiler behavior is fixed, is to widen a
+version bound.
 
 ## Run
 

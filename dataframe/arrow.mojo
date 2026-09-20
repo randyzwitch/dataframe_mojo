@@ -29,7 +29,9 @@ is never retained), then calls the producer's `release` exactly once.
 Pointers in the C structs are held as `Int` addresses: C pointer fields are
 nullable and Mojo `Pointer`s are not.
 """
-from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
+from std.ffi import external_call
+from std.memory import ArcPointer, Pointer
+from std.sys import size_of
 from .column import Column, _copy_bits
 from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
@@ -111,17 +113,23 @@ def _at[T: AnyType](address: Int) -> Pointer[T, MutAnyOrigin]:
 
 
 def _leak[T: Movable](var value: T) -> Int:
-    """Move value to the heap and return its address (see _reclaim)."""
-    var pointer = alloc(Layout[T](count=1)).unsafe_leak()
-    pointer.unsafe_write(value^)
-    return Int(pointer)
+    """Move value onto the C heap and return its address (see _reclaim).
+
+    These blocks outlive the call that creates them and are freed by a
+    release callback, so they use libc's allocator directly. That also keeps
+    the code working across Mojo versions, whose owned-allocation APIs differ.
+    """
+    var address = external_call["malloc", Int](size_of[T]())
+    Pointer[T, MutAnyOrigin](unsafe_from_address=address).unsafe_write(value^)
+    return address
 
 
 def _reclaim[T: Movable](address: Int) -> T:
-    """Take back a value leaked with _leak and free its memory."""
-    var pointer = Pointer[T, MutUntrackedOrigin](unsafe_from_address=address)
-    var value = pointer.unsafe_take_pointee()
-    dealloc(Allocation[T](unsafe_owned_ptr=pointer, layout=Layout[T](count=1)))
+    """Take back a value leaked with _leak and free its block."""
+    var value = Pointer[T, MutAnyOrigin](
+        unsafe_from_address=address
+    ).unsafe_take_pointee()
+    _ = external_call["free", NoneType](address)
     return value^
 
 

@@ -641,7 +641,12 @@ struct Series(Copyable, Sized, Writable):
             ref column = self._data[StringColumn]
             for i in range(n):
                 valid[i] = column._valid(i)
-            distinct = _dense_string_ranks(column, valid, ranks)
+            # Owned String keys: `sort` needs no comparator this way, which
+            # both Mojo 1.0 and 1.1 accept (they disagree on whether a
+            # comparator is a parameter or an argument), and comparing
+            # borrowed slices in a hand-written sort makes 1.0's compiler
+            # take minutes on any program that imports this package.
+            distinct = _dense_ranks(column._to_list(), valid, ranks)
         for i in range(n):
             if not valid[i]:
                 ranks[i] = distinct + 1 if nulls_last else -1
@@ -808,27 +813,6 @@ def _dense_ranks[
                 high = mid
         ranks[i] = low
     return len(distinct)
-
-
-def _dense_string_ranks(
-    column: StringColumn, usable: List[Bool], mut ranks: List[Int]
-) -> Int:
-    """Dense ranks over borrowed UTF-8 slices (byte order = code point order)."""
-    var order = List[Int]()
-    for i in range(len(column)):
-        if usable[i]:
-            order.append(i)
-
-    def less(a: Int, b: Int) {imm column} -> Bool:
-        return column._get(a) < column._get(b)
-
-    sort(order, less)
-    var distinct = 0
-    for k in range(len(order)):
-        if k > 0 and column._get(order[k]) != column._get(order[k - 1]):
-            distinct += 1
-        ranks[order[k]] = distinct
-    return distinct + 1 if len(order) > 0 else 0
 
 
 def _rank_less(ranks: List[List[Int]], a: Int, b: Int) -> Bool:

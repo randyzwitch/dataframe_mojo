@@ -45,6 +45,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- The source compiles on Mojo 1.0 as well as 1.1, and CI runs the test suite
+  on both (`pixi run -e mojo10 ...`). Develop against 1.1: on 1.0, a program
+  whose `main` calls into this library does not finish compiling in any usable
+  time, though the suite itself passes there.
+
 - Row-wise expressions and filters run on worker threads for large inputs:
   arithmetic and comparisons ~4x faster and filter ~3.5x faster at 1M rows,
   with identical row order and results (#5, #7).

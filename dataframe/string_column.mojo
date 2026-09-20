@@ -109,10 +109,13 @@ struct StringColumn(Copyable, Sized):
         return values^
 
     def _shares_buffers_with(self, other: Self) -> Bool:
+        """Whether both columns view the same buffers (address identity of the
+        shared lists; works on Mojo 1.0 and 1.1)."""
         return (
-            self._bytes.ptr() == other._bytes.ptr()
-            and self._offsets.ptr() == other._offsets.ptr()
-            and self._bits.ptr() == other._bits.ptr()
+            Int(Pointer(to=self._bytes[])) == Int(Pointer(to=other._bytes[]))
+            and Int(Pointer(to=self._offsets[]))
+            == Int(Pointer(to=other._offsets[]))
+            and Int(Pointer(to=self._bits[])) == Int(Pointer(to=other._bits[]))
         )
 
     def _check_index(self, index: Int) raises:

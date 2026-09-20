@@ -36,6 +36,12 @@ jobs:
       - name: Run tests
         run: pixi run test
 
+      # The lower bound of the supported Mojo range (see pixi.toml), so
+      # the source keeps compiling on 1.0 as well as 1.1.
+      - name: Run tests on the oldest supported Mojo
+        if: runner.os == 'Linux'
+        run: pixi run -e mojo10 bash scripts/run_tests.sh
+
       - name: Build examples
         run: pixi run build
 
