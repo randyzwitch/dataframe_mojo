@@ -225,8 +225,47 @@ def _parse_iso(text: String, dtype: DataType) raises -> Int64:
         pos += 1
         parts.second = _digits(text, pos, 2, 2)
         parts.nanos = _fraction(text, pos)
+    var offset = _zone(text, pos) if dtype.is_datetime() else Int64(0)
     _end(text, pos)
-    return join(parts, dtype)
+    var value = join(parts, dtype)
+    if offset != 0:
+        # Datetimes are time-zone-naive and hold UTC, so an offset is
+        # applied here rather than remembered: 12:00+01:00 is 11:00 UTC.
+        value = checked_add(
+            value, checked_mul(-offset * 60, dtype.per_second())
+        )
+    return value
+
+
+def _zone(text: String, mut pos: Int) raises -> Int64:
+    """A trailing ISO 8601 zone designator, as minutes east of UTC.
+
+    Accepts "Z" (and lowercase "z") for UTC, and "+HH:MM", "-HH:MM",
+    "+HHMM", "+HH". Returns 0 when there is no designator, which is the
+    naive case. The caller applies the shift; nothing here remembers the
+    zone, because datetimes in this library are naive UTC.
+    """
+    var bytes = text.as_bytes()
+    if pos >= len(bytes):
+        return 0
+    if bytes[pos] == 90 or bytes[pos] == 122:  # Z or z
+        pos += 1
+        return 0
+    if bytes[pos] != 43 and bytes[pos] != 45:
+        return 0
+    var negative = bytes[pos] == 45
+    pos += 1
+    var hours = _digits(text, pos, 2, 2)
+    var minutes = Int64(0)
+    if pos < len(bytes) and bytes[pos] == 58:
+        pos += 1
+        minutes = _digits(text, pos, 2, 2)
+    elif pos < len(bytes) and bytes[pos] >= 48 and bytes[pos] <= 57:
+        minutes = _digits(text, pos, 2, 2)
+    if hours > 23 or minutes > 59:
+        raise Error("time zone offset out of range")
+    var total = hours * 60 + minutes
+    return -total if negative else total
 
 
 def _fraction(text: String, mut pos: Int) raises -> Int64:
@@ -267,28 +306,32 @@ def _parse_format(
         if f[i] == 37 and i + 1 < len(f):
             var d = f[i + 1]
             i += 2
+            # With no literal between this directive and the next, the field
+            # has nothing to delimit it, so it must take exactly its width:
+            # "%Y%m%d" over "20240228" is 4 then 2 then 2, not a greedy year.
+            var packed = i + 1 < len(f) and f[i] == 37
             if d == 89:  # Y
                 var negative = pos < len(t) and t[pos] == 45
                 if negative or (pos < len(t) and t[pos] == 43):
                     pos += 1
-                parts.year = _digits(text, pos, 1, 6) * (
-                    Int64(-1) if negative else Int64(1)
-                )
+                parts.year = _digits(
+                    text, pos, 4 if packed else 1, 4 if packed else 6
+                ) * (Int64(-1) if negative else Int64(1))
             elif d == 109:  # m
-                parts.month = _digits(text, pos, 1, 2)
+                parts.month = _digits(text, pos, 2 if packed else 1, 2)
             elif d == 100:  # d
-                parts.day = _digits(text, pos, 1, 2)
+                parts.day = _digits(text, pos, 2 if packed else 1, 2)
             elif d == 72:  # H
-                parts.hour = _digits(text, pos, 1, 2)
+                parts.hour = _digits(text, pos, 2 if packed else 1, 2)
             elif d == 77:  # M
-                parts.minute = _digits(text, pos, 1, 2)
+                parts.minute = _digits(text, pos, 2 if packed else 1, 2)
             elif d == 83:  # S
-                parts.second = _digits(text, pos, 1, 2)
+                parts.second = _digits(text, pos, 2 if packed else 1, 2)
             elif d == 102:  # f
                 if pos < len(t) and t[pos] == 46:
                     parts.nanos = _fraction(text, pos)
             elif d == 106:  # j
-                ordinal = _digits(text, pos, 1, 3)
+                ordinal = _digits(text, pos, 3 if packed else 1, 3)
             elif d == 37:
                 _expect(text, pos, 37)
             else:
