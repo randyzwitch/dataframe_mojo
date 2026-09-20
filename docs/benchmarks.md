@@ -370,3 +370,50 @@ What remains is the merge tree's shape: with 15 runs the last round is a
 single job merging the whole array, so the tail of the sort is serial. A
 parallel multiway merge, where each worker binary-searches splitters to
 claim an output slice, would remove it.
+
+## Float parsing in CSV (#107)
+
+Reading 1,000,000 rows of 8 columns took 1,260 ms against Polars' 15 ms.
+Three attempts to speed this up by reasoning about the code failed, all
+measuring within noise of main: removing the per-field `String`, a SIMD
+structural scan that bulk-copies runs of ordinary bytes, and replacing the
+per-field `Variant` dispatch with an integer tag. Guessing does not work
+here.
+
+Ablation does. Replacing one parser at a time with a constant, on the
+4-column `bench_csv` file:
+
+| variant | best ms |
+|---|---|
+| unchanged | 79.6 |
+| integer parsing skipped as well | 50.5 |
+| float parsing skipped | 51.9 |
+
+So float parsing alone is about 28 ms of 79 ms, and integer parsing about
+1.3 ms. One of the four columns is a Float64, so that is roughly **140 ns
+per float field against 6.5 ns per integer field**.
+
+The reason is in `parse_float64`: Mojo's own parser accepts things CSV must
+reject (it reads `2024-02-28` as a number), so the grammar was checked with
+a full scan and the text was then converted with a second full scan.
+
+Plain decimals now take one pass that validates and computes together, and
+the result is exact rather than approximate: a mantissa below 2**53 divided
+by a power of ten below 10**23 is two exact operands, so the division is
+correctly rounded once. Anything else -- a sign, an exponent, `nan`, an
+infinity spelling, more than 19 digits, more than 22 fraction digits, a
+mantissa too large to hold exactly -- falls through to the original parser,
+so the accepted grammar and every value are unchanged.
+
+| 100,000 rows, 4 columns | best ms |
+|---|---|
+| before | 80.5-80.9 |
+| after | 65.8-67.5 |
+
+End to end on the 8-column file: 1,260 -> 1,081 ms.
+
+This is 1.2x, not the order of magnitude the workload needs. What it buys is
+a correct reading of where the time goes: per field, roughly 36 ns was
+parsing and 31 ns is the surrounding plumbing, against about 4 ns per byte
+of input. Parsing is now much cheaper, so the plumbing and the
+single-threadedness are what remain.

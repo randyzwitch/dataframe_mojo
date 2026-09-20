@@ -139,11 +139,21 @@ comptime _Builder = Variant[
     _IntBuilder, _FloatBuilder, _BoolBuilder, StringBuilder
 ]
 
+# Which builder a column holds. The answer is fixed for the whole file, so it
+# is decided once and compared as an integer; asking the Variant per field
+# means a chain of runtime tag tests on the hottest path in the reader.
+comptime _KIND_INT = 0
+comptime _KIND_TEMPORAL = 1
+comptime _KIND_FLOAT = 2
+comptime _KIND_BOOL = 3
+comptime _KIND_STRING = 4
+
 
 struct _CsvColumn(Copyable):
     var field: CsvField
     var builder: _Builder
     var keep: Bool
+    var kind: Int
 
     def __init__(out self, field: CsvField, keep: Bool = True):
         self.field = field.copy()
@@ -152,12 +162,18 @@ struct _CsvColumn(Copyable):
         # pattern) and every float into Float64; finish() narrows exactly.
         if field.dtype.physical() == CSV_INT64 or field.dtype.is_integer():
             self.builder = _Builder(_IntBuilder([], []))
+            self.kind = (
+                _KIND_TEMPORAL if field.dtype.is_temporal() else _KIND_INT
+            )
         elif field.dtype.is_float():
             self.builder = _Builder(_FloatBuilder([], []))
+            self.kind = _KIND_FLOAT
         elif field.dtype == CSV_BOOL:
             self.builder = _Builder(_BoolBuilder([], []))
+            self.kind = _KIND_BOOL
         else:
             self.builder = _Builder(StringBuilder())
+            self.kind = _KIND_STRING
 
     def _error(self, record: Int, text: String) -> Error:
         return Error(
@@ -175,13 +191,13 @@ struct _CsvColumn(Copyable):
         """Remove the last appended value (record rollback)."""
         if not self.keep:
             return
-        if self.builder.isa[_IntBuilder]():
+        if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
             _ = self.builder[_IntBuilder].values.pop()
             _ = self.builder[_IntBuilder].valid.pop()
-        elif self.builder.isa[_FloatBuilder]():
+        elif self.kind == _KIND_FLOAT:
             _ = self.builder[_FloatBuilder].values.pop()
             _ = self.builder[_FloatBuilder].valid.pop()
-        elif self.builder.isa[_BoolBuilder]():
+        elif self.kind == _KIND_BOOL:
             _ = self.builder[_BoolBuilder].values.pop()
             _ = self.builder[_BoolBuilder].valid.pop()
         else:
@@ -198,8 +214,10 @@ struct _CsvColumn(Copyable):
         # valid empty string while `,,` is null with the default marker.
         if not self.keep:
             return
-        var is_null = not quoted and text == ""
-        if not quoted and not is_null:
+        var is_null = not quoted and text.byte_length() == 0
+        # The marker scan only matters when markers exist, and unquoted
+        # non-empty fields are the common case.
+        if not quoted and not is_null and len(null_values) > 0:
             for token in null_values:
                 if text == token:
                     is_null = True
@@ -207,20 +225,20 @@ struct _CsvColumn(Copyable):
         if is_null:
             if not self.field.nullable:
                 raise self._error(record, "null in a non-nullable field")
-            if self.builder.isa[_IntBuilder]():
+            if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
                 self.builder[_IntBuilder].values.append(0)
                 self.builder[_IntBuilder].valid.append(False)
-            elif self.builder.isa[_FloatBuilder]():
+            elif self.kind == _KIND_FLOAT:
                 self.builder[_FloatBuilder].values.append(0)
                 self.builder[_FloatBuilder].valid.append(False)
-            elif self.builder.isa[_BoolBuilder]():
+            elif self.kind == _KIND_BOOL:
                 self.builder[_BoolBuilder].values.append(False)
                 self.builder[_BoolBuilder].valid.append(False)
             else:
                 self.builder[StringBuilder].append_null()
             return
 
-        if self.builder.isa[_IntBuilder]() and self.field.dtype.is_temporal():
+        if self.kind == _KIND_TEMPORAL:
             try:
                 self.builder[_IntBuilder].values.append(
                     parse_temporal(text, self.field.dtype, self.field.format)
@@ -228,7 +246,7 @@ struct _CsvColumn(Copyable):
             except e:
                 raise self._error(record, String(e))
             self.builder[_IntBuilder].valid.append(True)
-        elif self.builder.isa[_IntBuilder]():
+        elif self.kind == _KIND_INT:
             try:
                 self.builder[_IntBuilder].values.append(
                     _parse_int_slot(text, self.field.dtype)
@@ -243,13 +261,13 @@ struct _CsvColumn(Copyable):
                     + "'",
                 )
             self.builder[_IntBuilder].valid.append(True)
-        elif self.builder.isa[_FloatBuilder]():
+        elif self.kind == _KIND_FLOAT:
             try:
                 self.builder[_FloatBuilder].values.append(parse_float64(text))
             except e:
                 raise self._error(record, String(e))
             self.builder[_FloatBuilder].valid.append(True)
-        elif self.builder.isa[_BoolBuilder]():
+        elif self.kind == _KIND_BOOL:
             if text != "true" and text != "false":
                 raise self._error(
                     record, "Boolean must be exactly 'true' or 'false'"

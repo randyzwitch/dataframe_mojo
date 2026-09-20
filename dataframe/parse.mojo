@@ -134,10 +134,119 @@ def _is_special_float(text: String) -> Bool:
     )
 
 
+# Powers of ten that a Float64 holds exactly, so mantissa / 10**k is
+# correctly rounded whenever the mantissa is exact too (the classic fast
+# path: both operands exact means a single correctly-rounded division).
+def _pow10(k: Int) -> Float64:
+    """10**k for k in [0, 22]; every value here is an exact Float64."""
+    if k == 0:
+        return 1e0
+    if k == 1:
+        return 1e1
+    if k == 2:
+        return 1e2
+    if k == 3:
+        return 1e3
+    if k == 4:
+        return 1e4
+    if k == 5:
+        return 1e5
+    if k == 6:
+        return 1e6
+    if k == 7:
+        return 1e7
+    if k == 8:
+        return 1e8
+    if k == 9:
+        return 1e9
+    if k == 10:
+        return 1e10
+    if k == 11:
+        return 1e11
+    if k == 12:
+        return 1e12
+    if k == 13:
+        return 1e13
+    if k == 14:
+        return 1e14
+    if k == 15:
+        return 1e15
+    if k == 16:
+        return 1e16
+    if k == 17:
+        return 1e17
+    if k == 18:
+        return 1e18
+    if k == 19:
+        return 1e19
+    if k == 20:
+        return 1e20
+    if k == 21:
+        return 1e21
+    if k == 22:
+        return 1e22
+    return 1.0
+
+
+# 2**53: above this a Float64 cannot hold every integer, so the fast path
+# hands such mantissas to the strict parser instead of rounding twice.
+comptime _EXACT_LIMIT = UInt64(9007199254740992)
+
+
+def parse_float64(text: StringSlice) raises -> Float64:
+    """Strict decimal Float64. See the String overload for the contract.
+
+    Plain decimals -- no sign, no exponent, at most 22 fraction digits and a
+    mantissa a Float64 holds exactly -- are validated and computed in one
+    pass. That is the overwhelming majority of real CSV data, and the strict
+    parser below costs about 140 ns a field because it walks the text to
+    check the grammar and then walks it again to convert. Anything the fast
+    path does not fully consume, or cannot represent exactly, falls through
+    to that parser, so the accepted grammar and every result are unchanged.
+    """
+    var b = text.as_bytes()
+    var n = len(b)
+    var mantissa = UInt64(0)
+    var digits = 0
+    var fraction = -1
+    var i = 0
+    while i < n:
+        var c = b[i]
+        if c >= 48 and c <= 57:
+            if digits == 19:
+                return _parse_float64_strict(String(text))
+            mantissa = mantissa * 10 + UInt64(c - 48)
+            digits += 1
+            if fraction >= 0:
+                fraction += 1
+        elif c == 46 and fraction < 0:
+            fraction = 0
+        else:
+            # A sign, an exponent, "nan", "inf", or invalid text.
+            return _parse_float64_strict(String(text))
+        i += 1
+    if (
+        digits == 0
+        or fraction == 0  # a trailing "." the strict grammar may reject
+        or fraction > 22
+        or mantissa >= _EXACT_LIMIT
+    ):
+        return _parse_float64_strict(String(text))
+    var value = Float64(mantissa)
+    if fraction > 0:
+        value = value / _pow10(fraction)
+    return value
+
+
 def parse_float64(text: String) raises -> Float64:
     """Decimal text with an optional exponent, "nan"/"NaN", or an explicit
     infinity spelling. Mojo's own parser is more lenient (it reads
     "2024-02-28" as a number), so the grammar is checked first."""
+    return parse_float64(StringSlice(text))
+
+
+def _parse_float64_strict(text: String) raises -> Float64:
+    """The reference implementation: check the grammar, then convert."""
     if edge_ascii_whitespace(text):
         raise Error("Float64 fields cannot have surrounding whitespace")
     if not _is_decimal(text) and not _is_special_float(text):

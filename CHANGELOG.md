@@ -39,6 +39,20 @@ breaking changes can happen in any release and are listed under **Breaking**.
   O(groups). Frames below the parallel threshold keep the serial path,
   and `GroupBy.len` and `group_indices` are unchanged (#104).
 
+## Unreleased
+
+### Changed
+
+- CSV reads plain decimal Float64 fields in one pass that validates and
+  computes together, instead of checking the grammar with one scan and
+  converting with another. Values are unchanged and exact: the fast path
+  only runs when the mantissa and the power of ten are both exact, so the
+  single division is correctly rounded, and anything else (signs,
+  exponents, `nan`, infinities, long mantissas) uses the original parser.
+  Float parsing was about 35% of a CSV read; a 4-column file drops from
+  80.5 ms to 66 ms and a 1M-row 8-column file from 1,260 ms to 1,081 ms
+  (#107).
+
 ## 0.1.2 - 2026-09-20
 
 ### Added
