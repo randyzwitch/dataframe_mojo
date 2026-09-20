@@ -50,6 +50,7 @@ mojo = ">=1.1.0,<1.2"
 
 [tasks]
 test = "bash scripts/run_tests.sh"
+check-version = "python3 scripts/check_version.py"
 example = "mojo run -I . examples/sales.mojo && mojo run -I . examples/expressions.mojo && mojo run -I . examples/read_csv.mojo"
 format = "mblack --target-version mojo --line-length 80 dataframe tests examples benchmarks"
 format-check = "mblack --check --target-version mojo --line-length 80 dataframe tests examples benchmarks"
