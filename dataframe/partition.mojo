@@ -28,6 +28,8 @@ from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
+from .gather import take_parallel
+from .hashing import RowKeys, encode_rows
 from .parallel import Job, partitions, run_jobs
 from .series import Series
 from .string_column import StringColumn
@@ -302,3 +304,79 @@ struct Partitioner(Movable):
             )
         run_jobs(jobs)
         return Partitioned(order^, starts^)
+
+
+struct _EncodeJob(Job):
+    """Encode one bucket's keys with a private dictionary."""
+
+    var keys: List[Series]
+    var nulls_equal: Bool
+    var ids: List[Int]
+    var count: Int
+
+    def __init__(out self, var keys: List[Series], nulls_equal: Bool):
+        self.keys = keys^
+        self.nulls_equal = nulls_equal
+        self.ids = List[Int]()
+        self.count = 0
+
+    def run(mut self) raises:
+        var keys = encode_rows(self.keys, self.nulls_equal)
+        self.ids = keys.ids.copy()
+        self.count = keys.count()
+
+
+def encode_partitioned(
+    keys: List[Series], workers: Int, nulls_equal: Bool
+) raises -> RowKeys:
+    """Dense ids for distinct key rows, encoded one hash bucket at a time.
+
+    Equal keys share a bucket, so each bucket's private dictionary is
+    disjoint from every other's and local ids only need an offset to become
+    globally unique. That keeps each dictionary small, which is the whole
+    point: a single dictionary over hundreds of thousands of distinct keys
+    spends most of its time missing cache.
+
+    Unlike `encode_rows`, the numbering is unspecified rather than
+    first-occurrence, so this suits callers that only need equal keys to
+    share an id -- a join's row order comes from iterating rows, not from
+    the ids. `representatives` still names one row per id.
+    """
+    var rows = len(keys[0])
+    var partitioner = Partitioner(keys, workers)
+    var parts = partitioner.scatter(workers)
+    var gathered = take_parallel(keys, parts.order.copy(), workers)
+
+    var jobs = List[_EncodeJob]()
+    var offsets = List[Int]()
+    for b in range(parts.buckets()):
+        var lo = parts.bounds[b]
+        var hi = parts.bounds[b + 1]
+        if hi == lo:
+            continue
+        var slices = List[Series](capacity=len(gathered))
+        for column in gathered:
+            slices.append(column.slice(lo, hi - lo))
+        jobs.append(_EncodeJob(slices^, nulls_equal))
+        offsets.append(lo)
+    run_jobs(jobs)
+
+    var ids = List[Int](length=rows, fill=-1)
+    var representatives = List[Int]()
+    var base = 0
+    for j in range(len(jobs)):
+        var lo = offsets[j]
+        for i in range(len(jobs[j].ids)):
+            var local = jobs[j].ids[i]
+            # -1 marks a null key that must not match; it carries through.
+            if local >= 0:
+                ids[parts.order[lo + i]] = local + base
+        for _ in range(jobs[j].count):
+            representatives.append(0)
+        # One row per id, for callers that need a key value back.
+        for i in range(len(jobs[j].ids)):
+            var local = jobs[j].ids[i]
+            if local >= 0:
+                representatives[base + local] = parts.order[lo + i]
+        base += jobs[j].count
+    return RowKeys(ids^, representatives^)

@@ -16,6 +16,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Joins encode their key columns one hash bucket at a time when keys are
+  many, instead of building one dictionary over both sides. A join's row
+  order comes from iterating rows rather than from the id numbering, so the
+  ids may be assigned in any consistent order; the documented match order
+  is unchanged. The rows per key id also moved from one list per key to a
+  flat index. A 1M-row inner join on 500k distinct keys drops from 283 ms
+  to 188 ms (#105).
+
 - Grouping is parallel at every cardinality. Rows are hashed by key and
   partitioned into buckets, and each bucket is encoded and reduced on its
   own: equal keys always share a bucket, so no dictionaries or reduction
