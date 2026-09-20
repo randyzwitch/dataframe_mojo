@@ -39,6 +39,22 @@ breaking changes can happen in any release and are listed under **Breaking**.
   O(groups). Frames below the parallel threshold keep the serial path,
   and `GroupBy.len` and `group_indices` are unchanged (#104).
 
+## Unreleased
+
+### Fixed
+
+- CSV and temporal parsing accept an ISO 8601 zone designator on a
+  datetime: a trailing `Z` means UTC, and `+HH:MM`, `-HH:MM`, `+HHMM` or
+  `+HH` are converted to UTC, since datetimes here are naive and hold UTC.
+  Both forms previously raised "unexpected trailing text", which rejected
+  the most common datetime spelling in real data. Dates and times still
+  reject designators (#107).
+
+- Format directives with no separator between them take their exact width,
+  so `%Y%m%d` reads `20240228` instead of letting `%Y` consume six digits
+  and then failing. A directive followed by a literal still accepts
+  one-digit months and days as before (#107).
+
 ## 0.1.2 - 2026-09-20
 
 ### Added
