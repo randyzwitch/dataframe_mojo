@@ -7,6 +7,7 @@ structural scanning or parallel decoding can replace one stage at a time.
 from std.collections import Dict
 from std.utils import Variant
 
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
@@ -300,7 +301,7 @@ struct _CsvColumn(Copyable):
         if self.builder.isa[_BoolBuilder]():
             return Series(
                 self.field.name,
-                Column[Bool](
+                BoolColumn(
                     self.builder[_BoolBuilder].values.copy(),
                     self.builder[_BoolBuilder].valid.copy(),
                 ),
@@ -1078,8 +1079,8 @@ def _cell_text(series: Series, row: Int) -> String:
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
             return String(series._data[Column[Scalar[D]]]._get(row))
-    if series._data.isa[Column[Bool]]():
-        return "true" if series._data[Column[Bool]]._get(row) else "false"
+    if series._data.isa[BoolColumn]():
+        return "true" if series._data[BoolColumn]._get(row) else "false"
     return String(series._data[StringColumn]._get(row))
 
 
@@ -1088,8 +1089,8 @@ def _cell_valid(series: Series, row: Int) -> Bool:
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
             return series._data[Column[Scalar[D]]]._valid(row)
-    if series._data.isa[Column[Bool]]():
-        return series._data[Column[Bool]]._valid(row)
+    if series._data.isa[BoolColumn]():
+        return series._data[BoolColumn]._valid(row)
     return series._data[StringColumn]._valid(row)
 
 

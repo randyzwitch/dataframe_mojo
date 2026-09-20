@@ -1,4 +1,5 @@
 """Native, eager CPU dataframes for Mojo."""
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .series import Series

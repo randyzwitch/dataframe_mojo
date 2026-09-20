@@ -165,7 +165,8 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 
 ## Implemented
 
-- Typed `Column[T]` with bit-packed validity and checked element access.
+- Typed `Column[T]` with bit-packed validity and checked element access;
+  Booleans and strings use the Arrow bit-packed and UTF-8 layouts.
 - Heterogeneous `Series` and runtime-schema `DataFrame`: Int8–Int64,
   UInt8–UInt64, Float32, Float64, Bool, String, Date, Datetime, Duration, and
   Time. The runtime tag is per column, not per cell.

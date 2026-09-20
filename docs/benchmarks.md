@@ -212,3 +212,17 @@ avoids thread startup (~20-50 us per worker) on small frames. Joining the
 per-worker pieces is a serial O(n) copy and is the main remaining cost at
 high worker counts.
 
+## Bit-packed Booleans (#80)
+
+Boolean values moved from one byte per row to one bit, so Boolean results
+(comparisons, predicates, filter masks) write 8x fewer bytes. 1,000,000
+rows, default workers:
+
+| workload | before | after |
+|---|---|---|
+| nullable_compare | 4.7 ms | 2.7 ms |
+| filter (end to end) | 10.7 ms | 8.7 ms |
+
+Peak RSS for five 20,000,000-row Boolean columns: 252 MB -> 204 MB (the
+remainder is the transient `List[Bool]` inputs).
+

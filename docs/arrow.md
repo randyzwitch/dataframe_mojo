@@ -33,15 +33,15 @@ the shape pyarrow imports with `RecordBatch._import_from_c` and Polars with
 | UInt8–UInt64 | `C` `S` `I` `L` | zero-copy | |
 | Float32, Float64 | `f` `g` | zero-copy | |
 | String | `U` large_utf8 | zero-copy | `u` utf8 (offsets widened) |
-| Bool | `b` bool | values packed to bits | |
+| Bool | `b` bool | zero-copy | |
 | Date | `tdD` date32 | days narrowed to Int32 | `tdm` date64 |
 | Datetime(unit) | `ts{s,m,u,n}:` timestamp | zero-copy | |
 | Duration(unit) | `tD{s,m,u,n}` duration | zero-copy | |
 | Time | `ttn` time64[ns] | zero-copy | `ttu`, `ttm`, `tts` |
 
 Validity bitmaps are always shared. A sliced column exports its window offset
-as the ArrowArray `offset` instead of copying. Bool and Date export build new
-value buffers (Bool values are stored one byte per value internally).
+as the ArrowArray `offset` instead of copying. Only Date builds a new value
+buffer (Int64 days narrowed to Arrow's Int32).
 
 Import rejects, with an error naming the format: timestamps with a time zone, dictionary-encoded
 arrays, nested types other than the top-level struct, and struct arrays with
@@ -68,8 +68,7 @@ At 1,000,000 rows (Threadripper 3970X):
 
 | column | export | import |
 |---|---|---|
-| Int64 / Float64 / String | 0.18 ms | 0.7 / 0.7 / 1.7 ms |
-| Bool | 0.85 ms | 2.0 ms |
+| Int64 / Float64 / String / Bool | 0.18 ms | 0.7 / 0.7 / 1.7 / 0.2 ms |
 
 Zero-copy export only fills the structs and counts nulls with a popcount.
 Import is a bulk memory copy.
