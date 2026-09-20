@@ -3,7 +3,7 @@
 All notable changes are recorded here. The API is pre-1.0 and provisional:
 breaking changes can happen in any release and are listed under **Breaking**.
 
-## Unreleased
+## 0.1.3 - 2026-09-20
 
 ### Added
 
@@ -39,9 +39,6 @@ breaking changes can happen in any release and are listed under **Breaking**.
   O(groups). Frames below the parallel threshold keep the serial path,
   and `GroupBy.len` and `group_indices` are unchanged (#104).
 
-## Unreleased
-
-### Changed
 
 - CSV reads plain decimal Float64 fields in one pass that validates and
   computes together, instead of checking the grammar with one scan and

@@ -17,7 +17,7 @@ preview = ["pixi-build"]
 
 [dependencies]
 mojo = ">=1.1.0,<1.2"
-dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.1.2" }
+dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.1.3" }
 ```
 
 ```mojo
@@ -26,7 +26,7 @@ from dataframe import DataFrame, Series, Column, col
 
 A compiled Mojo package only loads in the Mojo version that produced it, and
 pixi builds this package with the newest Mojo that `[package.host-dependencies]`
-in `pixi.toml` allows, so each tag targets one Mojo version. `v0.1.2` targets
+in `pixi.toml` allows, so each tag targets one Mojo version. `v0.1.3` targets
 **1.1**.
 
 ## Run
