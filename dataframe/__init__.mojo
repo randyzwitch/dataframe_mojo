@@ -4,6 +4,7 @@ from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .frame import DataFrame, Field, GroupBy, concat
+from .groups import GroupIndices
 from .value import AnyValue
 from .dtype import DataType
 from .temporal_kernels import date_range, datetime_range
