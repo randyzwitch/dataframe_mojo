@@ -16,6 +16,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `sort`, `arg_sort`, `top_k` and `bottom_k` sort one row range per worker
+  and merge the runs, instead of one serial mergesort. The result is the
+  same stable order for any worker count: ranges are cut in row order and
+  merges prefer the earlier run on ties. Sorting 1M rows by two keys drops
+  from 594 ms to 346 ms (#108).
+
 - Joins encode their key columns one hash bucket at a time when keys are
   many, instead of building one dictionary over both sides. A join's row
   order comes from iterating rows rather than from the id numbering, so the

@@ -337,3 +337,36 @@ join goes 283 -> 188 ms, and from 10.5x to 7.0x of Polars.
 What is left is the part this did not touch: the match loop and the output
 gather are still serial, and each bucket pair is not joined independently.
 That is the rest of #105.
+
+## Parallel stable sort (#108)
+
+`sort`, `arg_sort`, `top_k` and `bottom_k` ran a single bottom-up mergesort
+over row indices. Sorting now splits rows into one contiguous range per
+worker, sorts each range, and merges the runs in rounds.
+
+Stability is preserved by construction rather than by luck: ranges are cut
+in row order, each range sort is the same stable mergesort as before, and
+every merge prefers the earlier run when the comparator reports a tie. The
+result is therefore the serial order for any worker count, which the tests
+assert row by row rather than by checking sortedness.
+
+1,000,000 rows, two keys, `bench-polars`, best of 5:
+
+| | ms | vs Polars |
+|---|---|---|
+| before | 594 | 11.9x |
+| ranges sorted in parallel | 446 | 7.6x |
+| plus the fixes below | 346 | 6.2x |
+
+Two costs were worth more than the parallelism itself:
+
+- Each merge round copied the whole index array to hand workers a source
+  buffer; they now read it by address and write disjoint output ranges.
+- `_rank_less` walked a `List[List[Int]]` per comparison, and a merge calls
+  it once per output row. Sorting by one key, the common case, now compares
+  that key directly.
+
+What remains is the merge tree's shape: with 15 runs the last round is a
+single job merging the whole array, so the tail of the sort is serial. A
+parallel multiway merge, where each worker binary-searches splitters to
+claim an output slice, would remove it.

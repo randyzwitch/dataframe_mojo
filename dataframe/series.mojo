@@ -6,6 +6,8 @@ from .column import Column
 from .string_column import StringColumn
 from .value import AnyValue
 from .display import render_series
+from .parallel import Job, partitions, run_jobs, worker_count
+from std.memory import ArcPointer
 from .cast import cast_series
 from .expr import Expr, col, lit
 from .frame import DataFrame
@@ -857,44 +859,188 @@ def _dense_string_ranks(
 
 def _rank_less(ranks: List[List[Int]], a: Int, b: Int) -> Bool:
     """Lexicographic rank order with the row index as the final tie-break."""
+    if len(ranks) == 1:
+        # Sorting by one key is the common case, and a merge calls this once
+        # per output row; going through the outer list costs more than the
+        # comparison itself.
+        ref key = ranks[0]
+        if key[a] != key[b]:
+            return key[a] < key[b]
+        return a < b
     for key in ranks:
         if key[a] != key[b]:
             return key[a] < key[b]
     return a < b
 
 
-def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
-    """Stable bottom-up mergesort of row indices by lexicographic ranks."""
-    if len(ranks) == 0:
-        raise Error("Sorting requires at least one key")
-    var n = len(ranks[0])
+def _merge_runs(
+    ranks: List[List[Int]],
+    source: List[Int],
+    mut target: List[Int],
+    start: Int,
+    mid: Int,
+    end: Int,
+):
+    """Merge two adjacent sorted runs, preferring the earlier on ties."""
+    var left = start
+    var right = mid
+    for dest in range(start, end):
+        if left < mid and (
+            right >= end or not _rank_less(ranks, source[right], source[left])
+        ):
+            target[dest] = source[left]
+            left += 1
+        else:
+            target[dest] = source[right]
+            right += 1
+
+
+def _sort_range(ranks: List[List[Int]], start: Int, end: Int) -> List[Int]:
+    """Stable bottom-up mergesort of rows [start, end), returned in order."""
+    var n = end - start
     var indices = List[Int](capacity=n)
-    for i in range(n):
+    for i in range(start, end):
         indices.append(i)
     var scratch = indices.copy()
     var width = 1
     while width < n:
-        var start = 0
-        while start < n:
-            var mid = min(start + width, n)
-            var end = min(start + 2 * width, n)
-            var left = start
-            var right = mid
-            for dest in range(start, end):
-                if left < mid and (
-                    right >= end
-                    or not _rank_less(ranks, indices[right], indices[left])
-                ):
-                    scratch[dest] = indices[left]
-                    left += 1
-                else:
-                    scratch[dest] = indices[right]
-                    right += 1
-            start = end
+        var at = 0
+        while at < n:
+            var mid = min(at + width, n)
+            var stop = min(at + 2 * width, n)
+            _merge_runs(ranks, indices, scratch, at, mid, stop)
+            at = stop
         var old = indices^
         indices = scratch^
         scratch = old^
         width *= 2
+    return indices^
+
+
+struct _SortRangeJob(Job):
+    """Sort one contiguous row range into the shared output."""
+
+    var ranks: ArcPointer[List[List[Int]]]
+    var start: Int
+    var end: Int
+    var rows: List[Int]
+
+    def __init__(
+        out self, ranks: ArcPointer[List[List[Int]]], start: Int, end: Int
+    ):
+        self.ranks = ranks.copy()
+        self.start = start
+        self.end = end
+        self.rows = List[Int]()
+
+    def run(mut self) raises:
+        self.rows = _sort_range(self.ranks[], self.start, self.end)
+
+
+struct _MergeJob(Job):
+    """Merge two adjacent sorted runs of `source` into `target`."""
+
+    var ranks: ArcPointer[List[List[Int]]]
+    var source: Int
+    var target: Int
+    var start: Int
+    var mid: Int
+    var end: Int
+
+    def __init__(
+        out self,
+        ranks: ArcPointer[List[List[Int]]],
+        source: Int,
+        target: Int,
+        start: Int,
+        mid: Int,
+        end: Int,
+    ):
+        self.ranks = ranks.copy()
+        self.source = source
+        self.target = target
+        self.start = start
+        self.mid = mid
+        self.end = end
+
+    def run(mut self) raises:
+        ref out = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.target
+        )[]
+        ref src = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.source
+        )[]
+        _merge_runs(self.ranks[], src, out, self.start, self.mid, self.end)
+
+
+def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
+    """Stable bottom-up mergesort of row indices by lexicographic ranks.
+
+    Large inputs sort one contiguous row range per worker and then merge the
+    runs in rounds. Ranges are formed in row order and every merge prefers
+    the earlier run on ties, so the result is the same stable order the
+    serial sort produces, for any worker count.
+    """
+    if len(ranks) == 0:
+        raise Error("Sorting requires at least one key")
+    var n = len(ranks[0])
+    var workers = worker_count(n)
+    if workers <= 1 or n < 2:
+        return _sort_range(ranks, 0, n)
+
+    var shared = ArcPointer(ranks.copy())
+    var bounds = partitions(n, workers, 1)
+    # partitions() can leave empty trailing ranges; keep only real ones.
+    var starts = List[Int]()
+    for w in range(workers):
+        if bounds[w + 1] > bounds[w]:
+            starts.append(bounds[w])
+    starts.append(n)
+    var runs = len(starts) - 1
+    if runs <= 1:
+        return _sort_range(ranks, 0, n)
+
+    var jobs = List[_SortRangeJob](capacity=runs)
+    for r in range(runs):
+        jobs.append(_SortRangeJob(shared, starts[r], starts[r + 1]))
+    run_jobs(jobs)
+    var indices = List[Int](length=n, fill=0)
+    for r in range(runs):
+        var at = starts[r]
+        for i in range(len(jobs[r].rows)):
+            indices[at + i] = jobs[r].rows[i]
+
+    # Merge adjacent runs in rounds, alternating buffers.
+    var scratch = List[Int](length=n, fill=0)
+    var stride = 1
+    while stride < runs:
+        var source_address = Int(Pointer(to=indices))
+        var merges = List[_MergeJob]()
+        var r = 0
+        while r < runs:
+            var start = starts[r]
+            var mid = starts[min(r + stride, runs)]
+            var end = starts[min(r + 2 * stride, runs)]
+            if mid < end:
+                merges.append(
+                    _MergeJob(
+                        shared,
+                        source_address,
+                        Int(Pointer(to=scratch)),
+                        start,
+                        mid,
+                        end,
+                    )
+                )
+            else:
+                for i in range(start, end):
+                    scratch[i] = indices[i]
+            r += 2 * stride
+        run_jobs(merges)
+        var old = indices^
+        indices = scratch^
+        scratch = old^
+        stride *= 2
     return indices^
 
 
