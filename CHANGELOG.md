@@ -3,7 +3,11 @@
 All notable changes are recorded here. The API is pre-1.0 and provisional:
 breaking changes can happen in any release and are listed under **Breaking**.
 
-## Unreleased
+## 0.1.1 - 2026-09-20
+
+Everything below is the initial feature set. v0.1.0 was tagged the same day and
+is identical except that it was missing bit-packed Boolean columns, whose merge
+had been stranded on a branch; prefer 0.1.1.
 
 ### Breaking
 
