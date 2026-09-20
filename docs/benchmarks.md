@@ -226,3 +226,27 @@ rows, default workers:
 Peak RSS for five 20,000,000-row Boolean columns: 252 MB -> 204 MB (the
 remainder is the transient `List[Bool]` inputs).
 
+
+## Reading a column out of the library (#91)
+
+Summing a 1,000,000-row Float64 column with 10% nulls, compiled with
+`mojo build`. All three paths produce the same total:
+
+| how the consumer reads | time |
+|---|---|
+| `Series.get(i)` -> `AnyValue` per element | ~3,500 us |
+| `Column.value(i)` (bounds check, raises) | ~4,740 us |
+| `unsafe_values()` + `unsafe_validity()` | ~700 us |
+
+`AnyValue` carries a `String` field a numeric column never fills, and
+`Series.get` rescans the dtype list per call; `Column.value` is slower still
+because it bounds-checks and re-reads the validity bit on every element. The
+buffer path resolves the dtype once and then walks the payload.
+
+Reading through the buffers is the intended way for another package to
+consume a column. `Series.numeric[D]()`, `.string()` and `.bool()` already
+hand back a window that shares the buffers in O(1), so the cost is one
+pointer dereference per row, not a copy.
+
+Measure with an optimized build: under `mojo run` the difference largely
+disappears.

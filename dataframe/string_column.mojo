@@ -101,7 +101,7 @@ struct StringColumn(Copyable, Sized):
             .unsafe_origin_cast[ImmutAnyOrigin]()
         )
 
-    def _to_list(self) -> List[String]:
+    def to_list(self) -> List[String]:
         """Owned copies of this window's rows (nulls read as "")."""
         var values = List[String](capacity=self._length)
         for i in range(self._length):
@@ -126,6 +126,36 @@ struct StringColumn(Copyable, Sized):
     def is_null(self, index: Int) raises -> Bool:
         self._check_index(index)
         return not self._valid(index)
+
+    def unsafe_bytes(self) -> Pointer[UInt8, ImmutAnyOrigin]:
+        """Arrow's UTF-8 payload buffer, indexed by `unsafe_offsets`, not by
+        row. Shared and read-only; valid only while this column is alive."""
+        return self._base()
+
+    def unsafe_offsets(self) -> Pointer[Int64, MutAnyOrigin]:
+        """Arrow's Int64 offset buffer. Row i occupies bytes
+        `offsets[validity_offset() + i]` up to the next entry, so it is not
+        shifted to row 0. Shared and read-only."""
+        return self._offsets[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+
+    def is_valid(self, index: Int) -> Bool:
+        """Whether row index holds a value: one validity bit, no bounds
+        check, for reading a window in bulk. Skip it when `null_count()` is
+        0."""
+        return self._valid(index)
+
+    def unsafe_validity(self) -> Pointer[UInt8, MutAnyOrigin]:
+        """Arrow's validity bitmap, LSB-first, 1 = present.
+
+        Bit `validity_offset() + i` describes row i. Irrelevant when
+        `null_count()` is 0. Shared with every other window onto the same
+        column, so read-only, and valid only while this column is alive.
+        """
+        return self._bits[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+
+    def validity_offset(self) -> Int:
+        """Row 0's bit index within `unsafe_validity`."""
+        return self._offset
 
     def value(self, index: Int) raises -> String:
         if self.is_null(index):
