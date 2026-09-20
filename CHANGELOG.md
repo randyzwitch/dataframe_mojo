@@ -14,6 +14,17 @@ breaking changes can happen in any release and are listed under **Breaking**.
   and multi-column sort. Each workload's row count and a column total must
   agree between the engines before their times are compared (#102).
 
+### Changed
+
+- Grouping is parallel at every cardinality. Rows are hashed by key and
+  partitioned into buckets, and each bucket is encoded and reduced on its
+  own: equal keys always share a bucket, so no dictionaries or reduction
+  states are ever merged, which is what the earlier merge-based attempts
+  (#8) lost at high cardinality. Output order is bucket order unless
+  `maintain_order=True`, which sorts groups by their first input row in
+  O(groups). Frames below the parallel threshold keep the serial path,
+  and `GroupBy.len` and `group_indices` are unchanged (#104).
+
 ## 0.1.2 - 2026-09-20
 
 ### Added

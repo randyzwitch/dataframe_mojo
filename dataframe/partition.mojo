@@ -1,0 +1,304 @@
+"""Hash partitioning of rows by key, so grouping needs no merge (#104).
+
+Rows are hashed by their key values and scattered into buckets by hash
+range. Equal keys hash equally and so land in the same bucket, which means
+each bucket can be grouped on its own: the dictionaries and reduction states
+of different buckets never mention the same key, and nothing has to be
+reconciled afterwards. That is what makes grouping parallel at every
+cardinality; the earlier merge-based attempts (#8) paid workers x distinct
+keys to reconcile private dictionaries and lost at high cardinality.
+
+Hash equality follows key equality as `encode_rows` defines it: every NaN
+is one value, -0.0 equals 0.0, strings compare by bytes, and a null key is
+one ordinary value. The permutation is stable: within a bucket, rows keep
+their input order, so first-occurrence order within a bucket is preserved.
+
+Partitioning is not always worth it. Gathering the key and value columns
+into bucket order costs a full materialization of the frame, which only
+pays off when the serial encode it replaces is itself expensive -- that is,
+when distinct keys are many. `low_cardinality` answers that beforehand by
+hashing a strided sample on the calling thread and counting how much of
+hash space it touches: keys spread across most slots mean many distinct
+values. The sample is a few thousand rows, so deciding costs far less than
+the hash pass it guards, and nothing is wasted when the answer is no.
+"""
+from std.memory import ArcPointer, Pointer, bitcast
+
+from .aggregate import float_key
+from .bool_column import BoolColumn
+from .column import Column
+from .dtype import NUMERIC_DTYPES
+from .parallel import Job, partitions, run_jobs
+from .series import Series
+from .string_column import StringColumn
+
+comptime _NULL_KEY = UInt64(0x9E3779B97F4A7C15)
+
+# Histogram granularity. Always 256 slots regardless of the bucket count, so
+# the number of occupied slots estimates distinct keys: each slot holds a
+# 1/256 slice of hash space, so few occupied slots means few distinct keys.
+comptime _SLOTS = 256
+comptime _SLOT_SHIFT = 56
+
+# Rows hashed to estimate cardinality before committing to a full pass.
+comptime _SAMPLE_ROWS = 4096
+
+
+def _mix(value: UInt64) -> UInt64:
+    """splitmix64's finalizer: spreads low-entropy keys across all bits."""
+    var z = value
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+    return z ^ (z >> 31)
+
+
+def _combine(seed: UInt64, key: UInt64) -> UInt64:
+    return _mix(seed ^ (key + 0x9E3779B97F4A7C15 + (seed << 6) + (seed >> 2)))
+
+
+def _hash_bytes(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt64:
+    """FNV-1a over the bytes, then mixed."""
+    var h = UInt64(0xCBF29CE484222325)
+    for k in range(len(bytes)):
+        h = (h ^ UInt64(bytes[k])) * 0x100000001B3
+    return _mix(h)
+
+
+def _hash_column(
+    series: Series, start: Int, end: Int, out_address: Int, first: Bool
+) raises:
+    """Hash rows [start, end) of one key column into `out`, combining with
+    what earlier key columns wrote unless this is the first."""
+    var p = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=out_address)
+
+    @__parameter
+    def write(i: Int, key: UInt64):
+        var slot = p.unsafe_offset(i)
+        slot[] = _mix(key) if first else _combine(slot[], key)
+
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            for i in range(start, end):
+                if not column._valid(i):
+                    write(i, _NULL_KEY)
+                    continue
+                var value = column._get(i)
+
+                comptime if D.is_floating_point():
+                    write(i, float_key(Float64(value)))
+                elif D.is_unsigned():
+                    write(i, UInt64(value))
+                else:
+                    write(i, bitcast[DType.uint64](Int64(value)))
+            return
+    if series._data.isa[BoolColumn]():
+        ref bools = series._data[BoolColumn]
+        for i in range(start, end):
+            if not bools._valid(i):
+                write(i, _NULL_KEY)
+            else:
+                write(i, UInt64(1) if bools._get(i) else UInt64(2))
+        return
+    ref strings = series._data[StringColumn]
+    for i in range(start, end):
+        if not strings._valid(i):
+            write(i, _NULL_KEY)
+        else:
+            write(i, _hash_bytes(strings._get(i).as_bytes()))
+
+
+struct _HashJob(Job):
+    """Hash one row range and count how many rows fall in each bucket."""
+
+    var keys: List[Series]
+    var start: Int
+    var end: Int
+    var out: Int
+    var histogram: List[Int]
+
+    def __init__(
+        out self,
+        keys: List[Series],
+        start: Int,
+        end: Int,
+        out_address: Int,
+    ):
+        self.keys = keys.copy()
+        self.start = start
+        self.end = end
+        self.out = out_address
+        self.histogram = List[Int](length=_SLOTS, fill=0)
+
+    def run(mut self) raises:
+        for j in range(len(self.keys)):
+            _hash_column(self.keys[j], self.start, self.end, self.out, j == 0)
+        var p = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=self.out)
+        for i in range(self.start, self.end):
+            self.histogram[
+                Int(p.unsafe_offset(i)[] >> UInt64(_SLOT_SHIFT))
+            ] += 1
+
+
+struct _ScatterJob(Job):
+    """Write one row range's indices into their buckets' reserved slots."""
+
+    var start: Int
+    var end: Int
+    var hashes: Int
+    var order: Int
+    var fold: Int
+    var next: List[Int]
+
+    def __init__(
+        out self,
+        start: Int,
+        end: Int,
+        hashes: Int,
+        order: Int,
+        fold: Int,
+        var next: List[Int],
+    ):
+        self.start = start
+        self.end = end
+        self.hashes = hashes
+        self.order = order
+        self.fold = fold
+        self.next = next^
+
+    def run(mut self) raises:
+        var h = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=self.hashes)
+        var o = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
+        for i in range(self.start, self.end):
+            var slot = Int(h.unsafe_offset(i)[] >> UInt64(_SLOT_SHIFT))
+            var bucket = slot >> self.fold
+            o.unsafe_offset(self.next[bucket])[] = i
+            self.next[bucket] += 1
+
+
+@fieldwise_init
+struct Partitioned(Movable):
+    """A stable permutation of row indices grouped by hash bucket.
+
+    Rows of bucket b are `order[bounds[b] : bounds[b + 1]]`, in input order.
+    """
+
+    var order: List[Int]
+    var bounds: List[Int]
+
+    def buckets(self) -> Int:
+        return len(self.bounds) - 1
+
+
+def low_cardinality(keys: List[Series]) raises -> Bool:
+    """Whether too few distinct keys are in play for partitioning to pay
+    for the gather it forces.
+
+    Hashes a strided sample serially -- no threads, so no dispatch cost --
+    and counts occupied slots of hash space. Sampling can only understate
+    cardinality, so the risk is taking the serial path on a frame that
+    would have partitioned well, never the reverse.
+    """
+    var rows = len(keys[0])
+    if rows == 0:
+        return True
+    var sample = min(rows, _SAMPLE_ROWS)
+    var stride = max(1, rows // sample)
+    var hashes = List[UInt64](length=rows, fill=0)
+    var address = Int(hashes.unsafe_ptr())
+    var seen = List[Bool](length=_SLOTS, fill=False)
+    var occupied = 0
+    var taken = 0
+    var i = 0
+    while i < rows and taken < sample:
+        for j in range(len(keys)):
+            _hash_column(keys[j], i, i + 1, address, j == 0)
+        var slot = Int(hashes[i] >> UInt64(_SLOT_SHIFT))
+        if not seen[slot]:
+            seen[slot] = True
+            occupied += 1
+        taken += 1
+        i += stride
+    _ = hashes^
+    # Scale the threshold by how much of hash space the sample could reach.
+    var reachable = min(sample, _SLOTS)
+    return 4 * occupied < reachable
+
+
+struct Partitioner(Movable):
+    """One hash pass over the keys, plus the histogram that decides whether
+    scattering is worth it."""
+
+    var hashes: List[UInt64]
+    var histogram: List[Int]
+    var rows: Int
+
+    def __init__(out self, keys: List[Series], workers: Int) raises:
+        self.rows = len(keys[0])
+        self.hashes = List[UInt64](length=self.rows, fill=0)
+        self.histogram = List[Int](length=_SLOTS, fill=0)
+        var bounds = partitions(self.rows, workers, 64)
+        var jobs = List[_HashJob](capacity=workers)
+        for w in range(workers):
+            jobs.append(
+                _HashJob(
+                    keys,
+                    bounds[w],
+                    bounds[w + 1],
+                    Int(self.hashes.unsafe_ptr()),
+                )
+            )
+        run_jobs(jobs)
+        for w in range(workers):
+            for s in range(_SLOTS):
+                self.histogram[s] += jobs[w].histogram[s]
+
+    def scatter(mut self, workers: Int) raises -> Partitioned:
+        """Build the stable permutation, folding slots into buckets."""
+        var buckets = 1
+        var fold = 8
+        while buckets < 2 * workers and buckets < _SLOTS:
+            buckets *= 2
+            fold -= 1
+
+        var starts = List[Int](length=buckets + 1, fill=0)
+        for s in range(_SLOTS):
+            starts[(s >> fold) + 1] += self.histogram[s]
+        for b in range(buckets):
+            starts[b + 1] += starts[b]
+
+        # Each worker's write cursor within every bucket: a worker's rows
+        # follow the previous workers' rows, which keeps the order stable.
+        var bounds = partitions(self.rows, workers, 64)
+        var per_worker = List[List[Int]](capacity=workers)
+        for w in range(workers):
+            var counts = List[Int](length=buckets, fill=0)
+            var p = Pointer[UInt64, MutAnyOrigin](
+                unsafe_from_address=Int(self.hashes.unsafe_ptr())
+            )
+            for i in range(bounds[w], bounds[w + 1]):
+                counts[
+                    Int(p.unsafe_offset(i)[] >> UInt64(_SLOT_SHIFT)) >> fold
+                ] += 1
+            per_worker.append(counts^)
+        var order = List[Int](length=self.rows, fill=0)
+        var cursor = starts.copy()
+        var jobs = List[_ScatterJob](capacity=workers)
+        for w in range(workers):
+            var next = List[Int](capacity=buckets)
+            for b in range(buckets):
+                next.append(cursor[b])
+                cursor[b] += per_worker[w][b]
+            jobs.append(
+                _ScatterJob(
+                    bounds[w],
+                    bounds[w + 1],
+                    Int(self.hashes.unsafe_ptr()),
+                    Int(order.unsafe_ptr()),
+                    fold,
+                    next^,
+                )
+            )
+        run_jobs(jobs)
+        return Partitioned(order^, starts^)
