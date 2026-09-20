@@ -60,12 +60,45 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
             .unsafe_origin_cast[MutAnyOrigin]()
         )
 
-    def _to_list(self) -> List[Self.T]:
-        """An owned copy of this window's payloads (including null slots)."""
+    def to_list(self) -> List[Self.T]:
+        """An owned copy of this window's payloads, null slots included.
+
+        Null slots hold whatever the buffer holds, as in Arrow, where they
+        are undefined; pair this with `is_valid` or `null_count`.
+        """
         var values = List[Self.T](capacity=self._length)
         for i in range(self._length):
             values.append(self._get(i).copy())
         return values^
+
+    def unsafe_values(self) -> Pointer[Self.T, MutAnyOrigin]:
+        """Row 0 of this window, for reading the payload in bulk.
+
+        This is Arrow's values buffer. It is shared with every other window
+        onto the same column, so treat it as read-only, and keep this column
+        alive for as long as the pointer is used. Null slots are undefined,
+        exactly as in Arrow.
+        """
+        return (
+            self._data[]
+            .unsafe_ptr()
+            .unsafe_offset(self._offset)
+            .unsafe_origin_cast[MutAnyOrigin]()
+        )
+
+    def unsafe_validity(self) -> Pointer[UInt8, MutAnyOrigin]:
+        """Arrow's validity bitmap, LSB-first, 1 = present.
+
+        Bit `validity_offset() + i` describes row i, so the bitmap is not
+        shifted to row 0 the way `unsafe_values` is. Irrelevant when
+        `null_count()` is 0. Same lifetime and read-only rules as
+        `unsafe_values`.
+        """
+        return self._bits[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+
+    def validity_offset(self) -> Int:
+        """Row 0's bit index within `unsafe_validity`."""
+        return self._offset
 
     def _shares_buffers_with(self, other: Self) -> Bool:
         return (
@@ -84,6 +117,12 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     def is_null(self, index: Int) raises -> Bool:
         self._check_index(index)
         return not self._valid(index)
+
+    def is_valid(self, index: Int) -> Bool:
+        """Whether row index holds a value: one validity bit, no bounds
+        check, for reading a window in bulk. Skip it when `null_count()` is
+        0."""
+        return self._valid(index)
 
     def value(self, index: Int) raises -> Self.T:
         if self.is_null(index):
@@ -160,7 +199,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 
     def _compact(self) -> Self:
         """A private copy of this window with offset 0."""
-        var result = Self(self._to_list())
+        var result = Self(self.to_list())
         result._bits = ArcPointer(
             _copy_bits(self._bits[], self._offset, self._length)
         )

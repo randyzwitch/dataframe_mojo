@@ -34,7 +34,7 @@ def test_slices_share_buffers_and_read_through_offsets() raises:
     assert_true(nested.is_null(0))  # row 7: 7 % 3 == 1
     assert_equal(nested.value(1), Int64(8))
     assert_equal(nested.null_count(), window.slice(2, 3).null_count())
-    assert_equal(nested._to_list(), [Int64(7), 8, 9])
+    assert_equal(nested.to_list(), [Int64(7), 8, 9])
 
 
 def test_frame_operations_share_instead_of_copying() raises:
@@ -85,18 +85,18 @@ def test_frame_operations_share_instead_of_copying() raises:
 
 def test_appending_never_mutates_shared_buffers() raises:
     var column = ints(10)
-    var before = column._to_list()
+    var before = column.to_list()
     var copy = column.copy()
     copy._append_column(ints(3))
     assert_equal(len(copy), 13)
     assert_equal(len(column), 10)
-    assert_equal(column._to_list(), before)
+    assert_equal(column.to_list(), before)
     assert_false(copy._shares_buffers_with(column))
     # Appending to a window must not overwrite the parent's later rows.
     var window = column.slice(0, 4)
     window._append_column(ints(2))
     assert_equal(column._get(4), Int64(4))
-    assert_equal(window._to_list(), [Int64(0), 1, 2, 3, 0, 1])
+    assert_equal(window.to_list(), [Int64(0), 1, 2, 3, 0, 1])
 
 
 def test_unaligned_windows_append_correctly() raises:

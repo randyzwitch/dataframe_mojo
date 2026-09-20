@@ -7,6 +7,16 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Public access to a column's Arrow buffers, so a consumer reads values in
+  place instead of one tagged `AnyValue` per element: `unsafe_values()`,
+  `unsafe_validity()` and `validity_offset()` on `Column`, `BoolColumn` and
+  `StringColumn` (plus `unsafe_bytes()` / `unsafe_offsets()` for the
+  `large_utf8` layout), a non-raising `is_valid(i)`, and `to_list()`
+  promoted from `_to_list()`. Summing a million-row Float64 column drops
+  from about 3,500 us through `Series.get` to about 700 us through the
+  buffers. Null slots hold whatever the buffer holds, as in Arrow, where
+  they are undefined (#91).
+
 - `DataFrame.group_indices(keys)` returns which rows belong to which group
   without aggregating them, for callers that want each group's rows rather
   than one summary row: `count`, `ids`, `rows(g)`, `all_rows`, `sizes`,

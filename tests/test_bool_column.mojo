@@ -111,7 +111,7 @@ def test_through_the_frame_api() raises:
     # Round trips: a packed column survives concat, sort, group_by, and unique.
     var stacked = concat([df.slice(0, 5), df.slice(7, 6)])
     assert_equal(stacked.height(), 11)
-    assert_equal(stacked.column("b")._data[BoolColumn]._to_list()[0], True)
+    assert_equal(stacked.column("b")._data[BoolColumn].to_list()[0], True)
     assert_equal(df.sort("b").item(0, "b").bool(), False)
     assert_equal(df.group_by("b").agg(col("i").sum()).height(), 3)
     assert_equal(df.select(["b"]).unique().height(), 3)

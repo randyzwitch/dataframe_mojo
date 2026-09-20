@@ -151,7 +151,7 @@ def test_list_backed_constructor_converts() raises:
     var s = Series("s", Column[String](["x", "yy", ""], [True, False, True]))
     assert_true(s.string().is_null(1))
     assert_equal(s.string().value(0), "x")
-    assert_equal(s.string()._to_list(), ["x", "", ""])
+    assert_equal(s.string().to_list(), ["x", "", ""])
 
 
 def test_kernels_on_multibyte_content() raises:
