@@ -303,3 +303,37 @@ says partition but the gather is not repaid at that cardinality and frame
 size. A reusable thread pool would likely remove it, since the extra hash,
 scatter and gather stages each pay thread creation today; that was measured
 and could not ship (#103).
+
+## Parallel joint-key encoding for joins (#105)
+
+An inner join of 1,000,000 rows to 500,000 distinct keys took 235 ms, of
+which `encode_rows` over both sides stacked (1.5M rows) was 204 ms. The
+dictionary holds every distinct key of both sides at once, so at high
+cardinality it spends most of its time missing cache -- the same problem
+#104 fixed for grouping.
+
+A join's row order comes from iterating rows, not from the id numbering:
+ids exist only so equal keys compare equal. So the ids may be assigned in
+any consistent order, and `encode_partitioned` assigns them one hash
+bucket at a time, each bucket with its own small dictionary and an offset.
+The join's semantics are untouched.
+
+Separately, the rows belonging to each key id were held as one `List` per
+distinct key, which is a heap allocation per key. They are now a flat CSR
+layout built with a counting sort, which preserves the increasing-row-order
+match sequence the contract documents.
+
+1,000,000 x 500,000 inner join, best of 3:
+
+| | ms |
+|---|---|
+| before | 235 |
+| partitioned encode | 150 |
+| plus flat group index | 134 |
+
+In `bench-polars` (more output columns, so assembly weighs more) the same
+join goes 283 -> 188 ms, and from 10.5x to 7.0x of Polars.
+
+What is left is the part this did not touch: the match loop and the output
+gather are still serial, and each bucket pair is not joined independently.
+That is the rest of #105.

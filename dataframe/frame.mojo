@@ -22,7 +22,7 @@ from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
 from .gather import take_parallel, true_rows
 from .parallel import Job, partitions, run_jobs, worker_count
-from .partition import Partitioner, low_cardinality
+from .partition import Partitioner, encode_partitioned, low_cardinality
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows
 from .groups import GroupIndices
@@ -569,30 +569,31 @@ struct DataFrame(Copyable, Sized, Writable):
         var left_ids = ids[0].copy()
         var right_ids = ids[1].copy()
         var count = ids[2]
-        var right_buckets = List[List[Int]](length=count, fill=List[Int]())
-        for j in range(len(right_ids)):
-            if right_ids[j] >= 0:
-                right_buckets[right_ids[j]].append(j)
+        # Rows per key id in a flat CSR layout: one list per distinct key
+        # would be hundreds of thousands of heap allocations on a
+        # high-cardinality join. Ids appear in increasing row order, so a
+        # counting sort preserves the match order the contract documents.
+        var right_starts = _group_index(right_ids, count)
+        var right_flat = _group_rows(right_ids, right_starts)
         var left_rows = List[Int]()
         var right_rows = List[Int]()
         if how == "semi" or how == "anti":
             for i in range(len(left_ids)):
+                var id = left_ids[i]
                 var matched = (
-                    left_ids[i] >= 0 and len(right_buckets[left_ids[i]]) > 0
+                    id >= 0 and right_starts[id + 1] > right_starts[id]
                 )
                 if matched == (how == "semi"):
                     left_rows.append(i)
             return self.take(left_rows)
         if how == "right":
-            var left_buckets = List[List[Int]](length=count, fill=List[Int]())
-            for i in range(len(left_ids)):
-                if left_ids[i] >= 0:
-                    left_buckets[left_ids[i]].append(i)
+            var left_starts = _group_index(left_ids, count)
+            var left_flat = _group_rows(left_ids, left_starts)
             for j in range(len(right_ids)):
                 var id = right_ids[j]
-                if id >= 0 and len(left_buckets[id]) > 0:
-                    for i in left_buckets[id]:
-                        left_rows.append(i)
+                if id >= 0 and left_starts[id + 1] > left_starts[id]:
+                    for k in range(left_starts[id], left_starts[id + 1]):
+                        left_rows.append(left_flat[k])
                         right_rows.append(j)
                 else:
                     left_rows.append(-1)
@@ -601,8 +602,9 @@ struct DataFrame(Copyable, Sized, Writable):
             var right_matched = List[Bool](length=len(right_ids), fill=False)
             for i in range(len(left_ids)):
                 var id = left_ids[i]
-                if id >= 0 and len(right_buckets[id]) > 0:
-                    for j in right_buckets[id]:
+                if id >= 0 and right_starts[id + 1] > right_starts[id]:
+                    for k in range(right_starts[id], right_starts[id + 1]):
+                        var j = right_flat[k]
                         left_rows.append(i)
                         right_rows.append(j)
                         right_matched[j] = True
@@ -1203,6 +1205,29 @@ def _as_int64(values: List[Int]) -> List[Int64]:
     return out^
 
 
+def _group_index(ids: List[Int], count: Int) -> List[Int]:
+    """Start offset per key id, in a flat CSR layout (count + 1 entries)."""
+    var starts = List[Int](length=count + 1, fill=0)
+    for id in ids:
+        if id >= 0:
+            starts[id + 1] += 1
+    for g in range(count):
+        starts[g + 1] += starts[g]
+    return starts^
+
+
+def _group_rows(ids: List[Int], starts: List[Int]) -> List[Int]:
+    """Row indices grouped by key id, each group in increasing row order."""
+    var rows = List[Int](length=starts[len(starts) - 1], fill=0)
+    var cursor = starts.copy()
+    for i in range(len(ids)):
+        var id = ids[i]
+        if id >= 0:
+            rows[cursor[id]] = i
+            cursor[id] += 1
+    return rows^
+
+
 def _joint_key_ids(
     left: DataFrame,
     right: DataFrame,
@@ -1215,7 +1240,17 @@ def _joint_key_ids(
         stacked.append(
             left._columns[left_keys[k]].append(right._columns[right_keys[k]])
         )
-    var keys = encode_rows(stacked, nulls_equal=False)
+    # A join's row order comes from iterating rows, not from the id
+    # numbering, so ids may be assigned in any consistent order. On a
+    # high-cardinality key a single dictionary over both sides is the
+    # dominant cost of the whole join, so encode per hash bucket instead.
+    var total = left.height() + right.height()
+    var workers = worker_count(total)
+    var keys = encode_partitioned(
+        stacked, workers, nulls_equal=False
+    ) if workers > 1 and not low_cardinality(stacked) else encode_rows(
+        stacked, nulls_equal=False
+    )
     var n = left.height()
     var left_ids = List[Int](capacity=n)
     var right_ids = List[Int](capacity=right.height())
