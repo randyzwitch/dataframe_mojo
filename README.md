@@ -7,6 +7,28 @@ is no Python, pandas, Polars, or Arrow runtime dependency.
 This is a working first implementation, not a production engine or a portable
 backend facade. The API is provisional.
 
+## Install
+
+Add it to another Pixi workspace straight from GitHub:
+
+```toml
+[workspace]
+preview = ["pixi-build"]
+
+[dependencies]
+mojo = ">=1.1.0,<1.2"
+dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.1.0" }
+```
+
+```mojo
+from dataframe import DataFrame, Series, Column, col
+```
+
+A compiled Mojo package only loads in the Mojo version that produced it, and
+pixi builds this package with the newest Mojo that `[package.host-dependencies]`
+in `pixi.toml` allows, so each tag targets one Mojo version. `v0.1.0` targets
+**1.1**.
+
 ## Run
 
 With [Pixi](https://pixi.sh) installed, from this directory:
