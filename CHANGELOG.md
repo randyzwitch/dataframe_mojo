@@ -3,6 +3,20 @@
 All notable changes are recorded here. The API is pre-1.0 and provisional:
 breaking changes can happen in any release and are listed under **Breaking**.
 
+## Unreleased
+
+### Changed
+
+- Worker threads are created once and reused. A process-wide pool of
+  `num_physical_cores() - 1` workers sleeps on a condition variable between
+  batches, so a parallel stage costs a wake-up (tens of microseconds) rather
+  than thread creation (over a millisecond for 32 threads). Batches are a
+  claim queue shared by the workers and the calling thread, so any job
+  count works, and a `run_jobs` call made while a batch is running -- from
+  inside a job, or from another thread -- runs inline rather than
+  deadlocking. `DATAFRAME_THREADS` still caps the threads a batch uses
+  and `1` still disables parallelism (#103).
+
 ## 0.1.2 - 2026-09-20
 
 ### Added

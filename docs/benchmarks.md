@@ -250,3 +250,46 @@ pointer dereference per row, not a copy.
 
 Measure with an optimized build: under `mojo run` the difference largely
 disappears.
+
+## Reusable thread pool (#103)
+
+Every parallel stage used to create its worker threads with `pthread_create`
+and join them at the end. Measured in isolation on the 32-core reference
+machine, creating 31 threads costs about 1,170 us; waking 31 pooled workers
+sleeping on a condition variable and having them all acknowledge costs about
+68 us. Dispatching a batch of trivial jobs through the pool, including the
+wake-up, is now 3-20 us for 2-64 jobs.
+
+That does not move the 1M-row numbers: dispatch was never their bottleneck.
+What it changes is the threshold below which a frame stays single-threaded.
+`MIN_ROWS_PER_WORKER` was 65,536, so a 100,000-row frame used one thread;
+with dispatch this cheap it can be 8,192. Best of 30, microseconds,
+`filter -> sum` (two stages), a global sum, and one comparison:
+
+| rows | workload | main (65,536) | pool, 4,096 | pool, 8,192 | pool, 16,384 |
+|---|---|---|---|---|---|
+| 16,384 | two_stage | 498 | 458-515 | 433-832 | 497-769 |
+| 16,384 | global_sum | 88-124 | 79-100 | 82-104 | 88-129 |
+| 16,384 | compare | 1,114-1,503 | 379-539 | 619-673 | 1,119-1,826 |
+| 50,000 | two_stage | 1,518 | 772-833 | 762-961 | 1,120-1,650 |
+| 50,000 | global_sum | 263 | 154-170 | 123-199 | 164-167 |
+| 50,000 | compare | 3,468-3,620 | 568-755 | 780-903 | 1,370-2,159 |
+| 100,000 | two_stage | 3,590-3,694 | 1,010-1,211 | 1,162-1,265 | 1,382-1,540 |
+| 100,000 | global_sum | 512-532 | 267-292 | 256-297 | 192-420 |
+| 100,000 | compare | 6,774-7,732 | 877-943 | 1,213-1,447 | 1,387-1,499 |
+| 1,000,000 | two_stage | 8,769-8,930 | 7,409-7,690 | 6,710-8,291 | 6,804-7,350 |
+| 1,000,000 | global_sum | 1,943-2,032 | 1,459-1,990 | 1,410-1,525 | 1,383-1,867 |
+| 1,000,000 | compare | 6,705-8,930 | 5,403-5,432 | 5,250-5,401 | 5,434-6,595 |
+
+Ranges are two rounds. 4,096 and 8,192 are within noise of each other and
+both clearly beat 16,384 at 50,000 rows; 8,192 is the one shipped, as the
+more conservative choice for small frames (a frame needs 16,384 rows before
+a second thread is used). At 16,384 rows nothing regresses against main.
+
+A batch is a claim queue: workers and the calling thread take task indices
+from an atomic counter, so any job count works with any pool size, and the
+caller never idles while work remains. The first version read the batch
+length from a plain field after the claim; a worker that entered the loop
+during the previous batch could hold a stale length and drop the task it
+had just claimed, hanging the caller with exactly one completion missing.
+Every batch field is atomic and read after the claim now.
