@@ -5,6 +5,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ## Unreleased
 
+### Added
+
+- `pixi run -e oracle bench-polars`: a head-to-head benchmark against Polars
+  on identical CSV inputs with thread counts pinned equal, covering CSV
+  read, elementwise arithmetic and comparison, filter, global sum, grouping
+  at low, high and skewed cardinality on Int64 and String keys, inner join,
+  and multi-column sort. Each workload's row count and a column total must
+  agree between the engines before their times are compared (#102).
+
 ### Changed
 
 - Worker threads are created once and reused. A process-wide pool of
