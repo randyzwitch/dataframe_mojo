@@ -9,6 +9,7 @@ median/quantile keep every valid value of a group.
 from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
@@ -115,6 +116,63 @@ def _distinct[
             sets[g][column._get(i).copy()] = True
         else:
             nulls[g] = True
+
+
+# BoolColumn overloads (bit-packed values).
+
+
+def _count_valid(
+    column: BoolColumn,
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    nulls: Bool,
+    mut counts: List[Int64],
+):
+    for i in range(len(column)):
+        if column._valid(i) != nulls:
+            counts[_group(grouped, groups, offset + i)] += 1
+
+
+def _extreme(
+    column: BoolColumn,
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    is_max: Bool,
+    mut seen: List[Bool],
+    mut best: List[Bool],
+):
+    for i in range(len(column)):
+        if not column._valid(i):
+            continue
+        var g = _group(grouped, groups, offset + i)
+        var value = column._get(i)
+        if (
+            not seen[g]
+            or (is_max and value and not best[g])
+            or (not is_max and not value and best[g])
+        ):
+            best[g] = value
+            seen[g] = True
+
+
+def _pick(
+    column: BoolColumn,
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    last: Bool,
+    mut seen: List[Bool],
+    mut valid: List[Bool],
+    mut best: List[Bool],
+):
+    for i in range(len(column)):
+        var g = _group(grouped, groups, offset + i)
+        if last or not seen[g]:
+            seen[g] = True
+            valid[g] = column._valid(i)
+            best[g] = column._get(i)
 
 
 # StringColumn overloads: rows are borrowed slices; per-group state owns
@@ -476,9 +534,9 @@ struct Reducer(Movable):
                     nulls,
                     self.counts,
                 )
-            elif chunk._data.isa[Column[Bool]]():
+            elif chunk._data.isa[BoolColumn]():
                 _count_valid(
-                    chunk._data[Column[Bool]],
+                    chunk._data[BoolColumn],
                     offset,
                     grouped,
                     groups,
@@ -512,7 +570,7 @@ struct Reducer(Movable):
                         column._get(i)
                     )
         elif op == ANY or op == ALL:
-            ref column = chunk._data[Column[Bool]]
+            ref column = chunk._data[BoolColumn]
             for i in range(len(column)):
                 self.logic[_group(grouped, groups, offset + i)].add(
                     column._valid(i), column._get(i)
@@ -561,9 +619,9 @@ struct Reducer(Movable):
                     ):
                         self.floats[g] = value
                         self.seen[g] = True
-            elif chunk._data.isa[Column[Bool]]():
+            elif chunk._data.isa[BoolColumn]():
                 _extreme(
-                    chunk._data[Column[Bool]],
+                    chunk._data[BoolColumn],
                     offset,
                     grouped,
                     groups,
@@ -605,9 +663,9 @@ struct Reducer(Movable):
                     self.picked_valid,
                     self.floats,
                 )
-            elif chunk._data.isa[Column[Bool]]():
+            elif chunk._data.isa[BoolColumn]():
                 _pick(
-                    chunk._data[Column[Bool]],
+                    chunk._data[BoolColumn],
                     offset,
                     grouped,
                     groups,
@@ -645,8 +703,8 @@ struct Reducer(Movable):
                         self.float_sets[g][float_key(column._get(i))] = True
                     else:
                         self.picked_valid[g] = True
-            elif chunk._data.isa[Column[Bool]]():
-                ref column = chunk._data[Column[Bool]]
+            elif chunk._data.isa[BoolColumn]():
+                ref column = chunk._data[BoolColumn]
                 for i in range(len(column)):
                     self.logic[_group(grouped, groups, offset + i)].add(
                         column._valid(i), column._get(i)
@@ -883,7 +941,7 @@ struct Reducer(Movable):
                             valid[g] = True
                 return Series("", Column[Float64](output^, valid))
             if self.dtype == DataType.BOOL:
-                return Series("", Column[Bool](self.bools.copy(), valid))
+                return Series("", BoolColumn(self.bools.copy(), valid))
             return Series("", StringColumn(self.strings, valid))
         var output = List[Bool](length=n, fill=False)
         var ignore_nulls = self.integer != 0
@@ -894,4 +952,4 @@ struct Reducer(Movable):
             valid[g] = Bool(result)
             if result:
                 output[g] = result.value()
-        return Series("", Column[Bool](output^, valid))
+        return Series("", BoolColumn(output^, valid))

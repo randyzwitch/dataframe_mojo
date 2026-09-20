@@ -72,6 +72,7 @@ from .hashing import encode_rows
 from .window import window_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
+from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .series import Series
@@ -212,7 +213,7 @@ def _eval[
     if node.op == LIT_INT or node.op == LIT_FLOAT:
         return _numeric_literal(node)
     if node.op == LIT_BOOL:
-        return Series("", Column[Bool]([Bool(node.integer)]))
+        return Series("", BoolColumn([Bool(node.integer)]))
     if node.op == LIT_STRING:
         return Series("", StringColumn([node.text]))
     if node.op == LIT_NULL:
@@ -291,7 +292,7 @@ def _conditional[
     var predicate = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
-    ref flags = predicate._data[Column[Bool]]
+    ref flags = predicate._data[BoolColumn]
     var selected = List[Bool](capacity=size)
     var then_mask = List[Bool](capacity=size)
     var other_mask = List[Bool](capacity=size)

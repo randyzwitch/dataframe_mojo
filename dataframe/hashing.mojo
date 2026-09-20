@@ -7,6 +7,7 @@ Float64 keys treat every NaN as one value and -0.0 as equal to 0.0.
 """
 from std.collections import Dict
 from .aggregate import float_key
+from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
 from .string_column import StringColumn, StringBuilder
@@ -69,8 +70,8 @@ def column_codes(
                 return len(lookup)
             else:
                 return _codes_by_value(column, codes, nulls)
-    if series._data.isa[Column[Bool]]():
-        ref column = series._data[Column[Bool]]
+    if series._data.isa[BoolColumn]():
+        ref column = series._data[BoolColumn]
         for i in range(len(column)):
             if not column._valid(i):
                 nulls[i] = True

@@ -7,6 +7,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Breaking
 
+- `Series.bool()` returns a `BoolColumn` (bit-packed values) instead of
+  `Column[Bool]`, with the same `value`, `is_null`, `null_count`, `take`,
+  and `slice` methods. `Series(name, Column[Bool](...))` and
+  `DataFrame.filter(Column[Bool])` still work and pack on construction (#80).
 - Arrow import keeps narrow integer and float32 types instead of widening
   them to Int64 / Float64, and accepts UInt64.
 - `Series.string()` returns a `StringColumn` (Arrow `large_utf8`: one UTF-8
@@ -49,6 +53,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
   `pixi-build-mojo` backend), so another Pixi workspace can depend on
   `dataframe_mojo` by git tag or path and `from dataframe import ...`. Adds
   a LICENSE file (MIT).
+
+- Boolean columns store one bit per value (Arrow layout): 8x less memory,
+  zero-copy Arrow export, and faster Boolean results (nullable compare
+  4.7 -> 2.7 ms, filter 10.7 -> 8.7 ms at 1M rows) (#80).
 
 - Row-wise expressions and filters run on worker threads for large inputs:
   arithmetic and comparisons ~4x faster and filter ~3.5x faster at 1M rows,
