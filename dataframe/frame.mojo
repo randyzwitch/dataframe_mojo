@@ -24,6 +24,7 @@ from .gather import take_parallel, true_rows
 from .parallel import worker_count
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows
+from .groups import GroupIndices
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
 from .lazy import LazyFrame
@@ -1144,6 +1145,30 @@ struct DataFrame(Copyable, Sized, Writable):
             seen[key] = True
             columns.append(self._columns[self._index(key)].copy())
         return GroupBy(self.copy(), columns^, maintain_order)
+
+    def group_indices(self, key: String) raises -> GroupIndices:
+        return self.group_indices([key])
+
+    def group_indices(self, keys: List[String]) raises -> GroupIndices:
+        """Which rows belong to which group, without aggregating them.
+
+        For callers that want each group's rows rather than one summary row
+        per group: `take(groups.rows(g))` builds a sub-frame, and
+        `representative(g)` says where to read that group's key values.
+        Groups are numbered in first-occurrence order, and null keys form
+        their own group, both as in `group_by`.
+        """
+        if len(keys) == 0:
+            raise Error("group_indices requires at least one key")
+        var seen = Dict[String, Bool]()
+        var columns = List[Series](capacity=len(keys))
+        for key in keys:
+            if key in seen:
+                raise Error("Duplicate group_indices key: " + key)
+            seen[key] = True
+            columns.append(self._columns[self._index(key)].copy())
+        var encoded = encode_rows(columns, True)
+        return GroupIndices(encoded.ids.copy(), encoded.representatives.copy())
 
     def group_by(
         self,

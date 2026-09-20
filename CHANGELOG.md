@@ -17,6 +17,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
   buffers. Null slots hold whatever the buffer holds, as in Arrow, where
   they are undefined (#91).
 
+- `DataFrame.group_indices(keys)` returns which rows belong to which group
+  without aggregating them, for callers that want each group's rows rather
+  than one summary row: `count`, `ids`, `rows(g)`, `all_rows`, `sizes`,
+  and `representative(g)` for where to read a group's key values. Groups are
+  numbered in first-occurrence order and null keys form their own group,
+  both as in `group_by`. Building sub-frames from the indices is left to the
+  caller, who may prefer to read the shared buffers directly (#92).
+
 ## 0.1.1 - 2026-09-20
 
 Everything below is the initial feature set. v0.1.0 was tagged the same day and

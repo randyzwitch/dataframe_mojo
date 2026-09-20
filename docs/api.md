@@ -317,6 +317,9 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Group by one or more columns of any dtype.
 - `def group_by(self, keys: List[Expr], *, maintain_order: Bool = False, batch_size: Int = Int(1024)) -> GroupBy`
   Group by computed keys; each key is evaluated once and named by its output name. Aggregations still see the original columns.
+- `def group_indices(self, key: String) -> GroupIndices`
+- `def group_indices(self, keys: List[String]) -> GroupIndices`
+  Which rows belong to which group, without aggregating them.
 
 ## `DataType`
 
@@ -637,6 +640,33 @@ It owns a snapshot of the input and the evaluated key columns.
 - `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
 - `def len(self, name: String = "len") -> DataFrame`
   Row count per group, including rows with null values.
+
+## `GroupIndices`
+
+Which rows belong to which group, plus a representative row per group.
+
+`ids()[i]` is row i's group. `representative(g)` is the first row of
+group g, which is where to read that group's key values from.
+
+- `def __init__(out self, var ids: List[Int], var representatives: List[Int])`
+- `def count(self) -> Int`
+  The number of groups.
+- `def height(self) -> Int`
+  The number of rows these groups cover.
+- `def ids(self) -> List[Int]`
+  Each row's group id, in row order.
+- `def group_of(self, row: Int) -> Int`
+  Row's group id.
+- `def representative(self, group: Int) -> Int`
+  The first row of this group: read the group's key values there.
+- `def representatives(self) -> List[Int]`
+  The first row of every group, in group order.
+- `def rows(self, group: Int) -> List[Int]`
+  One group's rows, in row order.
+- `def all_rows(self) -> List[List[Int]]`
+  Every group's rows, in group order then row order, in one pass.
+- `def sizes(self) -> List[Int]`
+  Each group's row count, in group order.
 
 ## `import_arrow`
 
