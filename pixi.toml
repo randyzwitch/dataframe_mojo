@@ -44,7 +44,9 @@ mojo = ">=1.1.0,<1.2"
 mojo = ">=1.1.0,<1.2"
 
 [dependencies]
-mojo = "==1.1.0"
+# The range CI tests, matching the package's host/run dependencies above, so a
+# 1.1 patch release does not need a manual bump here.
+mojo = ">=1.1.0,<1.2"
 
 [tasks]
 test = "bash scripts/run_tests.sh"
