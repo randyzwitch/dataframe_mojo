@@ -3,3 +3,6 @@ build/
 *.mojoc
 __pycache__/
 dist/
+
+# Build output from `pixi build` / package smoke tests
+*.conda
