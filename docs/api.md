@@ -74,7 +74,16 @@ A window onto shared, bit-packed values and validity.
 - `def __init__(out self, *, var values: List[UInt8], var bits: List[UInt8], length: Int)`
   Adopt finished value and validity bitmaps.
 - `def __len__(self) -> Int`
+- `def to_list(self) -> List[Bool]`
 - `def is_null(self, index: Int) -> Bool`
+- `def unsafe_values(self) -> Pointer[UInt8, MutAnyOrigin]`
+  Arrow's values buffer: a bitmap, LSB-first, one bit per row.
+- `def is_valid(self, index: Int) -> Bool`
+  Whether row index holds a value: one validity bit, no bounds check, for reading a window in bulk. Skip it when `null_count()` is 0.
+- `def unsafe_validity(self) -> Pointer[UInt8, MutAnyOrigin]`
+  Arrow's validity bitmap, LSB-first, 1 = present.
+- `def validity_offset(self) -> Int`
+  Row 0's bit index within `unsafe_validity`.
 - `def value(self, index: Int) -> Bool`
 - `def null_count(self) -> Int`
 - `def true_count(self) -> Int`
@@ -123,7 +132,17 @@ no mutable buffers or implicit negative indexing are exposed.
 - `def __init__(out self, var values: List[T])`
 - `def __init__(out self, var values: List[T], valid: List[Bool])`
 - `def __len__(self) -> Int`
+- `def to_list(self) -> List[T]`
+  An owned copy of this window's payloads, null slots included.
+- `def unsafe_values(self) -> Pointer[T, MutAnyOrigin]`
+  Row 0 of this window, for reading the payload in bulk.
+- `def unsafe_validity(self) -> Pointer[UInt8, MutAnyOrigin]`
+  Arrow's validity bitmap, LSB-first, 1 = present.
+- `def validity_offset(self) -> Int`
+  Row 0's bit index within `unsafe_validity`.
 - `def is_null(self, index: Int) -> Bool`
+- `def is_valid(self, index: Int) -> Bool`
+  Whether row index holds a value: one validity bit, no bounds check, for reading a window in bulk. Skip it when `null_count()` is 0.
 - `def value(self, index: Int) -> T`
 - `def null_count(self) -> Int`
 - `def take(self, indices: List[Int]) -> Self`
@@ -932,7 +951,19 @@ A window onto shared UTF-8 bytes, Int64 offsets, and validity.
 - `def __init__(out self, *, var bytes: List[UInt8], var offsets: List[Int64], var bits: List[UInt8], length: Int)`
   Adopt finished buffers; offsets must have length + 1 entries.
 - `def __len__(self) -> Int`
+- `def to_list(self) -> List[String]`
+  Owned copies of this window's rows (nulls read as "").
 - `def is_null(self, index: Int) -> Bool`
+- `def unsafe_bytes(self) -> Pointer[UInt8, ImmutAnyOrigin]`
+  Arrow's UTF-8 payload buffer, indexed by `unsafe_offsets`, not by row. Shared and read-only; valid only while this column is alive.
+- `def unsafe_offsets(self) -> Pointer[Int64, MutAnyOrigin]`
+  Arrow's Int64 offset buffer. Row i occupies bytes `offsets[validity_offset() + i]` up to the next entry, so it is not shifted to row 0. Shared and read-only.
+- `def is_valid(self, index: Int) -> Bool`
+  Whether row index holds a value: one validity bit, no bounds check, for reading a window in bulk. Skip it when `null_count()` is 0.
+- `def unsafe_validity(self) -> Pointer[UInt8, MutAnyOrigin]`
+  Arrow's validity bitmap, LSB-first, 1 = present.
+- `def validity_offset(self) -> Int`
+  Row 0's bit index within `unsafe_validity`.
 - `def value(self, index: Int) -> String`
 - `def null_count(self) -> Int`
 - `def take(self, indices: List[Int]) -> Self`

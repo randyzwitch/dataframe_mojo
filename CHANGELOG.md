@@ -3,6 +3,20 @@
 All notable changes are recorded here. The API is pre-1.0 and provisional:
 breaking changes can happen in any release and are listed under **Breaking**.
 
+## Unreleased
+
+### Added
+
+- Public access to a column's Arrow buffers, so a consumer reads values in
+  place instead of one tagged `AnyValue` per element: `unsafe_values()`,
+  `unsafe_validity()` and `validity_offset()` on `Column`, `BoolColumn` and
+  `StringColumn` (plus `unsafe_bytes()` / `unsafe_offsets()` for the
+  `large_utf8` layout), a non-raising `is_valid(i)`, and `to_list()`
+  promoted from `_to_list()`. Summing a million-row Float64 column drops
+  from about 3,500 us through `Series.get` to about 700 us through the
+  buffers. Null slots hold whatever the buffer holds, as in Arrow, where
+  they are undefined (#91).
+
 ## 0.1.1 - 2026-09-20
 
 Everything below is the initial feature set. v0.1.0 was tagged the same day and

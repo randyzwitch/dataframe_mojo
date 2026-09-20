@@ -74,7 +74,7 @@ struct BoolColumn(Copyable, Sized):
     def _valid(self, i: Int) -> Bool:
         return _bit(self._bits[], self._offset + i)
 
-    def _to_list(self) -> List[Bool]:
+    def to_list(self) -> List[Bool]:
         var values = List[Bool](capacity=self._length)
         for i in range(self._length):
             values.append(self._get(i))
@@ -93,6 +93,34 @@ struct BoolColumn(Copyable, Sized):
     def is_null(self, index: Int) raises -> Bool:
         self._check_index(index)
         return not self._valid(index)
+
+    def unsafe_values(self) -> Pointer[UInt8, MutAnyOrigin]:
+        """Arrow's values buffer: a bitmap, LSB-first, one bit per row.
+
+        Bit `validity_offset() + i` is row i, the same indexing as
+        `unsafe_validity`, because Boolean values are bit-packed too. Shared
+        and read-only; valid only while this column is alive.
+        """
+        return self._data[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+
+    def is_valid(self, index: Int) -> Bool:
+        """Whether row index holds a value: one validity bit, no bounds
+        check, for reading a window in bulk. Skip it when `null_count()` is
+        0."""
+        return self._valid(index)
+
+    def unsafe_validity(self) -> Pointer[UInt8, MutAnyOrigin]:
+        """Arrow's validity bitmap, LSB-first, 1 = present.
+
+        Bit `validity_offset() + i` describes row i. Irrelevant when
+        `null_count()` is 0. Shared with every other window onto the same
+        column, so read-only, and valid only while this column is alive.
+        """
+        return self._bits[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+
+    def validity_offset(self) -> Int:
+        """Row 0's bit index within `unsafe_validity`."""
+        return self._offset
 
     def value(self, index: Int) raises -> Bool:
         if self.is_null(index):

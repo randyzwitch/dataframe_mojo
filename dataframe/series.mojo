@@ -644,7 +644,7 @@ struct Series(Copyable, Sized, Writable):
                     var x = column._get(i)
                     nan[i] = valid[i] and x != x
                     usable[i] = valid[i] and not nan[i]
-                distinct = _dense_ranks(column._to_list(), usable, ranks)
+                distinct = _dense_ranks(column.to_list(), usable, ranks)
         if distinct >= 0:
             pass
         elif self._data.isa[BoolColumn]():
