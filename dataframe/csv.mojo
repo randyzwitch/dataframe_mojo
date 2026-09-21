@@ -4,6 +4,7 @@ The scalar tokenizer is deliberately separate from typed column decoding. It
 keeps state across input buffers, including quoted records, so later SIMD
 structural scanning or parallel decoding can replace one stage at a time.
 """
+from std.memory import ArcPointer
 from std.collections import Dict
 from std.utils import Variant
 
@@ -14,6 +15,8 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
 from .series import Series
 from .parse import parse_int64, parse_float64, parse_integer
+from .frame import concat
+from .parallel import Job, run_jobs, worker_count
 from .temporal import format as format_temporal, parse as parse_temporal
 
 
@@ -742,6 +745,75 @@ def _options(
     return options^
 
 
+@fieldwise_init
+struct _Split(Copyable, Movable):
+    """Where a record starts, and how many records precede it."""
+
+    var offset: Int
+    var record: Int
+
+
+@fieldwise_init
+struct _Layout(Movable):
+    """How a buffer divides into ranges that each begin on a record."""
+
+    var splits: List[_Split]
+    # Offset just after the last record terminator, so a caller reading in
+    # blocks knows what to carry forward. 0 when no record is complete.
+    var complete: Int
+    var records: Int
+
+
+def record_splits(
+    bytes: Span[UInt8, ImmutAnyOrigin],
+    quote: UInt8,
+    quoting: Bool,
+    parts: Int,
+) raises -> _Layout:
+    """Byte offsets at which records start, splitting into at most `parts`.
+
+    A chunk boundary may land inside a quoted field, and a quoted field may
+    contain newlines, so a newline is only a record boundary when an even
+    number of quotes precede it. Toggling on every quote byte handles CSV's
+    doubled-quote escape without a special case: `""` toggles twice, so a
+    newline after it still sees the enclosing field as open.
+
+    The returned splits always begin with offset 0, are strictly increasing,
+    and are followed by a terminator whose offset is the buffer length. Each
+    carries the number of complete records before it, so a worker can report
+    record numbers that match a serial read.
+    """
+    var n = len(bytes)
+    var splits = List[_Split]()
+    splits.append(_Split(0, 0))
+    if n == 0:
+        splits.append(_Split(0, 0))
+        return _Layout(splits^, 0, 0)
+
+    var stride = max(1, n // max(parts, 1))
+    var target = stride
+    var inside = False
+    var records = 0
+    var complete = 0
+    var i = 0
+    while i < n:
+        var byte = bytes[i]
+        if quoting and byte == quote:
+            inside = not inside
+        elif byte == 10 and not inside:
+            records += 1
+            complete = i + 1
+            # A split lands after the newline, so the next range starts on a
+            # record. The final byte is never a split: that would make an
+            # empty range whose reader would see no records.
+            if parts > 1 and i + 1 >= target and i + 1 < n:
+                splits.append(_Split(i + 1, records))
+                target = i + 1 + stride
+        i += 1
+    splits.append(_Split(n, records))
+    return _Layout(splits^, complete, records)
+
+
 def _projection(schema: CsvSchema, columns: List[String]) raises -> List[Bool]:
     var keep = List[Bool](length=len(schema), fill=len(columns) == 0)
     var requested = Dict[String, Bool]()
@@ -808,10 +880,168 @@ def read_csv(
         encoding,
         buffer_size,
     )
-    var reader = _CsvReader(
-        schema, has_header, options, _projection(schema, columns)
-    )
+    var keep = _projection(schema, columns)
+    if _parallel_is_safe(options, worker_count(1 << 40)):
+        return _stream_parallel(
+            path, schema, has_header, options, keep, buffer_size
+        )
+    var reader = _CsvReader(schema, has_header, options, keep)
     return _stream(path, reader, buffer_size)
+
+
+struct _RangeJob(Job):
+    """Decode one record-aligned byte range with a reader of its own."""
+
+    var reader: _CsvReader
+    var bytes: ArcPointer[List[UInt8]]
+    var start: Int
+    var end: Int
+    var frame: DataFrame
+
+    def __init__(
+        out self,
+        var reader: _CsvReader,
+        bytes: ArcPointer[List[UInt8]],
+        start: Int,
+        end: Int,
+    ) raises:
+        self.reader = reader^
+        self.bytes = bytes.copy()
+        self.start = start
+        self.end = end
+        self.frame = DataFrame(List[Series](), height=0)
+
+    def run(mut self) raises:
+        var slice = List[UInt8](capacity=self.end - self.start)
+        slice.extend(Span(self.bytes[])[self.start : self.end])
+        self.reader.feed(slice^)
+        self.frame = self.reader.finish()
+
+    def into_frame(deinit self) -> DataFrame:
+        return self.frame^
+
+
+# Worker sizing for CSV is by bytes, not rows: `worker_count` measures rows
+# and a block is bytes, so handing it a byte count silently yields one
+# worker. A quarter megabyte per worker keeps the per-range fixed costs
+# (a reader, its column builders, and the concatenation) small next to the
+# decoding.
+comptime _MIN_BYTES_PER_WORKER = 262144
+
+# Parallel reads pull larger blocks than the streaming default, because a
+# block is what gets divided: a 64 KiB block cannot usefully be split.
+comptime _PARALLEL_BLOCK = 8 << 20
+
+
+def _csv_workers(bytes: Int) -> Int:
+    """Threads for a block of this many bytes, honouring DATAFRAME_THREADS."""
+    return max(1, min(worker_count(1 << 40), bytes // _MIN_BYTES_PER_WORKER))
+
+
+def _stream_parallel(
+    path: String,
+    schema: CsvSchema,
+    has_header: Bool,
+    options: CsvOptions,
+    keep: List[Bool],
+    buffer_size: Int,
+) raises -> DataFrame:
+    """Read a file in blocks, decoding each block's records in parallel.
+
+    Blocks are read sequentially, so memory stays bounded by the block size
+    rather than the file size. Within a block, `record_splits` finds offsets
+    that begin a record, each range gets its own reader, and the partial
+    frames are concatenated in range order, which is what makes the output
+    identical to a serial read. Bytes after the last complete record are
+    carried into the next block.
+    """
+    var block_size = max(buffer_size, _PARALLEL_BLOCK)
+    var quoting = options.quote_char.byte_length() > 0
+    var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(0)
+    var frames = List[DataFrame]()
+    var carry = List[UInt8]()
+    var first_block = True
+    var base = 0
+    with open(path, "r") as file:
+        while True:
+            var block = file.read_bytes(block_size)
+            var last = len(block) == 0
+            var buffer = carry^
+            carry = List[UInt8]()
+            buffer.extend(Span(block))
+            _ = block^
+            if len(buffer) == 0:
+                break
+            var workers = _csv_workers(len(buffer))
+            var span = Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=buffer.unsafe_ptr()
+                .unsafe_mut_cast[False]()
+                .unsafe_origin_cast[ImmutAnyOrigin](),
+                length=len(buffer),
+            )
+            var layout = record_splits(span, quote, quoting, workers)
+            # Whatever follows the last record terminator belongs to the next
+            # block; on the final block there is nothing more to read, so the
+            # remainder is decoded here.
+            var upto = len(buffer) if last else layout.complete
+            if upto == 0:
+                carry = buffer^
+                if last:
+                    break
+                continue
+            if not last and upto < len(buffer):
+                carry.extend(Span(buffer)[upto : len(buffer)])
+            var shared = ArcPointer(buffer^)
+            var jobs = List[_RangeJob]()
+            for s in range(len(layout.splits) - 1):
+                var start = layout.splits[s].offset
+                var stop = min(layout.splits[s + 1].offset, upto)
+                if stop <= start:
+                    continue
+                var leading = first_block and s == 0
+                var reader = _CsvReader(
+                    schema, has_header and leading, options, keep.copy()
+                )
+                reader.record += base + layout.splits[s].record
+                # A byte-order mark means something only at the very start of
+                # the file. Every other range begins mid-file, where those
+                # bytes are data, so only the leading reader looks for one.
+                if not leading:
+                    reader.prefix_done = True
+                jobs.append(_RangeJob(reader^, shared, start, stop))
+            if len(jobs) == 1:
+                jobs[0].run()
+            else:
+                run_jobs(jobs)
+            while len(jobs) > 0:
+                frames.append(jobs.pop(0).into_frame())
+            base += layout.records
+            first_block = False
+            if last:
+                break
+    if len(frames) == 0:
+        var empty = _CsvReader(schema, has_header, options, keep.copy())
+        return empty.finish()
+    if len(frames) == 1:
+        return frames.pop(0)
+    return concat(frames)
+
+
+def _parallel_is_safe(options: CsvOptions, workers: Int) -> Bool:
+    """Whether a file can be split without changing the result.
+
+    Row-limited and row-skipping reads, and comment prefixes, all depend on
+    counting records from the start of the file, which a range cannot do on
+    its own. Those stay serial until they are handled explicitly.
+    """
+    return (
+        workers > 1
+        and options.n_rows < 0
+        and options.skip_rows == 0
+        and options.comment_prefix.byte_length() == 0
+        and not options.ignore_errors
+        and not options.truncate_ragged_lines
+    )
 
 
 def _is_integer_text(text: String) -> Bool:

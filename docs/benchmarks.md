@@ -417,3 +417,47 @@ a correct reading of where the time goes: per field, roughly 36 ns was
 parsing and 31 ns is the surrounding plumbing, against about 4 ns per byte
 of input. Parsing is now much cheaper, so the plumbing and the
 single-threadedness are what remain.
+
+## Parallel CSV decoding (#107)
+
+Reading 1,000,000 rows of 8 columns took 1,081 ms on one core. Blocks are
+now split at record boundaries and decoded on worker threads.
+
+| | best ms | vs Polars |
+|---|---|---|
+| before | 1,081 | 86.7x |
+| parallel | **215** | **13.4x** |
+
+The 100,000-row, 4-column `bench_csv` file goes 66 -> 18 ms, so small files
+gain too rather than paying for the machinery.
+
+### Why splitting is the whole problem
+
+A block boundary can land inside a quoted field, and a quoted field may
+contain newlines, so a worker cannot scan forward to the next newline and
+call it a record start. `record_splits` decides by quote parity: a newline
+is a boundary only when an even number of quotes precede it. Toggling on
+every quote byte handles CSV's doubled-quote escape with no special case,
+because `""` toggles twice.
+
+Blocks are read sequentially and bytes after the last complete record are
+carried into the next block, so memory stays bounded by the block size (8
+MiB for parallel reads) rather than by the file.
+
+Options that depend on counting records from the start of the file --
+`n_rows`, `skip_rows`, `comment_prefix`, `ignore_errors`,
+`truncate_ragged_lines` -- keep the serial path, because a range cannot
+resolve them on its own.
+
+### What the tests had to catch
+
+The first version sized workers with `worker_count`, which measures **rows**,
+against a byte count. A 64 KiB block yielded one worker, so the parallel
+path never ran and every CSV test passed while testing nothing. The
+differential tests caught it by asserting the parallel path was reachable
+before comparing. Worker sizing is by bytes now, a quarter megabyte each.
+
+Two further defects surfaced only once the path was live, both from the
+existing contract suites: an empty quote character indexed byte 0 of an
+empty string and crashed, and every range looked for a byte-order mark,
+which is meaningful only at the very start of a file.

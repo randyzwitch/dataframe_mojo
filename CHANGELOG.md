@@ -3,6 +3,22 @@
 All notable changes are recorded here. The API is pre-1.0 and provisional:
 breaking changes can happen in any release and are listed under **Breaking**.
 
+## Unreleased
+
+### Changed
+
+- CSV reads decode records on worker threads. A block is split at record
+  boundaries -- decided by quote parity, so a newline inside a quoted field
+  is never mistaken for one -- each range is decoded by its own reader, and
+  the partial frames are concatenated in order, which keeps the output
+  identical to a serial read. Blocks are read sequentially with the
+  trailing partial record carried forward, so memory stays bounded by the
+  block size rather than the file size. 1M rows of 8 columns drops from
+  1,081 ms to 215 ms, and a 100k-row file from 66 ms to 18 ms. Reads using
+  `n_rows`, `skip_rows`, `comment_prefix`, `ignore_errors` or
+  `truncate_ragged_lines` stay serial, since those count records from the
+  start of the file (#107).
+
 ## 0.1.3 - 2026-09-20
 
 ### Added
