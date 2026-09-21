@@ -22,6 +22,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
   119 ms to 116 ms and a 100k-row one from 15 ms to 13 ms; grouping 100k
   rows on a high-cardinality key from 4.2 ms to 3.6 ms (#105).
 
+- Partitioned key encoding turns each bucket's local ids into global ones
+  on worker threads. A bucket owns disjoint rows and a disjoint range of
+  ids, so once the id offsets are known the work is independent; it was
+  two serial passes over every row, each with a scattered write, and cost
+  about as much as the encoding it followed. Encoding the keys of a
+  1M x 500k join drops from 62 ms to 36 ms, taking the join from 116 ms to
+  101 ms (#105).
+
 - Sorting by fixed-width keys no longer ranks its key columns. Each value
   maps to an Int whose signed order is the value's order, in one linear
   pass, which is what the sort compares anyway; ranking existed to give
