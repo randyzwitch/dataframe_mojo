@@ -325,6 +325,62 @@ struct _EncodeJob(Job):
         self.ids = keys.ids.copy()
         self.count = keys.count()
 
+    def into_ids(deinit self) -> List[Int]:
+        """Hand the bucket's ids to the assembly, rather than copying them."""
+        return self.ids^
+
+
+struct _AssembleJob(Job):
+    """Rewrite one bucket's local ids as global ones.
+
+    Buckets hold disjoint rows and disjoint id ranges, so every write here
+    lands somewhere no other job touches and no locking is needed.
+    """
+
+    var local_ids: List[Int]
+    var order: Int
+    var ids: Int
+    var representatives: Int
+    var lo: Int
+    var base: Int
+
+    def __init__(
+        out self,
+        var local_ids: List[Int],
+        order: Int,
+        ids: Int,
+        representatives: Int,
+        lo: Int,
+        base: Int,
+    ):
+        self.local_ids = local_ids^
+        self.order = order
+        self.ids = ids
+        self.representatives = representatives
+        self.lo = lo
+        self.base = base
+
+    def run(mut self) raises:
+        # The bucket's ids are owned here, moved out of the encode job.
+        # Indexing a List of jobs hands back a copy, so a pointer taken
+        # through one points at a temporary -- the outputs below are
+        # addressed directly, from locals that stay put.
+        var order = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
+        var ids = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
+        var representatives = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.representatives
+        )
+        for i in range(len(self.local_ids)):
+            var local = self.local_ids[i]
+            # -1 marks a null key that must not match; it carries through.
+            if local >= 0:
+                var row = order.unsafe_offset(self.lo + i)[]
+                ids.unsafe_offset(row)[] = local + self.base
+                # One row per id, for callers that need a key value back.
+                # The serial version wrote this in a second pass, which
+                # left the last row of each id; one pass leaves the same.
+                representatives.unsafe_offset(self.base + local)[] = row
+
 
 def encode_partitioned(
     keys: List[Series], workers: Int, nulls_equal: Bool
@@ -361,22 +417,38 @@ def encode_partitioned(
         offsets.append(lo)
     run_jobs(jobs)
 
-    var ids = List[Int](length=rows, fill=-1)
-    var representatives = List[Int]()
+    # Turn each bucket's local ids into global ones. A bucket owns a
+    # disjoint set of rows and a disjoint range of ids, so once the id
+    # offsets are known this is one independent job per bucket rather than
+    # two serial passes over every row -- which, with a scattered write per
+    # row through `parts.order`, was about as expensive as the encoding.
+    var bases = List[Int](capacity=len(jobs) + 1)
     var base = 0
     for j in range(len(jobs)):
-        var lo = offsets[j]
-        for i in range(len(jobs[j].ids)):
-            var local = jobs[j].ids[i]
-            # -1 marks a null key that must not match; it carries through.
-            if local >= 0:
-                ids[parts.order[lo + i]] = local + base
-        for _ in range(jobs[j].count):
-            representatives.append(0)
-        # One row per id, for callers that need a key value back.
-        for i in range(len(jobs[j].ids)):
-            var local = jobs[j].ids[i]
-            if local >= 0:
-                representatives[base + local] = parts.order[lo + i]
+        bases.append(base)
         base += jobs[j].count
+    bases.append(base)
+
+    var ids = List[Int](length=rows, fill=-1)
+    var representatives = List[Int](length=base, fill=0)
+    if len(jobs) > 0:
+        var order_address = Int(parts.order.unsafe_ptr())
+        var ids_address = Int(ids.unsafe_ptr())
+        var representatives_address = Int(representatives.unsafe_ptr())
+        var assembly = List[_AssembleJob](capacity=len(jobs))
+        var j = 0
+        while len(jobs) > 0:
+            # Take the bucket's ids rather than borrowing them.
+            assembly.append(
+                _AssembleJob(
+                    jobs.pop(0).into_ids(),
+                    order_address,
+                    ids_address,
+                    representatives_address,
+                    offsets[j],
+                    bases[j],
+                )
+            )
+            j += 1
+        run_jobs(assembly)
     return RowKeys(ids^, representatives^)
