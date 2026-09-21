@@ -40,6 +40,25 @@ def main() -> None:
                      changelog, re.MULTILINE):
         fail(f"CHANGELOG.md has no dated '## {version} - YYYY-MM-DD' section")
 
+    # Exactly one Unreleased section at most. Resolving a changelog conflict
+    # by keeping both sides verbatim produces two, which reads as though
+    # entries were released when they were not; that happened once and this
+    # check did not catch it, because a dated section for the version
+    # existed either way.
+    unreleased = re.findall(r"^## Unreleased$", changelog, re.MULTILINE)
+    if len(unreleased) > 1:
+        fail(f"CHANGELOG.md has {len(unreleased)} '## Unreleased' sections")
+
+    # Every version heading must be unique and dated, so a release cannot
+    # silently appear twice.
+    headings = re.findall(r"^## (?!Unreleased$)(.+)$", changelog, re.MULTILINE)
+    for heading in headings:
+        if not re.fullmatch(r"\d+\.\d+\.\d+ - \d{4}-\d\d-\d\d", heading):
+            fail(f"CHANGELOG.md heading is not 'X.Y.Z - YYYY-MM-DD': {heading!r}")
+    duplicates = {h for h in headings if headings.count(h) > 1}
+    if duplicates:
+        fail(f"CHANGELOG.md has duplicate version headings: {sorted(duplicates)}")
+
     # Install snippets must point at this version's tag, or consumers follow
     # the README to a tag that does not exist.
     expected = f"v{version}"
