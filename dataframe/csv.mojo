@@ -208,7 +208,7 @@ struct _CsvColumn(Copyable):
 
     def append(
         mut self,
-        text: String,
+        text: StringSlice,
         quoted: Bool,
         record: Int,
         null_values: List[String] = List[String](),
@@ -244,7 +244,9 @@ struct _CsvColumn(Copyable):
         if self.kind == _KIND_TEMPORAL:
             try:
                 self.builder[_IntBuilder].values.append(
-                    parse_temporal(text, self.field.dtype, self.field.format)
+                    parse_temporal(
+                        String(text), self.field.dtype, self.field.format
+                    )
                 )
             except e:
                 raise self._error(record, String(e))
@@ -260,7 +262,7 @@ struct _CsvColumn(Copyable):
                     "invalid "
                     + _display_name(self.field.dtype)
                     + " value '"
-                    + text
+                    + String(text)
                     + "'",
                 )
             self.builder[_IntBuilder].valid.append(True)
@@ -271,11 +273,12 @@ struct _CsvColumn(Copyable):
                 raise self._error(record, String(e))
             self.builder[_FloatBuilder].valid.append(True)
         elif self.kind == _KIND_BOOL:
-            if text != "true" and text != "false":
+            var is_true = text.as_bytes() == "true".as_bytes()
+            if not is_true and text.as_bytes() != "false".as_bytes():
                 raise self._error(
                     record, "Boolean must be exactly 'true' or 'false'"
                 )
-            self.builder[_BoolBuilder].values.append(text == "true")
+            self.builder[_BoolBuilder].values.append(is_true)
             self.builder[_BoolBuilder].valid.append(True)
         else:
             self.builder[StringBuilder].append(text)
@@ -340,6 +343,12 @@ struct _CsvReader:
     var prefix_done: Bool
     var field_bytes: List[UInt8]
     var header_fields: List[String]
+    # Every field of the current record, end to end, with one end offset
+    # per field. A String per field was 849 ms of a 1,336 ms single-threaded
+    # read of 1M rows -- 8 million allocations -- and a slice over this
+    # buffer needs none.
+    var record_bytes: List[UInt8]
+    var field_ends: List[Int]
     var fields: List[String]
     var quoted: List[Bool]
     var field_index: Int
@@ -388,6 +397,8 @@ struct _CsvReader:
         self.prefix_done = False
         self.field_bytes = List[UInt8]()
         self.header_fields = List[String]()
+        self.record_bytes = List[UInt8]()
+        self.field_ends = List[Int]()
         self.fields = List[String]()
         self.quoted = List[Bool]()
         self.field_index = 0
@@ -437,14 +448,6 @@ struct _CsvReader:
         )
 
     def _finish_field(mut self) raises:
-        var text: String
-        if self.lossy:
-            text = String(from_utf8_lossy=self.field_bytes)
-        else:
-            try:
-                text = String(from_utf8=self.field_bytes)
-            except:
-                raise self._location("field is not valid UTF-8")
         if (
             not self.sampling
             and self.field_index >= len(self.schema)
@@ -452,13 +455,55 @@ struct _CsvReader:
         ):
             if not self.ignore_errors or (self.has_header and self.record == 1):
                 raise self._location("too many fields")
-        self.fields.append(text^)
+        var start = (self.field_ends[len(self.field_ends) - 1]) if len(
+            self.field_ends
+        ) > 0 else 0
+        if self.lossy:
+            # Lossy decoding substitutes U+FFFD, so the bytes change and a
+            # String has to be built; it is the rare path.
+            var text = String(
+                from_utf8_lossy=Span(self.record_bytes)[
+                    start : len(self.record_bytes)
+                ]
+            )
+            self.record_bytes.resize(start, 0)
+            self.record_bytes.extend(text.as_bytes())
+        else:
+            # Validation only, over bytes already in place: no allocation
+            # and no copy, the field having been written here directly.
+            try:
+                _ = StringSlice(
+                    from_utf8=Span(self.record_bytes)[
+                        start : len(self.record_bytes)
+                    ]
+                )
+            except:
+                raise self._location("field is not valid UTF-8")
+        self.field_ends.append(len(self.record_bytes))
+        if self.sampling or (self.has_header and self.record == 1):
+            # Inference keeps its sample, and a header's names are compared
+            # and stored, so those records still materialise Strings.
+            self.fields.append(
+                String(self._field_text(len(self.field_ends) - 1))
+            )
         self.quoted.append(self.field_quoted)
-        self.field_bytes.clear()
         self.field_index += 1
         self.field_quoted = False
         self.field_started = False
         self.after_quote = False
+
+    def _field_text(self, i: Int) -> StringSlice[ImmutAnyOrigin]:
+        """Field i of the current record, borrowed from `record_bytes`."""
+        var start = self.field_ends[i - 1] if i > 0 else 0
+        return StringSlice[ImmutAnyOrigin](
+            unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=self.record_bytes.unsafe_ptr()
+                .unsafe_mut_cast[False]()
+                .unsafe_origin_cast[ImmutAnyOrigin]()
+                .unsafe_offset(start),
+                length=self.field_ends[i] - start,
+            )
+        )
 
     def _finish_record(mut self) raises:
         self._finish_field()
@@ -467,6 +512,8 @@ struct _CsvReader:
             self.sample_quoted.append(self.quoted.copy())
             self.fields.clear()
             self.quoted.clear()
+            self.record_bytes.clear()
+            self.field_ends.clear()
             self.field_index = 0
             self.record += 1
             self.record_open = False
@@ -474,7 +521,7 @@ struct _CsvReader:
                 self.done = True
             return
         var header = self.has_header and self.record == 1
-        var count = len(self.fields)
+        var count = len(self.field_ends)
         if header and not self.check_header:
             pass
         elif header:
@@ -517,14 +564,17 @@ struct _CsvReader:
                 for i in range(len(self.schema)):
                     if i < count:
                         self.columns[i].append(
-                            self.fields[i],
+                            self._field_text(i),
                             self.quoted[i],
                             self.record,
                             self.null_values,
                         )
                     else:
                         self.columns[i].append(
-                            "", False, self.record, self.null_values
+                            StringSlice[ImmutAnyOrigin](),
+                            False,
+                            self.record,
+                            self.null_values,
                         )
                     appended += 1
                 self.rows += 1
@@ -538,6 +588,8 @@ struct _CsvReader:
                 self.skipped += 1
         self.fields.clear()
         self.quoted.clear()
+        self.record_bytes.clear()
+        self.field_ends.clear()
         self.field_index = 0
         self.record += 1
         self.record_open = False
@@ -591,7 +643,7 @@ struct _CsvReader:
         if self.in_quotes:
             if self.after_quote:
                 if byte == self.quote:
-                    self.field_bytes.append(self.quote)
+                    self.record_bytes.append(self.quote)
                     self.after_quote = False
                 elif byte == self.separator:
                     self.in_quotes = False
@@ -608,7 +660,7 @@ struct _CsvReader:
             elif byte == self.quote:
                 self.after_quote = True
             else:
-                self.field_bytes.append(byte)
+                self.record_bytes.append(byte)
                 if byte == 10:
                     self.physical_line += 1
             return
@@ -628,7 +680,7 @@ struct _CsvReader:
             self.pending_cr = True
         else:
             self.field_started = True
-            self.field_bytes.append(byte)
+            self.record_bytes.append(byte)
 
     def feed(mut self, bytes: List[UInt8]) raises:
         for byte in bytes:
@@ -1344,7 +1396,7 @@ def _render_field(
     return text
 
 
-def _parse_int_slot(text: String, dtype: DataType) raises -> Int64:
+def _parse_int_slot(text: StringSlice, dtype: DataType) raises -> Int64:
     """Parse an integer field range-checked for dtype into an Int64 slot
     (UInt64 keeps its bit pattern)."""
     if dtype == CSV_INT64 or dtype.is_temporal():

@@ -7,6 +7,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- The CSV reader no longer builds a `String` for every field. Fields of a
+  record are written end to end into one buffer and passed on as slices
+  over it, which needs no allocation; a 1M-row file of 8 columns was
+  allocating 8 million Strings. Reading that file single-threaded drops
+  from 1,336 ms to 992 ms, and across 32 threads from 155 ms to 118 ms.
+  Strings are still built where they are kept rather than parsed: schema
+  inference's sample, a header's names, and lossy decoding, which
+  substitutes U+FFFD and so changes the bytes (#107).
+
 - `concat` builds its output columns on worker threads. Each output column
   is assembled from that column of every input frame and touches nothing
   else, so there is nothing to coordinate. A parallel CSV read concatenates
