@@ -29,6 +29,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
   comparison is a total order and a slice boundary falls in exactly one
   place (#108).
 
+- A sort with several key columns ranks them at once rather than one after
+  another, which is worth doing because ranking a column is itself serial
+  and is the largest part of a sort. A two-key sort of 1M rows spends
+  107 ms ranking before and 76 ms after, for 191 ms to 155 ms overall
+  (#108).
+
 - CSV reads decode records on worker threads. A block is split at record
   boundaries -- decided by quote parity, so a newline inside a quoted field
   is never mistaken for one -- each range is decoded by its own reader, and
