@@ -182,5 +182,92 @@ def test_sort_errors() raises:
         _ = frame.sort(["i", "missing"])
 
 
+def test_dense_rank_edges_match_reference() raises:
+    """Column shapes where the rank pass has no values to sort, or nothing to
+    distinguish. Dense ranks are built by sorting (value, row) pairs, so the
+    cases that carry no pairs, or only equal ones, are the ones where a rank
+    count can go wrong without any comparison being wrong."""
+    var nan = Float64(0) / Float64(0)
+    var frames = List[DataFrame]()
+    # Every value null: no pairs at all.
+    frames.append(
+        DataFrame(
+            [
+                Series(
+                    "i",
+                    Column[Int64](
+                        List[Int64](length=6, fill=0),
+                        List[Bool](length=6, fill=False),
+                    ),
+                ),
+                Series("f", Column[Float64](List[Float64](length=6, fill=1.5))),
+            ]
+        ).with_row_index()
+    )
+    # One distinct value repeated: every pair compares equal.
+    frames.append(
+        DataFrame(
+            [
+                Series("i", Column[Int64](List[Int64](length=6, fill=7))),
+                Series("f", Column[Float64](List[Float64](length=6, fill=0.5))),
+            ]
+        ).with_row_index()
+    )
+    # NaN and null together, so both reserved ranks are in play at once.
+    frames.append(
+        DataFrame(
+            [
+                Series(
+                    "i",
+                    Column[Int64](
+                        [1, 1, 2, 2, 3, 3],
+                        [True, False, True, False, True, False],
+                    ),
+                ),
+                Series(
+                    "f",
+                    Column[Float64](
+                        [nan, 0.0, nan, -0.0, 1.0, nan],
+                        [True, True, False, True, True, True],
+                    ),
+                ),
+            ]
+        ).with_row_index()
+    )
+    # A single row, and an empty frame.
+    frames.append(
+        DataFrame(
+            [
+                Series("i", Column[Int64]([5])),
+                Series("f", Column[Float64]([2.5])),
+            ]
+        ).with_row_index()
+    )
+    frames.append(
+        DataFrame(
+            [
+                Series("i", Column[Int64](List[Int64]())),
+                Series("f", Column[Float64](List[Float64]())),
+            ]
+        ).with_row_index()
+    )
+
+    var keys: List[List[String]] = [["i"], ["f"], ["i", "f"], ["f", "i"]]
+    for f in range(len(frames)):
+        ref frame = frames[f]
+        for by in keys:
+            for d in range(2):
+                for last in range(2):
+                    var descending = List[Bool](length=len(by), fill=d == 1)
+                    var nulls_last = List[Bool](length=len(by), fill=last == 1)
+                    assert_equal(
+                        frame.arg_sort(
+                            by, descending=descending, nulls_last=nulls_last
+                        ),
+                        reference_order(frame, by, descending, nulls_last),
+                        msg="frame " + String(f),
+                    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

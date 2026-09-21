@@ -97,8 +97,14 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
         jobs.append(slots.pop(0).into_job())
 
 
-def worker_count(rows: Int) -> Int:
-    """Threads to use for `rows` rows (see the module docstring)."""
+def configured_workers() -> Int:
+    """The thread count itself, before any per-stage minimum is applied:
+    `DATAFRAME_THREADS` if set, else the physical core count.
+
+    A stage whose work per row is more than a scan -- sorting, which is
+    n log n -- can divide further than `MIN_ROWS_PER_WORKER` allows and
+    still keep every thread busy, so it sizes itself from this directly.
+    """
     var configured = num_physical_cores()
     var setting = getenv("DATAFRAME_THREADS")
     if setting:
@@ -106,7 +112,12 @@ def worker_count(rows: Int) -> Int:
             configured = Int(setting)
         except:
             pass
-    return max(1, min(configured, rows // MIN_ROWS_PER_WORKER))
+    return max(1, configured)
+
+
+def worker_count(rows: Int) -> Int:
+    """Threads to use for `rows` rows (see the module docstring)."""
+    return max(1, min(configured_workers(), rows // MIN_ROWS_PER_WORKER))
 
 
 def partitions(rows: Int, workers: Int, align: Int) -> List[Int]:

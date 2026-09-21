@@ -4,6 +4,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Series
 from dataframe.parallel import MIN_ROWS_PER_WORKER, worker_count
+from dataframe.series import _merge_runs, _merge_slice, _sort_range
 
 comptime ROWS = 200_000
 
@@ -124,6 +125,83 @@ def test_top_k_and_bottom_k_match_serial() raises:
     set_threads(32)
     assert_true(top_serial.equals(df.top_k(20, "k")))
     assert_true(bottom_serial.equals(df.bottom_k(20, "k")))
+
+
+def test_merge_slices_reproduce_the_whole_merge() raises:
+    """Splitting one merge into output slices must give the same array as
+    merging it in one go, for every slice count and every shape of the two
+    runs -- including a slice boundary landing on the first or last output,
+    and one run being empty or much longer than the other.
+
+    This is the co-rank directly: the sort suites only reach it through a
+    full sort, where a wrong split would still usually produce sorted
+    output and so could pass on all but the unlucky input.
+    """
+    var shapes: List[List[Int]] = [
+        [8, 8],
+        [1, 1],
+        [1, 15],
+        [15, 1],
+        [0, 9],
+        [9, 0],
+        [3, 100],
+        [100, 3],
+        [64, 64],
+        [37, 41],
+    ]
+    for shape in shapes:
+        var left_len = shape[0]
+        var right_len = shape[1]
+        var total = left_len + right_len
+        if total < 1:
+            continue
+        # Interleave so neither run is uniformly ahead of the other, and
+        # repeat values so equal ranks span the split.
+        var key = List[Int](length=total, fill=0)
+        for i in range(left_len):
+            key[i] = (i * 2) % 7
+        for i in range(right_len):
+            key[left_len + i] = (i * 3) % 7
+        var ranks: List[List[Int]] = [key^]
+
+        # Each run must already be sorted for a merge to be defined.
+        var source = List[Int](length=total, fill=0)
+        var left_rows = _sort_range(ranks, 0, left_len)
+        var right_rows = _sort_range(ranks, left_len, total)
+        for i in range(len(left_rows)):
+            source[i] = left_rows[i]
+        for i in range(len(right_rows)):
+            source[left_len + i] = right_rows[i]
+
+        var whole = List[Int](length=total, fill=-1)
+        _merge_runs(ranks, source, whole, 0, left_len, total)
+
+        for cuts in range(1, total + 2):
+            var sliced = List[Int](length=total, fill=-1)
+            var s = 0
+            while s < cuts:
+                var first = (total * s) // cuts
+                var last = (total * (s + 1)) // cuts
+                if last > first:
+                    _merge_slice(
+                        ranks, source, sliced, 0, left_len, total, first, last
+                    )
+                s += 1
+            for i in range(total):
+                assert_equal(
+                    sliced[i],
+                    whole[i],
+                    msg=(
+                        "shape "
+                        + String(left_len)
+                        + "/"
+                        + String(right_len)
+                        + " cuts "
+                        + String(cuts)
+                        + " at "
+                        + String(i)
+                    ),
+                )
 
 
 def main() raises:

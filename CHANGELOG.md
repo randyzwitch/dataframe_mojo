@@ -7,6 +7,34 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Sorting ranks its numeric key columns by sorting `(value, row)` pairs and
+  walking them, instead of reducing the values to the distinct ones and
+  binary-searching every row back in. That search was the largest single
+  cost of a sort -- 114 ms of the 182 ms spent ranking two key columns of
+  1M rows -- and the string path already ranked by walking a sorted order.
+  A two-key sort of 1M rows drops from 341 ms to 261 ms; ranking a
+  high-cardinality Int64 column drops from 195 ms to 72 ms. Row order is
+  unchanged for every dtype, direction and null placement (#108).
+
+- A sort's merge rounds are split across threads. Each round halves the
+  number of merges, so the last round was one thread merging the whole
+  array; every merge is now cut into output slices, located by binary
+  search so that a slice starts at the same place in both runs. Runs are
+  also formed one per thread rather than one per 65,536 rows, which that
+  minimum -- sized for a linear scan -- had capped at 15 on a 32-core
+  machine, and which left sorts below 131,072 rows entirely serial.
+  Merging and run-sorting 1M rows drops from 114 ms to 31 ms; a whole
+  two-key sort from 261 ms to 191 ms, and at 100k rows from 43 ms to
+  38 ms. Row order is unchanged: ranks break ties by row index, so the
+  comparison is a total order and a slice boundary falls in exactly one
+  place (#108).
+
+- A sort with several key columns ranks them at once rather than one after
+  another, which is worth doing because ranking a column is itself serial
+  and is the largest part of a sort. A two-key sort of 1M rows spends
+  107 ms ranking before and 76 ms after, for 191 ms to 155 ms overall
+  (#108).
+
 - CSV reads decode records on worker threads. A block is split at record
   boundaries -- decided by quote parity, so a newline inside a quoted field
   is never mistaken for one -- each range is decoded by its own reader, and

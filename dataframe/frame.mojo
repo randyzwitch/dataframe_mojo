@@ -441,6 +441,29 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error(
                 "descending and nulls_last must have one entry per sort column"
             )
+        # Ranking a column is serial and is the largest part of a sort, so
+        # several key columns are ranked at once. One column per job, not
+        # one row range per job: ranking sorts the values, which a row range
+        # cannot do independently. This is also why it is one `run_jobs`
+        # call -- each costs about 1.3 ms in thread creation at 32 threads,
+        # there being no pool yet (#103), which is enough to swallow the
+        # gain if it is paid per round.
+        if len(by) > 1 and worker_count(self.height()) > 1:
+            var jobs = List[_RankJob](capacity=len(by))
+            for i in range(len(by)):
+                jobs.append(
+                    _RankJob(
+                        self._columns[self._index(by[i])].copy(),
+                        descending[i],
+                        nulls_last[i],
+                    )
+                )
+            run_jobs(jobs)
+            var ranked = List[List[Int]](capacity=len(by))
+            for i in range(len(jobs)):
+                ranked.append(jobs[i].ranks.copy())
+            return ranked^
+
         var ranks = List[List[Int]](capacity=len(by))
         for i in range(len(by)):
             ranks.append(
@@ -1394,6 +1417,26 @@ def _bind_all(
         names[expression._name] = True
         bound.append(bind(expression, columns))
     return bound^
+
+
+struct _RankJob(Job):
+    """Compute one sort key column's dense ranks."""
+
+    var column: Series
+    var descending: Bool
+    var nulls_last: Bool
+    var ranks: List[Int]
+
+    def __init__(
+        out self, var column: Series, descending: Bool, nulls_last: Bool
+    ):
+        self.column = column^
+        self.descending = descending
+        self.nulls_last = nulls_last
+        self.ranks = List[Int]()
+
+    def run(mut self) raises:
+        self.ranks = self.column._sort_ranks(self.descending, self.nulls_last)
 
 
 struct _EncodeJob(Job):
