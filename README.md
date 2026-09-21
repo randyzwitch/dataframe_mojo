@@ -1,6 +1,6 @@
 # dataframe_mojo
 
-An experimental, native CPU dataframe library for **Mojo 1.1.0**. Import it as
+An experimental, native CPU dataframe library for **Mojo 1.1 and 1.2**. Import it as
 `dataframe`. Storage and computation use Mojo and its standard library; there
 is no Python, pandas, Polars, or Arrow runtime dependency.
 
@@ -16,7 +16,7 @@ Add it to another Pixi workspace straight from GitHub:
 preview = ["pixi-build"]
 
 [dependencies]
-mojo = ">=1.1.0,<1.2"
+mojo = ">=1.1.0,<1.3"
 dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.1.3" }
 ```
 
