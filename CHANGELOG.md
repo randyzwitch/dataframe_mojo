@@ -15,6 +15,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
   once. The join drops from 174 ms to 119 ms at 1M rows, and from 19 ms
   to 15 ms at 100k (#105).
 
+- Encoding a single key column no longer builds a hash map to combine it
+  with the others, there being no others: the distinct values are
+  renumbered in row order through an array indexed by code. This is on the
+  path every single-key join and group_by takes. A 1M-row join drops from
+  119 ms to 116 ms and a 100k-row one from 15 ms to 13 ms; grouping 100k
+  rows on a high-cardinality key from 4.2 ms to 3.6 ms (#105).
+
 - Sorting by fixed-width keys no longer ranks its key columns. Each value
   maps to an Int whose signed order is the value's order, in one linear
   pass, which is what the sort compares anyway; ranking existed to give
