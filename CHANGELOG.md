@@ -3,25 +3,34 @@
 All notable changes are recorded here. The API is pre-1.0 and provisional:
 breaking changes can happen in any release and are listed under **Breaking**.
 
-## Unreleased
+## 0.2.0 - 2026-09-21
+
+### Breaking
+
+- Mojo 1.1 is no longer supported; this release requires the 1.2 series.
+  A compiled Mojo package loads only in the version that produced it, so a
+  consumer on 1.1 must stay on 0.1.3. The package was built and its suite
+  run against 1.2.0.dev2026092105, which is what the bound names: 1.2 is a
+  nightly series today.
+
+- Development tracks the same nightly. The nightly channel is now a
+  workspace channel and there is one environment again, so plain
+  `pixi run test` is the supported toolchain; the separate `nightly`
+  environment added in 0.1.3's cycle has nothing left to do.
 
 ### Added
 
-- A `nightly` pixi environment that resolves Mojo from the nightly channel,
-  so the 1.2 series the version bound now admits can actually be run
-  against: `pixi run -e nightly test`. It is deliberately outside the
-  default solve group, which would otherwise force one Mojo across every
-  environment.
+- `Pool`, worker threads reused across the rounds of one operation instead
+  of created and joined per round. A pool is **scoped**: it joins its
+  workers when released, and never outlives the operation that made it. A
+  process-wide pool is not possible here -- its workers would still be
+  parked in JIT-compiled code when the process exits, which crashes about
+  one run in three under `mojo run`, and no Mojo code can run at exit to
+  join them first. Sorting uses one for its run pass and merge rounds: a
+  two-key sort of 1M rows drops from 156 ms to 150 ms, and at 100k rows
+  from 38 ms to 33 ms (#103).
 
 ### Changed
-
-- The Mojo bound widens from `>=1.1.0,<1.2` to `>=1.1.0,<1.3`, so the 1.2
-  series is admitted. The package builds and its suite passes on
-  1.2.0.dev2026092105. Note what the bound does and does not mean: a
-  compiled Mojo package still loads only in the version that produced it,
-  and a build takes the newest Mojo the bound allows, so one tag does not
-  serve both series. 1.2 exists only as a nightly today, so a build from
-  the release channel still produces a 1.1 package.
 
 - The CSV reader no longer builds a `String` for every field. Fields of a
   record are written end to end into one buffer and passed on as slices
@@ -78,20 +87,6 @@ breaking changes can happen in any release and are listed under **Breaking**.
   including embedded NUL bytes. A value longer than 24 bytes cannot be
   compared from its prefix alone, so such a column falls back to ranking.
   Sorting 1M rows by a string key drops from 331 ms to 75 ms (#108).
-
-### Added
-
-- `Pool`, worker threads reused across the rounds of one operation instead
-  of created and joined per round. A pool is **scoped**: it joins its
-  workers when released, and never outlives the operation that made it. A
-  process-wide pool is not possible here -- its workers would still be
-  parked in JIT-compiled code when the process exits, which crashes about
-  one run in three under `mojo run`, and no Mojo code can run at exit to
-  join them first. Sorting uses one for its run pass and merge rounds: a
-  two-key sort of 1M rows drops from 156 ms to 150 ms, and at 100k rows
-  from 38 ms to 33 ms (#103).
-
-### Changed
 
 - Sorting ranks its numeric key columns by sorting `(value, row)` pairs and
   walking them, instead of reducing the values to the distinct ones and
@@ -174,7 +169,6 @@ breaking changes can happen in any release and are listed under **Breaking**.
   `maintain_order=True`, which sorts groups by their first input row in
   O(groups). Frames below the parallel threshold keep the serial path,
   and `GroupBy.len` and `group_indices` are unchanged (#104).
-
 
 - CSV reads plain decimal Float64 fields in one pass that validates and
   computes together, instead of checking the grammar with one scan and

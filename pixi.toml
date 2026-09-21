@@ -1,8 +1,9 @@
 [workspace]
 name = "dataframe_mojo"
-version = "0.1.3"
+version = "0.2.0"
 description = "An experimental dataframe library for Mojo"
 channels = [
+    "https://conda.modular.com/max-nightly",
     "https://conda.modular.com/max",
     "conda-forge",
     "https://prefix.dev/pixi-build-backends",
@@ -14,21 +15,19 @@ preview = ["pixi-build"]
 # example:
 #
 #     [dependencies]
-#     dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.1.3" }
-#     mojo = ">=1.1.0,<1.3"
+#     dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.2.0" }
+#     mojo = ">=1.2,<1.3"
 #
 # and then `from dataframe import DataFrame, col`.
 #
 # A compiled Mojo package only loads in the Mojo version that produced it,
 # and pixi builds this package with the newest Mojo its host dependency
-# allows -- not with whatever the consumer pinned. The bound below is
-# therefore not a promise that one build runs on both 1.1 and 1.2: it says
-# which versions this source is known to build and pass on, and a build
-# picks the newest of them that is available. 1.2 exists only as a nightly
-# today, so a build from the release channel still produces a 1.1 package.
+# allows -- not with whatever the consumer pinned. From 0.2.0 this package
+# is Mojo 1.2 only. 1.2 is a nightly series today, so the bound names the
+# nightly this release was built and tested against.
 [package]
 name = "dataframe_mojo"
-version = "0.1.3"
+version = "0.2.0"
 description = "An experimental dataframe library for Mojo"
 license = "MIT"
 
@@ -41,15 +40,14 @@ name = "dataframe"
 path = "dataframe"
 
 [package.host-dependencies]
-mojo = ">=1.1.0,<1.3"
+mojo = ">=1.2.0.dev2026092105,<1.3"
 
 [package.run-dependencies]
-mojo = ">=1.1.0,<1.3"
+mojo = ">=1.2.0.dev2026092105,<1.3"
 
 [dependencies]
-# The range CI tests, matching the package's host/run dependencies above, so a
-# 1.1 patch release does not need a manual bump here.
-mojo = ">=1.1.0,<1.3"
+# What CI runs, matching the package's host and run dependencies above.
+mojo = ">=1.2.0.dev2026092105,<1.3"
 
 [tasks]
 test = "bash scripts/run_tests.sh"
@@ -80,23 +78,5 @@ oracle = "python3 scripts/oracle.py"
 oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo"
 bench-polars = "python3 scripts/bench_polars.py"
 
-# The Mojo 1.2 series exists only on the nightly channel, so the bound in
-# `[dependencies]` resolves to 1.1 from the release channel. This feature
-# is how 1.2 is actually exercised: `pixi run -e nightly test` runs the
-# same suite against it.
-#
-# It is deliberately not in `solve-group = "default"`. A shared solve group
-# would force one Mojo across every environment, which is the opposite of
-# what this is for.
-[feature.nightly]
-channels = ["https://conda.modular.com/max-nightly"]
-
-[feature.nightly.dependencies]
-mojo = ">=1.2.0.dev2026092105,<1.3"
-
-[feature.nightly.tasks]
-mojo-version = "mojo --version"
-
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }
-nightly = { features = ["nightly"] }
