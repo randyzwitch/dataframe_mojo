@@ -976,7 +976,7 @@ comptime _MIN_BYTES_PER_WORKER = 262144
 
 # Parallel reads pull larger blocks than the streaming default, because a
 # block is what gets divided: a 64 KiB block cannot usefully be split.
-comptime _PARALLEL_BLOCK = 8 << 20
+comptime _PARALLEL_BLOCK = 32 << 20
 
 
 def _csv_workers(bytes: Int) -> Int:

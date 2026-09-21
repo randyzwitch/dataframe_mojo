@@ -14,10 +14,16 @@ breaking changes can happen in any release and are listed under **Breaking**.
   identical to a serial read. Blocks are read sequentially with the
   trailing partial record carried forward, so memory stays bounded by the
   block size rather than the file size. 1M rows of 8 columns drops from
-  1,081 ms to 161 ms, and a 100k-row file from 66 ms to 18 ms. Reads using
+  1,081 ms to 145 ms, and a 100k-row file from 66 ms to 18 ms. Reads using
   `n_rows`, `skip_rows`, `comment_prefix`, `ignore_errors` or
   `truncate_ragged_lines` stay serial, since those count records from the
   start of the file (#107).
+
+- Appending one column to another copies the window in bulk instead of one
+  bounds-checked element at a time. That is how `concat`, `vstack`, batch
+  reassembly and every parallel stage reassemble their output, so it is not
+  specific to CSV; concatenating the 64 partial frames of a 1M-row CSV read
+  drops from 69 ms to 51 ms (#107).
 
 ## 0.1.3 - 2026-09-20
 
