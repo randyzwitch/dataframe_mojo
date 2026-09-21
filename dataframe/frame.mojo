@@ -23,6 +23,7 @@ from .execution import evaluate
 from .gather import take_parallel, true_rows
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
+from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows
 from .groups import GroupIndices
@@ -441,6 +442,20 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error(
                 "descending and nulls_last must have one entry per sort column"
             )
+        # Fixed-width keys need no ranking at all: each value maps to an
+        # Int ordered as the value is, in one linear pass, which is what
+        # `sort_indices` compares anyway. Ranking exists to handle strings,
+        # whose order cannot be carried in a fixed-width word.
+        var keys = List[Series](capacity=len(by))
+        var fixed = True
+        for i in range(len(by)):
+            ref column = self._columns[self._index(by[i])]
+            if not encodable(column):
+                fixed = False
+            keys.append(column.copy())
+        if fixed:
+            return encode_sort_keys(keys, descending, nulls_last)
+
         # Ranking a column is serial and is the largest part of a sort, so
         # several key columns are ranked at once. One column per job, not
         # one row range per job: ranking sorts the values, which a row range
