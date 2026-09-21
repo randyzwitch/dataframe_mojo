@@ -6,7 +6,7 @@ from .column import Column
 from .string_column import StringColumn
 from .value import AnyValue
 from .display import render_series
-from .parallel import Job, partitions, run_jobs, worker_count
+from .parallel import Job, configured_workers, partitions, run_jobs
 from std.memory import ArcPointer
 from .cast import cast_series
 from .expr import Expr, col, lit
@@ -911,6 +911,69 @@ def _merge_runs(
             right += 1
 
 
+def _co_rank(
+    ranks: List[List[Int]],
+    source: List[Int],
+    start: Int,
+    mid: Int,
+    end: Int,
+    k: Int,
+) -> Int:
+    """How many of the first `k` merged outputs come from the left run.
+
+    Splitting a merge across workers needs each worker to know where its
+    output slice begins in *both* runs. For output position k there is
+    exactly one split (i from the left, k - i from the right), because
+    `_rank_less` breaks ties by row index and is therefore a total order --
+    no two distinct rows compare equal, so no split is ambiguous. That also
+    means the slices reproduce the serial merge exactly, including which run
+    an equal-keyed row came from, so stability needs no special handling.
+
+    Found by binary search on i, the classic merge-path co-rank.
+    """
+    var left_len = mid - start
+    var right_len = end - mid
+    var low = max(0, k - right_len)
+    var high = min(k, left_len)
+    while low < high:
+        var i = (low + high) // 2
+        var j = k - i
+        # source[mid + j - 1] belongs before source[start + i]: take more
+        # from the left run.
+        if j > 0 and _rank_less(ranks, source[start + i], source[mid + j - 1]):
+            low = i + 1
+        else:
+            high = i
+    return low
+
+
+def _merge_slice(
+    ranks: List[List[Int]],
+    source: List[Int],
+    mut target: List[Int],
+    start: Int,
+    mid: Int,
+    end: Int,
+    first: Int,
+    last: Int,
+):
+    """Merge only outputs [first, last) of merging [start, mid) and
+    [mid, end), where both are offsets from `start`."""
+    var i = _co_rank(ranks, source, start, mid, end, first)
+    var j = first - i
+    var left = start + i
+    var right = mid + j
+    for dest in range(start + first, start + last):
+        if left < mid and (
+            right >= end or not _rank_less(ranks, source[right], source[left])
+        ):
+            target[dest] = source[left]
+            left += 1
+        else:
+            target[dest] = source[right]
+            right += 1
+
+
 def _sort_range(ranks: List[List[Int]], start: Int, end: Int) -> List[Int]:
     """Stable bottom-up mergesort of rows [start, end), returned in order."""
     var n = end - start
@@ -954,7 +1017,13 @@ struct _SortRangeJob(Job):
 
 
 struct _MergeJob(Job):
-    """Merge two adjacent sorted runs of `source` into `target`."""
+    """Merge outputs [first, last) of two adjacent sorted runs of `source`
+    into `target`, where first and last are offsets from `start`.
+
+    A whole merge is the slice [0, end - start); splitting it lets one merge
+    occupy every worker, which matters most in the last round, where the
+    pairwise tree has only one merge left and it spans the whole array.
+    """
 
     var ranks: ArcPointer[List[List[Int]]]
     var source: Int
@@ -962,6 +1031,8 @@ struct _MergeJob(Job):
     var start: Int
     var mid: Int
     var end: Int
+    var first: Int
+    var last: Int
 
     def __init__(
         out self,
@@ -971,6 +1042,8 @@ struct _MergeJob(Job):
         start: Int,
         mid: Int,
         end: Int,
+        first: Int,
+        last: Int,
     ):
         self.ranks = ranks.copy()
         self.source = source
@@ -978,6 +1051,8 @@ struct _MergeJob(Job):
         self.start = start
         self.mid = mid
         self.end = end
+        self.first = first
+        self.last = last
 
     def run(mut self) raises:
         ref out = Pointer[List[Int], MutAnyOrigin](
@@ -986,7 +1061,21 @@ struct _MergeJob(Job):
         ref src = Pointer[List[Int], MutAnyOrigin](
             unsafe_from_address=self.source
         )[]
-        _merge_runs(self.ranks[], src, out, self.start, self.mid, self.end)
+        _merge_slice(
+            self.ranks[],
+            src,
+            out,
+            self.start,
+            self.mid,
+            self.end,
+            self.first,
+            self.last,
+        )
+
+
+# Below this many rows a run is not worth its own thread, whatever the core
+# count. Sorting is n log n per run, so this is far under MIN_ROWS_PER_WORKER.
+comptime _MIN_ROWS_PER_RUN = 8192
 
 
 def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
@@ -1000,15 +1089,22 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
     if len(ranks) == 0:
         raise Error("Sorting requires at least one key")
     var n = len(ranks[0])
-    var workers = worker_count(n)
-    if workers <= 1 or n < 2:
+    # One run per thread, not one per MIN_ROWS_PER_WORKER rows: that minimum
+    # is sized for a linear scan, and it both caps a 1M-row sort at 15 runs
+    # however many cores are free and leaves a 100k-row sort entirely serial.
+    # Sorting a run is n log n, so shorter runs still repay their scheduling,
+    # and the merge rounds below are themselves split across threads and so
+    # do not lengthen as runs are added.
+    var workers = configured_workers()
+    var target = max(1, min(workers, n // _MIN_ROWS_PER_RUN))
+    if target <= 1 or n < 2:
         return _sort_range(ranks, 0, n)
 
     var shared = ArcPointer(ranks.copy())
-    var bounds = partitions(n, workers, 1)
+    var bounds = partitions(n, target, 1)
     # partitions() can leave empty trailing ranges; keep only real ones.
     var starts = List[Int]()
-    for w in range(workers):
+    for w in range(len(bounds) - 1):
         if bounds[w + 1] > bounds[w]:
             starts.append(bounds[w])
     starts.append(n)
@@ -1026,28 +1122,42 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
         for i in range(len(jobs[r].rows)):
             indices[at + i] = jobs[r].rows[i]
 
-    # Merge adjacent runs in rounds, alternating buffers.
+    # Merge adjacent runs in rounds, alternating buffers. Each round halves
+    # the number of merges, so the later rounds have fewer merges than there
+    # are workers -- the last has one, spanning the whole array. Every merge
+    # is therefore split into output slices, enough that a round has about
+    # one slice per worker however few merges it contains.
     var scratch = List[Int](length=n, fill=0)
     var stride = 1
     while stride < runs:
         var source_address = Int(Pointer(to=indices))
         var merges = List[_MergeJob]()
+        var pending = (runs + 2 * stride - 1) // (2 * stride)
+        var slices = max(1, (workers + pending - 1) // pending)
         var r = 0
         while r < runs:
             var start = starts[r]
             var mid = starts[min(r + stride, runs)]
             var end = starts[min(r + 2 * stride, runs)]
             if mid < end:
-                merges.append(
-                    _MergeJob(
-                        shared,
-                        source_address,
-                        Int(Pointer(to=scratch)),
-                        start,
-                        mid,
-                        end,
-                    )
-                )
+                var width = end - start
+                var cuts = min(slices, width)
+                for s in range(cuts):
+                    var first = (width * s) // cuts
+                    var last = (width * (s + 1)) // cuts
+                    if last > first:
+                        merges.append(
+                            _MergeJob(
+                                shared,
+                                source_address,
+                                Int(Pointer(to=scratch)),
+                                start,
+                                mid,
+                                end,
+                                first,
+                                last,
+                            )
+                        )
             else:
                 for i in range(start, end):
                     scratch[i] = indices[i]

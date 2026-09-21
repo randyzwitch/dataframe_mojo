@@ -16,6 +16,19 @@ breaking changes can happen in any release and are listed under **Breaking**.
   high-cardinality Int64 column drops from 195 ms to 72 ms. Row order is
   unchanged for every dtype, direction and null placement (#108).
 
+- A sort's merge rounds are split across threads. Each round halves the
+  number of merges, so the last round was one thread merging the whole
+  array; every merge is now cut into output slices, located by binary
+  search so that a slice starts at the same place in both runs. Runs are
+  also formed one per thread rather than one per 65,536 rows, which that
+  minimum -- sized for a linear scan -- had capped at 15 on a 32-core
+  machine, and which left sorts below 131,072 rows entirely serial.
+  Merging and run-sorting 1M rows drops from 114 ms to 31 ms; a whole
+  two-key sort from 261 ms to 191 ms, and at 100k rows from 43 ms to
+  38 ms. Row order is unchanged: ranks break ties by row index, so the
+  comparison is a total order and a slice boundary falls in exactly one
+  place (#108).
+
 - CSV reads decode records on worker threads. A block is split at record
   boundaries -- decided by quote parity, so a newline inside a quoted field
   is never mistaken for one -- each range is decoded by its own reader, and
