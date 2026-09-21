@@ -7,6 +7,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Sorting ranks its numeric key columns by sorting `(value, row)` pairs and
+  walking them, instead of reducing the values to the distinct ones and
+  binary-searching every row back in. That search was the largest single
+  cost of a sort -- 114 ms of the 182 ms spent ranking two key columns of
+  1M rows -- and the string path already ranked by walking a sorted order.
+  A two-key sort of 1M rows drops from 341 ms to 261 ms; ranking a
+  high-cardinality Int64 column drops from 195 ms to 72 ms. Row order is
+  unchanged for every dtype, direction and null placement (#108).
+
 - CSV reads decode records on worker threads. A block is split at record
   boundaries -- decided by quote parity, so a newline inside a quoted field
   is never mistaken for one -- each range is decoded by its own reader, and

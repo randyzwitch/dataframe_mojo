@@ -808,32 +808,48 @@ def _equal_columns[
     return True
 
 
+@fieldwise_init
+struct _RankPair[T: Copyable & Deinitable & Comparable](
+    Copyable, Deinitable, Movable
+):
+    """One usable value and the row it came from, so sorting the values also
+    records where each rank belongs."""
+
+    var value: Self.T
+    var row: Int
+
+
 def _dense_ranks[
     T: Copyable & Deinitable & Comparable
 ](values: List[T], usable: List[Bool], mut ranks: List[Int]) -> Int:
-    """Rank usable values densely by sorted order; returns the rank count."""
-    var ordered = List[T]()
+    """Rank usable values densely by sorted order; returns the rank count.
+
+    Sorting (value, row) pairs and then walking them in order assigns every
+    rank in one pass. Sorting the values alone loses the rows, which is why
+    this used to reduce them to the distinct values and binary-search each
+    row back in -- and that search, not the sort, was the dominant cost of a
+    sort: 114 ms of the 182 ms spent ranking two key columns of 1M rows.
+    `_dense_string_ranks` already ranked by walking a sorted order; this
+    brings the numeric path in line, carrying the value alongside the row so
+    that comparisons stay contiguous instead of chasing an index.
+    """
+    var pairs = List[_RankPair[T]](capacity=len(values))
     for i in range(len(values)):
         if usable[i]:
-            ordered.append(values[i].copy())
-    sort(ordered)
-    var distinct = List[T]()
-    for value in ordered:
-        if len(distinct) == 0 or not (distinct[len(distinct) - 1] == value):
-            distinct.append(value.copy())
-    for i in range(len(values)):
-        if not usable[i]:
-            continue
-        var low = 0
-        var high = len(distinct)
-        while low < high:
-            var mid = (low + high) // 2
-            if distinct[mid] < values[i]:
-                low = mid + 1
-            else:
-                high = mid
-        ranks[i] = low
-    return len(distinct)
+            pairs.append(_RankPair[T](values[i].copy(), i))
+    if len(pairs) == 0:
+        return 0
+
+    def by_value(a: _RankPair[T], b: _RankPair[T]) -> Bool:
+        return a.value < b.value
+
+    sort(pairs, by_value)
+    var distinct = 0
+    for k in range(len(pairs)):
+        if k > 0 and not (pairs[k].value == pairs[k - 1].value):
+            distinct += 1
+        ranks[pairs[k].row] = distinct
+    return distinct + 1
 
 
 def _dense_string_ranks(
