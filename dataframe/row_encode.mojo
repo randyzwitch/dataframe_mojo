@@ -42,11 +42,12 @@ Per key:
   never inverted, so both NaN and null placement survive `descending`.
   Columns that can hold neither skip the word entirely.
 """
-from std.memory import bitcast
+from std.memory import Pointer, bitcast
 
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
+from .parallel import Job, partitions, run_jobs, worker_count
 from .series import Series
 from .string_column import StringColumn
 
@@ -117,59 +118,91 @@ def _value_order[D: DType](value: Scalar[D]) -> Int:
     return Int(value)
 
 
-def encode_sort_keys(
-    columns: List[Series],
-    descending: List[Bool],
-    nulls_last: List[Bool],
-) raises -> List[List[Int]]:
-    """Order-preserving words for `columns`, lexicographic across the list.
+@fieldwise_init
+struct _Plan(Copyable, Movable):
+    """Where one column's words live, and how to fill them."""
 
-    Every column must satisfy `encodable`. The result is what
-    `sort_indices` compares: `result[w][row]`, word-major.
-    """
-    if len(columns) == 0:
-        raise Error("sort requires at least one column")
-    var rows = len(columns[0])
-    var words = List[List[Int]]()
+    var base: Int
+    var has_rank: Bool
+    var prefix: Int
+    var flip: Bool
+    var null_rank: Int
+    var nulls: Bool
+
+    def width(self) -> Int:
+        return Int(self.has_rank) + self.prefix + 1
+
+
+def _plan(
+    columns: List[Series], descending: List[Bool], nulls_last: List[Bool]
+) raises -> List[_Plan]:
+    """Word layout, decided once so the encode itself can be split by row."""
+    var plans = List[_Plan](capacity=len(columns))
+    var base = 0
     for k in range(len(columns)):
         ref column = columns[k]
-        var flip = descending[k]
         var nulls = column.null_count() > 0
         var floating = column.dtype().physical() in (
             DataType.FLOAT64,
             DataType.FLOAT32,
         )
-        var null_rank = 2 if nulls_last[k] else -1
-        var ranked = List[Int](length=rows, fill=0)
-        var values = List[Int](length=rows, fill=0)
-        # Strings fill these with their prefix; other dtypes leave it empty.
-        var chunks = List[List[Int]]()
+        var string = column.dtype() == DataType.STRING
+        var plan = _Plan(
+            base,
+            nulls or floating,
+            STRING_PREFIX_BYTES // 8 if string else 0,
+            descending[k],
+            2 if nulls_last[k] else -1,
+            nulls,
+        )
+        base += plan.width()
+        plans.append(plan^)
+    return plans^
+
+
+def _encode_rows(
+    columns: List[Series],
+    plans: List[_Plan],
+    target: Int,
+    start: Int,
+    end: Int,
+) raises:
+    """Encode rows [start, end) of every column into the shared words."""
+    ref words = Pointer[List[List[Int]], MutAnyOrigin](
+        unsafe_from_address=target
+    )[]
+    for k in range(len(columns)):
+        ref column = columns[k]
+        ref plan = plans[k]
+        var rank_at = plan.base
+        var value_at = plan.base + plan.width() - 1
+        var flip = plan.flip
 
         var filled = False
         comptime for t in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[t]
             if column._data.isa[Column[Scalar[D]]]():
                 ref typed = column._data[Column[Scalar[D]]]
-                for i in range(rows):
-                    if nulls and not typed._valid(i):
-                        ranked[i] = null_rank
+                for i in range(start, end):
+                    if plan.nulls and not typed._valid(i):
+                        words[rank_at][i] = plan.null_rank
                         continue
                     var value = typed._get(i)
                     comptime if D.is_floating_point():
                         if value != value:
-                            ranked[i] = 1
+                            words[rank_at][i] = 1
                             continue
                     var order = _value_order[D](value)
-                    values[i] = ~order if flip else order
+                    words[value_at][i] = ~order if flip else order
                 filled = True
         if not filled and column._data.isa[BoolColumn]():
             ref typed = column._data[BoolColumn]
-            for i in range(rows):
-                if nulls and not typed._valid(i):
-                    ranked[i] = null_rank
+            for i in range(start, end):
+                if plan.nulls and not typed._valid(i):
+                    words[rank_at][i] = plan.null_rank
                     continue
                 var order = Int(typed._get(i))
-                values[i] = ~order if flip else order
+                words[value_at][i] = ~order if flip else order
             filled = True
 
         if not filled:
@@ -183,17 +216,15 @@ def encode_sort_keys(
             if not column._data.isa[StringColumn]():
                 raise Error("row encoding requires a fixed-width dtype")
             ref typed = column._data[StringColumn]
-            comptime prefix_words = STRING_PREFIX_BYTES // 8
-            for _ in range(prefix_words):
-                chunks.append(List[Int](length=rows, fill=0))
-            for i in range(rows):
-                if nulls and not typed._valid(i):
-                    ranked[i] = null_rank
+            var first_chunk = plan.base + Int(plan.has_rank)
+            for i in range(start, end):
+                if plan.nulls and not typed._valid(i):
+                    words[rank_at][i] = plan.null_rank
                     continue
                 var text = typed._get(i)
                 var bytes = text.as_bytes()
                 var length = len(bytes)
-                for w in range(prefix_words):
+                for w in range(plan.prefix):
                     var packed = UInt64(0)
                     for b in range(8):
                         var at = w * 8 + b
@@ -208,12 +239,76 @@ def encode_sort_keys(
                             packed ^ UInt64(0x8000_0000_0000_0000)
                         )
                     )
-                    chunks[w][i] = ~order if flip else order
-                values[i] = ~length if flip else length
+                    words[first_chunk + w][i] = ~order if flip else order
+                words[value_at][i] = ~length if flip else length
 
-        if nulls or floating:
-            words.append(ranked^)
-        while len(chunks) > 0:
-            words.append(chunks.pop(0))
-        words.append(values^)
+
+struct _EncodeJob(Job):
+    """Encode one row range of every key column."""
+
+    var columns: List[Series]
+    var plans: List[_Plan]
+    var target: Int
+    var start: Int
+    var end: Int
+
+    def __init__(
+        out self,
+        columns: List[Series],
+        plans: List[_Plan],
+        target: Int,
+        start: Int,
+        end: Int,
+    ):
+        self.columns = columns.copy()
+        self.plans = plans.copy()
+        self.target = target
+        self.start = start
+        self.end = end
+
+    def run(mut self) raises:
+        _encode_rows(
+            self.columns, self.plans, self.target, self.start, self.end
+        )
+
+
+def encode_sort_keys(
+    columns: List[Series],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+) raises -> List[List[Int]]:
+    """Order-preserving words for `columns`, lexicographic across the list.
+
+    Every column must satisfy `encodable`. The result is what
+    `sort_indices` compares: `result[w][row]`, word-major.
+
+    Rows are encoded independently, so this splits by row range across
+    workers: the layout is decided first and every job then writes its own
+    rows of the shared words.
+    """
+    if len(columns) == 0:
+        raise Error("sort requires at least one column")
+    var rows = len(columns[0])
+    var plans = _plan(columns, descending, nulls_last)
+    var total = 0
+    for k in range(len(plans)):
+        total += plans[k].width()
+    var words = List[List[Int]](capacity=total)
+    for _ in range(total):
+        words.append(List[Int](length=rows, fill=0))
+
+    var workers = worker_count(rows)
+    var target = Int(Pointer(to=words))
+    if workers <= 1:
+        _encode_rows(columns, plans, target, 0, rows)
+        return words^
+
+    var bounds = partitions(rows, workers, 1)
+    var jobs = List[_EncodeJob](capacity=workers)
+    for w in range(workers):
+        if bounds[w + 1] > bounds[w]:
+            jobs.append(
+                _EncodeJob(columns, plans, target, bounds[w], bounds[w + 1])
+            )
+    run_jobs(jobs)
     return words^
