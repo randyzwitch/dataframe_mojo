@@ -51,14 +51,27 @@ from .series import Series
 from .string_column import StringColumn
 
 
-def encodable(dtype: DataType) -> Bool:
-    """Whether `dtype` has a fixed-width order-preserving Int encoding.
+# The longest string this encodes, in bytes. A string key becomes this many
+# bytes of zero padding plus a length word; anything longer falls back to
+# dense ranks, because carrying every byte would make the words longer than
+# the comparison saves.
+comptime STRING_PREFIX_BYTES = 24
 
-    Strings do not: a variable-length key needs an escaped byte encoding to
-    keep a short string from being a prefix of a longer one, so string keys
-    still take the dense-rank path.
+
+def encodable(column: Series) -> Bool:
+    """Whether this column has an order-preserving Int encoding.
+
+    Fixed-width dtypes always do. A string column does when every value
+    fits in `STRING_PREFIX_BYTES`, which is checked here rather than
+    assumed -- the encoding is exact only within the prefix it stores.
     """
-    return dtype != DataType.STRING
+    if column.dtype() != DataType.STRING:
+        return True
+    ref typed = column._data[StringColumn]
+    for i in range(len(typed)):
+        if typed._byte_length(i) > STRING_PREFIX_BYTES:
+            return False
+    return True
 
 
 def _float_order[D: DType](value: Scalar[D]) -> Int:
@@ -129,6 +142,8 @@ def encode_sort_keys(
         var null_rank = 2 if nulls_last[k] else -1
         var ranked = List[Int](length=rows, fill=0)
         var values = List[Int](length=rows, fill=0)
+        # Strings fill these with their prefix; other dtypes leave it empty.
+        var chunks = List[List[Int]]()
 
         var filled = False
         comptime for t in range(len(NUMERIC_DTYPES)):
@@ -147,9 +162,7 @@ def encode_sort_keys(
                     var order = _value_order[D](value)
                     values[i] = ~order if flip else order
                 filled = True
-        if not filled:
-            if not column._data.isa[BoolColumn]():
-                raise Error("row encoding requires a fixed-width dtype")
+        if not filled and column._data.isa[BoolColumn]():
             ref typed = column._data[BoolColumn]
             for i in range(rows):
                 if nulls and not typed._valid(i):
@@ -157,8 +170,50 @@ def encode_sort_keys(
                     continue
                 var order = Int(typed._get(i))
                 values[i] = ~order if flip else order
+            filled = True
+
+        if not filled:
+            # A string: its first STRING_PREFIX_BYTES bytes, big-endian so
+            # word order is byte order, then its length. Padding with zeros
+            # and comparing the length last is exact for any two strings
+            # that fit, including one that is a prefix of the other and
+            # including embedded NUL bytes -- "ab" and "ab\0" pad alike and
+            # are separated by the length. Polars escapes instead, which it
+            # needs because its keys are a byte stream with no length.
+            if not column._data.isa[StringColumn]():
+                raise Error("row encoding requires a fixed-width dtype")
+            ref typed = column._data[StringColumn]
+            comptime prefix_words = STRING_PREFIX_BYTES // 8
+            for _ in range(prefix_words):
+                chunks.append(List[Int](length=rows, fill=0))
+            for i in range(rows):
+                if nulls and not typed._valid(i):
+                    ranked[i] = null_rank
+                    continue
+                var text = typed._get(i)
+                var bytes = text.as_bytes()
+                var length = len(bytes)
+                for w in range(prefix_words):
+                    var packed = UInt64(0)
+                    for b in range(8):
+                        var at = w * 8 + b
+                        var byte = UInt64(bytes[at]) if at < length else UInt64(
+                            0
+                        )
+                        packed = (packed << 8) | byte
+                    # Toggle the top bit so unsigned byte order survives the
+                    # signed comparison sort_indices does.
+                    var order = Int(
+                        bitcast[DType.int64](
+                            packed ^ UInt64(0x8000_0000_0000_0000)
+                        )
+                    )
+                    chunks[w][i] = ~order if flip else order
+                values[i] = ~length if flip else length
 
         if nulls or floating:
             words.append(ranked^)
+        while len(chunks) > 0:
+            words.append(chunks.pop(0))
         words.append(values^)
     return words^

@@ -450,7 +450,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var fixed = True
         for i in range(len(by)):
             ref column = self._columns[self._index(by[i])]
-            if not encodable(column.dtype()):
+            if not encodable(column):
                 fixed = False
             keys.append(column.copy())
         if fixed:

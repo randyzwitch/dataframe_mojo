@@ -10,7 +10,11 @@ Int64.MIN under `descending`.
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 
 from dataframe import Column, DataFrame, DataType, Series
-from dataframe.row_encode import encodable, encode_sort_keys
+from dataframe.row_encode import (
+    STRING_PREFIX_BYTES,
+    encodable,
+    encode_sort_keys,
+)
 
 
 def order_of(
@@ -154,20 +158,106 @@ def test_several_keys_compare_lexicographically() raises:
     assert_true(words[1][1] < words[1][0])
 
 
-def test_strings_are_not_encodable() raises:
-    assert_true(not encodable(DataType.STRING))
-    assert_true(encodable(DataType.INT64))
-    assert_true(encodable(DataType.FLOAT64))
-    assert_true(encodable(DataType.BOOL))
-    assert_true(encodable(DataType.DATE))
-    var columns = List[Series]()
-    columns.append(Series("s", Column[String](["a", "b"])))
-    with assert_raises(contains="fixed-width"):
-        _ = encode_sort_keys(
-            columns,
-            List[Bool](length=1, fill=False),
-            List[Bool](length=1, fill=True),
-        )
+def test_strings_order_bytewise() raises:
+    var values: List[String] = ["b", "a", "c", "", "ab"]
+    var rank = order_of(Series("s", Column[String](values^)))
+    # "" < "a" < "ab" < "b" < "c"
+    var expected: List[Int] = [3, 1, 4, 0, 2]
+    for i in range(5):
+        assert_equal(rank[i], expected[i], "index " + String(i))
+
+
+def test_a_string_that_is_a_prefix_of_another() raises:
+    # Zero padding puts the shorter first, which is the byte order; the
+    # length word is what keeps that exact.
+    var values: List[String] = ["abc", "ab", "abcd", "a"]
+    var rank = order_of(Series("s", Column[String](values^)))
+    var expected: List[Int] = [2, 1, 3, 0]
+    for i in range(4):
+        assert_equal(rank[i], expected[i], "index " + String(i))
+
+
+def test_embedded_nul_bytes_are_not_padding() raises:
+    """A NUL inside a value must not read as the end of a shorter one.
+
+    Padding alone cannot tell "ab" from "ab\0" -- both pad to the same
+    bytes -- so the length word decides, and "ab" must come first.
+    """
+    var with_nul = String("ab") + chr(0)
+    var values: List[String] = [with_nul, "ab", "ab" + chr(0) + chr(0)]
+    var rank = order_of(Series("s", Column[String](values^)))
+    assert_equal(rank[1], 0, "ab first")
+    assert_equal(rank[0], 1, "ab NUL second")
+    assert_equal(rank[2], 2, "ab NUL NUL last")
+
+
+def test_multibyte_utf8_orders_by_code_point() raises:
+    # UTF-8 byte order is code point order, so no special handling.
+    var values: List[String] = ["é", "a", "z", "€"]
+    var rank = order_of(Series("s", Column[String](values^)))
+    var expected: List[Int] = [2, 0, 1, 3]
+    for i in range(4):
+        assert_equal(rank[i], expected[i], "index " + String(i))
+
+
+def test_strings_descending_and_null_placement() raises:
+    var values: List[String] = ["b", "a", ""]
+    var valid: List[Bool] = [True, False, True]
+    var down = order_of(
+        Series("s", Column[String](values.copy(), valid.copy())),
+        descending=True,
+        nulls_last=True,
+    )
+    assert_equal(down[0], 0, "b first descending")
+    assert_equal(down[2], 1, "empty second descending")
+    assert_equal(down[1], 2, "null last")
+    var first = order_of(
+        Series("s", Column[String](values^, valid^)),
+        descending=True,
+        nulls_last=False,
+    )
+    assert_equal(first[1], 0, "null first")
+
+
+def test_long_strings_fall_back_to_ranking() raises:
+    # Exactly the prefix is encodable; one byte more is not, because the
+    # encoding would silently compare only the prefix.
+    var fits = String()
+    for _ in range(STRING_PREFIX_BYTES):
+        fits += "x"
+    assert_true(encodable(Series("s", Column[String]([fits.copy()]))))
+    assert_true(encodable(Series("i", Column[Int64]([1]))))
+    assert_true(encodable(Series("f", Column[Float64]([1.0]))))
+    assert_true(encodable(Series("b", Column[Bool]([True]))))
+    var over = fits + "x"
+    assert_true(
+        not encodable(Series("s", Column[String]([over^]))),
+        "a value past the prefix must not claim to be encodable",
+    )
+
+
+def test_a_long_string_still_sorts_correctly() raises:
+    """The fallback has to produce the same order, or the cap is a bug.
+
+    These two differ only past the prefix, so an encoding that ignored the
+    cap would call them equal and leave them in row order.
+    """
+    var base = String()
+    for _ in range(STRING_PREFIX_BYTES):
+        base += "x"
+    var frame = DataFrame(
+        [
+            Series("s", Column[String]([base + "b", base + "a"])),
+            Series("r", Column[Int64]([0, 1])),
+        ]
+    )
+    var order = frame.arg_sort(
+        ["s"],
+        descending=List[Bool](length=1, fill=False),
+        nulls_last=List[Bool](length=1, fill=True),
+    )
+    assert_equal(order[0], 1, "the smaller tail must sort first")
+    assert_equal(order[1], 0)
 
 
 def main() raises:
