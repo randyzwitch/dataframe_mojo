@@ -682,7 +682,84 @@ struct _CsvReader:
             self.field_started = True
             self.record_bytes.append(byte)
 
+    def _ordinary_run(self, bytes: List[UInt8], start: Int) -> Int:
+        """How far from `start` the bytes are all ordinary field content.
+
+        Ordinary means none of the four bytes that end a run -- the
+        separator, LF, CR, and the quote when quoting is on. Found a block
+        at a time, so the common case (a field's worth of plain bytes)
+        costs one compare per lane rather than one call per byte.
+        """
+        var n = len(bytes)
+        var sep = _splat(self.separator)
+        var lf = _splat(10)
+        var cr = _splat(13)
+        var quote = _splat(self.quote if self.quoting else self.separator)
+        var ptr = bytes.unsafe_ptr()
+        var i = start
+        while i + _SCAN_WIDTH <= n:
+            var block = ptr.unsafe_load[width=_SCAN_WIDTH](i)
+            var hit = (
+                block.eq(sep) | block.eq(lf) | block.eq(cr) | block.eq(quote)
+            )
+            if hit.reduce_or():
+                break
+            i += _SCAN_WIDTH
+        while i < n:
+            var byte = bytes[i]
+            if (
+                byte == self.separator
+                or byte == 10
+                or byte == 13
+                or (self.quoting and byte == self.quote)
+            ):
+                break
+            i += 1
+        return i
+
     def feed(mut self, bytes: List[UInt8]) raises:
+        # Bulk path: with no state pending, a run of ordinary bytes is just
+        # field content, and _consume would do nothing per byte but append
+        # it. Copying the run whole skips a call and a branch chain for
+        # every byte of it, which is most of a file.
+        var bulk = (
+            self.prefix_done
+            and not self.done
+            and self.skip_lines == 0
+            and not self.in_comment
+            and len(self.comment) == 0
+            and not self.in_quotes
+            and not self.pending_cr
+        )
+        if bulk:
+            var i = 0
+            var n = len(bytes)
+            while i < n:
+                var stop = self._ordinary_run(bytes, i)
+                if stop > i:
+                    self.record_open = True
+                    self.field_started = True
+                    self.record_bytes.extend(Span(bytes)[i:stop])
+                    i = stop
+                    if i == n:
+                        break
+                self._consume(bytes[i])
+                i += 1
+                # Any state the fast path cannot carry sends the rest of
+                # this block back to the byte-at-a-time reader.
+                if (
+                    self.in_quotes
+                    or self.pending_cr
+                    or self.done
+                    or self.skip_lines > 0
+                    or self.in_comment
+                ):
+                    while i < n:
+                        self._consume(bytes[i])
+                        i += 1
+                    return
+            return
+
         for byte in bytes:
             if not self.prefix_done:
                 self.prefix.append(byte)
