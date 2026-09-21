@@ -40,7 +40,15 @@ pixi run build
 pixi run bench          # CPU benchmark suite; see docs/benchmarks.md
 pixi run bench-csv
 ./build/sales
+
+pixi run -e nightly test   # the same suite against the Mojo 1.2 nightly
 ```
+
+The default environment resolves Mojo 1.1, because 1.2 is only on the
+nightly channel. The `nightly` environment is how the 1.2 series is
+exercised; a compiled package still loads only in the Mojo version that
+built it, so this checks the source builds and passes on both, not that
+one build serves both.
 
 Supported platforms are Linux x86-64 and macOS arm64 (both tested in CI) and
 Linux aarch64 (resolved in `pixi.lock`, not yet tested in CI). Windows waits on

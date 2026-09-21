@@ -80,5 +80,23 @@ oracle = "python3 scripts/oracle.py"
 oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo"
 bench-polars = "python3 scripts/bench_polars.py"
 
+# The Mojo 1.2 series exists only on the nightly channel, so the bound in
+# `[dependencies]` resolves to 1.1 from the release channel. This feature
+# is how 1.2 is actually exercised: `pixi run -e nightly test` runs the
+# same suite against it.
+#
+# It is deliberately not in `solve-group = "default"`. A shared solve group
+# would force one Mojo across every environment, which is the opposite of
+# what this is for.
+[feature.nightly]
+channels = ["https://conda.modular.com/max-nightly"]
+
+[feature.nightly.dependencies]
+mojo = ">=1.2.0.dev2026092105,<1.3"
+
+[feature.nightly.tasks]
+mojo-version = "mojo --version"
+
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }
+nightly = { features = ["nightly"] }

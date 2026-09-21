@@ -5,6 +5,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ## Unreleased
 
+### Added
+
+- A `nightly` pixi environment that resolves Mojo from the nightly channel,
+  so the 1.2 series the version bound now admits can actually be run
+  against: `pixi run -e nightly test`. It is deliberately outside the
+  default solve group, which would otherwise force one Mojo across every
+  environment.
+
 ### Changed
 
 - The Mojo bound widens from `>=1.1.0,<1.2` to `>=1.1.0,<1.3`, so the 1.2
