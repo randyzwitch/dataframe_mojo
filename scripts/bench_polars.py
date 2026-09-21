@@ -118,7 +118,11 @@ def build_runner() -> Path:
     out = ROOT / "build" / "bench_vs_polars"
     out.parent.mkdir(exist_ok=True)
     source = ROOT / "benchmarks" / "bench_vs_polars.mojo"
-    if not out.exists() or out.stat().st_mtime < source.stat().st_mtime:
+    # The binary bakes in the library, so any library change must rebuild it.
+    # rglob, not glob: a future subpackage must not go unnoticed here, because
+    # the failure is silently benchmarking code that is no longer the source.
+    newest = max(p.stat().st_mtime for p in [source, *(ROOT / "dataframe").rglob("*.mojo")])
+    if not out.exists() or out.stat().st_mtime < newest:
         subprocess.run(["mojo", "build", "-I", str(ROOT), str(source), "-o", str(out)], check=True)
     return out
 
