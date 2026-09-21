@@ -25,6 +25,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
   compared from its prefix alone, so such a column falls back to ranking.
   Sorting 1M rows by a string key drops from 331 ms to 75 ms (#108).
 
+- Key encoding runs across worker threads. Rows encode independently, so
+  the word layout is decided once and each worker then fills its own rows.
+  For 1M rows and two keys that is 11 ms to 3 ms, taking the whole sort to
+  75 ms; sorting by a string key drops from 75 ms to 52 ms (#108).
+
 ### Added
 
 - `Pool`, worker threads reused across the rounds of one operation instead
