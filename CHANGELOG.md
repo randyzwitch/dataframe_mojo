@@ -5,6 +5,18 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ## Unreleased
 
+### Added
+
+- `Pool`, worker threads reused across the rounds of one operation instead
+  of created and joined per round. A pool is **scoped**: it joins its
+  workers when released, and never outlives the operation that made it. A
+  process-wide pool is not possible here -- its workers would still be
+  parked in JIT-compiled code when the process exits, which crashes about
+  one run in three under `mojo run`, and no Mojo code can run at exit to
+  join them first. Sorting uses one for its run pass and merge rounds: a
+  two-key sort of 1M rows drops from 156 ms to 150 ms, and at 100k rows
+  from 38 ms to 33 ms (#103).
+
 ### Changed
 
 - Sorting ranks its numeric key columns by sorting `(value, row)` pairs and
