@@ -7,6 +7,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Concatenation sizes each output column once instead of growing into it.
+  Every parallel stage reassembles its result this way -- a CSV read
+  produces one frame per range -- and letting the column double copied it
+  again at every step. The final height and the text size are both known
+  from the inputs. Reassembling 1M rows of 8 columns from 32 ranges drops
+  from 21 ms to 7 ms, and the whole parallel CSV read from a median of
+  86 ms to 67 ms across 32 threads (#107).
+
 - Signed decimals take the one-pass Float64 parser. Only unsigned text did,
   so every negative field went to the strict parser, which allocates a
   String to check the grammar -- half the fields of a column centred on

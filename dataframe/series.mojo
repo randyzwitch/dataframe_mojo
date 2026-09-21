@@ -790,6 +790,23 @@ struct Series(Copyable, Sized, Writable):
             indices.append(len(self) - 1 - i)
         return self.take(indices)
 
+    def _text_bytes(self) -> Int:
+        """Bytes of text this column holds, or 0 when it holds none."""
+        if self._data.isa[StringColumn]():
+            return self._data[StringColumn]._value_bytes()
+        return 0
+
+    def _reserve_rows(mut self, rows: Int, text_bytes: Int) raises:
+        """Size this column for a known final height before appending."""
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+            if self._data.isa[Column[E]]():
+                self._data[Column[E]]._reserve_rows(rows, text_bytes)
+        if self._data.isa[BoolColumn]():
+            self._data[BoolColumn]._reserve_rows(rows, text_bytes)
+        if self._data.isa[StringColumn]():
+            self._data[StringColumn]._reserve_rows(rows, text_bytes)
+
     def _append_series(mut self, other: Self) raises:
         if self._dtype.physical() != other._dtype.physical():
             raise Error("Cannot append different dtypes")

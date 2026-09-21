@@ -245,6 +245,18 @@ struct StringColumn(Copyable, Sized):
             length=self._length,
         )
 
+    def _reserve_rows(mut self, rows: Int, text_bytes: Int):
+        """Size the buffers for `rows` rows holding `text_bytes` of text.
+
+        The text buffer is the one that matters: it is the largest of the
+        three and the one a caller cannot infer from the row count.
+        """
+        if not self._owned():
+            self = self._compact()
+        self._offsets[].reserve(rows + 1)
+        self._bytes[].reserve(text_bytes)
+        self._bits[].reserve((rows + 7) // 8)
+
     def _append_column(mut self, other: Self):
         """Append rows in bulk: bytes and validity copied, offsets rebased.
 

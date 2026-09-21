@@ -205,6 +205,18 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         )
         return result^
 
+    def _reserve_rows(mut self, rows: Int, text_bytes: Int):
+        """Size the buffers for `rows` rows before appending any.
+
+        Growing geometrically copies the column again every time it
+        doubles, so a caller that knows the final height says so once.
+        `text_bytes` is for the string layout and means nothing here.
+        """
+        if not self._owned():
+            self = self._compact()
+        self._data[].reserve(rows)
+        self._bits[].reserve((rows + 7) // 8)
+
     def _append_column(mut self, other: Self):
         """Append payloads and validity bytewise, shifting when unaligned.
 

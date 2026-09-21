@@ -7,6 +7,7 @@ from std.testing import (
     assert_raises,
 )
 from dataframe import DataType, Column, DataFrame, Series, concat
+from dataframe.column import Column as TypedColumn
 
 
 def pattern(length: Int, seed: Int) -> List[Bool]:
@@ -59,6 +60,59 @@ def test_vertical_validity_boundaries() raises:
     var three = concat([make(3, 1), make(5, 2), make(9, 3)])
     assert_true(three.slice(8).equals(make(9, 3)))
     assert_true(three.slice(3, 5).equals(make(5, 2)))
+
+
+def test_many_frames_reassemble_exactly() raises:
+    """Enough frames and rows to take the parallel path, which sizes each
+    output column once from the heights and text sizes of the inputs. A
+    parallel CSV read reassembles exactly this way, one frame per range."""
+    var frames = List[DataFrame]()
+    var total = 0
+    for k in range(40):
+        frames.append(make(1000 + k, k))
+        total += 1000 + k
+    var joined = concat(frames)
+    assert_equal(joined.height(), total)
+    var row = 0
+    for k in range(40):
+        assert_true(joined.slice(row, 1000 + k).equals(make(1000 + k, k)))
+        row += 1000 + k
+
+
+def test_a_reservation_lands_on_the_column_that_will_be_appended_to() raises:
+    """Reserving has to take ownership first.
+
+    A column sliced out of another shares its buffers, and reserving on a
+    shared buffer would size the wrong one: the append that follows copies
+    before it writes, and the copy has the old capacity, so the column
+    doubles its way up anyway. Nothing about the result is wrong when that
+    happens, which is why this checks ownership rather than values.
+    """
+    var source = make(64, 5)
+    var window = source.slice(0, 16)
+    var column = window._columns[0].copy()
+    assert_false(column._data[TypedColumn[Int64]]._owned())
+    column._reserve_rows(4096, 0)
+    assert_true(column._data[TypedColumn[Int64]]._owned())
+    assert_true(column._data[TypedColumn[Int64]]._data[].capacity() >= 4096)
+    # The window it came from still holds exactly what it did.
+    assert_true(window.equals(source.slice(0, 16)))
+
+
+def test_reserving_does_not_disturb_shared_buffers() raises:
+    """Every input here is a window onto another frame's buffers, so sizing
+    the output has to copy before it writes anything."""
+    var source = make(64, 5)
+    var joined = concat(
+        [source.slice(0, 16), source.slice(16, 16), source.slice(32, 32)]
+    )
+    assert_true(joined.equals(source))
+    assert_true(source.equals(make(64, 5)))
+    # A second concatenation of the same windows must see them unchanged.
+    var again = concat(
+        [source.slice(0, 16), source.slice(16, 16), source.slice(32, 32)]
+    )
+    assert_true(again.equals(source))
 
 
 def test_vertical_schema_errors_and_shapes() raises:
