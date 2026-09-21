@@ -221,8 +221,13 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         # an exact reservation would copy the whole column on every append.
         if values.capacity() < start + count:
             values.reserve(max(start + count, 2 * values.capacity()))
-        for i in range(count):
-            values.append(other._get(i).copy())
+        # One bulk copy of the window, rather than a bounds-checked append per
+        # element: concatenation is how every parallel stage reassembles its
+        # output, so this is on the path of concat, vstack, batch reassembly
+        # and the parallel CSV reader.
+        values.extend(
+            Span(other._data[])[other._offset : other._offset + count]
+        )
         self._length = start + count
 
     @staticmethod
