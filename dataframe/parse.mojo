@@ -2,7 +2,7 @@
 from std.utils.numerics import isinf
 
 
-def parse_int64(text: String) raises -> Int64:
+def parse_int64(text: StringSlice) raises -> Int64:
     """Parse strict decimal Int64 without a floating-point round trip."""
     var bytes = text.as_bytes()
     if len(bytes) == 0:
@@ -32,7 +32,7 @@ def parse_int64(text: String) raises -> Int64:
     return Int64(magnitude)
 
 
-def parse_integer[D: DType](text: String) raises -> Scalar[D]:
+def parse_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
     """Parse a strict decimal integer, range-checked for Scalar[D] on the
     digits themselves (no floating-point round trip). "-0" is 0 for
     unsigned types."""
@@ -74,7 +74,7 @@ def parse_integer[D: DType](text: String) raises -> Scalar[D]:
     return magnitude.cast[D]()
 
 
-def edge_ascii_whitespace(text: String) -> Bool:
+def edge_ascii_whitespace(text: StringSlice) -> Bool:
     var bytes = text.as_bytes()
     if len(bytes) == 0:
         return False
@@ -268,7 +268,7 @@ def _parse_float64_strict(text: String) raises -> Float64:
     return value
 
 
-def parse_bool(text: String) raises -> Bool:
+def parse_bool(text: StringSlice) raises -> Bool:
     if text == "true":
         return True
     if text == "false":
