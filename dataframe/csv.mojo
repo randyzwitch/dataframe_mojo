@@ -745,6 +745,13 @@ def _options(
     return options^
 
 
+comptime _SCAN_WIDTH = 32
+
+
+def _splat(byte: UInt8) -> SIMD[DType.uint8, _SCAN_WIDTH]:
+    return SIMD[DType.uint8, _SCAN_WIDTH](byte)
+
+
 @fieldwise_init
 struct _Split(Copyable, Movable):
     """Where a record starts, and how many records precede it."""
@@ -796,20 +803,59 @@ def record_splits(
     var records = 0
     var complete = 0
     var i = 0
-    while i < n:
-        var byte = bytes[i]
+    var pointer = bytes.unsafe_ptr()
+    var quotes = _splat(quote)
+    var newlines = _splat(10)
+
+    @__parameter
+    def scan_byte(at: Int):
+        """The definition of the scan: one byte, in the state machine's terms."""
+        var byte = bytes[at]
         if quoting and byte == quote:
             inside = not inside
         elif byte == 10 and not inside:
             records += 1
-            complete = i + 1
-            # A split lands after the newline, so the next range starts on a
-            # record. The final byte is never a split: that would make an
-            # empty range whose reader would see no records.
-            if parts > 1 and i + 1 >= target and i + 1 < n:
-                splits.append(_Split(i + 1, records))
-                target = i + 1 + stride
+            complete = at + 1
+            if parts > 1 and at + 1 >= target and at + 1 < n:
+                splits.append(_Split(at + 1, records))
+                target = at + 1 + stride
+
+    while i < n:
+        # A block with no quote can be summarised rather than walked: every
+        # newline in it is a record boundary, because parity cannot change.
+        # Only a block that carries a quote, or that holds a split target or
+        # the running last boundary, needs the byte loop.
+        if i + _SCAN_WIDTH <= n:
+            var block = pointer.unsafe_load[width=_SCAN_WIDTH](i)
+            var quoted_here = quoting and block.eq(quotes).reduce_or()
+            if not quoted_here and not inside:
+                var found = block.eq(newlines)
+                var count = Int(found.cast[DType.uint8]().reduce_add())
+                if count == 0:
+                    i += _SCAN_WIDTH
+                    continue
+                var crosses_target = parts > 1 and i + _SCAN_WIDTH > target
+                if not crosses_target:
+                    # Nothing here needs a position, only the totals, except
+                    # the last boundary, which the tail pass recovers.
+                    records += count
+                    complete = -1
+                    i += _SCAN_WIDTH
+                    continue
+        scan_byte(i)
         i += 1
+
+    if complete < 0:
+        # A summarised block held the final boundary; find it by scanning
+        # back for the last newline outside quotes, which is the last byte
+        # the forward pass would have marked.
+        complete = 0
+        var back = n
+        while back > 0:
+            back -= 1
+            if bytes[back] == 10:
+                complete = back + 1
+                break
     splits.append(_Split(n, records))
     return _Layout(splits^, complete, records)
 

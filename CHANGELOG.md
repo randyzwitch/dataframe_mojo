@@ -14,7 +14,7 @@ breaking changes can happen in any release and are listed under **Breaking**.
   identical to a serial read. Blocks are read sequentially with the
   trailing partial record carried forward, so memory stays bounded by the
   block size rather than the file size. 1M rows of 8 columns drops from
-  1,081 ms to 215 ms, and a 100k-row file from 66 ms to 18 ms. Reads using
+  1,081 ms to 161 ms, and a 100k-row file from 66 ms to 18 ms. Reads using
   `n_rows`, `skip_rows`, `comment_prefix`, `ignore_errors` or
   `truncate_ragged_lines` stay serial, since those count records from the
   start of the file (#107).

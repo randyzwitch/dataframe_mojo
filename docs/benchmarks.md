@@ -426,7 +426,17 @@ now split at record boundaries and decoded on worker threads.
 | | best ms | vs Polars |
 |---|---|---|
 | before | 1,081 | 86.7x |
-| parallel | **215** | **13.4x** |
+| parallel ranges | 215 | 13.4x |
+| plus a SIMD boundary scan | **161** | **11.1x** |
+
+Once decoding was parallel, the boundary scan was the serial remainder: it
+ran a byte at a time over every block, at roughly the 4 ns/byte the
+tokenizer costs, which is most of 215 ms for a 50 MB file. A block that
+contains no quote cannot change parity, so every newline in it is a record
+boundary and the block can be summarised -- one SIMD load, a quote test and
+a newline count -- instead of walked. Only blocks holding a quote, a split
+target, or the final boundary need the byte loop, and that loop remains the
+definition of the format.
 
 The 100,000-row, 4-column `bench_csv` file goes 66 -> 18 ms, so small files
 gain too rather than paying for the machinery.
