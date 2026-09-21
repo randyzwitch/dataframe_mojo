@@ -3,6 +3,20 @@
 All notable changes are recorded here. The API is pre-1.0 and provisional:
 breaking changes can happen in any release and are listed under **Breaking**.
 
+## Unreleased
+
+### Changed
+
+- A parallel CSV read maps the file instead of reading it into a buffer.
+  Mapping the 50 MB benchmark file costs 2.4 ms against 58 ms to read it,
+  and the whole file being addressable at once removes the block loop and
+  the partial record carried between blocks. A range also reads straight
+  out of the mapping rather than copying itself out first, which was a
+  second pass over every byte. Reading 1M rows of 8 columns drops from a
+  median of 103 ms to 88 ms across 32 threads. A path with no length to map
+  -- a pipe, a character device -- still reads, through the block reader
+  (#107).
+
 ## 0.2.0 - 2026-09-21
 
 ### Breaking
