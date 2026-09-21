@@ -5,6 +5,18 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ## Unreleased
 
+### Changed
+
+- Sorting by fixed-width keys no longer ranks its key columns. Each value
+  maps to an Int whose signed order is the value's order, in one linear
+  pass, which is what the sort compares anyway; ranking existed to give
+  strings an order, and string keys still take that path. An n-column sort
+  did n sorts before the one that orders the rows, and now does none: for
+  1M rows and two keys, building the keys drops from 77 ms to 11 ms and the
+  whole sort from 147 ms to 85 ms, which is 3.0x to 1.5x of Polars. Row
+  order is unchanged, including -0.0 equal to 0.0, NaN after the numbers in
+  either direction, and null placement independent of direction (#108).
+
 ### Added
 
 - `Pool`, worker threads reused across the rounds of one operation instead
