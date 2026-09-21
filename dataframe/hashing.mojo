@@ -9,7 +9,7 @@ from std.collections import Dict
 from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column
-from .dtype import NUMERIC_DTYPES
+from .dtype import DataType, NUMERIC_DTYPES
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 
@@ -111,6 +111,40 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     var ids = List[Int](length=n, fill=0)
     var excluded = List[Bool](length=n, fill=False)
     var representatives = List[Int]()
+
+    if len(keys) == 1:
+        # One key column needs no hash map to combine columns, because
+        # there is nothing to combine. `column_codes` has already numbered
+        # the distinct values; all that remains is to renumber them in the
+        # order the rows meet them, which an array indexed by code does.
+        # The general path below uses a Dict for this, which on a
+        # high-cardinality key is a lookup per row over as many entries as
+        # there are distinct keys.
+        #
+        # The renumbering is not skippable even though most dtypes already
+        # code in first-occurrence order: a null takes an id in row order
+        # too, so one null early in the column shifts every id after it.
+        # Booleans code by value rather than by order, and this renumbers
+        # them correctly as well.
+        var codes = List[Int](length=n, fill=0)
+        var nulls = List[Bool](length=n, fill=False)
+        var distinct = column_codes(keys[0], codes, nulls)
+        var renumber = List[Int](length=distinct + 1, fill=-1)
+        var next_id = 0
+        for i in range(n):
+            if nulls[i]:
+                if not nulls_equal:
+                    ids[i] = -1
+                    continue
+                codes[i] = distinct
+            var code = codes[i]
+            if renumber[code] < 0:
+                renumber[code] = next_id
+                next_id += 1
+                representatives.append(i)
+            ids[i] = renumber[code]
+        return RowKeys(ids^, representatives^)
+
     for j in range(len(keys)):
         var codes = List[Int](length=n, fill=0)
         var nulls = List[Bool](length=n, fill=False)
