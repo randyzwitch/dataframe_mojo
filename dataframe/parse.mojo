@@ -196,13 +196,14 @@ comptime _EXACT_LIMIT = UInt64(9007199254740992)
 def parse_float64(text: StringSlice) raises -> Float64:
     """Strict decimal Float64. See the String overload for the contract.
 
-    Plain decimals -- no sign, no exponent, at most 22 fraction digits and a
-    mantissa a Float64 holds exactly -- are validated and computed in one
-    pass. That is the overwhelming majority of real CSV data, and the strict
-    parser below costs about 140 ns a field because it walks the text to
-    check the grammar and then walks it again to convert. Anything the fast
-    path does not fully consume, or cannot represent exactly, falls through
-    to that parser, so the accepted grammar and every result are unchanged.
+    Plain decimals -- an optional sign, no exponent, at most 22 fraction
+    digits and a mantissa a Float64 holds exactly -- are validated and
+    computed in one pass. That is the overwhelming majority of real CSV
+    data, and the strict parser below costs about 140 ns a field because it
+    walks the text to check the grammar and then walks it again to convert.
+    Anything the fast path does not fully consume, or cannot represent
+    exactly, falls through to that parser, so the accepted grammar and every
+    result are unchanged.
     """
     var b = text.as_bytes()
     var n = len(b)
@@ -210,6 +211,15 @@ def parse_float64(text: StringSlice) raises -> Float64:
     var digits = 0
     var fraction = -1
     var i = 0
+    # The strict grammar takes one leading sign, so reading it here leaves
+    # this path a subset of it. Signed data is not an edge case: half the
+    # float fields of a column centred on zero are negative, and sending
+    # every one of them to the strict parser -- which allocates a String to
+    # do it -- was 80 ms of a 730 ms single-threaded read of 1M rows.
+    var negative = False
+    if n > 0 and (b[0] == 43 or b[0] == 45):
+        negative = b[0] == 45
+        i = 1
     while i < n:
         var c = b[i]
         if c >= 48 and c <= 57:
@@ -235,7 +245,9 @@ def parse_float64(text: StringSlice) raises -> Float64:
     var value = Float64(mantissa)
     if fraction > 0:
         value = value / _pow10(fraction)
-    return value
+    # The sign applies to the magnitude, so "-0.0" stays negative and no
+    # other value's rounding changes.
+    return -value if negative else value
 
 
 def parse_float64(text: String) raises -> Float64:

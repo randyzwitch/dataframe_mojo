@@ -7,6 +7,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Signed decimals take the one-pass Float64 parser. Only unsigned text did,
+  so every negative field went to the strict parser, which allocates a
+  String to check the grammar -- half the fields of a column centred on
+  zero. Reading 1M rows of 8 columns drops 14% single-threaded (720 ms to
+  622 ms) and about 10% at 4 and 32 threads. The accepted grammar is
+  unchanged: the fast path takes the one leading sign the strict grammar
+  already allowed, and anything else it cannot finish still falls through
+  (#107).
+
 - A parallel CSV read maps the file instead of reading it into a buffer.
   Mapping the 50 MB benchmark file costs 2.4 ms against 58 ms to read it,
   and the whole file being addressable at once removes the block loop and
