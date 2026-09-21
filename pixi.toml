@@ -15,14 +15,17 @@ preview = ["pixi-build"]
 #
 #     [dependencies]
 #     dataframe_mojo = { git = "https://github.com/randyzwitch/dataframe_mojo.git", tag = "v0.1.3" }
-#     mojo = ">=1.1.0,<1.2"
+#     mojo = ">=1.1.0,<1.3"
 #
 # and then `from dataframe import DataFrame, col`.
 #
 # A compiled Mojo package only loads in the Mojo version that produced it,
 # and pixi builds this package with the newest Mojo its host dependency
-# allows -- not with whatever the consumer pinned. So the bound below names
-# the Mojo version this tag ships for.
+# allows -- not with whatever the consumer pinned. The bound below is
+# therefore not a promise that one build runs on both 1.1 and 1.2: it says
+# which versions this source is known to build and pass on, and a build
+# picks the newest of them that is available. 1.2 exists only as a nightly
+# today, so a build from the release channel still produces a 1.1 package.
 [package]
 name = "dataframe_mojo"
 version = "0.1.3"
@@ -38,15 +41,15 @@ name = "dataframe"
 path = "dataframe"
 
 [package.host-dependencies]
-mojo = ">=1.1.0,<1.2"
+mojo = ">=1.1.0,<1.3"
 
 [package.run-dependencies]
-mojo = ">=1.1.0,<1.2"
+mojo = ">=1.1.0,<1.3"
 
 [dependencies]
 # The range CI tests, matching the package's host/run dependencies above, so a
 # 1.1 patch release does not need a manual bump here.
-mojo = ">=1.1.0,<1.2"
+mojo = ">=1.1.0,<1.3"
 
 [tasks]
 test = "bash scripts/run_tests.sh"

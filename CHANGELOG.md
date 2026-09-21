@@ -7,6 +7,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- The Mojo bound widens from `>=1.1.0,<1.2` to `>=1.1.0,<1.3`, so the 1.2
+  series is admitted. The package builds and its suite passes on
+  1.2.0.dev2026092105. Note what the bound does and does not mean: a
+  compiled Mojo package still loads only in the version that produced it,
+  and a build takes the newest Mojo the bound allows, so one tag does not
+  serve both series. 1.2 exists only as a nightly today, so a build from
+  the release channel still produces a 1.1 package.
+
 - The CSV reader no longer builds a `String` for every field. Fields of a
   record are written end to end into one buffer and passed on as slices
   over it, which needs no allocation; a 1M-row file of 8 columns was
