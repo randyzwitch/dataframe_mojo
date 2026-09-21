@@ -262,7 +262,7 @@ struct _CsvColumn(Copyable):
                     "invalid "
                     + _display_name(self.field.dtype)
                     + " value '"
-                    + String(text)
+                    + String(from_utf8_lossy=text.as_bytes())
                     + "'",
                 )
             self.builder[_IntBuilder].valid.append(True)
@@ -458,7 +458,23 @@ struct _CsvReader:
         var start = (self.field_ends[len(self.field_ends) - 1]) if len(
             self.field_ends
         ) > 0 else 0
-        if self.lossy:
+        # Only a field whose bytes become text needs to be valid UTF-8: a
+        # string column, a header name, or an inference sample. A number,
+        # Boolean or timestamp is parsed from ASCII, and its parser rejects
+        # any byte above 0x7F, so validating it first is work that changes
+        # no outcome -- 238 ms of a 925 ms single-threaded read of 1M rows
+        # of 8 columns. Polars does not validate per field either; its
+        # parser takes raw bytes and only builds a (lossy) String to
+        # describe a field it could not parse.
+        var becomes_text = (
+            self.sampling
+            or (self.has_header and self.record == 1)
+            or (
+                self.field_index < len(self.columns)
+                and self.columns[self.field_index].kind == _KIND_STRING
+            )
+        )
+        if self.lossy and becomes_text:
             # Lossy decoding substitutes U+FFFD, so the bytes change and a
             # String has to be built; it is the rare path.
             var text = String(
@@ -468,7 +484,7 @@ struct _CsvReader:
             )
             self.record_bytes.resize(start, 0)
             self.record_bytes.extend(text.as_bytes())
-        else:
+        elif becomes_text:
             # Validation only, over bytes already in place: no allocation
             # and no copy, the field having been written here directly.
             try:
