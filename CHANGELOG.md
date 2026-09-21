@@ -7,6 +7,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `concat` builds its output columns on worker threads. Each output column
+  is assembled from that column of every input frame and touches nothing
+  else, so there is nothing to coordinate. A parallel CSV read concatenates
+  one frame per range per block -- 64 of them for a 50 MB file -- and doing
+  that one column after another was a third of the read: 1M rows of 8
+  columns drops from 158 ms to 133 ms (#107).
+
 - A join assembles its output across worker threads. It gathered one
   column at a time on the calling thread, which was about half of a join:
   98 ms of 198 ms for 1M x 500k inner. `take_parallel` already writes
