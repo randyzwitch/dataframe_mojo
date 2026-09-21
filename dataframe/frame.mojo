@@ -654,30 +654,46 @@ struct DataFrame(Copyable, Sized, Writable):
                     if not right_matched[j]:
                         left_rows.append(-1)
                         right_rows.append(j)
-        var columns = List[Series]()
+        # Assembling the output is about half of a join, and it used to
+        # gather one column at a time on the calling thread. take_parallel
+        # writes disjoint output ranges, so every column of both sides goes
+        # at once; `or_null` is what lets it carry the -1 that means "no row
+        # on this side".
+        var gather_workers = worker_count(len(left_rows))
         var sides_mixed = how == "right" or how == "full"
+        var left_sources = List[Series](capacity=self.width())
         for c in range(self.width()):
-            var column = self._columns[c].take_or_null(left_rows)
-            var key = -1
+            left_sources.append(self._columns[c].copy())
+        var columns = take_parallel(
+            left_sources, left_rows.copy(), gather_workers, or_null=True
+        )
+
+        # Right-side columns: the non-key output columns, plus any key
+        # column that has to be coalesced with its left counterpart.
+        var right_sources = List[Series]()
+        var coalesced = List[Int]()
+        for c in range(self.width()):
             for k in range(len(left_keys)):
-                if left_keys[k] == c:
-                    key = k
-            if key >= 0 and sides_mixed and not keep_right_keys:
-                var from_right = right._columns[right_keys[key]].take_or_null(
-                    right_rows
-                )
-                var use_left = List[Bool](capacity=len(left_rows))
-                for i in left_rows:
-                    use_left.append(i >= 0)
-                column = choose(use_left, column, from_right).renamed(
-                    self._columns[c].name()
-                )
-            columns.append(column^)
+                if left_keys[k] == c and sides_mixed and not keep_right_keys:
+                    coalesced.append(c)
+                    right_sources.append(right._columns[right_keys[k]].copy())
+        for k in range(len(right_output)):
+            right_sources.append(right._columns[right_output[k]].copy())
+        var from_right = take_parallel(
+            right_sources, right_rows.copy(), gather_workers, or_null=True
+        )
+
+        for j in range(len(coalesced)):
+            var c = coalesced[j]
+            var use_left = List[Bool](capacity=len(left_rows))
+            for i in left_rows:
+                use_left.append(i >= 0)
+            columns[c] = choose(use_left, columns[c], from_right[j]).renamed(
+                self._columns[c].name()
+            )
         for k in range(len(right_output)):
             columns.append(
-                right._columns[right_output[k]]
-                .take_or_null(right_rows)
-                .renamed(right_names[k])
+                from_right[len(coalesced) + k].renamed(right_names[k])
             )
         return Self(columns^, height=len(left_rows))
 

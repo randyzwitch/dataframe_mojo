@@ -79,6 +79,8 @@ struct _GatherJob(Job):
     var values: Int  # address of the output payloads (fixed-width columns)
     var bits: Int  # address of the output validity bytes
     var piece: Series  # string columns: the gathered range
+    # A join's unmatched rows carry index -1, meaning "no row on this side".
+    var or_null: Bool
 
     def __init__(
         out self,
@@ -88,6 +90,7 @@ struct _GatherJob(Job):
         end: Int,
         values: Int,
         bits: Int,
+        or_null: Bool = False,
     ):
         self.source = source.copy()
         self.indices = indices
@@ -96,6 +99,7 @@ struct _GatherJob(Job):
         self.values = values
         self.bits = bits
         self.piece = source.copy()
+        self.or_null = or_null
 
     def run(mut self) raises:
         ref rows = self.indices[]
@@ -103,7 +107,9 @@ struct _GatherJob(Job):
             var subset = List[Int](capacity=self.end - self.start)
             for k in range(self.start, self.end):
                 subset.append(rows[k])
-            self.piece = self.source.take(subset)
+            self.piece = self.source.take_or_null(
+                subset
+            ) if self.or_null else self.source.take(subset)
             return
         var out_bits = Pointer[UInt8, MutAnyOrigin](
             unsafe_from_address=self.bits
@@ -116,6 +122,8 @@ struct _GatherJob(Job):
             )
             for k in range(self.start, self.end):
                 var row = rows[k]
+                if self.or_null and row < 0:
+                    continue  # output starts null, so leaving it is the null
                 var mask = UInt8(1) << UInt8(k % 8)
                 if column._get(row):
                     out.unsafe_offset(k // 8)[] |= mask
@@ -131,6 +139,8 @@ struct _GatherJob(Job):
                 )
                 for k in range(self.start, self.end):
                     var row = rows[k]
+                    if self.or_null and row < 0:
+                        continue
                     out.unsafe_offset(k)[] = column._get(row)
                     if column._valid(row):
                         out_bits.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(
@@ -142,9 +152,16 @@ struct _GatherJob(Job):
 
 
 def take_parallel(
-    columns: List[Series], var indices: List[Int], workers: Int
+    columns: List[Series],
+    var indices: List[Int],
+    workers: Int,
+    or_null: Bool = False,
 ) raises -> List[Series]:
-    """Gather `indices` (already bounds-checked) from every column."""
+    """Gather `indices` (already bounds-checked) from every column.
+
+    With `or_null`, a negative index yields a null instead of a row, which
+    is how a join names the side that has no matching row.
+    """
     var m = len(indices)
     var shared = ArcPointer(indices^)
     var bounds = partitions(m, workers, 8)
@@ -166,6 +183,7 @@ def take_parallel(
                     bounds[w + 1],
                     values,
                     Int(bits[c].unsafe_ptr()),
+                    or_null,
                 )
             )
     run_jobs(jobs)

@@ -7,6 +7,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A join assembles its output across worker threads. It gathered one
+  column at a time on the calling thread, which was about half of a join:
+  98 ms of 198 ms for 1M x 500k inner. `take_parallel` already writes
+  disjoint output ranges, and now carries the -1 that a join uses for
+  "no row on this side", so every column of both sides is gathered at
+  once. The join drops from 174 ms to 119 ms at 1M rows, and from 19 ms
+  to 15 ms at 100k (#105).
+
 - Sorting by fixed-width keys no longer ranks its key columns. Each value
   maps to an Int whose signed order is the value's order, in one linear
   pass, which is what the sort compares anyway; ranking existed to give
