@@ -409,23 +409,29 @@ def _pow10(digits: Int) -> UInt64:
 
 
 @always_inline
-def _parse_magnitude_u64(
-    bytes: Span[UInt8, _], start: Int, digits: Int, wide: Bool
-) raises -> UInt64:
-    """The u64 normal path used by atoi_simd for bounded 1..16 fields."""
+def _parse_magnitude_u64[
+    wide: Bool
+](bytes: Span[UInt8, _], start: Int, digits: Int) raises -> UInt64:
+    """Monomorphized u64 normal route from atoi_simd's checked parsers."""
     comptime assert is_little_endian(), "atoi_simd packed path requires LE"
     comptime if _has_x86_atoi_simd_backend():
-        if (not wide or _has_wide_atoi_simd_backend()) and digits < 4:
-            return _parse_short(bytes, start, digits)
-        if wide and not _has_wide_atoi_simd_backend() and digits < 5:
-            return _parse_short(bytes, start, digits)
+        comptime if wide:
+            comptime if _has_wide_atoi_simd_backend():
+                if digits < 4:
+                    return _parse_short(bytes, start, digits)
+                return _parse_simd_at_most_16(bytes, start, digits)
+            else:
+                if digits < 5:
+                    return _parse_short(bytes, start, digits)
+                return _parse_swar_at_most_16(bytes, start, digits)
+        else:
+            if digits < 4:
+                return _parse_short(bytes, start, digits)
+            return _parse_simd_at_most_16(bytes, start, digits)
     else:
         if digits < 5:
             return _parse_short(bytes, start, digits)
-    comptime if _has_x86_atoi_simd_backend():
-        if not wide or _has_wide_atoi_simd_backend():
-            return _parse_simd_at_most_16(bytes, start, digits)
-    return _parse_swar_at_most_16(bytes, start, digits)
+        return _parse_swar_at_most_16(bytes, start, digits)
 
 
 @always_inline
@@ -440,6 +446,16 @@ def _parse_wide_fallback_17_to_20(
 
 
 @always_inline
+def _parse_wide_17_to_20(
+    bytes: Span[UInt8, _], start: Int, digits: Int
+) raises -> UInt128:
+    """Compile-time AVX2/fallback selection for atoi_simd's wide route."""
+    comptime if _has_wide_atoi_simd_backend():
+        return _parse_avx_17_to_20(bytes, start, digits)
+    return _parse_wide_fallback_17_to_20(bytes, start, digits)
+
+
+@always_inline
 def _skip_zeroes(bytes: Span[UInt8, _], mut index: Int) -> Int:
     # SKIP_ZEROES recovery after the source route reaches a size boundary.
     while index < len(bytes) and bytes[index] == 48:
@@ -447,10 +463,11 @@ def _skip_zeroes(bytes: Span[UInt8, _], mut index: Int) -> Int:
     return index
 
 
-def _parse_csv_magnitude(
-    text: StringSlice, wide: Bool
-) raises -> Tuple[UInt128, Bool]:
-    """Strict `parse::<_, true, true>` dispatch with deferred zero skipping."""
+@always_inline
+def _parse_csv_unsigned[
+    wide: Bool
+](text: StringSlice, maximum: UInt64) raises -> UInt64:
+    """Typed atoi_simd unsigned front end; the normal route returns a u64."""
     var bytes = text.as_bytes()
     if len(bytes) == 0:
         raise Error("empty CSV integer")
@@ -463,29 +480,37 @@ def _parse_csv_magnitude(
         raise Error("CSV integer sign without digits")
 
     var digits = len(bytes) - index
-    var normal_limit = 20 if wide else 16
-    # `parse_simd_16::<true>` and fallback::parse_16_by_8 only examine
-    # leading zeroes after a full 16-byte block. AVX's <17 path does not.
-    if not wide:
-        if digits == 16 and bytes[index] == 48:
-            index = _skip_zeroes(bytes, index)
-            if index == len(bytes):
-                return (UInt128(0), negative)
-            digits = len(bytes) - index
-    else:
+    var normal_limit = 16
+    comptime if wide:
+        normal_limit = 20
+        # AVX's <17 path does not defer a 16-byte leading-zero field.
         comptime if not _has_wide_atoi_simd_backend():
             if digits == 16 and bytes[index] == 48:
                 index = _skip_zeroes(bytes, index)
                 if index == len(bytes):
-                    return (UInt128(0), negative)
+                    if negative:
+                        raise Error("CSV unsigned integer overflow")
+                    return 0
                 digits = len(bytes) - index
+    else:
+        # parse_simd_16::<true> and fallback::parse_16_by_8 only examine
+        # leading zeroes after a full 16-byte block.
+        if digits == 16 and bytes[index] == 48:
+            index = _skip_zeroes(bytes, index)
+            if index == len(bytes):
+                if negative:
+                    raise Error("CSV unsigned integer overflow")
+                return 0
+            digits = len(bytes) - index
 
-    # SKIP_ZEROES is a recovery path for a field that exceeds its normal
-    # type/backend limit, never a prepass on ordinary CSV integers.
+    # SKIP_ZEROES is a recovery path after a size-boundary failure, never a
+    # prepass for ordinary values.
     if digits > normal_limit:
         index = _skip_zeroes(bytes, index)
         if index == len(bytes):
-            return (UInt128(0), negative)
+            if negative:
+                raise Error("CSV unsigned integer overflow")
+            return 0
         digits = len(bytes) - index
     if digits > normal_limit:
         for i in range(index, len(bytes)):
@@ -494,49 +519,97 @@ def _parse_csv_magnitude(
         raise Error("CSV integer overflow")
 
     if digits <= 16:
-        return (
-            UInt128(_parse_magnitude_u64(bytes, index, digits, wide)),
-            negative,
+        var magnitude = _parse_magnitude_u64[wide](bytes, index, digits)
+        if negative or magnitude > maximum:
+            raise Error("CSV unsigned integer overflow")
+        return magnitude
+
+    comptime if wide:
+        var long_magnitude = _parse_wide_17_to_20(bytes, index, digits)
+        if negative or long_magnitude > UInt128(maximum):
+            raise Error("CSV unsigned integer overflow")
+        return UInt64(long_magnitude)
+    raise Error("CSV integer overflow")
+
+
+@always_inline
+def _parse_csv_signed[
+    wide: Bool
+](text: StringSlice, maximum: UInt64) raises -> Int64:
+    """Typed atoi_simd signed front end; the normal route returns an i64."""
+    var bytes = text.as_bytes()
+    if len(bytes) == 0:
+        raise Error("empty CSV integer")
+    var index = 0
+    var negative = False
+    if bytes[0] == 43 or bytes[0] == 45:
+        negative = bytes[0] == 45
+        index = 1
+    if index == len(bytes):
+        raise Error("CSV integer sign without digits")
+
+    var digits = len(bytes) - index
+    var normal_limit = 16
+    comptime if wide:
+        normal_limit = 20
+        comptime if not _has_wide_atoi_simd_backend():
+            if digits == 16 and bytes[index] == 48:
+                index = _skip_zeroes(bytes, index)
+                if index == len(bytes):
+                    return 0
+                digits = len(bytes) - index
+    else:
+        if digits == 16 and bytes[index] == 48:
+            index = _skip_zeroes(bytes, index)
+            if index == len(bytes):
+                return 0
+            digits = len(bytes) - index
+
+    if digits > normal_limit:
+        index = _skip_zeroes(bytes, index)
+        if index == len(bytes):
+            return 0
+        digits = len(bytes) - index
+    if digits > normal_limit:
+        for i in range(index, len(bytes)):
+            if bytes[i] < 48 or bytes[i] > 57:
+                raise Error("invalid CSV integer byte")
+        raise Error("CSV integer overflow")
+
+    if digits <= 16:
+        var magnitude = _parse_magnitude_u64[wide](bytes, index, digits)
+        var limit = maximum + UInt64(1) if negative else maximum
+        if magnitude > limit:
+            raise Error("CSV signed integer overflow")
+        if not negative:
+            return Int64(magnitude)
+        if magnitude == UInt64(9223372036854775808):
+            return Int64(-9223372036854775807) - 1
+        return -Int64(magnitude)
+
+    comptime if wide:
+        var long_magnitude = _parse_wide_17_to_20(bytes, index, digits)
+        var limit = UInt128(maximum + UInt64(1)) if negative else UInt128(
+            maximum
         )
-    comptime if _has_wide_atoi_simd_backend():
-        if wide:
-            return (_parse_avx_17_to_20(bytes, index, digits), negative)
-    return (_parse_wide_fallback_17_to_20(bytes, index, digits), negative)
-
-
-@always_inline
-def _checked_unsigned(
-    text: StringSlice, maximum: UInt64, wide: Bool
-) raises -> UInt64:
-    var parsed = _parse_csv_magnitude(text, wide)
-    if parsed[1] or parsed[0] > UInt128(maximum):
-        raise Error("CSV unsigned integer overflow")
-    return UInt64(parsed[0])
-
-
-@always_inline
-def _checked_signed(
-    text: StringSlice, maximum: UInt64, wide: Bool
-) raises -> Int64:
-    var parsed = _parse_csv_magnitude(text, wide)
-    var limit = UInt128(maximum + UInt64(1)) if parsed[1] else UInt128(maximum)
-    if parsed[0] > limit:
-        raise Error("CSV signed integer overflow")
-    if not parsed[1]:
-        return Int64(UInt64(parsed[0]))
-    if parsed[0] == UInt128(9223372036854775808):
-        return Int64(-9223372036854775807) - 1
-    return -Int64(UInt64(parsed[0]))
+        if long_magnitude > limit:
+            raise Error("CSV signed integer overflow")
+        if not negative:
+            return Int64(UInt64(long_magnitude))
+        if long_magnitude == UInt128(9223372036854775808):
+            return Int64(-9223372036854775807) - 1
+        return -Int64(UInt64(long_magnitude))
+    raise Error("CSV integer overflow")
 
 
 def parse_csv_uint64(text: StringSlice) raises -> UInt64:
     """atoi_simd::parse::<u64, true, true> with strict full consumption."""
-    return _checked_unsigned(text, UInt64.MAX, True)
+    return _parse_csv_unsigned[True](text, UInt64.MAX)
 
 
 def parse_csv_int64(text: StringSlice) raises -> Int64:
     """atoi_simd::parse::<i64, true, true> with strict full consumption."""
-    return _checked_signed(text, UInt64(9223372036854775807), True)
+    return _parse_csv_signed[True](text, UInt64(9223372036854775807))
 
 
 def parse_csv_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
@@ -549,12 +622,12 @@ def parse_csv_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
     comptime if D.is_signed():
         var maximum = Scalar[D].MAX.cast[DType.uint64]()
         comptime if size_of[Scalar[D]]() >= 8:
-            return _checked_signed(text, maximum, True).cast[D]()
+            return _parse_csv_signed[True](text, maximum).cast[D]()
         else:
-            return _checked_signed(text, maximum, False).cast[D]()
+            return _parse_csv_signed[False](text, maximum).cast[D]()
     else:
         var maximum = Scalar[D].MAX.cast[DType.uint64]()
         comptime if size_of[Scalar[D]]() >= 8:
-            return _checked_unsigned(text, maximum, True).cast[D]()
+            return _parse_csv_unsigned[True](text, maximum).cast[D]()
         else:
-            return _checked_unsigned(text, maximum, False).cast[D]()
+            return _parse_csv_unsigned[False](text, maximum).cast[D]()
