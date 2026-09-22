@@ -76,7 +76,7 @@ from .window import window_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
 from .bool_column import BoolColumn
-from .column import Column, _count_set
+from .column import Column, _count_valid
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
@@ -471,7 +471,9 @@ def _direct_float_column_sum(
     """Accumulate a contiguous Float64 interval into one reducer state."""
     var values = column.unsafe_values()
     var total = SIMD[DType.float64, 4](0)
-    var count = _count_set(column._bits[], column._offset + start, end - start)
+    var count = _count_valid(
+        column._bits[], column._offset + start, end - start
+    )
     var i = start
     if count == end - start:
         while i + 4 <= end:
@@ -558,7 +560,7 @@ def _direct_numeric_column[
     """Direct ungrouped reduction preserving Reducer's canonical state."""
     if op == COUNT:
         reducer.counts[0] += Int64(
-            _count_set(column._bits[], column._offset + start, end - start)
+            _count_valid(column._bits[], column._offset + start, end - start)
         )
         return True
     for i in range(start, end):

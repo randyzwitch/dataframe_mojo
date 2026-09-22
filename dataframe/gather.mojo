@@ -17,7 +17,7 @@ partially built column.
 """
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
-from .column import Column, _bit
+from .column import Column, _bit, _validity_bit
 from .dtype import DataType, NUMERIC_DTYPES
 from .parallel import Job, partitions, run_jobs, worker_count
 from .series import Series
@@ -43,7 +43,7 @@ struct _MaskJob(Job):
         for i in range(self.start, self.end):
             var row = base + i
             # Values and validity are both LSB-first bitmaps.
-            if _bit(values, row) and _bit(bits, row):
+            if _bit(values, row) and _validity_bit(bits, row):
                 self.rows.append(i)
 
     def into_rows(deinit self) -> List[Int]:

@@ -7,7 +7,7 @@ MutableBinaryViewArray. That representation difference remains explicit.
 """
 from std.memory import ArcPointer
 from std.utils import Variant
-from .column import Column
+from .column import Column, _append_validity_bit
 from .bool_column import BoolColumn
 from .string_column import StringBuilder
 from .series import Series
@@ -31,10 +31,12 @@ struct _NumericBuffer[D: DType](Copyable):
 
     def __init__(out self, capacity: Int):
         self.values = List[Scalar[Self.D]](capacity=capacity)
-        self.bits = List[UInt8](capacity=(capacity + 7) // 8)
+        self.bits = List[UInt8]()
 
     def append(mut self, value: Scalar[Self.D], valid: Bool):
-        _push_bit(self.bits, len(self.values), valid)
+        _append_validity_bit(
+            self.bits, len(self.values), valid, self.values.capacity()
+        )
         self.values.append(value)
 
     def finish(mut self, name: String) -> Series:
@@ -52,12 +54,14 @@ struct _BoolBuffer(Copyable):
 
     def __init__(out self, capacity: Int):
         self.values = List[UInt8](capacity=(capacity + 7) // 8)
-        self.bits = List[UInt8](capacity=(capacity + 7) // 8)
+        self.bits = List[UInt8]()
         self.length = 0
 
     def append(mut self, value: Bool, valid: Bool):
         _push_bit(self.values, self.length, value)
-        _push_bit(self.bits, self.length, valid)
+        _append_validity_bit(
+            self.bits, self.length, valid, self.values.capacity() * 8
+        )
         self.length += 1
 
     def finish(mut self, name: String) -> Series:

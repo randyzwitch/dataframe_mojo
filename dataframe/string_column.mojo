@@ -19,6 +19,11 @@ from .column import (
     _copy_bits,
     _count_set,
     _pack_bits,
+    _validity_bit,
+    _count_valid,
+    _copy_validity,
+    _append_validity,
+    _append_validity_bit,
 )
 
 
@@ -121,7 +126,7 @@ struct StringColumn(Copyable, Sized):
 
     def _valid(self, i: Int) -> Bool:
         """Internal unchecked validity read after bounds validation."""
-        return _bit(self._bits[], self._offset + i)
+        return _validity_bit(self._bits[], self._offset + i)
 
     def is_null(self, index: Int) raises -> Bool:
         self._check_index(index)
@@ -163,7 +168,7 @@ struct StringColumn(Copyable, Sized):
         return String(self._get(index))
 
     def null_count(self) -> Int:
-        return self._length - _count_set(
+        return self._length - _count_valid(
             self._bits[], self._offset, self._length
         )
 
@@ -241,7 +246,7 @@ struct StringColumn(Copyable, Sized):
         return Self(
             bytes=bytes^,
             offsets=offsets^,
-            bits=_copy_bits(self._bits[], self._offset, self._length),
+            bits=_copy_validity(self._bits[], self._offset, self._length),
             length=self._length,
         )
 
@@ -255,7 +260,8 @@ struct StringColumn(Copyable, Sized):
             self = self._compact()
         self._offsets[].reserve(rows + 1)
         self._bytes[].reserve(text_bytes)
-        self._bits[].reserve((rows + 7) // 8)
+        if len(self._bits[]) != 0:
+            self._bits[].reserve((rows + 7) // 8)
 
     def _append_column(mut self, other: Self):
         """Append rows in bulk: bytes and validity copied, offsets rebased.
@@ -268,7 +274,7 @@ struct StringColumn(Copyable, Sized):
         var count = other._length
         if count == 0:
             return
-        _append_bits(
+        _append_validity(
             self._bits[], self._length, other._bits[], other._offset, count
         )
         var first = other._start(0)
@@ -342,19 +348,16 @@ struct StringBuilder(Copyable):
         self._bytes = List[UInt8](capacity=bytes)
         self._offsets = List[Int64](capacity=rows + 1)
         self._offsets.append(0)
-        self._bits = List[UInt8](capacity=(rows + 7) // 8)
+        self._bits = List[UInt8]()
         self._length = 0
 
     def __len__(self) -> Int:
         return self._length
 
     def _push_bit(mut self, valid: Bool):
-        if self._length % 8 == 0:
-            self._bits.append(0)
-        if valid:
-            self._bits[len(self._bits) - 1] |= UInt8(1) << UInt8(
-                self._length % 8
-            )
+        _append_validity_bit(
+            self._bits, self._length, valid, self._offsets.capacity() - 1
+        )
         self._length += 1
 
     def append(mut self, text: StringSlice):
@@ -374,12 +377,13 @@ struct StringBuilder(Copyable):
         _ = self._offsets.pop()
         self._bytes.resize(Int(self._offsets[len(self._offsets) - 1]), 0)
         self._length -= 1
-        if self._length % 8 == 0:
-            _ = self._bits.pop()
-        else:
-            self._bits[len(self._bits) - 1] &= ~(
-                UInt8(1) << UInt8(self._length % 8)
-            )
+        if len(self._bits) != 0:
+            if self._length % 8 == 0:
+                _ = self._bits.pop()
+            else:
+                self._bits[len(self._bits) - 1] &= ~(
+                    UInt8(1) << UInt8(self._length % 8)
+                )
 
     def _append_row(mut self, column: StringColumn, i: Int):
         """Copy row i of column, including its validity."""

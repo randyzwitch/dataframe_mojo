@@ -17,6 +17,7 @@ alone do not establish equivalence; the mapping below records actual functions.
 | `csv/read/parser.rs:CountLines::count/find_next` | `csv_scan.CountLines` | 64-byte quote-parity masks, newline count, last boundary, window doubling |
 | `csv/read/splitfields.rs:SplitFields::next` (SIMD build) | `csv_splitfields.CsvSplitFields` | Borrowed offsets; cached quoted-field structural ends; scalar tail |
 | `csv/read/parser.rs:parse_lines` | `csv_decode.decode_chunk` | Borrowed fields, projected-only buffers, null-on-error; focused semantic and explicit-reader orchestration tests pass |
+| Arrow mutable primitive/boolean validity | `CsvBuffer`, column validity helpers | Absent bitmap until first null; prior valid prefix initialized once; consumers and Arrow preserve absence |
 | `csv/read/builder.rs:validate_utf8` | `StringSlice(from_utf8=chunk)` | Whole-chunk validator; generated assembly verified SIMD on x86-64 |
 | `fast_float2` / `atoi_simd` dispatch | `csv_numeric.mojo` / existing integer parser | Float32/Float64 source dispatch, packed fractional digits and fixed-array batched decimal fallback; integer SIMD backend not yet ported |
 | Rayon scoped task publication | `csv_reader` + `Pool.run_produced` | Same scan/publish overlap; scoped pthread pool and shared queue remain explicit runtime differences from persistent Rayon/work stealing |
@@ -48,9 +49,6 @@ These are unfinished work, not alternative optimization choices:
 
 - Integer parsing is not yet a verified translation of the enabled atoi_simd
   architecture-specific backend.
-- Primitive/bool builders still write an eager validity bitmap. Polars creates
-  validity lazily at the first null; this requires matching the column storage
-  contract and its consumers, not just changing CSV append calls.
 - String builders still produce offset/byte arrays instead of Polars BinaryView.
 - The pool is scoped per read and uses a shared queue, not persistent Rayon
   workers with work stealing.

@@ -3,7 +3,7 @@ from .dtype import DataType
 from std.collections import Dict
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
-from .column import Column, _append_bits
+from .column import Column, _append_validity
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
 from .expr import (
@@ -1911,7 +1911,7 @@ def _concat_string_bits(frames: List[DataFrame], column: Int) -> List[UInt8]:
     for f in range(len(frames)):
         ref source = frames[f]._columns[column]._data[StringColumn]
         var count = len(source)
-        _append_bits(
+        _append_validity(
             bits,
             offset,
             source._bits[],

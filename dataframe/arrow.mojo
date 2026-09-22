@@ -31,7 +31,7 @@ nullable and Mojo `Pointer`s are not.
 """
 from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
 from .bool_column import BoolColumn
-from .column import Column, _copy_bits
+from .column import Column, _copy_bits, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
 from .series import Series
@@ -304,7 +304,9 @@ def _fill_array(
     if kept._data.isa[StringColumn]():
         ref column = kept._data[StringColumn]
         array.offset = Int64(column._offset)
-        state.buffers.append(Int(column._bits[].unsafe_ptr()))
+        state.buffers.append(
+            Int(column.unsafe_validity()) if len(column._bits[]) != 0 else 0
+        )
         state.buffers.append(Int(column._offsets[].unsafe_ptr()))
         state.buffers.append(Int(column._bytes[].unsafe_ptr()))
     elif kept._data.isa[BoolColumn]():
@@ -312,7 +314,9 @@ def _fill_array(
         # fixed-width type.
         ref column = kept._data[BoolColumn]
         array.offset = Int64(column._offset)
-        state.buffers.append(Int(column._bits[].unsafe_ptr()))
+        state.buffers.append(
+            Int(column.unsafe_validity()) if len(column._bits[]) != 0 else 0
+        )
         state.buffers.append(Int(column._data[].unsafe_ptr()))
     elif dtype == DataType.DATE:
         # Arrow date32 holds Int32 days; narrow (range-checked) at export.
@@ -324,10 +328,14 @@ def _fill_array(
             if day < Int64(Int32.MIN) or day > Int64(Int32.MAX):
                 raise Error("date outside the Arrow date32 range")
             out.unsafe_offset(i).unsafe_store(Int32(day))
-        state.owned.append(_copy_bits(column._bits[], column._offset, length))
+        state.owned.append(
+            _copy_validity(column._bits[], column._offset, length)
+        )
         state.owned.append(days^)
         array.offset = 0
-        state.buffers.append(Int(state.owned[0].unsafe_ptr()))
+        state.buffers.append(
+            Int(state.owned[0].unsafe_ptr()) if len(state.owned[0]) else 0
+        )
         state.buffers.append(Int(state.owned[1].unsafe_ptr()))
     else:
         # Every numeric (and remaining temporal) type is zero-copy.
@@ -336,7 +344,10 @@ def _fill_array(
             if kept._data.isa[Column[Scalar[D]]]():
                 ref column = kept._data[Column[Scalar[D]]]
                 array.offset = Int64(column._offset)
-                state.buffers.append(Int(column._bits[].unsafe_ptr()))
+                state.buffers.append(
+                    Int(column.unsafe_validity()) if len(column._bits[])
+                    != 0 else 0
+                )
                 state.buffers.append(Int(column._data[].unsafe_ptr()))
     array.n_buffers = Int64(len(state.buffers))
     array.buffers = Int(state.buffers.unsafe_ptr())
@@ -500,9 +511,7 @@ def _as_int64[
 def _int64_column(
     var values: List[Int64], var bits: List[UInt8]
 ) -> Column[Int64]:
-    var column = Column[Int64](values^)
-    column._bits = ArcPointer(bits^)
-    return column^
+    return Column[Int64](values=values^, bits=bits^)
 
 
 def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
@@ -512,14 +521,16 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     var offset = Int(array.offset)
     if array.dictionary != 0 or schema.dictionary != 0:
         raise Error("Arrow dictionary arrays are not supported")
-    var bits = _import_bits(_buffer(array, 0), offset, length)
+    var bits = List[UInt8]() if _buffer(array, 0) == 0 else _import_bits(
+        _buffer(array, 0), offset, length
+    )
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if format == _numeric_format(D):
             var column = Column[Scalar[D]](
-                _import_fixed[Scalar[D]](array, length, offset)
+                values=_import_fixed[Scalar[D]](array, length, offset),
+                bits=bits^,
             )
-            column._bits = ArcPointer(bits^)
             return Series(name, column^)
     if format == "b":
         return Series(
