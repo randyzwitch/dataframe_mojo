@@ -428,3 +428,45 @@ where they differed. Current correctness is checked against the documented
 public contract, public CSV fixtures, and the Polars oracle, as described in
 `csv-polars-port.md`. Further performance work should compare the current
 pipeline rather than the retired reader's stage costs.
+
+## Multi-million-row chunk-size check (2026-09-22)
+
+Issue #152 calls for evaluating the pinned Polars source path, but the useful
+performance target is a file large enough for loading time to matter. The
+100k-row diagnostic fixture exposed shared-queue publication overhead at 32
+threads; it is too small to choose a CSV policy. We therefore compared the
+unchanged source-port rule (16 chunks per worker) with 8 and 4 chunks per
+worker on a 5,000,000-row, 235,911,953-byte mixed fixture. The proposed rule
+changed only `csv_scan.chunk_size`; all three variants used the same public
+reader and output checks. This was an isolated experiment: **the production
+chunk-size rule remains 16**.
+
+The fixture is reproducible with:
+
+```sh
+python3 experiments/csv_port/prepare.py build/csv_port/mixed_5m.csv --rows 5000000
+```
+
+Optimized binaries ran three alternating process pairs per case, four reads
+per process. The table is the median of each process's three warmed reads,
+then the median of the three process results, in milliseconds. Pinned Polars
+1.44.2 used the same fixture and thread setting; its value is the median of
+five warmed reads. The ratios use the unchanged 16-chunk Mojo result.
+
+| Rows | Threads | Projection | Mojo 16 | Mojo 8 | Mojo 4 | Polars | Mojo 16 / Polars |
+|---:|---:|---|---:|---:|---:|---:|---:|
+| 5,000,000 | 16 | full | 96.54 | 99.84 | 109.34 | 47.68 | 2.02 |
+| 5,000,000 | 16 | projected | 64.10 | 66.47 | 71.78 | 45.98 | 1.39 |
+| 5,000,000 | 32 | full | 62.01 | 67.22 | 69.98 | 44.81 | 1.38 |
+| 5,000,000 | 32 | projected | 70.00 | 65.82 | 62.44 | 42.21 | 1.66 |
+
+Fewer chunks improve only the 32-thread projected case on this larger file;
+they regress both 16-thread cases and the 32-thread full read. A global
+chunk-count change is therefore not justified by the small-file win. The
+remaining gap is workload dependent, with projected 32-thread reads slower
+than full reads on the same fixture in the unchanged reader. The next
+investigation should isolate the projected decoder's worker time and the
+producer/consumer overlap on multi-million-row inputs before changing the
+scheduler or chunk policy. The temporary stage trace cannot attribute its
+producer interval solely to scanning because workers decode concurrently;
+its post-join “gather” interval also includes diagnostic aggregation.
