@@ -2129,8 +2129,11 @@ def _display_name(dtype: DataType) -> String:
     return dtype.name()
 
 
-def _cell_text(series: Series, row: Int) -> String:
+def _cell_text(series: Series, row: Int) raises -> String:
     """Canonical text for a valid cell; floats use the round-trip form."""
+    if series.is_chunked():
+        var part = series._chunk_at(row)
+        return _cell_text(part[0], part[1])
     if series.dtype().is_temporal():
         return format_temporal(
             series._data[Column[Int64]]._get(row), series.dtype()
@@ -2144,7 +2147,10 @@ def _cell_text(series: Series, row: Int) -> String:
     return String(series._data[StringColumn]._get(row))
 
 
-def _cell_valid(series: Series, row: Int) -> Bool:
+def _cell_valid(series: Series, row: Int) raises -> Bool:
+    if series.is_chunked():
+        var part = series._chunk_at(row)
+        return _cell_valid(part[0], part[1])
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
@@ -2210,7 +2216,7 @@ struct _CsvWriter:
             )
         return line + self.line_terminator
 
-    def row(self, frame: DataFrame, row: Int) -> String:
+    def row(self, frame: DataFrame, row: Int) raises -> String:
         var line = String()
         for c in range(frame.width()):
             if c > 0:

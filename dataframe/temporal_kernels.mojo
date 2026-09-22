@@ -56,6 +56,15 @@ def temporal_binary(
     right_type: DataType,
     result_type: DataType,
 ) raises -> Series:
+    if left.is_chunked() or right.is_chunked():
+        return temporal_binary(
+            op,
+            left.rechunk(),
+            right.rechunk(),
+            left_type,
+            right_type,
+            result_type,
+        )
     ref a = left._data[Column[Int64]]
     ref b = right._data[Column[Int64]]
     if len(a) != len(b) and len(a) != 1 and len(b) != 1:
@@ -178,6 +187,8 @@ def _total(value: Int64, dtype: DataType, unit: String) -> Int64:
 
 
 def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
+    if input.is_chunked():
+        return dt_op(node, input.rechunk(), dtype)
     var op = node.op
     if op == DT_STRPTIME:
         return _strptime(node, input)
@@ -265,6 +276,8 @@ def cast_temporal(
     """Casts involving a temporal type: to and from Int64 (the stored
     value), to and from String (ISO 8601), between date and datetime,
     datetime to time, and between units."""
+    if input.is_chunked():
+        return cast_temporal(input.rechunk(), source, target, strict)
     var n = len(input)
     if target == DataType.STRING:
         var texts = List[String](length=n, fill="")

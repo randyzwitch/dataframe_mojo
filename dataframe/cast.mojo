@@ -127,6 +127,8 @@ def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
     """Convert every valid, observed row; others become null."""
+    if input.is_chunked():
+        return cast_series(input.rechunk(), target, strict, offset, mask)
     var source = _dtype(input)
     if source == target:
         return input.copy()

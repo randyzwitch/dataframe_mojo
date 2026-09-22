@@ -162,6 +162,12 @@ def take_parallel(
     With `or_null`, a negative index yields a null instead of a row, which
     is how a join names the side that has no matching row.
     """
+    for column in columns:
+        if column.is_chunked():
+            var contiguous = List[Series](capacity=len(columns))
+            for item in columns:
+                contiguous.append(item.rechunk())
+            return take_parallel(contiguous^, indices^, workers, or_null)
     var m = len(indices)
     var shared = ArcPointer(indices^)
     var bounds = partitions(m, workers, 8)

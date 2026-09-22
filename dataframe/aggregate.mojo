@@ -495,6 +495,15 @@ struct Reducer(Movable):
     def update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
     ) raises:
+        # Batch slicing can span physical arrays.  State kernels operate on
+        # one contiguous typed buffer, so advance the global group offset for
+        # each array instead of silently reading chunk zero.
+        if chunk.is_chunked():
+            var part_offset = offset
+            for part in chunk.chunks():
+                self.update(part, part_offset, grouped, groups)
+                part_offset += len(part)
+            return
         if self.input == self.dtype:
             self._update(chunk, offset, grouped, groups)
             return

@@ -67,6 +67,11 @@ def encodable(column: Series) -> Bool:
     """
     if column.dtype() != DataType.STRING:
         return True
+    if column.is_chunked():
+        for part in column.chunks():
+            if not encodable(part):
+                return False
+        return True
     ref typed = column._data[StringColumn]
     for i in range(len(typed)):
         if typed._byte_length(i) > STRING_PREFIX_BYTES:
@@ -129,6 +134,12 @@ def encode_sort_keys(
     """
     if len(columns) == 0:
         raise Error("sort requires at least one column")
+    for column in columns:
+        if column.is_chunked():
+            var contiguous = List[Series](capacity=len(columns))
+            for item in columns:
+                contiguous.append(item.rechunk())
+            return encode_sort_keys(contiguous^, descending, nulls_last)
     var rows = len(columns[0])
     var words = List[List[Int]]()
     for k in range(len(columns)):

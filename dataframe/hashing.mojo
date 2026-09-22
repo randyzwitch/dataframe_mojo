@@ -102,6 +102,12 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     """
     if len(keys) == 0:
         raise Error("Row keys require at least one column")
+    for key in keys:
+        if key.is_chunked():
+            var contiguous = List[Series](capacity=len(keys))
+            for item in keys:
+                contiguous.append(item.rechunk())
+            return encode_rows(contiguous^, nulls_equal)
     var n = len(keys[0])
     for key in keys:
         if len(key) != n:

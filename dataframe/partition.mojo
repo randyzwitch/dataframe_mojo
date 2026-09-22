@@ -202,6 +202,12 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
     cardinality, so the risk is taking the serial path on a frame that
     would have partitioned well, never the reverse.
     """
+    for key in keys:
+        if key.is_chunked():
+            var contiguous = List[Series](capacity=len(keys))
+            for item in keys:
+                contiguous.append(item.rechunk())
+            return low_cardinality(contiguous^)
     var rows = len(keys[0])
     if rows == 0:
         return True
@@ -237,7 +243,10 @@ struct Partitioner(Movable):
     var rows: Int
 
     def __init__(out self, keys: List[Series], workers: Int) raises:
-        self.rows = len(keys[0])
+        var contiguous = List[Series](capacity=len(keys))
+        for key in keys:
+            contiguous.append(key.rechunk() if key.is_chunked() else key.copy())
+        self.rows = len(contiguous[0])
         self.hashes = List[UInt64](length=self.rows, fill=0)
         self.histogram = List[Int](length=_SLOTS, fill=0)
         var bounds = partitions(self.rows, workers, 64)
@@ -245,7 +254,7 @@ struct Partitioner(Movable):
         for w in range(workers):
             jobs.append(
                 _HashJob(
-                    keys,
+                    contiguous,
                     bounds[w],
                     bounds[w + 1],
                     Int(self.hashes.unsafe_ptr()),

@@ -52,6 +52,12 @@ comptime Storage = Variant[
 ]
 
 
+@fieldwise_init
+struct _SeriesChunks(Copyable):
+    var arrays: List[Storage]
+    var ends: List[Int]
+
+
 struct Series(Copyable, Sized, Writable):
     """A named column of one supported dtype, plus expression-backed methods."""
 
@@ -59,6 +65,8 @@ struct Series(Copyable, Sized, Writable):
     var _data: Storage
     # The logical type. Temporal types are stored in Column[Int64].
     var _dtype: DataType
+    # Immutable array metadata is shared too: cloning a chunked Series is O(1).
+    var _chunked: Optional[ArcPointer[_SeriesChunks]]
 
     def __init__[
         D: DType
@@ -66,11 +74,13 @@ struct Series(Copyable, Sized, Writable):
         self._name = name^
         self._data = Storage(column^)
         self._dtype = DataType.of(D)
+        self._chunked = None
 
     def __init__(out self, var name: String, var column: BoolColumn):
         self._name = name^
         self._data = Storage(column^)
         self._dtype = DataType.BOOL
+        self._chunked = None
 
     def __init__(out self, var name: String, column: Column[Bool]) raises:
         """Pack a byte-per-value Boolean column into bits."""
@@ -80,6 +90,7 @@ struct Series(Copyable, Sized, Writable):
         self._name = name^
         self._data = Storage(column^)
         self._dtype = DataType.STRING
+        self._chunked = None
 
     def __init__(out self, var name: String, column: Column[String]):
         """Convert list-backed strings to the contiguous UTF-8 layout."""
@@ -94,6 +105,86 @@ struct Series(Copyable, Sized, Writable):
         result._data = Storage(column^)
         result._dtype = result._storage_dtype()
         return result^
+
+    def __init__(
+        out self, var name: String, var storage: Storage, dtype: DataType
+    ):
+        self._name = name^
+        self._data = storage^
+        self._dtype = dtype
+        self._chunked = None
+
+    def is_chunked(self) -> Bool:
+        return True if self._chunked else False
+
+    def n_chunks(self) -> Int:
+        """Number of physical Arrow arrays backing this series."""
+        return len(self._chunked.value()[].arrays) if self.is_chunked() else 1
+
+    def chunks(self) -> List[Self]:
+        """Owned column views sharing the immutable buffers of each array."""
+        if not self.is_chunked():
+            return [self.copy()]
+        var result = List[Self](capacity=len(self._chunked.value()[].arrays))
+        for storage in self._chunked.value()[].arrays:
+            var part = Self(self._name, storage.copy(), self._dtype)
+            result.append(part^)
+        return result^
+
+    @staticmethod
+    def _from_chunks(parts: List[Self]) raises -> Self:
+        """Append array references without copying values or validity bits."""
+        if len(parts) == 0:
+            raise Error("Chunked series requires at least one array")
+        var result = parts[0].copy()
+        result._chunked = None
+        var arrays = List[Storage]()
+        var ends = List[Int]()
+        var height = 0
+        for part in parts:
+            if part.dtype() != result.dtype():
+                raise Error("Chunked series arrays must have the same dtype")
+            for chunk in part.chunks():
+                if len(chunk) == 0:
+                    continue
+                if len(chunk) > Int.MAX - height:
+                    raise Error("Chunked series length overflows")
+                height += len(chunk)
+                arrays.append(chunk._data.copy())
+                ends.append(height)
+        if len(arrays) > 0:
+            result._data = arrays[0].copy()
+        if len(arrays) > 1:
+            result._chunked = ArcPointer(_SeriesChunks(arrays^, ends^))
+        return result^
+
+    def rechunk(self) raises -> Self:
+        """Materialize one contiguous Arrow array, preserving name and dtype."""
+        if not self.is_chunked():
+            return self.copy()
+        var parts = self.chunks()
+        var result = parts[0].copy()
+        result._reserve_rows(len(self), self._text_bytes())
+        for i in range(1, len(parts)):
+            result._append_series(parts[i])
+        return result^
+
+    def _chunk_at(self, row: Int) raises -> Tuple[Self, Int]:
+        if row < 0 or row >= len(self):
+            raise Error("Column index out of bounds")
+        var lo = 0
+        var hi = len(self._chunked.value()[].ends)
+        while lo < hi:
+            var mid = lo + (hi - lo) // 2
+            if row < self._chunked.value()[].ends[mid]:
+                hi = mid
+            else:
+                lo = mid + 1
+        var part = Self(
+            self._name, self._chunked.value()[].arrays[lo].copy(), self._dtype
+        )
+        var start = 0 if lo == 0 else self._chunked.value()[].ends[lo - 1]
+        return (part^, row - start)
 
     def _storage_dtype(self) -> DataType:
         """The physical DataType of the stored column."""
@@ -149,6 +240,10 @@ struct Series(Copyable, Sized, Writable):
         return self._dtype
 
     def __len__(self) -> Int:
+        if self.is_chunked():
+            return self._chunked.value()[].ends[
+                len(self._chunked.value()[].ends) - 1
+            ]
         comptime for i in range(len(FixedElements.Ts)):
             comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
@@ -158,6 +253,11 @@ struct Series(Copyable, Sized, Writable):
         return len(self._data[StringColumn])
 
     def null_count(self) -> Int:
+        if self.is_chunked():
+            var count = 0
+            for chunk in self.chunks():
+                count += chunk.null_count()
+            return count
         comptime for i in range(len(FixedElements.Ts)):
             comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
@@ -168,6 +268,9 @@ struct Series(Copyable, Sized, Writable):
 
     def get(self, index: Int) raises -> AnyValue:
         """Return one cell as a tagged value; raises when out of bounds."""
+        if self.is_chunked():
+            var part = self._chunk_at(index)
+            return part[0].get(part[1])
         if self._dtype.is_temporal():
             ref column = self._data[Column[Int64]]
             if column.is_null(index):
@@ -201,6 +304,33 @@ struct Series(Copyable, Sized, Writable):
             return False
         if not null_equal and (self.null_count() > 0 or other.null_count() > 0):
             return False
+        if self.is_chunked() or other.is_chunked():
+            var a = self.chunks()
+            var b = other.chunks()
+            var ai = 0
+            var bi = 0
+            var ao = 0
+            var bo = 0
+            while ai < len(a) and bi < len(b):
+                var n = min(len(a[ai]) - ao, len(b[bi]) - bo)
+                try:
+                    if (
+                        not a[ai]
+                        .slice(ao, n)
+                        .equals(b[bi].slice(bo, n), null_equal=null_equal)
+                    ):
+                        return False
+                except:
+                    return False
+                ao += n
+                bo += n
+                if ao == len(a[ai]):
+                    ai += 1
+                    ao = 0
+                if bo == len(b[bi]):
+                    bi += 1
+                    bo = 0
+            return True
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if self._data.isa[Column[Scalar[D]]]():
@@ -492,12 +622,16 @@ struct Series(Copyable, Sized, Writable):
 
     def int64(self) raises -> Column[Int64]:
         """Return an owned typed copy, raising on a dtype mismatch."""
+        if self.is_chunked():
+            return self.rechunk().int64()
         if not self._data.isa[Column[Int64]]():
             raise Error("Expected int64 column")
         return self._data[Column[Int64]].copy()
 
     def float64(self) raises -> Column[Float64]:
         """Return an owned typed copy, raising on a dtype mismatch."""
+        if self.is_chunked():
+            return self.rechunk().float64()
         if not self._data.isa[Column[Float64]]():
             raise Error("Expected float64 column")
         return self._data[Column[Float64]].copy()
@@ -505,6 +639,8 @@ struct Series(Copyable, Sized, Writable):
     def numeric[D: DType](self) raises -> Column[Scalar[D]]:
         """The (shared, immutable) column as Scalar[D], raising on a dtype
         mismatch. Temporal columns read as their Int64 storage."""
+        if self.is_chunked():
+            return self.rechunk().numeric[D]()
         if not self._data.isa[Column[Scalar[D]]]():
             raise Error("Expected " + String(D) + " column")
         return self._data[Column[Scalar[D]]].copy()
@@ -535,17 +671,23 @@ struct Series(Copyable, Sized, Writable):
 
     def bool(self) raises -> BoolColumn:
         """Return an owned typed copy, raising on a dtype mismatch."""
+        if self.is_chunked():
+            return self.rechunk().bool()
         if not self._data.isa[BoolColumn]():
             raise Error("Expected bool column")
         return self._data[BoolColumn].copy()
 
     def string(self) raises -> StringColumn:
         """Return the (shared, immutable) column, raising on a dtype mismatch."""
+        if self.is_chunked():
+            return self.rechunk().string()
         if not self._data.isa[StringColumn]():
             raise Error("Expected string column")
         return self._data[StringColumn].copy()
 
     def take(self, indices: List[Int]) raises -> Self:
+        if self.is_chunked():
+            return self.rechunk().take(indices)
         var result = self._take_storage(indices)
         result._dtype = self._dtype
         return result^
@@ -562,6 +704,8 @@ struct Series(Copyable, Sized, Writable):
         return Self(self._name, self._data[StringColumn].take(indices))
 
     def take_or_null(self, indices: List[Int]) raises -> Self:
+        if self.is_chunked():
+            return self.rechunk().take_or_null(indices)
         var result = self._take_or_null_storage(indices)
         result._dtype = self._dtype
         return result^
@@ -636,6 +780,8 @@ struct Series(Copyable, Sized, Writable):
         Non-null, non-NaN values rank 0..d-1 (reversed when descending).
         NaN ranks d in either direction; null ranks -1 or d + 1.
         """
+        if self.is_chunked():
+            return self.rechunk()._sort_ranks(descending, nulls_last)
         var n = len(self)
         var ranks = List[Int](length=n, fill=0)
         var valid = List[Bool](length=n, fill=False)
@@ -679,6 +825,8 @@ struct Series(Copyable, Sized, Writable):
         self, descending: Bool = False, nulls_last: Bool = True
     ) raises -> List[Int]:
         """Comparator mergesort kept as a test oracle and benchmark baseline."""
+        if self.is_chunked():
+            return self.rechunk()._argsort_reference(descending, nulls_last)
         var indices = List[Int](capacity=len(self))
         for i in range(len(self)):
             indices.append(i)
@@ -714,6 +862,28 @@ struct Series(Copyable, Sized, Writable):
         return indices^
 
     def slice(self, offset: Int, length: Int) raises -> Self:
+        if self.is_chunked():
+            if (
+                offset < 0
+                or length < 0
+                or offset > len(self)
+                or length > len(self) - offset
+            ):
+                raise Error("Invalid column slice")
+            var parts = List[Self]()
+            var start = 0
+            for chunk in self.chunks():
+                var stop = start + len(chunk)
+                var a = max(offset, start)
+                var b = min(offset + length, stop)
+                if b > a:
+                    parts.append(chunk.slice(a - start, b - a))
+                start = stop
+                if start >= offset + length:
+                    break
+            if len(parts) == 0:
+                return self.chunks()[0].slice(0, 0)
+            return Self._from_chunks(parts)
         var result = self._slice_storage(offset, length)
         result._dtype = self._dtype
         return result^
@@ -732,6 +902,8 @@ struct Series(Copyable, Sized, Writable):
         return Self(self._name, self._data[StringColumn].slice(offset, length))
 
     def _broadcast(self, length: Int) raises -> Self:
+        if self.is_chunked():
+            return self.rechunk()._broadcast(length)
         var result = self._broadcast_storage(length)
         result._dtype = self._dtype
         return result^
@@ -780,9 +952,7 @@ struct Series(Copyable, Sized, Writable):
                 + self._name
                 + "'"
             )
-        var result = self.copy()
-        result._append_series(other)
-        return result^
+        return Self._from_chunks([self.copy(), other.copy()])
 
     def reverse(self) raises -> Self:
         var indices = List[Int](capacity=len(self))
@@ -792,12 +962,19 @@ struct Series(Copyable, Sized, Writable):
 
     def _text_bytes(self) -> Int:
         """Bytes of text this column holds, or 0 when it holds none."""
+        if self.is_chunked():
+            var total = 0
+            for chunk in self.chunks():
+                total += chunk._text_bytes()
+            return total
         if self._data.isa[StringColumn]():
             return self._data[StringColumn]._value_bytes()
         return 0
 
     def _reserve_rows(mut self, rows: Int, text_bytes: Int) raises:
         """Size this column for a known final height before appending."""
+        if self.is_chunked():
+            self = self.rechunk()
         comptime for i in range(len(FixedElements.Ts)):
             comptime E: Copyable & Deinitable = FixedElements.Ts[i]
             if self._data.isa[Column[E]]():
@@ -808,6 +985,12 @@ struct Series(Copyable, Sized, Writable):
             self._data[StringColumn]._reserve_rows(rows, text_bytes)
 
     def _append_series(mut self, other: Self) raises:
+        if self.is_chunked():
+            self = self.rechunk()
+        if other.is_chunked():
+            for chunk in other.chunks():
+                self._append_series(chunk)
+            return
         if self._dtype.physical() != other._dtype.physical():
             raise Error("Cannot append different dtypes")
         comptime for i in range(len(FixedElements.Ts)):

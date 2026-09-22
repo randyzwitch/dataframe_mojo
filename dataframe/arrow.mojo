@@ -290,7 +290,9 @@ def _fill_array(
 ) raises:
     var state = _ArrayState()
     state.releases = releases
-    state.keep.append(series.copy())
+    # ArrowArray represents one array; this single-array adapter materializes
+    # chunked input explicitly. A stream exporter is a separate interface.
+    state.keep.append(series.rechunk())
     ref kept = state.keep[0]
     var length = len(series)
     array.length = Int64(length)

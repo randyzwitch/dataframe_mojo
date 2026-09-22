@@ -1,0 +1,231 @@
+"""Differential coverage for consumers of multi-array Series values."""
+from std.testing import TestSuite, assert_equal, assert_true
+from dataframe import (
+    Column,
+    DataFrame,
+    Expr,
+    Series,
+    col,
+    concat_str,
+    lit,
+    to_csv_string,
+)
+
+
+def contiguous() raises -> DataFrame:
+    return DataFrame(
+        [
+            Series(
+                "i",
+                Column[Int64](
+                    [4, 1, 7, 2, 6, 3, 5, 8],
+                    [True, False, True, True, True, False, True, True],
+                ),
+            ),
+            Series(
+                "f",
+                Column[Float64](
+                    [1.5, 2.5, -3.0, 4.0, 5.5, 6.0, -7.0, 8.5],
+                    [True, True, False, True, True, True, False, True],
+                ),
+            ),
+            Series(
+                "ok",
+                Column[Bool](
+                    [True, False, True, False, True, True, False, True],
+                    [True, False, True, True, True, True, False, True],
+                ),
+            ),
+            Series(
+                "key",
+                Column[String](
+                    ["b", "a", "b", "a", "c", "a", "c", "b"],
+                    [True, True, True, False, True, True, True, True],
+                ),
+            ),
+            Series(
+                "s",
+                Column[String](
+                    [
+                        "one",
+                        "two",
+                        "THREE",
+                        "four",
+                        "é",
+                        "six",
+                        "seven",
+                        "eight",
+                    ],
+                    [True, True, False, True, True, False, True, True],
+                ),
+            ),
+        ]
+    )
+
+
+def chunked() raises -> DataFrame:
+    # Each column breaks at different rows. Nulls land both within chunks and
+    # immediately adjacent to a boundary, so a consumer cannot use chunk zero
+    # as if it held the whole series.
+    var i = Series._from_chunks(
+        [
+            Series("i", Column[Int64]([4, 1, 7], [True, False, True])),
+            Series("i", Column[Int64]([2, 6], [True, True])),
+            Series("i", Column[Int64]([3, 5, 8], [False, True, True])),
+        ]
+    )
+    var f = Series._from_chunks(
+        [
+            Series("f", Column[Float64]([1.5, 2.5], [True, True])),
+            Series(
+                "f",
+                Column[Float64](
+                    [-3.0, 4.0, 5.5, 6.0], [False, True, True, True]
+                ),
+            ),
+            Series("f", Column[Float64]([-7.0, 8.5], [False, True])),
+        ]
+    )
+    var ok = Series._from_chunks(
+        [
+            Series(
+                "ok",
+                Column[Bool](
+                    [True, False, True, False], [True, False, True, True]
+                ),
+            ),
+            Series("ok", Column[Bool]([True], [True])),
+            Series(
+                "ok", Column[Bool]([True, False, True], [True, False, True])
+            ),
+        ]
+    )
+    var key = Series._from_chunks(
+        [
+            Series("key", Column[String](["b", "a"], [True, True])),
+            Series("key", Column[String](["b", "a", "c"], [True, False, True])),
+            Series("key", Column[String](["a", "c", "b"], [True, True, True])),
+        ]
+    )
+    var s = Series._from_chunks(
+        [
+            Series("s", Column[String](["one"], [True])),
+            Series(
+                "s",
+                Column[String](["two", "THREE", "four"], [True, False, True]),
+            ),
+            Series(
+                "s",
+                Column[String](
+                    ["é", "six", "seven", "eight"], [True, False, True, True]
+                ),
+            ),
+        ]
+    )
+    return DataFrame([i^, f^, ok^, key^, s^])
+
+
+def assert_same(actual: DataFrame, expected: DataFrame, label: String) raises:
+    assert_true(
+        actual.equals(expected),
+        label
+        + "\nactual:\n"
+        + String(actual)
+        + "\nexpected:\n"
+        + String(expected),
+    )
+
+
+def test_chunked_reductions_elementwise_filter_and_cast() raises:
+    var whole = contiguous()
+    var parts = chunked()
+    assert_true(parts.equals(whole))
+    assert_true(parts.column("i").is_chunked())
+    assert_equal(parts.column("i").n_chunks(), 3)
+    var first = parts.column("i").chunks()[0].copy()
+
+    var reductions = List[Expr]()
+    reductions.append(col("i").sum().alias("i_sum"))
+    reductions.append(col("f").mean().alias("f_mean"))
+    reductions.append(col("ok").count().alias("ok_count"))
+    reductions.append(col("s").n_unique().alias("s_unique"))
+    assert_same(
+        parts.select_exprs(reductions, batch_size=2),
+        whole.select_exprs(reductions, batch_size=2),
+        "reductions",
+    )
+
+    var expressions = List[Expr]()
+    expressions.append((col("i") + lit(Int64(10))).alias("i_plus"))
+    expressions.append((col("f") * lit(Float64(2))).alias("f_twice"))
+    expressions.append(col("ok").is_not_null().alias("ok_present"))
+    assert_same(
+        parts.select_exprs(expressions, batch_size=2),
+        whole.select_exprs(expressions, batch_size=2),
+        "elementwise",
+    )
+    assert_same(
+        parts.filter(col("i") > lit(Int64(3)), batch_size=2),
+        whole.filter(col("i") > lit(Int64(3)), batch_size=2),
+        "filter",
+    )
+    assert_same(
+        parts.cast({"i": "string", "f": "int64"}, strict=False),
+        whole.cast({"i": "string", "f": "int64"}, strict=False),
+        "cast",
+    )
+
+    # Read-only reductions and expression evaluation retain every original
+    # chunk and still share the original Arrow buffer.
+    _ = parts.column("i").sum()
+    _ = parts.select((col("i") + lit(Int64(1))).alias("out"), batch_size=2)
+    assert_equal(len(parts.column("i")), 8)
+    assert_equal(parts.column("i").get(7).int64(), 8)
+    assert_true(
+        parts.column("i")
+        .chunks()[0]
+        .int64()
+        ._shares_buffers_with(first.int64())
+    )
+
+
+def test_chunked_strings_hash_sort_display_and_gather() raises:
+    var whole = contiguous()
+    var parts = chunked()
+
+    var string_expr = concat_str(
+        [col("key"), lit(String("/")), col("s").str().to_uppercase()]
+    ).alias("text")
+    assert_same(
+        parts.select(string_expr, batch_size=2),
+        whole.select(string_expr, batch_size=2),
+        "strings",
+    )
+    assert_same(
+        parts.take([7, 0, 3, 6, 1]), whole.take([7, 0, 3, 6, 1]), "gather"
+    )
+    assert_same(parts.slice(1, 6), whole.slice(1, 6), "sliced frame")
+    assert_same(parts.sort(["key", "i"]), whole.sort(["key", "i"]), "sort")
+
+    var grouped = List[Expr]()
+    grouped.append(col("i").sum().alias("total"))
+    grouped.append(col("s").count().alias("n"))
+    assert_same(
+        parts.group_by(["key", "ok"], maintain_order=True).agg(
+            grouped, batch_size=2
+        ),
+        whole.group_by(["key", "ok"], maintain_order=True).agg(
+            grouped, batch_size=2
+        ),
+        "row hashing and grouping",
+    )
+    assert_equal(String(parts), String(whole))
+    assert_equal(
+        parts.column("s").to_string(max_rows=4),
+        whole.column("s").to_string(max_rows=4),
+    )
+    assert_equal(to_csv_string(parts), to_csv_string(whole))
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
