@@ -44,6 +44,13 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._bits = ArcPointer(bits^)
         self._data = ArcPointer(values^)
 
+    def __init__(out self, *, var values: List[Self.T], var bits: List[UInt8]):
+        """Adopt typed values and a prepacked validity bitmap without copying."""
+        self._length = len(values)
+        self._offset = 0
+        self._data = ArcPointer(values^)
+        self._bits = ArcPointer(bits^)
+
     def __len__(self) -> Int:
         return self._length
 
