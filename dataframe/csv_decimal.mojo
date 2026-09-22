@@ -1,12 +1,7 @@
-"""fast-float2 0.2.4 long-mantissa decimal operations for CSV.
+"""Long-mantissa decimal operations for CSV.
 
-This is a direct port of src/decimal.rs (Decimal, parse_decimal, left_shift,
-right_shift, round, and number_of_digits_decimal_left_shift) and the shift
-schedule used by src/simple.rs. The source is fast-float2 0.2.4, licensed
-MIT OR Apache-2.0; the MIT notice is in THIRD_PARTY_NOTICES.md.
-
-The caller must first validate the numeric grammar, as fast-float2 does before
-parse_decimal. Values are stored as decimal digits, most-significant first.
+The caller must first validate the numeric grammar before parse_decimal.
+Values are stored as decimal digits, most-significant first.
 """
 comptime CSV_DECIMAL_MAX_DIGITS = 768
 comptime CSV_DECIMAL_POINT_RANGE = 2047

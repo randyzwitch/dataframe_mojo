@@ -1,11 +1,8 @@
-"""CSV-only numeric conversion paths modeled on Polars 1.44.2 dependencies.
+"""CSV-only numeric conversion paths.
 
 `parse_csv_float32` and `parse_csv_float64` are deliberately separate from
-dataframe.parse, so the clean CSV decoder can use fast-float2's direct
-semantics without changing legacy cast behavior.
-
-Algorithm translations derive from fast-float2 0.2.4 under its MIT option;
-its license notice is in ``THIRD_PARTY_NOTICES.md``.
+dataframe.parse, so the clean CSV decoder can preserve its float
+parsing behavior without changing legacy cast behavior.
 """
 from std.memory import bitcast
 from std.bit import count_leading_zeros
@@ -599,10 +596,6 @@ def parse_csv_float32(text: StringSlice) raises -> Float32:
     return -value if number.negative else value
 
 
-# Algorithm source: fast-float2 0.2.4, pinned by Polars 1.44.2. The direct
-# translation below follows number.rs, binary.rs, and simple.rs for Float64.
-# CsvDecimal supplies simple.rs's batched decimal shifts and metadata. See the
-# license notice in THIRD_PARTY_NOTICES.md.
 comptime _F64_MANTISSA_BITS = 52
 comptime _F64_MIN_EXPONENT = -1023
 comptime _F64_INFINITY_POWER = 2047
