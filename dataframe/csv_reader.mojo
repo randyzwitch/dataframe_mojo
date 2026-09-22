@@ -9,7 +9,7 @@ from std.atomic import Atomic
 from std.collections import Dict
 from .csv_infer import infer_csv_schema
 from std.memory import ArcPointer, Pointer
-from .csv import (
+from .csv_types import (
     CsvSchema,
     CsvOptions,
     _Mapping,
@@ -153,16 +153,10 @@ def _empty_record(
     return length == 1 and bytes[start] == 13
 
 
-def _prelude(
+def _before_header(
     bytes: Span[UInt8, ImmutAnyOrigin], options: CsvOptions, has_header: Bool
 ) -> Tuple[Int, Int]:
-    """Port streaming.rs SkipEmpty/SkipRowsBeforeHeader/SkipHeader.
-
-    ``skip_rows`` counts valid CSV records, never comments.  It therefore
-    uses the quote-aware field iterator, whereas comment detection occurs
-    only at the start of a record.  ``record`` is the source record number
-    passed into decode jobs after the prelude.
-    """
+    """Return the record boundary immediately before the optional header."""
     var start = 0
     var record = 1
     if (
@@ -182,10 +176,9 @@ def _prelude(
             start = end
             record += 1
 
+    # `SkipRowsBeforeHeader`: comments are discarded but do not consume a
+    # skipped record. The next non-comment is the header (or data without one).
     var remaining = options.skip_rows
-    # `SkipRowsBeforeHeader`: comments are always discarded but do not reduce
-    # the count; the first non-comment after it becomes the header (or data
-    # when has_header=False).
     while start < len(bytes):
         if _comment_at(bytes, start, options.comment_prefix):
             start = _line_end(bytes, start, options)
@@ -196,11 +189,70 @@ def _prelude(
         start = _line_end(bytes, start, options)
         record += 1
         remaining -= 1
+    return (start, record)
 
+
+def _prelude(
+    bytes: Span[UInt8, ImmutAnyOrigin], options: CsvOptions, has_header: Bool
+) -> Tuple[Int, Int]:
+    """Port streaming.rs SkipEmpty/SkipRowsBeforeHeader/SkipHeader.
+
+    ``skip_rows`` counts valid CSV records, never comments.  It therefore
+    uses the quote-aware field iterator, whereas comment detection occurs
+    only at the start of a record.  ``record`` is the source record number
+    passed into decode jobs after the prelude.
+    """
+    var before = _before_header(bytes, options, has_header)
+    var start = before[0]
+    var record = before[1]
     if has_header and start < len(bytes):
         start = _line_end(bytes, start, options)
         record += 1
     return (start, record)
+
+
+def _validate_explicit_header(
+    bytes: Span[UInt8, ImmutAnyOrigin],
+    schema: CsvSchema,
+    options: CsvOptions,
+    has_header: Bool,
+) raises:
+    """Match Polars' explicit-schema width check without legacy name checks.
+
+    An explicit schema labels output positionally, so file header spelling and
+    order are ignored. Polars still rejects a header that defines more input
+    columns than that schema; a shorter header is permitted because data rows
+    can legitimately supply trailing null fields.
+    """
+    if not has_header:
+        return
+    var before = _before_header(bytes, options, has_header)
+    var start = before[0]
+    if start >= len(bytes):
+        return
+    var end = _line_end(bytes, start, options)
+    var quote = options.quote_char.byte_length() != 0
+    var quote_byte = options.quote_char.as_bytes()[0] if quote else UInt8(34)
+    var fields = CsvSplitFields(
+        options.separator.as_bytes()[0], quote_byte, quote
+    )
+    var count = 0
+    var input = bytes[start:end]
+    while True:
+        var field = fields.next(input)
+        if not field:
+            break
+        count += 1
+    if count > len(schema):
+        raise Error(
+            String(
+                "provided schema does not match number of columns in file (",
+                len(schema),
+                " != ",
+                count,
+                " in file)",
+            )
+        )
 
 
 def _decode_unmapped(
@@ -221,6 +273,7 @@ def _decode_unmapped(
         .unsafe_origin_cast[ImmutAnyOrigin](),
         length=len(input),
     )
+    _validate_explicit_header(bytes, schema, options, has_header)
     var prelude = _prelude(bytes, options, has_header)
     var offset = prelude[0]
     var result = decode_chunk(
@@ -247,8 +300,14 @@ def read_csv_explicit(
     ignore_errors: Bool = False,
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
+    buffer_size: Int = 65536,
 ) raises -> DataFrame:
-    """Source-mapped CSV pipeline under differential validation."""
+    """Read an explicit schema through the source-mapped CSV pipeline.
+
+    ``buffer_size`` remains a validated public compatibility keyword. Mapped
+    input is range-split directly, as in Polars, so it does not set the mmap
+    chunk size; unmapped input is decoded as one owned byte span.
+    """
     var options = _options(
         separator,
         quote_char,
@@ -259,7 +318,7 @@ def read_csv_explicit(
         ignore_errors,
         truncate_ragged_lines,
         encoding,
-        65536,
+        buffer_size,
     )
     var keep = _projection(schema, columns)
     var mapping = _map_file(path)
@@ -270,6 +329,7 @@ def read_csv_explicit(
         with open(path, "r") as file:
             var input = file.read_bytes()
             return _decode_unmapped(input^, schema, options, keep, has_header)
+    _validate_explicit_header(mapping.span(), schema, options, has_header)
     var prelude = _prelude(mapping.span(), options, has_header)
     return _read_mapped_body(
         mapping^, schema, options, keep, prelude[0], prelude[1]
@@ -287,7 +347,7 @@ def _read_mapped_body(
     var n_rows = options.n_rows
     var quote_char = options.quote_char
     var bytes = mapping.span()
-    if offset == len(bytes) or n_rows == 0:
+    if offset == len(bytes):
         return decode_chunk(
             bytes[len(bytes) :], schema, options, keep, 0, record
         )
@@ -366,8 +426,16 @@ def read_csv_inferred(
     ignore_errors: Bool = False,
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
+    buffer_size: Int = 65536,
+    try_parse_dates: Bool = False,
 ) raises -> DataFrame:
-    """Infer and decode using one mapped input and one prelude traversal."""
+    """Infer and decode using one mapped input and one prelude traversal.
+
+    ``buffer_size`` is validated for public compatibility; mapped input is
+    split by record-aligned byte ranges. ``try_parse_dates`` is forwarded to
+    the inference port, which decides whether its supported temporal types
+    can be inferred.
+    """
     var options = _options(
         separator,
         quote_char,
@@ -378,7 +446,7 @@ def read_csv_inferred(
         ignore_errors,
         truncate_ragged_lines,
         encoding,
-        65536,
+        buffer_size,
     )
     var mapping = _map_file(path)
     if mapping.address != 0:
@@ -388,6 +456,7 @@ def read_csv_inferred(
             has_header=has_header,
             infer_schema_length=infer_schema_length,
             schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
         )
         if len(inferred.schema) == 0:
             return DataFrame([])
@@ -414,6 +483,7 @@ def read_csv_inferred(
             has_header=has_header,
             infer_schema_length=infer_schema_length,
             schema_overrides=schema_overrides,
+            try_parse_dates=try_parse_dates,
         )
         if len(inferred.schema) == 0:
             return DataFrame([])

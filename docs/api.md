@@ -131,6 +131,8 @@ no mutable buffers or implicit negative indexing are exposed.
 
 - `def __init__(out self, var values: List[T])`
 - `def __init__(out self, var values: List[T], valid: List[Bool])`
+- `def __init__(out self, *, var values: List[T], var bits: List[UInt8])`
+  Adopt typed values and a prepacked validity bitmap without copying.
 - `def __len__(self) -> Int`
 - `def to_list(self) -> List[T]`
   An owned copy of this window's payloads, null slots included.
@@ -205,6 +207,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
 
 - `def __init__(out self, var columns: List[Series], *, height: Int = Int(-1))`
 - `def __getitem__(self, name: String) -> Series`
+- `def rechunk(self) -> Self`
+  Return one contiguous array per column, copying only chunked data.
 - `def height(self) -> Int`
 - `def write_to(self, mut writer: T)`
 - `def to_string(self, *, max_rows: Int = Int(10), max_columns: Int = Int(12), max_string_length: Int = Int(32)) -> String`
@@ -814,14 +818,14 @@ def null(dtype: String) -> Expr
 
 ## `read_csv`
 
-Read a strict UTF-8 CSV file into typed, nullable columns.
+Read CSV through the Polars-derived scanner and typed builders.
 
 ```mojo
 def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
 ```
 
 ```mojo
-def read_csv(path: String, *, infer_schema_length: Int = Int(10000), schema_overrides: Dict[String, String] = Dict(), has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
 ```
 
 ## `scan_csv`
@@ -847,6 +851,7 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def __init__(out self, var name: String, var column: StringColumn)`
 - `def __init__(out self, var name: String, column: Column[String])`
   Convert list-backed strings to the contiguous UTF-8 layout.
+- `def __init__(out self, var name: String, var storage: Variant[Column[Int64], Column[Float64], BoolColumn, StringColumn, Column[Int8], Column[Int16], Column[Int32], Column[UInt8], Column[UInt16], Column[UInt32], Column[UInt64], Column[Float32]], dtype: DataType)`
 - `def __getitem__(self, index: Int) -> AnyValue`
   One cell; raises when out of bounds. Negative indices count from the end.
 - `def __neg__(self) -> Self`
@@ -876,6 +881,13 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def __and__(self, other: Self) -> Self`
 - `def __or__(self, other: Self) -> Self`
 - `def __xor__(self, other: Self) -> Self`
+- `def is_chunked(self) -> Bool`
+- `def n_chunks(self) -> Int`
+  Number of physical Arrow arrays backing this series.
+- `def chunks(self) -> List[Self]`
+  Owned column views sharing the immutable buffers of each array.
+- `def rechunk(self) -> Self`
+  Materialize one contiguous Arrow array, preserving name and dtype.
 - `def with_dtype(self, dtype: DataType) -> Self`
   The same values tagged with another logical type that shares their storage (temporal types and INT64).
 - `def name(self) -> String`
@@ -980,12 +992,16 @@ A window onto shared UTF-8 bytes, Int64 offsets, and validity.
   Convert a list-backed string column into the UTF-8 layout.
 - `def __init__(out self, *, var bytes: List[UInt8], var offsets: List[Int64], var bits: List[UInt8], length: Int)`
   Adopt finished buffers; offsets must have length + 1 entries.
+- `def __init__(out self, var storage: StringViewStorage)`
+  Adopt finished Arrow Utf8View descriptors and their Arc blocks.
 - `def __len__(self) -> Int`
+- `def to_large_utf8(self) -> Self`
+  Return an owned large_utf8 adapter when a contiguous ABI is needed.
 - `def to_list(self) -> List[String]`
   Owned copies of this window's rows (nulls read as "").
 - `def is_null(self, index: Int) -> Bool`
 - `def unsafe_bytes(self) -> Pointer[UInt8, ImmutAnyOrigin]`
-  Arrow's UTF-8 payload buffer, indexed by `unsafe_offsets`, not by row. Shared and read-only; valid only while this column is alive.
+  Arrow large_utf8 payload; call ``to_large_utf8`` for native views.
 - `def unsafe_offsets(self) -> Pointer[Int64, MutAnyOrigin]`
   Arrow's Int64 offset buffer. Row i occupies bytes `offsets[validity_offset() + i]` up to the next entry, so it is not shifted to row 0. Shared and read-only.
 - `def is_valid(self, index: Int) -> Bool`

@@ -15,9 +15,6 @@ Source mapping:
   for x86 SSSE3/SSE4.1 (and AVX2 for 17..20-digit 64-bit values); other targets
   use the packed SWAR fallback. A dedicated Neon madd reduction is not exposed
   by this module yet, so it is intentionally not described as a SIMD backend.
-
-atoi_simd is MIT OR Apache-2.0; this repository retains its MIT text at
-`third_party/ATOI_SIMD_LICENSE`.
 """
 from std.memory import bitcast, pack_bits
 from std.bit import count_trailing_zeros

@@ -138,15 +138,30 @@ def test_string_buffer_retains_inline_long_and_escaped_values() raises:
 def test_string_builder_captures_quote_and_lossy_encoding() raises:
     var buffer = CsvBuffer(CsvField.string("label"), 1, UInt8(39), False)
     var quoted = String("'it''s a long quoted field'")
-    buffer.add(Span[UInt8, ImmutAnyOrigin](
-        unsafe_ptr=quoted.as_bytes().unsafe_ptr().unsafe_mut_cast[False]().unsafe_origin_cast[ImmutAnyOrigin](),
-        length=quoted.byte_length()), True, False)
+    buffer.add(
+        Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=quoted.as_bytes()
+            .unsafe_ptr()
+            .unsafe_mut_cast[False]()
+            .unsafe_origin_cast[ImmutAnyOrigin](),
+            length=quoted.byte_length(),
+        ),
+        True,
+        False,
+    )
     assert_equal(buffer.finish().string().value(0), "it's a long quoted field")
     var lossy = CsvBuffer(CsvField.string("label"), 1, UInt8(34), True)
     var input: List[UInt8] = [102, 128]
-    lossy.add(Span[UInt8, ImmutAnyOrigin](
-        unsafe_ptr=input.unsafe_ptr().unsafe_mut_cast[False]().unsafe_origin_cast[ImmutAnyOrigin](),
-        length=len(input)), False, False)
+    lossy.add(
+        Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=input.unsafe_ptr()
+            .unsafe_mut_cast[False]()
+            .unsafe_origin_cast[ImmutAnyOrigin](),
+            length=len(input),
+        ),
+        False,
+        False,
+    )
     _ = input^
     assert_equal(lossy.finish().string().value(0), "f�")
 

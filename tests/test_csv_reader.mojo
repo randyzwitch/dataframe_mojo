@@ -3,7 +3,12 @@ from std.collections import Dict
 from dataframe.dtype import DataType
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 from dataframe.csv import CsvField, CsvOptions, CsvSchema
-from dataframe.csv_reader import _decode_unmapped, _prelude, read_csv_explicit, read_csv_inferred
+from dataframe.csv_reader import (
+    _decode_unmapped,
+    _prelude,
+    read_csv_explicit,
+    read_csv_inferred,
+)
 from dataframe.frame import DataFrame
 
 
@@ -137,6 +142,37 @@ def test_final_unterminated_record_and_comment_match_read_impl_count() raises:
     assert_equal(comment.height(), 0)
 
 
+def test_explicit_schema_names_override_file_header_and_buffer_size_validates() raises:
+    # Polars applies an explicit schema by position and adopts its names; it
+    # does not retain the legacy reader's header-name/order equality check.
+    with open(PATH, "w") as file:
+        file.write("file_id,file_name,file_score\n1,a,2\n")
+    var result = read_csv_explicit(PATH, schema())
+    assert_equal(result.columns(), [String("id"), "name", "score"])
+    assert_equal(cells(result), "1|a|2.0\n")
+
+    # Positional schemas may be wider than the header, but Polars rejects a
+    # header that introduces source fields absent from the supplied schema.
+    with open(PATH, "w") as file:
+        file.write("h0,h1,h2,h3\n1,a,2\n")
+    with assert_raises(contains="provided schema does not match"):
+        _ = read_csv_explicit(PATH, schema())
+
+    # The mapped reader does not use this legacy block size to partition its
+    # mmap, but public callers retain the validated keyword on both routes.
+    with assert_raises(contains="buffer_size must be positive"):
+        _ = read_csv_explicit(PATH, schema(), buffer_size=0)
+    with assert_raises(contains="buffer_size must be positive"):
+        _ = read_csv_inferred(PATH, buffer_size=0)
+
+    # Polars' n_rows bound is applied after parsing ranges, including a zero
+    # bound, so an invalid value beyond the retained head still raises.
+    with open(PATH, "w") as file:
+        file.write("id,name,score\n1,a,invalid\n")
+    with assert_raises(contains="invalid"):
+        _ = read_csv_explicit(PATH, schema(), n_rows=0)
+
+
 def test_inferred_reader_shares_mapping_and_projected_decode() raises:
     with open(PATH, "w") as file:
         file.write('id,score,active,name\n1,1.5,true,"a,b"\n2,,false,z\n')
@@ -149,7 +185,9 @@ def test_inferred_reader_shares_mapping_and_projected_decode() raises:
     assert_equal(result.column("score").null_count(), 1)
     var override = Dict[String, String]()
     override["id"] = "string"
-    var projected = read_csv_inferred(PATH, columns=["id"], schema_overrides=override, n_rows=1)
+    var projected = read_csv_inferred(
+        PATH, columns=["id"], schema_overrides=override, n_rows=1
+    )
     assert_equal(projected.height(), 1)
     assert_equal(projected.column("id").dtype(), DataType.STRING)
     assert_equal(projected.column("id").string().value(0), "1")

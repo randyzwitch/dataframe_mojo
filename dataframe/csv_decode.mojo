@@ -6,7 +6,7 @@ spans to builder.rs-style ``add``, and delegates omitted tails to the same
 quote-aware ``skip_this_line`` rule. Prelude removal and global n_rows bounds
 belong to orchestration, never to an individual chunk.
 """
-from .csv import CsvOptions, CsvSchema
+from .csv_types import CsvOptions, CsvSchema
 from .csv_buffers import CsvBuffer
 from .csv_splitfields import CsvSplitFields
 from .dtype import DataType
@@ -152,9 +152,19 @@ def decode_chunk(
                 if is_null:
                     buffers.unsafe_ptr().unsafe_offset(processed)[].add_null()
                 else:
-                    buffers.unsafe_ptr().unsafe_offset(processed)[].add(
-                        raw, field.needs_escaping, options.ignore_errors
-                    )
+                    try:
+                        buffers.unsafe_ptr().unsafe_offset(processed)[].add(
+                            raw, field.needs_escaping, options.ignore_errors
+                        )
+                    except error:
+                        raise Error(
+                            "CSV record "
+                            + String(record)
+                            + ", field '"
+                            + schema._fields[source_index].name
+                            + "': "
+                            + String(error)
+                        )
                 processed += 1
                 if processed < selected:
                     next_selected = projection.unsafe_ptr().unsafe_offset(

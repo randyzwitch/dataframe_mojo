@@ -1,157 +1,116 @@
 # CSV ingestion contract
 
-`read_csv(path, schema, has_header=True, buffer_size=65536)` reads a local file
-into the existing eager `DataFrame`. It is native Mojo code and has no Python,
-Arrow, pandas, or Polars runtime dependency.
+`read_csv(path, schema, ...)` reads typed columns; `read_csv(path, ...)`
+infers their types. Both use one native Mojo pipeline derived from Polars
+1.44.2: mapped input, quote-aware record scanning, borrowed field splitting,
+typed builders, and chunk-preserving assembly. There is no alternate legacy
+reader and no Python, Arrow, Polars, Rayon or jemalloc runtime dependency.
 
 ## Schema and records
 
-The schema is non-empty, ordered, and uniquely named. Fields are built with
-`CsvField.int64`, `.float64`, `.bool`, `.string`, `.date`, `.datetime`, and
-`.time`, or `CsvField(name, dtype)` for any dtype, including every numeric
-width (`CsvField("n", DataType.UINT16)`); each is nullable by default. Integer
-fields are range-checked at their width while parsing the digits (no float
-round trip). Native integer fields use a CSV-only port of Polars 1.44.2's
-`atoi_simd` 0.18.1 paths: `dataframe/csv_integer.mojo` maps the short,
-packed-fallback, and x86 SIMD routes, with its retained license at
-`third_party/ATOI_SIMD_LICENSE`. This does not change generic cast parsing in
-`dataframe.parse`. Inference only produces Int64 and Float64. With a header, names and order must match exactly. Without one, schema
-names are assigned positionally. Empty and header-only files produce zero rows
-with the requested schema. Every data record must have exactly the schema width.
+`CsvSchema` is ordered, non-empty and has unique names. Construct fields with
+`CsvField.int64`, `.float64`, `.bool`, `.string`, `.date`, `.datetime`, `.time`,
+or `CsvField(name, dtype)` for any supported numeric width. Explicit schema
+names label columns by position, including when the file has different header
+names. `CsvField.nullable` remains accepted metadata; it does not prohibit null
+CSV values, matching Polars' nullable columns.
 
-The parser accepts LF and CRLF record endings and an absent final newline. A
-bare CR outside quotes is invalid. Quoted fields may contain commas, CR/LF, and
-doubled quote escapes. A quote may only open at the start of a field, and no
-bytes may follow its closing quote before a delimiter or record ending.
-Whitespace is data and is never trimmed. The UTF-8 BOM is ignored only at byte
-zero; elsewhere it is ordinary Unicode text. Every completed field is validated
-as UTF-8, even across input-buffer boundaries.
+Empty and header-only files produce zero rows with an explicit schema. Short
+records are padded with nulls. Extra fields raise unless truncation or a partial
+projection permits skipping the remaining source fields. LF, CRLF, missing
+final newlines, quoted separators, doubled quotes and multiline fields are
+supported. Quote handling follows Polars' splitter and builders; the old
+strict tokenizer's rejection rules and error priority are not retained.
+The UTF-8 BOM is removed only at the beginning of the input.
 
-Temporal fields are `CsvField.date(name, format="")`,
-`CsvField.datetime(name, unit="us", format="")`, and
-`CsvField.time(name, format="")`; an empty format means ISO 8601, and a value
-that does not parse is an error naming the record and field. The writer formats
-temporal columns in ISO form, and `CsvSchema.of(frame)` keeps their types.
+Temporal fields accept an optional format; an empty format selects the existing
+ISO temporal converter. The writer emits ISO text. Temporal conversion uses
+this library's existing parser; it is not a complete port of Polars' chrono
+format inference. `CsvSchema.of(frame)` retains temporal types.
 
-## Null and conversion rules
+## Nulls and conversion
 
-An empty unquoted field is the sole null marker. Null markers never match quoted
-fields, so `""` is a valid empty String and is a conversion error for numeric or
-Boolean fields. Null in a non-nullable field raises.
+Bare empty fields are null. A quoted empty string remains an empty String;
+empty numeric or Boolean fields are null. `null_values` tokens match quoted
+as well as unquoted contents, in every column. Consequently, quoting a literal
+null token does not protect it when that token is configured as null.
 
-Int64 accepts an optional leading `+` or `-` followed by ASCII decimal digits.
-Unsigned integer fields accept an optional `+` and reject every negative
-spelling, including `-0`, matching Polars CSV parsing. This does not change
-the generic cast parser's handling of unsigned negative zero.
-All integer fields enforce their exact destination range without passing through
-Float64. Float64 accepts only decimal text with an optional sign, fraction, and
-exponent (Mojo's own parser is laxer and would read `2024-02-28` as a number),
-plus `nan`/`NaN`; it rejects surrounding ASCII space/tab/newline, and rejects overflow-to-infinity unless the token is one of
-the documented explicit infinity spellings. Valid NaN remains a value, distinct
-from null. Boolean accepts only lowercase `true` and `false`. String preserves
-decoded content exactly after CSV unquoting.
+Integers use the pinned `atoi_simd` algorithm, with exact destination-width
+checks and no floating-point intermediate. Signed fields accept `+` and `-`;
+unsigned fields reject all negative spellings, including `-0`. Floats use the
+pinned fast-float algorithm, preserving Float32/Float64 rounding and accepting
+its NaN/infinity spellings and overflow behavior. Numeric builders strip
+leading ASCII spaces and tabs; String content is preserved after CSV unquoting.
+Booleans recognize case-insensitive `true` and `false`.
 
-Errors identify the logical record and field where practical. Structural errors
-also report the physical line; a logical record can span several physical lines.
-Parsing is strict and never skips malformed records.
+`ignore_errors=True` replaces failed conversions with null in the affected
+field; it does not drop the entire record. Structural errors may still raise.
+Errors include record/field context where conversion provides it; their text
+is not a compatibility interface.
 
-## Buffering and performance direction
-
-File reads are bounded by `buffer_size`; tokenizer state survives arbitrary
-boundaries, including BOM bytes, CRLF pairs, escaped quotes, UTF-8 sequences, and
-multiline records. Temporary parsing memory is bounded by the input buffer and
-the current field, apart from typed output builders. String fields append their
-bytes straight into a UTF-8 buffer and offsets (no per-field `String`). Final
-column construction currently copies builder storage once; movable column
-builders can remove that copy later.
-
-The scalar tokenizer separates structural scanning from typed decoding. Future
-SIMD scanning must produce the same state transitions. Parallel partitions must
-begin at verified record boundaries or reconcile quote state; raw newline splits
-are incorrect for multiline fields.
-
-`pixi run bench-csv` generates a deterministic 100,000-row mixed dataset outside
-the timed region, performs one warmup, verifies every result height, and prints
-machine-readable timing and throughput metrics. For peak resident memory on
-Linux, run `/usr/bin/time -v pixi run bench-csv` (on macOS, `/usr/bin/time -l`); this intentionally remains an
-external measurement so the parser has no platform-specific runtime dependency.
+Strict UTF-8 validation checks each chunk once when the complete source schema
+contains a String column, even if that column is not projected. `utf8-lossy`
+replaces invalid String byte sequences with U+FFFD. Numeric-only input still
+passes through the numeric grammar checks.
 
 ## Schema inference
 
-`read_csv(path)` without a schema infers one. It tokenizes the header and the
-first `infer_schema_length` data records (default 10,000; `-1` reads every
-record) with the same options, and keeps those fields in memory as text. Each
-column takes the first type in Bool, Int64, Float64, Date, Datetime[us], String
-(ISO 8601 forms for the temporal types) that reads every
-sampled value:
+The default sample is **100 rows**; `infer_schema_length=-1` samples the whole
+input. Inference and decoding share the same mapped input. Boolean, Int64,
+Float64 and String candidates follow Polars' lexical inference rules. Leading
+zeroes do not force String, and an integer-shaped value can infer Int64 then
+fail range checking during decoding. Null fields are ignored; an all-null
+column defaults to String. Mixed integer/float candidates become Float64.
 
-- Nulls (empty unquoted fields and `null_values` tokens) are ignored; a column
-  with no values is String, and a quoted empty string makes the column String.
-- Integer-shaped text with a leading zero (`007`) or outside the Int64 range
-  infers as String, so identifiers and huge numbers are never altered.
-- Int64 and Float64 values together infer Float64.
+`try_parse_dates=True` enables temporal inference; the default is False.
+`schema_overrides` maps names to dtype strings and overrides inferred types.
+Unknown names are ignored, as in Polars; invalid dtype names for known columns
+raise. Duplicate header names use Polars' `_duplicated_N` suffixes; headerless
+columns are `column_1`, `column_2`, and so on. Empty inferred input raises an error. Use explicit types or a longer sample when later values
+cannot be represented by the inferred dtype.
 
-`schema_overrides={"name": "int64"}` fixes a column's dtype and wins over
-inference; unknown names or dtypes raise. The file is then read strictly with
-the resulting nullable schema. A value after the sample that does not fit
-raises with its record and field, plus a hint to pass `schema_overrides` or a
-larger `infer_schema_length`; types never change mid-file.
-
-Header names are kept, with repeats renamed `name_1`, `name_2`, and so on.
-Without a header, columns are `column_1`, `column_2`, .... Rows in the sample
-must have one field count unless `truncate_ragged_lines` or `ignore_errors` is
-set. An empty file returns a frame with no columns, and a header-only file
-returns String columns with zero rows.
-
-## Reader options
-
-All options are applied by the streaming tokenizer, one byte at a time, so
-results never depend on buffer boundaries; tests read every scenario with every
-buffer size from one byte to the whole file.
+## Options and input ownership
 
 | Option | Default | Meaning |
 |---|---|---|
+| `has_header` | `True` | consume the first content record as a header |
 | `separator` | `","` | one byte other than CR or LF |
-| `quote_char` | `'"'` | one byte, or `""` to treat quote bytes as data |
-| `comment_prefix` | `""` | records starting with this text (outside quotes) are skipped to the end of the line; a partial match is ordinary data |
-| `skip_rows` | `0` | raw physical lines skipped before parsing (and before the header), ignoring quotes |
-| `n_rows` | `-1` | stop after this many data records; the rest of the file is not read |
-| `columns` | all | decode and return only these fields, in schema order; other fields are tokenized but never converted |
-| `null_values` | none | extra unquoted tokens read as null in every column; quoted text never matches |
-| `ignore_errors` | `False` | drop data records with a conversion error or the wrong field count instead of raising; header errors still raise |
-| `truncate_ragged_lines` | `False` | pad short records with nulls and drop extra fields |
-| `encoding` | `"utf8"` | `"utf8-lossy"` replaces invalid sequences with U+FFFD instead of raising |
+| `quote_char` | `'"'` | one byte, or `""` to disable quoting |
+| `comment_prefix` | `""` | skip matching comment lines |
+| `skip_rows` | `0` | skip CSV records before the header, respecting quoted newlines |
+| `n_rows` | `-1` | limit returned rows; asynchronous decoding can read beyond the limit |
+| `columns` | all | select source columns for decoding |
+| `null_values` | none | additional null tokens for every column |
+| `ignore_errors` | `False` | null-fill failed conversions |
+| `truncate_ragged_lines` | `False` | ignore fields beyond the schema width |
+| `encoding` | `"utf8"` | strict UTF-8 or `"utf8-lossy"` |
+| `buffer_size` | `65536` | positive compatibility argument; it does not select a tokenizer or bound memory |
 
-A dropped record is removed atomically: fields already converted are rolled
-back, so column lengths stay aligned. Records are buffered as field text until
-they end, which keeps parser memory bounded by the current record. Projection
-cut ingestion time of the 100,000-row benchmark from 86 ms to 58 ms when
-reading one of four columns (`pixi run bench-csv`, Linux x86-64).
-Per-column null tokens and dropped-record counts are not yet available.
+Regular files are mapped. Sources that cannot be mapped are read into owned
+bytes and passed to the same decoder. That fallback is not a bounded-memory
+streaming API. Chunk boundaries come from the record scanner, independently
+of `buffer_size`. Numeric buffers and StringView storage transfer into output
+columns. Results may retain multiple chunks; `rechunk()` explicitly requests
+contiguous storage.
 
 ## Writing
 
-`write_csv(frame, path, has_header=True, separator=",",
-quote_style="necessary", null_value="", line_terminator="\n",
-buffer_size=65536)` streams a frame to UTF-8 CSV in chunks of about
-`buffer_size` bytes; `to_csv_string(frame, ...)` returns the same text.
-`CsvSchema.of(frame)` builds a nullable schema from a frame's names and dtypes.
+`write_csv(frame, path, has_header=True, separator=",", quote_style="necessary",
+null_value="", line_terminator="\n", buffer_size=65536)` writes UTF-8 CSV in
+bounded output batches; `to_csv_string(frame, ...)` returns the same text.
+The writer's `buffer_size` still controls its output batching.
 
-With the defaults the writer is the inverse of `read_csv`: for every supported
-dtype, `read_csv(path, CsvSchema.of(frame))` after `write_csv(frame, path)`
-equals the frame, including NaN, infinities, `-0.0`, Int64 extremes, empty
-strings, nulls, embedded quotes, separators, and line breaks.
+With default null markers, writing and then reading with `CsvSchema.of(frame)`
+round-trips supported values, including NaN, infinities, signed zero, empty
+strings, nulls, temporal values and multiline text. Custom null tokens that
+also occur as literal values cannot be distinguished by quoting alone.
 
-- Nulls are written as `null_value`, unquoted (empty by default).
-- `necessary` quotes a field (and header name) when it contains the separator,
-  a double quote, CR, or LF, is empty, or equals `null_value`, so empty strings
-  and literal null tokens stay distinct from nulls. Embedded quotes are doubled.
-- `always` quotes every non-null field; `non_numeric` quotes strings, Booleans,
-  and header names; `never` writes raw text and may not re-read correctly.
-- Int64 uses exact decimal digits, Float64 the shortest round-trippable form
-  (`nan`, `inf`, `-inf`, `-0.0`, `1e+300`), and Bool `true`/`false`.
-- `separator` must be one byte other than a quote, CR, or LF;
-  `line_terminator` is LF or CRLF; `null_value` cannot contain the separator,
-  quotes, or line breaks.
+- Nulls are written as unquoted `null_value`.
+- `necessary` quotes empty strings, separators, quotes, CR/LF and null-token
+  collisions. Embedded quotes are doubled.
+- `always` quotes every non-null field; `non_numeric` quotes strings, Booleans
+  and headers; `never` writes raw text and may not re-read correctly.
+- Output line endings may be LF or CRLF.
 
-Deferred features include compression and remote URLs.
+Compression, remote URLs, per-column null tokens, custom input EOL bytes and
+Arrow stream export are not exposed by this API.

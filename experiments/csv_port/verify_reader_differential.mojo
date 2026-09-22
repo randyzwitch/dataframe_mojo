@@ -6,7 +6,7 @@ documented option/type surface.
 """
 from std.sys import argv
 from dataframe import CsvField, CsvSchema, write_csv
-from dataframe.csv_reader import read_csv_explicit, read_csv_inferred
+from dataframe import read_csv
 
 
 def _base_schema() raises -> CsvSchema:
@@ -44,28 +44,26 @@ def main() raises:
     var scenario = String(args[3])
 
     if scenario == "base_explicit":
-        write_csv(read_csv_explicit(input, _base_schema()), output)
+        write_csv(read_csv(input, _base_schema()), output)
     elif scenario == "base_inferred":
-        write_csv(read_csv_inferred(input), output)
+        write_csv(read_csv(input), output)
     elif scenario == "base_projected_explicit":
         write_csv(
-            read_csv_explicit(input, _base_schema(), columns=["id", "label"]),
+            read_csv(input, _base_schema(), columns=["id", "label"]),
             output,
         )
     elif scenario == "base_projected_inferred":
-        write_csv(read_csv_inferred(input, columns=["id", "label"]), output)
+        write_csv(read_csv(input, columns=["id", "label"]), output)
     elif scenario == "nulls_explicit":
         write_csv(
-            read_csv_explicit(
-                input, _base_schema(), null_values=["NULL", "NA"]
-            ),
+            read_csv(input, _base_schema(), null_values=["NULL", "NA"]),
             output,
         )
     elif scenario == "nulls_inferred":
-        write_csv(read_csv_inferred(input, null_values=["NULL", "NA"]), output)
+        write_csv(read_csv(input, null_values=["NULL", "NA"]), output)
     elif scenario == "comments_limit_explicit":
         write_csv(
-            read_csv_explicit(
+            read_csv(
                 input,
                 _base_schema(),
                 comment_prefix="#",
@@ -76,7 +74,7 @@ def main() raises:
         )
     elif scenario == "comments_limit_inferred":
         write_csv(
-            read_csv_inferred(
+            read_csv(
                 input,
                 comment_prefix="#",
                 skip_rows=1,
@@ -85,8 +83,8 @@ def main() raises:
             output,
         )
     elif scenario == "wide_explicit":
-        write_csv(read_csv_explicit(input, _wide_schema()), output)
+        write_csv(read_csv(input, _wide_schema()), output)
     elif scenario == "wide_inferred":
-        write_csv(read_csv_inferred(input), output)
+        write_csv(read_csv(input), output)
     else:
         raise Error("unknown reader differential case: " + scenario)

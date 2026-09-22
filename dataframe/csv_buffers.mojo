@@ -12,7 +12,7 @@ from .string_column import StringColumn
 from .string_view import StringViewBuilder
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
-from .csv import CsvField
+from .csv_types import CsvField
 from .csv_integer import parse_csv_integer
 from .csv_numeric import parse_csv_float32, parse_csv_float64
 from .temporal import parse as parse_temporal
@@ -138,9 +138,7 @@ struct _Utf8Buffer(Movable):
                 else:
                     self.builder.append_null()
                 return
-        self.builder.append(
-            StringSlice(unsafe_from_utf8=bytes)
-        )
+        self.builder.append(StringSlice(unsafe_from_utf8=bytes))
 
     def finish(deinit self) -> StringColumn:
         return StringColumn(self.builder^.finish())
@@ -178,7 +176,13 @@ struct CsvBuffer(Movable):
     var field: CsvField
     var storage: _Buffers
 
-    def __init__(out self, field: CsvField, capacity: Int, quote_char: UInt8 = 34, lossy: Bool = False):
+    def __init__(
+        out self,
+        field: CsvField,
+        capacity: Int,
+        quote_char: UInt8 = 34,
+        lossy: Bool = False,
+    ):
         self.field = field.copy()
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]

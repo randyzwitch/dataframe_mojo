@@ -5,26 +5,30 @@ This maps ``csv/read/schema_inference.rs`` and the pre-inference states in
 and ``data_offset`` to its chunk pipeline; this module deliberately does not
 open files or decode rows.
 
-The current CSV API has four inferred dtypes: Bool, Int64, Float64, and
-String.  Polars' date/time, decimal-comma, Null, and optional Int128 branches
-are therefore intentionally represented as String (except the non-Int128
-Polars integer branch, which remains Int64).  Per-column null values and
-column-name replacement are likewise outside this API; ``CsvOptions`` has
-all-column null tokens and ``schema_overrides`` is the existing name-to-dtype
-adapter.  As in Polars, header names are always converted with UTF-8 loss
-replacement; body UTF-8 checking belongs to the later decoder path.
+The current CSV API infers Bool, Int64, Float64, and String. With
+``try_parse_dates=True``, it also infers the supported ISO Date,
+Datetime[us], and Time forms. This follows Polars' opt-in date inference:
+the pinned default is false. Decimal-comma, Null, optional Int128, per-column
+null values, and column-name replacement are outside this API; ``CsvOptions``
+has all-column null tokens and ``schema_overrides`` is the existing
+name-to-dtype adapter. As in Polars, header names are always converted with
+UTF-8 loss replacement; body UTF-8 checking belongs to the later decoder path.
 """
 from std.collections import Dict
 
-from .csv import CsvField, CsvOptions, CsvSchema
+from .csv_types import CsvField, CsvOptions, CsvSchema
 from .csv_splitfields import CsvSplitFields
 from .dtype import DataType
+from .temporal import parse as parse_temporal
 
 
 comptime _BOOL = 1
 comptime _INT = 2
 comptime _FLOAT = 4
 comptime _STRING = 8
+comptime _DATE = 16
+comptime _DATETIME = 32
+comptime _TIME = 64
 
 
 @fieldwise_init
@@ -192,8 +196,36 @@ def _float_regex(bytes: Span[UInt8, ImmutAnyOrigin]) -> Bool:
     return False
 
 
-def _infer_field(raw: Span[UInt8, ImmutAnyOrigin]) -> Int:
-    """Port infer_field_schema's Boolean, Float, Integer regex ordering."""
+def _infer_temporal(raw: Span[UInt8, ImmutAnyOrigin]) -> Int:
+    """The ISO subset of polars_time infer_pattern_single.
+
+    Polars reaches this branch only after Boolean, Float, and Integer regexes.
+    It tries Date, Time, then Datetime. The existing temporal parser supplies
+    that ISO subset; non-ISO DMY and compact chrono patterns stay String until
+    the public CSV API exposes matching format support.
+    """
+    var text = String(from_utf8_lossy=raw)
+    try:
+        _ = parse_temporal(text, DataType.DATE)
+        return _DATE
+    except:
+        pass
+    try:
+        _ = parse_temporal(text, DataType.TIME)
+        return _TIME
+    except:
+        pass
+    try:
+        _ = parse_temporal(text, DataType.datetime("us"))
+        return _DATETIME
+    except:
+        return _STRING
+
+
+def _infer_field(
+    raw: Span[UInt8, ImmutAnyOrigin], try_parse_dates: Bool
+) -> Int:
+    """Port infer_field_schema Boolean, Float, Integer, temporal ordering."""
     if _ascii_equal_ci(raw, "true") or _ascii_equal_ci(raw, "false"):
         return _BOOL
     if _float_regex(raw):
@@ -203,8 +235,10 @@ def _infer_field(raw: Span[UInt8, ImmutAnyOrigin]) -> Int:
         start = 1
     if _digits(raw, start, len(raw)):
         # With no dtype-i128 feature Polars preserves INTEGER_RE as Int64
-        # even when parse::<i64>() overflows.  The clean API has no Int128.
+        # even when parse::<i64>() overflows. The clean API has no Int128.
         return _INT
+    if try_parse_dates:
+        return _infer_temporal(raw)
     return _STRING
 
 
@@ -281,6 +315,7 @@ def infer_csv_schema(
     *,
     has_header: Bool = True,
     infer_schema_length: Int = 100,
+    try_parse_dates: Bool = False,
     schema_overrides: Dict[String, String] = Dict[String, String](),
 ) raises -> CsvInference:
     """Infer the clean CSV schema and return the prelude's content offset.
@@ -288,6 +323,7 @@ def infer_csv_schema(
     ``infer_schema_length`` follows Polars' ``Option<usize>`` adaptation:
     ``-1`` samples every data record, ``0`` samples enough width but forces
     String, and a positive value caps sampled non-comment records.
+    ``try_parse_dates`` is Polars' opt-in temporal inference switch.
     """
     # Options are validated by the reader before inference.
     if infer_schema_length < -1:
@@ -379,7 +415,7 @@ def infer_csv_schema(
                 else:
                     raw = _unwrapped(raw, field.needs_escaping)
                     if not _is_null(raw, options):
-                        candidates[column] |= _infer_field(raw)
+                        candidates[column] |= _infer_field(raw, try_parse_dates)
             column += 1
         start = end
         record += 1
@@ -399,6 +435,12 @@ def infer_csv_schema(
             dtype = DataType.INT64
         elif candidates[i] == _FLOAT or candidates[i] == (_INT | _FLOAT):
             dtype = DataType.FLOAT64
+        elif candidates[i] == _DATE:
+            dtype = DataType.DATE
+        elif candidates[i] == _DATETIME:
+            dtype = DataType.datetime("us")
+        elif candidates[i] == _TIME:
+            dtype = DataType.TIME
         elif candidates[i] == _STRING:
             dtype = DataType.STRING
         # Polars' Null/unsupported result becomes the clean API's String.

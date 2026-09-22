@@ -1328,7 +1328,7 @@ def _range_join_span_fits(low: Int64, high: Int64, cap: Int) -> Bool:
 
 def _bounded_int64_join_ids(
     left: DataFrame, right: DataFrame, left_column: Int, right_column: Int
-) -> Tuple[Bool, List[Int], List[Int], Int]:
+) raises -> Tuple[Bool, List[Int], List[Int], Int]:
     """Dense direct ids for one small Int64 value range, or `False`.
 
     This is deliberately a range guard, not a general direct-address table:

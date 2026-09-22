@@ -168,11 +168,9 @@ struct CsvSplitFields:
                 # Match Rust's cache relative to the slice advanced past the
                 # selected end. Shifting by 64 is invalid, hence its explicit
                 # final-lane branch in the source.
-                self.cached_ends = (
-                    UInt64(0)
-                    if bit == _SIMD_WIDTH - 1
-                    else ends >> UInt64(bit + 1)
-                )
+                self.cached_ends = UInt64(
+                    0
+                ) if bit == _SIMD_WIDTH - 1 else ends >> UInt64(bit + 1)
                 var end = i + bit
                 var record = input[end] == 10
                 var result = CsvFieldSpan(
