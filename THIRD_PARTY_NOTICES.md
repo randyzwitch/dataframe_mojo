@@ -1,6 +1,6 @@
 # Source attribution notices
 
-This project does not vendor Polars or fast-float2 packages. Some CSV algorithms are direct translations of their source. The following notices were previously stored under `third_party/`.
+This project does not vendor Polars or fast-float2 packages. Some CSV algorithms are direct translations of their source.
 
 ## Polars
 
