@@ -21,7 +21,7 @@ from .expr import (
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
-from .gather import take_parallel, true_rows
+from .gather import take_parallel, take_sorted_chunked, true_rows
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
 from .row_encode import encodable, encode_sort_keys
@@ -338,7 +338,20 @@ struct DataFrame(Copyable, Sized, Writable):
         """Keep true rows, dropping false and null mask entries, in input order."""
         if len(mask) != self._height:
             raise Error("Filter mask must match dataframe height")
-        return self.take(true_rows(mask))
+        var rows = true_rows(mask)
+        var max_chunks = 1
+        for column in self._columns:
+            max_chunks = max(max_chunks, column.n_chunks())
+        # For tiny CSV ranges, chunk-local gathers cost more than a
+        # single contiguous gather. Larger ranges repay that setup by avoiding
+        # a full input rechunk before selecting the rows.
+        if max_chunks > 1 and self._height // max_chunks >= 512:
+            var count = len(rows)
+            return Self(
+                take_sorted_chunked(self._columns, rows^, worker_count(count)),
+                height=count,
+            )
+        return self.take(rows^)
 
     def with_column(self, var column: Series) raises -> Self:
         """Replace by name or append; the input dataframe is unchanged."""
