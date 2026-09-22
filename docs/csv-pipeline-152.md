@@ -470,3 +470,12 @@ producer/consumer overlap on multi-million-row inputs before changing the
 scheduler or chunk policy. The temporary stage trace cannot attribute its
 producer interval solely to scanning because workers decode concurrently;
 its post-join “gather” interval also includes diagnostic aggregation.
+
+A second isolated change skipped quote-parity multiplication for 64-byte SIMD
+blocks with no quote bytes, while preserving the prior quote state. On the same
+5M fixture, three paired processes found no consistent gain: at 16 threads,
+full reads were 96.27 vs 96.89 ms and projected reads were 64.39 vs 67.08 ms
+(unchanged vs fast path); at 32 threads, full reads were 66.39 vs 67.44 ms
+and projected reads were 66.51 vs 62.84 ms. This fast path was also discarded.
+Further scanner work needs an isolated `CountLines` throughput measurement,
+not another branch on the mixed end-to-end timing alone.
