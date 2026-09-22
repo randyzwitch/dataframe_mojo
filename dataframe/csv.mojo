@@ -4,8 +4,9 @@ The scalar tokenizer is deliberately separate from typed column decoding. It
 keeps state across input buffers, including quoted records, so later SIMD
 structural scanning or parallel decoding can replace one stage at a time.
 """
+from std.bit import count_trailing_zeros
 from std.ffi import external_call
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, bitcast
 from std.collections import Dict
 from std.utils import Variant
 
@@ -17,7 +18,7 @@ from .frame import DataFrame
 from .series import Series
 from .parse import parse_int64, parse_float64, parse_integer
 from .frame import concat
-from .parallel import Job, run_jobs, worker_count
+from .parallel import Job, Pool, _ProducedJobs, worker_count
 from .temporal import format as format_temporal, parse as parse_temporal
 
 
@@ -699,101 +700,95 @@ struct _CsvReader:
             self.field_started = True
             self.record_bytes.append(byte)
 
-    def _ordinary_run(
-        self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
-    ) -> Int:
-        """How far from `start` the bytes are all ordinary field content.
+    def _mask(self, matches: SIMD[DType.bool, 64]) -> UInt64:
+        """Pack 64 comparison lanes into one bit per input byte.
 
-        Ordinary means none of the four bytes that end a run -- the
-        separator, LF, CR, and the quote when quoting is on. Found a block
-        at a time, so the common case (a field's worth of plain bytes)
-        costs one compare per lane rather than one call per byte.
+        Each byte is zero or one. Multiplication gathers eight such bytes
+        into the high byte of each word; distinct bit weights prevent carries.
+        The library requires little endian storage on every supported target.
         """
-        var n = len(bytes)
-        var sep = _splat(self.separator)
-        var lf = _splat(10)
-        var cr = _splat(13)
-        var quote = _splat(self.quote if self.quoting else self.separator)
-        var ptr = bytes.unsafe_ptr()
-        var i = start
-        while i + _SCAN_WIDTH <= n:
-            var block = ptr.unsafe_load[width=_SCAN_WIDTH](i)
-            var hit = (
-                block.eq(sep) | block.eq(lf) | block.eq(cr) | block.eq(quote)
-            )
-            if hit.reduce_or():
-                break
-            i += _SCAN_WIDTH
-        while i < n:
-            var byte = bytes[i]
-            if (
-                byte == self.separator
-                or byte == 10
-                or byte == 13
-                or (self.quoting and byte == self.quote)
-            ):
-                break
-            i += 1
-        return i
+        var words = bitcast[DType.uint64, 8](matches.cast[DType.uint8]())
+        var packed = (words * SIMD[DType.uint64, 8](0x0102040810204080)) >> 56
+        var shifts = SIMD[DType.uint64, 8](0, 8, 16, 24, 32, 40, 48, 56)
+        return (packed << shifts).reduce_or()
+
+    def _structural_mask(
+        self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
+    ) -> UInt64:
+        """Structural positions in one 64-byte block, low position first."""
+        var block = bytes.unsafe_ptr().unsafe_load[width=64](start)
+        var separator = SIMD[DType.uint8, 64](self.separator)
+        var newline = SIMD[DType.uint8, 64](10)
+        var carriage_return = SIMD[DType.uint8, 64](13)
+        # With quoting disabled, use the separator again so literal quotes
+        # remain ordinary content while this comparison stays uniform.
+        var quote = SIMD[DType.uint8, 64](
+            self.quote if self.quoting else self.separator
+        )
+        return self._mask(
+            block.eq(separator)
+            | block.eq(newline)
+            | block.eq(carriage_return)
+            | block.eq(quote)
+        )
+
+    def _append_ordinary(
+        mut self,
+        bytes: Span[UInt8, ImmutAnyOrigin],
+        start: Int,
+        stop: Int,
+    ):
+        """Append bytes known not to transition tokenizer state."""
+        if stop > start:
+            self.record_open = True
+            self.field_started = True
+            self.record_bytes.extend(bytes[start:stop])
 
     def feed(mut self, bytes: Span[UInt8, ImmutAnyOrigin]) raises:
-        # Bulk path: with no state pending, a run of ordinary bytes is just
-        # field content, and _consume would do nothing per byte but append
-        # it. Copying the run whole skips a call and a branch chain for
-        # every byte of it, which is most of a file.
-        var bulk = (
-            self.prefix_done
-            and not self.done
-            and self.skip_lines == 0
-            and not self.in_comment
-            and len(self.comment) == 0
-            and not self.in_quotes
-            and not self.pending_cr
-        )
-        if bulk:
-            var i = 0
-            var n = len(bytes)
-            while i < n:
-                var stop = self._ordinary_run(bytes, i)
-                if stop > i:
-                    self.record_open = True
-                    self.field_started = True
-                    self.record_bytes.extend(bytes[i:stop])
-                    i = stop
-                    if i == n:
-                        break
-                self._consume(bytes[i])
-                i += 1
-                # Any state the fast path cannot carry sends the rest of
-                # this block back to the byte-at-a-time reader.
+        var i = 0
+        var n = len(bytes)
+        # Resolve the optional BOM before scanning the remaining buffer.
+        while i < n and not self.prefix_done:
+            self.prefix.append(bytes[i])
+            i += 1
+            if len(self.prefix) == 3:
                 if (
-                    self.in_quotes
-                    or self.pending_cr
-                    or self.done
-                    or self.skip_lines > 0
-                    or self.in_comment
+                    self.prefix[0] != 239
+                    or self.prefix[1] != 187
+                    or self.prefix[2] != 191
                 ):
-                    while i < n:
+                    for byte in self.prefix:
+                        self._consume(byte)
+                self.prefix.clear()
+                self.prefix_done = True
+        if self.done:
+            return
+        if self.skip_lines == 0 and len(self.comment) == 0:
+            while i + 64 <= n:
+                var base = i
+                var end = base + 64
+                var mask = self._structural_mask(bytes, base)
+                while mask != 0:
+                    var stop = base + Int(count_trailing_zeros(mask))
+                    # Ordinary content after CR or a closing quote is an
+                    # error; let the scalar state machine diagnose it.
+                    if i < stop and (self.pending_cr or self.after_quote):
                         self._consume(bytes[i])
                         i += 1
-                    return
-            return
-
-        for byte in bytes:
-            if not self.prefix_done:
-                self.prefix.append(byte)
-                if len(self.prefix) == 3:
-                    if (
-                        self.prefix[0] != 239
-                        or self.prefix[1] != 187
-                        or self.prefix[2] != 191
-                    ):
-                        for prefix_byte in self.prefix:
-                            self._consume(prefix_byte)
-                    self.prefix.clear()
-                    self.prefix_done = True
-                continue
-            self._consume(byte)
+                    self._append_ordinary(bytes, i, stop)
+                    self._consume(bytes[stop])
+                    i = stop + 1
+                    mask &= mask - 1
+                    if self.done:
+                        return
+                if i < end and (self.pending_cr or self.after_quote):
+                    self._consume(bytes[i])
+                    i += 1
+                self._append_ordinary(bytes, i, end)
+                i = end
+        while i < n and not self.done:
+            self._consume(bytes[i])
+            i += 1
 
     def finish(mut self) raises -> DataFrame:
         # Files shorter than three bytes never resolved the optional BOM prefix.
@@ -1143,6 +1138,15 @@ struct _RangeJob(Job):
 # decoding.
 comptime _MIN_BYTES_PER_WORKER = 262144
 
+# A CSV range owns one set of column builders. Keep enough small ranges to
+# smooth out scheduler stalls and cache pressure, without making a very wide
+# frame allocate an unbounded number of builder sets. These are deliberately
+# byte based: the tokenizer has not decoded rows yet when it makes the plan.
+comptime _CHUNKS_PER_WORKER = 8
+comptime _CHUNK_ALLOCATION_BUDGET = 500000
+comptime _MIN_CHUNK_BYTES = 4096
+comptime _MAX_CHUNK_BYTES = 16 << 20
+
 # Parallel reads pull larger blocks than the streaming default, because a
 # block is what gets divided: a 64 KiB block cannot usefully be split.
 comptime _PARALLEL_BLOCK = 32 << 20
@@ -1151,6 +1155,25 @@ comptime _PARALLEL_BLOCK = 32 << 20
 def _csv_workers(bytes: Int) -> Int:
     """Threads for a block of this many bytes, honouring DATAFRAME_THREADS."""
     return max(1, min(worker_count(1 << 40), bytes // _MIN_BYTES_PER_WORKER))
+
+
+def _csv_chunks(bytes: Int, columns: Int, workers: Int) -> Int:
+    """How many record-aligned chunks to make for a parallel CSV read.
+
+    A worker claims several chunks instead of owning one large range. A slow
+    core then delays at most one cache-sized decode. The column cap matters
+    because every chunk creates one reader and therefore a builder per output
+    column.
+    """
+    if bytes <= 0 or workers <= 1:
+        return 1
+    var max_chunks = max(workers, _CHUNK_ALLOCATION_BUDGET // max(columns, 1))
+    var wanted = min(workers * _CHUNKS_PER_WORKER, max_chunks)
+    var chunk_bytes = min(
+        _MAX_CHUNK_BYTES, (bytes + max(wanted, 1) - 1) // max(wanted, 1)
+    )
+    chunk_bytes = max(_MIN_CHUNK_BYTES, chunk_bytes)
+    return max(1, (bytes + chunk_bytes - 1) // chunk_bytes)
 
 
 # A read-only whole-file mapping, so a parallel read neither copies the file
@@ -1262,6 +1285,101 @@ struct _MappedRangeJob(Job):
         return self.frame^
 
 
+def _read_mapped_produced(
+    var mapping: _Mapping,
+    schema: CsvSchema,
+    has_header: Bool,
+    options: CsvOptions,
+    keep: List[Bool],
+    workers: Int,
+    chunks: Int,
+) raises -> DataFrame:
+    """Scan one mapped file while workers decode each range as it appears.
+
+    Quote parity stays a single left-to-right state machine. The only change
+    from `record_splits` is that reaching a safe record boundary immediately
+    publishes the preceding range, hiding all but the first boundary scan
+    behind decoding.
+    """
+    var span = mapping.span()
+    var quoting = options.quote_char.byte_length() > 0
+    var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(0)
+    var pool = Pool(workers)
+    # At most one boundary is emitted per target, plus the final range.
+    var produced = _ProducedJobs[_MappedRangeJob](chunks + 1)
+    pool.run_produced(produced)
+
+    var n = len(span)
+    var stride = max(1, n // max(chunks, 1))
+    var target = stride
+    var start = 0
+    var start_record = 0
+    var records = 0
+    var inside = False
+    var i = 0
+    var pointer = span.unsafe_ptr()
+    var quotes = _splat(quote)
+    var newlines = _splat(10)
+
+    @__parameter
+    def publish(stop: Int) raises:
+        var leading = start == 0
+        var reader = _CsvReader(
+            schema, has_header and leading, options, keep.copy()
+        )
+        reader.record += start_record
+        if not leading:
+            reader.prefix_done = True
+        produced.submit(_MappedRangeJob(reader^, mapping.address, start, stop))
+        start = stop
+        start_record = records
+        target = stop + stride
+
+    @__parameter
+    def scan_byte(at: Int) raises:
+        var byte = span[at]
+        if quoting and byte == quote:
+            inside = not inside
+        elif byte == 10 and not inside:
+            records += 1
+            if at + 1 >= target and at + 1 < n:
+                publish(at + 1)
+
+    while i < n:
+        # The same fast path as `record_splits`: a quote-free SIMD block
+        # outside a field can update counts in bulk until it approaches the
+        # next target, where byte positions become necessary to publish.
+        if i + _SCAN_WIDTH <= n:
+            var block = pointer.unsafe_load[width=_SCAN_WIDTH](i)
+            var quoted_here = quoting and block.eq(quotes).reduce_or()
+            if not quoted_here and not inside:
+                var found = block.eq(newlines)
+                var count = Int(found.cast[DType.uint8]().reduce_add())
+                if count == 0:
+                    i += _SCAN_WIDTH
+                    continue
+                if i + _SCAN_WIDTH <= target:
+                    records += count
+                    i += _SCAN_WIDTH
+                    continue
+        scan_byte(i)
+        i += 1
+    if start < n:
+        publish(n)
+
+    var jobs = produced.finish()
+    # The scanner is finished. Join the idle workers before concat starts so
+    # their between-round spin cannot contend with column assembly.
+    pool.release()
+    var frames = List[DataFrame](capacity=len(jobs))
+    jobs.reverse()
+    while len(jobs) > 0:
+        frames.append(jobs.pop().into_frame())
+    var result = concat(frames) if len(frames) > 1 else frames.pop(0)
+    _ = mapping^
+    return result^
+
+
 def _read_mapped(
     var mapping: _Mapping,
     schema: CsvSchema,
@@ -1278,7 +1396,12 @@ def _read_mapped(
     var quoting = options.quote_char.byte_length() > 0
     var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(0)
     var workers = _csv_workers(len(span))
-    var layout = record_splits(span, quote, quoting, workers)
+    var chunks = _csv_chunks(len(span), len(keep), workers)
+    if workers > 1:
+        return _read_mapped_produced(
+            mapping^, schema, has_header, options, keep, workers, chunks
+        )
+    var layout = record_splits(span, quote, quoting, chunks)
 
     var jobs = List[_MappedRangeJob]()
     for s in range(len(layout.splits) - 1):
@@ -1303,7 +1426,11 @@ def _read_mapped(
     if len(jobs) == 1:
         jobs[0].run()
     else:
-        run_jobs(jobs)
+        # Ranges vary with field widths and allocator stalls. Claiming a
+        # small range dynamically keeps one delayed core from setting the
+        # read's tail while the result list preserves file order.
+        var pool = Pool(workers)
+        pool.run(jobs, claim=True)
     var frames = List[DataFrame]()
     while len(jobs) > 0:
         frames.append(jobs.pop(0).into_frame())
@@ -1348,13 +1475,14 @@ def _stream_parallel(
             if len(buffer) == 0:
                 break
             var workers = _csv_workers(len(buffer))
+            var chunks = _csv_chunks(len(buffer), len(keep), workers)
             var span = Span[UInt8, ImmutAnyOrigin](
                 unsafe_ptr=buffer.unsafe_ptr()
                 .unsafe_mut_cast[False]()
                 .unsafe_origin_cast[ImmutAnyOrigin](),
                 length=len(buffer),
             )
-            var layout = record_splits(span, quote, quoting, workers)
+            var layout = record_splits(span, quote, quoting, chunks)
             # Whatever follows the last record terminator belongs to the next
             # block; on the final block there is nothing more to read, so the
             # remainder is decoded here.
@@ -1387,7 +1515,8 @@ def _stream_parallel(
             if len(jobs) == 1:
                 jobs[0].run()
             else:
-                run_jobs(jobs)
+                var pool = Pool(workers)
+                pool.run(jobs, claim=True)
             while len(jobs) > 0:
                 frames.append(jobs.pop(0).into_frame())
             base += layout.records

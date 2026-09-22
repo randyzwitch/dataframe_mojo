@@ -7,6 +7,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- CSV reads publish small record-aligned chunks while scanning the file,
+  and workers claim them dynamically. Tokenization reuses structural masks
+  across fields; numeric grammar checks consume borrowed text before
+  handing it to the existing numeric conversion. See [the comparison notes](docs/csv-pipeline-152.md)
+  for measurements and the remaining work in #152.
+
 - Concatenation sizes each output column once instead of growing into it.
   Every parallel stage reassembles its result this way -- a CSV read
   produces one frame per range -- and letting the column double copied it

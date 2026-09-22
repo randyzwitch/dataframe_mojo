@@ -1,6 +1,7 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
 from .dtype import DataType
 from std.collections import Dict
+from std.memory import ArcPointer
 from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
@@ -1319,17 +1320,17 @@ def _joint_key_ids(
 struct _ConcatJob(Job):
     """Build one output column by appending that column of every frame."""
 
-    var frames: List[DataFrame]
+    var frames: ArcPointer[List[DataFrame]]
     var column: Int
     var result: Series
 
-    def __init__(out self, frames: List[DataFrame], column: Int):
+    def __init__(out self, frames: ArcPointer[List[DataFrame]], column: Int):
         self.frames = frames.copy()
         self.column = column
-        self.result = frames[0]._columns[column].copy()
+        self.result = frames[][0]._columns[column].copy()
 
     def run(mut self) raises:
-        _concat_column(self.frames, self.column, self.result)
+        _concat_column(self.frames[], self.column, self.result)
 
     def into_column(deinit self) -> Series:
         return self.result^
@@ -1408,9 +1409,10 @@ def concat(
         # 64 of them for a 50 MB file -- and doing that one column after
         # another was a third of the read.
         if len(first) > 1 and worker_count(height) > 1:
+            var shared = ArcPointer(frames.copy())
             var jobs = List[_ConcatJob](capacity=len(first))
             for c in range(len(first)):
-                jobs.append(_ConcatJob(frames, c))
+                jobs.append(_ConcatJob(shared, c))
             run_jobs(jobs)
             var built = List[Series](capacity=len(first))
             while len(jobs) > 0:

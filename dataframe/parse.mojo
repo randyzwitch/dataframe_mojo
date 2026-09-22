@@ -92,7 +92,7 @@ def edge_ascii_whitespace(text: StringSlice) -> Bool:
     )
 
 
-def _is_decimal(text: String) -> Bool:
+def _is_decimal(text: StringSlice) -> Bool:
     """[+-]? (digits [. digits?] | . digits) ([eE] [+-]? digits)?"""
     var b = text.as_bytes()
     var i = 0
@@ -123,15 +123,38 @@ def _is_decimal(text: String) -> Bool:
     return i == n
 
 
-def _is_special_float(text: String) -> Bool:
-    var body = text
-    if text.startswith("+") or text.startswith("-"):
-        body = String(text[byte=1:])
-    return (
-        body == "inf"
-        or body == "Infinity"
-        or ((body == "nan" or body == "NaN") and body == text)
-    )
+def _is_special_float(text: StringSlice) -> Bool:
+    """Recognize the explicitly supported spellings without slicing text.
+
+    A StringSlice is the representation CSV already has, so a byte-level
+    check avoids allocating an owned suffix for signed infinity values.
+    NaN deliberately has no sign, matching the historical contract.
+    """
+    var b = text.as_bytes()
+    var start = 0
+    if len(b) > 0 and (b[0] == 43 or b[0] == 45):
+        start = 1
+    var remaining = len(b) - start
+    if remaining == 3:
+        if b[start] == 105 and b[start + 1] == 110 and b[start + 2] == 102:
+            return True
+        # Unlike infinity, NaN may not have a sign.
+        return start == 0 and (
+            (b[0] == 110 and b[1] == 97 and b[2] == 110)
+            or (b[0] == 78 and b[1] == 97 and b[2] == 78)
+        )
+    if remaining == 8:
+        return (
+            b[start] == 73
+            and b[start + 1] == 110
+            and b[start + 2] == 102
+            and b[start + 3] == 105
+            and b[start + 4] == 110
+            and b[start + 5] == 105
+            and b[start + 6] == 116
+            and b[start + 7] == 121
+        )
+    return False
 
 
 # Powers of ten that a Float64 holds exactly, so mantissa / 10**k is
@@ -224,7 +247,7 @@ def parse_float64(text: StringSlice) raises -> Float64:
         var c = b[i]
         if c >= 48 and c <= 57:
             if digits == 19:
-                return _parse_float64_strict(String(text))
+                return _parse_float64_strict(text)
             mantissa = mantissa * 10 + UInt64(c - 48)
             digits += 1
             if fraction >= 0:
@@ -233,7 +256,7 @@ def parse_float64(text: StringSlice) raises -> Float64:
             fraction = 0
         else:
             # A sign, an exponent, "nan", "inf", or invalid text.
-            return _parse_float64_strict(String(text))
+            return _parse_float64_strict(text)
         i += 1
     if (
         digits == 0
@@ -241,7 +264,7 @@ def parse_float64(text: StringSlice) raises -> Float64:
         or fraction > 22
         or mantissa >= _EXACT_LIMIT
     ):
-        return _parse_float64_strict(String(text))
+        return _parse_float64_strict(text)
     var value = Float64(mantissa)
     if fraction > 0:
         value = value / _pow10(fraction)
@@ -257,26 +280,24 @@ def parse_float64(text: String) raises -> Float64:
     return parse_float64(StringSlice(text))
 
 
-def _parse_float64_strict(text: String) raises -> Float64:
-    """The reference implementation: check the grammar, then convert."""
+def _parse_float64_strict(text: StringSlice) raises -> Float64:
+    """The reference implementation: check the grammar, then convert.
+
+    Grammar validation reads the borrowed CSV field directly.  Mojo's current
+    Float64 conversion materializes an owned string for a StringSlice, so
+    this fallback is correct but not allocation-free for long fields.
+    """
     if edge_ascii_whitespace(text):
         raise Error("Float64 fields cannot have surrounding whitespace")
     if not _is_decimal(text) and not _is_special_float(text):
-        raise Error("invalid Float64 value '" + text + "'")
+        raise Error("invalid Float64 value '" + String(text) + "'")
     var value: Float64
     try:
         value = Float64(text)
     except:
-        raise Error("invalid Float64 value '" + text + "'")
-    if isinf(value) and (
-        text != "inf"
-        and text != "+inf"
-        and text != "-inf"
-        and text != "Infinity"
-        and text != "+Infinity"
-        and text != "-Infinity"
-    ):
-        raise Error("Float64 overflow for '" + text + "'")
+        raise Error("invalid Float64 value '" + String(text) + "'")
+    if isinf(value) and not _is_special_float(text):
+        raise Error("Float64 overflow for '" + String(text) + "'")
     return value
 
 

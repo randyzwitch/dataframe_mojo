@@ -10,6 +10,8 @@ must agree between the engines, so the table cannot compare different work.
     pixi run -e oracle bench-polars                 # 100k and 1M rows
     pixi run -e oracle bench-polars --sizes 10000000
     pixi run -e oracle bench-polars --smoke         # tiny, for CI
+    pixi run -e oracle bench-polars --csv-only --threads 32
+    pixi run -e oracle bench-polars --csv-only --runner build/bench_csv_before152
 
 The ratio column is dataframe_mojo time / Polars time: below 1 means this
 engine is faster. Measure with an optimized build only; the Mojo binary is
@@ -127,10 +129,10 @@ def build_runner() -> Path:
     return out
 
 
-def run_mojo(runner: Path, data_dir: Path, rows: int, reps: int, threads: int) -> dict:
+def run_mojo(runner: Path, data_dir: Path, rows: int, reps: int, threads: int, csv_only: bool = False) -> dict:
     env = dict(os.environ, DATAFRAME_THREADS=str(threads))
     proc = subprocess.run(
-        [str(runner), str(data_dir), str(rows), str(reps)],
+        [str(runner), str(data_dir), str(rows), str(reps)] + (["--csv-only"] if csv_only else []),
         capture_output=True, text=True, env=env, check=True,
     )
     results = {}
@@ -139,7 +141,7 @@ def run_mojo(runner: Path, data_dir: Path, rows: int, reps: int, threads: int) -
             continue
         workload, best_ns, height, value = line.split("\t")
         results[workload] = (int(best_ns) / 1e6, int(height), float(value))
-    missing = [w for w in WORKLOADS if w not in results]
+    missing = [w for w in (["csv_read"] if csv_only else WORKLOADS) if w not in results]
     if missing:
         raise SystemExit(f"mojo runner produced no result for: {missing}\n{proc.stderr}")
     return results
@@ -156,7 +158,7 @@ def best_of(fn, reps: int):
     return best / 1e6, result
 
 
-def run_polars(data_dir: Path, rows: int, reps: int) -> dict:
+def run_polars(data_dir: Path, rows: int, reps: int, csv_only: bool = False) -> dict:
     import polars as pl
 
     left_path = data_dir / f"left_{rows}.csv"
@@ -164,7 +166,6 @@ def run_polars(data_dir: Path, rows: int, reps: int) -> dict:
         "key_low": pl.Int64, "key_high": pl.Int64, "key_skew": pl.Int64,
         "key_str": pl.String, "jk": pl.Int64, "x": pl.Float64, "y": pl.Float64, "n": pl.Int64,
     }
-    right = pl.read_csv(data_dir / f"right_{rows}.csv", schema={"jk": pl.Int64, "r": pl.Float64})
 
     def total(frame: pl.DataFrame, name: str) -> float:
         value = frame[name].sum()
@@ -174,6 +175,11 @@ def run_polars(data_dir: Path, rows: int, reps: int) -> dict:
 
     ms, left = best_of(lambda: pl.read_csv(left_path, schema=left_schema), reps)
     results["csv_read"] = (ms, left.height, total(left, "x"))
+
+    if csv_only:
+        return results
+
+    right = pl.read_csv(data_dir / f"right_{rows}.csv", schema={"jk": pl.Int64, "r": pl.Float64})
 
     arithmetic = ((pl.col("x") + 3.0) * (pl.col("y") - 2.0) / 4.0).alias("out")
     ms, out = best_of(lambda: left.with_columns(arithmetic), reps)
@@ -207,7 +213,7 @@ def run_polars(data_dir: Path, rows: int, reps: int) -> dict:
 
 
 def check_agreement(rows: int, mojo: dict, polars: dict) -> None:
-    for workload in WORKLOADS:
+    for workload in mojo:
         _, mh, mv = mojo[workload]
         _, ph, pv = polars[workload]
         if mh != ph:
@@ -224,6 +230,8 @@ def main() -> int:
     parser.add_argument("--threads", type=int, default=physical_cores())
     parser.add_argument("--data-dir", default=str(ROOT / "build" / "bench_polars"))
     parser.add_argument("--smoke", action="store_true", help="5,000 rows, one repetition")
+    parser.add_argument("--runner", type=Path, help="use a previously built Mojo runner instead of rebuilding")
+    parser.add_argument("--csv-only", action="store_true", help="measure only CSV ingestion")
     args = parser.parse_args()
 
     # Polars reads its thread cap at import, so it must be set before then.
@@ -234,7 +242,7 @@ def main() -> int:
     reps = 1 if args.smoke else args.reps
     data_dir = Path(args.data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
-    runner = build_runner()
+    runner = args.runner.resolve() if args.runner else build_runner()
 
     print(f"# polars={pl.__version__} threads={args.threads} reps={reps} "
           f"machine={platform.machine()} {platform.system()}")
@@ -242,10 +250,10 @@ def main() -> int:
     print("|---|---|---|---|---|")
     for rows in sizes:
         generate(data_dir, rows)
-        mojo = run_mojo(runner, data_dir, rows, reps, args.threads)
-        polars = run_polars(data_dir, rows, reps)
+        mojo = run_mojo(runner, data_dir, rows, reps, args.threads, args.csv_only)
+        polars = run_polars(data_dir, rows, reps, args.csv_only)
         check_agreement(rows, mojo, polars)
-        for workload in WORKLOADS:
+        for workload in (["csv_read"] if args.csv_only else WORKLOADS):
             m, p = mojo[workload][0], polars[workload][0]
             ratio = m / p if p > 0 else float("inf")
             print(f"| {workload} | {rows:,} | {m:.2f} | {p:.2f} | {ratio:.1f}x |")
