@@ -22,7 +22,7 @@ alone do not establish equivalence; the mapping below records actual functions.
 | `csv/read/read_impl.rs:parse_csv` | `csv_reader._read_mapped_body` | Source-ordered decode jobs, schema-wide UTF-8 check, CountLines estimate validation, EOF-comment rule, probabilistic `n_rows` stop, final head |
 | Arrow mutable primitive/boolean validity | `CsvBuffer`, column validity helpers | Absent bitmap until first null; prior valid prefix initialized once; consumers and Arrow preserve absence |
 | `csv/read/builder.rs:validate_utf8` | `StringSlice(from_utf8=chunk)` | Whole-chunk validator; generated assembly verified SIMD on x86-64 |
-| `fast_float2` / `atoi_simd` dispatch | `csv_numeric.mojo` / `csv_integer.mojo` | Float32/Float64 source dispatch, packed fractional digits and fixed-array batched decimal fallback; source-dispatched SSE/AVX2 integer reductions and SWAR fallback |
+| `fast_float2` / `atoi_simd` dispatch | `csv_numeric.mojo` / `csv_integer.mojo` | Float 32/Float64 source dispatch, packed fractional digits and fixed-array batched decimal fallback; source-dispatched SSE/AVX2 integer reductions and SWAR fallback |
 | Rayon scoped task publication | `csv_reader` + `Pool.run_produced` | Same scan/publish overlap; scoped pthread pool and shared queue remain explicit runtime differences from persistent Rayon/work stealing |
 | `accumulate_dataframes_vertical` / `vstack_mut_owned` | `Series._from_chunks`, `frame.concat` | Append immutable Arrow array references; chunk storage and consumer tests pass |
 | Chunk-aware downstream kernels | `Series.chunks/slice`, kernel adapters | Row access, slicing, display and validity retain chunks; some consumers explicitly rechunk; reductions iterate chunks directly |
@@ -112,7 +112,7 @@ Focused checks passed on the main-based comparison branch: scanner 4/4,
 splitter 8/8, structural bits 2/2 (hardware and `-pclmul` fallback), numeric
 4/4, typed buffers 3/3, decoder 9/9, explicit/inferred reader 7/7 with four threads,
 chunked consumers 2/2, and Arrow 6/6. The numeric oracle verifier independently
-confirmed 419 stored Float32/Float64 bit patterns with installed Polars 1.44.2.
+confirmed 419 stored Float 32/Float64 bit patterns with installed Polars 1.44.2.
 Inference passed 7/7 focused tests and 11 differential fixtures against Polars
 1.44.2. Inferred reads retain the same mapping through sampling and decode.
 Earlier chunk storage and concat checks also passed. Initial same-machine timings are recorded in
@@ -164,3 +164,33 @@ limits, Unicode, multiline/escaped fields, and unterminated EOF with 1/4 workers
 Public read_csv is still unchanged. Before merge, the new reader must become
 the sole implementation and the old reader must be removed; this intermediate
 comparison branch is not ready for that switch.
+
+
+## Public integer PR and matched runtime experiments
+
+[Draft PR #159](https://github.com/randyzwitch/dataframe_mojo/pull/159) extracts
+only the atoi_simd integer conversion into the existing public reader. It
+adds no second reader. Wide-integer full reads improve 42% at one thread and
+13% at 32 threads; 32-thread projections regress, so the PR remains draft.
+Validation: 365 tests/55 modules, fallback tests, 100k-row actual Polars
+comparisons across all eight integer widths with 1/32 workers, plus docs,
+examples, package and benchmark smoke checks. The comparison branch contains
+that PR as an ancestor; main remains unchanged.
+
+The new matched Rayon matrix covers mixed, short ASCII and long ASCII files.
+With identical parser code, Rayon improves projected 32-thread reads on all three,
+but full reads regress on two. Emitted decode/integer/float hot instructions
+are identical across scheduler builds (only diagnostic source metadata and
+labels differ). UTF-8 validation already emits a 32-byte AVX2 loop; no missing
+scalar-to-SIMD implementation was found there.
+
+Polars' pinned Linux jemalloc allocator is a real implementation difference
+from Mojo's glibc allocation. An isolated pinned allocator probe passes 24
+Polars comparisons under each scheduler and helps some parallel Rayon cases,
+but barely changes single-thread performance. Neither the Rayon bridge nor
+the allocator interposer has been adopted as a production dependency.
+The full matrices, probe source and limitations are retained in
+[matched-rayon](../experiments/csv_port/results/matched-rayon/README.md) and
+[allocator-parity](../experiments/csv_port/results/allocator-parity/README.md).
+Runtime alignment alone has not established parity; the remaining parser and
+buffer costs still require direct source/codegen comparison.

@@ -1,0 +1,15 @@
+[package]
+name = "polars_jemalloc_probe"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+tikv-jemallocator = { version = "0.7.0", features = ["disable_initial_exec_tls", "background_threads"] }
+tikv-jemalloc-sys = { version = "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8", features = ["disable_initial_exec_tls", "background_threads"] }
+libc = "0.2"
+
+[patch.crates-io]
+tikv-jemalloc-sys = { git = "https://github.com/pola-rs/jemallocator", rev = "0d683dfb157097e2075d5e0eaf25f71f514a7552" }
