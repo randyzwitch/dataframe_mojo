@@ -51,3 +51,8 @@ Untimed cross-engine validation:
 
 The initial source-port readout and raw samples are in
 [results/initial-source-port](results/initial-source-port/README.md).
+
+Expanded deterministic differential matrix (24 comparisons):
+
+    pixi run mojo build -I . experiments/csv_port/verify_reader_differential.mojo -o /tmp/csv-verify-reader-differential
+    pixi run -e oracle python experiments/csv_port/verify_reader_differential.py /tmp/csv-verify-reader-differential
