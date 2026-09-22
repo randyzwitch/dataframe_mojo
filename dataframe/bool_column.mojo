@@ -206,6 +206,13 @@ struct BoolColumn(Copyable, Sized):
             length=self._length,
         )
 
+    def _reserve_rows(mut self, rows: Int, text_bytes: Int):
+        """Size the bit-packed buffers for `rows` rows before appending."""
+        if not self._owned():
+            self = self._compact()
+        self._data[].reserve((rows + 7) // 8)
+        self._bits[].reserve((rows + 7) // 8)
+
     def _append_column(mut self, other: Self):
         """Append values and validity bitwise, copying first unless this
         column owns its buffers."""

@@ -9,7 +9,7 @@ the check -- a leaked worker would take the process down with it.
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 
-from dataframe.parallel import Job, Pool, configured_workers
+from dataframe.parallel import Job, Pool, configured_workers, _ProducedJobs
 
 
 def c_string(text: String) -> List[UInt8]:
@@ -171,6 +171,73 @@ def test_many_pools_back_to_back() raises:
         for i in range(size * 3):
             assert_equal(jobs[i].output, i * i, "round " + String(round))
         pool.release()
+
+
+struct Increment(Job):
+    var count: Int
+
+    def __init__(out self):
+        self.count = 0
+
+    def run(mut self) raises:
+        self.count += 1
+
+
+def test_claimed_and_produced_rounds_run_exactly_once() raises:
+    for workers in [1, 2, 7]:
+        var pool = Pool(workers)
+        for round in range(30):
+            var n = round * 7 % 101
+            var produced = _ProducedJobs[Increment](n)
+            pool.run_produced(produced)
+            for _ in range(n):
+                produced.submit(Increment())
+            var result = produced.finish()
+            assert_equal(len(result), n)
+            for i in range(len(result)):
+                assert_equal(result[i].count, 1)
+            var jobs = List[Increment]()
+            for _ in range(n):
+                jobs.append(Increment())
+            pool.run(jobs, claim=True)
+            for i in range(len(jobs)):
+                assert_equal(jobs[i].count, 1)
+        pool.release()
+
+
+def test_producer_errors_drain_before_reuse() raises:
+    for workers in [1, 4]:
+        var pool = Pool(workers)
+        var produced = _ProducedJobs[Failing](10)
+        pool.run_produced(produced)
+        for i in range(10):
+            produced.submit(Failing(i))
+        with assert_raises(contains="job 1 failed"):
+            _ = produced.finish()
+        var jobs = List[Square]()
+        jobs.append(Square(9))
+        pool.run(jobs)
+        assert_equal(jobs[0].output, 81)
+        pool.release()
+
+
+def test_producer_capacity_failure_drains_on_unwind() raises:
+    var pool = Pool(4)
+    var refused = False
+    try:
+        var produced = _ProducedJobs[Square](1)
+        pool.run_produced(produced)
+        produced.submit(Square(2))
+        produced.submit(Square(3))
+    except e:
+        refused = True
+        assert_true("capacity exceeded" in String(e))
+    assert_true(refused)
+    var jobs = List[Square]()
+    jobs.append(Square(7))
+    pool.run(jobs)
+    assert_equal(jobs[0].output, 49)
+    pool.release()
 
 
 def main() raises:

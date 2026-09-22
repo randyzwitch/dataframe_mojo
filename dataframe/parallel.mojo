@@ -122,7 +122,20 @@ struct _Shared(Movable):
     # dropped exactly one task per hang.)
     var tasks: Atomic[Int64]
     var count: Atomic[Int64]
+    # The next task to claim for a dynamically scheduled round. Static rounds
+    # deliberately avoid touching this counter: their equally sized work is
+    # faster with fixed striding (see `_run_share`).
+    var next: Atomic[Int64]
     var done: Atomic[Int64]
+    # Workers that have left the current round. `done` counts only tasks;
+    # this barrier keeps a late waking worker from reading a cleared list.
+    var arrived: Atomic[Int64]
+    # 0 is a fixed share, 1 claims a completed list, and 2 receives tasks
+    # while the caller is still producing them.
+    var mode: Atomic[Int64]
+    # A produced round has no more tasks once this is set. It is separate
+    # from `stopping`, which tears the pool down for good.
+    var closed: Atomic[Int64]
     # Set once, at release, to let parked workers return instead of waiting.
     var stopping: Atomic[Int64]
     var threads: Int
@@ -133,7 +146,11 @@ struct _Shared(Movable):
         self.generation = Atomic[Int64](0)
         self.tasks = Atomic[Int64](0)
         self.count = Atomic[Int64](0)
+        self.next = Atomic[Int64](0)
         self.done = Atomic[Int64](0)
+        self.arrived = Atomic[Int64](0)
+        self.mode = Atomic[Int64](0)
+        self.closed = Atomic[Int64](0)
         self.stopping = Atomic[Int64](0)
         self.threads = 0
 
@@ -168,6 +185,49 @@ struct _Shared(Movable):
             tasks[i].run()
             _ = self.done.fetch_add(1)
             i += participants
+
+    def _run_claim(mut self):
+        """Claim coarse, uneven tasks until this round has none left.
+
+        This is intentionally separate from `_run_share`: a claim counter
+        gives a stalled worker's remaining work to another participant, but
+        costs more than static striding for the small, even sort tasks that
+        motivated the pool.
+        """
+        var count = Int(self.count.load())
+        ref tasks = Pointer[List[_Task], MutAnyOrigin](
+            unsafe_from_address=Int(self.tasks.load())
+        )[]
+        while True:
+            var i = Int(self.next.fetch_add(1))
+            if i >= count:
+                return
+            tasks[i].run()
+            _ = self.done.fetch_add(1)
+
+    def _run_produced(mut self):
+        """Claim tasks published by the producer, parking between submits."""
+        while True:
+            _ = external_call["pthread_mutex_lock", Int32](self._mutex())
+            while (
+                self.next.load() >= self.count.load()
+                and self.closed.load() == 0
+            ):
+                _ = external_call["pthread_cond_wait", Int32](
+                    self._cond(), self._mutex()
+                )
+            if self.next.load() >= self.count.load():
+                _ = external_call["pthread_mutex_unlock", Int32](self._mutex())
+                return
+            var i = Int(self.next.load())
+            self.next.store(Int64(i + 1))
+            var tasks = Pointer[_Task, MutAnyOrigin](
+                unsafe_from_address=Int(self.tasks.load())
+            )
+            var task = tasks.unsafe_offset(i)[].copy()
+            _ = external_call["pthread_mutex_unlock", Int32](self._mutex())
+            task.run()
+            _ = self.done.fetch_add(1)
 
 
 def _worker(argument: Int) abi("C") -> Int:
@@ -204,7 +264,124 @@ def _worker(argument: Int) abi("C") -> Int:
         if shared.stopping.load() != 0:
             return 0
         seen = shared.generation.load()
-        shared._run_share(index, shared.threads + 1)
+        if shared.mode.load() == 1:
+            shared._run_claim()
+        elif shared.mode.load() == 2:
+            shared._run_produced()
+        else:
+            shared._run_share(index, shared.threads + 1)
+        _ = shared.arrived.fetch_add(1)
+
+
+struct _ProducedJobs[J: Job](Movable):
+    """A fixed-capacity job list a caller fills while a pool consumes it.
+
+    `submit` publishes only after both the slot and its type-erased task are
+    in their preallocated lists. Holding the pool mutex during that short
+    append makes the list headers safe to inspect from a worker and provides
+    the release point for the published count.
+    """
+
+    var address: Int
+    var slots: List[_Slot[Self.J]]
+    var tasks: List[_Task]
+    var capacity: Int
+    var started: Bool
+    var finished: Bool
+
+    def __init__(out self, capacity: Int):
+        self.address = 0
+        self.slots = List[_Slot[Self.J]](capacity=capacity)
+        self.tasks = List[_Task](capacity=capacity)
+        self.capacity = capacity
+        self.started = False
+        self.finished = False
+
+    def _shared(mut self) -> ref[MutAnyOrigin] _Shared:
+        return Pointer[_Shared, MutAnyOrigin](
+            unsafe_from_address=self.address
+        )[]
+
+    def _begin(mut self, address: Int):
+        self.address = address
+        self.started = address != 0
+        if not self.started:
+            return
+        ref shared = self._shared()
+        _ = external_call["pthread_mutex_lock", Int32](shared._mutex())
+        shared.tasks.store(Int64(Int(self.tasks.unsafe_ptr())))
+        shared.count.store(0)
+        shared.next.store(0)
+        shared.done.store(0)
+        shared.arrived.store(0)
+        shared.closed.store(0)
+        shared.mode.store(2)
+        _ = shared.generation.fetch_add(1)
+        _ = external_call["pthread_cond_broadcast", Int32](shared._cond())
+        _ = external_call["pthread_mutex_unlock", Int32](shared._mutex())
+
+    def submit(mut self, var job: Self.J) raises:
+        """Publish one job. Jobs are returned in submit order after finish."""
+        if self.finished:
+            raise Error("cannot submit to a finished producer")
+        if len(self.slots) >= self.capacity:
+            raise Error("produced job capacity exceeded")
+        if not self.started:
+            self.slots.append(_Slot[Self.J](job^))
+            self.slots[len(self.slots) - 1].run()
+            return
+        ref shared = self._shared()
+        _ = external_call["pthread_mutex_lock", Int32](shared._mutex())
+        self.slots.append(_Slot[Self.J](job^))
+        var entry: _Entry = _entry[Self.J]
+        var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
+        self.tasks.append(
+            _Task(
+                entry_address,
+                Int(Pointer(to=self.slots[len(self.slots) - 1])),
+            )
+        )
+        shared.count.store(Int64(len(self.tasks)))
+        _ = external_call["pthread_cond_broadcast", Int32](shared._cond())
+        _ = external_call["pthread_mutex_unlock", Int32](shared._mutex())
+
+    def _close(mut self):
+        if self.finished:
+            return
+        if not self.started:
+            self.finished = True
+            return
+        ref shared = self._shared()
+        _ = external_call["pthread_mutex_lock", Int32](shared._mutex())
+        shared.closed.store(1)
+        _ = external_call["pthread_cond_broadcast", Int32](shared._cond())
+        _ = external_call["pthread_mutex_unlock", Int32](shared._mutex())
+        # After publishing EOF, the producer can decode unclaimed work.
+        shared._run_produced()
+        while shared.done.load() < shared.count.load():
+            _ = external_call["sched_yield", Int32]()
+        while shared.arrived.load() < Int64(shared.threads):
+            _ = external_call["sched_yield", Int32]()
+        shared.count.store(0)
+        shared.tasks.store(0)
+        self.finished = True
+
+    def finish(mut self) raises -> List[Self.J]:
+        """Drain workers, re-raise the first error, and return submitted jobs."""
+        self._close()
+        for t in range(len(self.slots)):
+            if self.slots[t].failed:
+                raise Error(self.slots[t].message)
+        var jobs = List[Self.J](capacity=len(self.slots))
+        self.slots.reverse()
+        while len(self.slots) > 0:
+            jobs.append(self.slots.pop().into_job())
+        return jobs^
+
+    def __deinit__(deinit self):
+        # A scanner may raise before EOF. Close and drain before destroying
+        # slots so no worker can retain a pointer into this producer.
+        self._close()
 
 
 struct Pool(Movable):
@@ -280,12 +457,18 @@ struct Pool(Movable):
             unsafe_from_address=self.address
         )[].threads
 
-    def run[J: Job](mut self, mut jobs: List[J]) raises:
+    def run_produced[J: Job](mut self, mut jobs: _ProducedJobs[J]):
+        """Start a produced round; call `submit` while discovering work."""
+        jobs._begin(self.address if self.workers() > 0 else 0)
+
+    def run[J: Job](mut self, mut jobs: List[J], *, claim: Bool = False) raises:
         """Run one round of jobs, returning them with their results.
 
         Same contract as `run_jobs`: jobs come back in the order given, and
         the first error in job order is re-raised once the round has
-        finished. With no workers, every job runs on the caller.
+        finished. With no workers, every job runs on the caller. `claim`
+        dynamically schedules coarse, uneven jobs; the default preserves the
+        static shares used by sort's fine, balanced rounds.
         """
         if len(jobs) == 0:
             return
@@ -307,20 +490,30 @@ struct Pool(Movable):
                 tasks.append(_Task(entry_address, Int(Pointer(to=slots[t]))))
             shared.tasks.store(Int64(Int(Pointer(to=tasks))))
             shared.count.store(Int64(len(tasks)))
+            shared.next.store(0)
             shared.done.store(0)
+            shared.arrived.store(0)
+            shared.closed.store(0)
+            shared.mode.store(Int64(1 if claim else 0))
             _ = external_call["pthread_mutex_lock", Int32](shared._mutex())
             _ = shared.generation.fetch_add(1)
             _ = external_call["pthread_cond_broadcast", Int32](shared._cond())
             _ = external_call["pthread_mutex_unlock", Int32](shared._mutex())
-            # The caller takes the last share, as run_jobs has it run the
-            # last job itself.
-            shared._run_share(shared.threads, shared.threads + 1)
+            if claim:
+                shared._run_claim()
+            else:
+                # The caller takes the last share, as run_jobs has it run the
+                # last job itself.
+                shared._run_share(shared.threads, shared.threads + 1)
             while shared.done.load() < Int64(len(tasks)):
+                _ = external_call["sched_yield", Int32]()
+            while shared.arrived.load() < Int64(shared.threads):
                 _ = external_call["sched_yield", Int32]()
             # Close the round before opening the next: a late claimant must
             # see an empty round, never a half-published one.
             shared.count.store(0)
             shared.tasks.store(0)
+            shared.mode.store(0)
             # `tasks` and `slots` must outlive every worker's use of them.
             _ = tasks^
 

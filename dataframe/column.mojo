@@ -205,6 +205,18 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         )
         return result^
 
+    def _reserve_rows(mut self, rows: Int, text_bytes: Int):
+        """Size the buffers for `rows` rows before appending any.
+
+        Growing geometrically copies the column again every time it
+        doubles, so a caller that knows the final height says so once.
+        `text_bytes` is for the string layout and means nothing here.
+        """
+        if not self._owned():
+            self = self._compact()
+        self._data[].reserve(rows)
+        self._bits[].reserve((rows + 7) // 8)
+
     def _append_column(mut self, other: Self):
         """Append payloads and validity bytewise, shifting when unaligned.
 
@@ -271,10 +283,31 @@ def _count_set(bits: List[UInt8], offset: Int, length: Int) -> Int:
 
 
 def _pack_bits(valid: List[Bool]) -> List[UInt8]:
+    """Pack each group of eight Boolean values into one LSB-first byte."""
     var bits = List[UInt8](length=(len(valid) + 7) // 8, fill=0)
-    for i in range(len(valid)):
-        if valid[i]:
-            bits[i // 8] |= UInt8(1) << UInt8(i % 8)
+    var i = 0
+    var byte_index = 0
+    while i + 8 <= len(valid):
+        bits[byte_index] = (
+            UInt8(valid[i])
+            | (UInt8(valid[i + 1]) << 1)
+            | (UInt8(valid[i + 2]) << 2)
+            | (UInt8(valid[i + 3]) << 3)
+            | (UInt8(valid[i + 4]) << 4)
+            | (UInt8(valid[i + 5]) << 5)
+            | (UInt8(valid[i + 6]) << 6)
+            | (UInt8(valid[i + 7]) << 7)
+        )
+        i += 8
+        byte_index += 1
+    if i < len(valid):
+        var byte = UInt8(0)
+        var shift = UInt8(0)
+        while i < len(valid):
+            byte |= UInt8(valid[i]) << shift
+            i += 1
+            shift += 1
+        bits[byte_index] = byte
     return bits^
 
 
@@ -316,8 +349,8 @@ def _append_bits(
     var full_bytes = count // 8
     var tail_bits = count % 8
     if shift == 0:
-        for b in range(full_bytes):
-            bits.append(incoming[first_byte + b])
+        if full_bytes > 0:
+            bits.extend(Span(incoming)[first_byte : first_byte + full_bytes])
         if tail_bits > 0:
             var mask = (UInt8(1) << UInt8(tail_bits)) - 1
             bits.append(incoming[first_byte + full_bytes] & mask)
@@ -325,11 +358,41 @@ def _append_bits(
     var last = len(bits) - 1
     bits[last] &= (UInt8(1) << UInt8(shift)) - 1
     var source_bytes = (count + 7) // 8
-    for b in range(source_bytes):
+    # Size once, then write every output byte in place. The previous append
+    # loop paid a capacity/length update per source byte, which dominates
+    # concatenating many record-aligned chunks whose row counts are rarely
+    # multiples of eight.
+    bits.resize(needed, 0)
+    var first = incoming[first_byte]
+    bits[last] |= first << UInt8(shift)
+    if last + 1 < needed:
+        bits[last + 1] = first >> UInt8(8 - shift)
+
+    # For every byte after the first, the destination is the current source
+    # shifted left plus its predecessor shifted right. Adjacent SIMD loads
+    # provide those pairs without a cross-lane shuffle.
+    var full_sources = source_bytes - (1 if tail_bits > 0 else 0)
+    var b = 1
+    var left_shift = UInt8(shift)
+    var right_shift = UInt8(8 - shift)
+    while b + 16 <= full_sources:
+        var current = incoming.unsafe_ptr().unsafe_offset(first_byte + b)
+        var previous = incoming.unsafe_ptr().unsafe_offset(first_byte + b - 1)
+        bits.unsafe_ptr().unsafe_offset(last + b).unsafe_store[width=16](
+            (current.unsafe_load[width=16]() << left_shift)
+            | (previous.unsafe_load[width=16]() >> right_shift)
+        )
+        b += 16
+    while b < source_bytes:
         var byte = incoming[first_byte + b]
         if b == source_bytes - 1 and tail_bits > 0:
             byte &= (UInt8(1) << UInt8(tail_bits)) - 1
-        bits[len(bits) - 1] |= byte << UInt8(shift)
-        bits.append(byte >> UInt8(8 - shift))
-    while len(bits) > needed:
-        _ = bits.pop()
+        bits[last + b] = (byte << left_shift) | (
+            incoming[first_byte + b - 1] >> right_shift
+        )
+        b += 1
+    if last + source_bytes < needed:
+        var tail = incoming[first_byte + source_bytes - 1]
+        if tail_bits > 0:
+            tail &= (UInt8(1) << UInt8(tail_bits)) - 1
+        bits[last + source_bytes] = tail >> right_shift

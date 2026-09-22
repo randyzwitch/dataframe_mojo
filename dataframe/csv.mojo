@@ -4,10 +4,10 @@ The scalar tokenizer is deliberately separate from typed column decoding. It
 keeps state across input buffers, including quoted records, so later SIMD
 structural scanning or parallel decoding can replace one stage at a time.
 """
+from std.bit import count_trailing_zeros, pop_count
 from std.ffi import external_call
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, bitcast
 from std.collections import Dict
-from std.utils import Variant
 
 from .bool_column import BoolColumn
 from .column import Column
@@ -17,7 +17,7 @@ from .frame import DataFrame
 from .series import Series
 from .parse import parse_int64, parse_float64, parse_integer
 from .frame import concat
-from .parallel import Job, run_jobs, worker_count
+from .parallel import Job, Pool, _ProducedJobs, worker_count
 from .temporal import format as format_temporal, parse as parse_temporal
 
 
@@ -122,30 +122,66 @@ struct CsvSchema(Copyable, Sized):
 
 
 @fieldwise_init
-struct _IntBuilder(Copyable):
+struct _IntBuilder(Movable):
     var values: List[Int64]
     var valid: List[Bool]
 
+    def into_column(mut self) raises -> Column[Int64]:
+        var values = self.values^
+        self.values = List[Int64]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        return Column[Int64](values^, valid)
+
+    def cast[D: DType](mut self) raises -> Column[Scalar[D]]:
+        var source = self.values^
+        self.values = List[Int64]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        var values = List[Scalar[D]](capacity=len(source))
+        for x in source:
+            values.append(x.cast[D]())
+        return Column[Scalar[D]](values^, valid)
+
 
 @fieldwise_init
-struct _FloatBuilder(Copyable):
+struct _FloatBuilder(Movable):
     var values: List[Float64]
     var valid: List[Bool]
 
+    def into_column(mut self) raises -> Column[Float64]:
+        var values = self.values^
+        self.values = List[Float64]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        return Column[Float64](values^, valid)
+
+    def cast[D: DType](mut self) raises -> Column[Scalar[D]]:
+        var source = self.values^
+        self.values = List[Float64]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        var values = List[Scalar[D]](capacity=len(source))
+        for x in source:
+            values.append(x.cast[D]())
+        return Column[Scalar[D]](values^, valid)
+
 
 @fieldwise_init
-struct _BoolBuilder(Copyable):
+struct _BoolBuilder(Movable):
     var values: List[Bool]
     var valid: List[Bool]
 
+    def into_column(mut self) raises -> BoolColumn:
+        var values = self.values^
+        self.values = List[Bool]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        return BoolColumn(values^, valid)
 
-comptime _Builder = Variant[
-    _IntBuilder, _FloatBuilder, _BoolBuilder, StringBuilder
-]
 
 # Which builder a column holds. The answer is fixed for the whole file, so it
-# is decided once and compared as an integer; asking the Variant per field
-# means a chain of runtime tag tests on the hottest path in the reader.
+# is decided once and compared as an integer on the hottest path.
 comptime _KIND_INT = 0
 comptime _KIND_TEMPORAL = 1
 comptime _KIND_FLOAT = 2
@@ -153,31 +189,52 @@ comptime _KIND_BOOL = 3
 comptime _KIND_STRING = 4
 
 
-struct _CsvColumn(Copyable):
+struct _CsvColumn(Movable):
     var field: CsvField
-    var builder: _Builder
+    # A column uses exactly one builder, selected by `kind`. Keeping them as
+    # fields lets finalization transfer its buffers directly.
+    var ints: _IntBuilder
+    var floats: _FloatBuilder
+    var bools: _BoolBuilder
+    var strings: StringBuilder
     var keep: Bool
     var kind: Int
 
     def __init__(out self, field: CsvField, keep: Bool = True):
         self.field = field.copy()
         self.keep = keep
+        self.ints = _IntBuilder([], [])
+        self.floats = _FloatBuilder([], [])
+        self.bools = _BoolBuilder([], [])
+        self.strings = StringBuilder()
         # Every integer width parses into Int64 slots (UInt64 by bit
         # pattern) and every float into Float64; finish() narrows exactly.
         if field.dtype.physical() == CSV_INT64 or field.dtype.is_integer():
-            self.builder = _Builder(_IntBuilder([], []))
             self.kind = (
                 _KIND_TEMPORAL if field.dtype.is_temporal() else _KIND_INT
             )
         elif field.dtype.is_float():
-            self.builder = _Builder(_FloatBuilder([], []))
             self.kind = _KIND_FLOAT
         elif field.dtype == CSV_BOOL:
-            self.builder = _Builder(_BoolBuilder([], []))
             self.kind = _KIND_BOOL
         else:
-            self.builder = _Builder(StringBuilder())
             self.kind = _KIND_STRING
+
+    def reserve(mut self, rows: Int):
+        if not self.keep:
+            return
+        if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
+            self.ints.values.reserve(rows)
+            self.ints.valid.reserve(rows)
+        elif self.kind == _KIND_FLOAT:
+            self.floats.values.reserve(rows)
+            self.floats.valid.reserve(rows)
+        elif self.kind == _KIND_BOOL:
+            self.bools.values.reserve(rows)
+            self.bools.valid.reserve(rows)
+        else:
+            self.strings._offsets.reserve(rows + 1)
+            self.strings._bits.reserve((rows + 7) // 8)
 
     def _error(self, record: Int, text: String) -> Error:
         return Error(
@@ -196,16 +253,16 @@ struct _CsvColumn(Copyable):
         if not self.keep:
             return
         if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
-            _ = self.builder[_IntBuilder].values.pop()
-            _ = self.builder[_IntBuilder].valid.pop()
+            _ = self.ints.values.pop()
+            _ = self.ints.valid.pop()
         elif self.kind == _KIND_FLOAT:
-            _ = self.builder[_FloatBuilder].values.pop()
-            _ = self.builder[_FloatBuilder].valid.pop()
+            _ = self.floats.values.pop()
+            _ = self.floats.valid.pop()
         elif self.kind == _KIND_BOOL:
-            _ = self.builder[_BoolBuilder].values.pop()
-            _ = self.builder[_BoolBuilder].valid.pop()
+            _ = self.bools.values.pop()
+            _ = self.bools.valid.pop()
         else:
-            self.builder[StringBuilder]._pop()
+            self.strings._pop()
 
     def append(
         mut self,
@@ -230,33 +287,31 @@ struct _CsvColumn(Copyable):
             if not self.field.nullable:
                 raise self._error(record, "null in a non-nullable field")
             if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
-                self.builder[_IntBuilder].values.append(0)
-                self.builder[_IntBuilder].valid.append(False)
+                self.ints.values.append(0)
+                self.ints.valid.append(False)
             elif self.kind == _KIND_FLOAT:
-                self.builder[_FloatBuilder].values.append(0)
-                self.builder[_FloatBuilder].valid.append(False)
+                self.floats.values.append(0)
+                self.floats.valid.append(False)
             elif self.kind == _KIND_BOOL:
-                self.builder[_BoolBuilder].values.append(False)
-                self.builder[_BoolBuilder].valid.append(False)
+                self.bools.values.append(False)
+                self.bools.valid.append(False)
             else:
-                self.builder[StringBuilder].append_null()
+                self.strings.append_null()
             return
 
         if self.kind == _KIND_TEMPORAL:
             try:
-                self.builder[_IntBuilder].values.append(
+                self.ints.values.append(
                     parse_temporal(
                         String(text), self.field.dtype, self.field.format
                     )
                 )
             except e:
                 raise self._error(record, String(e))
-            self.builder[_IntBuilder].valid.append(True)
+            self.ints.valid.append(True)
         elif self.kind == _KIND_INT:
             try:
-                self.builder[_IntBuilder].values.append(
-                    _parse_int_slot(text, self.field.dtype)
-                )
+                self.ints.values.append(_parse_int_slot(text, self.field.dtype))
             except:
                 raise self._error(
                     record,
@@ -266,74 +321,54 @@ struct _CsvColumn(Copyable):
                     + String(from_utf8_lossy=text.as_bytes())
                     + "'",
                 )
-            self.builder[_IntBuilder].valid.append(True)
+            self.ints.valid.append(True)
         elif self.kind == _KIND_FLOAT:
             try:
-                self.builder[_FloatBuilder].values.append(parse_float64(text))
+                self.floats.values.append(parse_float64(text))
             except e:
                 raise self._error(record, String(e))
-            self.builder[_FloatBuilder].valid.append(True)
+            self.floats.valid.append(True)
         elif self.kind == _KIND_BOOL:
             var is_true = text.as_bytes() == "true".as_bytes()
             if not is_true and text.as_bytes() != "false".as_bytes():
                 raise self._error(
                     record, "Boolean must be exactly 'true' or 'false'"
                 )
-            self.builder[_BoolBuilder].values.append(is_true)
-            self.builder[_BoolBuilder].valid.append(True)
+            self.bools.values.append(is_true)
+            self.bools.valid.append(True)
         else:
-            self.builder[StringBuilder].append(text)
+            self.strings.append(text)
 
-    def finish(self) raises -> Series:
+    def finish(deinit self) raises -> Series:
         var dtype = self.field.dtype
         if dtype.is_numeric() and dtype != CSV_INT64 and dtype != CSV_FLOAT64:
             comptime for k in range(len(NUMERIC_DTYPES)):
                 comptime D = NUMERIC_DTYPES[k]
                 if dtype == DataType.of(D):
-                    var values = List[Scalar[D]]()
-                    var valid: List[Bool]
                     comptime if D.is_floating_point():
-                        ref builder = self.builder[_FloatBuilder]
-                        valid = builder.valid.copy()
-                        values.reserve(len(builder.values))
-                        for x in builder.values:
-                            values.append(x.cast[D]())
+                        return Series(
+                            self.field.name.copy(), self.floats.cast[D]()
+                        )
                     else:
-                        ref builder = self.builder[_IntBuilder]
-                        valid = builder.valid.copy()
-                        values.reserve(len(builder.values))
-                        for x in builder.values:
-                            values.append(x.cast[D]())
-                    return Series(
-                        self.field.name, Column[Scalar[D]](values^, valid)
-                    )
-        if self.builder.isa[_IntBuilder]():
+                        return Series(
+                            self.field.name.copy(), self.ints.cast[D]()
+                        )
+        if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
             return Series(
-                self.field.name,
-                Column[Int64](
-                    self.builder[_IntBuilder].values.copy(),
-                    self.builder[_IntBuilder].valid.copy(),
-                ),
-            ).with_dtype(self.field.dtype)
-        if self.builder.isa[_FloatBuilder]():
+                self.field.name.copy(),
+                self.ints.into_column(),
+            ).with_dtype(dtype)
+        if self.kind == _KIND_FLOAT:
             return Series(
-                self.field.name,
-                Column[Float64](
-                    self.builder[_FloatBuilder].values.copy(),
-                    self.builder[_FloatBuilder].valid.copy(),
-                ),
+                self.field.name.copy(),
+                self.floats.into_column(),
             )
-        if self.builder.isa[_BoolBuilder]():
+        if self.kind == _KIND_BOOL:
             return Series(
-                self.field.name,
-                BoolColumn(
-                    self.builder[_BoolBuilder].values.copy(),
-                    self.builder[_BoolBuilder].valid.copy(),
-                ),
+                self.field.name.copy(),
+                self.bools.into_column(),
             )
-        return Series(
-            self.field.name, self.builder[StringBuilder].copy().finish()
-        )
+        return Series(self.field.name.copy(), self.strings^.finish())
 
 
 struct _CsvReader:
@@ -699,101 +734,284 @@ struct _CsvReader:
             self.field_started = True
             self.record_bytes.append(byte)
 
-    def _ordinary_run(
-        self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
-    ) -> Int:
-        """How far from `start` the bytes are all ordinary field content.
+    def _mask(self, matches: SIMD[DType.bool, 64]) -> UInt64:
+        return _mask64(matches)
 
-        Ordinary means none of the four bytes that end a run -- the
-        separator, LF, CR, and the quote when quoting is on. Found a block
-        at a time, so the common case (a field's worth of plain bytes)
-        costs one compare per lane rather than one call per byte.
+    def _structural_mask(
+        self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
+    ) -> UInt64:
+        """Structural positions in one 64-byte block, low position first."""
+        var block = bytes.unsafe_ptr().unsafe_load[width=64](start)
+        var separator = SIMD[DType.uint8, 64](self.separator)
+        var newline = SIMD[DType.uint8, 64](10)
+        var carriage_return = SIMD[DType.uint8, 64](13)
+        # With quoting disabled, use the separator again so literal quotes
+        # remain ordinary content while this comparison stays uniform.
+        var quote = SIMD[DType.uint8, 64](
+            self.quote if self.quoting else self.separator
+        )
+        return self._mask(
+            block.eq(separator)
+            | block.eq(newline)
+            | block.eq(carriage_return)
+            | block.eq(quote)
+        )
+
+    def _append_ordinary(
+        mut self,
+        bytes: Span[UInt8, ImmutAnyOrigin],
+        start: Int,
+        stop: Int,
+    ):
+        """Append bytes known not to transition tokenizer state."""
+        if stop > start:
+            self.record_open = True
+            self.field_started = True
+            self.record_bytes.extend(bytes[start:stop])
+
+    def _append_borrowed_record[
+        encoded_quotes: Bool = False
+    ](mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int) raises:
+        """Decode a complete borrowed record directly from the input span.
+
+        The quoted specialization stores a closing-quote offset as its
+        bitwise complement.  It keeps the plain instantiation unchanged and
+        lets the scanner retain offsets only for the duration of this call.
         """
-        var n = len(bytes)
-        var sep = _splat(self.separator)
-        var lf = _splat(10)
-        var cr = _splat(13)
-        var quote = _splat(self.quote if self.quoting else self.separator)
-        var ptr = bytes.unsafe_ptr()
-        var i = start
-        while i + _SCAN_WIDTH <= n:
-            var block = ptr.unsafe_load[width=_SCAN_WIDTH](i)
-            var hit = (
-                block.eq(sep) | block.eq(lf) | block.eq(cr) | block.eq(quote)
+        # Validate text before conversion, as the scalar tokenizer does.
+        var field_start = start
+        for c in range(len(self.columns)):
+            var end = self.field_ends[c]
+            var quoted = False
+            comptime if encoded_quotes:
+                if end < 0:
+                    quoted = True
+                    end = ~end
+            var content_start = field_start + 1 if quoted else field_start
+            if self.columns[c].kind == _KIND_STRING:
+                try:
+                    _ = StringSlice(from_utf8=bytes[content_start:end])
+                except:
+                    self.field_index = c
+                    raise self._location("field is not valid UTF-8")
+            field_start = end + (2 if quoted else 1)
+        field_start = start
+        for c in range(len(self.columns)):
+            var end = self.field_ends[c]
+            var quoted = False
+            comptime if encoded_quotes:
+                if end < 0:
+                    quoted = True
+                    end = ~end
+            var content_start = field_start + 1 if quoted else field_start
+            self.columns[c].append(
+                StringSlice(unsafe_from_utf8=bytes[content_start:end]),
+                quoted,
+                self.record,
+                self.null_values,
             )
-            if hit.reduce_or():
-                break
-            i += _SCAN_WIDTH
-        while i < n:
-            var byte = bytes[i]
-            if (
-                byte == self.separator
-                or byte == 10
-                or byte == 13
-                or (self.quoting and byte == self.quote)
-            ):
-                break
-            i += 1
-        return i
+            field_start = end + (2 if quoted else 1)
+        self.field_ends.clear()
+        self.rows += 1
+        self.record += 1
+        self.physical_line += 1
+        if self.n_rows >= 0 and self.rows >= self.n_rows:
+            self.done = True
+
+    def _feed_borrowed_quoted(
+        mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
+    ) raises -> Int:
+        """Borrow simple quoted fields; replay complex records through scalar parsing."""
+        var row_start = start
+        var field_start = start
+        var base = start
+        var n = len(bytes)
+        var quoted = False
+        var inside = False
+        var close = -1
+        while base < n:
+            var end = min(base + 64, n)
+            var mask = UInt64(0)
+            if end - base == 64:
+                mask = self._structural_mask(bytes, base)
+            else:
+                for i in range(base, end):
+                    var byte = bytes[i]
+                    if (
+                        byte == self.separator
+                        or byte == self.quote
+                        or byte == 10
+                        or byte == 13
+                    ):
+                        mask |= UInt64(1) << UInt64(i - base)
+            while mask != 0:
+                var stop = base + Int(count_trailing_zeros(mask))
+                var byte = bytes[stop]
+                mask &= mask - 1
+                if inside:
+                    if byte == self.quote:
+                        inside = False
+                        close = stop
+                    elif byte == 10 or byte == 13:
+                        self.field_ends.clear()
+                        return row_start
+                    continue
+                if close >= 0 and (
+                    stop != close + 1 or (byte != self.separator and byte != 10)
+                ):
+                    self.field_ends.clear()
+                    return row_start
+                if byte == self.quote:
+                    if stop != field_start:
+                        self.field_ends.clear()
+                        return row_start
+                    quoted = True
+                    inside = True
+                    continue
+                if byte == self.separator or byte == 10:
+                    self.field_ends.append(~close if quoted else stop)
+                    if byte == self.separator:
+                        if len(self.field_ends) >= len(self.columns):
+                            self.field_ends.clear()
+                            return row_start
+                    else:
+                        if len(self.field_ends) != len(self.columns):
+                            self.field_ends.clear()
+                            return row_start
+                        self._append_borrowed_record[True](bytes, row_start)
+                        row_start = stop + 1
+                        if self.done:
+                            return row_start
+                    field_start = stop + 1
+                    quoted = False
+                    close = -1
+                    continue
+                self.field_ends.clear()
+                return row_start
+            base = end
+        self.field_ends.clear()
+        return row_start
+
+    def _feed_borrowed(
+        mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
+    ) raises -> Int:
+        """Consume complete plain records; return the first scalar record.
+
+        Offsets refer to this input only while the method runs. A quote, CR,
+        ragged row, or incomplete final record hands the whole current record
+        back to the stateful reader. No borrow survives a buffer boundary.
+        """
+        var row_start = start
+        var base = start
+        var n = len(bytes)
+        while base < n:
+            var mask = UInt64(0)
+            var end = min(base + 64, n)
+            if end - base == 64:
+                mask = self._structural_mask(bytes, base)
+            else:
+                for i in range(base, end):
+                    var byte = bytes[i]
+                    if (
+                        byte == self.separator
+                        or byte == 10
+                        or byte == 13
+                        or (self.quoting and byte == self.quote)
+                    ):
+                        mask |= UInt64(1) << UInt64(i - base)
+            while mask != 0:
+                var stop = base + Int(count_trailing_zeros(mask))
+                var byte = bytes[stop]
+                if byte == self.separator:
+                    self.field_ends.append(stop)
+                    if len(self.field_ends) >= len(self.columns):
+                        self.field_ends.clear()
+                        return row_start
+                elif byte == 10:
+                    self.field_ends.append(stop)
+                    if len(self.field_ends) != len(self.columns):
+                        self.field_ends.clear()
+                        return row_start
+                    self._append_borrowed_record(bytes, row_start)
+                    row_start = stop + 1
+                    if self.done:
+                        return row_start
+                elif self.quoting and byte == self.quote:
+                    self.field_ends.clear()
+                    return self._feed_borrowed_quoted(bytes, row_start)
+                else:
+                    self.field_ends.clear()
+                    return row_start
+                mask &= mask - 1
+            base = end
+        self.field_ends.clear()
+        return row_start
 
     def feed(mut self, bytes: Span[UInt8, ImmutAnyOrigin]) raises:
-        # Bulk path: with no state pending, a run of ordinary bytes is just
-        # field content, and _consume would do nothing per byte but append
-        # it. Copying the run whole skips a call and a branch chain for
-        # every byte of it, which is most of a file.
-        var bulk = (
-            self.prefix_done
-            and not self.done
-            and self.skip_lines == 0
-            and not self.in_comment
+        var i = 0
+        var n = len(bytes)
+        # Resolve the optional BOM before scanning the remaining buffer.
+        while i < n and not self.prefix_done:
+            self.prefix.append(bytes[i])
+            i += 1
+            if len(self.prefix) == 3:
+                if (
+                    self.prefix[0] != 239
+                    or self.prefix[1] != 187
+                    or self.prefix[2] != 191
+                ):
+                    for byte in self.prefix:
+                        self._consume(byte)
+                self.prefix.clear()
+                self.prefix_done = True
+        if self.done:
+            return
+        if (
+            self.skip_lines == 0
             and len(self.comment) == 0
-            and not self.in_quotes
-            and not self.pending_cr
-        )
-        if bulk:
-            var i = 0
-            var n = len(bytes)
-            while i < n:
-                var stop = self._ordinary_run(bytes, i)
-                if stop > i:
-                    self.record_open = True
-                    self.field_started = True
-                    self.record_bytes.extend(bytes[i:stop])
-                    i = stop
-                    if i == n:
-                        break
+            and not self.sampling
+            and not self.lossy
+            and not self.ignore_errors
+            and not self.truncate_ragged
+        ):
+            # Finish a partial record or header before borrowing.
+            while (
+                i < n
+                and (self.record_open or (self.has_header and self.record == 1))
+                and not self.done
+            ):
                 self._consume(bytes[i])
                 i += 1
-                # Any state the fast path cannot carry sends the rest of
-                # this block back to the byte-at-a-time reader.
-                if (
-                    self.in_quotes
-                    or self.pending_cr
-                    or self.done
-                    or self.skip_lines > 0
-                    or self.in_comment
-                ):
-                    while i < n:
+            if not self.done and not self.record_open and i < n:
+                i = self._feed_borrowed(bytes, i)
+            if self.done:
+                return
+        if self.skip_lines == 0 and len(self.comment) == 0:
+            while i + 64 <= n:
+                var base = i
+                var end = base + 64
+                var mask = self._structural_mask(bytes, base)
+                while mask != 0:
+                    var stop = base + Int(count_trailing_zeros(mask))
+                    # Ordinary content after CR or a closing quote is an
+                    # error; let the scalar state machine diagnose it.
+                    if i < stop and (self.pending_cr or self.after_quote):
                         self._consume(bytes[i])
                         i += 1
-                    return
-            return
-
-        for byte in bytes:
-            if not self.prefix_done:
-                self.prefix.append(byte)
-                if len(self.prefix) == 3:
-                    if (
-                        self.prefix[0] != 239
-                        or self.prefix[1] != 187
-                        or self.prefix[2] != 191
-                    ):
-                        for prefix_byte in self.prefix:
-                            self._consume(prefix_byte)
-                    self.prefix.clear()
-                    self.prefix_done = True
-                continue
-            self._consume(byte)
+                    self._append_ordinary(bytes, i, stop)
+                    self._consume(bytes[stop])
+                    i = stop + 1
+                    mask &= mask - 1
+                    if self.done:
+                        return
+                if i < end and (self.pending_cr or self.after_quote):
+                    self._consume(bytes[i])
+                    i += 1
+                self._append_ordinary(bytes, i, end)
+                i = end
+        while i < n and not self.done:
+            self._consume(bytes[i])
+            i += 1
 
     def finish(mut self) raises -> DataFrame:
         # Files shorter than three bytes never resolved the optional BOM prefix.
@@ -819,11 +1037,14 @@ struct _CsvReader:
             self._finish_record()
         return self._frame()
 
-    def _frame(self) raises -> DataFrame:
-        var output = List[Series](capacity=len(self.columns))
-        for column in self.columns:
+    def _frame(mut self) raises -> DataFrame:
+        ref columns = self.columns
+        var output = List[Series](capacity=len(columns))
+        columns.reverse()
+        while len(columns) > 0:
+            var column = columns.pop()
             if column.keep:
-                output.append(column.finish())
+                output.append(column^.finish())
         return DataFrame(output^, height=self.rows)
 
 
@@ -891,6 +1112,14 @@ def _options(
     )
     options.validate()
     return options^
+
+
+def _mask64(matches: SIMD[DType.bool, 64]) -> UInt64:
+    """Pack one bit per comparison lane, low byte first."""
+    var words = bitcast[DType.uint64, 8](matches.cast[DType.uint8]())
+    var packed = (words * SIMD[DType.uint64, 8](0x0102040810204080)) >> 56
+    var shifts = SIMD[DType.uint64, 8](0, 8, 16, 24, 32, 40, 48, 56)
+    return (packed << shifts).reduce_or()
 
 
 comptime _SCAN_WIDTH = 32
@@ -1143,6 +1372,15 @@ struct _RangeJob(Job):
 # decoding.
 comptime _MIN_BYTES_PER_WORKER = 262144
 
+# A CSV range owns one set of column builders. Keep enough small ranges to
+# smooth out scheduler stalls and cache pressure, without making a very wide
+# frame allocate an unbounded number of builder sets. These are deliberately
+# byte based: the tokenizer has not decoded rows yet when it makes the plan.
+comptime _CHUNKS_PER_WORKER = 8
+comptime _CHUNK_ALLOCATION_BUDGET = 500000
+comptime _MIN_CHUNK_BYTES = 4096
+comptime _MAX_CHUNK_BYTES = 16 << 20
+
 # Parallel reads pull larger blocks than the streaming default, because a
 # block is what gets divided: a 64 KiB block cannot usefully be split.
 comptime _PARALLEL_BLOCK = 32 << 20
@@ -1151,6 +1389,25 @@ comptime _PARALLEL_BLOCK = 32 << 20
 def _csv_workers(bytes: Int) -> Int:
     """Threads for a block of this many bytes, honouring DATAFRAME_THREADS."""
     return max(1, min(worker_count(1 << 40), bytes // _MIN_BYTES_PER_WORKER))
+
+
+def _csv_chunks(bytes: Int, columns: Int, workers: Int) -> Int:
+    """How many record-aligned chunks to make for a parallel CSV read.
+
+    A worker claims several chunks instead of owning one large range. A slow
+    core then delays at most one cache-sized decode. The column cap matters
+    because every chunk creates one reader and therefore a builder per output
+    column.
+    """
+    if bytes <= 0 or workers <= 1:
+        return 1
+    var max_chunks = max(workers, _CHUNK_ALLOCATION_BUDGET // max(columns, 1))
+    var wanted = min(workers * _CHUNKS_PER_WORKER, max_chunks)
+    var chunk_bytes = min(
+        _MAX_CHUNK_BYTES, (bytes + max(wanted, 1) - 1) // max(wanted, 1)
+    )
+    chunk_bytes = max(_MIN_CHUNK_BYTES, chunk_bytes)
+    return max(1, (bytes + chunk_bytes - 1) // chunk_bytes)
 
 
 # A read-only whole-file mapping, so a parallel read neither copies the file
@@ -1223,30 +1480,61 @@ def _try_map(path: String) raises -> _Mapping:
         return _Mapping(address, length)
 
 
-struct _MappedRangeJob(Job):
-    """Decode one record-aligned range of a mapped file.
+@fieldwise_init
+struct _MappedReadConfig(Movable):
+    var schema: CsvSchema
+    var options: CsvOptions
+    var keep: List[Bool]
+    var has_header: Bool
 
-    The mapping outlives every job, being held by the frame-building call
-    below, so a range reads straight out of it.
+
+struct _MappedRangeJob(Job):
+    """Decode a mapped range, constructing its builders on its worker.
+
+    Configuration is immutable and shared. The caller retains the mapping
+    until every job has finished; no input pointer escapes into a result.
     """
 
-    var reader: _CsvReader
+    var config: ArcPointer[_MappedReadConfig]
     var base: Int
     var start: Int
     var end: Int
+    var record: Int
+    var rows: Int
     var frame: DataFrame
 
     def __init__(
-        out self, var reader: _CsvReader, base: Int, start: Int, end: Int
+        out self,
+        config: ArcPointer[_MappedReadConfig],
+        base: Int,
+        start: Int,
+        end: Int,
+        record: Int,
+        rows: Int,
     ) raises:
-        self.reader = reader^
+        self.config = config.copy()
         self.base = base
         self.start = start
         self.end = end
+        self.rows = rows
+        self.record = record
         self.frame = DataFrame(List[Series](), height=0)
 
     def run(mut self) raises:
-        self.reader.feed(
+        ref config = self.config[]
+        var reader = _CsvReader(
+            config.schema,
+            config.has_header and self.start == 0,
+            config.options,
+            config.keep,
+        )
+        for c in range(len(reader.columns)):
+            reader.columns[c].reserve(self.rows)
+        reader.record += self.record
+        # A byte-order mark is special only at the start of the file.
+        if self.start != 0:
+            reader.prefix_done = True
+        reader.feed(
             Span[UInt8, ImmutAnyOrigin](
                 unsafe_ptr=Pointer[UInt8, MutAnyOrigin](
                     unsafe_from_address=self.base + self.start
@@ -1256,10 +1544,141 @@ struct _MappedRangeJob(Job):
                 length=self.end - self.start,
             )
         )
-        self.frame = self.reader.finish()
+        self.frame = reader.finish()
 
     def into_frame(deinit self) -> DataFrame:
         return self.frame^
+
+
+def _read_mapped_produced(
+    var mapping: _Mapping,
+    schema: CsvSchema,
+    has_header: Bool,
+    options: CsvOptions,
+    keep: List[Bool],
+    workers: Int,
+    chunks: Int,
+) raises -> DataFrame:
+    """Scan one mapped file while workers decode each range as it appears.
+
+    Quote parity stays a single left-to-right state machine. The only change
+    from `record_splits` is that reaching a safe record boundary immediately
+    publishes the preceding range, hiding all but the first boundary scan
+    behind decoding.
+    """
+    var config = ArcPointer(
+        _MappedReadConfig(
+            schema.copy(), options.copy(), keep.copy(), has_header
+        )
+    )
+    var span = mapping.span()
+    var quoting = options.quote_char.byte_length() > 0
+    var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(0)
+    var pool = Pool(workers)
+    # At most one boundary is emitted per target, plus the final range.
+    var produced = _ProducedJobs[_MappedRangeJob](chunks + 1)
+    pool.run_produced(produced)
+
+    var n = len(span)
+    var stride = max(1, n // max(chunks, 1))
+    var target = stride
+    var start = 0
+    var start_record = 0
+    var records = 0
+    var inside = False
+    var i = 0
+    var pointer = span.unsafe_ptr()
+    var quotes = _splat(quote)
+    var newlines = _splat(10)
+
+    @__parameter
+    def publish(stop: Int) raises:
+        produced.submit(
+            _MappedRangeJob(
+                config,
+                mapping.address,
+                start,
+                stop,
+                start_record,
+                records - start_record + Int(stop == n),
+            )
+        )
+        start = stop
+        start_record = records
+        target = stop + stride
+
+    @__parameter
+    def scan_byte(at: Int) raises:
+        var byte = span[at]
+        if quoting and byte == quote:
+            inside = not inside
+        elif byte == 10 and not inside:
+            records += 1
+            if at + 1 >= target and at + 1 < n:
+                publish(at + 1)
+
+    while i < n:
+        # The same fast path as `record_splits`: a quote-free SIMD block
+        # outside a field can update counts in bulk until it approaches the
+        # next target, where byte positions become necessary to publish.
+        if i + _SCAN_WIDTH <= n:
+            var block = pointer.unsafe_load[width=_SCAN_WIDTH](i)
+            var quoted_here = quoting and block.eq(quotes).reduce_or()
+            if not quoted_here and not inside:
+                var found = block.eq(newlines)
+                var count = Int(found.cast[DType.uint8]().reduce_add())
+                if count == 0:
+                    i += _SCAN_WIDTH
+                    continue
+                if i + _SCAN_WIDTH <= target:
+                    records += count
+                    i += _SCAN_WIDTH
+                    continue
+        if i + 64 <= n:
+            # Quote-bearing blocks used to reload an overlapping SIMD block
+            # after every scalar byte. Prefix XOR gives the quote state at
+            # every position from one load, including doubled quotes.
+            var block = pointer.unsafe_load[width=64](i)
+            var quotes_mask = UInt64(0)
+            if quoting:
+                quotes_mask = _mask64(block.eq(SIMD[DType.uint8, 64](quote)))
+            var parity = quotes_mask
+            parity ^= parity << 1
+            parity ^= parity << 2
+            parity ^= parity << 4
+            parity ^= parity << 8
+            parity ^= parity << 16
+            parity ^= parity << 32
+            var newlines_mask = _mask64(block.eq(SIMD[DType.uint8, 64](10)))
+            var boundaries = newlines_mask & (parity if inside else ~parity)
+            inside = inside != (pop_count(quotes_mask) % 2 != 0)
+            if i + 64 <= target:
+                records += Int(pop_count(boundaries))
+            else:
+                while boundaries != 0:
+                    var stop = i + Int(count_trailing_zeros(boundaries)) + 1
+                    boundaries &= boundaries - 1
+                    records += 1
+                    if stop >= target and stop < n:
+                        publish(stop)
+            i += 64
+            continue
+        scan_byte(i)
+        i += 1
+    if start < n:
+        publish(n)
+
+    var jobs = produced.finish()
+    # The scanner is finished. Join the idle workers before concat starts so
+    # their between-round spin cannot contend with column assembly.
+    pool.release()
+    var frames = List[DataFrame](capacity=len(jobs))
+    jobs.reverse()
+    while len(jobs) > 0:
+        frames.append(jobs.pop().into_frame())
+    var result = concat(frames) if len(frames) > 1 else frames.pop(0)
+    _ = mapping^
+    return result^
 
 
 def _read_mapped(
@@ -1278,7 +1697,17 @@ def _read_mapped(
     var quoting = options.quote_char.byte_length() > 0
     var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(0)
     var workers = _csv_workers(len(span))
-    var layout = record_splits(span, quote, quoting, workers)
+    var chunks = _csv_chunks(len(span), len(keep), workers)
+    if workers > 1:
+        return _read_mapped_produced(
+            mapping^, schema, has_header, options, keep, workers, chunks
+        )
+    var config = ArcPointer(
+        _MappedReadConfig(
+            schema.copy(), options.copy(), keep.copy(), has_header
+        )
+    )
+    var layout = record_splits(span, quote, quoting, chunks)
 
     var jobs = List[_MappedRangeJob]()
     for s in range(len(layout.splits) - 1):
@@ -1286,16 +1715,18 @@ def _read_mapped(
         var stop = min(layout.splits[s + 1].offset, len(span))
         if stop <= start:
             continue
-        var leading = s == 0
-        var reader = _CsvReader(
-            schema, has_header and leading, options, keep.copy()
+        jobs.append(
+            _MappedRangeJob(
+                config,
+                mapping.address,
+                start,
+                stop,
+                layout.splits[s].record,
+                layout.splits[s + 1].record
+                - layout.splits[s].record
+                + Int(stop == len(span)),
+            )
         )
-        reader.record += layout.splits[s].record
-        # A byte-order mark means something only at the very start of the
-        # file; elsewhere those bytes are data.
-        if not leading:
-            reader.prefix_done = True
-        jobs.append(_MappedRangeJob(reader^, mapping.address, start, stop))
 
     if len(jobs) == 0:
         var empty = _CsvReader(schema, has_header, options, keep.copy())
@@ -1303,7 +1734,11 @@ def _read_mapped(
     if len(jobs) == 1:
         jobs[0].run()
     else:
-        run_jobs(jobs)
+        # Ranges vary with field widths and allocator stalls. Claiming a
+        # small range dynamically keeps one delayed core from setting the
+        # read's tail while the result list preserves file order.
+        var pool = Pool(workers)
+        pool.run(jobs, claim=True)
     var frames = List[DataFrame]()
     while len(jobs) > 0:
         frames.append(jobs.pop(0).into_frame())
@@ -1348,13 +1783,14 @@ def _stream_parallel(
             if len(buffer) == 0:
                 break
             var workers = _csv_workers(len(buffer))
+            var chunks = _csv_chunks(len(buffer), len(keep), workers)
             var span = Span[UInt8, ImmutAnyOrigin](
                 unsafe_ptr=buffer.unsafe_ptr()
                 .unsafe_mut_cast[False]()
                 .unsafe_origin_cast[ImmutAnyOrigin](),
                 length=len(buffer),
             )
-            var layout = record_splits(span, quote, quoting, workers)
+            var layout = record_splits(span, quote, quoting, chunks)
             # Whatever follows the last record terminator belongs to the next
             # block; on the final block there is nothing more to read, so the
             # remainder is decoded here.
@@ -1387,7 +1823,8 @@ def _stream_parallel(
             if len(jobs) == 1:
                 jobs[0].run()
             else:
-                run_jobs(jobs)
+                var pool = Pool(workers)
+                pool.run(jobs, claim=True)
             while len(jobs) > 0:
                 frames.append(jobs.pop(0).into_frame())
             base += layout.records

@@ -7,6 +7,37 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Simple quoted CSV fields decode borrowed input spans with SIMD structural
+  scanning. Quoted empty strings and quoted null tokens keep their existing
+  meaning; escaped quotes and embedded line breaks retain the state machine.
+
+- CSV boundary scanning computes quote parity in blocks instead of repeatedly
+  loading overlapping bytes around quotes. Workers construct and reserve
+  their builders using scanned record counts. Validity packing and shifted
+  bitmap assembly write groups of bits at once; string concatenation splits
+  bytes, offsets, and validity into independent jobs within the thread cap.
+  Fully validated wide plain decimals skip a duplicate grammar scan while
+  retaining the standard Float64 converter.
+
+- Plain CSV records decode borrowed input spans without copying fields into
+  a record buffer. Finished column builders transfer their buffers, and
+  Int64 fields of at most 18 digits avoid per-digit overflow checks. Quoted
+  and irregular records retain the strict state machine.
+
+- CSV reads publish small record-aligned chunks while scanning the file,
+  and workers claim them dynamically. Tokenization reuses structural masks
+  across fields; numeric grammar checks consume borrowed text before
+  handing it to the existing numeric conversion. See [the comparison notes](docs/csv-pipeline-152.md)
+  for measurements and the remaining work in #152.
+
+- Concatenation sizes each output column once instead of growing into it.
+  Every parallel stage reassembles its result this way -- a CSV read
+  produces one frame per range -- and letting the column double copied it
+  again at every step. The final height and the text size are both known
+  from the inputs. Reassembling 1M rows of 8 columns from 32 ranges drops
+  from 21 ms to 7 ms, and the whole parallel CSV read from a median of
+  86 ms to 67 ms across 32 threads (#107).
+
 - Signed decimals take the one-pass Float64 parser. Only unsigned text did,
   so every negative field went to the strict parser, which allocates a
   String to check the grammar -- half the fields of a column centred on

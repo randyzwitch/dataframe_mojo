@@ -31,6 +31,7 @@ def outcome(
             PATH,
             schema,
             buffer_size=size,
+            n_rows=1 << 30,  # Force streaming so buffer_size=1 is scalar.
             encoding="utf8-lossy" if lossy else "utf8",
             ignore_errors=permissive,
         )
@@ -71,7 +72,7 @@ def test_random_bytes_parse_or_fail_cleanly_at_every_split() raises:
     var rng = Lcg(424242)
     for index in range(CASES):
         var bytes: List[UInt8] = [97, 44, 98, 10]
-        for _ in range(rng.next(40)):
+        for _ in range(rng.next(320)):
             bytes.append(alphabet[rng.next(len(alphabet))])
         with open(PATH, "w") as file:
             file.write_bytes(bytes)
@@ -80,12 +81,29 @@ def test_random_bytes_parse_or_fail_cleanly_at_every_split() raises:
             var reference = outcome(
                 len(bytes) + 1, chosen, mode >= 2, mode == 3
             )
-            for size in [1, 2, 3, 7]:
+            for size in [1, 2, 3, 7, 63, 64, 65]:
                 assert_equal(
                     outcome(size, chosen, mode >= 2, mode == 3),
                     reference,
                     msg="case " + String(index) + " mode " + String(mode),
                 )
+
+
+def test_valid_quoted_records_at_every_simd_alignment() raises:
+    var schema = CsvSchema([CsvField.string("a"), CsvField.string("b")])
+    for padding in range(128):
+        var prefix = String()
+        for _ in range(padding):
+            prefix += "x"
+        var text = String("a,b\r\n")
+        for _ in range(5):
+            text += prefix + ',"a,b\r\nc""d"\r\n'
+            text += '"",plain\n'
+        with open(PATH, "w") as file:
+            file.write(text)
+        var reference = outcome(1, schema, False, False)
+        for size in [63, 64, 65, 127, 128, 129, 4096]:
+            assert_equal(outcome(size, schema, False, False), reference)
 
 
 def main() raises:

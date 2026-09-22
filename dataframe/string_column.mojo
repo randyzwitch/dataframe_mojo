@@ -245,6 +245,18 @@ struct StringColumn(Copyable, Sized):
             length=self._length,
         )
 
+    def _reserve_rows(mut self, rows: Int, text_bytes: Int):
+        """Size the buffers for `rows` rows holding `text_bytes` of text.
+
+        The text buffer is the one that matters: it is the largest of the
+        three and the one a caller cannot infer from the row count.
+        """
+        if not self._owned():
+            self = self._compact()
+        self._offsets[].reserve(rows + 1)
+        self._bytes[].reserve(text_bytes)
+        self._bits[].reserve((rows + 7) // 8)
+
     def _append_column(mut self, other: Self):
         """Append rows in bulk: bytes and validity copied, offsets rebased.
 
@@ -274,8 +286,23 @@ struct StringColumn(Copyable, Sized):
         if offsets.capacity() < len(offsets) + count:
             offsets.reserve(max(len(offsets) + count, 2 * offsets.capacity()))
         ref incoming = other._offsets[]
-        for i in range(1, count + 1):
-            offsets.append(incoming[other._offset + i] + shift)
+        # The output positions are known after reserve. Writing them in place
+        # avoids one bounds-checked append per row; four Int64 offsets fit a
+        # small SIMD register and all share the same rebase shift.
+        var target = len(offsets)
+        offsets.resize(target + count, 0)
+        var source = incoming.unsafe_ptr().unsafe_offset(other._offset + 1)
+        var destination = offsets.unsafe_ptr().unsafe_offset(target)
+        var i = 0
+        var shift_vector = SIMD[DType.int64, 4](shift)
+        while i + 4 <= count:
+            destination.unsafe_store[width=4](
+                i, source.unsafe_load[width=4](i) + shift_vector
+            )
+            i += 4
+        while i < count:
+            offsets[target + i] = incoming[other._offset + i + 1] + shift
+            i += 1
         self._length += count
 
     @staticmethod

@@ -59,14 +59,16 @@ def both_ways(path: String) raises:
     """Read serially and in parallel, and require identical frames."""
     set_threads(1)
     var serial = read_csv(path, schema())
-    set_threads(32)
-    var parallel = read_csv(path, schema())
-    assert_equal(
-        serial.height(), parallel.height(), "row counts differ for " + path
-    )
-    assert_true(
-        serial.equals(parallel), "parallel read differs from serial: " + path
-    )
+    for threads in [2, 3, 7, 32]:
+        set_threads(threads)
+        var parallel = read_csv(path, schema())
+        assert_equal(
+            serial.height(), parallel.height(), "row counts differ for " + path
+        )
+        assert_true(
+            serial.equals(parallel),
+            "parallel read differs from serial: " + path,
+        )
 
 
 def body(rows: Int, quoted_every: Int, crlf: Bool) raises -> String:
@@ -210,6 +212,28 @@ def test_a_parse_error_is_not_swallowed_by_the_fallback() raises:
     write(path, "id,text,value,flag\n1,a,2.5,true\nnotanint,b,1.0,false\n")
     with assert_raises(contains="invalid Int64"):
         _ = read_csv(path, schema())
+
+
+def test_late_chunk_errors_keep_record_numbers() raises:
+    var path = String("/tmp/claude-1000/par_late_bad.csv")
+    var text = body(30000, 7, True)
+    text += "bad,plain,1.0,true\r\n"
+    write(path, text)
+    for threads in [1, 3, 7, 32]:
+        set_threads(threads)
+        with assert_raises(contains="CSV record 30002, field"):
+            _ = read_csv(path, schema())
+
+
+def test_quote_parity_preserves_late_malformed_record() raises:
+    var path = String("/tmp/claude-1000/par_quote_parity.csv")
+    write(path, body(50000, 17, False) + '50000,bad"quote,1.5,true\n')
+    set_threads(32)
+    assert_true(_csv_workers(_file_size(path)) > 1)
+    for threads in [1, 3, 32]:
+        set_threads(threads)
+        with assert_raises(contains="CSV record 50002, field 2"):
+            _ = read_csv(path, schema())
 
 
 def main() raises:

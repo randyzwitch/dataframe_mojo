@@ -167,14 +167,21 @@ def timed_sort(frame: DataFrame, repetitions: Int) raises:
 
 def main() raises:
     var args = argv()
-    if len(args) != 4:
-        raise Error("usage: bench_vs_polars DATA_DIR ROWS REPETITIONS")
+    if len(args) != 4 and len(args) != 5:
+        raise Error(
+            "usage: bench_vs_polars DATA_DIR ROWS REPETITIONS [--csv-only]"
+        )
+    var csv_only = len(args) == 5
+    if csv_only and String(args[4]) != "--csv-only":
+        raise Error("unknown benchmark option")
     var data_dir = String(args[1])
     var rows = String(args[2])
     var repetitions = Int(String(args[3]))
     print("# threads=", worker_count(1 << 40), sep="")
 
     var left = timed_csv(data_dir + "/left_" + rows + ".csv", repetitions)
+    if csv_only:
+        return
     var right = read_csv(data_dir + "/right_" + rows + ".csv", right_schema())
 
     timed_with_columns(
