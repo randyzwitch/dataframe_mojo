@@ -275,7 +275,8 @@ def _float32_nan() -> Float32:
     return _float32_from_bits(UInt32(0x7FC00000))
 
 
-comptime _POW10_F32: SIMD[DType.float32, 16] = SIMD[DType.float32, 16](
+# fast-float2 float.rs fixed tables, kept addressable for its indexed lookup.
+comptime _POW10_F32: Array[Float32, 16] = [
     1e0,
     1e1,
     1e2,
@@ -292,8 +293,8 @@ comptime _POW10_F32: SIMD[DType.float32, 16] = SIMD[DType.float32, 16](
     0.0,
     0.0,
     0.0,
-)
-comptime _POW10_F64: SIMD[DType.float64, 32] = SIMD[DType.float64, 32](
+]
+comptime _POW10_F64: Array[Float64, 32] = [
     1e0,
     1e1,
     1e2,
@@ -326,8 +327,8 @@ comptime _POW10_F64: SIMD[DType.float64, 32] = SIMD[DType.float64, 32](
     0.0,
     0.0,
     0.0,
-)
-comptime _INT_POW10: SIMD[DType.uint64, 16] = SIMD[DType.uint64, 16](
+]
+comptime _INT_POW10: Array[UInt64, 16] = [
     1,
     10,
     100,
@@ -344,7 +345,7 @@ comptime _INT_POW10: SIMD[DType.uint64, 16] = SIMD[DType.uint64, 16](
     10000000000000,
     100000000000000,
     1000000000000000,
-)
+]
 
 
 @always_inline
