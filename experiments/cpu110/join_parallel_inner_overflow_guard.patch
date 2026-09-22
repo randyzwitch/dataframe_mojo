@@ -1,0 +1,16 @@
+--- dataframe/frame.mojo
++++ dataframe/frame.mojo
+@@ -1542,7 +1542,12 @@
+         for row in range(self.start, self.end):
+             var key = self.left_ids[][row]
+             if key >= 0:
+-                self.count += self.right_starts[][key + 1] - self.right_starts[][key]
++                var matches = (
++                    self.right_starts[][key + 1] - self.right_starts[][key]
++                )
++                if matches > Int.MAX - self.count:
++                    raise Error("Join output row count overflows")
++                self.count += matches
+ 
+ 
+ struct _JoinFillJob(Job):

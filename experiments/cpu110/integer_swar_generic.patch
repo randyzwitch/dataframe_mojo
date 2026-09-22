@@ -1,0 +1,85 @@
+diff --git a/dataframe/parse.mojo b/dataframe/parse.mojo
+index 61b30d1..de5de31 100644
+--- a/dataframe/parse.mojo
++++ b/dataframe/parse.mojo
+@@ -1,5 +1,8 @@
+ """Strict text parsing shared by read_csv and cast, so both agree."""
+ from std.utils.numerics import isinf
++from std.memory import bitcast
++from std.sys import size_of
++from std.sys.info import is_little_endian
+ 
+ # Private APIs from the Mojo 1.2 nightly pinned in pixi.lock. These are the
+ # same conversion routines Float64(String) uses; keep reference-bit tests
+@@ -10,6 +13,46 @@ from std.collections.string._parsing_numbers.parsing_floats import (
+ )
+ 
+ 
++@always_inline
++def _short_decimal(bytes: Span[UInt8, _], start: Int) raises -> UInt64:
++    """Parse a decimal magnitude known to fit from a bounded byte span.
++
++    The packed reductions consume only complete 8- or 4-byte blocks; scalar
++    cleanup therefore remains safe for every StringSlice offset and length.
++    """
++    comptime assert is_little_endian(), "packed decimal parsing requires little endian"
++    var index = start
++    var value = UInt64(0)
++    while index + 8 <= len(bytes):
++        var block = bytes.unsafe_ptr().unsafe_load[width=8](index)
++        var word = bitcast[DType.uint64, 1](block)
++        if ((word + UInt64(0x4646464646464646)) | (word - UInt64(0x3030303030303030))) & UInt64(0x8080808080808080) != 0:
++            raise Error("non-decimal integer byte")
++        word -= UInt64(0x3030303030303030)
++        word = (word * 10 + (word >> 8)) & UInt64(0x00FF00FF00FF00FF)
++        word = (word * 100 + (word >> 16)) & UInt64(0x0000FFFF0000FFFF)
++        word = (word * 10000 + (word >> 32)) & UInt64(0xFFFFFFFF)
++        value = value * 100000000 + word
++        index += 8
++    if index + 4 <= len(bytes):
++        var block = bytes.unsafe_ptr().unsafe_load[width=4](index)
++        var word = bitcast[DType.uint32, 1](block)
++        if ((word + UInt32(0x46464646)) | (word - UInt32(0x30303030))) & UInt32(0x80808080) != 0:
++            raise Error("non-decimal integer byte")
++        word -= UInt32(0x30303030)
++        word = (word * 10 + (word >> 8)) & UInt32(0x00FF00FF)
++        word = (word * 100 + (word >> 16)) & UInt32(0xFFFF)
++        value = value * 10000 + UInt64(word)
++        index += 4
++    while index < len(bytes):
++        var byte = bytes[index]
++        if byte < 48 or byte > 57:
++            raise Error("non-decimal integer byte")
++        value = value * 10 + UInt64(byte - 48)
++        index += 1
++    return value
++
++
+ def parse_int64(text: StringSlice) raises -> Int64:
+     """Parse strict decimal Int64 without a floating-point round trip."""
+     var bytes = text.as_bytes()
+@@ -72,6 +115,24 @@ def parse_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
+         index = 1
+     if index == len(bytes):
+         raise Error("integer sign without digits")
++    # The fast branch only accepts lengths that fit every value of the dtype,
++    # so it cannot alter overflow-versus-invalid-byte precedence.
++    comptime safe_digits = 2 if size_of[Scalar[D]]() == 1 else (
++        4 if size_of[Scalar[D]]() == 2 else (
++            9 if size_of[Scalar[D]]() == 4 else 19
++        )
++    )
++    var digits = len(bytes) - index
++    if (
++        digits >= 4
++        and digits <= safe_digits
++        and (D.is_signed() or not negative)
++    ):
++        var magnitude = _short_decimal(bytes, index)
++        comptime if D.is_signed():
++            if negative:
++                return (-Int64(magnitude)).cast[D]()
++        return magnitude.cast[D]()
+     var high = Scalar[D].MAX.cast[DType.uint64]()
+     var limit = high
+     comptime if D.is_signed():

@@ -1,0 +1,5 @@
+Build from the repository root:
+  pixi run -m pixi.toml mojo build -I . /tmp/bench_float32_base152.mojo -o /tmp/bench_float32_base152
+  pixi run -m pixi.toml mojo build -I . -I /tmp /tmp/bench_float32_subset152.mojo -o /tmp/bench_float32_subset152
+Run each binary directly.  Each emits 20M-field `short_ns` and `fallback_ns` timings.
+Correctness scope: `/tmp/float32_candidate152.mojo` compares the subset parser against `Float32(parse_float64(...))` for 10,000 deterministic mantissas, every decimal point and both signs.

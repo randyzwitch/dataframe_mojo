@@ -1,0 +1,12 @@
+--- dataframe/frame.mojo
++++ dataframe/frame.mojo
+@@ -1513,6 +1513,9 @@
+             )
+         )
+     run_jobs(fills)
++    # `fills` carries `order` only as an address. Keep the owning list live
++    # until its workers have consumed that address.
++    _ = order^
+     return flat^
+ 
+ 

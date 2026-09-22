@@ -1,0 +1,694 @@
+numeric integrated 0 build/bench_numeric149
+plain_ns,128721249
+wide_ns,287395194
+exponent_ns,1832293818
+
+
+numeric integrated 0 /tmp/bench_numeric_integrated110
+plain_ns,130491121
+wide_ns,285172134
+exponent_ns,286487105
+
+
+csv integrated 0 build/bench_polars build/bench_csv_numeric149
+# threads=32
+csv_read	22201137	1000000	-2151.380000000121
+
+
+csv integrated 0 build/bench_polars /tmp/bench_csv_integrated110
+# threads=32
+csv_read	23332291	1000000	-2151.380000000121
+
+
+csv integrated 0 build/cpu110_exponent build/bench_csv_numeric149
+# threads=32
+csv_read	51545765	1000000	-2151.380000000121
+
+
+csv integrated 0 build/cpu110_exponent /tmp/bench_csv_integrated110
+# threads=32
+csv_read	31237436	1000000	-2151.380000000121
+
+
+numeric integrated 1 build/bench_numeric149
+plain_ns,132894297
+wide_ns,287990201
+exponent_ns,1825240870
+
+
+numeric integrated 1 /tmp/bench_numeric_integrated110
+plain_ns,131321642
+wide_ns,288475041
+exponent_ns,279206478
+
+
+csv integrated 1 build/bench_polars build/bench_csv_numeric149
+# threads=32
+csv_read	21731877	1000000	-2151.380000000121
+
+
+csv integrated 1 build/bench_polars /tmp/bench_csv_integrated110
+# threads=32
+csv_read	23166035	1000000	-2151.380000000121
+
+
+csv integrated 1 build/cpu110_exponent build/bench_csv_numeric149
+# threads=32
+csv_read	51551194	1000000	-2151.380000000121
+
+
+csv integrated 1 build/cpu110_exponent /tmp/bench_csv_integrated110
+# threads=32
+csv_read	31087799	1000000	-2151.380000000121
+
+
+numeric integrated 2 build/bench_numeric149
+plain_ns,133446136
+wide_ns,288664907
+exponent_ns,1825960728
+
+
+numeric integrated 2 /tmp/bench_numeric_integrated110
+plain_ns,128805619
+wide_ns,281451888
+exponent_ns,273358688
+
+
+csv integrated 2 build/bench_polars build/bench_csv_numeric149
+# threads=32
+csv_read	22065280	1000000	-2151.380000000121
+
+
+csv integrated 2 build/bench_polars /tmp/bench_csv_integrated110
+# threads=32
+csv_read	22736045	1000000	-2151.380000000121
+
+
+csv integrated 2 build/cpu110_exponent build/bench_csv_numeric149
+# threads=32
+csv_read	51207122	1000000	-2151.380000000121
+
+
+csv integrated 2 build/cpu110_exponent /tmp/bench_csv_integrated110
+# threads=32
+csv_read	31036090	1000000	-2151.380000000121
+
+
+chunks rows=1000000 trial=0 chunks_per_worker=4
+# threads=32
+csv_read	22076010	1000000	-2151.380000000121
+
+
+chunks rows=1000000 trial=0 chunks_per_worker=8
+# threads=32
+csv_read	22275766	1000000	-2151.380000000121
+
+
+chunks rows=1000000 trial=0 chunks_per_worker=16
+# threads=32
+csv_read	23750413	1000000	-2151.380000000121
+
+
+chunks rows=1000000 trial=0 chunks_per_worker=32
+# threads=32
+csv_read	29690920	1000000	-2151.380000000121
+
+
+chunks rows=1000000 trial=1 chunks_per_worker=4
+# threads=32
+csv_read	22175127	1000000	-2151.380000000121
+
+
+chunks rows=1000000 trial=1 chunks_per_worker=8
+# threads=32
+csv_read	22130658	1000000	-2151.380000000121
+
+
+chunks rows=1000000 trial=1 chunks_per_worker=16
+# threads=32
+csv_read	23960427	1000000	-2151.380000000121
+
+
+chunks rows=1000000 trial=1 chunks_per_worker=32
+# threads=32
+csv_read	29568393	1000000	-2151.380000000121
+
+
+chunks rows=10000000 trial=0 chunks_per_worker=4
+# threads=32
+csv_read	178329889	10000000	-157877.81000000145
+
+
+chunks rows=10000000 trial=0 chunks_per_worker=8
+# threads=32
+csv_read	169528455	10000000	-157877.81000000145
+
+
+chunks rows=10000000 trial=0 chunks_per_worker=16
+# threads=32
+csv_read	161842256	10000000	-157877.81000000145
+
+
+chunks rows=10000000 trial=0 chunks_per_worker=32
+# threads=32
+csv_read	162116840	10000000	-157877.81000000145
+
+
+chunks rows=10000000 trial=1 chunks_per_worker=4
+# threads=32
+csv_read	185021241	10000000	-157877.81000000145
+
+
+chunks rows=10000000 trial=1 chunks_per_worker=8
+# threads=32
+csv_read	170038555	10000000	-157877.81000000145
+
+
+chunks rows=10000000 trial=1 chunks_per_worker=16
+# threads=32
+csv_read	160299601	10000000	-157877.81000000145
+
+
+chunks rows=10000000 trial=1 chunks_per_worker=32
+# threads=32
+csv_read	164172505	10000000	-157877.81000000145
+
+
+csv phaseprofile build/bench_polars
+# threads=32
+# phases_ns,1300541,7896734,7153731,29110,9607156
+# chunk_ns,1600924,1747392,2058314,1839319,1927958,2020655,1959976,2298359,1879988,1851279,1868528,1896638,2173932,2175712,1909817,2106573,1880378,1907907,1800870,1761841,1973937,2016246,2116793,1920567,1906658,1835590,1948877,1812480,2453985,2383777,1773411,1441738,1657103,1400609,1503486,1593805,1473638,1502757,1505837,1476947,1532176,1402559,1443908,1526886,1460878,1499526,1553525,1428699,1437468,1426779,1396709,1491576,1605164,1470548,1695872,1489067,1616374,1434789,1447678,1506606,1945676,1413568,1529256,2157372,1487367,2121523,1542036,1542045,1477317,1559795,1514706,1438928,1499727,1398549,1426088,1450807,1455978,1472667,1470907,1473388,1457907,1454917,1514737,1532446,1483457,1428439,1431418,1493757,1533786,1523786,1493877,1382669,1450118,1510117,1407899,1438118,1596784,1421148,1530376,1512187,1460958,1499267,1419589,1449228,1455018,1447478,1623584,1400559,1494816,1460708,1467728,2185642,2186292,1488157,1482427,1401228,1434888,1497256,1456937,1538786,1531346,1444398,1406429,1486857,1422068,1521436,1461218,1393669,1467157,1424338,1531066,1452727,1524806,1555545,1438748,1450778,1463557,1456118,1399459,1477617,1475188,1573305,1384110,1406779,1461677,1450517,1479277,1442408,1452008,1462607,1511786,1512566,1531926,1425988,1424079,2145342,2113523,1457618,1431248,1445738,1386859,1432468,1412899,1449568,1729312,1442118,1522636,1426978,1482948,1484247,1461087,1392939,1542025,1621074,1605044,1480898,1488987,1536186,1536416,1535586,1466877,1470238,1553516,1486807,1420179,1596224,1457167,1439708,1466567,1427678,1410969,1469738,1440548,1482047,1481207,1417319,1501387,1529666,1509937,1520297,1514366,2196051,2170882,1697132,1498147,1705702,1474947,1534826,1543906,1472287,1531726,1522107,1428289,1495197,1572345,1520546,1532096,1470668,1513437,1432418,1489697,1438678,1427328,1414639,1425438,1394499,1432288,1426878,1522196,1457338,1417038,1485237,1473218,1440128,1408499,1480257,1396019,1408289,1458537,1383309,1452958,1432048,1416128,1420528,1421639,1393149,1503316,2089834,2058974,1416378,1398579,1432978,1422558,1400489,1414199,1348710
+# phases_ns,1307061,7885585,6289120,7130,9685995
+# chunk_ns,1297501,1312091,1430128,1392199,1352680,1307161,1244092,1374899,1343280,1372519,1287551,1279121,1349840,1357620,1321341,1781631,1261092,1300891,1339970,1261362,1323541,1272791,1297631,1283182,1331841,2263409,1692263,1390659,1307541,1319550,1376769,1303301,1239712,1399869,1363670,1371340,1556845,1444898,1588915,1434168,1404399,1630264,1559086,1602174,1457528,1460708,1567855,1558315,1626824,1425948,1307431,1315361,1262002,1294871,1298781,1331681,1929707,1357270,1317441,1363490,1396449,1469828,1535015,1343020,1357350,1331880,1327220,1484077,1369760,1389799,1656543,2213391,1631153,1589295,1591875,1515066,1533846,1400799,1454548,1380909,1351230,1391020,1389029,1311891,1336920,1287431,1266772,1291101,1276592,1278552,1331510,1290431,1324621,1369580,1413238,2257520,1305641,2234620,1439198,1544986,2240111,1595145,2077634,1507776,1756501,1599554,1555675,1546875,1648873,1656264,2207001,1435738,1769650,1707972,1520266,1529286,1544425,2310299,1452678,1477907,1432389,1346060,2245440,1553415,1464197,1390289,1262122,1278031,1279861,1560686,1298191,1624544,1581625,1476317,1484168,1471388,2304929,1443588,1292081,1294022,1297331,1305081,1873548,1280091,1363970,1410669,1345100,1414668,1411159,1863538,1450678,2017945,1272482,1242442,1251582,1846919,1256102,1241003,1922527,1256763,1478037,1922858,1265502,1269411,1341880,1363999,1311731,1364879,1295862,1362050,1381259,1256953,1334640,1432728,1271822,1390839,1267782,1284322,1371010,1359120,1419439,1384040,1517886,1396519,2104514,1360410,1413169,2103013,1301801,2137522,1982726,1361320,1272782,1596624,1265732,1311021,1387759,1307151,1332761,1419629,2088004,1450838,1420468,1442358,1440178,1410999,1414018,1395929,1461277,1473187,1364770,2032965,1316241,1351500,1301781,1357800,1295312,1286921,1251292,1236843,1252283,1255722,1268042,1260502,1293971,1923817,1262262,1264572,1295511,1347840,1307511,1542816,1367880,1341200,1350900,1283601,2092284,1357740,1257112,1896848,1400179,1270071,1277801,1954307,1280222,1279402,1291991,1363500,1875158,1293241,1263782,1881338,1257802,1248543,1245862,1220652
+csv_read	26197528	1000000	-2151.380000000121
+
+
+csv phaseprofile /tmp/dataframe_mojo_quoted_keystr152
+# threads=32
+# phases_ns,1354429,17797026,2693250,18129,9940930
+# chunk_ns,1882648,1843809,2164312,2814608,1932208,1723471,1735321,1703642,1652003,1648253,1624884,2295619,1662823,1666753,1633734,1670493,2097314,2140913,1665713,1991526,1623374,1659334,1662003,1662034,1631124,1674103,2191652,2249480,1884199,1697843,1591805,1624554,1554506,1661743,1575786,1644603,1694633,1536307,1593555,1610025,1563046,1601255,1556296,1585885,2170052,1600765,1561155,1550556,1755551,1582745,1605404,1922457,1566775,1608994,1522456,2267560,1536336,1612185,1555245,1566086,1665603,2147943,1640973,1577695,1541236,1547506,1533506,1548146,1558866,1565675,1735532,1543416,1655924,2143902,1590725,1583335,1619174,1548216,1585775,2167442,1574185,1541446,1553345,1564386,1541906,2107444,1612504,1567765,1698172,1683803,1613434,1537996,2141292,1578485,1591664,1529346,2205591,1531716,1754051,1566956,1513876,1518636,1541995,1599605,1615034,1723952,1615664,1596545,1559685,1519786,1598765,2192121,1572185,1536535,1545456,2171462,1653514,1738871,1597385,1547175,2191612,1573355,1595215,1625103,1541536,1548676,1515026,1514407,1532906,1507027,1576935,1616834,2226790,1564655,1564805,2229090,1549786,1553596,1536926,1543616,1546725,1546296,1772880,1536096,1567215,2227031,1601354,1613295,1624854,1681672,1557366,1547826,1620794,1539576,1526896,2162052,1558715,1543705,1541276,2172222,1567895,1571135,1591485,1660493,1577035,1659093,1593295,1545375,1542336,2166542,1559375,1594204,2371038,1530116,1734232,1602334,1590915,1655913,1580425,1600314,1693142,1557436,1598184,1582405,1524616,1612924,1638203,1594265,2193221,1609654,1554395,1537366,2210441,1696982,1549786,2162602,1521436,1546876,1503837,1636443,1597205,1597214,1526406,2223280,1657003,1714382,1607975,1547235,1763051,1532446,2140722,1534986,1559315,1541956,1509367,1546566,1563266,1519336,1528036,1604054,1565516,1649923,1585295,1524866,1540856,1521436,2250630,1529706,1539316,2193881,2233410,1810950,1834019,1651383,1579624,1605914,1526206,1561065,1538966,1516656,1569675,2182381,1517827,2284709,2059324,1524886,1538816,1536606,1504647,1530366,1528716,1539106,1540486,2299689,1524796,2119383
+# phases_ns,1324400,13608768,3355535,7070,9544848
+# chunk_ns,1447058,1472027,1432558,1590325,1437338,1457817,2221861,2265599,1549856,1514866,2088004,1568015,1540926,1437128,1468338,1596575,1856808,1495297,2013435,1789050,1527226,1697342,1548725,1444338,1448478,1537376,1471207,1633853,2153452,1698772,1485077,1532056,1534005,1431399,1424059,1489277,1529096,1862258,2492525,1759121,1561585,2112503,1806129,1641543,1513186,2143892,2265420,2210111,1465927,2086564,1468848,1638054,2405657,1690412,2273879,1653963,1838790,1718222,1912618,1696132,1652463,1608234,1657533,1582854,2345578,1603205,1555106,2303789,1629724,1711912,1650763,2065584,1802410,1577295,1608845,1598604,2291449,1744621,1668093,2396307,2425226,1748531,1799830,2337698,2624932,2517294,1502856,1447648,1435548,1486307,1574226,1522786,1510696,1711762,1545115,2108703,2119652,1442298,1496177,1538176,1613945,1672253,2328388,1652063,1810510,1693252,2211821,1478047,1426229,1425888,1465877,1503737,1456248,1451388,1471467,1441268,1460378,1573905,1435638,2178592,1745601,1537566,2185451,2169282,1530396,2180232,1539806,1612594,2118483,2358368,2265580,2358547,1609884,1513347,1814490,1607814,1663743,1592655,1544126,1544536,1512406,1414988,1423948,1483288,1456678,1416988,1434608,2043654,1458858,2079824,1417798,1652093,1443108,1476867,2104163,1388969,1401209,1392259,2070004,2042074,1501796,1533906,1531396,1587705,1596145,2203691,1595555,1564785,1518996,2205481,1499777,1458337,1784970,1512597,1530206,2280629,1657263,2492434,2518024,1611865,1673973,2192012,1625074,1454888,1446808,2151372,1438018,1463547,1463748,1479977,1458918,1484977,1436838,1454687,1489317,1628804,1612364,1596654,1607064,2301749,1525497,1718942,2217911,2253800,1581165,1441497,2171102,2125093,1476307,1487017,1455737,1550316,1427408,2124453,1419819,2142513,1397939,1421588,1447858,2314469,1509526,2198711,1482007,1467778,1453178,2187582,1495417,1529316,1483427,1433098,1441848,1454668,1423419,1602344,1423358,1367140,1432008,1360730,1411739,2085153,1380359,1520786,2022795,2104673,1354890,2058664,1375990,1445108,2108233,1389689,1466688,1414219,1402379,1400089,2109393,1361400
+csv_read	31274905	1000000	-2151.380000000121
+
+
+reduction threads=1 rows=1000000
+global_sum	369752	1	-500000.0
+
+
+reduction threads=2 rows=1000000
+global_sum	238684	1	-500000.0
+
+
+reduction threads=4 rows=1000000
+global_sum	206975	1	-500000.0
+
+
+reduction threads=8 rows=1000000
+global_sum	347183	1	-500000.0
+
+
+reduction threads=16 rows=1000000
+global_sum	664855	1	-500000.0
+
+
+reduction threads=32 rows=1000000
+global_sum	663235	1	-500000.0
+
+
+reduction threads=1 rows=10000000
+global_sum	6185592	1	-5000000.0
+
+
+reduction threads=2 rows=10000000
+global_sum	4061280	1	-5000000.0
+
+
+reduction threads=4 rows=10000000
+global_sum	2487725	1	-5000000.0
+
+
+reduction threads=8 rows=10000000
+global_sum	1541555	1	-5000000.0
+
+
+reduction threads=16 rows=10000000
+global_sum	1602354	1	-5000000.0
+
+
+reduction threads=32 rows=10000000
+global_sum	2076344	1	-5000000.0
+
+
+joinintegration rows=1000000 variant=base
+# threads=32
+csv_read	25256139	1000000	-2151.380000000121
+arithmetic_chain	4179127	1000000	32183649.24674996
+nullable_compare	1957786	1000000	113101.0
+filter	15185992	449675	22451157.50000006
+global_sum	1849649	1	-2151.380000000121
+grouped_low	23226584	16	997848.62
+grouped_high	26573990	99989	997848.6199999999
+grouped_skew	24233363	1000	997848.6199999999
+grouped_str	33548796	100	997848.62
+join_inner	138676862	1000000	49982574.70000003
+sort_multi	89343417	1000000	-49122.4599999999
+
+	Command being timed: "build/bench_csv_numeric149 build/bench_polars 1000000 3"
+	User time (seconds): 12.94
+	System time (seconds): 0.83
+	Percent of CPU this job got: 768%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:01.79
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 375540
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 154788
+	Voluntary context switches: 5245
+	Involuntary context switches: 656
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+joinintegration rows=1000000 variant=inner
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,1000000,1000000,126729927
+
+	Command being timed: "/tmp/cpu110_7a01b37/join_inner_end_to_end build/bench_polars 1000000 3"
+	User time (seconds): 2.28
+	System time (seconds): 0.42
+	Percent of CPU this job got: 359%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.75
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 373016
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 124851
+	Voluntary context switches: 1934
+	Involuntary context switches: 68
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+joinintegration rows=1000000 variant=csr
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,1000000,1000000,157966623
+
+	Command being timed: "/tmp/cpu110_join_csr152/join_inner_csr_end_to_end build/bench_polars 1000000 3"
+	User time (seconds): 2.37
+	System time (seconds): 0.45
+	Percent of CPU this job got: 361%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.78
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 369140
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 123965
+	Voluntary context switches: 1963
+	Involuntary context switches: 52
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+joinintegration rows=10000000 variant=base
+# threads=32
+csv_read	172565460	10000000	-157877.81000000145
+arithmetic_chain	32407211	10000000	320079409.95875025
+nullable_compare	12805895	10000000	1128135.0
+filter	101901688	4497690	224568671.90000054
+global_sum	10191724	1	-157877.81000000145
+grouped_low	243334628	16	9842122.19
+grouped_high	196463729	999942	9842122.19
+grouped_skew	218393412	1000	9842122.19
+grouped_str	313078161	100	9842122.19
+join_inner	2609013011	10000000	499612111.79999965
+sort_multi	1168244369	10000000	-49921.10999999953
+
+	Command being timed: "build/bench_csv_numeric149 build/bench_polars 10000000 3"
+	User time (seconds): 244.91
+	System time (seconds): 6.27
+	Percent of CPU this job got: 1144%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:21.94
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3597716
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1479487
+	Voluntary context switches: 14472
+	Involuntary context switches: 17814
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+joinintegration rows=10000000 variant=inner
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,10000000,10000000,1750137104
+
+	Command being timed: "/tmp/cpu110_7a01b37/join_inner_end_to_end build/bench_polars 10000000 3"
+	User time (seconds): 45.55
+	System time (seconds): 4.35
+	Percent of CPU this job got: 582%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:08.56
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3758032
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1092733
+	Voluntary context switches: 6748
+	Involuntary context switches: 1532
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+joinintegration rows=10000000 variant=csr
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,10000000,10000000,1440983789
+
+	Command being timed: "/tmp/cpu110_join_csr152/join_inner_csr_end_to_end build/bench_polars 10000000 3"
+	User time (seconds): 50.08
+	System time (seconds): 4.50
+	Percent of CPU this job got: 738%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:07.39
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 3725960
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1098243
+	Voluntary context switches: 6678
+	Involuntary context switches: 1345
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+streamRSS rows=1000000 mode=eager batch=8192
+sum,22494536.199999996
+batch_rows,8192
+
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109 build/bench_polars/left_1000000.csv eager 8192 --rss 22494536.199999996"
+	User time (seconds): 0.52
+	System time (seconds): 0.18
+	Percent of CPU this job got: 653%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.10
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 212940
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 52574
+	Voluntary context switches: 1482
+	Involuntary context switches: 8
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+streamRSS rows=1000000 mode=stream batch=8192
+sum,22494536.199999996
+batch_rows,8192
+
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109 build/bench_polars/left_1000000.csv stream 8192 --rss 22494536.199999996"
+	User time (seconds): 0.52
+	System time (seconds): 0.02
+	Percent of CPU this job got: 103%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.53
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 24700
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 4752
+	Voluntary context switches: 86
+	Involuntary context switches: 12
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+streamRSS rows=1000000 mode=parallel batch=4194304
+sum,22494536.199999996
+batch_rows,4194304
+window_bytes,4194304
+
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109 build/bench_polars/left_1000000.csv parallel 4194304 --rss 22494536.199999996"
+	User time (seconds): 0.78
+	System time (seconds): 0.04
+	Percent of CPU this job got: 959%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.08
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 34900
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 8041
+	Voluntary context switches: 427
+	Involuntary context switches: 8
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+streamRSS rows=1000000 mode=parallel batch=33554432
+sum,22494536.199999996
+batch_rows,33554432
+window_bytes,33554432
+
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109 build/bench_polars/left_1000000.csv parallel 33554432 --rss 22494536.199999996"
+	User time (seconds): 0.85
+	System time (seconds): 0.11
+	Percent of CPU this job got: 882%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.11
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 89948
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 26647
+	Voluntary context switches: 592
+	Involuntary context switches: 15
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+streamRSS rows=10000000 mode=eager batch=8192
+sum,224846755.66000003
+batch_rows,8192
+
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109 build/bench_polars/left_10000000.csv eager 8192 --rss 224846755.66000003"
+	User time (seconds): 5.34
+	System time (seconds): 1.68
+	Percent of CPU this job got: 811%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.86
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 2023868
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 517359
+	Voluntary context switches: 4887
+	Involuntary context switches: 50
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+streamRSS rows=10000000 mode=stream batch=8192
+sum,224846755.66000003
+batch_rows,8192
+
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109 build/bench_polars/left_10000000.csv stream 8192 --rss 224846755.66000003"
+	User time (seconds): 5.13
+	System time (seconds): 0.06
+	Percent of CPU this job got: 100%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:05.17
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 24508
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 4798
+	Voluntary context switches: 96
+	Involuntary context switches: 50
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+streamRSS rows=10000000 mode=parallel batch=4194304
+sum,224846755.66000003
+batch_rows,4194304
+window_bytes,4194304
+
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109 build/bench_polars/left_10000000.csv parallel 4194304 --rss 224846755.66000003"
+	User time (seconds): 7.43
+	System time (seconds): 0.09
+	Percent of CPU this job got: 1326%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.56
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 34196
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 7997
+	Voluntary context switches: 2293
+	Involuntary context switches: 74
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+streamRSS rows=10000000 mode=parallel batch=33554432
+sum,224846755.66000003
+batch_rows,33554432
+window_bytes,33554432
+
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109 build/bench_polars/left_10000000.csv parallel 33554432 --rss 224846755.66000003"
+	User time (seconds): 9.05
+	System time (seconds): 0.26
+	Percent of CPU this job got: 1586%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.58
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 146544
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 48182
+	Voluntary context switches: 1069
+	Involuntary context switches: 45
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+parquet left_10000000_SNAPPY_1.parquet
+total_ns,298885733,read_ns,150663560,rechunk_and_import_ns,148222173,rows,10000000
+
+
+parquet left_1000000_LZ4_0.parquet
+total_ns,37818122,read_ns,18234876,rechunk_and_import_ns,19583246,rows,1000000
+
+
+parquet left_1000000_LZ4_1.parquet
+total_ns,36455381,read_ns,17952232,rechunk_and_import_ns,18503149,rows,1000000
+
+
+parquet left_1000000_NONE_0.parquet
+total_ns,34238450,read_ns,15133694,rechunk_and_import_ns,19104756,rows,1000000
+
+
+parquet left_1000000_NONE_1.parquet
+total_ns,36779375,read_ns,17807895,rechunk_and_import_ns,18971480,rows,1000000
+
+
+parquet left_1000000_SNAPPY_0.parquet
+total_ns,52390858,read_ns,33555496,rechunk_and_import_ns,18835362,rows,1000000
+
+
+parquet left_1000000_SNAPPY_1.parquet
+total_ns,38369069,read_ns,20372718,rechunk_and_import_ns,17996351,rows,1000000
+
+
+parquet left_1000000_ZSTD_0.parquet
+total_ns,41388033,read_ns,22499191,rechunk_and_import_ns,18888842,rows,1000000
+
+
+parquet left_1000000_ZSTD_1.parquet
+total_ns,35546161,read_ns,17347215,rechunk_and_import_ns,18198946,rows,1000000
+
+

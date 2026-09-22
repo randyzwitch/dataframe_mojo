@@ -1,0 +1,483 @@
+
+### join 32 1000000 adaptive
+COMMAND ['/tmp/cpu110_join_csr152/join_inner_csr_adaptive_end_to_end', 'build/bench_polars', '1000000', '5']
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,1000000,1000000,137553689
+
+
+### join 32 1000000 fastbucket
+COMMAND ['/tmp/cpu110_join_csr_fastbucket152/join_inner_csr_fastbucket_end_to_end', 'build/bench_polars', '1000000', '5']
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,1000000,1000000,131251892
+
+
+### join 32 1000000 dense
+COMMAND ['/tmp/cpu110_join_csr152/join_int64_range_csr_adaptive_end_to_end', 'build/bench_polars', '1000000', '5']
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,1000000,1000000,57535320
+
+
+### join 32 10000000 adaptive
+COMMAND ['/tmp/cpu110_join_csr152/join_inner_csr_adaptive_end_to_end', 'build/bench_polars', '10000000', '3']
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,10000000,10000000,1419080209
+
+
+### join 32 10000000 fastbucket
+COMMAND ['/tmp/cpu110_join_csr_fastbucket152/join_inner_csr_fastbucket_end_to_end', 'build/bench_polars', '10000000', '3']
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,10000000,10000000,1400082336
+
+
+### join 32 10000000 dense
+COMMAND ['/tmp/cpu110_join_csr152/join_int64_range_csr_adaptive_end_to_end', 'build/bench_polars', '10000000', '3']
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,10000000,10000000,561873265
+
+
+### join 1 1000000 dense
+COMMAND ['/tmp/cpu110_join_csr152/join_int64_range_csr_adaptive_end_to_end', 'build/bench_polars', '1000000', '5']
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,1000000,1000000,91599404
+
+
+### join 1 10000000 dense
+COMMAND ['/tmp/cpu110_join_csr152/join_int64_range_csr_adaptive_end_to_end', 'build/bench_polars', '10000000', '3']
+workload,rows,output_rows,best_ns
+inner_join_count_prefix_fill,10000000,10000000,2614575072
+
+
+### reduction types 1 base
+COMMAND ['/tmp/reduction_types_base110', '1000000']
+i8,sum,10530012,42428529
+i8,mean,10509762,49.499942250009624
+i8,count,8865125,857143
+i8,min,11154820,0
+i8,max,11162189,99
+u8,sum,10543951,42428529
+u8,mean,10556961,49.499942250009624
+u8,count,8933153,857143
+u8,min,11172259,0
+u8,max,11152049,99
+i16,sum,10528722,42428529
+i16,mean,10515922,49.499942250009624
+i16,count,8858675,857143
+i16,min,11122080,0
+i16,max,11119750,99
+u16,sum,10504303,42428529
+u16,mean,10503912,49.499942250009624
+u16,count,8847106,857143
+u16,min,11114590,0
+u16,max,11159539,99
+i32,sum,10525851,42428529
+i32,mean,10500333,49.499942250009624
+i32,count,8857505,857143
+i32,min,11141189,0
+i32,max,11140289,99
+u32,sum,10513752,42428529
+u32,mean,10448174,49.499942250009624
+u32,count,8801065,857143
+u32,min,11116900,0
+u32,max,11148580,99
+i64,sum,4780626,42428529
+i64,mean,4757916,49.499942250009624
+i64,count,3114048,857143
+i64,min,5383933,0
+i64,max,5399043,99
+u64,sum,4728706,42428529
+u64,mean,4718377,49.499942250009624
+u64,count,8868275,857143
+u64,min,11176939,0
+u64,max,11177119,99
+f32,sum,10332526,42428530.0
+f32,mean,10336096,49.499942250009624
+f32,count,8898834,857143
+f32,min,11159979,0.0
+f32,max,11171549,99.0
+f64,sum,4557510,42428529.0
+f64,mean,4583130,49.499942250009624
+f64,count,3107559,857143
+f64,min,5409273,0.0
+f64,max,5404293,99.0
+
+
+### reduction types 1 candidate
+COMMAND ['/tmp/reduction_types_candidate110', '1000000']
+i8,sum,4518600,42428529
+i8,mean,4542391,49.499942250009624
+i8,count,182206,857143
+i8,min,5165278,0
+i8,max,5162848,99
+u8,sum,4514610,42428529
+u8,mean,4527071,49.499942250009624
+u8,count,181176,857143
+u8,min,5163128,0
+u8,max,5133848,99
+i16,sum,4532691,42428529
+i16,mean,4537710,49.499942250009624
+i16,count,181106,857143
+i16,min,5160578,0
+i16,max,5152808,99
+u16,sum,4552430,42428529
+u16,mean,4545090,49.499942250009624
+u16,count,182246,857143
+u16,min,5167647,0
+u16,max,5152408,99
+i32,sum,4551890,42428529
+i32,mean,4548349,49.499942250009624
+i32,count,182217,857143
+i32,min,5166537,0
+i32,max,5169998,99
+u32,sum,4542530,42428529
+u32,mean,4533381,49.499942250009624
+u32,count,182206,857143
+u32,min,5165468,0
+u32,max,5151788,99
+i64,sum,4553520,42428529
+i64,mean,4552090,49.499942250009624
+i64,count,182226,857143
+i64,min,5169958,0
+i64,max,5167267,99
+u64,sum,4556189,42428529
+u64,mean,4560750,49.499942250009624
+u64,count,182256,857143
+u64,min,5168148,0
+u64,max,5169207,99
+f32,sum,4340874,42428530.0
+f32,mean,4340604,49.499942250009624
+f32,count,182286,857143
+f32,min,5161248,0.0
+f32,max,5171237,99.0
+f64,sum,839193,42428529.0
+f64,mean,848803,49.499942250009624
+f64,count,183456,857143
+f64,min,5172818,0.0
+f64,max,5170038,99.0
+
+
+### dictionary join 1 100
+COMMAND ['/tmp/dictionary_join110', '1000000', '100']
+rows,1000000
+distinct,100
+left_dictionary,100
+right_dictionary,100
+right_remapped,75
+right_unmatched,25
+join_rows,742273
+encode_remap_ns,29048345
+string_join_ns,61708759
+reconciled_int32_join_ns,40049118
+
+
+### dictionary join 1 100000
+COMMAND ['/tmp/dictionary_join110', '1000000', '100000']
+rows,1000000
+distinct,100000
+left_dictionary,100000
+right_dictionary,100000
+right_remapped,75000
+right_unmatched,25000
+join_rows,743040
+encode_remap_ns,59983593
+string_join_ns,87987648
+reconciled_int32_join_ns,54636329
+
+
+### reduction types 32 base
+COMMAND ['/tmp/reduction_types_base110', '1000000']
+i8,sum,1631108,42428529
+i8,mean,1586248,49.499942250009624
+i8,count,1683436,857143
+i8,min,1625888,0
+i8,max,1609889,99
+u8,sum,1566918,42428529
+u8,mean,1644317,49.499942250009624
+u8,count,1741645,857143
+u8,min,1595079,0
+u8,max,1576748,99
+i16,sum,1588228,42428529
+i16,mean,1596038,49.499942250009624
+i16,count,1693327,857143
+i16,min,1609848,0
+i16,max,1609848,99
+u16,sum,1640638,42428529
+u16,mean,1653627,49.499942250009624
+u16,count,1773125,857143
+u16,min,1595979,0
+u16,max,1611298,99
+i32,sum,1602188,42428529
+i32,mean,1935762,49.499942250009624
+i32,count,1985410,857143
+i32,min,1943101,0
+i32,max,1968221,99
+u32,sum,1820614,42428529
+u32,mean,1920882,49.499942250009624
+u32,count,1880732,857143
+u32,min,1993631,0
+u32,max,1636867,99
+i64,sum,1461131,42428529
+i64,mean,1399172,49.499942250009624
+i64,count,1704726,857143
+i64,min,1147007,0
+i64,max,1151707,99
+u64,sum,1451541,42428529
+u64,mean,1388802,49.499942250009624
+u64,count,1673657,857143
+u64,min,1633497,0
+u64,max,1644838,99
+f32,sum,1789605,42428530.0
+f32,mean,1681747,49.499942250009624
+f32,count,1735546,857143
+f32,min,1620078,0.0
+f32,max,1696457,99.0
+f64,sum,1709756,42428529.0
+f64,mean,1671227,49.499942250009624
+f64,count,1678936,857143
+f64,min,1171656,0.0
+f64,max,1184586,99.0
+
+
+### reduction types 32 candidate
+COMMAND ['/tmp/reduction_types_candidate110', '1000000']
+i8,sum,1384922,42428529
+i8,mean,1339874,49.499942250009624
+i8,count,634957,857143
+i8,min,947081,0
+i8,max,936861,99
+u8,sum,977471,42428529
+u8,mean,988330,49.499942250009624
+u8,count,631788,857143
+u8,min,915532,0
+u8,max,940542,99
+i16,sum,989150,42428529
+i16,mean,985350,49.499942250009624
+i16,count,613488,857143
+i16,min,930582,0
+i16,max,947691,99
+u16,sum,1012510,42428529
+u16,mean,981731,49.499942250009624
+u16,count,623267,857143
+u16,min,925552,0
+u16,max,921391,99
+i32,sum,999980,42428529
+i32,mean,986411,49.499942250009624
+i32,count,627887,857143
+i32,min,931891,0
+i32,max,953611,99
+u32,sum,984820,42428529
+u32,mean,984691,49.499942250009624
+u32,count,650587,857143
+u32,min,945891,0
+u32,max,979740,99
+i64,sum,977400,42428529
+i64,mean,1012640,49.499942250009624
+i64,count,615498,857143
+i64,min,947901,0
+i64,max,977750,99
+u64,sum,1047949,42428529
+u64,mean,1012690,49.499942250009624
+u64,count,659806,857143
+u64,min,951101,0
+u64,max,944021,99
+f32,sum,1522010,42428530.0
+f32,mean,1469081,49.499942250009624
+f32,count,623158,857143
+f32,min,923782,0.0
+f32,max,942531,99.0
+f64,sum,353453,42428529.0
+f64,mean,326994,49.499942250009624
+f64,count,643877,857143
+f64,min,949761,0.0
+f64,max,933602,99.0
+
+
+### dictionary join 32 100
+COMMAND ['/tmp/dictionary_join110', '1000000', '100']
+rows,1000000
+distinct,100
+left_dictionary,100
+right_dictionary,100
+right_remapped,75
+right_unmatched,25
+join_rows,742273
+encode_remap_ns,29229622
+string_join_ns,50071939
+reconciled_int32_join_ns,36469558
+
+
+### dictionary join 32 100000
+COMMAND ['/tmp/dictionary_join110', '1000000', '100000']
+rows,1000000
+distinct,100000
+left_dictionary,100000
+right_dictionary,100000
+right_remapped,75000
+right_unmatched,25000
+join_rows,743040
+encode_remap_ns,59981913
+string_join_ns,78013955
+reconciled_int32_join_ns,64692558
+
+
+### integer widths base
+COMMAND ['/tmp/bench_parse_integer_widths_base152']
+u8_ns,74453596
+i16_ns,131896127
+i32_ns,250622507
+u64_ns,535139650
+
+
+### integer widths inline
+COMMAND ['/tmp/bench_parse_integer_widths_short152']
+u8_ns,71918105
+i16_ns,82536095
+i32_ns,121680050
+u64_ns,214782256
+
+
+### integer widths outline
+COMMAND ['/tmp/integer_widths_outline110']
+u8_ns,71323796
+i16_ns,111790636
+i32_ns,164642327
+u64_ns,229808957
+
+
+### csv 1gb 0 integrated
+COMMAND ['/tmp/bench_csv10_integrated110', 'build/cpu110_streaming_1gb.csv']
+iteration,1
+read_ns,366455238
+iteration,2
+read_ns,395540271
+iteration,3
+read_ns,378196245
+iteration,4
+read_ns,367253461
+iteration,5
+read_ns,376839361
+iteration,6
+read_ns,376075285
+iteration,7
+read_ns,413877164
+rows,20000000
+
+
+### csv 1gb 0 adaptive
+COMMAND ['/tmp/bench_csv10_adaptive110', 'build/cpu110_streaming_1gb.csv']
+iteration,1
+read_ns,374072671
+iteration,2
+read_ns,374903074
+iteration,3
+read_ns,385042552
+iteration,4
+read_ns,375233677
+iteration,5
+read_ns,404186623
+iteration,6
+read_ns,381799465
+iteration,7
+read_ns,380806305
+rows,20000000
+
+
+### csv 1gb 1 integrated
+COMMAND ['/tmp/bench_csv10_integrated110', 'build/cpu110_streaming_1gb.csv']
+iteration,1
+read_ns,378669466
+iteration,2
+read_ns,396407212
+iteration,3
+read_ns,385562928
+iteration,4
+read_ns,385823632
+iteration,5
+read_ns,400738005
+iteration,6
+read_ns,385430149
+iteration,7
+read_ns,375519775
+rows,20000000
+
+
+### csv 1gb 1 adaptive
+COMMAND ['/tmp/bench_csv10_adaptive110', 'build/cpu110_streaming_1gb.csv']
+iteration,1
+read_ns,354997150
+iteration,2
+read_ns,389258919
+iteration,3
+read_ns,355694254
+iteration,4
+read_ns,358756184
+iteration,5
+read_ns,364998470
+iteration,6
+read_ns,369543818
+iteration,7
+read_ns,356951568
+rows,20000000
+
+
+### stream 1gb internal eager
+COMMAND ['/usr/bin/time', '-v', '/tmp/df_streaming_experiment/bench_streaming_109_10col', 'build/cpu110_streaming_1gb.csv', 'eager', '4194304', '--rss', '449890723.99999994']
+iteration,0
+pipeline_ns,1476582178
+sum,449890723.99999994
+batch_rows,4194304
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109_10col build/cpu110_streaming_1gb.csv eager 4194304 --rss 449890723.99999994"
+	User time (seconds): 13.59
+	System time (seconds): 4.27
+	Percent of CPU this job got: 927%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:01.92
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 4776668
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1282713
+	Voluntary context switches: 9298
+	Involuntary context switches: 346
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+
+
+### stream 1gb internal parallel
+COMMAND ['/usr/bin/time', '-v', '/tmp/df_streaming_experiment/bench_streaming_109_10col', 'build/cpu110_streaming_1gb.csv', 'parallel', '4194304', '--rss', '449890723.99999994']
+iteration,0
+pipeline_ns,1190443577
+sum,449890723.99999994
+batch_rows,4194304
+window_bytes,4194304
+	Command being timed: "/tmp/df_streaming_experiment/bench_streaming_109_10col build/cpu110_streaming_1gb.csv parallel 4194304 --rss 449890723.99999994"
+	User time (seconds): 16.94
+	System time (seconds): 0.18
+	Percent of CPU this job got: 1412%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:01.21
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 34644
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 8046
+	Voluntary context switches: 4996
+	Involuntary context switches: 60
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
+

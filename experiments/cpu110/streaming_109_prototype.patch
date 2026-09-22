@@ -1,0 +1,355 @@
+diff --git a/dataframe/csv.mojo b/dataframe/csv.mojo
+index 29997d3..20cd760 100644
+--- a/dataframe/csv.mojo
++++ b/dataframe/csv.mojo
+@@ -13,6 +13,7 @@ from .bool_column import BoolColumn
+ from .column import Column
+ from .string_column import StringColumn, StringBuilder
+ from .dtype import DataType, NUMERIC_DTYPES
++from .expr import col, lit
+ from .frame import DataFrame
+ from .series import Series
+ from .parse import parse_int64, parse_float64, parse_integer
+@@ -374,6 +375,7 @@ struct _CsvColumn(Movable):
+ struct _CsvReader:
+     var schema: CsvSchema
+     var columns: List[_CsvColumn]
++    var keep: List[Bool]
+     var has_header: Bool
+     var prefix: List[UInt8]
+     var prefix_done: Bool
+@@ -405,6 +407,7 @@ struct _CsvReader:
+     var skip_lines: Int
+     var n_rows: Int
+     var rows: Int
++    var emitted_rows: Int
+     var done: Bool
+     var null_values: List[String]
+     var ignore_errors: Bool
+@@ -428,6 +431,7 @@ struct _CsvReader:
+         self.columns = List[_CsvColumn](capacity=len(schema))
+         for i in range(len(schema)):
+             self.columns.append(_CsvColumn(schema._fields[i], keep[i]))
++        self.keep = keep.copy()
+         self.has_header = has_header
+         self.prefix = List[UInt8](capacity=3)
+         self.prefix_done = False
+@@ -457,6 +461,7 @@ struct _CsvReader:
+         self.skip_lines = options.skip_rows
+         self.n_rows = options.n_rows
+         self.rows = 0
++        self.emitted_rows = 0
+         self.done = options.n_rows == 0
+         self.null_values = options.null_values.copy()
+         self.ignore_errors = options.ignore_errors
+@@ -1037,15 +1042,29 @@ struct _CsvReader:
+             self._finish_record()
+         return self._frame()
+ 
+-    def _frame(mut self) raises -> DataFrame:
+-        ref columns = self.columns
+-        var output = List[Series](capacity=len(columns))
+-        columns.reverse()
+-        while len(columns) > 0:
+-            var column = columns.pop()
++    def drain(mut self) raises -> DataFrame:
++        """Move complete decoded rows into one frame while keeping tokenizer state.
++
++        Call only after a record boundary. Header, quote, UTF-8, and error
++        state remain on this reader; only typed builders restart for the next
++        bounded batch.
++        """
++        var batch_rows = self.rows - self.emitted_rows
++        var previous = self.columns^
++        self.columns = List[_CsvColumn](capacity=len(self.schema))
++        for i in range(len(self.schema)):
++            self.columns.append(_CsvColumn(self.schema._fields[i], self.keep[i]))
++        self.emitted_rows = self.rows
++        previous.reverse()
++        var output = List[Series](capacity=len(previous))
++        while len(previous) > 0:
++            var column = previous.pop()
+             if column.keep:
+                 output.append(column^.finish())
+-        return DataFrame(output^, height=self.rows)
++        return DataFrame(output^, height=batch_rows)
++
++    def _frame(mut self) raises -> DataFrame:
++        return self.drain()
+ 
+ 
+ @fieldwise_init
+@@ -1274,6 +1293,186 @@ def _stream(
+     return reader.finish()
+ 
+ 
++def stream_csv_parallel_filter_select_sum(
++    path: String, schema: CsvSchema, *, window_bytes: Int = _PARALLEL_BLOCK
++) raises -> DataFrame:
++    """Experimental bounded parallel CSV pipeline for x>0, x*2, then sum.
++
++    A 32 MiB input window is split at safe CSV record boundaries. Dynamic
++    pool jobs decode one range and reduce it before releasing its frame, so
++    only one window and scalar partial sums remain live. This intentionally
++    covers the row-local-to-global-reduction shape of #109, not general lazy
++    plans or pipeline breakers.
++    """
++    if window_bytes < _MIN_CHUNK_BYTES:
++        raise Error("window_bytes is too small")
++    var options = _options(
++        ",", '"', "", 0, -1, List[String](), False, False, "utf8", 65536
++    )
++    var keep = _projection(schema, List[String]())
++    var quote = options.quote_char.as_bytes()[0]
++    var config = ArcPointer(_StreamingConfig(schema.copy(), options^, keep^))
++    var total = Float64(0)
++    var seen = False
++    var carry = List[UInt8]()
++    var first_window = True
++    var base = 0
++    var workers = _csv_workers(window_bytes)
++    var pool = Pool(workers)
++    with open(path, "r") as file:
++        while True:
++            var block = file.read_bytes(window_bytes)
++            var last = len(block) == 0
++            var buffer = carry^
++            carry = List[UInt8]()
++            buffer.extend(Span(block))
++            _ = block^
++            if len(buffer) == 0:
++                break
++            var chunks = _csv_chunks(len(buffer), len(config[].keep), workers)
++            var span = Span[UInt8, ImmutAnyOrigin](
++                unsafe_ptr=buffer.unsafe_ptr()
++                .unsafe_mut_cast[False]()
++                .unsafe_origin_cast[ImmutAnyOrigin](),
++                length=len(buffer),
++            )
++            var layout = record_splits(span, quote, True, chunks)
++            var upto = len(buffer) if last else layout.complete
++            if upto == 0:
++                carry = buffer^
++                if last:
++                    break
++                continue
++            if not last and upto < len(buffer):
++                carry.extend(Span(buffer)[upto:len(buffer)])
++            var shared = ArcPointer(buffer^)
++            var jobs = List[_StreamingRangeJob](capacity=len(layout.splits))
++            for split in range(len(layout.splits) - 1):
++                var start = layout.splits[split].offset
++                var end = min(layout.splits[split + 1].offset, upto)
++                if end <= start:
++                    continue
++                jobs.append(
++                    _StreamingRangeJob(
++                        config,
++                        shared,
++                        start,
++                        end,
++                        base + layout.splits[split].record,
++                        first_window and split == 0,
++                    )
++                )
++            if len(jobs) == 1:
++                jobs[0].run()
++            elif len(jobs) > 1:
++                pool.run(jobs, claim=True)
++            for i in range(len(jobs)):
++                if jobs[i].seen:
++                    total += jobs[i].total
++                    seen = True
++            base += layout.records
++            first_window = False
++            if last:
++                break
++    pool.release()
++    var values = List[Float64]([total])
++    var valid = List[Bool]([seen])
++    return DataFrame([Series("sum", Column[Float64](values^, valid))])
++
++
++def stream_csv_filter_select_sum(
++    path: String, schema: CsvSchema, *, batch_rows: Int = 8192
++) raises -> DataFrame:
++    """Experimental bounded CSV pipeline: filter x>0, select x*2 and y, sum.
++
++    This is deliberately not a general lazy executor. It demonstrates that a
++    stateful `_CsvReader` can transfer completed record batches to existing
++    eager row kernels and immediately merge a terminal aggregate, without
++    retaining source batches or rereading the file. The raw boundary scanner
++    handles quoted multiline records; the reader remains responsible for all
++    CSV validation and reports its original global record locations.
++    """
++    if batch_rows <= 0:
++        raise Error("batch_rows must be positive")
++    var options = _options(
++        ",", '"', "", 0, -1, List[String](), False, False, "utf8", 65536
++    )
++    var keep = _projection(schema, List[String]())
++    var reader = _CsvReader(schema, True, options, keep^)
++    var predicate = col("x") > lit(Float64(0))
++    var total = Float64(0)
++    var seen = False
++
++    @__parameter
++    def consume(var batch: DataFrame) raises:
++        if batch.height() == 0:
++            return
++        var selected = batch.filter(predicate.copy()).select_exprs(
++            [(col("x") * lit(Float64(2))).alias("double"), col("y")]
++        )
++        var part = selected.column("double").sum()
++        if not part.is_null():
++            total += part.float64()
++            seen = True
++
++    # This small structural scan decides only when it is safe to drain. It
++    # toggles twice for doubled quotes, carries quote parity across file reads,
++    # and never parses or validates fields; `_CsvReader` sees every byte in
++    # original order and remains the source of all errors.
++    var buffer = List[UInt8]()
++    var scan = 0
++    var records = 0
++    var inside = False
++    with open(path, "r") as file:
++        while True:
++            var block = file.read_bytes(65536)
++            var eof = len(block) == 0
++            buffer.extend(Span(block))
++            _ = block^
++            while scan < len(buffer):
++                var byte = buffer[scan]
++                scan += 1
++                if reader.quoting and byte == reader.quote:
++                    inside = not inside
++                elif byte == 10 and not inside:
++                    records += 1
++                    if records >= batch_rows:
++                        reader.feed(Span[UInt8, ImmutAnyOrigin](
++                            unsafe_ptr=buffer.unsafe_ptr()
++                            .unsafe_mut_cast[False]()
++                            .unsafe_origin_cast[ImmutAnyOrigin](),
++                            length=scan,
++                        ))
++                        consume(reader.drain())
++                        var tail = List[UInt8](capacity=len(buffer) - scan)
++                        tail.extend(Span[UInt8, ImmutAnyOrigin](
++                unsafe_ptr=buffer.unsafe_ptr()
++                .unsafe_mut_cast[False]()
++                .unsafe_origin_cast[ImmutAnyOrigin](),
++                length=len(buffer),
++            )[scan:len(buffer)])
++                        buffer = tail^
++                        scan = 0
++                        records = 0
++                        # Drains happen only on an outside newline.
++                        inside = False
++            if eof:
++                break
++    if len(buffer) > 0:
++        reader.feed(
++            Span[UInt8, ImmutAnyOrigin](
++                unsafe_ptr=buffer.unsafe_ptr()
++                .unsafe_mut_cast[False]()
++                .unsafe_origin_cast[ImmutAnyOrigin](),
++                length=len(buffer),
++            )
++        )
++    consume(reader.finish())
++    var values = List[Float64]([total])
++    var valid = List[Bool]([seen])
++    return DataFrame([Series("sum", Column[Float64](values^, valid))])
++
++
+ def read_csv(
+     path: String,
+     schema: CsvSchema,
+@@ -1324,6 +1523,73 @@ def read_csv(
+     return _stream(path, reader, buffer_size)
+ 
+ 
++@fieldwise_init
++struct _StreamingConfig(Movable):
++    var schema: CsvSchema
++    var options: CsvOptions
++    var keep: List[Bool]
++
++
++struct _StreamingRangeJob(Job):
++    """Decode one bounded window range and immediately reduce its rows."""
++
++    var config: ArcPointer[_StreamingConfig]
++    var bytes: ArcPointer[List[UInt8]]
++    var start: Int
++    var end: Int
++    var record: Int
++    var leading: Bool
++    var total: Float64
++    var seen: Bool
++
++    def __init__(
++        out self,
++        config: ArcPointer[_StreamingConfig],
++        bytes: ArcPointer[List[UInt8]],
++        start: Int,
++        end: Int,
++        record: Int,
++        leading: Bool,
++    ):
++        self.config = config.copy()
++        self.bytes = bytes.copy()
++        self.start = start
++        self.end = end
++        self.record = record
++        self.leading = leading
++        self.total = 0
++        self.seen = False
++
++    def run(mut self) raises:
++        ref config = self.config[]
++        var reader = _CsvReader(
++            config.schema, self.leading, config.options, config.keep
++        )
++        reader.record += self.record
++        if not self.leading:
++            reader.prefix_done = True
++        ref bytes = self.bytes[]
++        reader.feed(
++            Span[UInt8, ImmutAnyOrigin](
++                unsafe_ptr=bytes.unsafe_ptr()
++                .unsafe_mut_cast[False]()
++                .unsafe_origin_cast[ImmutAnyOrigin]()
++                .unsafe_offset(self.start),
++                length=self.end - self.start,
++            )
++        )
++        var input = reader.finish()
++        if input.height() == 0:
++            return
++        var selected = input.filter(col("x") > lit(Float64(0))).select_exprs(
++            [(col("x") * lit(Float64(2))).alias("double"), col("y")]
++        )
++        var part = selected.column("double").sum()
++        if not part.is_null():
++            self.total = part.float64()
++            self.seen = True
++
++
+ struct _RangeJob(Job):
+     """Decode one record-aligned byte range with a reader of its own."""
+ 
+diff --git a/dataframe/__init__.mojo b/dataframe/__init__.mojo
+index 60028ef..c725f1c 100644
+--- a/dataframe/__init__.mojo
++++ b/dataframe/__init__.mojo
+@@ -42,6 +42,8 @@ from .csv import (
+     CsvOptions,
+     CsvSchema,
+     read_csv,
++    stream_csv_filter_select_sum,
++    stream_csv_parallel_filter_select_sum,
+     to_csv_string,
+     write_csv,
+ )
