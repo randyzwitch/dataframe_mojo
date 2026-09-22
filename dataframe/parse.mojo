@@ -14,6 +14,21 @@ def parse_int64(text: StringSlice) raises -> Int64:
         index = 1
     if index == len(bytes):
         raise Error("integer sign without digits")
+    var digits = len(bytes) - index
+    if digits <= 18:
+        # Every 18-digit unsigned decimal fits Int64, including when it is
+        # negated.  The range check can therefore stay out of this loop,
+        # avoiding a divide per byte on the normal CSV path.
+        var magnitude = UInt64(0)
+        while index < len(bytes):
+            var byte = bytes[index]
+            if byte < 48 or byte > 57:
+                raise Error("non-decimal integer byte")
+            magnitude = magnitude * 10 + UInt64(byte - 48)
+            index += 1
+        if negative:
+            return -Int64(magnitude)
+        return Int64(magnitude)
     var limit = UInt64(9223372036854775807) + UInt64(negative)
     var magnitude = UInt64(0)
     while index < len(bytes):

@@ -8,7 +8,6 @@ from std.bit import count_trailing_zeros
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast
 from std.collections import Dict
-from std.utils import Variant
 
 from .bool_column import BoolColumn
 from .column import Column
@@ -123,30 +122,66 @@ struct CsvSchema(Copyable, Sized):
 
 
 @fieldwise_init
-struct _IntBuilder(Copyable):
+struct _IntBuilder(Movable):
     var values: List[Int64]
     var valid: List[Bool]
 
+    def into_column(mut self) raises -> Column[Int64]:
+        var values = self.values^
+        self.values = List[Int64]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        return Column[Int64](values^, valid)
+
+    def cast[D: DType](mut self) raises -> Column[Scalar[D]]:
+        var source = self.values^
+        self.values = List[Int64]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        var values = List[Scalar[D]](capacity=len(source))
+        for x in source:
+            values.append(x.cast[D]())
+        return Column[Scalar[D]](values^, valid)
+
 
 @fieldwise_init
-struct _FloatBuilder(Copyable):
+struct _FloatBuilder(Movable):
     var values: List[Float64]
     var valid: List[Bool]
 
+    def into_column(mut self) raises -> Column[Float64]:
+        var values = self.values^
+        self.values = List[Float64]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        return Column[Float64](values^, valid)
+
+    def cast[D: DType](mut self) raises -> Column[Scalar[D]]:
+        var source = self.values^
+        self.values = List[Float64]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        var values = List[Scalar[D]](capacity=len(source))
+        for x in source:
+            values.append(x.cast[D]())
+        return Column[Scalar[D]](values^, valid)
+
 
 @fieldwise_init
-struct _BoolBuilder(Copyable):
+struct _BoolBuilder(Movable):
     var values: List[Bool]
     var valid: List[Bool]
 
+    def into_column(mut self) raises -> BoolColumn:
+        var values = self.values^
+        self.values = List[Bool]()
+        var valid = self.valid^
+        self.valid = List[Bool]()
+        return BoolColumn(values^, valid)
 
-comptime _Builder = Variant[
-    _IntBuilder, _FloatBuilder, _BoolBuilder, StringBuilder
-]
 
 # Which builder a column holds. The answer is fixed for the whole file, so it
-# is decided once and compared as an integer; asking the Variant per field
-# means a chain of runtime tag tests on the hottest path in the reader.
+# is decided once and compared as an integer on the hottest path.
 comptime _KIND_INT = 0
 comptime _KIND_TEMPORAL = 1
 comptime _KIND_FLOAT = 2
@@ -154,30 +189,35 @@ comptime _KIND_BOOL = 3
 comptime _KIND_STRING = 4
 
 
-struct _CsvColumn(Copyable):
+struct _CsvColumn(Movable):
     var field: CsvField
-    var builder: _Builder
+    # A column uses exactly one builder, selected by `kind`. Keeping them as
+    # fields lets finalization transfer its buffers directly.
+    var ints: _IntBuilder
+    var floats: _FloatBuilder
+    var bools: _BoolBuilder
+    var strings: StringBuilder
     var keep: Bool
     var kind: Int
 
     def __init__(out self, field: CsvField, keep: Bool = True):
         self.field = field.copy()
         self.keep = keep
+        self.ints = _IntBuilder([], [])
+        self.floats = _FloatBuilder([], [])
+        self.bools = _BoolBuilder([], [])
+        self.strings = StringBuilder()
         # Every integer width parses into Int64 slots (UInt64 by bit
         # pattern) and every float into Float64; finish() narrows exactly.
         if field.dtype.physical() == CSV_INT64 or field.dtype.is_integer():
-            self.builder = _Builder(_IntBuilder([], []))
             self.kind = (
                 _KIND_TEMPORAL if field.dtype.is_temporal() else _KIND_INT
             )
         elif field.dtype.is_float():
-            self.builder = _Builder(_FloatBuilder([], []))
             self.kind = _KIND_FLOAT
         elif field.dtype == CSV_BOOL:
-            self.builder = _Builder(_BoolBuilder([], []))
             self.kind = _KIND_BOOL
         else:
-            self.builder = _Builder(StringBuilder())
             self.kind = _KIND_STRING
 
     def _error(self, record: Int, text: String) -> Error:
@@ -197,16 +237,16 @@ struct _CsvColumn(Copyable):
         if not self.keep:
             return
         if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
-            _ = self.builder[_IntBuilder].values.pop()
-            _ = self.builder[_IntBuilder].valid.pop()
+            _ = self.ints.values.pop()
+            _ = self.ints.valid.pop()
         elif self.kind == _KIND_FLOAT:
-            _ = self.builder[_FloatBuilder].values.pop()
-            _ = self.builder[_FloatBuilder].valid.pop()
+            _ = self.floats.values.pop()
+            _ = self.floats.valid.pop()
         elif self.kind == _KIND_BOOL:
-            _ = self.builder[_BoolBuilder].values.pop()
-            _ = self.builder[_BoolBuilder].valid.pop()
+            _ = self.bools.values.pop()
+            _ = self.bools.valid.pop()
         else:
-            self.builder[StringBuilder]._pop()
+            self.strings._pop()
 
     def append(
         mut self,
@@ -231,33 +271,31 @@ struct _CsvColumn(Copyable):
             if not self.field.nullable:
                 raise self._error(record, "null in a non-nullable field")
             if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
-                self.builder[_IntBuilder].values.append(0)
-                self.builder[_IntBuilder].valid.append(False)
+                self.ints.values.append(0)
+                self.ints.valid.append(False)
             elif self.kind == _KIND_FLOAT:
-                self.builder[_FloatBuilder].values.append(0)
-                self.builder[_FloatBuilder].valid.append(False)
+                self.floats.values.append(0)
+                self.floats.valid.append(False)
             elif self.kind == _KIND_BOOL:
-                self.builder[_BoolBuilder].values.append(False)
-                self.builder[_BoolBuilder].valid.append(False)
+                self.bools.values.append(False)
+                self.bools.valid.append(False)
             else:
-                self.builder[StringBuilder].append_null()
+                self.strings.append_null()
             return
 
         if self.kind == _KIND_TEMPORAL:
             try:
-                self.builder[_IntBuilder].values.append(
+                self.ints.values.append(
                     parse_temporal(
                         String(text), self.field.dtype, self.field.format
                     )
                 )
             except e:
                 raise self._error(record, String(e))
-            self.builder[_IntBuilder].valid.append(True)
+            self.ints.valid.append(True)
         elif self.kind == _KIND_INT:
             try:
-                self.builder[_IntBuilder].values.append(
-                    _parse_int_slot(text, self.field.dtype)
-                )
+                self.ints.values.append(_parse_int_slot(text, self.field.dtype))
             except:
                 raise self._error(
                     record,
@@ -267,74 +305,54 @@ struct _CsvColumn(Copyable):
                     + String(from_utf8_lossy=text.as_bytes())
                     + "'",
                 )
-            self.builder[_IntBuilder].valid.append(True)
+            self.ints.valid.append(True)
         elif self.kind == _KIND_FLOAT:
             try:
-                self.builder[_FloatBuilder].values.append(parse_float64(text))
+                self.floats.values.append(parse_float64(text))
             except e:
                 raise self._error(record, String(e))
-            self.builder[_FloatBuilder].valid.append(True)
+            self.floats.valid.append(True)
         elif self.kind == _KIND_BOOL:
             var is_true = text.as_bytes() == "true".as_bytes()
             if not is_true and text.as_bytes() != "false".as_bytes():
                 raise self._error(
                     record, "Boolean must be exactly 'true' or 'false'"
                 )
-            self.builder[_BoolBuilder].values.append(is_true)
-            self.builder[_BoolBuilder].valid.append(True)
+            self.bools.values.append(is_true)
+            self.bools.valid.append(True)
         else:
-            self.builder[StringBuilder].append(text)
+            self.strings.append(text)
 
-    def finish(self) raises -> Series:
+    def finish(deinit self) raises -> Series:
         var dtype = self.field.dtype
         if dtype.is_numeric() and dtype != CSV_INT64 and dtype != CSV_FLOAT64:
             comptime for k in range(len(NUMERIC_DTYPES)):
                 comptime D = NUMERIC_DTYPES[k]
                 if dtype == DataType.of(D):
-                    var values = List[Scalar[D]]()
-                    var valid: List[Bool]
                     comptime if D.is_floating_point():
-                        ref builder = self.builder[_FloatBuilder]
-                        valid = builder.valid.copy()
-                        values.reserve(len(builder.values))
-                        for x in builder.values:
-                            values.append(x.cast[D]())
+                        return Series(
+                            self.field.name.copy(), self.floats.cast[D]()
+                        )
                     else:
-                        ref builder = self.builder[_IntBuilder]
-                        valid = builder.valid.copy()
-                        values.reserve(len(builder.values))
-                        for x in builder.values:
-                            values.append(x.cast[D]())
-                    return Series(
-                        self.field.name, Column[Scalar[D]](values^, valid)
-                    )
-        if self.builder.isa[_IntBuilder]():
+                        return Series(
+                            self.field.name.copy(), self.ints.cast[D]()
+                        )
+        if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
             return Series(
-                self.field.name,
-                Column[Int64](
-                    self.builder[_IntBuilder].values.copy(),
-                    self.builder[_IntBuilder].valid.copy(),
-                ),
-            ).with_dtype(self.field.dtype)
-        if self.builder.isa[_FloatBuilder]():
+                self.field.name.copy(),
+                self.ints.into_column(),
+            ).with_dtype(dtype)
+        if self.kind == _KIND_FLOAT:
             return Series(
-                self.field.name,
-                Column[Float64](
-                    self.builder[_FloatBuilder].values.copy(),
-                    self.builder[_FloatBuilder].valid.copy(),
-                ),
+                self.field.name.copy(),
+                self.floats.into_column(),
             )
-        if self.builder.isa[_BoolBuilder]():
+        if self.kind == _KIND_BOOL:
             return Series(
-                self.field.name,
-                BoolColumn(
-                    self.builder[_BoolBuilder].values.copy(),
-                    self.builder[_BoolBuilder].valid.copy(),
-                ),
+                self.field.name.copy(),
+                self.bools.into_column(),
             )
-        return Series(
-            self.field.name, self.builder[StringBuilder].copy().finish()
-        )
+        return Series(self.field.name.copy(), self.strings^.finish())
 
 
 struct _CsvReader:
@@ -744,6 +762,90 @@ struct _CsvReader:
             self.field_started = True
             self.record_bytes.extend(bytes[start:stop])
 
+    def _append_borrowed_record(
+        mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
+    ) raises:
+        """Decode a complete plain record directly from the input span."""
+        # Validate text before conversion, as the scalar tokenizer does.
+        var field_start = start
+        for c in range(len(self.columns)):
+            var end = self.field_ends[c]
+            if self.columns[c].kind == _KIND_STRING:
+                try:
+                    _ = StringSlice(from_utf8=bytes[field_start:end])
+                except:
+                    self.field_index = c
+                    raise self._location("field is not valid UTF-8")
+            field_start = end + 1
+        field_start = start
+        for c in range(len(self.columns)):
+            var end = self.field_ends[c]
+            self.columns[c].append(
+                StringSlice(unsafe_from_utf8=bytes[field_start:end]),
+                False,
+                self.record,
+                self.null_values,
+            )
+            field_start = end + 1
+        self.field_ends.clear()
+        self.rows += 1
+        self.record += 1
+        self.physical_line += 1
+        if self.n_rows >= 0 and self.rows >= self.n_rows:
+            self.done = True
+
+    def _feed_borrowed(
+        mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
+    ) raises -> Int:
+        """Consume complete plain records; return the first scalar record.
+
+        Offsets refer to this input only while the method runs. A quote, CR,
+        ragged row, or incomplete final record hands the whole current record
+        back to the stateful reader. No borrow survives a buffer boundary.
+        """
+        var row_start = start
+        var base = start
+        var n = len(bytes)
+        while base < n:
+            var mask = UInt64(0)
+            var end = min(base + 64, n)
+            if end - base == 64:
+                mask = self._structural_mask(bytes, base)
+            else:
+                for i in range(base, end):
+                    var byte = bytes[i]
+                    if (
+                        byte == self.separator
+                        or byte == 10
+                        or byte == 13
+                        or (self.quoting and byte == self.quote)
+                    ):
+                        mask |= UInt64(1) << UInt64(i - base)
+            while mask != 0:
+                var stop = base + Int(count_trailing_zeros(mask))
+                var byte = bytes[stop]
+                if byte == self.separator:
+                    self.field_ends.append(stop)
+                    if len(self.field_ends) >= len(self.columns):
+                        self.field_ends.clear()
+                        return row_start
+                elif byte == 10:
+                    self.field_ends.append(stop)
+                    if len(self.field_ends) != len(self.columns):
+                        self.field_ends.clear()
+                        return row_start
+                    self._append_borrowed_record(bytes, row_start)
+                    row_start = stop + 1
+                    if self.done:
+                        return row_start
+                else:
+                    self.field_ends.clear()
+                    return row_start
+                mask &= mask - 1
+            base = end
+        self.field_ends.clear()
+        return row_start
+
     def feed(mut self, bytes: Span[UInt8, ImmutAnyOrigin]) raises:
         var i = 0
         var n = len(bytes)
@@ -763,6 +865,26 @@ struct _CsvReader:
                 self.prefix_done = True
         if self.done:
             return
+        if (
+            self.skip_lines == 0
+            and len(self.comment) == 0
+            and not self.sampling
+            and not self.lossy
+            and not self.ignore_errors
+            and not self.truncate_ragged
+        ):
+            # Finish a partial record or header before borrowing.
+            while (
+                i < n
+                and (self.record_open or (self.has_header and self.record == 1))
+                and not self.done
+            ):
+                self._consume(bytes[i])
+                i += 1
+            if not self.done and not self.record_open and i < n:
+                i = self._feed_borrowed(bytes, i)
+            if self.done:
+                return
         if self.skip_lines == 0 and len(self.comment) == 0:
             while i + 64 <= n:
                 var base = i
@@ -814,11 +936,14 @@ struct _CsvReader:
             self._finish_record()
         return self._frame()
 
-    def _frame(self) raises -> DataFrame:
-        var output = List[Series](capacity=len(self.columns))
-        for column in self.columns:
+    def _frame(mut self) raises -> DataFrame:
+        ref columns = self.columns
+        var output = List[Series](capacity=len(columns))
+        columns.reverse()
+        while len(columns) > 0:
+            var column = columns.pop()
             if column.keep:
-                output.append(column.finish())
+                output.append(column^.finish())
         return DataFrame(output^, height=self.rows)
 
 

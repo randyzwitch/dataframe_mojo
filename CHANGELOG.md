@@ -7,6 +7,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Plain CSV records decode borrowed input spans without copying fields into
+  a record buffer. Finished column builders transfer their buffers, and
+  Int64 fields of at most 18 digits avoid per-digit overflow checks. Quoted
+  and irregular records retain the strict state machine.
+
 - CSV reads publish small record-aligned chunks while scanning the file,
   and workers claim them dynamically. Tokenization reuses structural masks
   across fields; numeric grammar checks consume borrowed text before

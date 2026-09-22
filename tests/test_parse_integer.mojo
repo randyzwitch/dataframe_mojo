@@ -32,6 +32,15 @@ def test_int64_exact_boundaries_and_syntax() raises:
             _ = parse_int64(text)
 
 
+def test_short_integer_path_preserves_signs_and_bad_byte_rejection() raises:
+    assert_equal(parse_int64("+42"), Int64(42))
+    assert_equal(parse_int64("-7654321"), Int64(-7654321))
+    assert_equal(parse_int64("00000123"), Int64(123))
+    for text in ["12x", "1_2", "12 ", " 12"]:
+        with assert_raises(contains="non-decimal integer byte"):
+            _ = parse_int64(text)
+
+
 def test_signed_width_boundaries() raises:
     accepts[DType.int8]("-128", Int8.MIN)
     accepts[DType.int8]("127", Int8.MAX)
