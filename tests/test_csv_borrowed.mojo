@@ -1,4 +1,4 @@
-"""Differential tests for plain-record CSV borrowing.
+"""Differential tests for plain and simple-quoted CSV borrowing.
 
 The one-byte read is the scalar reference. A finite, oversized row limit
 keeps every read on the serial streaming path, including the large buffers
@@ -198,6 +198,53 @@ def test_invalid_ignored_string_is_still_validated() raises:
     bytes.extend("\n".as_bytes())
     write_bytes(bytes)
     assert_error_matches_scalar(projected=True)
+
+
+def test_simple_quotes_null_tokens_and_mask_boundaries() raises:
+    var text = String("a,b,c\n")
+    var padding = String()
+    for _ in range(128):
+        text += '"' + padding + '","a,b",""\n'
+        padding += "x"
+    text += 'NA,"NA",\n"",plain,"end"\n'
+    write(text)
+    var reference = read_csv(
+        PATH,
+        text_schema(),
+        null_values=["NA"],
+        n_rows=SERIAL_LIMIT,
+        buffer_size=1,
+    )
+    for size in [64, 65, 128, 4096]:
+        var actual = read_csv(
+            PATH,
+            text_schema(),
+            null_values=["NA"],
+            n_rows=SERIAL_LIMIT,
+            buffer_size=size,
+        )
+        assert_true(actual.equals(reference))
+
+
+def test_simple_quote_fallback_error_precedence() raises:
+    for row in [
+        '2,"name"junk,2\n',
+        '2,"a""b",bad\n',
+        'bad,"name",2,extra\n',
+        '2,"unterminated,2',
+        '2,"name",2\r3,next,3\n',
+    ]:
+        write('id,name,score\n1,"plain",1\n' + row)
+        assert_error_matches_scalar()
+
+
+def test_invalid_quoted_text_precedes_numeric_conversion() raises:
+    var bytes: List[UInt8] = []
+    bytes.extend('id,name,score\n1,"plain",1\nbad,"'.as_bytes())
+    bytes.append(255)
+    bytes.extend('",2\n'.as_bytes())
+    write_bytes(bytes)
+    assert_error_matches_scalar()
 
 
 def main() raises:

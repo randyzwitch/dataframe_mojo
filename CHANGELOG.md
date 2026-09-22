@@ -7,6 +7,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Simple quoted CSV fields decode borrowed input spans with SIMD structural
+  scanning. Quoted empty strings and quoted null tokens keep their existing
+  meaning; escaped quotes and embedded line breaks retain the state machine.
+
 - CSV boundary scanning computes quote parity in blocks instead of repeatedly
   loading overlapping bytes around quotes. Workers construct and reserve
   their builders using scanned record counts. Validity packing and shifted

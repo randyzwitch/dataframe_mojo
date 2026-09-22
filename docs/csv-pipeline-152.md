@@ -290,3 +290,80 @@ Saved comparison runners are `build/bench_csv_checkpoint2_152` and
 and `build/csv_tuning_third152.txt`. The quoted fixture is in
 `/tmp/dataframe_mojo_quoted_keystr152`; use `--data-dir` and `--sizes 1000000`
 with the benchmark driver to compare it. These are local untracked artifacts.
+
+## Fourth checkpoint: borrowed simple quoted fields
+
+Built on `696fb9e`. Once a plain-record scan encounters a quote, a second
+SIMD structural-mask loop handles simple quoted fields directly in the
+input span. Closing-quote offsets are encoded in the temporary field-end
+list; a compile-time specialization strips the quote wrappers and preserves
+quoted-empty and quoted-null-token semantics. The plain specialization is
+unchanged. No borrow survives `feed`.
+
+Escaped quotes, embedded CR/LF, incomplete records, and malformed quote
+sequences replay the entire current record through the existing state
+machine. UTF-8 validation still precedes typed conversion and still applies
+to projected-out String fields. This is not a general zero-copy CSV reader:
+retained string values still copy into output column storage.
+
+### Paired measurements
+
+Same machine and versions, September 22, two interleaved runs with seven
+repetitions after warmup and no concurrent builds/tests. Each range contains
+the two run minima, not a confidence interval.
+
+| Input | Rows | Threads | `696fb9e` (ms) | Fourth checkpoint (ms) | Polars during fourth-checkpoint runs (ms) |
+|---|---:|---:|---:|---:|---:|
+| Plain | 100,000 | 1 | 38.80–39.16 | 37.88–38.01 | 21.35–21.51 |
+| Plain | 100,000 | 32 | 5.85–5.94 | 5.68–5.99 | 2.37–2.77 |
+| Plain | 1,000,000 | 1 | 386.64–391.59 | 381.41–387.36 | 211.71–211.85 |
+| Plain | 1,000,000 | 32 | 26.03–27.11 | 26.43–27.16 | 15.74–16.05 |
+| Quoted strings | 1,000,000 | 1 | 579.08–579.68 | 419.63–421.53 | 208.71–213.48 |
+| Quoted strings | 1,000,000 | 32 | 41.71–42.04 | 29.43–29.92 | 13.73–13.76 |
+
+The quoted parallel read takes about 29% less time and the single-threaded
+read about 28% less time, comparing best minima. Plain parallel timings
+remain within the observed run-to-run variation. Polars was faster on the
+quoted fixture in this measurement session too: parity is still unmet,
+with roughly 1.7x its runtime for plain parallel input and 2.1–2.2x for
+quoted parallel input.
+
+A scalar borrowed-quote prototype took 32.14–32.18 ms versus the SIMD
+prototype's 28.81–29.31 ms in a separate paired experiment, so the SIMD
+version was selected. Those are exploratory numbers; the table above is
+the final integrated-source comparison.
+
+All 49 test modules and 100 Polars oracle cases (seeds 1–100) pass. The nine
+borrowed-record tests now include quote wrappers at all mask offsets,
+separators inside quotes, quoted empty strings/null tokens, malformed
+suffixes, escapes, incomplete quotes, and invalid quoted UTF-8 before a
+bad numeric conversion. Formatting, API docs, dtype literal checks,
+version consistency, and `git diff --check` pass.
+
+Raw results: `build/csv_comparison_fourth152.txt` and
+`build/csv_quoted_prototypes152.txt`. The final runner is
+`build/bench_csv_fourth152`, compared with `build/bench_csv_final_third152`.
+To recreate the quoted fixture after generating the normal benchmark data:
+
+```python
+from pathlib import Path
+import shutil
+
+source = Path("build/bench_polars")
+target = Path("build/bench_polars_quoted")
+target.mkdir(exist_ok=True)
+with (source / "left_1000000.csv").open("rb") as reader:
+    with (target / "left_1000000.csv").open("wb") as writer:
+        writer.write(reader.readline())
+        for line in reader:
+            fields = line.split(b",")
+            fields[3] = b'"' + fields[3] + b'"'
+            writer.write(b",".join(fields))
+shutil.copyfile(source / "right_1000000.csv", target / "right_1000000.csv")
+```
+
+Run the benchmark driver with `--csv-only --sizes 1000000 --threads 32
+--reps 7 --data-dir build/bench_polars_quoted --runner build/bench_csv_fourth152`.
+The next remaining costs include typed decoding and final contiguous-buffer
+assembly. These checkpoints do not close #152 or establish performance on
+other machines or platforms.

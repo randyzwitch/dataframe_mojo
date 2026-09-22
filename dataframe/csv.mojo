@@ -769,37 +769,128 @@ struct _CsvReader:
             self.field_started = True
             self.record_bytes.extend(bytes[start:stop])
 
-    def _append_borrowed_record(
-        mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
-    ) raises:
-        """Decode a complete plain record directly from the input span."""
+    def _append_borrowed_record[
+        encoded_quotes: Bool = False
+    ](mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int) raises:
+        """Decode a complete borrowed record directly from the input span.
+
+        The quoted specialization stores a closing-quote offset as its
+        bitwise complement.  It keeps the plain instantiation unchanged and
+        lets the scanner retain offsets only for the duration of this call.
+        """
         # Validate text before conversion, as the scalar tokenizer does.
         var field_start = start
         for c in range(len(self.columns)):
             var end = self.field_ends[c]
+            var quoted = False
+            comptime if encoded_quotes:
+                if end < 0:
+                    quoted = True
+                    end = ~end
+            var content_start = field_start + 1 if quoted else field_start
             if self.columns[c].kind == _KIND_STRING:
                 try:
-                    _ = StringSlice(from_utf8=bytes[field_start:end])
+                    _ = StringSlice(from_utf8=bytes[content_start:end])
                 except:
                     self.field_index = c
                     raise self._location("field is not valid UTF-8")
-            field_start = end + 1
+            field_start = end + (2 if quoted else 1)
         field_start = start
         for c in range(len(self.columns)):
             var end = self.field_ends[c]
+            var quoted = False
+            comptime if encoded_quotes:
+                if end < 0:
+                    quoted = True
+                    end = ~end
+            var content_start = field_start + 1 if quoted else field_start
             self.columns[c].append(
-                StringSlice(unsafe_from_utf8=bytes[field_start:end]),
-                False,
+                StringSlice(unsafe_from_utf8=bytes[content_start:end]),
+                quoted,
                 self.record,
                 self.null_values,
             )
-            field_start = end + 1
+            field_start = end + (2 if quoted else 1)
         self.field_ends.clear()
         self.rows += 1
         self.record += 1
         self.physical_line += 1
         if self.n_rows >= 0 and self.rows >= self.n_rows:
             self.done = True
+
+    def _feed_borrowed_quoted(
+        mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
+    ) raises -> Int:
+        """Borrow simple quoted fields; replay complex records through scalar parsing."""
+        var row_start = start
+        var field_start = start
+        var base = start
+        var n = len(bytes)
+        var quoted = False
+        var inside = False
+        var close = -1
+        while base < n:
+            var end = min(base + 64, n)
+            var mask = UInt64(0)
+            if end - base == 64:
+                mask = self._structural_mask(bytes, base)
+            else:
+                for i in range(base, end):
+                    var byte = bytes[i]
+                    if (
+                        byte == self.separator
+                        or byte == self.quote
+                        or byte == 10
+                        or byte == 13
+                    ):
+                        mask |= UInt64(1) << UInt64(i - base)
+            while mask != 0:
+                var stop = base + Int(count_trailing_zeros(mask))
+                var byte = bytes[stop]
+                mask &= mask - 1
+                if inside:
+                    if byte == self.quote:
+                        inside = False
+                        close = stop
+                    elif byte == 10 or byte == 13:
+                        self.field_ends.clear()
+                        return row_start
+                    continue
+                if close >= 0 and (
+                    stop != close + 1 or (byte != self.separator and byte != 10)
+                ):
+                    self.field_ends.clear()
+                    return row_start
+                if byte == self.quote:
+                    if stop != field_start:
+                        self.field_ends.clear()
+                        return row_start
+                    quoted = True
+                    inside = True
+                    continue
+                if byte == self.separator or byte == 10:
+                    self.field_ends.append(~close if quoted else stop)
+                    if byte == self.separator:
+                        if len(self.field_ends) >= len(self.columns):
+                            self.field_ends.clear()
+                            return row_start
+                    else:
+                        if len(self.field_ends) != len(self.columns):
+                            self.field_ends.clear()
+                            return row_start
+                        self._append_borrowed_record[True](bytes, row_start)
+                        row_start = stop + 1
+                        if self.done:
+                            return row_start
+                    field_start = stop + 1
+                    quoted = False
+                    close = -1
+                    continue
+                self.field_ends.clear()
+                return row_start
+            base = end
+        self.field_ends.clear()
+        return row_start
 
     def _feed_borrowed(
         mut self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
@@ -845,6 +936,9 @@ struct _CsvReader:
                     row_start = stop + 1
                     if self.done:
                         return row_start
+                elif self.quoting and byte == self.quote:
+                    self.field_ends.clear()
+                    return self._feed_borrowed_quoted(bytes, row_start)
                 else:
                     self.field_ends.clear()
                     return row_start
