@@ -88,5 +88,39 @@ def test_null_append_follows_polars_nullable_columns() raises:
     assert_equal(result.null_count(), 1)
 
 
+def test_string_buffer_retains_inline_long_and_escaped_values() raises:
+    var buffer = CsvBuffer(CsvField.string("label"), 8)
+    var expected: List[String] = ["short", "123456789012", "1234567890123", "héllo世界-long"]
+    for value in expected:
+        add_text(buffer, value)
+    var quoted = String('"long string with ""quotes"" and a newline\ninside"')
+    buffer.add(
+        Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=quoted.as_bytes().unsafe_ptr().unsafe_mut_cast[False]().unsafe_origin_cast[ImmutAnyOrigin](),
+            length=quoted.byte_length(),
+        ), True, options(),
+    )
+    # Reusing the escape scratch must not overwrite previously appended bytes.
+    var next_quoted = String('"next ""quoted"" value"')
+    buffer.add(
+        Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=next_quoted.as_bytes().unsafe_ptr().unsafe_mut_cast[False]().unsafe_origin_cast[ImmutAnyOrigin](),
+            length=next_quoted.byte_length(),
+        ), True, options(),
+    )
+    buffer.add_null()
+    var result = buffer.finish().string()
+    for i in range(len(expected)):
+        assert_equal(result.value(i), expected[i])
+    assert_equal(result.value(4), 'long string with "quotes" and a newline\ninside')
+    assert_equal(result.value(5), 'next "quoted" value')
+    assert_equal(result.null_count(), 1)
+    # finish resets builder ownership; another output cannot invalidate result.
+    add_text(buffer, String("another output with long bytes"))
+    var other = buffer.finish().string()
+    assert_equal(other.value(0), "another output with long bytes")
+    assert_equal(result.value(2), "1234567890123")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

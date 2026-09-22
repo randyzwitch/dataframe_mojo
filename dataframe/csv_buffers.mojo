@@ -218,22 +218,29 @@ struct CsvBuffer(Movable):
                 raise Error("CSV string field is not properly escaped")
             self.scratch.clear()
             self.scratch.reserve(len(raw))
+            # escape_field writes into reserved spare capacity; avoid a List
+            # append/capacity branch for every output byte. UInt8 is trivial,
+            # so the borrowed span can track length without publishing elements.
+            var scratch_ptr = self.scratch.unsafe_ptr()
+            var written = 0
             var previous_quote = False
             for byte in raw[1 : len(raw) - 1]:
                 if byte == quote:
                     if previous_quote:
                         previous_quote = False
-                        self.scratch.append(byte)
+                        scratch_ptr.unsafe_offset(written)[] = byte
+                        written += 1
                     else:
                         previous_quote = True
                 else:
                     previous_quote = False
-                    self.scratch.append(byte)
+                    scratch_ptr.unsafe_offset(written)[] = byte
+                    written += 1
             bytes = Span[UInt8, ImmutAnyOrigin](
                 unsafe_ptr=self.scratch.unsafe_ptr()
                 .unsafe_mut_cast[False]()
                 .unsafe_origin_cast[ImmutAnyOrigin](),
-                length=len(self.scratch),
+                length=written,
             )
         if options.encoding == "utf8-lossy" or options.ignore_errors:
             try:
