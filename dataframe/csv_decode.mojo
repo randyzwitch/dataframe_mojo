@@ -82,9 +82,13 @@ def decode_chunk(
         except:
             raise Error("CSV input is not valid UTF-8")
 
+    # Polars parse_lines receives compiled projection indices, not a mask
+    # scanned again for every record. Compile the API mask once per chunk.
+    var projection = List[Int](capacity=selected)
     var buffers = List[CsvBuffer](capacity=selected)
     for i in range(len(schema)):
         if keep[i]:
+            projection.append(i)
             buffers.append(CsvBuffer(schema._fields[i], rows + 1))
 
     # parser.rs treats any projection as implicit ragged truncation.
@@ -96,6 +100,7 @@ def decode_chunk(
         0
     ] if options.quote_char.byte_length() == 1 else UInt8(0)
     var quoting = options.quote_char.byte_length() == 1
+    var separator = options.separator.as_bytes()[0]
     while offset < len(bytes):
         if _comment_at(bytes, offset, options.comment_prefix):
             while offset < len(bytes) and bytes[offset] != 10:
@@ -106,13 +111,9 @@ def decode_chunk(
 
         var record_offset = offset
         var input = bytes[record_offset:]
-        var fields = CsvSplitFields(
-            options.separator.as_bytes()[0], quote, quoting
-        )
+        var fields = CsvSplitFields(separator, quote, quoting)
         var source_index = 0
-        var next_selected = 0
-        while next_selected < len(schema) and not keep[next_selected]:
-            next_selected += 1
+        var next_selected = projection[0]
         var processed = 0
         var complete = False
         while not complete and offset < len(bytes):
@@ -131,9 +132,8 @@ def decode_chunk(
                     raw = raw[0 : len(raw) - 1]
                 buffers[processed].add(raw, field.needs_escaping, options)
                 processed += 1
-                next_selected += 1
-                while next_selected < len(schema) and not keep[next_selected]:
-                    next_selected += 1
+                if processed < selected:
+                    next_selected = projection[processed]
 
             offset = record_offset + consumed
             if processed == selected:
