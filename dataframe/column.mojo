@@ -44,6 +44,13 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._bits = ArcPointer(bits^)
         self._data = ArcPointer(values^)
 
+    def __init__(out self, *, var values: List[Self.T], var bits: List[UInt8]):
+        """Adopt typed values and a prepacked validity bitmap without copying."""
+        self._length = len(values)
+        self._offset = 0
+        self._data = ArcPointer(values^)
+        self._bits = ArcPointer(bits^)
+
     def __len__(self) -> Int:
         return self._length
 
@@ -112,7 +119,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 
     def _valid(self, i: Int) -> Bool:
         """Internal unchecked validity read after bounds validation."""
-        return _bit(self._bits[], self._offset + i)
+        return _validity_bit(self._bits[], self._offset + i)
 
     def is_null(self, index: Int) raises -> Bool:
         self._check_index(index)
@@ -130,7 +137,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         return self._get(index).copy()
 
     def null_count(self) -> Int:
-        return self._length - _count_set(
+        return self._length - _count_valid(
             self._bits[], self._offset, self._length
         )
 
@@ -145,7 +152,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         for k in range(len(indices)):
             var row = base + indices[k]
             values.append(data[row].copy())
-            if (bits[row // 8] >> UInt8(row % 8)) & 1 == 1:
+            if _validity_bit(bits, row):
                 out_bits[k // 8] |= UInt8(1) << UInt8(k % 8)
         var result = Self(values^)
         result._bits = ArcPointer(out_bits^)
@@ -168,7 +175,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
                 continue
             var row = base + i
             values.append(data[row].copy())
-            if (bits[row // 8] >> UInt8(row % 8)) & 1 == 1:
+            if _validity_bit(bits, row):
                 out_bits[k // 8] |= UInt8(1) << UInt8(k % 8)
         var result = Self(values^)
         result._bits = ArcPointer(out_bits^)
@@ -199,11 +206,10 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 
     def _compact(self) -> Self:
         """A private copy of this window with offset 0."""
-        var result = Self(self.to_list())
-        result._bits = ArcPointer(
-            _copy_bits(self._bits[], self._offset, self._length)
+        return Self(
+            values=self.to_list(),
+            bits=_copy_validity(self._bits[], self._offset, self._length),
         )
-        return result^
 
     def _reserve_rows(mut self, rows: Int, text_bytes: Int):
         """Size the buffers for `rows` rows before appending any.
@@ -215,7 +221,8 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         if not self._owned():
             self = self._compact()
         self._data[].reserve(rows)
-        self._bits[].reserve((rows + 7) // 8)
+        if len(self._bits[]) != 0:
+            self._bits[].reserve((rows + 7) // 8)
 
     def _append_column(mut self, other: Self):
         """Append payloads and validity bytewise, shifting when unaligned.
@@ -227,7 +234,9 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
             self = self._compact()
         var start = self._length
         var count = other._length
-        _append_bits(self._bits[], start, other._bits[], other._offset, count)
+        _append_validity(
+            self._bits[], start, other._bits[], other._offset, count
+        )
         ref values = self._data[]
         # Grow geometrically: batch reassembly appends many small chunks, and
         # an exact reservation would copy the whole column on every append.
@@ -396,3 +405,58 @@ def _append_bits(
         if tail_bits > 0:
             tail &= (UInt8(1) << UInt8(tail_bits)) - 1
         bits[last + source_bytes] = tail >> right_shift
+
+
+# Arrow/Polars validity is absent until the first null. An empty validity
+# list represents that absence; payload bitmaps always use the raw helpers.
+def _validity_bit(bits: List[UInt8], index: Int) -> Bool:
+    return len(bits) == 0 or _bit(bits, index)
+
+
+def _count_valid(bits: List[UInt8], offset: Int, length: Int) -> Int:
+    return length if len(bits) == 0 else _count_set(bits, offset, length)
+
+
+def _copy_validity(bits: List[UInt8], offset: Int, length: Int) -> List[UInt8]:
+    if len(bits) == 0:
+        return List[UInt8]()
+    return _copy_bits(bits, offset, length)
+
+
+def _append_validity_bit(
+    mut bits: List[UInt8], index: Int, valid: Bool, capacity: Int
+):
+    if len(bits) == 0:
+        if valid:
+            return
+        bits.reserve((capacity + 7) // 8)
+        bits.resize((index + 8) // 8, 255)
+        # Existing rows are valid; the current null and unused tail are zero.
+        bits[len(bits) - 1] &= (UInt8(1) << UInt8(index % 8)) - 1
+        return
+    if index % 8 == 0:
+        bits.append(0)
+    var mask = UInt8(1) << UInt8(index % 8)
+    if valid:
+        bits[len(bits) - 1] |= mask
+    else:
+        bits[len(bits) - 1] &= ~mask
+
+
+def _append_validity(
+    mut bits: List[UInt8],
+    length: Int,
+    incoming: List[UInt8],
+    offset: Int,
+    count: Int,
+):
+    if count == 0 or (len(bits) == 0 and len(incoming) == 0):
+        return
+    if len(bits) == 0:
+        bits.resize((length + 7) // 8, 255)
+    if len(incoming) == 0:
+        if length % 8 != 0:
+            bits[length // 8] |= UInt8(255) << UInt8(length % 8)
+        bits.resize((length + count + 7) // 8, 255)
+    else:
+        _append_bits(bits, length, incoming, offset, count)

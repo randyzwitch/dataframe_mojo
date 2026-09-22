@@ -17,6 +17,7 @@ from dataframe import (
     import_arrow,
     import_arrow_series,
 )
+from dataframe.string_view import StringViewBuilder
 from dataframe.arrow import (
     _at,
     _buffer,
@@ -144,6 +145,26 @@ def test_export_shares_buffers_and_outlives_source() raises:
     var series = import_arrow_series(array, schema)
     assert_equal(releases, 1)
     assert_equal(series.string().value(2), "gamma")
+
+
+def test_native_string_views_export_via_retained_large_utf8_adapter() raises:
+    var builder = StringViewBuilder()
+    builder.append("short")
+    builder.append("native string beyond inline")
+    builder.append_null()
+    builder.append("日本")
+    var source = Series("s", StringColumn(builder^.finish()))
+    assert_true(source.string()._is_view_storage())
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow_series(source, array, schema)
+    # The current complete C adapter is U. It retains its materialization in
+    # ArrowArray.private_data, so no pointer escapes a temporary conversion.
+    assert_equal(_read_c_string(schema.format), "U")
+    assert_equal(array.n_buffers, 3)
+    var back = import_arrow_series(array, schema)
+    assert_true(back.equals(source))
+    assert_false(back.string()._is_view_storage())
 
 
 def test_series_round_trip_and_release_once() raises:

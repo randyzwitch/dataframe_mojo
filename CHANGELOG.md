@@ -7,6 +7,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Breaking
 
+- Public read_csv now uses the single source-derived Polars CSV pipeline; the
+  former scalar reader is no longer available as a fallback. Observable
+  contract changes include positional explicit schemas, nullable short records,
+  100-row default inference, opt-in temporal inference, Polars duplicate
+  header suffixes, and Polars numeric parsing. See
+  [the CSV integration notes](docs/csv-polars-port.md).
+
 - Unsigned CSV integer fields now reject `-0`, matching Polars' `atoi_simd`
   parser. Generic casts retain their existing behavior.
 

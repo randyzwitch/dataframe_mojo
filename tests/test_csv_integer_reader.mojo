@@ -55,10 +55,15 @@ def test_public_csv_integer_overflow_and_invalid_bytes() raises:
     var schema = CsvSchema([CsvField("u8", DataType.UINT8, False)])
     # atoi_simd's unsigned route rejects every negative spelling, including
     # -0. dataframe.parse keeps its historical generic-cast behavior instead.
-    for text in ["u8\n256", "u8\n-1", "u8\n-0", "u8\n12x", "u8\n+", "u8\n\n"]:
+    for text in ["u8\n256", "u8\n-1", "u8\n-0", "u8\n12x", "u8\n+"]:
         _write(text)
         with assert_raises():
             _ = read_csv(CSV_PATH, schema, buffer_size=1)
+    # Polars has nullable CSV columns even when legacy schema metadata says
+    # nullable=False; a bare empty integer field is a null, not a parse error.
+    _write("u8\n\n")
+    var empty = read_csv(CSV_PATH, schema, buffer_size=1)
+    assert_equal(empty.column("u8").null_count(), 1)
 
 
 def test_public_csv_temporal_fields_keep_their_existing_parser() raises:

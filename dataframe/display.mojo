@@ -63,6 +63,13 @@ def format_string(text: String, max_length: Int) -> String:
 
 def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
     """Format one cell; assumes the row index is in bounds."""
+    if series.is_chunked():
+        var remaining = row
+        for part in series.chunks():
+            if remaining < len(part):
+                return format_cell(part, remaining, max_string_length)
+            remaining -= len(part)
+        return ""
     comptime for i in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[i]
         if series._data.isa[Column[Scalar[D]]]():

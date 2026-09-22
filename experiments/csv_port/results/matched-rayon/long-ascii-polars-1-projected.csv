@@ -1,0 +1,8 @@
+engine,scenario,workers,iteration,read_ns,rows,width,nulls
+polars,projected,1,0,83315948,1000000,2,0
+polars,projected,1,1,87335911,1000000,2,0
+polars,projected,1,2,85484322,1000000,2,0
+polars,projected,1,3,89570222,1000000,2,0
+polars,projected,1,4,90670178,1000000,2,0
+polars,projected,1,5,86453769,1000000,2,0
+polars,projected,1,6,84844046,1000000,2,0

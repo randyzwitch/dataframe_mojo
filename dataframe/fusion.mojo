@@ -127,6 +127,12 @@ def fused[
     offset: Int,
     length: Int,
 ) raises -> Series:
+    for column in columns:
+        if column.is_chunked():
+            var contiguous = List[Series](capacity=len(columns))
+            for item in columns:
+                contiguous.append(item.rechunk())
+            return fused[width](bound, contiguous^, root, offset, length)
     var steps = _program(bound, root)
     var predicate = bound.dtypes[root] == DataType.BOOL
     var valid = List[Bool](length=length, fill=True)

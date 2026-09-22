@@ -328,7 +328,9 @@ def test_csv_fields_check_each_width() raises:
         _ = read_csv(PATH, schema)
     except e:
         message = String(e)
-    assert_true("invalid int8 value '128'" in message, message)
+    # The Polars-derived typed builder reports numeric overflow by parser
+    # category rather than the retired reader's dtype-specific text.
+    assert_true("CSV signed integer overflow" in message, message)
 
 
 def test_float32_nan_and_sort() raises:

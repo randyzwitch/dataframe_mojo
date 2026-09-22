@@ -3,7 +3,7 @@ from .dtype import DataType
 from std.collections import Dict
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
-from .column import Column, _append_bits
+from .column import Column, _append_validity
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
 from .expr import (
@@ -70,6 +70,13 @@ struct DataFrame(Copyable, Sized, Writable):
             names[name] = True
         self._columns = columns^
         self._height = inferred
+
+    def rechunk(self) raises -> Self:
+        """Return one contiguous array per column, copying only chunked data."""
+        var columns = List[Series](capacity=self.width())
+        for column in self._columns:
+            columns.append(column.rechunk())
+        return Self(columns^, height=self._height)
 
     def height(self) -> Int:
         return self._height
@@ -827,7 +834,7 @@ struct DataFrame(Copyable, Sized, Writable):
         )
         if bound.shape() != ROWS:
             result = result._broadcast(self._height)
-        return self.filter(result._data[BoolColumn])
+        return self.filter(result.bool())
 
     def unpivot(
         self,
@@ -1321,7 +1328,7 @@ def _range_join_span_fits(low: Int64, high: Int64, cap: Int) -> Bool:
 
 def _bounded_int64_join_ids(
     left: DataFrame, right: DataFrame, left_column: Int, right_column: Int
-) -> Tuple[Bool, List[Int], List[Int], Int]:
+) raises -> Tuple[Bool, List[Int], List[Int], Int]:
     """Dense direct ids for one small Int64 value range, or `False`.
 
     This is deliberately a range guard, not a general direct-address table:
@@ -1345,8 +1352,8 @@ def _bounded_int64_join_ids(
     var found = False
     var low = Int64(0)
     var high = Int64(0)
-    ref left_values = left._columns[left_column]._data[Column[Int64]]
-    ref right_values = right._columns[right_column]._data[Column[Int64]]
+    var left_values = left._columns[left_column].int64()
+    var right_values = right._columns[right_column].int64()
     for row in range(len(left_values)):
         if left_values._valid(row):
             var value = left_values._get(row)
@@ -1904,7 +1911,7 @@ def _concat_string_bits(frames: List[DataFrame], column: Int) -> List[UInt8]:
     for f in range(len(frames)):
         ref source = frames[f]._columns[column]._data[StringColumn]
         var count = len(source)
-        _append_bits(
+        _append_validity(
             bits,
             offset,
             source._bits[],
@@ -1982,56 +1989,14 @@ def concat(
                         + first[c].dtype.name()
                     )
             height += frames[f].height()
-        # Each output column is built from its own column of every frame
-        # and touches nothing else, so the columns are built concurrently.
-        # A parallel CSV read concatenates one frame per range per block --
-        # 64 of them for a 50 MB file -- and doing that one column after
-        # another was a third of the read.
-        var parts = len(first)
-        for c in range(len(first)):
-            if first[c].dtype == DataType.STRING:
-                # String bytes, offsets, and validity use disjoint output
-                # buffers, so one string column still has useful parallelism.
-                parts += 2
-        if parts > 1 and worker_count(height) > 1:
-            var shared = ArcPointer(frames.copy())
-            var jobs = List[_ConcatJob](capacity=parts)
-            for c in range(len(first)):
-                if first[c].dtype == DataType.STRING:
-                    jobs.append(_ConcatJob(shared, c, _CONCAT_STRING_BYTES))
-                    jobs.append(_ConcatJob(shared, c, _CONCAT_STRING_OFFSETS))
-                    jobs.append(_ConcatJob(shared, c, _CONCAT_STRING_BITS))
-                else:
-                    jobs.append(_ConcatJob(shared, c, _CONCAT_COLUMN))
-            run_jobs(jobs)
-            jobs.reverse()
-            var built = List[Series](capacity=len(first))
-            for c in range(len(first)):
-                var job = jobs.pop()
-                if job.part == _CONCAT_COLUMN:
-                    built.append(job^.into_column())
-                else:
-                    var bytes = job^.into_bytes()
-                    var offsets = jobs.pop().into_offsets()
-                    var bits = jobs.pop().into_bits()
-                    built.append(
-                        Series(
-                            first[c].name.copy(),
-                            StringColumn(
-                                bytes=bytes^,
-                                offsets=offsets^,
-                                bits=bits^,
-                                length=height,
-                            ),
-                        )
-                    )
-            return DataFrame(built^, height=height)
-
+        # Polars accumulate_dataframes_vertical / vstack_mut_owned:
+        # append Arrow array references; keep the output multi-chunk.
         var columns = List[Series](capacity=len(first))
         for c in range(len(first)):
-            var column = frames[0]._columns[c].copy()
-            _concat_column(frames, c, column)
-            columns.append(column^)
+            var parts = List[Series](capacity=len(frames))
+            for frame in frames:
+                parts.append(frame._columns[c].copy())
+            columns.append(Series._from_chunks(parts))
         return DataFrame(columns^, height=height)
     if how == "diagonal":
         var names = List[String]()

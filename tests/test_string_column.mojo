@@ -1,5 +1,6 @@
 """Arrow large_utf8 string columns: layout, windows, and bulk operations."""
 from std.testing import TestSuite, assert_equal, assert_true, assert_false
+from dataframe.string_view import StringViewBuilder
 from dataframe import (
     Column,
     DataFrame,
@@ -40,6 +41,73 @@ def test_layout_is_arrow_large_utf8() raises:
     assert_equal(column._byte_length(4), 6)
     assert_equal(column._byte_length(5), 5)
     assert_equal(column._bits[][0], UInt8(0b10110111))
+
+
+def native_sample() -> StringColumn:
+    var builder = StringViewBuilder(6)
+    builder.append("small")
+    builder.append("a string beyond inline")
+    builder.append_null()
+    builder.append('quoted, "escaped" field')
+    builder.append("日本")
+    builder.append("tail beyond 12")
+    return StringColumn(builder^.finish())
+
+
+def test_native_views_slice_gather_and_rechunk_retain_byte_blocks() raises:
+    var column = native_sample()
+    assert_true(column._is_view_storage())
+    assert_equal(
+        expected(column),
+        [
+            "small",
+            "a string beyond inline",
+            "<null>",
+            'quoted, "escaped" field',
+            "日本",
+            "tail beyond 12",
+        ],
+    )
+    var window = column.slice(1, 4)
+    assert_true(window._is_view_storage())
+    assert_true(window._shares_buffers_with(column))
+    assert_equal(
+        expected(window),
+        ["a string beyond inline", "<null>", 'quoted, "escaped" field', "日本"],
+    )
+    var gathered = window.take([2, 0, 2, 1])
+    assert_true(gathered._is_view_storage())
+    assert_equal(
+        expected(gathered),
+        [
+            'quoted, "escaped" field',
+            "a string beyond inline",
+            'quoted, "escaped" field',
+            "<null>",
+        ],
+    )
+    var outer = window.take_or_null([-1, 3, -1], "")
+    assert_true(outer._is_view_storage())
+    assert_equal(expected(outer), ["<null>", "日本", "<null>"])
+    var source_buffers = column._view_storage_unchecked().buffers_arc()
+    var gathered_buffers = gathered._view_storage_unchecked().buffers_arc()
+    assert_equal(
+        Int(source_buffers[][0][].unsafe_ptr()),
+        Int(gathered_buffers[][0][].unsafe_ptr()),
+    )
+    var left = Series("s", column.slice(0, 3))
+    var right = Series("s", column.slice(3, 3))
+    var chunked = Series._from_chunks([left.copy(), right.copy()])
+    var rechunked = chunked.rechunk()
+    assert_true(rechunked.string()._is_view_storage())
+    assert_true(rechunked.equals(Series("s", column.copy())))
+    var rechunked_buffers = (
+        rechunked.string()._view_storage_unchecked().buffers_arc()
+    )
+    assert_equal(
+        Int(source_buffers[][0][].unsafe_ptr()),
+        Int(rechunked_buffers[][0][].unsafe_ptr()),
+    )
 
 
 def test_empty_strings_are_not_nulls() raises:

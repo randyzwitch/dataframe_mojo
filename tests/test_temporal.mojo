@@ -374,10 +374,10 @@ def test_csv_round_trip_and_inference() raises:
     var schema = CsvSchema.of(df)
     assert_true(schema.field(1).dtype == DataType.datetime("us"))
     assert_true(read_csv(PATH, schema).equals(df))
-    var inferred = read_csv(PATH)
+    var inferred = read_csv(PATH, try_parse_dates=True)
     assert_true(inferred.dtypes()[0] == DataType.DATE)
     assert_true(inferred.dtypes()[1] == DataType.datetime("us"))
-    assert_true(inferred.dtypes()[2] == DataType.STRING)
+    assert_true(inferred.dtypes()[2] == DataType.TIME)
     with open(PATH, "w") as file:
         file.write("when,day\n31/12/1999 23:59,2024-060\n")
     var custom = read_csv(

@@ -12,6 +12,7 @@ Internal kernels read rows as borrowed `StringSlice`s via `_get`; public
 accessors return owned `String`s.
 """
 from std.memory import ArcPointer, Pointer
+from .string_view import StringViewStorage
 from .column import (
     Column,
     _append_bits,
@@ -19,6 +20,11 @@ from .column import (
     _copy_bits,
     _count_set,
     _pack_bits,
+    _validity_bit,
+    _count_valid,
+    _copy_validity,
+    _append_validity,
+    _append_validity_bit,
 )
 
 
@@ -30,6 +36,8 @@ struct StringColumn(Copyable, Sized):
     var _bits: ArcPointer[List[UInt8]]
     var _offset: Int
     var _length: Int
+    # `None` is Arrow large_utf8; native CSV views retain descriptors/blocks.
+    var _view_storage: Optional[StringViewStorage]
 
     def __init__(out self, values: List[String]):
         var builder = StringBuilder(len(values))
@@ -67,24 +75,48 @@ struct StringColumn(Copyable, Sized):
         self._bits = ArcPointer(bits^)
         self._offset = 0
         self._length = length
+        self._view_storage = None
+
+    def __init__(out self, var storage: StringViewStorage):
+        """Adopt finished Arrow Utf8View descriptors and their Arc blocks."""
+        self._bytes = ArcPointer(List[UInt8]())
+        self._offsets = ArcPointer(List[Int64](length=1, fill=0))
+        self._bits = storage.validity_arc()
+        self._offset = 0
+        self._length = len(storage)
+        self._view_storage = storage^
 
     def __len__(self) -> Int:
         return self._length
 
+    def _is_view_storage(self) -> Bool:
+        return True if self._view_storage else False
+
+    def _view_storage_unchecked(self) -> StringViewStorage:
+        """Copy Arc metadata; caller first checks `_is_view_storage()`."""
+        return self._view_storage.value().copy()
+
     def _start(self, i: Int) -> Int:
+        assert not self._is_view_storage()
         return Int(self._offsets[][self._offset + i])
 
     def _end(self, i: Int) -> Int:
+        assert not self._is_view_storage()
         return Int(self._offsets[][self._offset + i + 1])
 
     def _byte_length(self, i: Int) -> Int:
+        if self._is_view_storage():
+            return Int(
+                self._view_storage.value()
+                ._view_unchecked(self._offset + i)
+                .length
+            )
         return self._end(i) - self._start(i)
 
     def _get(self, i: Int) -> StringSlice[ImmutAnyOrigin]:
-        """Unchecked borrowed read of row i; valid while this column lives.
-
-        Null rows read as the empty string.
-        """
+        """Unchecked borrowed read of a conventional or native view row."""
+        if self._is_view_storage():
+            return self._view_storage.value()._get_unchecked(self._offset + i)
         var start = self._start(i)
         return StringSlice[ImmutAnyOrigin](
             unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
@@ -94,12 +126,27 @@ struct StringColumn(Copyable, Sized):
         )
 
     def _base(self) -> Pointer[UInt8, ImmutAnyOrigin]:
+        assert not self._is_view_storage()
         return (
             self._bytes[]
             .unsafe_ptr()
             .unsafe_mut_cast[False]()
             .unsafe_origin_cast[ImmutAnyOrigin]()
         )
+
+    def to_large_utf8(self) -> Self:
+        """Return an owned large_utf8 adapter when a contiguous ABI is needed.
+
+        Native ``Utf8View`` columns deliberately have no synthetic temporary
+        offsets/data pointer. Consumers requiring Arrow's legacy ``U`` layout
+        must retain this returned column while using its buffers.
+        """
+        if not self._is_view_storage():
+            return self.copy()
+        var builder = StringBuilder(self._length, self._value_bytes())
+        for i in range(self._length):
+            builder._append_row(self, i)
+        return builder^.finish()
 
     def to_list(self) -> List[String]:
         """Owned copies of this window's rows (nulls read as "")."""
@@ -109,6 +156,16 @@ struct StringColumn(Copyable, Sized):
         return values^
 
     def _shares_buffers_with(self, other: Self) -> Bool:
+        if self._is_view_storage() or other._is_view_storage():
+            if not (self._is_view_storage() and other._is_view_storage()):
+                return False
+            var left = self._view_storage.value().copy()
+            var right = other._view_storage.value().copy()
+            return (
+                left.views_arc().ptr() == right.views_arc().ptr()
+                and left.buffers_arc().ptr() == right.buffers_arc().ptr()
+                and left.validity_arc().ptr() == right.validity_arc().ptr()
+            )
         return (
             self._bytes.ptr() == other._bytes.ptr()
             and self._offsets.ptr() == other._offsets.ptr()
@@ -121,21 +178,22 @@ struct StringColumn(Copyable, Sized):
 
     def _valid(self, i: Int) -> Bool:
         """Internal unchecked validity read after bounds validation."""
-        return _bit(self._bits[], self._offset + i)
+        return _validity_bit(self._bits[], self._offset + i)
 
     def is_null(self, index: Int) raises -> Bool:
         self._check_index(index)
         return not self._valid(index)
 
     def unsafe_bytes(self) -> Pointer[UInt8, ImmutAnyOrigin]:
-        """Arrow's UTF-8 payload buffer, indexed by `unsafe_offsets`, not by
-        row. Shared and read-only; valid only while this column is alive."""
+        """Arrow large_utf8 payload; call ``to_large_utf8`` for native views."""
+        assert not self._is_view_storage()
         return self._base()
 
     def unsafe_offsets(self) -> Pointer[Int64, MutAnyOrigin]:
         """Arrow's Int64 offset buffer. Row i occupies bytes
         `offsets[validity_offset() + i]` up to the next entry, so it is not
         shifted to row 0. Shared and read-only."""
+        assert not self._is_view_storage()
         return self._offsets[].unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
 
     def is_valid(self, index: Int) -> Bool:
@@ -163,12 +221,17 @@ struct StringColumn(Copyable, Sized):
         return String(self._get(index))
 
     def null_count(self) -> Int:
-        return self._length - _count_set(
+        return self._length - _count_valid(
             self._bits[], self._offset, self._length
         )
 
     def _value_bytes(self) -> Int:
         """Bytes of text in this window."""
+        if self._is_view_storage():
+            var total = 0
+            for i in range(self._length):
+                total += self._byte_length(i)
+            return total
         if self._length == 0:
             return 0
         return self._end(self._length - 1) - self._start(0)
@@ -176,6 +239,11 @@ struct StringColumn(Copyable, Sized):
     def take(self, indices: List[Int]) raises -> Self:
         for i in indices:
             self._check_index(i)
+        if self._is_view_storage():
+            var gathered = self._view_storage.value()._gather(
+                indices, self._offset
+            )
+            return Self(gathered^)
         var total = 0
         for i in indices:
             total += self._byte_length(i)
@@ -186,10 +254,17 @@ struct StringColumn(Copyable, Sized):
 
     def take_or_null(self, indices: List[Int], fill: String) raises -> Self:
         """Gather rows, treating only -1 as a missing row (for outer joins)."""
-        var total = 0
         for i in indices:
             if i != -1:
                 self._check_index(i)
+        if self._is_view_storage():
+            var gathered = self._view_storage.value()._gather(
+                indices, self._offset, allow_missing=True
+            )
+            return Self(gathered^)
+        var total = 0
+        for i in indices:
+            if i != -1:
                 total += self._byte_length(i)
         var builder = StringBuilder(len(indices), total)
         for i in indices:
@@ -215,6 +290,8 @@ struct StringColumn(Copyable, Sized):
 
     def _owned(self) -> Bool:
         """Whether the buffers are unshared and exactly this window."""
+        if self._is_view_storage():
+            return False
         return (
             self._bytes.count() == 1
             and self._offsets.count() == 1
@@ -225,7 +302,9 @@ struct StringColumn(Copyable, Sized):
         )
 
     def _compact(self) -> Self:
-        """A private copy of this window with offsets rebased to 0."""
+        """A private large_utf8 copy of this window with offsets rebased to 0."""
+        if self._is_view_storage():
+            return self.to_large_utf8()
         # offsets[_offset] exists even for an empty window at the end.
         var first = self._start(0)
         var total = self._value_bytes()
@@ -241,7 +320,7 @@ struct StringColumn(Copyable, Sized):
         return Self(
             bytes=bytes^,
             offsets=offsets^,
-            bits=_copy_bits(self._bits[], self._offset, self._length),
+            bits=_copy_validity(self._bits[], self._offset, self._length),
             length=self._length,
         )
 
@@ -255,20 +334,35 @@ struct StringColumn(Copyable, Sized):
             self = self._compact()
         self._offsets[].reserve(rows + 1)
         self._bytes[].reserve(text_bytes)
-        self._bits[].reserve((rows + 7) // 8)
+        if len(self._bits[]) != 0:
+            self._bits[].reserve((rows + 7) // 8)
 
     def _append_column(mut self, other: Self):
-        """Append rows in bulk: bytes and validity copied, offsets rebased.
-
-        Copies first unless this column owns its buffers, so values shared
-        with other columns are never modified.
-        """
+        """Append rows in bulk, retaining native view payload blocks when possible."""
+        if self._is_view_storage():
+            if other._is_view_storage():
+                var combined = self._view_storage.value()._concat(
+                    self._offset,
+                    self._length,
+                    other._view_storage.value(),
+                    other._offset,
+                    other._length,
+                )
+                self = Self(combined^)
+                return
+            self = self.to_large_utf8()
+        if other._is_view_storage():
+            # Existing large_utf8 append remains the safe adapter for a mixed
+            # pair. Native-to-native follows the descriptor-only path above.
+            var conventional_other = other.to_large_utf8()
+            self._append_column(conventional_other)
+            return
         if not self._owned():
             self = self._compact()
         var count = other._length
         if count == 0:
             return
-        _append_bits(
+        _append_validity(
             self._bits[], self._length, other._bits[], other._offset, count
         )
         var first = other._start(0)
@@ -342,19 +436,16 @@ struct StringBuilder(Copyable):
         self._bytes = List[UInt8](capacity=bytes)
         self._offsets = List[Int64](capacity=rows + 1)
         self._offsets.append(0)
-        self._bits = List[UInt8](capacity=(rows + 7) // 8)
+        self._bits = List[UInt8]()
         self._length = 0
 
     def __len__(self) -> Int:
         return self._length
 
     def _push_bit(mut self, valid: Bool):
-        if self._length % 8 == 0:
-            self._bits.append(0)
-        if valid:
-            self._bits[len(self._bits) - 1] |= UInt8(1) << UInt8(
-                self._length % 8
-            )
+        _append_validity_bit(
+            self._bits, self._length, valid, self._offsets.capacity() - 1
+        )
         self._length += 1
 
     def append(mut self, text: StringSlice):
@@ -374,12 +465,13 @@ struct StringBuilder(Copyable):
         _ = self._offsets.pop()
         self._bytes.resize(Int(self._offsets[len(self._offsets) - 1]), 0)
         self._length -= 1
-        if self._length % 8 == 0:
-            _ = self._bits.pop()
-        else:
-            self._bits[len(self._bits) - 1] &= ~(
-                UInt8(1) << UInt8(self._length % 8)
-            )
+        if len(self._bits) != 0:
+            if self._length % 8 == 0:
+                _ = self._bits.pop()
+            else:
+                self._bits[len(self._bits) - 1] &= ~(
+                    UInt8(1) << UInt8(self._length % 8)
+                )
 
     def _append_row(mut self, column: StringColumn, i: Int):
         """Copy row i of column, including its validity."""
