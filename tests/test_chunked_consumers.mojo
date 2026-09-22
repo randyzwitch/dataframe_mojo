@@ -219,6 +219,16 @@ def test_chunked_strings_hash_sort_display_and_gather() raises:
         ),
         "row hashing and grouping",
     )
+    assert_same(
+        parts.group_by("key", maintain_order=True).agg(grouped, batch_size=2),
+        whole.group_by("key", maintain_order=True).agg(grouped, batch_size=2),
+        "ordered single-key grouping",
+    )
+    assert_same(
+        parts.group_by("key").len(),
+        whole.group_by("key").len(),
+        "chunked group lengths",
+    )
     assert_equal(String(parts), String(whole))
     assert_equal(
         parts.column("s").to_string(max_rows=4),

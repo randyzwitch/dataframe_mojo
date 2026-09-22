@@ -2388,7 +2388,10 @@ struct GroupBy(Copyable):
     ) raises -> DataFrame:
         """Serial key encoding, then the parallel per-group reduce."""
         var groups = encode_rows(self._keys, nulls_equal=True)
-        var columns = self._key_columns(groups)
+        # First-occurrence representatives are ordered by source row.
+        var columns = take_sorted_chunked(
+            self._keys, groups.representatives.copy(), 1
+        )
         for expression in bound:
             columns.append(
                 evaluate(
@@ -2413,7 +2416,9 @@ struct GroupBy(Copyable):
         var counts = List[Int64](length=groups.count(), fill=0)
         for id in groups.ids:
             counts[id] += 1
-        var columns = self._key_columns(groups)
+        var columns = take_sorted_chunked(
+            self._keys, groups.representatives.copy(), 1
+        )
         columns.append(Series(name, Column[Int64](counts^)))
         return DataFrame(columns^, height=groups.count())
 
