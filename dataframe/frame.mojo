@@ -2302,8 +2302,7 @@ struct GroupBy(Copyable):
         A bucket holding several times its share of rows (a skewed key)
         would serialize the batch, so such buckets run on the calling
         thread, where their reduce can use the pool, and only the light
-        buckets are jobs. Low cardinality needs no special case: measured
-        at 16 groups, partitioning still beats the serial encode.
+        buckets are jobs.
         """
         var height = self._frame.height()
         # A sampled estimate decides whether scattering is worth its gather;
