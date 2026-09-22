@@ -37,7 +37,7 @@ With [Pixi](https://pixi.sh) installed, from this directory:
 pixi run test          # runs every tests/test_*.mojo, in parallel
 pixi run example
 pixi run build
-pixi run bench          # CPU benchmark suite; see docs/benchmarks.md
+pixi run bench          # CPU benchmark suite; see the [benchmark guide](https://github.com/randyzwitch/dataframe_mojo/wiki/benchmarks)
 pixi run bench-csv
 ./build/sales
 
@@ -245,3 +245,4 @@ and a generated [API reference](docs/api.md) (`pixi run docs`). See the
 
 See [semantics](docs/semantics.md) for the behavior the tests promise and
 [architecture and next steps](docs/architecture.md) for the intended progression.
+Historical benchmarks and one-off experiments are in the [research wiki](https://github.com/randyzwitch/dataframe_mojo/wiki).

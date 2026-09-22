@@ -3,8 +3,7 @@
 This is a direct port of src/decimal.rs (Decimal, parse_decimal, left_shift,
 right_shift, round, and number_of_digits_decimal_left_shift) and the shift
 schedule used by src/simple.rs. The source is fast-float2 0.2.4, licensed
-MIT OR Apache-2.0; this repository retains the MIT text at
-third_party/FAST_FLOAT2_LICENSE.
+MIT OR Apache-2.0; the MIT notice is in THIRD_PARTY_NOTICES.md.
 
 The caller must first validate the numeric grammar, as fast-float2 does before
 parse_decimal. Values are stored as decimal digits, most-significant first.

@@ -42,5 +42,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            dist/dataframe.mojoc docs/api.md \
+            dist/dataframe.mojoc docs/api.md LICENSE THIRD_PARTY_NOTICES.md \
             --title "$GITHUB_REF_NAME" --notes-file notes.md

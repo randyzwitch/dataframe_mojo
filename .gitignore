@@ -6,3 +6,6 @@ dist/
 
 # Build output from `pixi build` / package smoke tests
 *.conda
+
+# One-off benchmark research is kept in the GitHub wiki.
+/experiments/

@@ -1,8 +1,0 @@
-engine,scenario,workers,iteration,read_ns,rows,width,nulls
-polars,full,4,0,36967013,1000000,4,90910
-polars,full,4,1,36007863,1000000,4,90910
-polars,full,4,2,36032503,1000000,4,90910
-polars,full,4,3,35845587,1000000,4,90910
-polars,full,4,4,36260978,1000000,4,90910
-polars,full,4,5,36592341,1000000,4,90910
-polars,full,4,6,36335016,1000000,4,90910

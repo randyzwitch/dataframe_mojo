@@ -12,7 +12,7 @@ breaking changes can happen in any release and are listed under **Breaking**.
   contract changes include positional explicit schemas, nullable short records,
   100-row default inference, opt-in temporal inference, Polars duplicate
   header suffixes, and Polars numeric parsing. See
-  [the CSV integration notes](docs/csv-polars-port.md).
+  [the CSV integration notes](https://github.com/randyzwitch/dataframe_mojo/wiki/csv-polars-port).
 
 - Unsigned CSV integer fields now reject `-0`, matching Polars' `atoi_simd`
   parser. Generic casts retain their existing behavior.
@@ -22,14 +22,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - CSV integer fields use a source port of Polars' `atoi_simd` parser, with
   destination-width overflow checks, x86 SIMD reductions and a packed
   fallback. The public reader remains the only CSV implementation. See
-  [measurements and limitations](experiments/csv_integer/README.md).
+  [measurements and limitations](https://github.com/randyzwitch/dataframe_mojo/wiki/csv-integer-experiments).
 
 - Float64 parsing passes validated wide decimal mantissas directly to Mojo's
   Lemire converter and uses its borrowed-span converter for exponent and
   long inputs. This avoids reparsing wide decimals and constructing an owned
   string for successful conversion, while retaining existing result bits and
   strict grammar. The private converter dependency is covered by reference
-  comparisons; see [numeric parsing measurements](docs/numeric-parsing-149.md).
+  comparisons; see [numeric parsing measurements](https://github.com/randyzwitch/dataframe_mojo/wiki/numeric-parsing-149).
 
 - Simple quoted CSV fields decode borrowed input spans with SIMD structural
   scanning. Quoted empty strings and quoted null tokens keep their existing
@@ -51,7 +51,7 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - CSV reads publish small record-aligned chunks while scanning the file,
   and workers claim them dynamically. Tokenization reuses structural masks
   across fields; numeric grammar checks consume borrowed text before
-  handing it to the existing numeric conversion. See [the comparison notes](docs/csv-pipeline-152.md)
+  handing it to the existing numeric conversion. See [the comparison notes](https://github.com/randyzwitch/dataframe_mojo/wiki/csv-pipeline-152)
   for measurements and the remaining work in #152.
 
 - Concatenation sizes each output column once instead of growing into it.
