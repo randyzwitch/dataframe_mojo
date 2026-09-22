@@ -374,6 +374,12 @@ struct _CsvColumn(Movable):
 struct _CsvReader:
     var schema: CsvSchema
     var columns: List[_CsvColumn]
+    # The final selected source field. Bytes after it are scanned only for
+    # CSV state and field-count validation; they are neither copied nor decoded.
+    var last_kept: Int
+    var partial_projection: Bool
+    var projection_skip: Bool
+    var projection_skip_in_quotes: Bool
     var has_header: Bool
     var prefix: List[UInt8]
     var prefix_done: Bool
@@ -426,8 +432,19 @@ struct _CsvReader:
     ) raises:
         self.schema = schema.copy()
         self.columns = List[_CsvColumn](capacity=len(schema))
+        self.last_kept = -1
+        var kept = 0
         for i in range(len(schema)):
             self.columns.append(_CsvColumn(schema._fields[i], keep[i]))
+            if keep[i]:
+                self.last_kept = i
+                kept += 1
+        # Polars treats a partial projection as an implicit ragged-line
+        # truncation: after its final requested field it only finds the next
+        # quote-aware newline, without validating the omitted tail.
+        self.partial_projection = kept < len(schema)
+        self.projection_skip = False
+        self.projection_skip_in_quotes = False
         self.has_header = has_header
         self.prefix = List[UInt8](capacity=3)
         self.prefix_done = False
@@ -483,6 +500,21 @@ struct _CsvReader:
             )
         )
 
+    def _store_current_field(self) -> Bool:
+        return (
+            self.sampling
+            or (self.has_header and self.record == 1)
+            or self.field_index <= self.last_kept
+        )
+
+    def _skip_projection_tail_after_field(self) -> Bool:
+        return (
+            self.partial_projection
+            and not self.sampling
+            and not (self.has_header and self.record == 1)
+            and self.field_index == self.last_kept
+        )
+
     def _finish_field(mut self) raises:
         if (
             not self.sampling
@@ -491,6 +523,15 @@ struct _CsvReader:
         ):
             if not self.ignore_errors or (self.has_header and self.record == 1):
                 raise self._location("too many fields")
+        # After the rightmost projected column, retain only tokenizer state.
+        # `field_index` still counts the skipped trailing fields so strict
+        # ragged-row validation remains unchanged.
+        if not self._store_current_field():
+            self.field_index += 1
+            self.field_quoted = False
+            self.field_started = False
+            self.after_quote = False
+            return
         var start = (self.field_ends[len(self.field_ends) - 1]) if len(
             self.field_ends
         ) > 0 else 0
@@ -507,6 +548,7 @@ struct _CsvReader:
             or (self.has_header and self.record == 1)
             or (
                 self.field_index < len(self.columns)
+                and self.columns[self.field_index].keep
                 and self.columns[self.field_index].kind == _KIND_STRING
             )
         )
@@ -557,8 +599,9 @@ struct _CsvReader:
             )
         )
 
-    def _finish_record(mut self) raises:
-        self._finish_field()
+    def _finish_record(mut self, field_already_finished: Bool = False) raises:
+        if not field_already_finished:
+            self._finish_field()
         if self.sampling:
             self.sample.append(self.fields.copy())
             self.sample_quoted.append(self.quoted.copy())
@@ -573,7 +616,7 @@ struct _CsvReader:
                 self.done = True
             return
         var header = self.has_header and self.record == 1
-        var count = len(self.field_ends)
+        var count = self.field_index
         if header and not self.check_header:
             pass
         elif header:
@@ -599,7 +642,11 @@ struct _CsvReader:
                             "'",
                         )
                     )
-        elif count != len(self.schema) and not self.truncate_ragged:
+        elif (
+            count != len(self.schema)
+            and not self.truncate_ragged
+            and not self.projection_skip
+        ):
             if not self.ignore_errors:
                 raise self._location(
                     String(
@@ -614,6 +661,8 @@ struct _CsvReader:
             var appended = 0
             try:
                 for i in range(len(self.schema)):
+                    if not self.columns[i].keep:
+                        continue
                     if i < count:
                         self.columns[i].append(
                             self._field_text(i),
@@ -643,6 +692,8 @@ struct _CsvReader:
         self.record_bytes.clear()
         self.field_ends.clear()
         self.field_index = 0
+        self.projection_skip = False
+        self.projection_skip_in_quotes = False
         self.record += 1
         self.record_open = False
 
@@ -681,6 +732,17 @@ struct _CsvReader:
     def _consume_record_byte(mut self, byte: UInt8) raises:
         if self.done:
             return
+        if self.projection_skip:
+            # Match Polars `skip_this_line`: quotes toggle line scanning but
+            # the omitted tail is otherwise never tokenized or validated.
+            if self.quoting and byte == self.quote:
+                self.projection_skip_in_quotes = (
+                    not self.projection_skip_in_quotes
+                )
+            elif byte == 10 and not self.projection_skip_in_quotes:
+                self._finish_record(True)
+                self.physical_line += 1
+            return
         if self.pending_cr:
             if byte != 10:
                 raise self._location(
@@ -695,11 +757,15 @@ struct _CsvReader:
         if self.in_quotes:
             if self.after_quote:
                 if byte == self.quote:
-                    self.record_bytes.append(self.quote)
+                    if self._store_current_field():
+                        self.record_bytes.append(self.quote)
                     self.after_quote = False
                 elif byte == self.separator:
                     self.in_quotes = False
+                    var skip_tail = self._skip_projection_tail_after_field()
                     self._finish_field()
+                    if skip_tail:
+                        self.projection_skip = True
                 elif byte == 10:
                     self.in_quotes = False
                     self._finish_record()
@@ -712,7 +778,8 @@ struct _CsvReader:
             elif byte == self.quote:
                 self.after_quote = True
             else:
-                self.record_bytes.append(byte)
+                if self._store_current_field():
+                    self.record_bytes.append(byte)
                 if byte == 10:
                     self.physical_line += 1
             return
@@ -724,7 +791,10 @@ struct _CsvReader:
             self.field_quoted = True
             self.field_started = True
         elif byte == self.separator:
+            var skip_tail = self._skip_projection_tail_after_field()
             self._finish_field()
+            if skip_tail:
+                self.projection_skip = True
         elif byte == 10:
             self._finish_record()
             self.physical_line += 1
@@ -732,7 +802,8 @@ struct _CsvReader:
             self.pending_cr = True
         else:
             self.field_started = True
-            self.record_bytes.append(byte)
+            if self._store_current_field():
+                self.record_bytes.append(byte)
 
     def _mask(self, matches: SIMD[DType.bool, 64]) -> UInt64:
         return _mask64(matches)
@@ -767,7 +838,8 @@ struct _CsvReader:
         if stop > start:
             self.record_open = True
             self.field_started = True
-            self.record_bytes.extend(bytes[start:stop])
+            if self._store_current_field():
+                self.record_bytes.extend(bytes[start:stop])
 
     def _append_borrowed_record[
         encoded_quotes: Bool = False
@@ -788,7 +860,7 @@ struct _CsvReader:
                     quoted = True
                     end = ~end
             var content_start = field_start + 1 if quoted else field_start
-            if self.columns[c].kind == _KIND_STRING:
+            if self.columns[c].keep and self.columns[c].kind == _KIND_STRING:
                 try:
                     _ = StringSlice(from_utf8=bytes[content_start:end])
                 except:
@@ -804,12 +876,13 @@ struct _CsvReader:
                     quoted = True
                     end = ~end
             var content_start = field_start + 1 if quoted else field_start
-            self.columns[c].append(
-                StringSlice(unsafe_from_utf8=bytes[content_start:end]),
-                quoted,
-                self.record,
-                self.null_values,
-            )
+            if self.columns[c].keep:
+                self.columns[c].append(
+                    StringSlice(unsafe_from_utf8=bytes[content_start:end]),
+                    quoted,
+                    self.record,
+                    self.null_values,
+                )
             field_start = end + (2 if quoted else 1)
         self.field_ends.clear()
         self.rows += 1
@@ -1028,7 +1101,11 @@ struct _CsvReader:
             return self._frame()
         if self.pending_cr:
             raise self._location("bare carriage return at end of file")
-        if self.in_quotes:
+        if self.projection_skip:
+            # Polars accepts an unfinished skipped tail at EOF; it is not a
+            # projected field and its quote syntax was intentionally bypassed.
+            self._finish_record(True)
+        elif self.in_quotes:
             if self.after_quote:
                 self.in_quotes = False
             else:

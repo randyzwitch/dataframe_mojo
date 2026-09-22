@@ -117,6 +117,14 @@ def test_n_rows_and_projection() raises:
     assert_equal(
         read_all_splits(n, columns=["name", "id"]), "2:1|a\n2|b\n3|c\n"
     )
+    # Polars projection pushdown stops after its final requested source field.
+    # Its quote-aware line scan bypasses field-count and trailing-tail syntax.
+    n = write('id,name,score\n1,"not-used\nstill",x,extra\n2,ok,2\n')
+    assert_equal(read_all_splits(n, columns=["id"]), "1:1\n2\n")
+    # An unfinished omitted tail at EOF is likewise irrelevant to a partial
+    # projection, as in Polars `skip_this_line`.
+    n = write('id,name,score\n1,"unterminated')
+    assert_equal(read_all_splits(n, columns=["id"]), "1:1\n")
     with assert_raises(contains="Unknown CSV column: zzz"):
         _ = read_csv(PATH, schema(), columns=["zzz"])
     with assert_raises(contains="listed twice"):
