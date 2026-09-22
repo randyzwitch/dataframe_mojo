@@ -227,5 +227,34 @@ def test_chunked_strings_hash_sort_display_and_gather() raises:
     assert_equal(to_csv_string(parts), to_csv_string(whole))
 
 
+def test_large_chunked_filter_with_misaligned_columns_and_null_mask() raises:
+    var ids = List[Int64]()
+    var labels = List[String]()
+    var chosen = List[Bool]()
+    var valid = List[Bool]()
+    for i in range(1024):
+        ids.append(Int64(i))
+        labels.append(String("key_", i % 7))
+        chosen.append(i % 3 == 0)
+        valid.append(i % 17 != 0)
+    var id = Series("id", Column[Int64](ids^))
+    var label = Series("label", Column[String](labels^))
+    var whole = DataFrame([id.copy(), label.copy()])
+    var parts = DataFrame(
+        [
+            Series._from_chunks([id.slice(0, 512), id.slice(512, 512)]),
+            Series._from_chunks([label.slice(0, 600), label.slice(600, 424)]),
+        ]
+    )
+    var mask = Column[Bool](chosen^, valid^)
+    var actual = parts.filter(mask)
+    assert_same(actual, whole.filter(mask), "large chunked filter")
+    assert_true(actual.column("id").is_chunked())
+    var reject_all = Column[Bool](List[Bool](length=1024, fill=False))
+    assert_same(
+        parts.filter(reject_all), whole.filter(reject_all), "empty filter"
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

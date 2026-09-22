@@ -68,6 +68,67 @@ def true_rows(mask: BoolColumn) raises -> List[Int]:
     return rows^
 
 
+struct _SortedChunkTakeJob(Job):
+    """Gather ordered filter indices from one column without rechunking it."""
+
+    var source: Series
+    var indices: ArcPointer[List[Int]]
+    var result: Series
+
+    def __init__(out self, source: Series, indices: ArcPointer[List[Int]]):
+        self.source = source.copy()
+        self.indices = indices.copy()
+        self.result = source.copy()
+
+    def run(mut self) raises:
+        ref rows = self.indices[]
+        if len(rows) == 0:
+            self.result = self.source.slice(0, 0)
+            return
+        if not self.source.is_chunked():
+            self.result = self.source.take(rows.copy())
+            return
+        var selected = List[Series]()
+        var offset = 0
+        var next_row = 0
+        for chunk in self.source.chunks():
+            var end = offset + len(chunk)
+            var local = List[Int]()
+            while next_row < len(rows) and rows[next_row] < end:
+                local.append(rows[next_row] - offset)
+                next_row += 1
+            if len(local) > 0:
+                selected.append(chunk.take(local))
+            offset = end
+        self.result = Series._from_chunks(selected^)
+
+    def into_result(deinit self) -> Series:
+        return self.result^
+
+
+def take_sorted_chunked(
+    columns: List[Series], var indices: List[Int], workers: Int
+) raises -> List[Series]:
+    """Filter source-ordered rows within physical chunks.
+
+    Generic ``take_parallel`` still handles arbitrary join indices. Jobs run
+    by column, so the selected chunks remain in source order in the result.
+    """
+    var jobs = List[_SortedChunkTakeJob](capacity=len(columns))
+    var shared = ArcPointer(indices^)
+    for column in columns:
+        jobs.append(_SortedChunkTakeJob(column, shared))
+    if workers > 1 and len(jobs) > 1:
+        run_jobs(jobs)
+    else:
+        for i in range(len(jobs)):
+            jobs[i].run()
+    var result = List[Series](capacity=len(jobs))
+    while len(jobs) > 0:
+        result.append(jobs.pop(0).into_result())
+    return result^
+
+
 struct _GatherJob(Job):
     """Rows `indices[start:end]` of one column into output positions
     [start, end), writing through raw output buffer addresses."""
