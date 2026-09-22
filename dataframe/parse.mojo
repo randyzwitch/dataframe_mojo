@@ -75,15 +75,10 @@ def parse_int64(text: StringSlice) raises -> Int64:
     var digits = len(bytes) - index
     if digits <= 18:
         # Every 18-digit unsigned decimal fits Int64, including when it is
-        # negated.  The range check can therefore stay out of this loop,
-        # avoiding a divide per byte on the normal CSV path.
-        var magnitude = UInt64(0)
-        while index < len(bytes):
-            var byte = bytes[index]
-            if byte < 48 or byte > 57:
-                raise Error("non-decimal integer byte")
-            magnitude = magnitude * 10 + UInt64(byte - 48)
-            index += 1
+        # negated. The packed reducer validates every byte before combining
+        # complete 8-byte blocks, with scalar cleanup for the final 1--7
+        # digits, so the range check stays out of the normal path.
+        var magnitude = _short_decimal(bytes, index)
         if negative:
             return -Int64(magnitude)
         return Int64(magnitude)
@@ -407,18 +402,14 @@ def _scan_float64[parse_exponent: Bool](text: StringSlice) raises -> Float64:
     if (
         digits == 0
         or fraction == 0  # a trailing "." the strict grammar may reject
-        or fraction > 22
+        or fraction > 342
     ):
         return _float_scan_fallback[parse_exponent](text)
-    # The loop has consumed the complete strict plain-decimal grammar.  A
-    # field of at most 19 digits cannot overflow Float64, so wide mantissas
-    # can convert directly without walking their bytes a second time.
-    if mantissa > _EXACT_LIMIT:
-        var value = lemire_algorithm(mantissa, Int64(-max(fraction, 0)))
-        return -value if negative else value
-    var value = Float64(mantissa)
-    if fraction > 0:
-        value = value / _pow10(fraction)
+    # The loop has consumed the complete strict plain-decimal grammar.  Its
+    # <=19-digit mantissa and [-342, 0] decimal exponent are Eisel--Lemire's
+    # bounded input domain, so use the same correctly rounded conversion as
+    # the exponent path instead of a separate division approximation.
+    var value = lemire_algorithm(mantissa, Int64(-max(fraction, 0)))
     # The sign applies to the magnitude, so "-0.0" stays negative and no
     # other value's rounding changes.
     return -value if negative else value
