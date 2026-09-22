@@ -127,13 +127,21 @@ def fused[
     offset: Int,
     length: Int,
 ) raises -> Series:
-    for column in columns:
-        if column.is_chunked():
-            var contiguous = List[Series](capacity=len(columns))
-            for item in columns:
-                contiguous.append(item.rechunk())
-            return fused[width](bound, contiguous^, root, offset, length)
     var steps = _program(bound, root)
+    # Only columns referenced by this fused subtree need contiguous buffers.
+    # evaluate prepares them once; this fallback also keeps direct callers safe.
+    for step in steps:
+        if step.op == COL and columns[step.source].is_chunked():
+            var contiguous = columns.copy()
+            for source_step in steps:
+                if (
+                    source_step.op == COL
+                    and contiguous[source_step.source].is_chunked()
+                ):
+                    contiguous[source_step.source] = contiguous[
+                        source_step.source
+                    ].rechunk()
+            return fused[width](bound, contiguous^, root, offset, length)
     var predicate = bound.dtypes[root] == DataType.BOOL
     var valid = List[Bool](length=length, fill=True)
     for step in steps:

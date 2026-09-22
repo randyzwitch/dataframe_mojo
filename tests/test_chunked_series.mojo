@@ -23,6 +23,23 @@ def test_chunk_views_and_rechunk() raises:
     assert_true(slice.equals(compact.slice(1, 3)))
 
 
+def test_slices_find_only_overlapping_chunks() raises:
+    var parts = List[Series]()
+    for i in range(17):
+        parts.append(
+            Series("x", Column[Int64]([Int64(2 * i), Int64(2 * i + 1)]))
+        )
+    var series = Series._from_chunks(parts)
+    var compact = series.rechunk()
+    for offset in range(len(series) + 1):
+        for length in range(len(series) - offset + 1):
+            var actual = series.slice(offset, length)
+            var expected = compact.slice(offset, length)
+            assert_true(actual.equals(expected))
+            if length > 0 and offset // 2 == (offset + length - 1) // 2:
+                assert_equal(actual.n_chunks(), 1)
+
+
 def main() raises:
     var suite = TestSuite.discover_tests[__functions_in_module()]()
     suite^.run()

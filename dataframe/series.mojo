@@ -907,19 +907,40 @@ struct Series(Copyable, Sized, Writable):
                 or length > len(self) - offset
             ):
                 raise Error("Invalid column slice")
+            ref chunks = self._chunked.value()[]
+            if length == 0:
+                var empty = Self(
+                    self._name, chunks.arrays[0].copy(), self._dtype
+                )
+                return empty.slice(0, 0)
+            # Expression batches are usually within one chunk. Locate the
+            # first overlapping array from cumulative ends instead of making
+            # a List of every chunk for each batch.
+            var lo = 0
+            var hi = len(chunks.ends)
+            while lo < hi:
+                var mid = lo + (hi - lo) // 2
+                if offset < chunks.ends[mid]:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            var start = 0 if lo == 0 else chunks.ends[lo - 1]
+            var stop = chunks.ends[lo]
+            var end = offset + length
+            var first = Self(self._name, chunks.arrays[lo].copy(), self._dtype)
+            if end <= stop:
+                return first.slice(offset - start, length)
             var parts = List[Self]()
-            var start = 0
-            for chunk in self.chunks():
-                var stop = start + len(chunk)
-                var a = max(offset, start)
-                var b = min(offset + length, stop)
-                if b > a:
-                    parts.append(chunk.slice(a - start, b - a))
+            parts.append(first.slice(offset - start, stop - offset))
+            lo += 1
+            while lo < len(chunks.ends) and stop < end:
                 start = stop
-                if start >= offset + length:
-                    break
-            if len(parts) == 0:
-                return self.chunks()[0].slice(0, 0)
+                stop = chunks.ends[lo]
+                var part = Self(
+                    self._name, chunks.arrays[lo].copy(), self._dtype
+                )
+                parts.append(part.slice(0, min(end, stop) - start))
+                lo += 1
             return Self._from_chunks(parts)
         var result = self._slice_storage(offset, length)
         result._dtype = self._dtype

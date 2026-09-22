@@ -1,6 +1,15 @@
 """Fused Float64 kernels match the unfused evaluator exactly."""
 from std.testing import TestSuite, assert_equal, assert_true, assert_false
-from dataframe import DataType, Column, DataFrame, Expr, Series, col, lit
+from dataframe import (
+    DataType,
+    Column,
+    DataFrame,
+    Expr,
+    Series,
+    col,
+    lit,
+    concat,
+)
 from dataframe.binding import bind
 from dataframe.execution import evaluate
 
@@ -102,6 +111,24 @@ def test_fused_matches_unfused() raises:
                 assert_true(
                     bitwise_equal(run[8](df, e, True, batch), reference)
                 )
+
+
+def test_fused_chunked_inputs_match_contiguous() raises:
+    var pieces = List[DataFrame]()
+    for _ in range(20):
+        pieces.append(frame(25))
+    var chunked = concat(pieces)
+    var contiguous = chunked.rechunk()
+    for expr in [
+        (col("x") + lit(Float64(3))) * (col("y") - lit(Float64(2))),
+        col("x") > col("y"),
+        (col("x") + col("y")).sum(),
+    ]:
+        for batch in [1, 64, 1024]:
+            var expected = run[4](contiguous, expr, True, batch)
+            assert_true(
+                bitwise_equal(run[4](chunked, expr, True, batch), expected)
+            )
 
 
 def test_fusible_analysis() raises:
