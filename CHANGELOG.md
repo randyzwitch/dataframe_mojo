@@ -7,6 +7,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Float64 parsing passes validated wide decimal mantissas directly to Mojo's
+  Lemire converter and uses its borrowed-span converter for exponent and
+  long inputs. This avoids reparsing wide decimals and constructing an owned
+  string for successful conversion, while retaining existing result bits and
+  strict grammar. The private converter dependency is covered by reference
+  comparisons; see [numeric parsing measurements](docs/numeric-parsing-149.md).
+
 - Simple quoted CSV fields decode borrowed input spans with SIMD structural
   scanning. Quoted empty strings and quoted null tokens keep their existing
   meaning; escaped quotes and embedded line breaks retain the state machine.
