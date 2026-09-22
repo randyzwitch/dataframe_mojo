@@ -8,8 +8,7 @@ floats, temporal parsing, chunking, scheduling and string storage are unchanged.
 The source port maps atoi_simd short.rs, fallback.rs and simd/sse_avx.rs to
 Mojo. x86 SSSE3/SSE4.1 and AVX2 use source-shaped SIMD reductions; unsupported
 SIMD targets use the packed fallback. ARM has no dedicated Neon port yet.
-The MIT license is retained in third_party/ATOI_SIMD_LICENSE. See the module
-header for the exact source mapping.
+See the module header for the exact source mapping.
 
 One deliberate CSV behavior change: unsigned negative zero is rejected, as by
 Polars CSV/atoi_simd. Generic dataframe.parse cast semantics still accept it.
