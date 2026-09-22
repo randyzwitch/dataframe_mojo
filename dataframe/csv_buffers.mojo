@@ -2,14 +2,14 @@
 
 Numeric values are built in their output dtype and validity is packed during
 append. Variant payloads are swapped out at finish, transferring ownership.
-Strings currently adapt to this library's Arrow large_utf8 layout; Polars uses
-MutableBinaryViewArray. That representation difference remains explicit.
+Strings use Polars' 16-byte views with inline short values and retained blocks.
 """
 from std.memory import ArcPointer
 from std.utils import Variant
 from .column import Column, _append_validity_bit
 from .bool_column import BoolColumn
-from .string_column import StringBuilder
+from .string_column import StringColumn
+from .string_view import StringViewBuilder
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .csv import CsvField, CsvOptions
@@ -86,7 +86,7 @@ comptime _Buffers = Variant[
     _NumericBuffer[DType.uint64],
     _NumericBuffer[DType.float32],
     _BoolBuffer,
-    StringBuilder,
+    StringViewBuilder,
 ]
 
 
@@ -118,7 +118,7 @@ struct CsvBuffer(Movable):
         if field.dtype == DataType.BOOL:
             self.storage = _Buffers(_BoolBuffer(capacity))
         else:
-            self.storage = _Buffers(StringBuilder(capacity))
+            self.storage = _Buffers(StringViewBuilder(capacity))
 
     def add_null(mut self) raises:
         comptime for i in range(len(NUMERIC_DTYPES)):
@@ -129,7 +129,7 @@ struct CsvBuffer(Movable):
         if self.storage.isa[_BoolBuffer]():
             self.storage[_BoolBuffer].append(False, False)
         else:
-            self.storage[StringBuilder].append_null()
+            self.storage[StringViewBuilder].append_null()
 
     def add(
         mut self,
@@ -146,7 +146,7 @@ struct CsvBuffer(Movable):
             if value == marker.as_bytes():
                 self.add_null()
                 return
-        if self.storage.isa[StringBuilder]():
+        if self.storage.isa[StringViewBuilder]():
             self._add_string(raw, needs_escaping, options)
             return
         if self.storage.isa[_BoolBuffer]():
@@ -248,11 +248,13 @@ struct CsvBuffer(Movable):
             except:
                 if options.encoding == "utf8-lossy":
                     var lossy = String(from_utf8_lossy=bytes)
-                    self.storage[StringBuilder].append(lossy)
+                    self.storage[StringViewBuilder].append(StringSlice(lossy))
                 else:
                     self.add_null()
                 return
-        self.storage[StringBuilder].append(StringSlice(unsafe_from_utf8=bytes))
+        self.storage[StringViewBuilder].append(
+            StringSlice(unsafe_from_utf8=bytes)
+        )
 
     def finish(mut self) raises -> Series:
         comptime for i in range(len(NUMERIC_DTYPES)):
@@ -265,6 +267,6 @@ struct CsvBuffer(Movable):
                 )
         if self.storage.isa[_BoolBuffer]():
             return self.storage[_BoolBuffer].finish(self.field.name)
-        var builder = StringBuilder()
-        swap(builder, self.storage[StringBuilder])
-        return Series(self.field.name, builder^.finish())
+        var builder = StringViewBuilder()
+        swap(builder, self.storage[StringViewBuilder])
+        return Series(self.field.name, StringColumn(builder^.finish()))

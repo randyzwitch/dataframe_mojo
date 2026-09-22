@@ -273,6 +273,9 @@ def _format(dtype: DataType) raises -> String:
 
 
 def _fill_schema(mut schema: ArrowSchema, series: Series) raises:
+    # The current C adapter publishes the established large_utf8 `U` layout.
+    # Native Utf8View output needs Arrow C's final variadic buffer-size array;
+    # export uses StringColumn.to_large_utf8() until that complete ABI lands.
     var state = _SchemaState(_format(series.dtype()), series.name())
     schema.format = Int(state.format.unsafe_ptr())
     schema.name = Int(state.name.unsafe_ptr())
@@ -292,7 +295,16 @@ def _fill_array(
     state.releases = releases
     # ArrowArray represents one array; this single-array adapter materializes
     # chunked input explicitly. A stream exporter is a separate interface.
-    state.keep.append(series.rechunk())
+    var materialized = series.rechunk()
+    if (
+        materialized._data.isa[StringColumn]()
+        and materialized._data[StringColumn]._is_view_storage()
+    ):
+        materialized = Series(
+            materialized.name(),
+            materialized._data[StringColumn].to_large_utf8(),
+        )
+    state.keep.append(materialized^)
     ref kept = state.keep[0]
     var length = len(series)
     array.length = Int64(length)

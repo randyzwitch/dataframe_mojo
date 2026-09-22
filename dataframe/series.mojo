@@ -4,6 +4,7 @@ from std.utils import Variant
 from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn
+from .string_view import StringViewStorage
 from .value import AnyValue
 from .display import render_series
 from .parallel import (
@@ -164,6 +165,30 @@ struct Series(Copyable, Sized, Writable):
             return self.copy()
         var parts = self.chunks()
         var result = parts[0].copy()
+        # Utf8View chunks concatenate descriptors and Arc byte blocks. Calling
+        # the legacy reserve path would materialize their payloads first.
+        if (
+            result._data.isa[StringColumn]()
+            and result._data[StringColumn]._is_view_storage()
+        ):
+            var storages = List[StringViewStorage](capacity=len(parts))
+            var offsets = List[Int](capacity=len(parts))
+            var lengths = List[Int](capacity=len(parts))
+            for part in parts:
+                ref column = part._data[StringColumn]
+                if not column._is_view_storage():
+                    # The mixed path below uses the explicit large_utf8 adapter.
+                    result._reserve_rows(len(self), self._text_bytes())
+                    for i in range(1, len(parts)):
+                        result._append_series(parts[i])
+                    return result^
+                storages.append(column._view_storage_unchecked())
+                offsets.append(column._offset)
+                lengths.append(len(column))
+            var merged = StringViewStorage._concat_many(
+                storages^, offsets^, lengths^
+            )
+            return Self(self._name, StringColumn(merged^))
         result._reserve_rows(len(self), self._text_bytes())
         for i in range(1, len(parts)):
             result._append_series(parts[i])

@@ -57,7 +57,10 @@ that unsupported configuration is not presented as a tokenizer regression.
 
 - Integer SSE/AVX2 dispatch and reductions are ported and instruction-checked
   on x86; the dedicated Neon integer backend remains unported (SWAR fallback).
-- String builders still produce offset/byte arrays instead of Polars BinaryView.
+- CSV strings now retain native 16-byte BinaryView descriptors and Arc-owned
+  blocks through slicing, gathering, and batch rechunking. Single-array Arrow
+  export currently materializes the legacy large_utf8 ABI; native `vu` export
+  and its final variadic buffer-size array remain unimplemented.
 - The pool is scoped per read and uses a shared queue, not persistent Rayon
   workers with work stealing.
 - Temporal conversion still uses the existing Mojo parser and constructs a
@@ -118,3 +121,9 @@ have been collected for this new pipeline.
 Integer validation: default x86, explicit SSE/AVX2, and SIMD-disabled fallback
 all pass 3/3 tests, with 31 pinned Polars oracle cases. Emitted x86 assembly
 contains the expected `vpmaddubsw`, `vpmaddwd`, and `vpackusdw` reductions.
+
+StringView integration: storage 3/3, StringColumn 10/10, Arrow 7/7, typed CSV
+buffers 4/4, and reader 7/7 passed. Actual end-to-end outputs match Polars
+1.44.2 in eight runs: explicit/inferred schemas, full/projected reads, and
+one/four threads on 6,000 mixed rows with nulls, escapes, Unicode, and multiline
+strings. The oracle driver and verifier live in `experiments/csv_port`.
