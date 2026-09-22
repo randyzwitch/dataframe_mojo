@@ -109,3 +109,41 @@ would not establish an improvement to this workload.
 Float32 work, and a fuller single-pass exponent/long-mantissa implementation
 with documented ambiguous-case behavior. #151's chunked-column storage
 and the overall performance target in #152 remain open.
+
+## Re-evaluation after the public CSV port (2026-09-22)
+
+The figures above describe #154's branch, before #155's exponent changes and
+#161's public reader replacement. Public CSV now uses the direct Float32 and
+Float64 fast-float2-derived paths in `csv_numeric.mojo` and the atoi_simd-derived
+integer path in `csv_integer.mojo`. They are separate from the shared strict
+cast parser to preserve the existing cast grammar and bits.
+
+The string-to-number cast caller still made an owned `String` from every
+`StringColumn` value before passing it to parsers that accept `StringSlice`.
+This branch passes the borrowed slice directly. `StringColumn._get` returns a
+borrowed slice for both regular and StringView storage. Error text is still
+created only when a conversion fails.
+
+The new `benchmarks/bench_cast_parse.mojo` measures 12 complete casts of a
+100,000-row String column per case. The binaries were built from `5e05b84`
+and this branch with the same pinned Mojo environment, then run in alternating
+baseline/branch order for three pairs. Medians of the three runs, in ms:
+
+| Cast case | Baseline | Borrowed slice | Change |
+|---|---:|---:|---:|
+| Int64, short | 197.7 | 186.2 | -6% |
+| Int64, 18 digits | 226.7 | 198.4 | -12% |
+| Float64, plain | 190.0 | 167.1 | -12% |
+| Float64, exponent | 211.0 | 201.7 | -4% |
+| Float32, plain | 189.9 | 167.1 | -12% |
+
+The old exponent microbenchmark of about 1,840 ms for 10 million conversions
+is also stale: the current merged `bench_numeric_parse.mojo` binary measured
+277 ms in one run. These cast numbers include column access, conversion, and
+output construction; they are not parser-only ablations. The cast improvement
+comes from removing the per-row owned copy. It preserves the existing Float32
+cast through Float64, which is the documented intermediate representation.
+
+A packed Int64 parser experiment improved 18-digit parser microbenchmarks but
+regressed one- to two-digit cases by about 15% in alternating runs. It was
+removed. No parser algorithm change is justified by that result.

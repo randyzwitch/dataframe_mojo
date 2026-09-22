@@ -1,4 +1,4 @@
-"""Explicit dtype conversion. String parsing matches read_csv exactly.
+"""Explicit dtype conversion. String parsing uses the shared strict cast grammar.
 
 Values pass through an exact intermediate: Int128 for every integer type
 (UInt64 included) and Bool, Float64 for both float types. Integer targets
@@ -86,7 +86,8 @@ def _read_source(
 ) raises:
     """Row i of input into the intermediate, parsing strings for target."""
     if source == DataType.STRING:
-        var text = String(input._data[StringColumn]._get(i))
+        # Numeric parsers consume borrowed slices; avoid an owned copy per row.
+        var text = input._data[StringColumn]._get(i)
         if target.is_float():
             values.floats[i] = parse_float64(text)
         elif target == DataType.BOOL:
