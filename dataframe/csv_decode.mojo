@@ -109,10 +109,20 @@ def decode_chunk(
             continue
 
         var record_offset = offset
-        var input = bytes[record_offset:]
+        # `offset` is initially zero and thereafter is `record_offset +
+        # fields.consumed()`, where SplitFields proves consumed <= len(input).
+        # This is parser.rs' trusted cursor advance, rather than a checked
+        # slice reconstruction for every record.
+        var input = Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(record_offset),
+            length=len(bytes) - record_offset,
+        )
         var fields = CsvSplitFields(separator, quote, quoting)
         var source_index = 0
-        var next_selected = projection[0]
+        # `selected > 0` above, and projection/buffers both have this exact
+        # length. These mirror parser.rs' projection iterator and unchecked
+        # builder indexing inside its processed_fields < projection.len proof.
+        var next_selected = projection.unsafe_ptr()[]
         var processed = 0
         var complete = False
         while not complete and offset < len(bytes):
@@ -123,7 +133,7 @@ def decode_chunk(
             var consumed = fields.consumed()
             if source_index == next_selected:
                 # parser.rs removes CR directly before Builder::add.
-                var raw = field.bytes(input)
+                var raw = field._unsafe_bytes(input)
                 # parse_lines trims a selected field's trailing CR before
                 # Builder::add regardless of how SplitFields terminated it.
                 # This includes an unterminated final record at EOF.
@@ -140,12 +150,16 @@ def decode_chunk(
                             is_null = True
                             break
                 if is_null:
-                    buffers[processed].add_null()
+                    buffers.unsafe_ptr().unsafe_offset(processed)[].add_null()
                 else:
-                    buffers[processed].add(raw, field.needs_escaping, options.ignore_errors)
+                    buffers.unsafe_ptr().unsafe_offset(processed)[].add(
+                        raw, field.needs_escaping, options.ignore_errors
+                    )
                 processed += 1
                 if processed < selected:
-                    next_selected = projection[processed]
+                    next_selected = projection.unsafe_ptr().unsafe_offset(
+                        processed
+                    )[]
 
             offset = record_offset + consumed
             if processed == selected:
@@ -170,7 +184,7 @@ def decode_chunk(
             break
         # parser.rs fills unvisited projected buffers with null for short rows.
         while processed < selected:
-            buffers[processed].add_null()
+            buffers.unsafe_ptr().unsafe_offset(processed)[].add_null()
             processed += 1
         output_rows += 1
         record += 1

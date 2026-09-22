@@ -40,6 +40,22 @@ struct CsvFieldSpan(Copyable):
     ) -> Span[UInt8, ImmutAnyOrigin]:
         return input[self.start : self.end]
 
+    @always_inline
+    def _unsafe_bytes(
+        self, input: Span[UInt8, ImmutAnyOrigin]
+    ) -> Span[UInt8, ImmutAnyOrigin]:
+        """Borrow an iterator-produced field without rechecking its range.
+
+        `CsvSplitFields.next` establishes `0 <= start <= end <= len(input)`
+        before it returns a span. This mirrors SplitFields' internal
+        `get_unchecked(..pos)` handoff in Polars. Keep `bytes` above as the
+        checked API for independently constructed spans.
+        """
+        return Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=input.unsafe_ptr().unsafe_offset(self.start),
+            length=self.end - self.start,
+        )
+
 
 struct CsvSplitFields:
     """Iterate fields in one complete CSV record or byte range.
