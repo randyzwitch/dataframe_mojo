@@ -9,7 +9,7 @@ Both buffers use the bitmap helpers in `column.mojo`, so windows at any
 offset append, slice, and compact correctly.
 """
 from std.bit import pop_count
-from std.memory import ArcPointer
+from std.memory import ArcPointer, Pointer
 from .column import (
     Column,
     _append_bits,
@@ -17,6 +17,11 @@ from .column import (
     _copy_bits,
     _count_set,
     _pack_bits,
+    _validity_bit,
+    _count_valid,
+    _copy_validity,
+    _append_validity,
+    _append_validity_bit,
 )
 
 
@@ -72,7 +77,7 @@ struct BoolColumn(Copyable, Sized):
         return _bit(self._data[], self._offset + i)
 
     def _valid(self, i: Int) -> Bool:
-        return _bit(self._bits[], self._offset + i)
+        return _validity_bit(self._bits[], self._offset + i)
 
     def to_list(self) -> List[Bool]:
         var values = List[Bool](capacity=self._length)
@@ -128,7 +133,7 @@ struct BoolColumn(Copyable, Sized):
         return self._get(index)
 
     def null_count(self) -> Int:
-        return self._length - _count_set(
+        return self._length - _count_valid(
             self._bits[], self._offset, self._length
         )
 
@@ -149,7 +154,7 @@ struct BoolColumn(Copyable, Sized):
             var mask = UInt8(1) << UInt8(k % 8)
             if _bit(data, row):
                 values[k // 8] |= mask
-            if _bit(bits, row):
+            if _validity_bit(bits, row):
                 out_bits[k // 8] |= mask
         return Self(values=values^, bits=out_bits^, length=len(indices))
 
@@ -173,7 +178,7 @@ struct BoolColumn(Copyable, Sized):
             var row = base + i
             if _bit(data, row):
                 values[k // 8] |= mask
-            if _bit(bits, row):
+            if _validity_bit(bits, row):
                 out_bits[k // 8] |= mask
         return Self(values=values^, bits=out_bits^, length=len(indices))
 
@@ -202,7 +207,7 @@ struct BoolColumn(Copyable, Sized):
     def _compact(self) -> Self:
         return Self(
             values=_copy_bits(self._data[], self._offset, self._length),
-            bits=_copy_bits(self._bits[], self._offset, self._length),
+            bits=_copy_validity(self._bits[], self._offset, self._length),
             length=self._length,
         )
 
@@ -211,7 +216,8 @@ struct BoolColumn(Copyable, Sized):
         if not self._owned():
             self = self._compact()
         self._data[].reserve((rows + 7) // 8)
-        self._bits[].reserve((rows + 7) // 8)
+        if len(self._bits[]) != 0:
+            self._bits[].reserve((rows + 7) // 8)
 
     def _append_column(mut self, other: Self):
         """Append values and validity bitwise, copying first unless this
@@ -224,7 +230,7 @@ struct BoolColumn(Copyable, Sized):
         _append_bits(
             self._data[], self._length, other._data[], other._offset, count
         )
-        _append_bits(
+        _append_validity(
             self._bits[], self._length, other._bits[], other._offset, count
         )
         self._length += count

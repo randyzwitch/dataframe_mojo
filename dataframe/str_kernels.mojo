@@ -109,6 +109,8 @@ def _pad(text: String, fill: String, mode: Int64, width: Int) -> String:
 
 
 def string_op(node: Node, input: Series) raises -> Series:
+    if input.is_chunked():
+        return string_op(node, input.rechunk())
     ref column = input._data[StringColumn]
     var n = len(column)
     var valid = List[Bool](capacity=n)
@@ -169,6 +171,8 @@ def string_op(node: Node, input: Series) raises -> Series:
 def concat_strings(
     left: Series, right: Series, separator: String
 ) raises -> Series:
+    if left.is_chunked() or right.is_chunked():
+        return concat_strings(left.rechunk(), right.rechunk(), separator)
     ref a = left._data[StringColumn]
     ref b = right._data[StringColumn]
     if len(a) != len(b) and len(a) != 1 and len(b) != 1:

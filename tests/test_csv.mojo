@@ -1,4 +1,4 @@
-"""Native CSV parsing, conversion, buffering, and expression integration."""
+"""Public Polars-derived CSV parsing and expression integration."""
 from std.testing import (
     TestSuite,
     assert_almost_equal,
@@ -74,13 +74,15 @@ def test_all_dtypes_nulls_quotes_unicode_and_expression_pipeline() raises:
     )
 
 
-def test_buffer_boundaries_produce_identical_results() raises:
+def test_buffer_size_compatibility_preserves_public_results() raises:
     var text = String(
         'id,value,active,label\n1,2.5,true,"a,b"\n2,3.5,false,"x\n""y"""\n'
     )
     _write(text)
-    var expected = read_csv(CSV_PATH, _schema(), buffer_size=65536)
-    for size in range(1, text.byte_length() + 2):
+    var expected = read_csv(CSV_PATH, _schema())
+    # buffer_size remains accepted for API compatibility; range discovery is
+    # now CountLines-driven rather than a separate streaming tokenizer.
+    for size in [1, 64, 65, 65536]:
         var actual = read_csv(CSV_PATH, _schema(), buffer_size=size)
         assert_equal(actual.height(), expected.height())
         for row in range(actual.height()):
@@ -132,32 +134,40 @@ def test_schema_and_option_validation() raises:
         _ = read_csv(CSV_PATH, _schema(), buffer_size=0)
 
 
-def test_conversion_and_nullability_errors() raises:
+def test_conversion_errors_and_nullable_metadata() raises:
     var one_int = CsvSchema([CsvField.int64("x", False)])
-    for bad in ["x\n\n", 'x\n""', "x\n9223372036854775808", "x\n1.5"]:
+    # CsvField.nullable describes schema metadata. Polars' parser emits null
+    # for empty primitive fields regardless of that metadata flag.
+    for empty in ["x\n\n", 'x\n""']:
+        _write(empty)
+        var parsed = read_csv(CSV_PATH, one_int)
+        assert_true(parsed.column("x").int64().is_null(0))
+    for bad in ["x\n9223372036854775808", "x\n1.5"]:
         _write(bad)
         with assert_raises():
             _ = read_csv(CSV_PATH, one_int)
 
     var one_float = CsvSchema([CsvField.float64("x")])
     _write("x\n1e9999")
-    with assert_raises():
-        _ = read_csv(CSV_PATH, one_float)
+    # Polars' float parser accepts exponent overflow as IEEE positive infinity.
+    var overflow = read_csv(CSV_PATH, one_float)
+    assert_true(overflow.column("x").float64().value(0) > 1e300)
 
     var one_bool = CsvSchema([CsvField.bool("x")])
-    for bad in ["x\nTrue", "x\n1", "x\nyes"]:
+    for valid in ["x\nTrue", "x\nTRUE", "x\nfAlSe"]:
+        _write(valid)
+        _ = read_csv(CSV_PATH, one_bool)
+    for bad in ["x\n1", "x\nyes"]:
         _write(bad)
         with assert_raises():
             _ = read_csv(CSV_PATH, one_bool)
 
 
-def test_malformed_csv_and_header_errors() raises:
+def test_malformed_csv_and_positional_explicit_schema() raises:
     var schema = CsvSchema([CsvField.string("a"), CsvField.string("b")])
     for bad in [
-        "a,b\n1",
         "a,b\n1,2,3",
         'a,b\n"unterminated,2',
-        'a,b\n1"quote,2',
         'a,b\n"x"tail,2',
         "a,b\n1,2\r3,4",
     ]:
@@ -165,9 +175,17 @@ def test_malformed_csv_and_header_errors() raises:
         with assert_raises():
             _ = read_csv(CSV_PATH, schema, buffer_size=1)
 
+    # Missing trailing fields null-fill; an interior quote is raw data unless
+    # the field started quoted. Both cases follow Polars splitfields rules.
+    _write('a,b\n1\n1"quote,2\n')
+    var short = read_csv(CSV_PATH, schema)
+    assert_true(short.column("b").string().is_null(0))
+    assert_equal(short.column("a").string().value(1), '1"quote')
+
+    # Explicit schema names label positions and do not validate header names.
     _write("b,a\n1,2")
-    with assert_raises():
-        _ = read_csv(CSV_PATH, schema)
+    var positional = read_csv(CSV_PATH, schema)
+    assert_equal(positional.column("a").string().value(0), "1")
 
 
 def test_invalid_utf8_is_rejected_across_buffer_boundaries() raises:

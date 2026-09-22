@@ -76,7 +76,7 @@ from .window import window_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
 from .bool_column import BoolColumn
-from .column import Column, _count_set
+from .column import Column, _count_valid
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
@@ -296,7 +296,10 @@ def _conditional[
     var predicate = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
-    ref flags = predicate._data[BoolColumn]
+    var contiguous_predicate = (
+        predicate.rechunk() if predicate.is_chunked() else predicate.copy()
+    )
+    ref flags = contiguous_predicate._data[BoolColumn]
     var selected = List[Bool](capacity=size)
     var then_mask = List[Bool](capacity=size)
     var other_mask = List[Bool](capacity=size)
@@ -462,33 +465,15 @@ struct _RowsJob[width: Int](Job):
             self.result._append_series(chunk)
 
 
-def _direct_float_sum(
-    mut reducer: Reducer,
-    bound: BoundExpr,
-    columns: List[Series],
-    node: Node,
-    start: Int,
-    end: Int,
-    grouped: Bool,
-) raises -> Bool:
-    """Accumulate Float64 buffers without materializing expression batches.
-
-    Mask null payloads before adding: Arrow permits arbitrary bits (including
-    NaN) in those slots. The bit count also distinguishes empty means.
-    """
-    if (
-        grouped
-        or (node.op != SUM and node.op != MEAN)
-        or bound.expr._nodes[node.left].op != COL
-    ):
-        return False
-    ref series = columns[bound.sources[node.left]]
-    if series.dtype() != DataType.FLOAT64:
-        return False
-    ref column = series._data[Column[Float64]]
+def _direct_float_column_sum(
+    mut reducer: Reducer, column: Column[Float64], start: Int, end: Int
+):
+    """Accumulate a contiguous Float64 interval into one reducer state."""
     var values = column.unsafe_values()
     var total = SIMD[DType.float64, 4](0)
-    var count = _count_set(column._bits[], column._offset + start, end - start)
+    var count = _count_valid(
+        column._bits[], column._offset + start, end - start
+    )
     var i = start
     if count == end - start:
         while i + 4 <= end:
@@ -519,6 +504,47 @@ def _direct_float_sum(
         if column._valid(i):
             reducer.float_sums[0].total += column._get(i)
         i += 1
+
+
+def _direct_float_sum(
+    mut reducer: Reducer,
+    bound: BoundExpr,
+    columns: List[Series],
+    node: Node,
+    start: Int,
+    end: Int,
+    grouped: Bool,
+) raises -> Bool:
+    """SIMD Float64 sum/mean across intersecting physical chunk intervals."""
+    if (
+        grouped
+        or (node.op != SUM and node.op != MEAN)
+        or bound.expr._nodes[node.left].op != COL
+    ):
+        return False
+    ref series = columns[bound.sources[node.left]]
+    if series.dtype() != DataType.FLOAT64:
+        return False
+    if not series.is_chunked():
+        _direct_float_column_sum(
+            reducer, series._data[Column[Float64]], start, end
+        )
+        return True
+    var chunk_start = 0
+    for part in series.chunks():
+        var chunk_end = chunk_start + len(part)
+        var lo = max(start, chunk_start)
+        var hi = min(end, chunk_end)
+        if lo < hi:
+            _direct_float_column_sum(
+                reducer,
+                part._data[Column[Float64]],
+                lo - chunk_start,
+                hi - chunk_start,
+            )
+        chunk_start = chunk_end
+        if chunk_start >= end:
+            break
     return True
 
 
@@ -534,7 +560,7 @@ def _direct_numeric_column[
     """Direct ungrouped reduction preserving Reducer's canonical state."""
     if op == COUNT:
         reducer.counts[0] += Int64(
-            _count_set(column._bits[], column._offset + start, end - start)
+            _count_valid(column._bits[], column._offset + start, end - start)
         )
         return True
     for i in range(start, end):
@@ -580,6 +606,23 @@ def _direct_numeric_column[
     return True
 
 
+def _direct_numeric_part(
+    mut reducer: Reducer,
+    part: Series,
+    op: Int,
+    start: Int,
+    end: Int,
+) -> Bool:
+    """Dispatch an interval inside one physical numeric array."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if part._data.isa[Column[Scalar[D]]]():
+            return _direct_numeric_column[D](
+                reducer, part._data[Column[Scalar[D]]], op, start, end
+            )
+    return False
+
+
 def _direct_numeric_reduction(
     mut reducer: Reducer,
     bound: BoundExpr,
@@ -602,13 +645,21 @@ def _direct_numeric_reduction(
     ):
         return False
     ref series = columns[bound.sources[node.left]]
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        if series._data.isa[Column[Scalar[D]]]():
-            return _direct_numeric_column[D](
-                reducer, series._data[Column[Scalar[D]]], node.op, start, end
-            )
-    return False
+    if not series.is_chunked():
+        return _direct_numeric_part(reducer, series, node.op, start, end)
+    var chunk_start = 0
+    for part in series.chunks():
+        var chunk_end = chunk_start + len(part)
+        var lo = max(start, chunk_start)
+        var hi = min(end, chunk_end)
+        if lo < hi and not _direct_numeric_part(
+            reducer, part, node.op, lo - chunk_start, hi - chunk_start
+        ):
+            return False
+        chunk_start = chunk_end
+        if chunk_start >= end:
+            break
+    return True
 
 
 def _reduce[

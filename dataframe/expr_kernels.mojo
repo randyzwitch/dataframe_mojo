@@ -727,6 +727,11 @@ def _fill_nan[
 
 
 def validity(series: Series) -> List[Bool]:
+    if series.is_chunked():
+        var result = List[Bool](capacity=len(series))
+        for part in series.chunks():
+            result.extend(Span(validity(part)))
+        return result^
     var n = len(series)
     var valid = List[Bool](capacity=n)
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -764,6 +769,8 @@ def binary[
 ](
     left: Series, right: Series, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
+    if left.is_chunked() or right.is_chunked():
+        return binary[op, width](left.rechunk(), right.rechunk(), mask)
     comptime if is_logical(op):
         return _logical[op](left._data[BoolColumn], right._data[BoolColumn])
     elif op == FILL_NAN:
@@ -853,6 +860,8 @@ def unary[
 ](
     input: Series, integer: Int64, mask: List[Bool] = List[Bool]()
 ) raises -> Series:
+    if input.is_chunked():
+        return unary[op, width](input.rechunk(), integer, mask)
     comptime if op == IS_NULL or op == IS_NOT_NULL:
         var valid = validity(input)
         var values = List[Bool](capacity=len(valid))
@@ -895,6 +904,8 @@ def _choose[
 
 def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     """Row-wise pick between branch results, broadcasting scalar branches."""
+    if then.is_chunked() or other.is_chunked():
+        return choose(selected, then.rechunk(), other.rechunk())
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if then._data.isa[Column[Scalar[D]]]():

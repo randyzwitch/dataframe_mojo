@@ -1,0 +1,8 @@
+engine,scenario,workers,iteration,read_ns,rows,width,nulls
+mojo-public,full,1,0,256715579,1000000,4,90910
+mojo-public,full,1,1,251389233,1000000,4,90910
+mojo-public,full,1,2,250388044,1000000,4,90910
+mojo-public,full,1,3,249137081,1000000,4,90910
+mojo-public,full,1,4,250293936,1000000,4,90910
+mojo-public,full,1,5,250232297,1000000,4,90910
+mojo-public,full,1,6,249113141,1000000,4,90910

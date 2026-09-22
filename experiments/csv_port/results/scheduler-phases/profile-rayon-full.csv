@@ -1,0 +1,16 @@
+rayon_phase,scan_ns,spawn_ns,decode_aggregate_ns,decode_jobs,scope_ns,scope_tail_ns,collect_ns,concat_ns,mapped_total_ns,9349982,149470,493602169,513,16593397,6934159,2729271,1722032,22674224
+engine,scenario,workers,iteration,read_ns,rows,width,nulls
+rayon_phase,scan_ns,spawn_ns,decode_aggregate_ns,decode_jobs,scope_ns,scope_tail_ns,collect_ns,concat_ns,mapped_total_ns,8148814,170744,423680738,513,14739388,6321122,2715711,1572006,19053564
+explicit,full,32,0,19078803,1000000,4,90910
+rayon_phase,scan_ns,spawn_ns,decode_aggregate_ns,decode_jobs,scope_ns,scope_tail_ns,collect_ns,concat_ns,mapped_total_ns,7712360,169407,497451644,513,17104666,9124970,2652401,1548717,21335594
+explicit,full,32,1,21405722,1000000,4,90910
+rayon_phase,scan_ns,spawn_ns,decode_aggregate_ns,decode_jobs,scope_ns,scope_tail_ns,collect_ns,concat_ns,mapped_total_ns,10367512,209816,633237997,513,21174667,10463241,2654292,1538546,25398345
+explicit,full,32,2,25465754,1000000,4,90910
+rayon_phase,scan_ns,spawn_ns,decode_aggregate_ns,decode_jobs,scope_ns,scope_tail_ns,collect_ns,concat_ns,mapped_total_ns,10821154,231615,697795422,513,23474346,12280281,2580673,1515747,27596246
+explicit,full,32,3,27659345,1000000,4,90910
+rayon_phase,scan_ns,spawn_ns,decode_aggregate_ns,decode_jobs,scope_ns,scope_tail_ns,collect_ns,concat_ns,mapped_total_ns,10907129,248067,728816941,513,24363458,13050255,2571774,1547696,28507627
+explicit,full,32,4,28576266,1000000,4,90910
+rayon_phase,scan_ns,spawn_ns,decode_aggregate_ns,decode_jobs,scope_ns,scope_tail_ns,collect_ns,concat_ns,mapped_total_ns,11000875,244631,727709300,513,24263949,12866288,2605993,1512936,28419258
+explicit,full,32,5,28491987,1000000,4,90910
+rayon_phase,scan_ns,spawn_ns,decode_aggregate_ns,decode_jobs,scope_ns,scope_tail_ns,collect_ns,concat_ns,mapped_total_ns,10919962,252614,726869276,513,24128922,12799200,2592993,1513577,28266672
+explicit,full,32,6,28341220,1000000,4,90910

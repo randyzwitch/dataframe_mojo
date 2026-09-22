@@ -122,6 +122,8 @@ def _narrow_sum(result: Series, target: DataType) raises -> Series:
 
 
 def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
+    if input.is_chunked():
+        return window_op(node, input.rechunk(), ids)
     var op_code = node.op
     if (
         op_code == CUM_SUM or op_code == ROLLING_SUM or op_code == ROLLING_MEAN

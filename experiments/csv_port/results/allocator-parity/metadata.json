@@ -1,0 +1,10 @@
+{
+  "parser_commit": "2637cbc",
+  "iterations": 7,
+  "mojo": "1.2.0.dev2026092105 (e9569894)",
+  "polars": "1.44.2",
+  "jemalloc_sys_revision": "0d683dfb157097e2075d5e0eaf25f71f514a7552",
+  "jemalloc_config": "dirty_decay_ms:500,muzzy_decay_ms:1000",
+  "preload_scope": "Mojo child only",
+  "probe_library_sha256": "2f91a7fef455eb11fcb5ef12559d37c9abfbf87e1b9eee24456d53a7b2c17ea4"
+}
