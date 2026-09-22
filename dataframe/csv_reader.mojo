@@ -6,8 +6,17 @@ publication, and array-reference reassembly. The legacy reader remains the
 reference during the port.
 """
 from std.atomic import Atomic
+from std.collections import Dict
+from .csv_infer import infer_csv_schema
 from std.memory import ArcPointer, Pointer
-from .csv import CsvSchema, CsvOptions, _map_file, _options, _projection
+from .csv import (
+    CsvSchema,
+    CsvOptions,
+    _Mapping,
+    _map_file,
+    _options,
+    _projection,
+)
 from .csv_decode import decode_chunk
 from .csv_scan import CountLines, chunk_size
 from .csv_splitfields import CsvSplitFields
@@ -261,10 +270,23 @@ def read_csv_explicit(
         with open(path, "r") as file:
             var input = file.read_bytes()
             return _decode_unmapped(input^, schema, options, keep, has_header)
+    var prelude = _prelude(mapping.span(), options, has_header)
+    return _read_mapped_body(
+        mapping^, schema, options, keep, prelude[0], prelude[1]
+    )
+
+
+def _read_mapped_body(
+    var mapping: _Mapping,
+    schema: CsvSchema,
+    options: CsvOptions,
+    keep: List[Bool],
+    var offset: Int,
+    var record: Int,
+) raises -> DataFrame:
+    var n_rows = options.n_rows
+    var quote_char = options.quote_char
     var bytes = mapping.span()
-    var prelude = _prelude(bytes, options, has_header)
-    var offset = prelude[0]
-    var record = prelude[1]
     if offset == len(bytes) or n_rows == 0:
         return decode_chunk(
             bytes[len(bytes) :], schema, options, keep, 0, record
@@ -326,3 +348,85 @@ def read_csv_explicit(
     if n_rows >= 0 and result.height() > n_rows:
         return result.head(n_rows)
     return result^
+
+
+def read_csv_inferred(
+    path: String,
+    *,
+    infer_schema_length: Int = 100,
+    schema_overrides: Dict[String, String] = Dict[String, String](),
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+) raises -> DataFrame:
+    """Infer and decode using one mapped input and one prelude traversal."""
+    var options = _options(
+        separator,
+        quote_char,
+        comment_prefix,
+        skip_rows,
+        n_rows,
+        null_values,
+        ignore_errors,
+        truncate_ragged_lines,
+        encoding,
+        65536,
+    )
+    var mapping = _map_file(path)
+    if mapping.address != 0:
+        var inferred = infer_csv_schema(
+            mapping.span(),
+            options,
+            has_header=has_header,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+        )
+        if len(inferred.schema) == 0:
+            return DataFrame([])
+        var keep = _projection(inferred.schema, columns)
+        return _read_mapped_body(
+            mapping^,
+            inferred.schema,
+            options,
+            keep,
+            inferred.data_offset,
+            inferred.record_start,
+        )
+    with open(path, "r") as file:
+        var input = file.read_bytes()
+        var bytes = Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=input.unsafe_ptr()
+            .unsafe_mut_cast[False]()
+            .unsafe_origin_cast[ImmutAnyOrigin](),
+            length=len(input),
+        )
+        var inferred = infer_csv_schema(
+            bytes,
+            options,
+            has_header=has_header,
+            infer_schema_length=infer_schema_length,
+            schema_overrides=schema_overrides,
+        )
+        if len(inferred.schema) == 0:
+            return DataFrame([])
+        var keep = _projection(inferred.schema, columns)
+        var result = decode_chunk(
+            bytes[inferred.data_offset :],
+            inferred.schema,
+            options,
+            keep,
+            0,
+            inferred.record_start,
+        )
+        if n_rows >= 0 and result.height() > n_rows:
+            result = result.head(n_rows)
+        _ = input^
+        return result^

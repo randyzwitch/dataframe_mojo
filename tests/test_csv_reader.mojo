@@ -1,7 +1,9 @@
 """End-to-end coverage for the clean explicit-schema CSV orchestration."""
+from std.collections import Dict
+from dataframe.dtype import DataType
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 from dataframe.csv import CsvField, CsvOptions, CsvSchema
-from dataframe.csv_reader import _decode_unmapped, _prelude, read_csv_explicit
+from dataframe.csv_reader import _decode_unmapped, _prelude, read_csv_explicit, read_csv_inferred
 from dataframe.frame import DataFrame
 
 
@@ -133,6 +135,24 @@ def test_final_unterminated_record_and_comment_match_read_impl_count() raises:
         file.write("id,name,score\n# final comment")
     var comment = read_csv_explicit(PATH, schema(), comment_prefix="#")
     assert_equal(comment.height(), 0)
+
+
+def test_inferred_reader_shares_mapping_and_projected_decode() raises:
+    with open(PATH, "w") as file:
+        file.write('id,score,active,name\n1,1.5,true,"a,b"\n2,,false,z\n')
+    var result = read_csv_inferred(PATH)
+    assert_equal(result.height(), 2)
+    assert_equal(result.column("id").dtype(), DataType.INT64)
+    assert_equal(result.column("score").dtype(), DataType.FLOAT64)
+    assert_equal(result.column("active").dtype(), DataType.BOOL)
+    assert_equal(result.column("name").string().value(0), "a,b")
+    assert_equal(result.column("score").null_count(), 1)
+    var override = Dict[String, String]()
+    override["id"] = "string"
+    var projected = read_csv_inferred(PATH, columns=["id"], schema_overrides=override, n_rows=1)
+    assert_equal(projected.height(), 1)
+    assert_equal(projected.column("id").dtype(), DataType.STRING)
+    assert_equal(projected.column("id").string().value(0), "1")
 
 
 def main() raises:

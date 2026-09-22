@@ -17,6 +17,9 @@ alone do not establish equivalence; the mapping below records actual functions.
 | `csv/read/parser.rs:CountLines::count/find_next` | `csv_scan.CountLines` | 64-byte quote-parity masks, newline count, last boundary, window doubling |
 | `csv/read/splitfields.rs:SplitFields::next` (SIMD build) | `csv_splitfields.CsvSplitFields` | Borrowed offsets; cached quoted-field structural ends; scalar tail |
 | `csv/read/parser.rs:parse_lines` | `csv_decode.decode_chunk` | Borrowed fields, projected-only buffers, null-on-error; focused semantic and explicit-reader orchestration tests pass |
+| `csv/read/schema_inference.rs` | `csv_infer.infer_csv_schema` | Lossy UTF-8 headers, `_duplicated_N` names, all-column null tokens, Bool/Float/Int candidate sets, and Polars' 100-record default |
+| `csv/read/streaming.rs:read_until_start_and_infer_schema` | `csv_infer.infer_csv_schema` | BOM, SkipEmpty, quote-aware `skip_rows`, header removal, comments, and retained post-prelude mmap offset |
+| `csv/read/read_impl.rs:parse_csv` | `csv_reader._read_mapped_body` | Source-ordered decode jobs, schema-wide UTF-8 check, CountLines estimate validation, EOF-comment rule, probabilistic `n_rows` stop, final head |
 | Arrow mutable primitive/boolean validity | `CsvBuffer`, column validity helpers | Absent bitmap until first null; prior valid prefix initialized once; consumers and Arrow preserve absence |
 | `csv/read/builder.rs:validate_utf8` | `StringSlice(from_utf8=chunk)` | Whole-chunk validator; generated assembly verified SIMD on x86-64 |
 | `fast_float2` / `atoi_simd` dispatch | `csv_numeric.mojo` / existing integer parser | Float32/Float64 source dispatch, packed fractional digits and fixed-array batched decimal fallback; integer SIMD backend not yet ported |
@@ -45,7 +48,12 @@ Polars-derived code is covered by [its retained license](../third_party/POLARS_L
 
 ## Remaining source differences
 
-These are unfinished work, not alternative optimization choices:
+The source mapping above covers the implemented hot path. It does **not** mean
+that the internal reader exposes every Polars CSV option. The items below are
+split between hot-path/representation differences and public-option scope so
+that unsupported configuration is not presented as a tokenizer regression.
+
+### Hot path and representation
 
 - Integer parsing is not yet a verified translation of the enabled atoi_simd
   architecture-specific backend.
@@ -54,8 +62,25 @@ These are unfinished work, not alternative optimization choices:
   workers with work stealing.
 - Temporal conversion still uses the existing Mojo parser and constructs a
   String; the Polars temporal parser has not been translated.
-- New schema inference is not implemented. The public reader remains unchanged.
+- Inference supports Bool/Int64/Float64/String, with explicit dtype overrides;
+  temporal inference remains unported. The internal default sample is 100,
+  matching Polars; the legacy public reader remains unchanged.
 - Single-array Arrow export explicitly rechunks; Arrow stream export is pending.
+
+### Unsupported reader options and type surface
+
+These are source features not yet exposed by the clean reader API, rather than
+alternate semantics for its existing arguments:
+
+- `skip_lines` (naive, quote-agnostic) and `skip_rows_after_header` are absent.
+- Custom `eol_char` is absent; the clean scanner and splitter use LF.
+- Named per-column null tokens and `missing_is_null=False` are absent. The
+  current `null_values` list applies to every column and bare empty fields are
+  null.
+- Date/time inference, `decimal_comma`, and optional Int128 inference are not
+  implemented. Unsupported inferred candidates become String.
+- Column-name replacement, positional projection, row indices, compression,
+  and Polars' `raise_if_empty` controls are outside this internal API.
 
 No end-to-end performance parity is claimed for this intermediate state.
 
@@ -82,8 +107,10 @@ that the branch's legacy reader is not an untouched-main performance baseline.
 
 Focused checks passed on the main-based comparison branch: scanner 4/4,
 splitter 8/8, structural bits 2/2 (hardware and `-pclmul` fallback), numeric
-4/4, typed buffers 3/3, decoder 9/9, explicit reader 6/6 with four threads,
+4/4, typed buffers 3/3, decoder 9/9, explicit/inferred reader 7/7 with four threads,
 chunked consumers 2/2, and Arrow 6/6. The numeric oracle verifier independently
 confirmed 419 stored Float32/Float64 bit patterns with installed Polars 1.44.2.
+Inference passed 7/7 focused tests and 11 differential fixtures against Polars
+1.44.2. Inferred reads retain the same mapping through sampling and decode.
 Earlier chunk storage and concat checks also passed. No throughput timings
 have been collected for this new pipeline.
