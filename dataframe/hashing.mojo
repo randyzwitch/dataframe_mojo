@@ -94,6 +94,130 @@ def column_codes(
     return len(lookup)
 
 
+struct _InlineStringCodes(Movable):
+    """Exact codes for inline view keys with a general high-cardinality fallback."""
+
+    var keys: List[UInt128]
+    var codes: List[Int]
+    var count: Int
+    var fallback: Dict[UInt128, Int]
+    var use_fallback: Bool
+
+    def __init__(out self):
+        self.keys = List[UInt128](length=512, fill=0)
+        self.codes = List[Int](length=512, fill=-1)
+        self.count = 0
+        self.fallback = Dict[UInt128, Int]()
+        self.use_fallback = False
+
+    def get_or_insert(mut self, key: UInt128, next_id: Int) -> Int:
+        if self.use_fallback:
+            var code = self.fallback.get(key, -1)
+            if code < 0:
+                self.fallback[key] = next_id
+                return next_id
+            return code
+        var hash_value = UInt64(key) ^ UInt64(key >> 64)
+        hash_value = (hash_value ^ (hash_value >> 30)) * 0xBF58476D1CE4E5B9
+        hash_value = (hash_value ^ (hash_value >> 27)) * 0x94D049BB133111EB
+        var slot = Int((hash_value ^ (hash_value >> 31)) & 511)
+        while self.codes[slot] >= 0:
+            if self.keys[slot] == key:
+                return self.codes[slot]
+            slot = (slot + 1) & 511
+        self.keys[slot] = key
+        self.codes[slot] = next_id
+        self.count += 1
+        if self.count == 256:
+            for i in range(512):
+                if self.codes[i] >= 0:
+                    self.fallback[self.keys[i]] = self.codes[i]
+            self.use_fallback = True
+        return next_id
+
+
+def _inline_view_key(value: StringSlice[ImmutAnyOrigin]) -> UInt128:
+    """Pack legacy short strings into the same key as inline views."""
+    var bytes = value.as_bytes()
+    var key = UInt128(len(bytes))
+    for i in range(len(bytes)):
+        key |= UInt128(bytes[i]) << UInt128((i + 4) * 8)
+    return key
+
+
+def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
+    """Number one string key directly across its physical chunks."""
+    var ids = List[Int](capacity=len(series))
+    var representatives = List[Int]()
+    var inline = _InlineStringCodes()
+    var long_lookup = Dict[StringSlice[ImmutAnyOrigin], Int]()
+    var null_code = -1
+    var row = 0
+    for chunk in series.chunks():
+        ref column = chunk._data[StringColumn]
+        if column._is_view_storage():
+            var storage = column._view_storage_unchecked()
+            for i in range(len(column)):
+                if not column._valid(i):
+                    if nulls_equal:
+                        if null_code < 0:
+                            null_code = len(representatives)
+                            representatives.append(row)
+                        ids.append(null_code)
+                    else:
+                        ids.append(-1)
+                    row += 1
+                    continue
+                var view = storage._view_unchecked(column._offset + i)
+                var code: Int
+                if view.is_inline():
+                    var key = (
+                        UInt128(view.length)
+                        | (UInt128(view.prefix) << 32)
+                        | (UInt128(view.buffer_index) << 64)
+                        | (UInt128(view.offset) << 96)
+                    )
+                    code = inline.get_or_insert(key, len(representatives))
+                else:
+                    var value = storage._get_unchecked(column._offset + i)
+                    code = long_lookup.get(value, -1)
+                    if code < 0:
+                        code = len(representatives)
+                        long_lookup[value] = code
+                if code == len(representatives):
+                    representatives.append(row)
+                ids.append(code)
+                row += 1
+        else:
+            for i in range(len(column)):
+                if not column._valid(i):
+                    if nulls_equal:
+                        if null_code < 0:
+                            null_code = len(representatives)
+                            representatives.append(row)
+                        ids.append(null_code)
+                    else:
+                        ids.append(-1)
+                    row += 1
+                    continue
+                var value = column._get(i)
+                var code = -1
+                if value.byte_length() <= 12:
+                    code = inline.get_or_insert(
+                        _inline_view_key(value), len(representatives)
+                    )
+                else:
+                    code = long_lookup.get(value, -1)
+                    if code < 0:
+                        code = len(representatives)
+                        long_lookup[value] = code
+                if code == len(representatives):
+                    representatives.append(row)
+                ids.append(code)
+                row += 1
+    return RowKeys(ids^, representatives^)
+
+
 def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     """Assign dense ids to distinct key rows, in first-occurrence order.
 
@@ -102,6 +226,8 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     """
     if len(keys) == 0:
         raise Error("Row keys require at least one column")
+    if len(keys) == 1 and keys[0]._data.isa[StringColumn]():
+        return _encode_string_rows(keys[0], nulls_equal)
     for key in keys:
         if key.is_chunked():
             var contiguous = List[Series](capacity=len(keys))

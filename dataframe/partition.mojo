@@ -67,7 +67,12 @@ def _hash_bytes(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt64:
 
 
 def _hash_column(
-    series: Series, start: Int, end: Int, out_address: Int, first: Bool
+    series: Series,
+    start: Int,
+    end: Int,
+    out_address: Int,
+    first: Bool,
+    output_offset: Int = 0,
 ) raises:
     """Hash rows [start, end) of one key column into `out`, combining with
     what earlier key columns wrote unless this is the first."""
@@ -75,7 +80,7 @@ def _hash_column(
 
     @__parameter
     def write(i: Int, key: UInt64):
-        var slot = p.unsafe_offset(i)
+        var slot = p.unsafe_offset(i - output_offset)
         slot[] = _mix(key) if first else _combine(slot[], key)
 
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -204,10 +209,7 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
     """
     for key in keys:
         if key.is_chunked():
-            var contiguous = List[Series](capacity=len(keys))
-            for item in keys:
-                contiguous.append(item.rechunk())
-            return low_cardinality(contiguous^)
+            return _low_cardinality_chunked(keys)
     var rows = len(keys[0])
     if rows == 0:
         return True
@@ -233,6 +235,50 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
     # than half the reachable hash slots are occupied.
     var reachable = min(sample, _SLOTS)
     return 2 * occupied < reachable
+
+
+def _low_cardinality_chunked(keys: List[Series]) raises -> Bool:
+    """Sample source chunks without materializing whole key columns."""
+    var rows = len(keys[0])
+    if rows == 0:
+        return True
+    var sample = min(rows, _SAMPLE_ROWS)
+    var stride = max(1, rows // sample)
+    var parts = List[List[Series]](capacity=len(keys))
+    var indexes = List[Int](length=len(keys), fill=0)
+    var ends = List[Int](capacity=len(keys))
+    for key in keys:
+        var chunks = key.chunks()
+        ends.append(len(chunks[0]))
+        parts.append(chunks^)
+    var hash = List[UInt64](length=1, fill=0)
+    var address = Int(hash.unsafe_ptr())
+    var seen = List[Bool](length=_SLOTS, fill=False)
+    var occupied = 0
+    var taken = 0
+    var i = 0
+    while i < rows and taken < sample:
+        for j in range(len(keys)):
+            while i >= ends[j]:
+                indexes[j] += 1
+                ends[j] += len(parts[j][indexes[j]])
+            var part = parts[j][indexes[j]].copy()
+            var local = i - (ends[j] - len(part))
+            _hash_column(
+                part,
+                local,
+                local + 1,
+                address,
+                j == 0,
+                output_offset=local,
+            )
+        var slot = Int(hash[0] >> UInt64(_SLOT_SHIFT))
+        if not seen[slot]:
+            seen[slot] = True
+            occupied += 1
+        taken += 1
+        i += stride
+    return 2 * occupied < min(sample, _SLOTS)
 
 
 struct Partitioner(Movable):
