@@ -367,3 +367,64 @@ Run the benchmark driver with `--csv-only --sizes 1000000 --threads 32
 The next remaining costs include typed decoding and final contiguous-buffer
 assembly. These checkpoints do not close #152 or establish performance on
 other machines or platforms.
+
+## Public reader after #161: source-stage recheck (2026-09-22)
+
+The preceding checkpoints describe the retired reader. Public `read_csv` now
+uses the source-mapped pipeline documented in [csv-polars-port.md](csv-polars-port.md),
+with Polars 1.44.2 pinned for the comparison. The old 65.5 ms / 18.1 ms
+headline and the serial concat-copy cost in #152 are no longer current.
+
+| #152 Polars stage | Current public Mojo path | Remaining difference |
+|---|---|---|
+| mmap | `_map_file`, then one bounded byte span | Unmappable inputs use owned bytes through the same decoder. |
+| chunk sizing and `CountLines` | `chunk_size` and `CountLines.find_next` produce 513 ranges of about 97 KB on the 1M-row reference fixture | Same size class as Polars' 512 ranges; count includes the final tail. |
+| publish while scanning | `Pool.run_produced` with a shared produced-job queue | Pool is scoped to one read; Rayon workers persist and work steal. |
+| UTF-8 and builders | `decode_chunk` validates once when String is projected and reserves `rows + 1` | Uses Mojo's validator and builders. |
+| `SplitFields` and projection | Cached structural masks, borrowed fields, and quote-aware tail skipping | See the supported options in `csv-polars-port.md`. |
+| numeric conversion | `csv_numeric` ports pinned fast-float2 for Float32/Float64; `csv_integer` ports pinned atoi_simd | ARM integers use a packed fallback. |
+| vertical assembly | `concat` retains chunked output without copying values | The generic `Series._from_chunks` previously allocated a one-element chunk list for each contiguous input. This branch appends its array reference directly. |
+
+The 49.7 MB, 1M-row, eight-column reference CSV was measured with
+`pixi run -e oracle bench-polars --csv-only --sizes 1000000 --threads N --reps 7`.
+On this machine, unmodified `main` measured 361.68 ms against Polars 212.84 ms
+at one thread, and 19.08 ms against Polars 15.19 ms at 32 threads. This is
+18.9x Mojo scaling and 1.26x Polars' time at 32 threads. These runs are a
+current checkpoint, not a claim that every workload reaches the same ratio.
+
+A separate temporary worktree instrumented `_read_mapped_body` and each decode
+job with `monotonic()`. It did not modify the production branch. Four warmed
+32-thread reads produced 513 jobs each. In the fastest of those instrumented
+reads, setup was 1.19 ms, producer scan/publication 7.18 ms, remaining
+join/drain 8.95 ms, frame gathering 0.41 ms, and chunk assembly 2.94 ms.
+Producer and worker decoding overlap, so the producer elapsed time is not
+an isolated CPU cost. Across the four reads, range medians fell in 0.8–1.0 ms
+100-µs buckets and maxima were 1.47–1.97 ms, within about 2.2x of the
+corresponding median bucket. Instrumentation adds overhead; use the unmodified
+binaries for the performance comparison.
+
+### Owned-array assembly change
+
+Polars' `accumulate_dataframes_vertical` appends Arrow chunks in
+`vstack_mut_owned`. Mojo's `concat` already preserves chunked output, but
+`Series._from_chunks` called `part.chunks()` for every input part. For the
+usual one-array decode result, that constructed a temporary one-element List,
+a temporary Series, and another storage reference before appending the array.
+The new single-chunk branch appends its storage reference directly. Existing
+multi-chunk inputs retain the old flattening path and checks.
+
+Two optimized binaries were built from `5e05b84` and this branch with the same
+pinned Mojo environment. Four pairs of seven-repetition reads alternated
+baseline and branch at 32 threads; the reported value from each process is its
+best warmed read. Median baseline was 18.93 ms, median branch 18.17 ms, a
+0.76 ms (4.0%) improvement. Every pair improved. At one thread, three paired
+runs were within noise (baseline median 362.12 ms, branch 362.61 ms).
+Correctness checks included `test_chunked_series`, `test_concat`,
+`test_csv_consumers`, and `test_csv_parallel`.
+
+#152's original semantic criterion refers to an unchanged scalar reference
+reader. #161 removed that reader and deliberately adopted Polars' semantics
+where they differed. Current correctness is checked against the documented
+public contract, public CSV fixtures, and the Polars oracle, as described in
+`csv-polars-port.md`. Further performance work should compare the current
+pipeline rather than the retired reader's stage costs.
