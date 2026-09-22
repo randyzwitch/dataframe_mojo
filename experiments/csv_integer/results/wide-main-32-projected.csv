@@ -1,0 +1,8 @@
+engine,scenario,workers,iteration,read_ns,rows,width,nulls
+legacy,projected,32,0,15171822,1000000,1,0
+legacy,projected,32,1,16378315,1000000,1,0
+legacy,projected,32,2,16958982,1000000,1,0
+legacy,projected,32,3,16679039,1000000,1,0
+legacy,projected,32,4,17579470,1000000,1,0
+legacy,projected,32,5,16418614,1000000,1,0
+legacy,projected,32,6,17209477,1000000,1,0
