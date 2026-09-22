@@ -22,7 +22,7 @@ alone do not establish equivalence; the mapping below records actual functions.
 | `csv/read/read_impl.rs:parse_csv` | `csv_reader._read_mapped_body` | Source-ordered decode jobs, schema-wide UTF-8 check, CountLines estimate validation, EOF-comment rule, probabilistic `n_rows` stop, final head |
 | Arrow mutable primitive/boolean validity | `CsvBuffer`, column validity helpers | Absent bitmap until first null; prior valid prefix initialized once; consumers and Arrow preserve absence |
 | `csv/read/builder.rs:validate_utf8` | `StringSlice(from_utf8=chunk)` | Whole-chunk validator; generated assembly verified SIMD on x86-64 |
-| `fast_float2` / `atoi_simd` dispatch | `csv_numeric.mojo` / existing integer parser | Float32/Float64 source dispatch, packed fractional digits and fixed-array batched decimal fallback; integer SIMD backend not yet ported |
+| `fast_float2` / `atoi_simd` dispatch | `csv_numeric.mojo` / `csv_integer.mojo` | Float32/Float64 source dispatch, packed fractional digits and fixed-array batched decimal fallback; source-dispatched SSE/AVX2 integer reductions and SWAR fallback |
 | Rayon scoped task publication | `csv_reader` + `Pool.run_produced` | Same scan/publish overlap; scoped pthread pool and shared queue remain explicit runtime differences from persistent Rayon/work stealing |
 | `accumulate_dataframes_vertical` / `vstack_mut_owned` | `Series._from_chunks`, `frame.concat` | Append immutable Arrow array references; chunk storage and consumer tests pass |
 | Chunk-aware downstream kernels | `Series.chunks/slice`, kernel adapters | Row access, slicing, display and validity retain chunks; some consumers explicitly rechunk; reductions iterate chunks directly |
@@ -55,8 +55,8 @@ that unsupported configuration is not presented as a tokenizer regression.
 
 ### Hot path and representation
 
-- Integer parsing is not yet a verified translation of the enabled atoi_simd
-  architecture-specific backend.
+- Integer SSE/AVX2 dispatch and reductions are ported and instruction-checked
+  on x86; the dedicated Neon integer backend remains unported (SWAR fallback).
 - String builders still produce offset/byte arrays instead of Polars BinaryView.
 - The pool is scoped per read and uses a shared queue, not persistent Rayon
   workers with work stealing.
@@ -114,3 +114,7 @@ Inference passed 7/7 focused tests and 11 differential fixtures against Polars
 1.44.2. Inferred reads retain the same mapping through sampling and decode.
 Earlier chunk storage and concat checks also passed. No throughput timings
 have been collected for this new pipeline.
+
+Integer validation: default x86, explicit SSE/AVX2, and SIMD-disabled fallback
+all pass 3/3 tests, with 31 pinned Polars oracle cases. Emitted x86 assembly
+contains the expected `vpmaddubsw`, `vpmaddwd`, and `vpackusdw` reductions.

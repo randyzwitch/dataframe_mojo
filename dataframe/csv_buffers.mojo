@@ -13,7 +13,7 @@ from .string_column import StringBuilder
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .csv import CsvField, CsvOptions
-from .parse import parse_integer
+from .csv_integer import parse_csv_integer
 from .csv_numeric import parse_csv_float32, parse_csv_float64
 from .temporal import parse as parse_temporal
 
@@ -193,7 +193,7 @@ struct CsvBuffer(Movable):
                         )
                     else:
                         self.storage[_NumericBuffer[D]].append(
-                            parse_integer[D](text), True
+                            parse_csv_integer[D](text), True
                         )
                     return
         except e:
