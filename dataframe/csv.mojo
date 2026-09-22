@@ -4,7 +4,7 @@ The scalar tokenizer is deliberately separate from typed column decoding. It
 keeps state across input buffers, including quoted records, so later SIMD
 structural scanning or parallel decoding can replace one stage at a time.
 """
-from std.bit import count_trailing_zeros
+from std.bit import count_trailing_zeros, pop_count
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast
 from std.collections import Dict
@@ -219,6 +219,22 @@ struct _CsvColumn(Movable):
             self.kind = _KIND_BOOL
         else:
             self.kind = _KIND_STRING
+
+    def reserve(mut self, rows: Int):
+        if not self.keep:
+            return
+        if self.kind == _KIND_INT or self.kind == _KIND_TEMPORAL:
+            self.ints.values.reserve(rows)
+            self.ints.valid.reserve(rows)
+        elif self.kind == _KIND_FLOAT:
+            self.floats.values.reserve(rows)
+            self.floats.valid.reserve(rows)
+        elif self.kind == _KIND_BOOL:
+            self.bools.values.reserve(rows)
+            self.bools.valid.reserve(rows)
+        else:
+            self.strings._offsets.reserve(rows + 1)
+            self.strings._bits.reserve((rows + 7) // 8)
 
     def _error(self, record: Int, text: String) -> Error:
         return Error(
@@ -719,16 +735,7 @@ struct _CsvReader:
             self.record_bytes.append(byte)
 
     def _mask(self, matches: SIMD[DType.bool, 64]) -> UInt64:
-        """Pack 64 comparison lanes into one bit per input byte.
-
-        Each byte is zero or one. Multiplication gathers eight such bytes
-        into the high byte of each word; distinct bit weights prevent carries.
-        The library requires little endian storage on every supported target.
-        """
-        var words = bitcast[DType.uint64, 8](matches.cast[DType.uint8]())
-        var packed = (words * SIMD[DType.uint64, 8](0x0102040810204080)) >> 56
-        var shifts = SIMD[DType.uint64, 8](0, 8, 16, 24, 32, 40, 48, 56)
-        return (packed << shifts).reduce_or()
+        return _mask64(matches)
 
     def _structural_mask(
         self, bytes: Span[UInt8, ImmutAnyOrigin], start: Int
@@ -1011,6 +1018,14 @@ def _options(
     )
     options.validate()
     return options^
+
+
+def _mask64(matches: SIMD[DType.bool, 64]) -> UInt64:
+    """Pack one bit per comparison lane, low byte first."""
+    var words = bitcast[DType.uint64, 8](matches.cast[DType.uint8]())
+    var packed = (words * SIMD[DType.uint64, 8](0x0102040810204080)) >> 56
+    var shifts = SIMD[DType.uint64, 8](0, 8, 16, 24, 32, 40, 48, 56)
+    return (packed << shifts).reduce_or()
 
 
 comptime _SCAN_WIDTH = 32
@@ -1371,30 +1386,61 @@ def _try_map(path: String) raises -> _Mapping:
         return _Mapping(address, length)
 
 
-struct _MappedRangeJob(Job):
-    """Decode one record-aligned range of a mapped file.
+@fieldwise_init
+struct _MappedReadConfig(Movable):
+    var schema: CsvSchema
+    var options: CsvOptions
+    var keep: List[Bool]
+    var has_header: Bool
 
-    The mapping outlives every job, being held by the frame-building call
-    below, so a range reads straight out of it.
+
+struct _MappedRangeJob(Job):
+    """Decode a mapped range, constructing its builders on its worker.
+
+    Configuration is immutable and shared. The caller retains the mapping
+    until every job has finished; no input pointer escapes into a result.
     """
 
-    var reader: _CsvReader
+    var config: ArcPointer[_MappedReadConfig]
     var base: Int
     var start: Int
     var end: Int
+    var record: Int
+    var rows: Int
     var frame: DataFrame
 
     def __init__(
-        out self, var reader: _CsvReader, base: Int, start: Int, end: Int
+        out self,
+        config: ArcPointer[_MappedReadConfig],
+        base: Int,
+        start: Int,
+        end: Int,
+        record: Int,
+        rows: Int,
     ) raises:
-        self.reader = reader^
+        self.config = config.copy()
         self.base = base
         self.start = start
         self.end = end
+        self.rows = rows
+        self.record = record
         self.frame = DataFrame(List[Series](), height=0)
 
     def run(mut self) raises:
-        self.reader.feed(
+        ref config = self.config[]
+        var reader = _CsvReader(
+            config.schema,
+            config.has_header and self.start == 0,
+            config.options,
+            config.keep,
+        )
+        for c in range(len(reader.columns)):
+            reader.columns[c].reserve(self.rows)
+        reader.record += self.record
+        # A byte-order mark is special only at the start of the file.
+        if self.start != 0:
+            reader.prefix_done = True
+        reader.feed(
             Span[UInt8, ImmutAnyOrigin](
                 unsafe_ptr=Pointer[UInt8, MutAnyOrigin](
                     unsafe_from_address=self.base + self.start
@@ -1404,7 +1450,7 @@ struct _MappedRangeJob(Job):
                 length=self.end - self.start,
             )
         )
-        self.frame = self.reader.finish()
+        self.frame = reader.finish()
 
     def into_frame(deinit self) -> DataFrame:
         return self.frame^
@@ -1426,6 +1472,11 @@ def _read_mapped_produced(
     publishes the preceding range, hiding all but the first boundary scan
     behind decoding.
     """
+    var config = ArcPointer(
+        _MappedReadConfig(
+            schema.copy(), options.copy(), keep.copy(), has_header
+        )
+    )
     var span = mapping.span()
     var quoting = options.quote_char.byte_length() > 0
     var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(0)
@@ -1448,14 +1499,16 @@ def _read_mapped_produced(
 
     @__parameter
     def publish(stop: Int) raises:
-        var leading = start == 0
-        var reader = _CsvReader(
-            schema, has_header and leading, options, keep.copy()
+        produced.submit(
+            _MappedRangeJob(
+                config,
+                mapping.address,
+                start,
+                stop,
+                start_record,
+                records - start_record + Int(stop == n),
+            )
         )
-        reader.record += start_record
-        if not leading:
-            reader.prefix_done = True
-        produced.submit(_MappedRangeJob(reader^, mapping.address, start, stop))
         start = stop
         start_record = records
         target = stop + stride
@@ -1487,6 +1540,35 @@ def _read_mapped_produced(
                     records += count
                     i += _SCAN_WIDTH
                     continue
+        if i + 64 <= n:
+            # Quote-bearing blocks used to reload an overlapping SIMD block
+            # after every scalar byte. Prefix XOR gives the quote state at
+            # every position from one load, including doubled quotes.
+            var block = pointer.unsafe_load[width=64](i)
+            var quotes_mask = UInt64(0)
+            if quoting:
+                quotes_mask = _mask64(block.eq(SIMD[DType.uint8, 64](quote)))
+            var parity = quotes_mask
+            parity ^= parity << 1
+            parity ^= parity << 2
+            parity ^= parity << 4
+            parity ^= parity << 8
+            parity ^= parity << 16
+            parity ^= parity << 32
+            var newlines_mask = _mask64(block.eq(SIMD[DType.uint8, 64](10)))
+            var boundaries = newlines_mask & (parity if inside else ~parity)
+            inside = inside != (pop_count(quotes_mask) % 2 != 0)
+            if i + 64 <= target:
+                records += Int(pop_count(boundaries))
+            else:
+                while boundaries != 0:
+                    var stop = i + Int(count_trailing_zeros(boundaries)) + 1
+                    boundaries &= boundaries - 1
+                    records += 1
+                    if stop >= target and stop < n:
+                        publish(stop)
+            i += 64
+            continue
         scan_byte(i)
         i += 1
     if start < n:
@@ -1526,6 +1608,11 @@ def _read_mapped(
         return _read_mapped_produced(
             mapping^, schema, has_header, options, keep, workers, chunks
         )
+    var config = ArcPointer(
+        _MappedReadConfig(
+            schema.copy(), options.copy(), keep.copy(), has_header
+        )
+    )
     var layout = record_splits(span, quote, quoting, chunks)
 
     var jobs = List[_MappedRangeJob]()
@@ -1534,16 +1621,18 @@ def _read_mapped(
         var stop = min(layout.splits[s + 1].offset, len(span))
         if stop <= start:
             continue
-        var leading = s == 0
-        var reader = _CsvReader(
-            schema, has_header and leading, options, keep.copy()
+        jobs.append(
+            _MappedRangeJob(
+                config,
+                mapping.address,
+                start,
+                stop,
+                layout.splits[s].record,
+                layout.splits[s + 1].record
+                - layout.splits[s].record
+                + Int(stop == len(span)),
+            )
         )
-        reader.record += layout.splits[s].record
-        # A byte-order mark means something only at the very start of the
-        # file; elsewhere those bytes are data.
-        if not leading:
-            reader.prefix_done = True
-        jobs.append(_MappedRangeJob(reader^, mapping.address, start, stop))
 
     if len(jobs) == 0:
         var empty = _CsvReader(schema, has_header, options, keep.copy())

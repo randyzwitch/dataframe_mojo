@@ -226,8 +226,9 @@ def _pow10(k: Int) -> Float64:
     return 1.0
 
 
-# 2**53: above this a Float64 cannot hold every integer, so the fast path
-# hands such mantissas to the strict parser instead of rounding twice.
+# 2**53: above this a Float64 cannot hold every integer.  A fully consumed
+# plain decimal still passes directly to the standard converter, which is
+# responsible for its exact rounding.
 comptime _EXACT_LIMIT = UInt64(9007199254740992)
 
 
@@ -239,9 +240,9 @@ def parse_float64(text: StringSlice) raises -> Float64:
     computed in one pass. That is the overwhelming majority of real CSV
     data, and the strict parser below costs about 140 ns a field because it
     walks the text to check the grammar and then walks it again to convert.
-    Anything the fast path does not fully consume, or cannot represent
-    exactly, falls through to that parser, so the accepted grammar and every
-    result are unchanged.
+    Fully consumed wide plain decimals use the standard converter directly;
+    anything this scan does not fully consume falls through to the strict
+    parser.  The accepted grammar and every result are unchanged.
     """
     var b = text.as_bytes()
     var n = len(b)
@@ -277,9 +278,13 @@ def parse_float64(text: StringSlice) raises -> Float64:
         digits == 0
         or fraction == 0  # a trailing "." the strict grammar may reject
         or fraction > 22
-        or mantissa >= _EXACT_LIMIT
     ):
         return _parse_float64_strict(text)
+    # The loop has consumed the complete strict plain-decimal grammar.  A
+    # field of at most 19 digits cannot overflow Float64, so wide mantissas
+    # can convert directly without walking their bytes a second time.
+    if mantissa >= _EXACT_LIMIT:
+        return Float64(text)
     var value = Float64(mantissa)
     if fraction > 0:
         value = value / _pow10(fraction)

@@ -7,6 +7,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- CSV boundary scanning computes quote parity in blocks instead of repeatedly
+  loading overlapping bytes around quotes. Workers construct and reserve
+  their builders using scanned record counts. Validity packing and shifted
+  bitmap assembly write groups of bits at once; string concatenation splits
+  bytes, offsets, and validity into independent jobs within the thread cap.
+  Fully validated wide plain decimals skip a duplicate grammar scan while
+  retaining the standard Float64 converter.
+
 - Plain CSV records decode borrowed input spans without copying fields into
   a record buffer. Finished column builders transfer their buffers, and
   Int64 fields of at most 18 digits avoid per-digit overflow checks. Quoted

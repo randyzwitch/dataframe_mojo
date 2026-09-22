@@ -214,3 +214,79 @@ commit. The local saved runners are `build/bench_csv_checkpoint152` and
 - Changed Mojo files pass formatting checks. Public API documentation,
   dtype literal checks, version consistency, and `git diff --check` pass.
 - Only Linux x86-64 was executed locally; macOS/arm64 need CI coverage.
+
+## Third checkpoint: quote scanning and buffer assembly
+
+Built on `d92c063` on the same branch. The main changes are:
+
+- Reader construction moves from the producer to workers, which reserve
+  retained column capacity from the boundary scanner's row counts.
+- Quote-free blocks retain the existing short SIMD path. Quote-bearing and
+  target-crossing blocks use 64-bit masks and prefix XOR to identify record
+  terminators without repeatedly loading overlapping blocks. Doubled quotes
+  still toggle parity twice; the decoder remains responsible for syntax.
+- Validity packing writes eight Boolean values per output byte. Bitmap
+  appends bulk-copy aligned bytes and SIMD-shift unaligned destinations.
+  String offset rebasing uses SIMD, and parallel concat schedules separate
+  byte, offset, and validity jobs for each string column in one global pool.
+- Fully consumed plain decimals with a wide mantissa call the standard
+  Float64 converter directly, skipping a redundant grammar scan. Conversion
+  still allocates internally and preserves the existing rounding behavior.
+
+### Paired measurements
+
+Same hardware and versions as previous checkpoints, measured September 22.
+Two interleaved runs, seven timed repetitions after warmup, with no concurrent
+builds or tests. Ranges contain each run's minimum.
+
+| Input | Rows | Threads | `d92c063` (ms) | Third checkpoint (ms) | Polars during third-checkpoint runs (ms) |
+|---|---:|---:|---:|---:|---:|
+| Plain | 100,000 | 1 | 39.65–39.77 | 38.87–39.44 | 21.62–21.77 |
+| Plain | 100,000 | 32 | 7.07–7.09 | 6.09–6.44 | 2.42–2.58 |
+| Plain | 1,000,000 | 1 | 395.41–406.05 | 394.99–395.89 | 213.68–214.84 |
+| Plain | 1,000,000 | 32 | 29.15–29.64 | 26.40–27.59 | 16.66–17.53 |
+| Quoted strings | 1,000,000 | 32 | 90.42–92.26 | 42.55–42.75 | 15.49–16.42 |
+
+The quoted fixture contains the same values as the plain file, with only
+`key_str` surrounded by quotes. These results represent about 9% less time
+for the plain parallel read and 53% less for the quoted read, comparing the
+best run minima. Single-threaded improvements are small. Parity is still
+unmet: approximately 1.6x Polars on plain input and 2.6–2.7x on quoted input.
+
+A late warmed read in a separate instrumented build measured:
+
+| Phase | ms |
+|---|---:|
+| Pool and producer setup | 1.26 |
+| Overlapping scan and publication | 7.93 |
+| Remaining decoding, drain, and join | 9.06 |
+| Frame collection, including diagnostic output | 0.61 |
+| Concatenation | 6.25 |
+
+Instrumented end-to-end minimum was 26.12 ms. Concatenation remains material;
+this checkpoint parallelizes copies rather than eliminating them. Quoted
+fields still fall back to the copying decoder after boundary discovery.
+
+### Experiments and validation
+
+- Chunk factors 1, 2, 4, 8, 16, and 32 were compared. Eight remains the default;
+  fewer chunks increased tail variability and more increased overhead.
+- A wider 256-byte quote-free scan did not reliably improve runtime and was
+  omitted. A parity-only scanner helped quoted input but not consistently
+  plain input, motivating the hybrid path.
+- Assembly inspection confirmed that `List.extend(Span[UInt8])` already uses
+  AVX bulk copying. Replacing it with another byte-copy loop was not pursued.
+- All 49 test modules and all 100 Polars oracle cases (seeds 1–100) pass on
+  the final source. Changed Mojo formatting, API docs, dtype literal checks,
+  version consistency, and `git diff --check` pass.
+- New tests exercise bitmap source/destination alignments 0–7 and counts
+  around 128/256-bit boundaries, large sliced nullable string concatenation,
+  and a malformed quote after enough records to ensure actual parallel CSV
+  decoding. The concat suite also passes with `DATAFRAME_THREADS=1`.
+
+Saved comparison runners are `build/bench_csv_checkpoint2_152` and
+`build/bench_csv_final_third152`. Raw results are
+`build/csv_comparison_final_third152.txt`, `build/csv_phases_final_third152.txt`,
+and `build/csv_tuning_third152.txt`. The quoted fixture is in
+`/tmp/dataframe_mojo_quoted_keystr152`; use `--data-dir` and `--sizes 1000000`
+with the benchmark driver to compare it. These are local untracked artifacts.

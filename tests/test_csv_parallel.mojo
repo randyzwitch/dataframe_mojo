@@ -225,5 +225,16 @@ def test_late_chunk_errors_keep_record_numbers() raises:
             _ = read_csv(path, schema())
 
 
+def test_quote_parity_preserves_late_malformed_record() raises:
+    var path = String("/tmp/claude-1000/par_quote_parity.csv")
+    write(path, body(50000, 17, False) + '50000,bad"quote,1.5,true\n')
+    set_threads(32)
+    assert_true(_csv_workers(_file_size(path)) > 1)
+    for threads in [1, 3, 32]:
+        set_threads(threads)
+        with assert_raises(contains="CSV record 50002, field 2"):
+            _ = read_csv(path, schema())
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
