@@ -1,0 +1,9 @@
+Implementation: be91deb (formatting-only normalization after final build).
+Full suite rerun after CSR lifetime fix: 53 modules, 0 failed (TEST_JOBS=16).
+Polars oracle rerun: 150/150, seeds110..259.
+Mutation oracle:20/20 injected bugs caught.
+PyArrow C Data Interface:interop passed.
+Formatting:98 production/test/example/benchmark Mojo files checked; final frame checked after fix.
+Version0.2.0 and dtype checks passed; API documentation check passed.
+Examples, benchmark smoke, precompiled-package smoke passed.
+Full final comparisons:1M/10M, caps1/32, heights and checksums agree.

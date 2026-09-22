@@ -1,0 +1,14 @@
+--- dataframe/frame.mojo
++++ dataframe/frame.mojo
+@@ -1304,6 +1304,11 @@
+ 
+ 
+ def _id_range_bucket(id: Int, groups: Int, buckets: Int) -> Int:
++    # Boundaries are ceil(bucket * groups / buckets), so the inverse is
++    # floor(id * buckets / groups). Avoid the per-row linear boundary search
++    # when native multiplication is provably safe.
++    if groups <= Int.MAX // buckets:
++        return id * buckets // groups
+     var bucket = 0
+     while (
+         bucket + 1 < buckets

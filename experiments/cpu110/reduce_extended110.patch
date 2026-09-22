@@ -1,0 +1,184 @@
+diff --git a/dataframe/execution.mojo b/dataframe/execution.mojo
+index c4e0384..a0d9dc8 100644
+--- a/dataframe/execution.mojo
++++ b/dataframe/execution.mojo
+@@ -18,7 +18,10 @@ from .expr import (
+     GT,
+     EQ,
+     SUM,
++    MEAN,
+     COUNT,
++    MIN,
++    MAX,
+     LT,
+     GE,
+     LE,
+@@ -73,13 +76,14 @@ from .window import window_op
+ from .fusion import fused
+ from .temporal_kernels import dt_op, temporal_binary
+ from .bool_column import BoolColumn
+-from .column import Column
++from .column import Column, _count_set
+ from .string_column import StringColumn, StringBuilder
+ from .series import Series
+ from .expr_kernels import binary, unary, choose, fit_mask
+ from .aggregate import Reducer
+ from .parallel import Job, partitions, run_jobs, worker_count
+ from std.memory import ArcPointer
++from std.math import isnan
+ 
+ 
+ def _numeric_literal(node: Node) raises -> Series:
+@@ -384,6 +388,9 @@ struct _ReduceJob[width: Int](Job):
+         return self.reducer^
+ 
+     def run(mut self) raises:
++        if _direct_numeric_reduction(self.reducer, self.bound, self.columns,
++                             self.node, self.start, self.end, self.grouped):
++            return
+         for offset in range(self.start, self.end, self.batch_size):
+             var chunk = _batch[Self.width](
+                 self.bound,
+@@ -448,6 +455,131 @@ struct _RowsJob[width: Int](Job):
+             self.result._append_series(chunk)
+ 
+ 
++def _direct_float_sum(
++    mut reducer: Reducer, bound: BoundExpr, columns: List[Series],
++    node: Node, start: Int, end: Int, grouped: Bool,
++) raises -> Bool:
++    if (
++        grouped
++        or (node.op != SUM and node.op != MEAN)
++        or bound.expr._nodes[node.left].op != COL
++    ):
++        return False
++    ref series = columns[bound.sources[node.left]]
++    if series.dtype() != DataType.FLOAT64:
++        return False
++    ref column = series._data[Column[Float64]]
++    var values = column.unsafe_values()
++    var total = SIMD[DType.float64, 4](0)
++    var count = _count_set(column._bits[], column._offset + start, end - start)
++    var i = start
++    if count == end - start:
++        while i + 4 <= end:
++            total += values.unsafe_load[width=4](i)
++            i += 4
++    else:
++        var bits = column.unsafe_validity()
++        while i + 4 <= end:
++            var bit = column._offset + i
++            var mask = UInt16(bits.unsafe_load(bit // 8)) >> UInt16(bit % 8)
++            if bit % 8 > 4:
++                mask |= UInt16(bits.unsafe_load(bit // 8 + 1)) << UInt16(8 - bit % 8)
++            var valid = (SIMD[DType.uint64, 4](UInt64(mask), UInt64(mask), UInt64(mask), UInt64(mask)) & SIMD[DType.uint64, 4](1, 2, 4, 8)).ne(SIMD[DType.uint64, 4](0))
++            total += valid.select(values.unsafe_load[width=4](i), SIMD[DType.float64, 4](0))
++            i += 4
++    reducer.float_sums[0].total += total.reduce_add()
++    reducer.float_sums[0].count += Int64(count)
++    while i < end:
++        if column._valid(i):
++            reducer.float_sums[0].total += column._get(i)
++        i += 1
++    return True
++
++
++def _direct_numeric_column[D: DType](
++    mut reducer: Reducer,
++    column: Column[Scalar[D]],
++    op: Int,
++    start: Int,
++    end: Int,
++) -> Bool:
++    """Direct ungrouped reduction preserving Reducer's canonical state."""
++    for i in range(start, end):
++        if not column._valid(i):
++            continue
++        var value = column._get(i)
++        if op == COUNT:
++            reducer.counts[0] += 1
++        elif op == SUM or op == MEAN:
++            comptime if D.is_integral():
++                comptime if D == DType.uint64:
++                    reducer.int_sums[0].add_wide(value.cast[DType.int128]())
++                else:
++                    reducer.int_sums[0].add(value.cast[DType.int64]())
++            else:
++                reducer.float_sums[0].add(value.cast[DType.float64]())
++        else:
++            var is_max = op == MAX
++            comptime if D.is_floating_point():
++                var floating = value.cast[DType.float64]()
++                if isnan(floating):
++                    reducer.nan_seen[0] = True
++                elif (
++                    not reducer.seen[0]
++                    or (is_max and floating > reducer.floats[0])
++                    or (not is_max and floating < reducer.floats[0])
++                ):
++                    reducer.floats[0] = floating
++                    reducer.seen[0] = True
++            else:
++                var integer: Int64
++                comptime if D == DType.uint64:
++                    integer = (
++                        value.cast[DType.uint64]() ^ (UInt64(1) << 63)
++                    ).cast[DType.int64]()
++                else:
++                    integer = value.cast[DType.int64]()
++                if (
++                    not reducer.seen[0]
++                    or (is_max and integer > reducer.ints[0])
++                    or (not is_max and integer < reducer.ints[0])
++                ):
++                    reducer.ints[0] = integer
++                    reducer.seen[0] = True
++    return True
++
++
++def _direct_numeric_reduction(
++    mut reducer: Reducer,
++    bound: BoundExpr,
++    columns: List[Series],
++    node: Node,
++    start: Int,
++    end: Int,
++    grouped: Bool,
++) raises -> Bool:
++    if grouped or bound.expr._nodes[node.left].op != COL:
++        return False
++    if _direct_float_sum(reducer, bound, columns, node, start, end, grouped):
++        return True
++    if (
++        node.op != SUM
++        and node.op != MEAN
++        and node.op != COUNT
++        and node.op != MIN
++        and node.op != MAX
++    ):
++        return False
++    ref series = columns[bound.sources[node.left]]
++    comptime for k in range(len(NUMERIC_DTYPES)):
++        comptime D = NUMERIC_DTYPES[k]
++        if series._data.isa[Column[Scalar[D]]]():
++            return _direct_numeric_column[D](
++                reducer, series._data[Column[Scalar[D]]], node.op, start, end
++            )
++    return False
++
++
+ def _reduce[
+     width: Int
+ ](
+@@ -471,6 +603,10 @@ def _reduce[
+         workers = min(workers, max(1, height // max(1, 4 * group_count)))
+     if workers <= 1:
+         var reducer = _new_reducer(bound, node, group_count)
++        if _direct_numeric_reduction(
++            reducer, bound, columns, node, 0, height, grouped
++        ):
++            return reducer^
+         for offset in range(0, height, batch_size):
+             var chunk = _batch[width](
+                 bound,

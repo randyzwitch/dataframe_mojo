@@ -1,7 +1,7 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
 from .dtype import DataType
 from std.collections import Dict
-from std.memory import ArcPointer
+from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
 from .column import Column, _append_bits
 from .string_column import StringColumn, StringBuilder
@@ -557,7 +557,8 @@ struct DataFrame(Copyable, Sized, Writable):
             and how != "anti"
         ):
             raise Error(
-                "Join how must be inner, left, right, full, semi, anti, or cross"
+                "Join how must be inner, left, right, full, semi, anti, or"
+                " cross"
             )
         if len(left_on) == 0 or len(left_on) != len(right_on):
             raise Error(
@@ -613,7 +614,17 @@ struct DataFrame(Copyable, Sized, Writable):
         # high-cardinality join. Ids appear in increasing row order, so a
         # counting sort preserves the match order the contract documents.
         var right_starts = _group_index(right_ids, count)
-        var right_flat = _group_rows(right_ids, right_starts)
+        var csr_workers = worker_count(len(right_ids))
+        # The stable range scatter adds an order list and one cursor per key.
+        # It wins only once its parallel scatter repays those buffers; keep
+        # the compact serial CSR below the measured 2M-right-row crossover.
+        var right_flat = _parallel_group_rows(
+            right_ids, right_starts, csr_workers
+        ) if (
+            how == "inner" and csr_workers > 1 and len(right_ids) >= 2_000_000
+        ) else _group_rows(
+            right_ids, right_starts
+        )
         var left_rows = List[Int]()
         var right_rows = List[Int]()
         if how == "semi" or how == "anti":
@@ -637,6 +648,12 @@ struct DataFrame(Copyable, Sized, Writable):
                 else:
                     left_rows.append(-1)
                     right_rows.append(j)
+        elif how == "inner" and worker_count(len(left_ids)) > 1:
+            var pairs = _parallel_inner_rows(
+                left_ids, right_starts, right_flat, worker_count(len(left_ids))
+            )
+            left_rows = pairs[0].copy()
+            right_rows = pairs[1].copy()
         else:
             var right_matched = List[Bool](length=len(right_ids), fill=False)
             for i in range(len(left_ids)):
@@ -858,7 +875,8 @@ struct DataFrame(Copyable, Sized, Writable):
             or value_name in index_set
         ):
             raise Error(
-                "unpivot output names must be distinct from each other and the index"
+                "unpivot output names must be distinct from each other and the"
+                " index"
             )
         var repeated = List[Int](capacity=self._height * len(columns_on))
         for _ in range(len(columns_on)):
@@ -1283,6 +1301,455 @@ def _group_rows(ids: List[Int], starts: List[Int]) -> List[Int]:
     return rows^
 
 
+comptime _RANGE_JOIN_MAX_IDS = 8_000_000
+
+
+def _range_join_span_fits(low: Int64, high: Int64, cap: Int) -> Bool:
+    """Whether `[low, high]` has at most `cap` Int64 values, safely."""
+    if cap <= 0:
+        return False
+    if low >= 0 or high < 0:
+        # Same-sign subtraction cannot overflow here. The largest negative
+        # span is Int64.MAX (`-1 - Int64.MIN`).
+        return high - low < Int64(cap)
+    # A span crossing zero needs unsigned addition. `-Int64.MIN` itself is
+    # not representable, and its range cannot meet our small cap anyway.
+    if low == Int64.MIN:
+        return False
+    return UInt64(high) + UInt64(-low) < UInt64(cap)
+
+
+def _bounded_int64_join_ids(
+    left: DataFrame, right: DataFrame, left_column: Int, right_column: Int
+) -> Tuple[Bool, List[Int], List[Int], Int]:
+    """Dense direct ids for one small Int64 value range, or `False`.
+
+    This is deliberately a range guard, not a general direct-address table:
+    `count` feeds the join CSR's `starts` allocation, so a sparse or wide
+    range must use the normal dictionary encoder even when few values occur.
+    """
+    if (
+        left._columns[left_column].dtype().physical() != DataType.INT64
+        or right._columns[right_column].dtype().physical() != DataType.INT64
+    ):
+        return (False, List[Int](), List[Int](), 0)
+    # The relative cap below is only an allocation guard. Avoid overflowing
+    # its row-count input on theoretical maximal frames; those must use the
+    # dictionary path.
+    if left.height() > Int.MAX - right.height():
+        return (False, List[Int](), List[Int](), 0)
+    var total = left.height() + right.height()
+    var cap = _RANGE_JOIN_MAX_IDS
+    if total < cap // 4:
+        cap = total * 4
+    var found = False
+    var low = Int64(0)
+    var high = Int64(0)
+    ref left_values = left._columns[left_column]._data[Column[Int64]]
+    ref right_values = right._columns[right_column]._data[Column[Int64]]
+    for row in range(len(left_values)):
+        if left_values._valid(row):
+            var value = left_values._get(row)
+            if not found:
+                low = value
+                high = value
+                found = True
+            else:
+                low = min(low, value)
+                high = max(high, value)
+    for row in range(len(right_values)):
+        if right_values._valid(row):
+            var value = right_values._get(row)
+            if not found:
+                low = value
+                high = value
+                found = True
+            else:
+                low = min(low, value)
+                high = max(high, value)
+    if not found:
+        return (
+            True,
+            List[Int](length=len(left_values), fill=-1),
+            List[Int](length=len(right_values), fill=-1),
+            0,
+        )
+    if not _range_join_span_fits(low, high, cap):
+        return (False, List[Int](), List[Int](), 0)
+    var count = Int(high - low) + 1
+    var left_ids = List[Int](capacity=len(left_values))
+    var right_ids = List[Int](capacity=len(right_values))
+    for row in range(len(left_values)):
+        left_ids.append(
+            Int(left_values._get(row) - low) if left_values._valid(row) else -1
+        )
+    for row in range(len(right_values)):
+        right_ids.append(
+            Int(right_values._get(row) - low) if right_values._valid(
+                row
+            ) else -1
+        )
+    return (True, left_ids^, right_ids^, count)
+
+
+def _id_range_first(bucket: Int, groups: Int, buckets: Int) -> Int:
+    return (bucket * groups + buckets - 1) // buckets
+
+
+def _id_range_bucket(id: Int, groups: Int, buckets: Int) -> Int:
+    var bucket = 0
+    while bucket + 1 < buckets and id >= _id_range_first(
+        bucket + 1, groups, buckets
+    ):
+        bucket += 1
+    return bucket
+
+
+struct _CSRCountJob(Job):
+    """Count one input range into contiguous global-id buckets."""
+
+    var ids: Int
+    var start: Int
+    var end: Int
+    var groups: Int
+    var buckets: Int
+    var counts: List[Int]
+
+    def __init__(
+        out self, ids: Int, start: Int, end: Int, groups: Int, buckets: Int
+    ):
+        self.ids = ids
+        self.start = start
+        self.end = end
+        self.groups = groups
+        self.buckets = buckets
+        self.counts = List[Int]()
+
+    def run(mut self) raises:
+        ref ids = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.ids
+        )[]
+        self.counts = List[Int](length=self.buckets, fill=0)
+        for row in range(self.start, self.end):
+            if ids[row] >= 0:
+                self.counts[
+                    _id_range_bucket(ids[row], self.groups, self.buckets)
+                ] += 1
+
+
+struct _CSRScatterJob(Job):
+    """Stably scatter one input range into its global-id bucket spans."""
+
+    var ids: Int
+    var output: Int
+    var start: Int
+    var end: Int
+    var groups: Int
+    var buckets: Int
+    var cursor: List[Int]
+
+    def __init__(
+        out self,
+        ids: Int,
+        output: Int,
+        start: Int,
+        end: Int,
+        groups: Int,
+        buckets: Int,
+        var cursor: List[Int],
+    ):
+        self.ids = ids
+        self.output = output
+        self.start = start
+        self.end = end
+        self.groups = groups
+        self.buckets = buckets
+        self.cursor = cursor^
+
+    def run(mut self) raises:
+        ref ids = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.ids
+        )[]
+        ref output = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.output
+        )[]
+        for row in range(self.start, self.end):
+            var id = ids[row]
+            if id >= 0:
+                var bucket = _id_range_bucket(id, self.groups, self.buckets)
+                output[self.cursor[bucket]] = row
+                self.cursor[bucket] += 1
+
+
+struct _CSRFillJob(Job):
+    """Fill the final CSR groups for one disjoint contiguous id range."""
+
+    var ids: Int
+    var starts: Int
+    var order: Int
+    var output: Int
+    var first: Int
+    var last: Int
+    var group_first: Int
+    var cursor: List[Int]
+
+    def __init__(
+        out self,
+        ids: Int,
+        starts: Int,
+        order: Int,
+        output: Int,
+        first: Int,
+        last: Int,
+        group_first: Int,
+        var cursor: List[Int],
+    ):
+        self.ids = ids
+        self.starts = starts
+        self.order = order
+        self.output = output
+        self.first = first
+        self.last = last
+        self.group_first = group_first
+        self.cursor = cursor^
+
+    def run(mut self) raises:
+        ref ids = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.ids
+        )[]
+        ref order = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.order
+        )[]
+        ref output = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.output
+        )[]
+        for at in range(self.first, self.last):
+            var row = order[at]
+            var id = ids[row]
+            output[self.cursor[id - self.group_first]] = row
+            self.cursor[id - self.group_first] += 1
+
+
+def _parallel_group_rows(
+    ids: List[Int], starts: List[Int], workers: Int
+) raises -> List[Int]:
+    """Stable counting-sort rows into CSR groups without random writes.
+
+    The first scatter is only by a small contiguous-id bucket, with worker
+    spans laid out in input order. Each bucket then owns whole CSR groups and
+    writes its final segment independently. For one id, its input row order
+    therefore survives both passes exactly.
+    """
+    var groups = len(starts) - 1
+    var rows = starts[len(starts) - 1]
+    if rows == 0 or groups == 0:
+        return List[Int]()
+    var buckets = min(workers, groups)
+    var bounds = partitions(len(ids), workers, 1)
+    var counts = List[_CSRCountJob](capacity=workers)
+    for worker in range(workers):
+        counts.append(
+            _CSRCountJob(
+                Int(Pointer(to=ids)),
+                bounds[worker],
+                bounds[worker + 1],
+                groups,
+                buckets,
+            )
+        )
+    run_jobs(counts)
+    var bucket_starts = List[Int](length=buckets + 1, fill=0)
+    for bucket in range(buckets):
+        for worker in range(workers):
+            bucket_starts[bucket + 1] += counts[worker].counts[bucket]
+        bucket_starts[bucket + 1] += bucket_starts[bucket]
+    var cursors = List[Int](capacity=buckets)
+    for bucket in range(buckets):
+        cursors.append(bucket_starts[bucket])
+    var scatters = List[_CSRScatterJob](capacity=workers)
+    var order = List[Int](length=rows, fill=0)
+    for worker in range(workers):
+        var cursor = cursors.copy()
+        for bucket in range(buckets):
+            cursors[bucket] += counts[worker].counts[bucket]
+        scatters.append(
+            _CSRScatterJob(
+                Int(Pointer(to=ids)),
+                Int(Pointer(to=order)),
+                bounds[worker],
+                bounds[worker + 1],
+                groups,
+                buckets,
+                cursor^,
+            )
+        )
+    run_jobs(scatters)
+    var flat = List[Int](length=rows, fill=0)
+    var fills = List[_CSRFillJob](capacity=buckets)
+    for bucket in range(buckets):
+        var first_group = _id_range_first(bucket, groups, buckets)
+        var last_group = _id_range_first(bucket + 1, groups, buckets)
+        var cursor = List[Int](capacity=last_group - first_group)
+        for group in range(first_group, last_group):
+            cursor.append(starts[group])
+        fills.append(
+            _CSRFillJob(
+                Int(Pointer(to=ids)),
+                Int(Pointer(to=starts)),
+                Int(Pointer(to=order)),
+                Int(Pointer(to=flat)),
+                bucket_starts[bucket],
+                bucket_starts[bucket + 1],
+                first_group,
+                cursor^,
+            )
+        )
+    run_jobs(fills)
+    # `fills` carries `order` only as an address. Keep the owning list live
+    # until its workers have consumed that address.
+    _ = order^
+    return flat^
+
+
+struct _JoinCountJob(Job):
+    """Count inner-join output rows for one contiguous left range."""
+
+    var left_ids: ArcPointer[List[Int]]
+    var right_starts: ArcPointer[List[Int]]
+    var start: Int
+    var end: Int
+    var count: Int
+
+    def __init__(
+        out self,
+        left_ids: ArcPointer[List[Int]],
+        right_starts: ArcPointer[List[Int]],
+        start: Int,
+        end: Int,
+    ):
+        self.left_ids = left_ids.copy()
+        self.right_starts = right_starts.copy()
+        self.start = start
+        self.end = end
+        self.count = 0
+
+    def run(mut self) raises:
+        for row in range(self.start, self.end):
+            var key = self.left_ids[][row]
+            if key >= 0:
+                var matches = (
+                    self.right_starts[][key + 1] - self.right_starts[][key]
+                )
+                if matches > Int.MAX - self.count:
+                    raise Error("Join output row count overflows")
+                self.count += matches
+
+
+struct _JoinFillJob(Job):
+    """Fill one already-counted inner-join output span."""
+
+    var left_ids: ArcPointer[List[Int]]
+    var right_starts: ArcPointer[List[Int]]
+    var right_flat: ArcPointer[List[Int]]
+    var start: Int
+    var end: Int
+    var output: Int
+    var left_output: Int
+    var right_output: Int
+
+    def __init__(
+        out self,
+        left_ids: ArcPointer[List[Int]],
+        right_starts: ArcPointer[List[Int]],
+        right_flat: ArcPointer[List[Int]],
+        start: Int,
+        end: Int,
+        output: Int,
+        left_output: Int,
+        right_output: Int,
+    ):
+        self.left_ids = left_ids.copy()
+        self.right_starts = right_starts.copy()
+        self.right_flat = right_flat.copy()
+        self.start = start
+        self.end = end
+        self.output = output
+        self.left_output = left_output
+        self.right_output = right_output
+
+    def run(mut self) raises:
+        ref left_rows = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.left_output
+        )[]
+        ref right_rows = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.right_output
+        )[]
+        var output = self.output
+        for row in range(self.start, self.end):
+            var key = self.left_ids[][row]
+            if key >= 0:
+                for at in range(
+                    self.right_starts[][key], self.right_starts[][key + 1]
+                ):
+                    left_rows[output] = row
+                    right_rows[output] = self.right_flat[][at]
+                    output += 1
+
+
+def _parallel_inner_rows(
+    left_ids: List[Int],
+    right_starts: List[Int],
+    right_flat: List[Int],
+    workers: Int,
+) raises -> Tuple[List[Int], List[Int]]:
+    """Inner pairs in the same left-major order as the serial loop.
+
+    Each worker owns a contiguous left-row range. Counting it first assigns
+    a disjoint output span; prefixing spans in left-range order preserves
+    the public order contract, and each CSR group is itself right-row order.
+    """
+    var shared_left = ArcPointer(left_ids.copy())
+    var shared_starts = ArcPointer(right_starts.copy())
+    var shared_flat = ArcPointer(right_flat.copy())
+    var bounds = partitions(len(left_ids), workers, 1)
+    var counts = List[_JoinCountJob](capacity=workers)
+    for worker in range(workers):
+        counts.append(
+            _JoinCountJob(
+                shared_left,
+                shared_starts,
+                bounds[worker],
+                bounds[worker + 1],
+            )
+        )
+    run_jobs(counts)
+    var outputs = List[Int](capacity=workers)
+    var total = 0
+    for worker in range(workers):
+        outputs.append(total)
+        if counts[worker].count > Int.MAX - total:
+            raise Error("Join output row count overflows")
+        total += counts[worker].count
+    var left_rows = List[Int](length=total, fill=0)
+    var right_rows = List[Int](length=total, fill=0)
+    var fills = List[_JoinFillJob](capacity=workers)
+    for worker in range(workers):
+        fills.append(
+            _JoinFillJob(
+                shared_left,
+                shared_starts,
+                shared_flat,
+                bounds[worker],
+                bounds[worker + 1],
+                outputs[worker],
+                Int(Pointer(to=left_rows)),
+                Int(Pointer(to=right_rows)),
+            )
+        )
+    run_jobs(fills)
+    return (left_rows^, right_rows^)
+
+
 def _joint_key_ids(
     left: DataFrame,
     right: DataFrame,
@@ -1290,6 +1757,12 @@ def _joint_key_ids(
     right_keys: List[Int],
 ) raises -> Tuple[List[Int], List[Int], Int]:
     """Encode both sides' keys in one id space; null keys get id -1."""
+    if len(left_keys) == 1:
+        var direct = _bounded_int64_join_ids(
+            left, right, left_keys[0], right_keys[0]
+        )
+        if direct[0]:
+            return (direct[1].copy(), direct[2].copy(), direct[3])
     var stacked = List[Series](capacity=len(left_keys))
     for k in range(len(left_keys)):
         stacked.append(
