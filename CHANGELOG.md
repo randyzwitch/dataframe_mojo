@@ -5,7 +5,17 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ## Unreleased
 
+### Breaking
+
+- Unsigned CSV integer fields now reject `-0`, matching Polars' `atoi_simd`
+  parser. Generic casts retain their existing behavior.
+
 ### Changed
+
+- CSV integer fields use a source port of Polars' `atoi_simd` parser, with
+  destination-width overflow checks, x86 SIMD reductions and a packed
+  fallback. The public reader remains the only CSV implementation. See
+  [measurements and limitations](experiments/csv_integer/README.md).
 
 - Float64 parsing passes validated wide decimal mantissas directly to Mojo's
   Lemire converter and uses its borrowed-span converter for exponent and

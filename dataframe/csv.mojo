@@ -15,7 +15,8 @@ from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
 from .series import Series
-from .parse import parse_int64, parse_float64, parse_integer
+from .parse import parse_int64, parse_float64
+from .csv_integer import parse_csv_int64, parse_csv_integer
 from .frame import concat
 from .parallel import Job, Pool, _ProducedJobs, worker_count
 from .temporal import format as format_temporal, parse as parse_temporal
@@ -2111,15 +2112,22 @@ def _render_field(
 
 
 def _parse_int_slot(text: StringSlice, dtype: DataType) raises -> Int64:
-    """Parse an integer field range-checked for dtype into an Int64 slot
-    (UInt64 keeps its bit pattern)."""
-    if dtype == CSV_INT64 or dtype.is_temporal():
+    """Parse a CSV integer directly into the legacy Int64 staging slot.
+
+    Temporal fields keep dataframe.parse's temporal-compatible Int64 grammar.
+    Native integer CSV fields use the atoi_simd source port, which performs the
+    destination-width check before the legacy builder stores its Int64 bit
+    pattern for final narrowing.
+    """
+    if dtype.is_temporal():
         return parse_int64(text)
+    if dtype == CSV_INT64:
+        return parse_csv_int64(text)
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         comptime if D.is_integral():
             if dtype == DataType.of(D):
-                return parse_integer[D](text).cast[DType.int64]()
+                return parse_csv_integer[D](text).cast[DType.int64]()
     raise Error("not an integer dtype")
 
 
