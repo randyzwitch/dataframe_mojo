@@ -229,9 +229,10 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
         taken += 1
         i += stride
     _ = hashes^
-    # Scale the threshold by how much of hash space the sample could reach.
+    # Scattering and gathering cost more than serial encoding when fewer
+    # than half the reachable hash slots are occupied.
     var reachable = min(sample, _SLOTS)
-    return 4 * occupied < reachable
+    return 2 * occupied < reachable
 
 
 struct Partitioner(Movable):
