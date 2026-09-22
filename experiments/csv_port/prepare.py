@@ -9,6 +9,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path", type=Path)
     parser.add_argument("--rows", type=int, default=1_000_000)
+    parser.add_argument(
+        "--profile", choices=("mixed", "short-ascii", "long-ascii"), default="mixed"
+    )
     args = parser.parse_args()
     if args.rows < 1:
         parser.error("--rows must be positive")
@@ -18,9 +21,14 @@ def main():
         writer.writerow(("id", "value", "active", "label"))
         for i in range(args.rows):
             value = "" if i % 11 == 0 else f"{i / 7:.12g}"
-            label = f'group,{i % 97}: "café"'
-            if i % 101 == 0:
-                label += "\nsecond line"
+            if args.profile == "mixed":
+                label = f'group,{i % 97}: "café"'
+                if i % 101 == 0:
+                    label += "\nsecond line"
+            else:
+                label = f"group{i % 97}"
+                if args.profile == "long-ascii":
+                    label += "_abcdefghijklmnopqrstuvwxyz0123456789"
             writer.writerow((i, value, "true" if i % 2 == 0 else "false", label))
     print(f"{args.rows} rows, {args.path.stat().st_size} bytes: {args.path}")
 
