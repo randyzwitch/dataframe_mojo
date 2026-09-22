@@ -1,0 +1,16 @@
+csv_phase,scan_ns,submit_ns,decode_aggregate_ns,decode_jobs,drain_release_ns,collect_ns,concat_ns,mapped_total_ns,7691622,498899,506563130,513,9468183,2598623,1700393,23253211
+engine,scenario,workers,iteration,read_ns,rows,width,nulls
+csv_phase,scan_ns,submit_ns,decode_aggregate_ns,decode_jobs,drain_release_ns,collect_ns,concat_ns,mapped_total_ns,7647237,435388,426518469,513,7177514,2620212,1517187,20658958
+explicit,full,32,0,20717547,1000000,4,90910
+csv_phase,scan_ns,submit_ns,decode_aggregate_ns,decode_jobs,drain_release_ns,collect_ns,concat_ns,mapped_total_ns,7818935,507762,482721842,513,8976804,2605883,1544126,22818461
+explicit,full,32,1,22904200,1000000,4,90910
+csv_phase,scan_ns,submit_ns,decode_aggregate_ns,decode_jobs,drain_release_ns,collect_ns,concat_ns,mapped_total_ns,8895995,623276,413083654,513,5239095,2593374,1544406,20254177
+explicit,full,32,2,20354414,1000000,4,90910
+csv_phase,scan_ns,submit_ns,decode_aggregate_ns,decode_jobs,drain_release_ns,collect_ns,concat_ns,mapped_total_ns,7589970,446253,419070656,513,6750083,2614473,1511747,20299447
+explicit,full,32,3,20393654,1000000,4,90910
+csv_phase,scan_ns,submit_ns,decode_aggregate_ns,decode_jobs,drain_release_ns,collect_ns,concat_ns,mapped_total_ns,7648582,477940,417502958,513,6535037,2605693,1543177,20197039
+explicit,full,32,4,20282046,1000000,4,90910
+csv_phase,scan_ns,submit_ns,decode_aggregate_ns,decode_jobs,drain_release_ns,collect_ns,concat_ns,mapped_total_ns,8785137,676195,398050727,513,5010291,2605783,1542776,19984933
+explicit,full,32,5,20071552,1000000,4,90910
+csv_phase,scan_ns,submit_ns,decode_aggregate_ns,decode_jobs,drain_release_ns,collect_ns,concat_ns,mapped_total_ns,7713963,450308,410784334,513,6326951,2580564,1525097,19960524
+explicit,full,32,6,20045341,1000000,4,90910
