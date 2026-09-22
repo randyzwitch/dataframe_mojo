@@ -168,5 +168,61 @@ def test_seventeen_digit_decimal_rounding() raises:
             assert_agrees("-" + text)
 
 
+def test_borrowed_conversion_boundaries() raises:
+    # Include historical rounding differences from mathematically rounded
+    # conversion: this optimization must preserve the installed reference.
+    var texts: List[String] = [
+        "4441829661224440.750",
+        "9651576341293971.0",
+        "41900288798.355793",
+        "9007199254740992",
+        "900719925474099.2",
+        "0.9007199254740992",
+        "9999999999999999999",
+        "00000000000000000000000000000000000001.25",
+        "1.234567890123456789012345678901234567890123456789e-200",
+        "0e99999",
+        "1e-99999",
+        "1e99999",
+        "2.225073858507201e-308",
+        "4.9406564584124654e-324",
+        "1.7976931348623159e308",
+        "nan",
+        "NaN",
+        "inf",
+        "Infinity",
+        "INF",
+        "2024-02-28",
+        "1-2",
+        "1.5.5",
+        "1e",
+        ".",
+        "+",
+        "e5",
+        "1e2x",
+    ]
+    for text in texts:
+        assert_agrees(text)
+        assert_agrees("-" + text)
+        assert_agrees("+" + text)
+        # The borrowed converter must respect the slice's end, even with
+        # more numeric-looking bytes in the underlying String.
+        var padded = "123" + text + "987e42"
+        var field = padded[byte = 3 : 3 + text.byte_length()]
+        var actual: String
+        var expected: String
+        try:
+            actual = String(bitcast[DType.uint64](parse_float64(field)))
+        except e:
+            actual = String(e)
+        try:
+            expected = String(
+                bitcast[DType.uint64](_parse_float64_strict(field))
+            )
+        except e:
+            expected = String(e)
+        assert_equal(actual, expected, msg="borrowed field: " + text)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

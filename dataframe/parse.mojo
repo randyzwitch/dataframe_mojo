@@ -1,6 +1,14 @@
 """Strict text parsing shared by read_csv and cast, so both agree."""
 from std.utils.numerics import isinf
 
+# Private APIs from the Mojo 1.2 nightly pinned in pixi.lock. These are the
+# same conversion routines Float64(String) uses; keep reference-bit tests
+# when upgrading Mojo. Passing a borrowed span avoids constructing a String.
+from std.collections.string._parsing_numbers.parsing_floats import (
+    _atof,
+    lemire_algorithm,
+)
+
 
 def parse_int64(text: StringSlice) raises -> Int64:
     """Parse strict decimal Int64 without a floating-point round trip."""
@@ -240,7 +248,8 @@ def parse_float64(text: StringSlice) raises -> Float64:
     computed in one pass. That is the overwhelming majority of real CSV
     data, and the strict parser below costs about 140 ns a field because it
     walks the text to check the grammar and then walks it again to convert.
-    Fully consumed wide plain decimals use the standard converter directly;
+    Fully consumed wide plain decimals pass their accumulated mantissa to
+    the standard library Lemire converter without reparsing the text;
     anything this scan does not fully consume falls through to the strict
     parser.  The accepted grammar and every result are unchanged.
     """
@@ -263,7 +272,7 @@ def parse_float64(text: StringSlice) raises -> Float64:
         var c = b[i]
         if c >= 48 and c <= 57:
             if digits == 19:
-                return _parse_float64_strict(text)
+                return _parse_float64_borrowed(text)
             mantissa = mantissa * 10 + UInt64(c - 48)
             digits += 1
             if fraction >= 0:
@@ -272,19 +281,20 @@ def parse_float64(text: StringSlice) raises -> Float64:
             fraction = 0
         else:
             # A sign, an exponent, "nan", "inf", or invalid text.
-            return _parse_float64_strict(text)
+            return _parse_float64_borrowed(text)
         i += 1
     if (
         digits == 0
         or fraction == 0  # a trailing "." the strict grammar may reject
         or fraction > 22
     ):
-        return _parse_float64_strict(text)
+        return _parse_float64_borrowed(text)
     # The loop has consumed the complete strict plain-decimal grammar.  A
     # field of at most 19 digits cannot overflow Float64, so wide mantissas
     # can convert directly without walking their bytes a second time.
-    if mantissa >= _EXACT_LIMIT:
-        return Float64(text)
+    if mantissa > _EXACT_LIMIT:
+        var value = lemire_algorithm(mantissa, Int64(-max(fraction, 0)))
+        return -value if negative else value
     var value = Float64(mantissa)
     if fraction > 0:
         value = value / _pow10(fraction)
@@ -314,6 +324,27 @@ def _parse_float64_strict(text: StringSlice) raises -> Float64:
     var value: Float64
     try:
         value = Float64(text)
+    except:
+        raise Error("invalid Float64 value '" + String(text) + "'")
+    if isinf(value) and not _is_special_float(text):
+        raise Error("Float64 overflow for '" + String(text) + "'")
+    return value
+
+
+def _parse_float64_borrowed(text: StringSlice) raises -> Float64:
+    """Validate strict grammar before using the borrowed standard converter.
+
+    Successful conversion does not construct an owned String. Error text is
+    materialized only on failure. Keep the strict reference independent so
+    tests catch changes in the private standard-library entry point.
+    """
+    if edge_ascii_whitespace(text):
+        raise Error("Float64 fields cannot have surrounding whitespace")
+    if not _is_decimal(text) and not _is_special_float(text):
+        raise Error("invalid Float64 value '" + String(text) + "'")
+    var value: Float64
+    try:
+        value = _atof(text)
     except:
         raise Error("invalid Float64 value '" + String(text) + "'")
     if isinf(value) and not _is_special_float(text):
