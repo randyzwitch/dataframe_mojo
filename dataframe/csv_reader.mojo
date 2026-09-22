@@ -1,9 +1,8 @@
 """CSV orchestration port of Polars py-1.44.2 read_impl::parse_csv.
 
-The public reader is switched only after differential validation. This module
-owns mapping, header removal, CountLines range discovery, immediate decode
-publication, and array-reference reassembly. The legacy reader remains the
-reference during the port.
+Both public read_csv overloads use this pipeline. This module owns mapping,
+header removal, CountLines range discovery, immediate decode publication, and
+array-reference reassembly.
 """
 from std.atomic import Atomic
 from std.collections import Dict
