@@ -1,0 +1,8 @@
+engine,scenario,workers,iteration,read_ns,rows,width,nulls
+legacy,full,1,0,119552872,1000000,2,0
+legacy,full,1,1,119706459,1000000,2,0
+legacy,full,1,2,116210284,1000000,2,0
+legacy,full,1,3,116385450,1000000,2,0
+legacy,full,1,4,120412544,1000000,2,0
+legacy,full,1,5,129071865,1000000,2,0
+legacy,full,1,6,117345940,1000000,2,0

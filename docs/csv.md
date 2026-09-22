@@ -11,7 +11,11 @@ The schema is non-empty, ordered, and uniquely named. Fields are built with
 `.time`, or `CsvField(name, dtype)` for any dtype, including every numeric
 width (`CsvField("n", DataType.UINT16)`); each is nullable by default. Integer
 fields are range-checked at their width while parsing the digits (no float
-round trip). Inference only produces Int64 and Float64. With a header, names and order must match exactly. Without one, schema
+round trip). Native integer fields use a CSV-only port of Polars 1.44.2's
+`atoi_simd` 0.18.1 paths: `dataframe/csv_integer.mojo` maps the short,
+packed-fallback, and x86 SIMD routes, with its retained license at
+`third_party/ATOI_SIMD_LICENSE`. This does not change generic cast parsing in
+`dataframe.parse`. Inference only produces Int64 and Float64. With a header, names and order must match exactly. Without one, schema
 names are assigned positionally. Empty and header-only files produce zero rows
 with the requested schema. Every data record must have exactly the schema width.
 
@@ -36,8 +40,11 @@ fields, so `""` is a valid empty String and is a conversion error for numeric or
 Boolean fields. Null in a non-nullable field raises.
 
 Int64 accepts an optional leading `+` or `-` followed by ASCII decimal digits.
-It checks magnitude before every operation and supports the exact range, without
-passing through Float64. Float64 accepts only decimal text with an optional sign, fraction, and
+Unsigned integer fields accept an optional `+` and reject every negative
+spelling, including `-0`, matching Polars CSV parsing. This does not change
+the generic cast parser's handling of unsigned negative zero.
+All integer fields enforce their exact destination range without passing through
+Float64. Float64 accepts only decimal text with an optional sign, fraction, and
 exponent (Mojo's own parser is laxer and would read `2024-02-28` as a number),
 plus `nan`/`NaN`; it rejects surrounding ASCII space/tab/newline, and rejects overflow-to-infinity unless the token is one of
 the documented explicit infinity spellings. Valid NaN remains a value, distinct
