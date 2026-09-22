@@ -1,0 +1,2 @@
+kind,shape,rows,cardinality,threads,output_rows,polars_join_ns
+int64,sparse,10000000,1000000,32,9921259,87200025

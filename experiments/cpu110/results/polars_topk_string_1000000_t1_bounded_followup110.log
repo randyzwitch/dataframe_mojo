@@ -1,0 +1,6 @@
+workload=topk
+kind=string
+rows=1000000
+threads=1
+semantics=stable_tiebroken_topk_nulls_last
+best_ns=25318065

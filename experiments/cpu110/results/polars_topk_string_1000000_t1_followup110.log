@@ -1,0 +1,7 @@
+running polars topk rows=1000000 kind=string threads=1
+workload=topk
+kind=string
+rows=1000000
+threads=1
+semantics=stable_sort_nulls_last_head100
+best_ns=285183728

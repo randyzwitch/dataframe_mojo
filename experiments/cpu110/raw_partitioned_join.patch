@@ -1,0 +1,1122 @@
+diff --git a/experiments/cpu110/raw_partitioned_join_lib.mojo b/experiments/cpu110/raw_partitioned_join_lib.mojo
+new file mode 100644
+index 0000000..5fcb4b5
+--- /dev/null
++++ b/experiments/cpu110/raw_partitioned_join_lib.mojo
+@@ -0,0 +1,532 @@
++"""Isolated raw-key hash-partitioned inner join experiment for #105.
++
++This deliberately bypasses `_joint_key_ids`: both inputs are partitioned by
++the same raw-key hash, then every bucket builds a private `Dict[key, group]`
++over the right rows and probes left values directly.  Output pairs are rebuilt
++from per-left match counts, restoring the public left-major/right-row order.
++The count and fill passes currently rebuild each private dictionary; that
++intentional experimental duplication remains included in the reported timing.
++It is an experiment, not a dataframe API.
++"""
++from std.collections import Dict
++from std.memory import ArcPointer, Pointer
++from std.time import monotonic
++
++from dataframe import Column, DataFrame, DataType, Series
++from dataframe.gather import take_parallel
++from dataframe.parallel import Job, run_jobs, worker_count
++from dataframe.partition import Partitioner
++from dataframe.string_column import StringColumn
++
++
++@fieldwise_init
++struct RawPartitionedJoin(Movable):
++    # The retained output has the same single-key inner-join schema as
++    # DataFrame.join: all left columns, then right non-key columns, with the
++    # default suffix on collisions. Keeping it makes gather timing comparable
++    # to the production result rather than a discarded two-frame materialization.
++    var frame: DataFrame
++    var left_rows: List[Int]
++    var right_rows: List[Int]
++    var partition_ns: Int
++    var build_probe_ns: Int
++    var order_ns: Int
++    var gather_ns: Int
++
++
++struct _Int64CountJob(Job):
++    var left_key: Series
++    var right_key: Series
++    var left_order: ArcPointer[List[Int]]
++    var right_order: ArcPointer[List[Int]]
++    var left_start: Int
++    var left_end: Int
++    var right_start: Int
++    var right_end: Int
++    var counts: Int
++
++    def __init__(
++        out self,
++        left_key: Series,
++        right_key: Series,
++        left_order: ArcPointer[List[Int]],
++        right_order: ArcPointer[List[Int]],
++        left_start: Int,
++        left_end: Int,
++        right_start: Int,
++        right_end: Int,
++        counts: Int,
++    ):
++        self.left_key = left_key.copy()
++        self.right_key = right_key.copy()
++        self.left_order = left_order.copy()
++        self.right_order = right_order.copy()
++        self.left_start = left_start
++        self.left_end = left_end
++        self.right_start = right_start
++        self.right_end = right_end
++        self.counts = counts
++
++    def run(mut self) raises:
++        ref left = self.left_key._data[Column[Int64]]
++        ref right = self.right_key._data[Column[Int64]]
++        ref counts = Pointer[List[Int], MutAnyOrigin](
++            unsafe_from_address=self.counts
++        )[]
++        var ids = Dict[Int64, Int]()
++        var matches = List[List[Int]]()
++        for at in range(self.right_start, self.right_end):
++            var row = self.right_order[][at]
++            if right._valid(row):
++                var value = right._get(row)
++                var group = ids.get(value, -1)
++                if group < 0:
++                    group = len(matches)
++                    ids[value] = group
++                    matches.append(List[Int]())
++                matches[group].append(row)
++        for at in range(self.left_start, self.left_end):
++            var row = self.left_order[][at]
++            if left._valid(row):
++                var group = ids.get(left._get(row), -1)
++                if group >= 0:
++                    counts[row] = len(matches[group])
++
++
++struct _Int64FillJob(Job):
++    var left_key: Series
++    var right_key: Series
++    var left_order: ArcPointer[List[Int]]
++    var right_order: ArcPointer[List[Int]]
++    var left_start: Int
++    var left_end: Int
++    var right_start: Int
++    var right_end: Int
++    var offsets: Int
++    var right_rows: Int
++
++    def __init__(
++        out self,
++        left_key: Series,
++        right_key: Series,
++        left_order: ArcPointer[List[Int]],
++        right_order: ArcPointer[List[Int]],
++        left_start: Int,
++        left_end: Int,
++        right_start: Int,
++        right_end: Int,
++        offsets: Int,
++        right_rows: Int,
++    ):
++        self.left_key = left_key.copy()
++        self.right_key = right_key.copy()
++        self.left_order = left_order.copy()
++        self.right_order = right_order.copy()
++        self.left_start = left_start
++        self.left_end = left_end
++        self.right_start = right_start
++        self.right_end = right_end
++        self.offsets = offsets
++        self.right_rows = right_rows
++
++    def run(mut self) raises:
++        ref left = self.left_key._data[Column[Int64]]
++        ref right = self.right_key._data[Column[Int64]]
++        ref offsets = Pointer[List[Int], MutAnyOrigin](
++            unsafe_from_address=self.offsets
++        )[]
++        ref output = Pointer[List[Int], MutAnyOrigin](
++            unsafe_from_address=self.right_rows
++        )[]
++        var ids = Dict[Int64, Int]()
++        var matches = List[List[Int]]()
++        for at in range(self.right_start, self.right_end):
++            var row = self.right_order[][at]
++            if right._valid(row):
++                var value = right._get(row)
++                var group = ids.get(value, -1)
++                if group < 0:
++                    group = len(matches)
++                    ids[value] = group
++                    matches.append(List[Int]())
++                matches[group].append(row)
++        for at in range(self.left_start, self.left_end):
++            var row = self.left_order[][at]
++            if left._valid(row):
++                var group = ids.get(left._get(row), -1)
++                if group >= 0:
++                    var out = offsets[row]
++                    for right_row in matches[group]:
++                        output[out] = right_row
++                        out += 1
++
++
++struct _StringCountJob(Job):
++    var left_key: Series
++    var right_key: Series
++    var left_order: ArcPointer[List[Int]]
++    var right_order: ArcPointer[List[Int]]
++    var left_start: Int
++    var left_end: Int
++    var right_start: Int
++    var right_end: Int
++    var counts: Int
++
++    def __init__(
++        out self,
++        left_key: Series,
++        right_key: Series,
++        left_order: ArcPointer[List[Int]],
++        right_order: ArcPointer[List[Int]],
++        left_start: Int,
++        left_end: Int,
++        right_start: Int,
++        right_end: Int,
++        counts: Int,
++    ):
++        self.left_key = left_key.copy()
++        self.right_key = right_key.copy()
++        self.left_order = left_order.copy()
++        self.right_order = right_order.copy()
++        self.left_start = left_start
++        self.left_end = left_end
++        self.right_start = right_start
++        self.right_end = right_end
++        self.counts = counts
++
++    def run(mut self) raises:
++        ref left = self.left_key._data[StringColumn]
++        ref right = self.right_key._data[StringColumn]
++        ref counts = Pointer[List[Int], MutAnyOrigin](
++            unsafe_from_address=self.counts
++        )[]
++        var ids = Dict[StringSlice[ImmutAnyOrigin], Int]()
++        var matches = List[List[Int]]()
++        for at in range(self.right_start, self.right_end):
++            var row = self.right_order[][at]
++            if right._valid(row):
++                var value = right._get(row)
++                var group = ids.get(value, -1)
++                if group < 0:
++                    group = len(matches)
++                    ids[value] = group
++                    matches.append(List[Int]())
++                matches[group].append(row)
++        for at in range(self.left_start, self.left_end):
++            var row = self.left_order[][at]
++            if left._valid(row):
++                var group = ids.get(left._get(row), -1)
++                if group >= 0:
++                    counts[row] = len(matches[group])
++
++
++struct _StringFillJob(Job):
++    var left_key: Series
++    var right_key: Series
++    var left_order: ArcPointer[List[Int]]
++    var right_order: ArcPointer[List[Int]]
++    var left_start: Int
++    var left_end: Int
++    var right_start: Int
++    var right_end: Int
++    var offsets: Int
++    var right_rows: Int
++
++    def __init__(
++        out self,
++        left_key: Series,
++        right_key: Series,
++        left_order: ArcPointer[List[Int]],
++        right_order: ArcPointer[List[Int]],
++        left_start: Int,
++        left_end: Int,
++        right_start: Int,
++        right_end: Int,
++        offsets: Int,
++        right_rows: Int,
++    ):
++        self.left_key = left_key.copy()
++        self.right_key = right_key.copy()
++        self.left_order = left_order.copy()
++        self.right_order = right_order.copy()
++        self.left_start = left_start
++        self.left_end = left_end
++        self.right_start = right_start
++        self.right_end = right_end
++        self.offsets = offsets
++        self.right_rows = right_rows
++
++    def run(mut self) raises:
++        ref left = self.left_key._data[StringColumn]
++        ref right = self.right_key._data[StringColumn]
++        ref offsets = Pointer[List[Int], MutAnyOrigin](
++            unsafe_from_address=self.offsets
++        )[]
++        ref output = Pointer[List[Int], MutAnyOrigin](
++            unsafe_from_address=self.right_rows
++        )[]
++        var ids = Dict[StringSlice[ImmutAnyOrigin], Int]()
++        var matches = List[List[Int]]()
++        for at in range(self.right_start, self.right_end):
++            var row = self.right_order[][at]
++            if right._valid(row):
++                var value = right._get(row)
++                var group = ids.get(value, -1)
++                if group < 0:
++                    group = len(matches)
++                    ids[value] = group
++                    matches.append(List[Int]())
++                matches[group].append(row)
++        for at in range(self.left_start, self.left_end):
++            var row = self.left_order[][at]
++            if left._valid(row):
++                var group = ids.get(left._get(row), -1)
++                if group >= 0:
++                    var out = offsets[row]
++                    for right_row in matches[group]:
++                        output[out] = right_row
++                        out += 1
++
++
++def _partitions(
++    left: DataFrame,
++    right: DataFrame,
++    left_key: Series,
++    right_key: Series,
++    workers: Int,
++) raises -> Tuple[
++    ArcPointer[List[Int]], ArcPointer[List[Int]], List[Int], List[Int]
++]:
++    var left_keys = List[Series]([left_key.copy()])
++    var right_keys = List[Series]([right_key.copy()])
++    var left_partitioner = Partitioner(left_keys, workers)
++    var left_parts = left_partitioner.scatter(workers)
++    var right_partitioner = Partitioner(right_keys, workers)
++    var right_parts = right_partitioner.scatter(workers)
++    if left_parts.buckets() != right_parts.buckets():
++        raise Error("raw partitioners chose incompatible bucket counts")
++    return (
++        ArcPointer(left_parts.order.copy()),
++        ArcPointer(right_parts.order.copy()),
++        left_parts.bounds.copy(),
++        right_parts.bounds.copy(),
++    )
++
++
++def _finish(
++    left: DataFrame,
++    right: DataFrame,
++    right_column: Int,
++    suffix: String,
++    counts: List[Int],
++    partition_ns: Int,
++    build_probe_ns: Int,
++    order_start: Int,
++    mut fill_int: List[_Int64FillJob],
++    mut fill_string: List[_StringFillJob],
++) raises -> RawPartitionedJoin:
++    var offsets = List[Int](length=len(counts) + 1, fill=0)
++    for row in range(len(counts)):
++        if counts[row] > Int.MAX - offsets[row]:
++            raise Error("Join output row count overflows")
++        offsets[row + 1] = offsets[row] + counts[row]
++    var right_rows = List[Int](length=offsets[len(counts)], fill=0)
++    if len(fill_int) > 0:
++        for i in range(len(fill_int)):
++            fill_int[i].offsets = Int(Pointer(to=offsets))
++            fill_int[i].right_rows = Int(Pointer(to=right_rows))
++        run_jobs(fill_int)
++    if len(fill_string) > 0:
++        for i in range(len(fill_string)):
++            fill_string[i].offsets = Int(Pointer(to=offsets))
++            fill_string[i].right_rows = Int(Pointer(to=right_rows))
++        run_jobs(fill_string)
++    var left_rows = List[Int](length=len(right_rows), fill=0)
++    for row in range(len(counts)):
++        for at in range(offsets[row], offsets[row + 1]):
++            left_rows[at] = row
++    var order_ns = monotonic() - order_start
++
++    # Match DataFrame.join's single-key inner output: all left columns, then
++    # right non-key columns.  Gather every returned column through the same
++    # parallel gatherer production uses, and retain the assembled frame.
++    var gather_start = monotonic()
++    var workers = worker_count(len(left_rows))
++    var left_sources = List[Series](capacity=left.width())
++    var names = Dict[String, Bool]()
++    for column in left._columns:
++        left_sources.append(column.copy())
++        names[column.name()] = True
++    var columns = take_parallel(
++        left_sources, left_rows.copy(), workers, or_null=True
++    )
++    var right_sources = List[Series]()
++    var right_names = List[String]()
++    for c in range(right.width()):
++        if c == right_column:
++            continue
++        var name = right._columns[c].name()
++        if name in names:
++            name += suffix
++        if name in names:
++            raise Error("Join output name collision: " + name)
++        names[name] = True
++        right_sources.append(right._columns[c].copy())
++        right_names.append(name)
++    var from_right = take_parallel(
++        right_sources, right_rows.copy(), workers, or_null=True
++    )
++    for c in range(len(from_right)):
++        columns.append(from_right[c].renamed(right_names[c]))
++    var frame = DataFrame(columns^, height=len(left_rows))
++    return RawPartitionedJoin(
++        frame^,
++        left_rows^,
++        right_rows^,
++        partition_ns,
++        build_probe_ns,
++        order_ns,
++        monotonic() - gather_start,
++    )
++
++
++def raw_partitioned_int64_inner(
++    left: DataFrame,
++    right: DataFrame,
++    left_column: Int,
++    right_column: Int,
++    workers: Int,
++    suffix: String = "_right",
++) raises -> RawPartitionedJoin:
++    ref left_key = left._columns[left_column]
++    ref right_key = right._columns[right_column]
++    if (
++        left_key.dtype().physical() != DataType.INT64
++        or right_key.dtype().physical() != DataType.INT64
++    ):
++        raise Error("raw Int64 prototype requires physical Int64 keys")
++    var partition_start = monotonic()
++    var parts = _partitions(left, right, left_key, right_key, workers)
++    var left_order = parts[0].copy()
++    var right_order = parts[1].copy()
++    var left_bounds = parts[2].copy()
++    var right_bounds = parts[3].copy()
++    var partition_ns = monotonic() - partition_start
++    var count_start = monotonic()
++    var counts = List[Int](length=left.height(), fill=0)
++    var count_jobs = List[_Int64CountJob](capacity=len(left_bounds) - 1)
++    var fill_jobs = List[_Int64FillJob](capacity=len(left_bounds) - 1)
++    for bucket in range(len(left_bounds) - 1):
++        count_jobs.append(
++            _Int64CountJob(
++                left_key,
++                right_key,
++                left_order,
++                right_order,
++                left_bounds[bucket],
++                left_bounds[bucket + 1],
++                right_bounds[bucket],
++                right_bounds[bucket + 1],
++                Int(Pointer(to=counts)),
++            )
++        )
++        fill_jobs.append(
++            _Int64FillJob(
++                left_key,
++                right_key,
++                left_order,
++                right_order,
++                left_bounds[bucket],
++                left_bounds[bucket + 1],
++                right_bounds[bucket],
++                right_bounds[bucket + 1],
++                0,
++                0,
++            )
++        )
++    run_jobs(count_jobs)
++    var build_probe_ns = monotonic() - count_start
++    var no_string_fills = List[_StringFillJob]()
++    return _finish(
++        left,
++        right,
++        right_column,
++        suffix,
++        counts,
++        partition_ns,
++        build_probe_ns,
++        monotonic(),
++        fill_jobs,
++        no_string_fills,
++    )
++
++
++def raw_partitioned_string_inner(
++    left: DataFrame,
++    right: DataFrame,
++    left_column: Int,
++    right_column: Int,
++    workers: Int,
++    suffix: String = "_right",
++) raises -> RawPartitionedJoin:
++    ref left_key = left._columns[left_column]
++    ref right_key = right._columns[right_column]
++    if (
++        left_key.dtype().physical() != DataType.STRING
++        or right_key.dtype().physical() != DataType.STRING
++    ):
++        raise Error("raw String prototype requires string keys")
++    var partition_start = monotonic()
++    var parts = _partitions(left, right, left_key, right_key, workers)
++    var left_order = parts[0].copy()
++    var right_order = parts[1].copy()
++    var left_bounds = parts[2].copy()
++    var right_bounds = parts[3].copy()
++    var partition_ns = monotonic() - partition_start
++    var count_start = monotonic()
++    var counts = List[Int](length=left.height(), fill=0)
++    var count_jobs = List[_StringCountJob](capacity=len(left_bounds) - 1)
++    var fill_jobs = List[_StringFillJob](capacity=len(left_bounds) - 1)
++    for bucket in range(len(left_bounds) - 1):
++        count_jobs.append(
++            _StringCountJob(
++                left_key,
++                right_key,
++                left_order,
++                right_order,
++                left_bounds[bucket],
++                left_bounds[bucket + 1],
++                right_bounds[bucket],
++                right_bounds[bucket + 1],
++                Int(Pointer(to=counts)),
++            )
++        )
++        fill_jobs.append(
++            _StringFillJob(
++                left_key,
++                right_key,
++                left_order,
++                right_order,
++                left_bounds[bucket],
++                left_bounds[bucket + 1],
++                right_bounds[bucket],
++                right_bounds[bucket + 1],
++                0,
++                0,
++            )
++        )
++    run_jobs(count_jobs)
++    var build_probe_ns = monotonic() - count_start
++    var no_int_fills = List[_Int64FillJob]()
++    return _finish(
++        left,
++        right,
++        right_column,
++        suffix,
++        counts,
++        partition_ns,
++        build_probe_ns,
++        monotonic(),
++        no_int_fills,
++        fill_jobs,
++    )
+diff --git a/experiments/cpu110/raw_partitioned_join_differential.mojo b/experiments/cpu110/raw_partitioned_join_differential.mojo
+new file mode 100644
+index 0000000..050186b
+--- /dev/null
++++ b/experiments/cpu110/raw_partitioned_join_differential.mojo
+@@ -0,0 +1,192 @@
++"""Exact raw-key partitioned join checks for the isolated #105 experiment."""
++from std.ffi import external_call
++from std.testing import TestSuite, assert_equal
++
++from dataframe import Column, DataFrame, Series
++from dataframe.frame import _joint_key_ids
++from dataframe.string_column import StringColumn
++from raw_partitioned_join_lib import (
++    raw_partitioned_int64_inner,
++    raw_partitioned_string_inner,
++)
++
++
++def _c_string(text: String) -> List[UInt8]:
++    var bytes = List[UInt8]()
++    bytes.extend(text.as_bytes())
++    bytes.append(0)
++    return bytes^
++
++
++def _set_threads(count: Int):
++    var name = _c_string("DATAFRAME_THREADS")
++    var value = _c_string(String(count))
++    _ = external_call["setenv", Int32](
++        Int(name.unsafe_ptr()), Int(value.unsafe_ptr()), Int32(1)
++    )
++    _ = name^
++    _ = value^
++
++
++def int_frame(
++    var keys: List[Int64], var valid: List[Bool], var payload_name: String
++) raises -> DataFrame:
++    var payload = List[Int64](capacity=len(keys))
++    for row in range(len(keys)):
++        payload.append(Int64(row))
++    return DataFrame(
++        [
++            Series("k", Column[Int64](keys^, valid^)),
++            Series(payload_name, Column[Int64](payload^)),
++        ]
++    )
++
++
++def string_frame(
++    var keys: List[String], var valid: List[Bool], var payload_name: String
++) raises -> DataFrame:
++    var payload = List[Int64](capacity=len(keys))
++    for row in range(len(keys)):
++        payload.append(Int64(row))
++    return DataFrame(
++        [
++            Series("k", Column[String](keys^, valid^)),
++            Series(payload_name, Column[Int64](payload^)),
++        ]
++    )
++
++
++def expected_int(
++    left: DataFrame, right: DataFrame
++) -> Tuple[List[Int], List[Int]]:
++    ref left_key = left._columns[0]._data[Column[Int64]]
++    ref right_key = right._columns[0]._data[Column[Int64]]
++    var left_rows = List[Int]()
++    var right_rows = List[Int]()
++    for i in range(len(left_key)):
++        if left_key._valid(i):
++            for j in range(len(right_key)):
++                if right_key._valid(j) and left_key._get(i) == right_key._get(
++                    j
++                ):
++                    left_rows.append(i)
++                    right_rows.append(j)
++    return (left_rows^, right_rows^)
++
++
++def expected_string(
++    left: DataFrame, right: DataFrame
++) -> Tuple[List[Int], List[Int]]:
++    ref left_key = left._columns[0]._data[StringColumn]
++    ref right_key = right._columns[0]._data[StringColumn]
++    var left_rows = List[Int]()
++    var right_rows = List[Int]()
++    for i in range(len(left_key)):
++        if left_key._valid(i):
++            for j in range(len(right_key)):
++                if right_key._valid(j) and left_key._get(i) == right_key._get(
++                    j
++                ):
++                    left_rows.append(i)
++                    right_rows.append(j)
++    return (left_rows^, right_rows^)
++
++
++def assert_int_pairs(
++    left: DataFrame,
++    right: DataFrame,
++    workers: Int,
++    suffix: String = "_right",
++) raises:
++    var expected = expected_int(left, right)
++    var actual = raw_partitioned_int64_inner(
++        left, right, 0, 0, workers, suffix=suffix
++    )
++    assert_equal(actual.left_rows, expected[0])
++    assert_equal(actual.right_rows, expected[1])
++    var joined = left.join(right, "k", suffix=suffix)
++    assert_equal(actual.frame.equals(joined), True)
++
++
++def assert_string_pairs(
++    left: DataFrame,
++    right: DataFrame,
++    workers: Int,
++    suffix: String = "_right",
++) raises:
++    var expected = expected_string(left, right)
++    var actual = raw_partitioned_string_inner(
++        left, right, 0, 0, workers, suffix=suffix
++    )
++    assert_equal(actual.left_rows, expected[0])
++    assert_equal(actual.right_rows, expected[1])
++    var joined = left.join(right, "k", suffix=suffix)
++    assert_equal(actual.frame.equals(joined), True)
++
++
++def test_int64_low_cardinality_nullable_duplicates_and_sparse_extremes() raises:
++    _set_threads(8)
++    var left = int_frame(
++        [Int64.MIN, -9, 3, 3, 700_000_003, 0, Int64.MAX],
++        [True, True, True, True, True, False, True],
++        "payload",
++    )
++    var right = int_frame(
++        [3, Int64.MIN, 3, -9, Int64.MAX, 12, 700_000_003],
++        [True, True, True, True, True, False, True],
++        "payload",
++    )
++    # The production dense-range path must reject this astronomical span.
++    var ids = _joint_key_ids(left, right, [0], [0])
++    assert_equal(ids[2], 5)
++    # This also checks right payload suffixing against DataFrame.join.
++    assert_int_pairs(left, right, 8, suffix="_rhs")
++    _set_threads(1)
++
++
++def test_int64_high_cardinality_and_skew_keep_left_major_order() raises:
++    _set_threads(8)
++    var left_keys = List[Int64]()
++    var left_valid = List[Bool]()
++    for row in range(2003):
++        left_keys.append(Int64(17) if row % 5 else Int64(row % 257))
++        left_valid.append(row % 71 != 0)
++    var right_keys = List[Int64]()
++    for key in range(257):
++        right_keys.append(Int64(key))
++    var left = int_frame(left_keys^, left_valid^, "left_row")
++    var right = int_frame(
++        right_keys^, List[Bool](length=257, fill=True), "right_row"
++    )
++    assert_int_pairs(left, right, 8)
++    _set_threads(1)
++
++
++def test_string_low_high_and_skew_nullable_duplicates() raises:
++    _set_threads(8)
++    var left_keys = List[String]()
++    var left_valid = List[Bool]()
++    var right_keys = List[String]()
++    var right_valid = List[Bool]()
++    for key in range(257):
++        right_keys.append("key_" + String(key))
++        right_valid.append(True)
++    right_keys.append("hot")
++    right_keys.append("hot")
++    right_valid.append(True)
++    right_valid.append(True)
++    for row in range(2003):
++        left_keys.append("hot" if row % 5 else "key_" + String(row % 257))
++        left_valid.append(row % 67 != 0)
++    left_keys.append("missing")
++    left_keys.append("hot")
++    left_valid.append(False)
++    left_valid.append(True)
++    var left = string_frame(left_keys^, left_valid^, "payload")
++    var right = string_frame(right_keys^, right_valid^, "payload")
++    assert_string_pairs(left, right, 8)
++    _set_threads(1)
++
++
++def main() raises:
++    TestSuite.discover_tests[__functions_in_module()]().run()
+diff --git a/experiments/cpu110/raw_partitioned_join_bench.mojo b/experiments/cpu110/raw_partitioned_join_bench.mojo
+new file mode 100644
+index 0000000..8f3f95f
+--- /dev/null
++++ b/experiments/cpu110/raw_partitioned_join_bench.mojo
+@@ -0,0 +1,128 @@
++"""Phase-reporting synthetic benchmark for raw-key partitioned #105 joins.
++
++Usage: raw_partitioned_join_bench int64|string ROWS REPETITIONS WORKERS
++The right side is a unique dimension and the left side repeats those keys, so
++the workload avoids a deliberately quadratic many-to-many result.
++"""
++from std.sys import argv
++
++from dataframe import Column, DataFrame, Series
++from raw_partitioned_join_lib import (
++    RawPartitionedJoin,
++    raw_partitioned_int64_inner,
++    raw_partitioned_string_inner,
++)
++
++
++comptime RIGHT_KEYS = 100_003
++
++
++def int_inputs(rows: Int) raises -> Tuple[DataFrame, DataFrame]:
++    var left_keys = List[Int64](capacity=rows)
++    var left_valid = List[Bool](capacity=rows)
++    var right_keys = List[Int64](capacity=RIGHT_KEYS)
++    for key in range(RIGHT_KEYS):
++        right_keys.append(Int64(key))
++    for row in range(rows):
++        left_keys.append(Int64(row % RIGHT_KEYS))
++        left_valid.append(row % 127 != 0)
++    return (
++        DataFrame([Series("k", Column[Int64](left_keys^, left_valid^))]),
++        DataFrame([Series("k", Column[Int64](right_keys^))]),
++    )
++
++
++def string_inputs(rows: Int) raises -> Tuple[DataFrame, DataFrame]:
++    var left_keys = List[String](capacity=rows)
++    var left_valid = List[Bool](capacity=rows)
++    var right_keys = List[String](capacity=RIGHT_KEYS)
++    for key in range(RIGHT_KEYS):
++        right_keys.append("key_" + String(key))
++    for row in range(rows):
++        left_keys.append("key_" + String(row % RIGHT_KEYS))
++        left_valid.append(row % 127 != 0)
++    return (
++        DataFrame([Series("k", Column[String](left_keys^, left_valid^))]),
++        DataFrame([Series("k", Column[String](right_keys^))]),
++    )
++
++
++def report(kind: String, rows: Int, result: RawPartitionedJoin):
++    print(
++        "kind,rows,output_rows,partition_ns,build_probe_ns,order_ns,gather_ns"
++    )
++    print(
++        kind,
++        ",",
++        rows,
++        ",",
++        len(result.left_rows),
++        ",",
++        result.partition_ns,
++        ",",
++        result.build_probe_ns,
++        ",",
++        result.order_ns,
++        ",",
++        result.gather_ns,
++        sep="",
++    )
++
++
++def main() raises:
++    var args = argv()
++    if len(args) != 5:
++        raise Error(
++            "usage: raw_partitioned_join_bench int64|string ROWS REPETITIONS WORKERS"
++        )
++    var kind = String(args[1])
++    var rows = Int(String(args[2]))
++    var repetitions = Int(String(args[3]))
++    var workers = Int(String(args[4]))
++    if rows <= 0 or repetitions <= 0 or workers <= 0:
++        raise Error("rows, repetitions, and workers must be positive")
++    if kind == "int64":
++        var inputs = int_inputs(rows)
++        var best = raw_partitioned_int64_inner(
++            inputs[0], inputs[1], 0, 0, workers
++        )
++        for _ in range(1, repetitions):
++            var result = raw_partitioned_int64_inner(
++                inputs[0], inputs[1], 0, 0, workers
++            )
++            if (
++                result.partition_ns
++                + result.build_probe_ns
++                + result.order_ns
++                + result.gather_ns
++                < best.partition_ns
++                + best.build_probe_ns
++                + best.order_ns
++                + best.gather_ns
++            ):
++                best = result^
++        report(kind, rows, best)
++        return
++    if kind == "string":
++        var inputs = string_inputs(rows)
++        var best = raw_partitioned_string_inner(
++            inputs[0], inputs[1], 0, 0, workers
++        )
++        for _ in range(1, repetitions):
++            var result = raw_partitioned_string_inner(
++                inputs[0], inputs[1], 0, 0, workers
++            )
++            if (
++                result.partition_ns
++                + result.build_probe_ns
++                + result.order_ns
++                + result.gather_ns
++                < best.partition_ns
++                + best.build_probe_ns
++                + best.order_ns
++                + best.gather_ns
++            ):
++                best = result^
++        report(kind, rows, best)
++        return
++    raise Error("kind must be int64 or string")
+diff --git a/experiments/cpu110/raw_partitioned_join_matrix_bench.mojo b/experiments/cpu110/raw_partitioned_join_matrix_bench.mojo
+new file mode 100644
+index 0000000..f834326
+--- /dev/null
++++ b/experiments/cpu110/raw_partitioned_join_matrix_bench.mojo
+@@ -0,0 +1,246 @@
++"""Full-output phase bench for the isolated raw-key #105 join prototype.
++
++The raw hash path intentionally differs from production key encoding, but it
++now retains the same single-key inner-join output frame and validates it
++against DataFrame.join after every measured call. Logs from the earlier
++row-pair-only gather are provisional and are not comparable full-join timings.
++
++Usage:
++  raw_partitioned_join_matrix_bench int64|string ROWS REPS WORKERS CARDINALITY repeat|skew|sparse
++
++`repeat` gives dense Int64 values, `sparse` starts at Int64.MIN so the
++production bounded-range path must fall back, and `skew` sends 90% of left
++rows to one key. The right side remains a unique-key dimension.
++"""
++from std.sys import argv
++from std.time import monotonic
++
++from dataframe import Column, DataFrame, Series
++from raw_partitioned_join_lib import (
++    RawPartitionedJoin,
++    raw_partitioned_int64_inner,
++    raw_partitioned_string_inner,
++)
++
++
++def left_index(row: Int, cardinality: Int, shape: String) -> Int:
++    return 0 if shape == "skew" and row % 10 != 0 else row % cardinality
++
++
++def int_value(index: Int, shape: String) -> Int64:
++    # `sparse` intentionally includes Int64.MIN, which rejects dense direct
++    # ids before subtraction and exercises the production dictionary fallback.
++    return Int64.MIN + Int64(index) * 1_000_003 if shape == "sparse" else Int64(
++        index
++    )
++
++
++def int_inputs(
++    rows: Int, cardinality: Int, shape: String
++) raises -> Tuple[DataFrame, DataFrame]:
++    var left_keys = List[Int64](capacity=rows)
++    var left_valid = List[Bool](capacity=rows)
++    var left_payload = List[Int64](capacity=rows)
++    var right_keys = List[Int64](capacity=cardinality)
++    var right_payload = List[Int64](capacity=cardinality)
++    for key in range(cardinality):
++        right_keys.append(int_value(key, shape))
++        right_payload.append(Int64(key))
++    for row in range(rows):
++        left_keys.append(int_value(left_index(row, cardinality, shape), shape))
++        left_valid.append(row % 127 != 0)
++        left_payload.append(Int64(row))
++    return (
++        DataFrame(
++            [
++                Series("k", Column[Int64](left_keys^, left_valid^)),
++                Series("left_payload", Column[Int64](left_payload^)),
++            ]
++        ),
++        DataFrame(
++            [
++                Series("k", Column[Int64](right_keys^)),
++                Series("right_payload", Column[Int64](right_payload^)),
++            ]
++        ),
++    )
++
++
++def string_inputs(
++    rows: Int, cardinality: Int, shape: String
++) raises -> Tuple[DataFrame, DataFrame]:
++    var left_keys = List[String](capacity=rows)
++    var left_valid = List[Bool](capacity=rows)
++    var left_payload = List[Int64](capacity=rows)
++    var right_keys = List[String](capacity=cardinality)
++    var right_payload = List[Int64](capacity=cardinality)
++    for key in range(cardinality):
++        right_keys.append("key_" + String(key))
++        right_payload.append(Int64(key))
++    for row in range(rows):
++        left_keys.append("key_" + String(left_index(row, cardinality, shape)))
++        left_valid.append(row % 127 != 0)
++        left_payload.append(Int64(row))
++    return (
++        DataFrame(
++            [
++                Series("k", Column[String](left_keys^, left_valid^)),
++                Series("left_payload", Column[Int64](left_payload^)),
++            ]
++        ),
++        DataFrame(
++            [
++                Series("k", Column[String](right_keys^)),
++                Series("right_payload", Column[Int64](right_payload^)),
++            ]
++        ),
++    )
++
++
++def _check_output(result: RawPartitionedJoin, expected: DataFrame) raises:
++    if not result.frame.equals(expected):
++        raise Error("raw join output differs from DataFrame.join")
++
++
++def phase_total(result: RawPartitionedJoin) -> Int:
++    return (
++        result.partition_ns
++        + result.build_probe_ns
++        + result.order_ns
++        + result.gather_ns
++    )
++
++
++def report(
++    kind: String,
++    shape: String,
++    rows: Int,
++    cardinality: Int,
++    baseline_ns: Int,
++    raw_wall_ns: Int,
++    result: RawPartitionedJoin,
++):
++    # `raw_wall_total_ns` matches the production benchmark scope: it starts
++    # immediately before the raw call and ends once the retained output frame
++    # returns. The phase sum is diagnostic only and intentionally excludes
++    # small wrapper/setup/cleanup work between phase timestamps.
++    print(
++        "kind,shape,rows,cardinality,output_rows,baseline_join_ns,raw_partition_ns,raw_build_probe_ns,raw_order_ns,raw_gather_ns,raw_phase_sum_ns,raw_wall_total_ns"
++    )
++    print(
++        kind,
++        ",",
++        shape,
++        ",",
++        rows,
++        ",",
++        cardinality,
++        ",",
++        len(result.left_rows),
++        ",",
++        baseline_ns,
++        ",",
++        result.partition_ns,
++        ",",
++        result.build_probe_ns,
++        ",",
++        result.order_ns,
++        ",",
++        result.gather_ns,
++        ",",
++        phase_total(result),
++        ",",
++        raw_wall_ns,
++        sep="",
++    )
++
++
++def main() raises:
++    var args = argv()
++    if len(args) != 7:
++        raise Error(
++            "usage: raw_partitioned_join_matrix_bench int64|string ROWS REPS WORKERS CARDINALITY repeat|skew|sparse"
++        )
++    var kind = String(args[1])
++    var rows = Int(String(args[2]))
++    var repetitions = Int(String(args[3]))
++    var workers = Int(String(args[4]))
++    var cardinality = Int(String(args[5]))
++    var shape = String(args[6])
++    if rows <= 0 or repetitions <= 0 or workers <= 0 or cardinality <= 0:
++        raise Error(
++            "rows, repetitions, workers, and cardinality must be positive"
++        )
++    if shape != "repeat" and shape != "skew" and shape != "sparse":
++        raise Error("shape must be repeat, skew, or sparse")
++    if kind == "int64":
++        var inputs = int_inputs(rows, cardinality, shape)
++        var warm = inputs[0].join(inputs[1], "k")
++        var best_baseline = Int.MAX
++        var raw_start = monotonic()
++        var best_raw = raw_partitioned_int64_inner(
++            inputs[0], inputs[1], 0, 0, workers
++        )
++        var best_raw_wall_ns = monotonic() - raw_start
++        _check_output(best_raw, warm)
++        for _ in range(repetitions):
++            var start = monotonic()
++            var joined = inputs[0].join(inputs[1], "k")
++            best_baseline = min(best_baseline, monotonic() - start)
++            if not joined.equals(warm):
++                raise Error("baseline join output changed")
++            raw_start = monotonic()
++            var raw = raw_partitioned_int64_inner(
++                inputs[0], inputs[1], 0, 0, workers
++            )
++            var raw_wall_ns = monotonic() - raw_start
++            _check_output(raw, warm)
++            if raw_wall_ns < best_raw_wall_ns:
++                best_raw = raw^
++                best_raw_wall_ns = raw_wall_ns
++        report(
++            kind,
++            shape,
++            rows,
++            cardinality,
++            best_baseline,
++            best_raw_wall_ns,
++            best_raw,
++        )
++        return
++    if kind == "string":
++        var inputs = string_inputs(rows, cardinality, shape)
++        var warm = inputs[0].join(inputs[1], "k")
++        var best_baseline = Int.MAX
++        var raw_start = monotonic()
++        var best_raw = raw_partitioned_string_inner(
++            inputs[0], inputs[1], 0, 0, workers
++        )
++        var best_raw_wall_ns = monotonic() - raw_start
++        _check_output(best_raw, warm)
++        for _ in range(repetitions):
++            var start = monotonic()
++            var joined = inputs[0].join(inputs[1], "k")
++            best_baseline = min(best_baseline, monotonic() - start)
++            if not joined.equals(warm):
++                raise Error("baseline join output changed")
++            raw_start = monotonic()
++            var raw = raw_partitioned_string_inner(
++                inputs[0], inputs[1], 0, 0, workers
++            )
++            var raw_wall_ns = monotonic() - raw_start
++            _check_output(raw, warm)
++            if raw_wall_ns < best_raw_wall_ns:
++                best_raw = raw^
++                best_raw_wall_ns = raw_wall_ns
++        report(
++            kind,
++            shape,
++            rows,
++            cardinality,
++            best_baseline,
++            best_raw_wall_ns,
++            best_raw,
++        )
++        return
++    raise Error("kind must be int64 or string")

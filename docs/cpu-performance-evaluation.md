@@ -1,6 +1,8 @@
 # CPU performance evaluation after #154
 
-Implementation commit: `be91deb`.
+Production implementation: `be91deb`, PR #155 (Ubuntu and macOS CI passed).
+Follow-up experiments are on `perf/cpu-evaluation-followup-110`, stacked on #155.
+Parquet research is excluded at the user's request; it is not part of this follow-up.
 
 Measured on 2026-09-22, Linux x86-64, AMD Threadripper 3970X, pinned Mojo
 1.2 nightly and Polars 1.44.2. The unchanged baseline is `7a01b37` (#154),
@@ -137,8 +139,8 @@ patches, commands, raw results and limitations are in
 | Scoped pool reuse | Two-stage 1M pipeline ~2.93 to 0.50 ms | Execution-context reuse is promising. No process-global pool or JIT-lifetime change shipped |
 | Parallel CSR/expansion | 10M join ~2.56 to 1.41 s before direct integer IDs | Retained with large-right-side threshold; small CSR stays serial |
 | CSR bucket arithmetic | Dictionary-key join 1.419 vs 1.400 s | Insufficient measured benefit to retain another change |
-| Serial/parallel radix | Encoded-rank 1M serial merge ~271 to radix49 ms; at32 threads merge30 vs parallel radix97 ms | Current parallel radix rejected. Serial radix needs full multi-key/null integration; rank-only times are not full sorts |
-| Parallel partial selection | Encoded-rank top-k ~4.80 to 2.14 ms | Promising, but full pipeline still pays key encoding; not shipped |
+| Serial/parallel radix | Full Int64 sort at32: 1M40.76→76.38ms (regression), 10M513.51→445.62ms; Polars14.75/143.49ms | Reject unconditional dispatch; selective eligibility is needed. String/null/multikey fallback preserved |
+| Parallel partial selection | Full Int64 top100 at32: 1M12.97→9.99ms, 10M131.63→81.00ms; stable Polars18.75/212.35ms. 10MString433.31→409.98ms vs Polars283.62ms | Candidate worth retaining for small-k, especially integers; isolated patch only |
 | Dictionary grouping | 1M repeated grouping saves ~17–25 ms; encode costs ~28–42 ms | Reuse amortizes encoding; logical payload 4–7x smaller. No categorical dtype shipped |
 | Dictionary join reconciliation | 1M,32 threads: strings50.1/78.0 ms vs codes36.5/64.7 ms (100/100k keys); encode/remap29.2/60.0 ms | Approximately 3/5 uses to amortize; independent dictionaries, nulls and right-only keys validated. Arrow dictionary arrays remain unsupported |
 | Bounded streaming | 20M rows /1.154GB: eager1.477 s, parallel windows1.190 s; peak RSS ~4.6GiB vs34MiB | Strong memory improvement; slower than Polars. Prototype supports one pipeline, not the full lazy API |
@@ -167,11 +169,13 @@ are distinct from warmed repeated throughput results.
 4. Introduce chunked buffers with chunk-aware consumers, keeping contiguous
    materialization explicit. Copy avoidance helps CSV and Arrow import only
    when downstream operators can retain that layout.
-5. Finish sort rank/selection integration and dictionary lifetime/reconciliation
-   APIs. Isolated kernel wins do not establish full-pipeline parity.
+5. Integrate eligible parallel top-k, with the measured full-pipeline benefit.
+   Keep radix dispatch selective; rank encoding and gathering remain expensive.
+   Add dictionary lifetime/reconciliation APIs where repeated use amortizes
+   encoding costs.
 
 This evaluation does not close the full chunked-column, streaming, dictionary,
-thread-pool, sorting or native-Parquet feature issues. Correctness contracts
+thread-pool or sorting feature issues. Parquet is excluded from further work. Correctness contracts
 and reproducible end-to-end gains determine which prototypes should graduate.
 
 ## Validation
@@ -193,5 +197,53 @@ The expanded CSR test found a real temporary-buffer lifetime defect before
 publication. An explicit keepalive now retains the row-order buffer until the
 worker barrier; the full suite and oracle were rerun after the fix. Earlier
 isolated CSR measurements are historical evidence, while the final integrated
-comparison above measures the corrected implementation. Cross-platform CI is
-still needed; local timings and tests are Linux x86-64 only.
+comparison above measures the corrected implementation. PR #155 passed both Ubuntu and macOS CI. The follow-up experiments and all
+performance timings remain Linux x86-64 only.
+
+## Follow-up evaluation
+
+The complete stable single-key sort and top-100 matrix (1M/10M, Int64/String,
+1/32 threads) is recorded in the [experiment ledger](../experiments/cpu110/README.md).
+Its Polars top-k comparator uses the original row as a secondary key to
+preserve ties, then sorts only the selected 100 rows. These measurements
+include rank encoding, selection and output gathering.
+
+The bounded CSV pipeline also completed a 200M-row, 11.54GB input under an
+8GiB process address-space cap, with the expected aggregate. This demonstrates
+input larger than the process allocation limit for the tested pipeline; the
+OS page cache is not restricted. It is a correctness/memory-bound check, not
+a comparative throughput measurement.
+
+Raw-key join phase measurements initially omitted retained result assembly.
+Those logs are provisional and superseded by the full-result matrix: the
+corrected experiment retains a DataFrame, verifies exact production equality,
+and times the entire call externally. Its single-thread path loses to the
+production implementation in all twelve tested key/cardinality/size cases.
+The [24-case full-result matrix](../experiments/cpu110/results/raw_join_full_matrix.md)
+is complete. At32 threads, 10M sparse Int64 improves826→419ms and strings
+1002→568ms, versus Polars87/115ms. Dense integers and skewed strings regress.
+Retain this only as a candidate for guarded sparse/high-cardinality paths;
+it is not a universal replacement and is not integrated into production.
+
+The final pool experiment measures100K filter→sum at173us with the legacy
+serial threshold,909us with fresh workers at an8K grain, and113us with a reused
+explicit owner. Owner startup is1.23ms, so reuse across stages matters. Nested
+inline work/error recovery and compiled/JIT exit checks pass. A hidden
+process-global owner is not implemented or validated.
+
+The dictionary follow-up confirms repeated code operations benefit beyond
+grouping/joins: at1M/32, lexical sorting drops98→39ms (100keys) and82→35ms
+(100Kkeys). Unique/count/equality also improve. The lexical dictionary plus
+encoding of two columns costs111/201ms; one-shot conversion is generally a
+loss. These are encoded-output operations, not a complete categorical API.
+
+### Current disposition
+
+PR #155 contains the production parser, reduction, and ordered-join changes
+and passes Ubuntu/macOS CI. This stacked follow-up contains experiments and
+evidence only. The remaining feature integrations are explicit pool ownership,
+chunk-aware columns, categorical storage, eligible parallel top-k, selective
+raw-key joins, and a general streaming plan. The measurements do not establish
+the user's target of twice Polars' speed across workloads. The largest broad
+gaps remain output materialization/copies, general joins, and sort-key work.
+Parquet was removed from the follow-up scope at the user's request.

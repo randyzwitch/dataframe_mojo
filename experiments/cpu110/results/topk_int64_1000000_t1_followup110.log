@@ -1,0 +1,7 @@
+running topk rows=1000000 kind=int64 threads=1
+kind,int64
+rows,1000000
+k,100
+full_sort_ns,426649958
+serial_topk_ns,12895611
+candidate_topk_ns,12866302

@@ -1,0 +1,7 @@
+running polars radix rows=10000000 kind=string threads=32
+workload=radix
+kind=string
+rows=10000000
+threads=32
+semantics=stable_sort_nulls_last
+best_ns=399913008

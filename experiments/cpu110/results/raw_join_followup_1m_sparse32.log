@@ -1,0 +1,2 @@
+kind,shape,rows,cardinality,output_rows,baseline_join_ns,raw_partition_ns,raw_build_probe_ns,raw_order_ns,raw_gather_ns,raw_total_ns
+int64,sparse,1000000,100000,992125,62520419,11496868,8773132,21974690,11100457,53345147

@@ -1,0 +1,2 @@
+kind,shape,rows,cardinality,output_rows,baseline_join_ns,raw_partition_ns,raw_build_probe_ns,raw_order_ns,raw_gather_ns,raw_phase_sum_ns,raw_wall_total_ns
+string,repeat,1000000,100000,992125,101849726,12811411,11085061,22926783,15649178,62472433,62484853

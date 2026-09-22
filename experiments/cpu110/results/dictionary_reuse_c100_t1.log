@@ -1,0 +1,13 @@
+rows,1000000
+distinct,100
+encode_lexical_remap_ns,113296042
+string_sort_ns,801338273
+code_sort_ns,403992517
+string_unique_ns,33929660
+code_unique_ns,22045238
+string_n_unique_ns,36857859
+code_n_unique_ns,19284036
+string_value_counts_ns,30656809
+code_value_counts_ns,18630230
+string_eq_ns,19823645
+code_eq_ns,12242314

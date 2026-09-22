@@ -1,0 +1,6 @@
+run_id=followup110
+git_head=1f76355afff35a951e58f07be91575a592feb673
+topk_bin=/tmp/df_topk_experiment/topk_pipeline_108
+radix_bin=/tmp/df_radix_experiment/radix_pipeline_108
+polars_script=/home/randyzwitch/GitHub/dataframe_mojo/experiments/cpu110/sort_matrix_polars.py
+matrix=rows:{1000000,10000000};kind:{int64,string};threads:{1,32}

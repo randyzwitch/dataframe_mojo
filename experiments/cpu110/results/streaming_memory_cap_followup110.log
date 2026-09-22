@@ -1,0 +1,4 @@
+input_bytes=1153606359,address_space_cap_bytes=536870912,threads=1
+176 external/tcmalloc+/tcmalloc/internal/system_allocator.h:585] MmapAligned() failed - unable to allocate with tag (hint=0x6de2c0000000, size=1073741824, alignment=1073741824) - is something limiting address placement?
+176 external/tcmalloc+/tcmalloc/internal/system_allocator.h:592] Note: the allocation may have failed because TCMalloc assumes a 48-bit virtual address space size; you may need to rebuild TCMalloc with TCMALLOC_ADDRESS_BITS defined to your system's virtual address space size
+176 external/tcmalloc+/tcmalloc/arena.cc:59] CHECK in Alloc: FATAL ERROR: Out of memory trying to allocate internal tcmalloc data (bytes=131072, object-size=16384); is something preventing mmap from succeeding (sandbox, VSS limitations)?

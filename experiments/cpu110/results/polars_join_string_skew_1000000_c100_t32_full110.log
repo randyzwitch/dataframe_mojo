@@ -1,0 +1,2 @@
+kind,shape,rows,cardinality,threads,output_rows,polars_join_ns
+string,skew,1000000,100,32,992125,11987770

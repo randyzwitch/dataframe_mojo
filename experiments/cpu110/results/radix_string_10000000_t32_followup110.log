@@ -1,0 +1,5 @@
+running radix rows=10000000 kind=string threads=32
+kind,string
+rows,10000000
+merge_sort_ns,1195592565
+candidate_sort_ns,1212497464

@@ -1,0 +1,5 @@
+running radix rows=1000000 kind=int64 threads=1
+kind,int64
+rows,1000000
+merge_sort_ns,318149939
+candidate_sort_ns,263912567

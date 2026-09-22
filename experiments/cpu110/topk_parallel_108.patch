@@ -1,0 +1,183 @@
+diff --git a/dataframe/series.mojo b/dataframe/series.mojo
+index b1533ee..e75654f 100644
+--- a/dataframe/series.mojo
++++ b/dataframe/series.mojo
+@@ -12,6 +12,7 @@ from .parallel import (
+     configured_workers,
+     partitions,
+     run_jobs,
++    worker_count,
+ )
+ from std.memory import ArcPointer
+ from .cast import cast_series
+@@ -1199,7 +1200,7 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
+     return indices^
+ 
+ 
+-def smallest_indices(ranks: List[List[Int]], k: Int) raises -> List[Int]:
++def _smallest_indices_serial(ranks: List[List[Int]], k: Int) raises -> List[Int]:
+     """The k first rows of sort_indices(ranks), in order, in O(n log k).
+ 
+     A max-heap holds the best k rows seen so far under the same total order
+@@ -1260,3 +1261,161 @@ def smallest_indices(ranks: List[List[Int]], k: Int) raises -> List[Int]:
+     for i in order:
+         result.append(heap[i])
+     return result^
++
++
++def _partial_smallest(
++    ranks: List[List[Int]], start: Int, end: Int, k: Int
++) -> List[Int]:
++    """Unordered best rows from one input span under the stable rank order."""
++    var heap = List[Int](capacity=min(k, end - start))
++    for row in range(start, end):
++        if len(heap) < k:
++            heap.append(row)
++            var child = len(heap) - 1
++            while child > 0:
++                var parent = (child - 1) // 2
++                if not _rank_less(ranks, heap[parent], heap[child]):
++                    break
++                var tmp = heap[parent]
++                heap[parent] = heap[child]
++                heap[child] = tmp
++                child = parent
++        elif k > 0 and _rank_less(ranks, row, heap[0]):
++            heap[0] = row
++            var parent = 0
++            while True:
++                var largest = parent
++                var left = 2 * parent + 1
++                var right = left + 1
++                if left < len(heap) and _rank_less(
++                    ranks, heap[largest], heap[left]
++                ):
++                    largest = left
++                if right < len(heap) and _rank_less(
++                    ranks, heap[largest], heap[right]
++                ):
++                    largest = right
++                if largest == parent:
++                    break
++                var tmp = heap[parent]
++                heap[parent] = heap[largest]
++                heap[largest] = tmp
++                parent = largest
++    return heap^
++
++
++def _order_smallest(ranks: List[List[Int]], rows: List[Int]) raises -> List[Int]:
++    var selected = List[List[Int]]()
++    for key in ranks:
++        var subset = List[Int](capacity=len(rows))
++        for row in rows:
++            subset.append(key[row])
++        selected.append(subset^)
++    var positions = List[Int](capacity=len(rows))
++    for row in rows:
++        positions.append(row)
++    selected.append(positions^)
++    var order = sort_indices(selected)
++    var result = List[Int](capacity=len(rows))
++    for i in order:
++        result.append(rows[i])
++    return result^
++
++
++struct _TopKRangeJob(Job):
++    """Select one contiguous range; the final merge handles worker overlap."""
++
++    var ranks: ArcPointer[List[List[Int]]]
++    var start: Int
++    var end: Int
++    var k: Int
++    var rows: List[Int]
++
++    def __init__(
++        out self,
++        ranks: ArcPointer[List[List[Int]]],
++        start: Int,
++        end: Int,
++        k: Int,
++    ):
++        self.ranks = ranks.copy()
++        self.start = start
++        self.end = end
++        self.k = k
++        self.rows = List[Int]()
++
++    def run(mut self) raises:
++        self.rows = _partial_smallest(self.ranks[], self.start, self.end, self.k)
++
++
++def _parallel_smallest_indices(
++    ranks: List[List[Int]], k: Int, workers: Int
++) raises -> List[Int]:
++    """A stable global top-k from independently selected contiguous ranges."""
++    var n = len(ranks[0])
++    var shared = ArcPointer(ranks.copy())
++    var bounds = partitions(n, workers, 1)
++    var jobs = List[_TopKRangeJob](capacity=workers)
++    for worker in range(workers):
++        jobs.append(
++            _TopKRangeJob(shared, bounds[worker], bounds[worker + 1], k)
++        )
++    run_jobs(jobs)
++    var candidates = List[Int](capacity=k * workers)
++    for worker in range(workers):
++        for row in jobs[worker].rows:
++            candidates.append(row)
++    # A global top-k member must be among its own range's k stable best rows.
++    # This second heap is small (at most workers * k), then restores output
++    # order by the same rank-plus-row order as the serial implementation.
++    var best = List[Int](capacity=k)
++    for row in candidates:
++        if len(best) < k:
++            best.append(row)
++            var child = len(best) - 1
++            while child > 0:
++                var parent = (child - 1) // 2
++                if not _rank_less(ranks, best[parent], best[child]):
++                    break
++                var tmp = best[parent]
++                best[parent] = best[child]
++                best[child] = tmp
++                child = parent
++        elif _rank_less(ranks, row, best[0]):
++            best[0] = row
++            var parent = 0
++            while True:
++                var largest = parent
++                var left = 2 * parent + 1
++                var right = left + 1
++                if left < len(best) and _rank_less(ranks, best[largest], best[left]):
++                    largest = left
++                if right < len(best) and _rank_less(ranks, best[largest], best[right]):
++                    largest = right
++                if largest == parent:
++                    break
++                var tmp = best[parent]
++                best[parent] = best[largest]
++                best[largest] = tmp
++                parent = largest
++    return _order_smallest(ranks, best)
++
++
++def smallest_indices(ranks: List[List[Int]], k: Int) raises -> List[Int]:
++    """The k first stable sort rows, using range selection when it repays."""
++    if len(ranks) == 0:
++        raise Error("Sorting requires at least one key")
++    if k < 0:
++        raise Error("k must be nonnegative")
++    var n = len(ranks[0])
++    var workers = worker_count(n)
++    # Each range contributes at most k candidates. Keep enough scan work per
++    # worker to repay job setup and avoid turning near-full selections into a
++    # larger candidate merge.
++    if (
++        workers <= 1
++        or k == 0
++        or k > n // (workers * 4)
++    ):
++        return _smallest_indices_serial(ranks, k)
++    return _parallel_smallest_indices(ranks, k, workers)

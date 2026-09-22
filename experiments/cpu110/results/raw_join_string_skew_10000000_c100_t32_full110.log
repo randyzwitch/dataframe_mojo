@@ -1,0 +1,2 @@
+kind,shape,rows,cardinality,output_rows,baseline_join_ns,raw_partition_ns,raw_build_probe_ns,raw_order_ns,raw_gather_ns,raw_phase_sum_ns,raw_wall_total_ns
+string,skew,10000000,100,9921259,447647945,60572043,152585648,270461361,90209853,573828905,573839635

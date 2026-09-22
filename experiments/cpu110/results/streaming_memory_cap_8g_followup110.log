@@ -1,0 +1,6 @@
+input_bytes=11536063059,address_space_cap_bytes=8589934592,threads=1
+iteration,0
+pipeline_ns,90002772711
+sum,4498907239.999999
+batch_rows,4194304
+window_bytes,4194304

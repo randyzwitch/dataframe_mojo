@@ -1,0 +1,2 @@
+kind,shape,rows,cardinality,threads,output_rows,polars_join_ns
+string,repeat,1000000,100000,1,992125,36220982

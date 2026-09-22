@@ -1,0 +1,10 @@
+owner_startup_ns=140
+rows,grain,stage_workers,mode,best_ns,mean_ns=4096,65536,1,fresh,7240,7261
+rows,grain,stage_workers,mode,best_ns,mean_ns=4096,8192,1,fresh,7240,7252
+rows,grain,stage_workers,mode,best_ns,mean_ns=4096,8192,1,owned,7249,7297
+rows,grain,stage_workers,mode,best_ns,mean_ns=16384,65536,1,fresh,28259,30572
+rows,grain,stage_workers,mode,best_ns,mean_ns=16384,8192,1,fresh,28249,28279
+rows,grain,stage_workers,mode,best_ns,mean_ns=16384,8192,1,owned,28230,28266
+rows,grain,stage_workers,mode,best_ns,mean_ns=100000,65536,1,fresh,172206,174519
+rows,grain,stage_workers,mode,best_ns,mean_ns=100000,8192,1,fresh,173176,174284
+rows,grain,stage_workers,mode,best_ns,mean_ns=100000,8192,1,owned,173137,174408
