@@ -115,8 +115,8 @@ chunked consumers 2/2, and Arrow 6/6. The numeric oracle verifier independently
 confirmed 419 stored Float32/Float64 bit patterns with installed Polars 1.44.2.
 Inference passed 7/7 focused tests and 11 differential fixtures against Polars
 1.44.2. Inferred reads retain the same mapping through sampling and decode.
-Earlier chunk storage and concat checks also passed. No throughput timings
-have been collected for this new pipeline.
+Earlier chunk storage and concat checks also passed. Initial same-machine timings are recorded in
+[`experiments/csv_port/results/initial-source-port`](../experiments/csv_port/results/initial-source-port/README.md).
 
 Integer validation: default x86, explicit SSE/AVX2, and SIMD-disabled fallback
 all pass 3/3 tests, with 31 pinned Polars oracle cases. Emitted x86 assembly

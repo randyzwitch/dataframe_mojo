@@ -52,7 +52,8 @@ def main() -> None:
     reference = read()
     expected_shape = reference.shape
     expected_nulls = total_nulls(reference)
-    _ = read()
+    warm = read()
+    del warm
 
     workers = pl.thread_pool_size()
     print("engine,scenario,workers,iteration,read_ns,rows,width,nulls")
@@ -70,6 +71,8 @@ def main() -> None:
             f"polars,{args.scenario},{workers},{iteration},{elapsed},"
             f"{frame.height},{frame.width},{total_nulls(frame)}"
         )
+        # Keep destruction of the preceding output outside the next read.
+        del frame
 
 
 if __name__ == "__main__":

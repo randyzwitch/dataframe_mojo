@@ -43,3 +43,11 @@ Keep every output file; calculate medians only afterward:
 branch it also uses the shared chunk-storage changes, so it is not an untouched
 `main` baseline. Record the checkout commit with results and build an unchanged
 main reader separately before making a before/after performance claim.
+
+Untimed cross-engine validation:
+
+    pixi run mojo build -I . experiments/csv_port/verify_reader.mojo -o /tmp/csv-verify-reader
+    pixi run -e oracle python experiments/csv_port/verify_reader_oracle.py /tmp/csv-verify-reader
+
+The initial source-port readout and raw samples are in
+[results/initial-source-port](results/initial-source-port/README.md).
