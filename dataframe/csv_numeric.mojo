@@ -5,7 +5,7 @@ dataframe.parse, so the clean CSV decoder can use fast-float2's direct
 semantics without changing legacy cast behavior.
 
 Algorithm translations derive from fast-float2 0.2.4 under its MIT option;
-its retained text is in ``third_party/FAST_FLOAT2_LICENSE``.
+its retained text is in ``THIRD_PARTY_NOTICES.md``.
 """
 from std.memory import bitcast
 from std.bit import count_leading_zeros
@@ -602,7 +602,7 @@ def parse_csv_float32(text: StringSlice) raises -> Float32:
 # Algorithm source: fast-float2 0.2.4, pinned by Polars 1.44.2. The direct
 # translation below follows number.rs, binary.rs, and simple.rs for Float64.
 # CsvDecimal supplies simple.rs's batched decimal shifts and metadata. See the
-# retained third_party license.
+# retained notice in THIRD_PARTY_NOTICES.md.
 comptime _F64_MANTISSA_BITS = 52
 comptime _F64_MIN_EXPONENT = -1023
 comptime _F64_INFINITY_POWER = 2047
