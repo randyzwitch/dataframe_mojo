@@ -157,6 +157,19 @@ def test_permissive_modes() raises:
         _ = read_csv(PATH, schema(), ignore_errors=True)
 
 
+def test_inferred_projection_validates_mapped_chunk_once() raises:
+    # Sampling stops after the valid first data row. The inferred strict pass
+    # must still take the mapped range reader and validate a later omitted
+    # field because `name` is a projected String column.
+    with open(PATH, "w") as file:
+        file.write("id,name,score\n1,kept,1\n2,later,")
+    var bytes: List[UInt8] = [255, 10]
+    with open(PATH, "a") as file:
+        file.write_bytes(bytes)
+    with assert_raises(contains="not valid UTF-8"):
+        _ = read_csv(PATH, columns=["name"], infer_schema_length=1)
+
+
 def test_lossy_encoding() raises:
     with open(PATH, "w") as file:
         file.write("id,name,score\n1,")

@@ -1595,6 +1595,7 @@ struct _MappedReadConfig(Movable):
     var options: CsvOptions
     var keep: List[Bool]
     var has_header: Bool
+    var check_header: Bool
 
 
 struct _MappedRangeJob(Job):
@@ -1637,6 +1638,7 @@ struct _MappedRangeJob(Job):
             config.options,
             config.keep,
         )
+        reader.check_header = config.check_header
         for c in range(len(reader.columns)):
             reader.columns[c].reserve(self.rows)
         reader.record += self.record
@@ -1667,6 +1669,7 @@ def _read_mapped_produced(
     keep: List[Bool],
     workers: Int,
     chunks: Int,
+    check_header: Bool = True,
 ) raises -> DataFrame:
     """Scan one mapped file while workers decode each range as it appears.
 
@@ -1677,7 +1680,11 @@ def _read_mapped_produced(
     """
     var config = ArcPointer(
         _MappedReadConfig(
-            schema.copy(), options.copy(), keep.copy(), has_header
+            schema.copy(),
+            options.copy(),
+            keep.copy(),
+            has_header,
+            check_header,
         )
     )
     var span = mapping.span()
@@ -1796,6 +1803,7 @@ def _read_mapped(
     has_header: Bool,
     options: CsvOptions,
     keep: List[Bool],
+    check_header: Bool = True,
 ) raises -> DataFrame:
     """Read a mapped file: split it once, decode the ranges in parallel.
 
@@ -1809,11 +1817,18 @@ def _read_mapped(
     var chunks = _csv_chunks(len(span), len(keep), workers)
     if workers > 1:
         return _read_mapped_produced(
-            mapping^, schema, has_header, options, keep, workers, chunks
+            mapping^,
+            schema,
+            has_header,
+            options,
+            keep,
+            workers,
+            chunks,
+            check_header,
         )
     var config = ArcPointer(
         _MappedReadConfig(
-            schema.copy(), options.copy(), keep.copy(), has_header
+            schema.copy(), options.copy(), keep.copy(), has_header, check_header
         )
     )
     var layout = record_splits(span, quote, quoting, chunks)
@@ -2166,11 +2181,19 @@ def read_csv(
     var schema = CsvSchema(fields^)
     var strict = options.copy()
     strict.n_rows = n_rows
-    var reader = _CsvReader(
-        schema, has_header, strict, _projection(schema, columns)
-    )
-    reader.check_header = False
+    var keep = _projection(schema, columns)
+    # The inferred reader normally has a mapped, record-aligned strict pass
+    # too. It skips header equality because duplicate inferred names may have
+    # been disambiguated, while retaining chunk-wide UTF-8 validation.
     try:
+        if _parallel_is_safe(strict, worker_count(1 << 40)):
+            var mapping = _map_file(path)
+            if mapping.address != 0:
+                return _read_mapped(
+                    mapping^, schema, has_header, strict, keep, False
+                )
+        var reader = _CsvReader(schema, has_header, strict, keep)
+        reader.check_header = False
         return _stream(path, reader, buffer_size)
     except e:
         var message = String(e)
