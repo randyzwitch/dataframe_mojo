@@ -33,3 +33,16 @@ and contended atomics prohibit attributing exact percentage costs from these
 numbers. Worker decode totals overlap and must not be added to wall phases.
 Polars' persistent Rayon scope/work-stealing queues remain an explicit runtime
 difference. The isolated Rayon benchmark had mixed results; see ../rayon-isolated.
+
+Snapshot clarification: `new` includes builder alignment, typed integer
+frontends, trusted internal spans, and the isolated scanner-inline/slow-outline
+float candidate (before Array tables). `old` is f568d61. Thus these phases
+compare cumulative parser changes, not the builder change in isolation.
+Neither profile is the final static-table-only parser. The separate builder
+benchmark in ../builder-and-splitter isolates builder state.
+
+The later `profile-rayon` traces use the earlier builder-only parser, with
+checked spans and original integer/float frontends. They must not be compared
+against the new scoped profile as a scheduler-only A/B test. The original
+uninstrumented ../rayon-isolated comparison did use the same builder-only
+parser on both schedulers. These distinctions matter when assigning costs.

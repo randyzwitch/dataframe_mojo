@@ -127,3 +127,40 @@ buffers 4/4, and reader 7/7 passed. Actual end-to-end outputs match Polars
 1.44.2 in eight runs: explicit/inferred schemas, full/projected reads, and
 one/four threads on 6,000 mixed rows with nulls, escapes, Unicode, and multiline
 strings. The oracle driver and verifier live in `experiments/csv_port`.
+
+
+## Follow-up source alignment (2026-09-22)
+
+The comparison branch now compiles projection indices once per chunk, matches
+Polars' relative splitter cache, stores quote/encoding/scratch in the UTF-8
+builder, monomorphizes the atoi_simd integer frontend, preserves iterator-proven
+spans through the decoder, and stores fast-float lookup tables as addressable
+scalar arrays. Each change is isolated in a commit. The larger float
+inlining/slow-outlining experiment was measured but not retained.
+
+On the same million-row mixed fixture, final single-thread medians are
+247.91 ms full and 147.55 ms projected, versus the initial port's 381.62 and
+290.58 ms. Recent Polars reference runs were 138.11 and 93.74 ms. These
+comparisons span benchmark rounds; paired per-change runs and every raw sample
+are retained under experiments/csv_port/results. No general parity is claimed.
+The final 32-thread medians are 19.82 ms full and 22.58 ms projected. The
+projected result remains worse than the initial port's 16.41 ms.
+
+Diagnostic phase traces show faster cumulative decoding alongside increased
+shared-queue submission cost for projected 32-thread reads (~0.85 to 8.62 ms).
+Instrumentation affects scheduling, and the snapshots differ in several
+parser changes; see the exact provenance and caveats in
+[the phase report](../experiments/csv_port/results/scheduler-phases/README.md).
+An isolated native Rayon prototype was correct but gave mixed timings and is
+not a production dependency. Matching Polars' persistent work-stealing runtime
+remains outstanding; changing schedulers alone has not demonstrated parity.
+
+Latest focused validation: decoder 9/9, splitter 9/9, buffers 5/5, lazy validity 4/4,
+integers 3/3 default and 3/3 fallback, reader 7/7, numeric 4/4 including 419 reference
+bit patterns. The final candidate passes 24 actual Polars output comparisons
+covering explicit/inferred schemas, projections, quoted nulls, comments, row
+limits, Unicode, multiline/escaped fields, and unterminated EOF with 1/4 workers.
+
+Public read_csv is still unchanged. Before merge, the new reader must become
+the sole implementation and the old reader must be removed; this intermediate
+comparison branch is not ready for that switch.
