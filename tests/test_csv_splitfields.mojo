@@ -60,6 +60,28 @@ def test_structural_cache_crosses_64_byte_boundary() raises:
     assert_equal(split(text), expected)
 
 
+def test_relative_cached_ends_at_block_boundary_and_eof() raises:
+    # A comma at byte 62 leaves structural ends at 64, 66, and 68 cached.
+    # They must be relative to the position after each selected field.
+    var cached = String('"')
+    for _ in range(60):
+        cached += "x"
+    assert_equal(split(cached + '",a,b,c\n'), cached + '"*,a-,b-,c-|')
+    assert_equal(split(cached + '",a,b'), cached + '"*,a-,b-|')
+
+    # The last SIMD lane must take the no-shift-by-64 branch. A comma in the
+    # first byte after the block must still be found by the scalar tail.
+    var last_lane = String('"')
+    for _ in range(61):
+        last_lane += "x"
+    assert_equal(split(last_lane + '",a,b,c\n'), last_lane + '"*,a-,b-,c-|')
+
+    var next_block = String('"')
+    for _ in range(62):
+        next_block += "x"
+    assert_equal(split(next_block + '",a,b,c\n'), next_block + '"*,a-,b-,c-|')
+
+
 def test_quoted_close_at_every_simd_offset() raises:
     # The opening quote stays at byte zero; every closing quote position from
     # the scalar tail through three SIMD blocks must expose the same comma.

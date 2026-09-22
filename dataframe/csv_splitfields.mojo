@@ -6,8 +6,8 @@ Mapping to ``polars-io/src/csv/read/splitfields.rs``:
   for separator/LF, while a field beginning with the quote character runs a
   quote-parity scan and returns the raw field with ``needs_escaping=True``.
 * ``_prefix_xor_inclusive`` is the same inclusive quote-prefix parity used by
-  Polars' SIMD implementation. ``cached_ends`` is its
-  ``previous_valid_ends`` cache, represented as absolute block offsets.
+  Polars' SIMD implementation. ``cached_ends`` is its relative
+  ``previous_valid_ends`` cache, shifted after each returned field.
 * ``CsvFieldSpan.bytes`` is the Mojo borrowing handoff. It yields a view into
   caller-owned bytes and never copies the field.
 
@@ -52,11 +52,15 @@ struct CsvSplitFields:
     var separator: UInt8
     var quote: UInt8
     var quoting: Bool
+    # Polars stores these SIMD splats in `SplitFields`, rather than rebuilding
+    # them in every 64-byte block scan.
+    var simd_separator: SIMD[DType.uint8, _SIMD_WIDTH]
+    var simd_eol: SIMD[DType.uint8, _SIMD_WIDTH]
+    var simd_quote: SIMD[DType.uint8, _SIMD_WIDTH]
     var position: Int
     var finished: Bool
-    # Valid structural ends remaining from a prior quoted SIMD block. Bit i is
-    # an absolute offset ``cache_base + i``.
-    var cache_base: Int
+    # `previous_valid_ends` from Polars. Bit zero is relative to `position`;
+    # consuming an end shifts the remaining mask into the next field's frame.
     var cached_ends: UInt64
 
     def __init__(
@@ -68,25 +72,20 @@ struct CsvSplitFields:
         self.separator = separator
         self.quote = quote
         self.quoting = quoting
+        self.simd_separator = SIMD[DType.uint8, _SIMD_WIDTH](separator)
+        self.simd_eol = SIMD[DType.uint8, _SIMD_WIDTH](10)
+        self.simd_quote = SIMD[DType.uint8, _SIMD_WIDTH](quote)
         self.position = 0
         self.finished = False
-        self.cache_base = 0
         self.cached_ends = 0
 
-    def _cached_end(mut self, input: Span[UInt8, ImmutAnyOrigin]) -> Int:
-        if self.cached_ends == 0 or self.position < self.cache_base:
+    def _cached_end(mut self) -> Int:
+        if self.cached_ends == 0:
             return -1
-        var offset = self.position - self.cache_base
-        if offset >= _SIMD_WIDTH:
-            self.cached_ends = 0
-            return -1
-        var remaining = self.cached_ends & (~UInt64(0) << UInt64(offset))
-        if remaining == 0:
-            self.cached_ends = 0
-            return -1
-        var bit = Int(count_trailing_zeros(remaining))
-        self.cached_ends &= ~(UInt64(1) << UInt64(bit))
-        return self.cache_base + bit
+        var offset = Int(count_trailing_zeros(self.cached_ends))
+        # Match `previous_valid_ends >>= pos + 1` in SplitFields::next.
+        self.cached_ends >>= UInt64(offset + 1)
+        return self.position + offset
 
     def consumed(self) -> Int:
         """Bytes consumed from the input after the most recent field."""
@@ -100,8 +99,7 @@ struct CsvSplitFields:
         while i + _SIMD_WIDTH < n:
             var block = input.unsafe_ptr().unsafe_load[width=_SIMD_WIDTH](i)
             var mask = _mask64(
-                block.eq(SIMD[DType.uint8, _SIMD_WIDTH](self.separator))
-                | block.eq(SIMD[DType.uint8, _SIMD_WIDTH](10))
+                block.eq(self.simd_separator) | block.eq(self.simd_eol)
             )
             if mask != 0:
                 var end = i + Int(count_trailing_zeros(mask))
@@ -138,12 +136,9 @@ struct CsvSplitFields:
         var inside = False
         while i + _SIMD_WIDTH < n:
             var block = input.unsafe_ptr().unsafe_load[width=_SIMD_WIDTH](i)
-            var quote_mask = _mask64(
-                block.eq(SIMD[DType.uint8, _SIMD_WIDTH](self.quote))
-            )
+            var quote_mask = _mask64(block.eq(self.simd_quote))
             var structural = _mask64(
-                block.eq(SIMD[DType.uint8, _SIMD_WIDTH](self.separator))
-                | block.eq(SIMD[DType.uint8, _SIMD_WIDTH](10))
+                block.eq(self.simd_separator) | block.eq(self.simd_eol)
             )
             # Equivalent to Polars' `prefix_xorsum_inclusive`: one bit for
             # every byte that is inside a quoted field after that byte.
@@ -154,8 +149,14 @@ struct CsvSplitFields:
             var ends = structural & outside
             if ends != 0:
                 var bit = Int(count_trailing_zeros(ends))
-                self.cache_base = i
-                self.cached_ends = ends & ~(UInt64(1) << UInt64(bit))
+                # Match Rust's cache relative to the slice advanced past the
+                # selected end. Shifting by 64 is invalid, hence its explicit
+                # final-lane branch in the source.
+                self.cached_ends = (
+                    UInt64(0)
+                    if bit == _SIMD_WIDTH - 1
+                    else ends >> UInt64(bit + 1)
+                )
                 var end = i + bit
                 var record = input[end] == 10
                 var result = CsvFieldSpan(
@@ -198,7 +199,7 @@ struct CsvSplitFields:
         if self.position == len(input):
             self.finished = True
             return CsvFieldSpan(self.position, self.position, False, True, 0)
-        var cached = self._cached_end(input)
+        var cached = self._cached_end()
         if cached >= 0:
             var record = input[cached] == 10
             var escaped = self.quoting and input[self.position] == self.quote
