@@ -1,13 +1,9 @@
 """Typed CSV builder boundaries, nulls, and ownership transfer."""
 from std.memory import bitcast
 from std.testing import TestSuite, assert_equal, assert_raises
-from dataframe.csv import CsvField, CsvOptions
+from dataframe.csv import CsvField
 from dataframe.csv_buffers import CsvBuffer
 from dataframe.dtype import DataType
-
-
-def options() -> CsvOptions:
-    return CsvOptions(",", '"', "", 0, -1, [], False, False, "utf8")
 
 
 def add_text(mut buffer: CsvBuffer, text: String) raises:
@@ -19,7 +15,7 @@ def add_text(mut buffer: CsvBuffer, text: String) raises:
             length=text.byte_length(),
         ),
         False,
-        options(),
+        False,
     )
 
 
@@ -108,7 +104,7 @@ def test_string_buffer_retains_inline_long_and_escaped_values() raises:
             length=quoted.byte_length(),
         ),
         True,
-        options(),
+        False,
     )
     # Reusing the escape scratch must not overwrite previously appended bytes.
     var next_quoted = String('"next ""quoted"" value"')
@@ -121,7 +117,7 @@ def test_string_buffer_retains_inline_long_and_escaped_values() raises:
             length=next_quoted.byte_length(),
         ),
         True,
-        options(),
+        False,
     )
     buffer.add_null()
     var result = buffer.finish().string()
@@ -137,6 +133,22 @@ def test_string_buffer_retains_inline_long_and_escaped_values() raises:
     var other = buffer.finish().string()
     assert_equal(other.value(0), "another output with long bytes")
     assert_equal(result.value(2), "1234567890123")
+
+
+def test_string_builder_captures_quote_and_lossy_encoding() raises:
+    var buffer = CsvBuffer(CsvField.string("label"), 1, UInt8(39), False)
+    var quoted = String("'it''s a long quoted field'")
+    buffer.add(Span[UInt8, ImmutAnyOrigin](
+        unsafe_ptr=quoted.as_bytes().unsafe_ptr().unsafe_mut_cast[False]().unsafe_origin_cast[ImmutAnyOrigin](),
+        length=quoted.byte_length()), True, False)
+    assert_equal(buffer.finish().string().value(0), "it's a long quoted field")
+    var lossy = CsvBuffer(CsvField.string("label"), 1, UInt8(34), True)
+    var input: List[UInt8] = [102, 128]
+    lossy.add(Span[UInt8, ImmutAnyOrigin](
+        unsafe_ptr=input.unsafe_ptr().unsafe_mut_cast[False]().unsafe_origin_cast[ImmutAnyOrigin](),
+        length=len(input)), False, False)
+    _ = input^
+    assert_equal(lossy.finish().string().value(0), "f�")
 
 
 def main() raises:

@@ -13,7 +13,7 @@ from dataframe import (
 from dataframe.arrow import _buffer
 from dataframe.bool_column import BoolColumn
 from dataframe.string_column import StringBuilder
-from dataframe.csv import CsvField, CsvOptions
+from dataframe.csv import CsvField
 from dataframe.csv_buffers import CsvBuffer
 from dataframe.dtype import DataType
 
@@ -25,9 +25,7 @@ def _add(mut buffer: CsvBuffer, text: String) raises:
         .unsafe_origin_cast[ImmutAnyOrigin](),
         length=text.byte_length(),
     )
-    buffer.add(
-        bytes, False, CsvOptions(",", '"', "", 0, -1, [], False, False, "utf8")
-    )
+    buffer.add(bytes, False, False)
 
 
 def test_csv_builders_allocate_validity_only_on_first_null() raises:

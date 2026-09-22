@@ -84,22 +84,21 @@ def decode_chunk(
 
     # Polars parse_lines receives compiled projection indices, not a mask
     # scanned again for every record. Compile the API mask once per chunk.
+    var quoting = options.quote_char.byte_length() == 1
+    var quote = options.quote_char.as_bytes()[0] if quoting else UInt8(34)
+    var lossy = options.encoding == "utf8-lossy"
     var projection = List[Int](capacity=selected)
     var buffers = List[CsvBuffer](capacity=selected)
     for i in range(len(schema)):
         if keep[i]:
             projection.append(i)
-            buffers.append(CsvBuffer(schema._fields[i], rows + 1))
+            buffers.append(CsvBuffer(schema._fields[i], rows + 1, quote, lossy))
 
     # parser.rs treats any projection as implicit ragged truncation.
     var partial_projection = selected != len(schema)
     var offset = 0
     var record = record_start
     var output_rows = 0
-    var quote = options.quote_char.as_bytes()[
-        0
-    ] if options.quote_char.byte_length() == 1 else UInt8(0)
-    var quoting = options.quote_char.byte_length() == 1
     var separator = options.separator.as_bytes()[0]
     while offset < len(bytes):
         if _comment_at(bytes, offset, options.comment_prefix):
@@ -130,7 +129,20 @@ def decode_chunk(
                 # This includes an unterminated final record at EOF.
                 if len(raw) > 0 and raw[len(raw) - 1] == 13:
                     raw = raw[0 : len(raw) - 1]
-                buffers[processed].add(raw, field.needs_escaping, options)
+                # parser.rs matches compiled null tokens before Builder::add.
+                var is_null = False
+                if len(options.null_values) != 0:
+                    var null_candidate = raw
+                    if field.needs_escaping and len(raw) >= 2:
+                        null_candidate = raw[1 : len(raw) - 1]
+                    for marker in options.null_values:
+                        if null_candidate == marker.as_bytes():
+                            is_null = True
+                            break
+                if is_null:
+                    buffers[processed].add_null()
+                else:
+                    buffers[processed].add(raw, field.needs_escaping, options.ignore_errors)
                 processed += 1
                 if processed < selected:
                     next_selected = projection[processed]
