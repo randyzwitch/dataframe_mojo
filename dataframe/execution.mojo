@@ -851,6 +851,26 @@ def evaluate[
         raise Error("Invalid group mapping")
     var count = len(bound.expr._nodes)
     var root = count - 1
+    # Fused kernels read source buffers directly. Rechunk their Float64 inputs
+    # once for the whole expression, not once for every 1,024-row batch.
+    var prepared_columns = columns.copy()
+    var has_fused = False
+    for i in range(count):
+        if bound.fusible[i] and bound.expr._nodes[i].left >= 0:
+            has_fused = True
+            break
+    if has_fused:
+        for i in range(count):
+            if bound.expr._nodes[i].op == COL:
+                var source = bound.sources[i]
+                if (
+                    source >= 0
+                    and prepared_columns[source].dtype() == DataType.FLOAT64
+                    and prepared_columns[source].is_chunked()
+                ):
+                    prepared_columns[source] = prepared_columns[
+                        source
+                    ].rechunk()
     var row_mode = grouped and bound.shape() == ROWS
     # Nodes under over() are evaluated by that over() in its own partitions.
     var inside_over = List[Bool](length=count, fill=False)
@@ -881,7 +901,7 @@ def evaluate[
         if is_reduction(node.op):
             var reducer = _reduce[width](
                 bound,
-                columns,
+                prepared_columns,
                 states,
                 node,
                 height,
@@ -896,14 +916,20 @@ def evaluate[
             states[node_index] = state^
         elif is_window(node.op):
             var input = _full[width](
-                bound, columns, states, node.left, height, batch_size, row_mode
+                bound,
+                prepared_columns,
+                states,
+                node.left,
+                height,
+                batch_size,
+                row_mode,
             )
             states[node_index] = window_op(
                 node, input, groups.copy() if grouped else List[Int]()
             )
         elif node.op == OVER:
             states[node_index] = _over[width](
-                bound, columns, node_index, height, batch_size
+                bound, prepared_columns, node_index, height, batch_size
             )
     var result = _empty(bound.dtypes[root])
     var size = height if bound.shape() == ROWS else (
@@ -914,7 +940,7 @@ def evaluate[
         for offset in range(0, size, batch_size):
             var chunk = _batch[width](
                 bound,
-                columns,
+                prepared_columns,
                 states,
                 root,
                 offset,
@@ -933,7 +959,7 @@ def evaluate[
             jobs.append(
                 _RowsJob[width](
                     bound,
-                    columns,
+                    prepared_columns,
                     states,
                     root,
                     bounds[w],
