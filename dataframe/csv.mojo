@@ -380,6 +380,11 @@ struct _CsvReader:
     var partial_projection: Bool
     var projection_skip: Bool
     var projection_skip_in_quotes: Bool
+    var has_projected_string: Bool
+    # True only for a record-aligned input range whose UTF-8 was checked
+    # before tokenization. Streaming buffers can split a code point, so they
+    # retain field validation instead.
+    var utf8_chunk_validated: Bool
     var has_header: Bool
     var prefix: List[UInt8]
     var prefix_done: Bool
@@ -433,18 +438,22 @@ struct _CsvReader:
         self.schema = schema.copy()
         self.columns = List[_CsvColumn](capacity=len(schema))
         self.last_kept = -1
+        self.has_projected_string = False
         var kept = 0
         for i in range(len(schema)):
             self.columns.append(_CsvColumn(schema._fields[i], keep[i]))
             if keep[i]:
                 self.last_kept = i
                 kept += 1
+                if schema._fields[i].dtype == CSV_STRING:
+                    self.has_projected_string = True
         # Polars treats a partial projection as an implicit ragged-line
         # truncation: after its final requested field it only finds the next
         # quote-aware newline, without validating the omitted tail.
         self.partial_projection = kept < len(schema)
         self.projection_skip = False
         self.projection_skip_in_quotes = False
+        self.utf8_chunk_validated = False
         self.has_header = has_header
         self.prefix = List[UInt8](capacity=3)
         self.prefix_done = False
@@ -515,6 +524,25 @@ struct _CsvReader:
             and self.field_index == self.last_kept
         )
 
+    def _checks_utf8_input(self) -> Bool:
+        return (self.has_projected_string or self.sampling) and not self.lossy
+
+    def validate_utf8_chunk(
+        mut self, bytes: Span[UInt8, ImmutAnyOrigin]
+    ) raises:
+        """Validate one record-aligned parse range before field decoding.
+
+        Polars validates an input chunk once when it builds UTF-8 output.
+        This is deliberately not used by the arbitrary-sized streaming
+        reader: a valid code point may cross one of its buffer boundaries.
+        """
+        if self._checks_utf8_input():
+            try:
+                _ = StringSlice(from_utf8=bytes)
+            except:
+                raise Error("CSV input is not valid UTF-8")
+            self.utf8_chunk_validated = True
+
     def _finish_field(mut self) raises:
         if (
             not self.sampling
@@ -562,9 +590,9 @@ struct _CsvReader:
             )
             self.record_bytes.resize(start, 0)
             self.record_bytes.extend(text.as_bytes())
-        elif becomes_text:
-            # Validation only, over bytes already in place: no allocation
-            # and no copy, the field having been written here directly.
+        elif becomes_text and not self.utf8_chunk_validated:
+            # Streaming buffers can divide a UTF-8 sequence, so they retain
+            # field validation. Record-aligned range jobs validated once.
             try:
                 _ = StringSlice(
                     from_utf8=Span(self.record_bytes)[
@@ -860,7 +888,11 @@ struct _CsvReader:
                     quoted = True
                     end = ~end
             var content_start = field_start + 1 if quoted else field_start
-            if self.columns[c].keep and self.columns[c].kind == _KIND_STRING:
+            if (
+                not self.utf8_chunk_validated
+                and self.columns[c].keep
+                and self.columns[c].kind == _KIND_STRING
+            ):
                 try:
                     _ = StringSlice(from_utf8=bytes[content_start:end])
                 except:
@@ -1427,15 +1459,15 @@ struct _RangeJob(Job):
         # A view into the shared buffer. Copying the range out first cost a
         # second pass over every byte of the file, on top of reading it.
         ref buffer = self.bytes[]
-        self.reader.feed(
-            Span[UInt8, ImmutAnyOrigin](
-                unsafe_ptr=buffer.unsafe_ptr()
-                .unsafe_mut_cast[False]()
-                .unsafe_origin_cast[ImmutAnyOrigin]()
-                .unsafe_offset(self.start),
-                length=self.end - self.start,
-            )
+        var input = Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=buffer.unsafe_ptr()
+            .unsafe_mut_cast[False]()
+            .unsafe_origin_cast[ImmutAnyOrigin]()
+            .unsafe_offset(self.start),
+            length=self.end - self.start,
         )
+        self.reader.validate_utf8_chunk(input)
+        self.reader.feed(input)
         self.frame = self.reader.finish()
 
     def into_frame(deinit self) -> DataFrame:
@@ -1611,16 +1643,16 @@ struct _MappedRangeJob(Job):
         # A byte-order mark is special only at the start of the file.
         if self.start != 0:
             reader.prefix_done = True
-        reader.feed(
-            Span[UInt8, ImmutAnyOrigin](
-                unsafe_ptr=Pointer[UInt8, MutAnyOrigin](
-                    unsafe_from_address=self.base + self.start
-                )
-                .unsafe_mut_cast[False]()
-                .unsafe_origin_cast[ImmutAnyOrigin](),
-                length=self.end - self.start,
+        var input = Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=self.base + self.start
             )
+            .unsafe_mut_cast[False]()
+            .unsafe_origin_cast[ImmutAnyOrigin](),
+            length=self.end - self.start,
         )
+        reader.validate_utf8_chunk(input)
+        reader.feed(input)
         self.frame = reader.finish()
 
     def into_frame(deinit self) -> DataFrame:

@@ -4,7 +4,7 @@ The one-byte read is the scalar reference. A finite, oversized row limit
 keeps every read on the serial streaming path, including the large buffers
 that exercise `_feed_borrowed`.
 """
-from std.testing import TestSuite, assert_equal, assert_true
+from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 
 from dataframe import CsvField, CsvSchema, DataFrame, read_csv
 
@@ -189,15 +189,42 @@ def test_invalid_unprojected_string_matches_scalar_error_priority() raises:
     assert_error_matches_scalar()
 
 
-def test_invalid_ignored_string_is_still_validated() raises:
-    # Projection skips conversion and storage, never UTF-8 validation for a
-    # declared String column. The complete row lets the borrowed path check it.
+def test_utf8_validation_follows_projected_string_columns() raises:
     var bytes: List[UInt8] = []
     bytes.extend("id,hidden\n1,".as_bytes())
     bytes.append(255)
     bytes.extend("\n".as_bytes())
     write_bytes(bytes)
-    assert_error_matches_scalar(projected=True)
+    # No String column is projected, so the omitted field is not decoded or
+    # validated. This is the same projection rule Polars applies.
+    var projected_schema = CsvSchema(
+        [CsvField.int64("id"), CsvField.string("hidden")]
+    )
+    for size in [1, 64, 65, 128, 4096]:
+        var frame = read_csv(
+            PATH,
+            projected_schema,
+            columns=["id"],
+            n_rows=SERIAL_LIMIT,
+            buffer_size=size,
+        )
+        assert_equal(frame.height(), 1)
+
+    # Selecting a String column validates the whole input chunk, including an
+    # invalid byte in a projected-out field.
+    bytes = []
+    bytes.extend("id,name,score\n1,kept,".as_bytes())
+    bytes.append(255)
+    bytes.extend("\n".as_bytes())
+    write_bytes(bytes)
+    for size in [1, 64, 65, 128, 4096]:
+        with assert_raises(contains="not valid UTF-8"):
+            _ = read_csv(
+                PATH,
+                typed_schema(),
+                columns=["name"],
+                buffer_size=size,
+            )
 
 
 def test_simple_quotes_null_tokens_and_mask_boundaries() raises:
