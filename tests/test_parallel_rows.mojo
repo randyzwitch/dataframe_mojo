@@ -144,6 +144,34 @@ def test_small_empty_and_zero_column_frames() raises:
     set_threads(1)
 
 
+def test_medium_multicolumn_take_matches_serial_chunks() raises:
+    var whole = frame()
+    var chunks = List[Series](capacity=whole.width())
+    for c in range(whole.width()):
+        var column = whole._columns[c].copy()
+        var split = 50001 + 137 * c
+        chunks.append(
+            Series._from_chunks(
+                [
+                    column.slice(0, split),
+                    column.slice(split, ROWS - split),
+                ]
+            )
+        )
+    var source = DataFrame(chunks^)
+    var rows = List[Int](capacity=100000)
+    for i in range(100000):
+        rows.append((i * 97) % ROWS)
+    var expected_columns = List[Series](capacity=whole.width())
+    for column in whole._columns:
+        expected_columns.append(column.take(rows))
+    var expected = DataFrame(expected_columns^)
+    set_threads(32)
+    var actual = source.take(rows)
+    assert_frames_equal(actual, expected, "medium multi-column gather")
+    set_threads(1)
+
+
 def test_worker_errors_leave_no_partial_result() raises:
     var values = List[Int32](length=ROWS, fill=1)
     values[ROWS - 7] = Int32.MAX
