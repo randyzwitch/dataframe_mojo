@@ -23,6 +23,7 @@ values. The sample is a few thousand rows, so deciding costs far less than
 the hash pass it guards, and nothing is wasted when the answer is no.
 """
 from std.memory import ArcPointer, Pointer, bitcast
+from std.collections import Dict
 
 from .aggregate import float_key
 from .bool_column import BoolColumn
@@ -198,14 +199,32 @@ struct Partitioned(Movable):
         return len(self.bounds) - 1
 
 
-def low_cardinality(keys: List[Series]) raises -> Bool:
-    """Whether too few distinct keys are in play for partitioning to pay
-    for the gather it forces.
+def _prefer_whole_sample(
+    occupied: Int, taken: Int, counts: List[Int], hashes: List[UInt64]
+) -> Bool:
+    if 2 * occupied < min(taken, _SLOTS):
+        return True
+    if taken < 128:
+        return False
+    var largest = 0
+    for count in counts:
+        largest = max(largest, count)
+    if 4 * largest < taken:
+        return False
+    # A hot key alone does not imply cheap serial encoding: the remaining
+    # rows may all be unique. Count exact hashes only for skewed samples.
+    var distinct = Dict[UInt64, Bool]()
+    for hash in hashes:
+        distinct[hash] = True
+    return 3 * len(distinct) <= taken
 
-    Hashes a strided sample serially -- no threads, so no dispatch cost --
-    and counts occupied slots of hash space. Sampling can only understate
-    cardinality, so the risk is taking the serial path on a frame that
-    would have partitioned well, never the reverse.
+
+def low_cardinality(keys: List[Series]) raises -> Bool:
+    """Whether whole-frame encoding is cheaper than hash partitioning.
+
+    A bounded sample first counts occupied hash slots. If a key dominates,
+    exact sampled hash cardinality checks whether the remaining domain is
+    small enough to avoid the partition scatter and gather.
     """
     for key in keys:
         if key.is_chunked():
@@ -218,6 +237,8 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
     var hash = List[UInt64](length=1, fill=0)
     var address = Int(hash.unsafe_ptr())
     var seen = List[Bool](length=_SLOTS, fill=False)
+    var counts = List[Int](length=_SLOTS, fill=0)
+    var hashes = List[UInt64](capacity=sample)
     var occupied = 0
     var taken = 0
     var i = 0
@@ -225,15 +246,14 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
         for j in range(len(keys)):
             _hash_column(keys[j], i, i + 1, address, j == 0, output_offset=i)
         var slot = Int(hash[0] >> UInt64(_SLOT_SHIFT))
+        counts[slot] += 1
+        hashes.append(hash[0])
         if not seen[slot]:
             seen[slot] = True
             occupied += 1
         taken += 1
-        i += stride
-    # Scattering and gathering cost more than serial encoding when fewer
-    # than half the reachable hash slots are occupied.
-    var reachable = min(sample, _SLOTS)
-    return 2 * occupied < reachable
+        i = taken * stride + (taken * 7919) % stride
+    return _prefer_whole_sample(occupied, taken, counts, hashes)
 
 
 def _low_cardinality_chunked(keys: List[Series]) raises -> Bool:
@@ -253,6 +273,8 @@ def _low_cardinality_chunked(keys: List[Series]) raises -> Bool:
     var hash = List[UInt64](length=1, fill=0)
     var address = Int(hash.unsafe_ptr())
     var seen = List[Bool](length=_SLOTS, fill=False)
+    var counts = List[Int](length=_SLOTS, fill=0)
+    var hashes = List[UInt64](capacity=sample)
     var occupied = 0
     var taken = 0
     var i = 0
@@ -272,12 +294,14 @@ def _low_cardinality_chunked(keys: List[Series]) raises -> Bool:
                 output_offset=local,
             )
         var slot = Int(hash[0] >> UInt64(_SLOT_SHIFT))
+        counts[slot] += 1
+        hashes.append(hash[0])
         if not seen[slot]:
             seen[slot] = True
             occupied += 1
         taken += 1
-        i += stride
-    return 2 * occupied < min(sample, _SLOTS)
+        i = taken * stride + (taken * 7919) % stride
+    return _prefer_whole_sample(occupied, taken, counts, hashes)
 
 
 struct Partitioner(Movable):
