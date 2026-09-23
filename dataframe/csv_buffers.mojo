@@ -282,6 +282,7 @@ struct CsvBuffer(Movable):
         mut self,
         bytes: Span[UInt8, ImmutAnyOrigin],
         cells: List[CsvCell],
+        count: Int,
         ignore_errors: Bool,
     ) raises -> Tuple[Int, String]:
         var first_record = -1
@@ -292,7 +293,10 @@ struct CsvBuffer(Movable):
             comptime for i in range(len(NUMERIC_DTYPES)):
                 comptime D = NUMERIC_DTYPES[i]
                 if self.storage.isa[_NumericBuffer[D]]():
-                    for cell in cells:
+                    for index in range(count):
+                        var cell = (
+                            cells.unsafe_ptr().unsafe_offset(index)[].copy()
+                        )
                         if cell.start < 0:
                             self.storage[_NumericBuffer[D]].append(0, False)
                             continue
@@ -336,7 +340,8 @@ struct CsvBuffer(Movable):
                                     first_record = cell.record
                                     first_message = String(error)
                     return (first_record, first_message)
-        for cell in cells:
+        for index in range(count):
+            var cell = cells.unsafe_ptr().unsafe_offset(index)[].copy()
             if cell.start < 0:
                 self.add_null()
                 continue

@@ -15,6 +15,10 @@ from .frame import DataFrame
 from .series import Series
 
 
+# Bound temporary field metadata to a small group per projected column.
+comptime _STAGED_ROWS = 256
+
+
 def _skip_projected_tail(
     bytes: Span[UInt8, ImmutAnyOrigin], start: Int, quote: UInt8, quoting: Bool
 ) -> Int:
@@ -48,13 +52,20 @@ def _append_cell(
     bytes: Span[UInt8, ImmutAnyOrigin],
     mut buffers: List[CsvBuffer],
     mut staged: List[List[CsvCell]],
+    mut staged_counts: List[Int],
     index: Int,
     cell: CsvCell,
     staged_decode: Bool,
     ignore_errors: Bool,
 ) raises:
     if staged_decode:
-        staged.unsafe_ptr().unsafe_offset(index)[].append(cell.copy())
+        # Each selected column gets at most one descriptor per record, and
+        # the caller flushes after _STAGED_ROWS completed records.
+        var count = staged_counts.unsafe_ptr().unsafe_offset(index)[]
+        staged.unsafe_ptr().unsafe_offset(index)[].unsafe_ptr().unsafe_offset(
+            count
+        )[] = cell.copy()
+        staged_counts.unsafe_ptr().unsafe_offset(index)[] = count + 1
         return
     if cell.start < 0:
         buffers.unsafe_ptr().unsafe_offset(index)[].add_null()
@@ -82,6 +93,7 @@ def _flush_staged(
     bytes: Span[UInt8, ImmutAnyOrigin],
     mut buffers: List[CsvBuffer],
     mut staged: List[List[CsvCell]],
+    mut staged_counts: List[Int],
     ignore_errors: Bool,
 ) raises:
     var first_record = -1
@@ -92,14 +104,17 @@ def _flush_staged(
             buffers.unsafe_ptr()
             .unsafe_offset(i)[]
             .add_many(
-                bytes, staged.unsafe_ptr().unsafe_offset(i)[], ignore_errors
+                bytes,
+                staged.unsafe_ptr().unsafe_offset(i)[],
+                staged_counts.unsafe_ptr().unsafe_offset(i)[],
+                ignore_errors,
             )
         )
         if result[0] >= 0 and (first_record < 0 or result[0] < first_record):
             first_record = result[0]
             first_column = i
             first_message = result[1]
-        staged.unsafe_ptr().unsafe_offset(i)[].clear()
+        staged_counts.unsafe_ptr().unsafe_offset(i)[] = 0
     if first_record >= 0:
         raise Error(
             "CSV record "
@@ -159,11 +174,19 @@ def decode_chunk(
     var projection = List[Int](capacity=selected)
     var buffers = List[CsvBuffer](capacity=selected)
     var staged = List[List[CsvCell]](capacity=selected)
+    var staged_counts = List[Int](capacity=selected)
     for i in range(len(schema)):
         if keep[i]:
             projection.append(i)
             buffers.append(CsvBuffer(schema._fields[i], rows + 1, quote, lossy))
-            staged.append(List[CsvCell](capacity=256 if selected > 1 else 0))
+            var cells = List[CsvCell](
+                capacity=_STAGED_ROWS if selected > 1 else 0
+            )
+            if selected > 1:
+                for _ in range(_STAGED_ROWS):
+                    cells.append(CsvCell(-1, 0, False, 0))
+            staged.append(cells^)
+            staged_counts.append(0)
 
     # parser.rs treats any projection as implicit ragged truncation.
     var partial_projection = selected != len(schema)
@@ -235,6 +258,7 @@ def decode_chunk(
                                 bytes,
                                 buffers,
                                 staged,
+                                staged_counts,
                                 processed,
                                 CsvCell(
                                     -1, 0, False, record
@@ -265,7 +289,11 @@ def decode_chunk(
                         and not options.truncate_ragged_lines
                     ):
                         _flush_staged(
-                            bytes, buffers, staged, options.ignore_errors
+                            bytes,
+                            buffers,
+                            staged,
+                            staged_counts,
+                            options.ignore_errors,
                         )
                         raise Error("found more fields than defined in schema")
                     while processed < selected:
@@ -273,6 +301,7 @@ def decode_chunk(
                             bytes,
                             buffers,
                             staged,
+                            staged_counts,
                             processed,
                             CsvCell(-1, 0, False, record),
                             staged_decode,
@@ -282,9 +311,13 @@ def decode_chunk(
                     offset += last + 1
                     output_rows += 1
                     record += 1
-                    if staged_decode and output_rows % 256 == 0:
+                    if staged_decode and output_rows % _STAGED_ROWS == 0:
                         _flush_staged(
-                            bytes, buffers, staged, options.ignore_errors
+                            bytes,
+                            buffers,
+                            staged,
+                            staged_counts,
+                            options.ignore_errors,
                         )
                     continue
 
@@ -333,6 +366,7 @@ def decode_chunk(
                     bytes,
                     buffers,
                     staged,
+                    staged_counts,
                     processed,
                     CsvCell(-1, 0, False, record) if is_null else CsvCell(
                         record_offset + field.start,
@@ -362,7 +396,11 @@ def decode_chunk(
                         and offset < len(bytes)
                     ):
                         _flush_staged(
-                            bytes, buffers, staged, options.ignore_errors
+                            bytes,
+                            buffers,
+                            staged,
+                            staged_counts,
+                            options.ignore_errors,
                         )
                         raise Error("found more fields than defined in schema")
                     offset = _skip_projected_tail(bytes, offset, quote, quoting)
@@ -379,6 +417,7 @@ def decode_chunk(
                 bytes,
                 buffers,
                 staged,
+                staged_counts,
                 processed,
                 CsvCell(-1, 0, False, record),
                 staged_decode,
@@ -387,11 +426,15 @@ def decode_chunk(
             processed += 1
         output_rows += 1
         record += 1
-        if staged_decode and output_rows % 256 == 0:
-            _flush_staged(bytes, buffers, staged, options.ignore_errors)
+        if staged_decode and output_rows % _STAGED_ROWS == 0:
+            _flush_staged(
+                bytes, buffers, staged, staged_counts, options.ignore_errors
+            )
 
     if staged_decode:
-        _flush_staged(bytes, buffers, staged, options.ignore_errors)
+        _flush_staged(
+            bytes, buffers, staged, staged_counts, options.ignore_errors
+        )
 
     var output = List[Series](capacity=selected)
     while len(buffers) > 0:
