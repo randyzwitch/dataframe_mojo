@@ -1,5 +1,6 @@
 """Differential coverage for consumers of multi-array Series values."""
 from std.testing import TestSuite, assert_equal, assert_true
+from dataframe.gather import _take_sorted_chunked_partitioned
 from dataframe import (
     Column,
     DataFrame,
@@ -264,6 +265,42 @@ def test_large_chunked_filter_with_misaligned_columns_and_null_mask() raises:
     assert_same(
         parts.filter(reject_all), whole.filter(reject_all), "empty filter"
     )
+
+
+def test_partitioned_sorted_chunk_gather_preserves_order_and_nulls() raises:
+    var numbers = List[Int64]()
+    var labels = List[String]()
+    var valid = List[Bool]()
+    for i in range(1024):
+        numbers.append(Int64(i))
+        labels.append("key_" + String(i % 11))
+        valid.append(i % 17 != 0)
+    var id = Series("id", Column[Int64](numbers^, valid.copy()))
+    var label = Series("label", Column[String](labels^, valid^))
+    var whole = DataFrame([id.copy(), label.copy()])
+    var id_parts = List[Series]()
+    var label_parts = List[Series]()
+    for c in range(16):
+        id_parts.append(id.slice(c * 64, 64))
+        var first = c * 63
+        label_parts.append(label.slice(first, 79 if c == 15 else 63))
+    var parts = DataFrame(
+        [
+            Series._from_chunks(id_parts^),
+            Series._from_chunks(label_parts^),
+        ]
+    )
+    var rows = List[Int]()
+    for i in range(1024):
+        if i % 3 == 0 or i == 1023:
+            rows.append(i)
+    var expected = whole.take(rows.copy())
+    var actual = DataFrame(
+        _take_sorted_chunked_partitioned(parts._columns, rows^, 4)
+    )
+    assert_same(actual, expected, "partitioned sorted chunk gather")
+    assert_true(actual.column("id").is_chunked())
+    assert_true(actual.column("label").is_chunked())
 
 
 def main() raises:
