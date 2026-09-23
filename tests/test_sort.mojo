@@ -299,5 +299,63 @@ def test_medium_low_cardinality_first_key_matches_stable_order() raises:
     assert_equal(frame.arg_sort(["k", "x"]), expected)
 
 
+def test_large_bucket_radix_preserves_order_and_stability() raises:
+    # Above 200k rows, low-cardinality first keys take the radix route.
+    # Check every output position and source row without another sort.
+    var count = 200_001
+    var keys = List[Int64](capacity=count)
+    var floats = List[Float64](capacity=count)
+    var valid = List[Bool](capacity=count)
+    var third = List[Int64](capacity=count)
+    for i in range(count):
+        keys.append(Int64((i * 17) % 16))
+        floats.append(Float64((i * 131) % 1009) / 7.0 - 70.0)
+        valid.append(i % 19 != 0)
+        third.append(Int64((i * 23) % 41) - 20)
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("x", Column[Float64](floats^, valid^)),
+            Series("z", Column[Int64](third^)),
+        ]
+    )
+    var pairs: List[List[String]] = [["k", "x"], ["k", "x", "z"]]
+    for by in pairs:
+        var descending = List[Bool](length=len(by), fill=False)
+        var nulls_last = List[Bool](length=len(by), fill=True)
+        descending[1] = True
+        nulls_last[1] = False
+        var order = frame.arg_sort(
+            by, descending=descending, nulls_last=nulls_last
+        )
+        if len(order) != count:
+            raise Error("large radix sort changed row count")
+        var seen = List[Bool](length=count, fill=False)
+        var columns = List[Series]()
+        for name in by:
+            columns.append(frame.column(name))
+        for position in range(count):
+            var row = order[position]
+            if row < 0 or row >= count or seen[row]:
+                raise Error("large radix sort lost or duplicated a row")
+            seen[row] = True
+            if position == 0:
+                continue
+            var previous = order[position - 1]
+            var strictly_before = False
+            for k in range(len(by)):
+                if columns[k]._less(
+                    previous, row, descending[k], nulls_last[k]
+                ):
+                    strictly_before = True
+                    break
+                if columns[k]._less(
+                    row, previous, descending[k], nulls_last[k]
+                ):
+                    raise Error("large radix sort put keys out of order")
+            if not strictly_before and previous > row:
+                raise Error("large radix sort broke stable row order")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
