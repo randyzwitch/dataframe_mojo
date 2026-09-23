@@ -311,6 +311,46 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
             raise Error("Key columns must have equal lengths")
     if n >= 2147483647:
         raise Error("Row key encoding supports fewer than 2**31 rows")
+    if len(keys) == 1 and keys[0]._data.isa[Column[Int64]]():
+        ref column = keys[0]._data[Column[Int64]]
+        var first = True
+        var low = Int64(0)
+        var high = Int64(0)
+        for i in range(n):
+            if not column._valid(i):
+                continue
+            var value = column._get(i)
+            if first:
+                low = value
+                high = value
+                first = False
+            else:
+                low = min(low, value)
+                high = max(high, value)
+        # A compact integer domain can be encoded by direct lookup, avoiding
+        # a hash-table probe and a second renumbering pass for every row.
+        if first or UInt64(high) - UInt64(low) < 4096:
+            var slots = List[Int](
+                length=1 if first else Int(UInt64(high) - UInt64(low)) + 1,
+                fill=-1,
+            )
+            var ids = List[Int](length=n, fill=-1)
+            var representatives = List[Int]()
+            var null_id = -1
+            for i in range(n):
+                if not column._valid(i):
+                    if nulls_equal:
+                        if null_id < 0:
+                            null_id = len(representatives)
+                            representatives.append(i)
+                        ids[i] = null_id
+                    continue
+                var slot = Int(UInt64(column._get(i)) - UInt64(low))
+                if slots[slot] < 0:
+                    slots[slot] = len(representatives)
+                    representatives.append(i)
+                ids[i] = slots[slot]
+            return RowKeys(ids^, representatives^)
     var ids = List[Int](length=n, fill=0)
     var excluded = List[Bool](length=n, fill=False)
     var representatives = List[Int]()

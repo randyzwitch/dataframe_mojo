@@ -104,6 +104,25 @@ def reference_groups(
     return (groups^, sums^, counts^)
 
 
+def test_dense_int64_encoding_preserves_first_occurrence_and_nulls() raises:
+    var key = Series(
+        "k",
+        Column[Int64](
+            [2, -1, 2, 0, -1, 7], [True, True, False, True, True, False]
+        ),
+    )
+    var equal = encode_rows([key.copy()], nulls_equal=True)
+    assert_equal(equal.ids, [0, 1, 2, 3, 1, 2])
+    assert_equal(equal.representatives, [0, 1, 2, 3])
+    var strict = encode_rows([key.copy()], nulls_equal=False)
+    assert_equal(strict.ids, [0, 1, -1, 2, 1, -1])
+    assert_equal(strict.representatives, [0, 1, 3])
+    var extremes = Series("k", Column[Int64]([Int64.MIN, Int64.MAX, Int64.MIN]))
+    var fallback = encode_rows([extremes^], nulls_equal=True)
+    assert_equal(fallback.ids, [0, 1, 0])
+    assert_equal(fallback.representatives, [0, 1])
+
+
 def test_encode_rows_policies() raises:
     var keys: List[Series] = [
         Series(
