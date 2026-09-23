@@ -215,22 +215,23 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
         return True
     var sample = min(rows, _SAMPLE_ROWS)
     var stride = max(1, rows // sample)
-    var hashes = List[UInt64](length=rows, fill=0)
-    var address = Int(hashes.unsafe_ptr())
+    var hash = List[UInt64](length=1, fill=0)
+    var address = Int(hash.unsafe_ptr())
     var seen = List[Bool](length=_SLOTS, fill=False)
     var occupied = 0
     var taken = 0
     var i = 0
     while i < rows and taken < sample:
         for j in range(len(keys)):
-            _hash_column(keys[j], i, i + 1, address, j == 0)
-        var slot = Int(hashes[i] >> UInt64(_SLOT_SHIFT))
+            _hash_column(
+                keys[j], i, i + 1, address, j == 0, output_offset=i
+            )
+        var slot = Int(hash[0] >> UInt64(_SLOT_SHIFT))
         if not seen[slot]:
             seen[slot] = True
             occupied += 1
         taken += 1
         i += stride
-    _ = hashes^
     # Scattering and gathering cost more than serial encoding when fewer
     # than half the reachable hash slots are occupied.
     var reachable = min(sample, _SLOTS)
