@@ -702,9 +702,19 @@ struct DataFrame(Copyable, Sized, Writable):
         var left_sources = List[Series](capacity=self.width())
         for c in range(self.width()):
             left_sources.append(self._columns[c].copy())
-        var columns = take_parallel(
-            left_sources, left_rows.copy(), gather_workers, or_null=True
-        )
+        # When every left row appears once in input order, its columns are
+        # already the exact output. Sharing them avoids a full-frame gather.
+        var left_identity = len(left_rows) == self.height()
+        if left_identity:
+            for i in range(len(left_rows)):
+                if left_rows[i] != i:
+                    left_identity = False
+                    break
+        var columns = left_sources^
+        if not left_identity:
+            columns = take_parallel(
+                columns^, left_rows.copy(), gather_workers, or_null=True
+            )
 
         # Right-side columns: the non-key output columns, plus any key
         # column that has to be coalesced with its left counterpart.
