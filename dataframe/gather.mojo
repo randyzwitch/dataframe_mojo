@@ -20,7 +20,13 @@ from .bool_column import BoolColumn
 from .column import Column, _bit, _validity_bit
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import GT, LT, GE, LE, EQ, NE
-from .parallel import Job, partitions, run_jobs, worker_count
+from .parallel import (
+    Job,
+    configured_workers,
+    partitions,
+    run_jobs,
+    worker_count,
+)
 from .series import Series
 from .string_column import StringColumn
 
@@ -231,6 +237,88 @@ struct _SortedChunkTakeJob(Job):
         return self.result^
 
 
+struct _SortedChunkPartJob(Job):
+    """Gather one column from a contiguous range of physical chunks."""
+
+    var source: Series
+    var indices: ArcPointer[List[Int]]
+    var first: Int
+    var last: Int
+    var result: Series
+
+    def __init__(
+        out self,
+        source: Series,
+        indices: ArcPointer[List[Int]],
+        first: Int,
+        last: Int,
+    ):
+        self.source = source.copy()
+        self.indices = indices.copy()
+        self.first = first
+        self.last = last
+        self.result = source.copy()
+
+    def run(mut self) raises:
+        ref chunks = self.source._chunked.value()[]
+        ref rows = self.indices[]
+        var chunk_start = 0 if self.first == 0 else chunks.ends[self.first - 1]
+        var lower = 0
+        var upper = len(rows)
+        while lower < upper:
+            var mid = (lower + upper) // 2
+            if rows[mid] < chunk_start:
+                lower = mid + 1
+            else:
+                upper = mid
+        var next_row = lower
+        var selected = List[Series]()
+        for i in range(self.first, self.last):
+            var end = chunks.ends[i]
+            var local = List[Int]()
+            while next_row < len(rows) and rows[next_row] < end:
+                local.append(rows[next_row] - chunk_start)
+                next_row += 1
+            if len(local) > 0:
+                var part = Series(
+                    self.source.name(),
+                    chunks.arrays[i].copy(),
+                    self.source.dtype(),
+                )
+                selected.append(part.take(local))
+            chunk_start = end
+        if len(selected) == 0:
+            self.result = self.source.slice(0, 0)
+        else:
+            self.result = Series._from_chunks(selected^)
+
+
+def _take_sorted_chunked_partitioned(
+    columns: List[Series], var indices: List[Int], parts: Int
+) raises -> List[Series]:
+    var shared = ArcPointer(indices^)
+    var jobs = List[_SortedChunkPartJob](capacity=len(columns) * parts)
+    for column in columns:
+        var bounds = partitions(column.n_chunks(), parts, 1)
+        for p in range(parts):
+            jobs.append(
+                _SortedChunkPartJob(column, shared, bounds[p], bounds[p + 1])
+            )
+    run_jobs(jobs)
+    var result = List[Series](capacity=len(columns))
+    for c in range(len(columns)):
+        var pieces = List[Series](capacity=parts)
+        for p in range(parts):
+            ref part = jobs[c * parts + p].result
+            if len(part) > 0:
+                pieces.append(part.copy())
+        if len(pieces) == 0:
+            result.append(columns[c].slice(0, 0))
+        else:
+            result.append(Series._from_chunks(pieces^))
+    return result^
+
+
 def take_sorted_chunked(
     columns: List[Series], var indices: List[Int], workers: Int
 ) raises -> List[Series]:
@@ -239,6 +327,18 @@ def take_sorted_chunked(
     Generic ``take_parallel`` still handles arbitrary join indices. Jobs run
     by column, so the selected chunks remain in source order in the result.
     """
+    if len(indices) >= 2_000_000 and len(columns) > 1:
+        var parts = min(4, configured_workers() // len(columns))
+        if parts > 1:
+            var chunked = True
+            for column in columns:
+                if not column.is_chunked() or column.n_chunks() < 16:
+                    chunked = False
+                    break
+            if chunked:
+                return _take_sorted_chunked_partitioned(
+                    columns, indices^, parts
+                )
     var jobs = List[_SortedChunkTakeJob](capacity=len(columns))
     var shared = ArcPointer(indices^)
     for column in columns:
