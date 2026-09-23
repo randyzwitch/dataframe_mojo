@@ -350,7 +350,11 @@ def _read_mapped_body(
         return decode_chunk(
             bytes[len(bytes) :], schema, options, keep, 0, record
         )
-    var workers = configured_workers()
+    # Give each decode worker enough input to amortize pool startup.
+    # Large mapped files still use every configured worker.
+    var workers = min(
+        configured_workers(), max(1, (len(bytes) - offset) // (256 * 1024))
+    )
     var projected_width = 0
     for selected in keep:
         projected_width += Int(selected)
