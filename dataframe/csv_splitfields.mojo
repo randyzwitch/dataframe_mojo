@@ -90,6 +90,7 @@ struct CsvSplitFields:
         self.finished = False
         self.cached_ends = 0
 
+    @always_inline
     def _cached_end(mut self) -> Int:
         if self.cached_ends == 0:
             return -1
@@ -102,6 +103,7 @@ struct CsvSplitFields:
         """Bytes consumed from the input after the most recent field."""
         return self.position
 
+    @always_inline
     def _plain_end(
         mut self, input: Span[UInt8, ImmutAnyOrigin]
     ) -> CsvFieldSpan:
@@ -197,6 +199,7 @@ struct CsvSplitFields:
         self.position = n
         return result^
 
+    @always_inline
     def next(
         mut self, input: Span[UInt8, ImmutAnyOrigin]
     ) -> Optional[CsvFieldSpan]:
