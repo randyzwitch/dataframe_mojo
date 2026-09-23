@@ -2316,9 +2316,10 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
 struct _DirectSumCountBucketJob(Job):
     """Reduce one hash bucket by source row ID without gathering columns."""
 
-    var key: Column[Int64]
-    var values: Column[Float64]
-    var counted: Column[Int64]
+    var key: Series
+    var values: Series
+    var counted: Series
+    var aligned: Bool
     var order: ArcPointer[List[Int]]
     var start: Int
     var end: Int
@@ -2330,9 +2331,10 @@ struct _DirectSumCountBucketJob(Job):
 
     def __init__(
         out self,
-        key: Column[Int64],
-        values: Column[Float64],
-        counted: Column[Int64],
+        key: Series,
+        values: Series,
+        counted: Series,
+        aligned: Bool,
         order: ArcPointer[List[Int]],
         start: Int,
         end: Int,
@@ -2340,6 +2342,7 @@ struct _DirectSumCountBucketJob(Job):
         self.key = key.copy()
         self.values = values.copy()
         self.counted = counted.copy()
+        self.aligned = aligned
         self.order = order.copy()
         self.start = start
         self.end = end
@@ -2349,6 +2352,37 @@ struct _DirectSumCountBucketJob(Job):
         self.counts = List[Int64]()
         self.firsts = List[Int]()
 
+    @always_inline
+    def _add_row(
+        mut self,
+        key: Column[Int64],
+        values: Column[Float64],
+        counted: Column[Int64],
+        local: Int,
+        row: Int,
+        mut lookup: Dict[Int64, Int],
+        mut null_group: Int,
+    ):
+        var valid = key._valid(local)
+        var group = lookup.get(key._get(local), -1) if valid else null_group
+        if group < 0:
+            group = len(self.keys)
+            if valid:
+                var value = key._get(local).copy()
+                lookup[value] = group
+                self.keys.append(value)
+            else:
+                null_group = group
+                self.keys.append(0)
+            self.key_valid.append(valid)
+            self.sums.append(FloatSumState())
+            self.counts.append(0)
+            self.firsts.append(row)
+        if values._valid(local):
+            self.sums[group].add(values._get(local))
+        if counted._valid(local):
+            self.counts[group] += 1
+
     def run(mut self) raises:
         var bucket_rows = self.end - self.start
         var capacity = (
@@ -2356,30 +2390,39 @@ struct _DirectSumCountBucketJob(Job):
         )
         var lookup = Dict[Int64, Int](capacity=capacity)
         var null_group = -1
+        var key_source = self.key.copy()
+        var value_source = self.values.copy()
+        var count_source = self.counted.copy()
         ref order = self.order[]
-        for i in range(self.start, self.end):
-            var row = order[i]
-            var valid = self.key._valid(row)
-            var group = lookup.get(
-                self.key._get(row), -1
-            ) if valid else null_group
-            if group < 0:
-                group = len(self.keys)
-                if valid:
-                    var value = self.key._get(row).copy()
-                    lookup[value] = group
-                    self.keys.append(value)
-                else:
-                    null_group = group
-                    self.keys.append(0)
-                self.key_valid.append(valid)
-                self.sums.append(FloatSumState())
-                self.counts.append(0)
-                self.firsts.append(row)
-            if self.values._valid(row):
-                self.sums[group].add(self.values._get(row))
-            if self.counted._valid(row):
-                self.counts[group] += 1
+        if not self.aligned:
+            ref key = key_source._data[Column[Int64]]
+            ref values = value_source._data[Column[Float64]]
+            ref counted = count_source._data[Column[Int64]]
+            for i in range(self.start, self.end):
+                var row = order[i]
+                self._add_row(
+                    key, values, counted, row, row, lookup, null_group
+                )
+            return
+        ref key_chunks = key_source._chunked.value()[]
+        ref value_chunks = value_source._chunked.value()[]
+        ref count_chunks = count_source._chunked.value()[]
+        var i = self.start
+        var base = 0
+        for c in range(len(key_chunks.ends)):
+            var end = key_chunks.ends[c]
+            ref key = key_chunks.arrays[c][Column[Int64]]
+            ref values = value_chunks.arrays[c][Column[Float64]]
+            ref counted = count_chunks.arrays[c][Column[Int64]]
+            while i < self.end and order[i] < end:
+                var row = order[i]
+                self._add_row(
+                    key, values, counted, row - base, row, lookup, null_group
+                )
+                i += 1
+            if i == self.end:
+                break
+            base = end
 
 
 struct _BucketJob(Job):
@@ -2637,19 +2680,16 @@ struct GroupBy(Copyable):
     ) raises -> DataFrame:
         var partitioner = Partitioner(self._keys, workers)
         var parts = partitioner.scatter(workers)
-        var key = self._keys[0].rechunk()._data[Column[Int64]].copy()
-        var values = (
-            self._frame._columns[bound[sum_expr].sources[0]]
-            .rechunk()
-            ._data[Column[Float64]]
-            .copy()
+        var key = self._keys[0].copy()
+        var values = self._frame._columns[bound[sum_expr].sources[0]].copy()
+        var counted = self._frame._columns[bound[count_expr].sources[0]].copy()
+        var aligned = can_filter_float_chunks(
+            [key.copy(), values.copy(), counted.copy()]
         )
-        var counted = (
-            self._frame._columns[bound[count_expr].sources[0]]
-            .rechunk()
-            ._data[Column[Int64]]
-            .copy()
-        )
+        if not aligned:
+            key = key.rechunk()
+            values = values.rechunk()
+            counted = counted.rechunk()
         var bucket_count = parts.buckets()
         var bounds = parts.bounds.copy()
         var order = ArcPointer(parts.order.copy())
@@ -2660,7 +2700,7 @@ struct GroupBy(Copyable):
             if hi > lo:
                 jobs.append(
                     _DirectSumCountBucketJob(
-                        key, values, counted, order, lo, hi
+                        key, values, counted, aligned, order, lo, hi
                     )
                 )
         run_jobs(jobs)
