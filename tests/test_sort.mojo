@@ -269,5 +269,35 @@ def test_dense_rank_edges_match_reference() raises:
                     )
 
 
+def test_medium_low_cardinality_first_key_matches_stable_order() raises:
+    var keys = List[Int64]()
+    var values = List[Float64]()
+    var valid = List[Bool]()
+    for i in range(8192):
+        keys.append(Int64((i * 7) % 16))
+        values.append(Float64((i * 13) % 32))
+        valid.append(i % 11 != 0)
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("x", Column[Float64](values^, valid^)),
+        ]
+    )
+    var expected = List[Int]()
+    for key in range(16):
+        for value in range(32):
+            for row in range(frame.height()):
+                if (
+                    (row * 7) % 16 == key
+                    and row % 11 != 0
+                    and (row * 13) % 32 == value
+                ):
+                    expected.append(row)
+        for row in range(frame.height()):
+            if (row * 7) % 16 == key and row % 11 == 0:
+                expected.append(row)
+    assert_equal(frame.arg_sort(["k", "x"]), expected)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
