@@ -43,9 +43,8 @@ struct CsvFieldSpan(Copyable):
         """Borrow an iterator-produced field without rechecking its range.
 
         `CsvSplitFields.next` establishes `0 <= start <= end <= len(input)`
-        before it returns a span. This uses the
-        `get_unchecked(..pos)` handoff in Polars. Keep `bytes` above as the
-        checked API for independently constructed spans.
+        before it returns a span. Keep `bytes` above as the checked API for
+        independently constructed spans.
         """
         return Span[UInt8, ImmutAnyOrigin](
             unsafe_ptr=input.unsafe_ptr().unsafe_offset(self.start),
