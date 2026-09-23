@@ -312,6 +312,23 @@ struct _GatherJob(Job):
         return self.piece^
 
 
+struct _RechunkJob(Job):
+    """Materialize one input column before a parallel gather."""
+
+    var source: Series
+    var result: Series
+
+    def __init__(out self, source: Series):
+        self.source = source.copy()
+        self.result = source.copy()
+
+    def run(mut self) raises:
+        self.result = self.source.rechunk()
+
+    def into_result(deinit self) -> Series:
+        return self.result^
+
+
 def take_parallel(
     columns: List[Series],
     var indices: List[Int],
@@ -323,12 +340,22 @@ def take_parallel(
     With `or_null`, a negative index yields a null instead of a row, which
     is how a join names the side that has no matching row.
     """
-    for column in columns:
-        if column.is_chunked():
-            var contiguous = List[Series](capacity=len(columns))
-            for item in columns:
-                contiguous.append(item.rechunk())
-            return take_parallel(contiguous^, indices^, workers, or_null)
+    var contiguous = List[Series](capacity=len(columns))
+    var rechunk = List[_RechunkJob]()
+    var positions = List[Int]()
+    for c in range(len(columns)):
+        contiguous.append(columns[c].copy())
+        if columns[c].is_chunked():
+            positions.append(c)
+            rechunk.append(_RechunkJob(columns[c]))
+    if len(rechunk) > 0:
+        if len(rechunk) == 1:
+            rechunk[0].run()
+        else:
+            run_jobs(rechunk)
+        while len(rechunk) > 0:
+            contiguous[positions.pop(0)] = rechunk.pop(0).into_result()
+        return take_parallel(contiguous^, indices^, workers, or_null)
     var m = len(indices)
     var shared = ArcPointer(indices^)
     var bounds = partitions(m, workers, 8)

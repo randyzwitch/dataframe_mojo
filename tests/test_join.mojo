@@ -250,6 +250,50 @@ def test_left_on_right_on_and_schemas() raises:
     assert_equal(anti.item(0, "customer").int64(), Int64(4))
 
 
+def test_identity_left_rows_share_columns_and_fallback_gathers() raises:
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64]([2, 1, 2])),
+            Series("v", Column[Int64]([5, 6, 7])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2])),
+            Series("r", Column[Int64]([10, 20])),
+        ]
+    )
+    var joined = left.join(right, "k")
+    assert_equal(joined.height(), 3)
+    assert_equal(joined.column("r").int64().to_list(), [Int64(20), 10, 20])
+    assert_true(
+        joined.column("v")
+        .int64()
+        ._shares_buffers_with(left.column("v").int64())
+    )
+    var repeated = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2, 2])),
+            Series("r", Column[Int64]([10, 20, 30])),
+        ]
+    )
+    var expanded = left.join(repeated, "k")
+    assert_equal(expanded.height(), 5)
+    assert_false(
+        expanded.column("v")
+        .int64()
+        ._shares_buffers_with(left.column("v").int64())
+    )
+    assert_equal(expanded.column("v").int64().to_list(), [Int64(5), 5, 6, 7, 7])
+    var reduced = left.join(DataFrame([Series("k", Column[Int64]([2]))]), "k")
+    assert_equal(reduced.height(), 2)
+    assert_false(
+        reduced.column("v")
+        .int64()
+        ._shares_buffers_with(left.column("v").int64())
+    )
+
+
 def test_cross_join() raises:
     var a = DataFrame([Series("x", Column[Int64]([1, 2]))])
     var b = DataFrame(
