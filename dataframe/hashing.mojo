@@ -12,6 +12,7 @@ from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .string_column import StringColumn, StringBuilder
 from .series import Series
+from .parallel import Job, partitions, run_jobs
 
 
 @fieldwise_init
@@ -215,6 +216,76 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
                     representatives.append(row)
                 ids.append(code)
                 row += 1
+    return RowKeys(ids^, representatives^)
+
+
+struct _StringEncodeJob(Job):
+    var source: Series
+    var start: Int
+    var end: Int
+    var nulls_equal: Bool
+    var result: RowKeys
+
+    def __init__(
+        out self, source: Series, start: Int, end: Int, nulls_equal: Bool
+    ):
+        self.source = source.copy()
+        self.start = start
+        self.end = end
+        self.nulls_equal = nulls_equal
+        self.result = RowKeys(List[Int](), List[Int]())
+
+    def run(mut self) raises:
+        self.result = _encode_string_rows(
+            self.source.slice(self.start, self.end - self.start),
+            self.nulls_equal,
+        )
+
+    def into_result(deinit self) -> RowKeys:
+        return self.result^
+
+
+def encode_string_rows_parallel(
+    series: Series, nulls_equal: Bool, workers: Int
+) raises -> RowKeys:
+    """Encode contiguous string row ranges in parallel, then merge local ids."""
+    if workers <= 1:
+        return _encode_string_rows(series, nulls_equal)
+    var bounds = partitions(len(series), workers, 1)
+    var jobs = List[_StringEncodeJob](capacity=workers)
+    for w in range(workers):
+        jobs.append(
+            _StringEncodeJob(series, bounds[w], bounds[w + 1], nulls_equal)
+        )
+    run_jobs(jobs)
+    var ids = List[Int](length=len(series), fill=-1)
+    var representatives = List[Int]()
+    var lookup = Dict[String, Int]()
+    var null_code = -1
+    for w in range(workers):
+        var local = jobs.pop(0).into_result()
+        var mapping = List[Int](length=local.count(), fill=-1)
+        for code in range(local.count()):
+            var row = bounds[w] + local.representatives[code]
+            var value = series.get(row)
+            var global_code: Int
+            if value.is_null():
+                if null_code < 0:
+                    null_code = len(representatives)
+                    representatives.append(row)
+                global_code = null_code
+            else:
+                var key = value.string()
+                global_code = lookup.get(key, -1)
+                if global_code < 0:
+                    global_code = len(representatives)
+                    lookup[key] = global_code
+                    representatives.append(row)
+            mapping[code] = global_code
+        for i in range(len(local.ids)):
+            var code = local.ids[i]
+            if code >= 0:
+                ids[bounds[w] + i] = mapping[code]
     return RowKeys(ids^, representatives^)
 
 
