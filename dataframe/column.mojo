@@ -30,9 +30,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         comptime assert is_little_endian(), "dataframe requires little-endian"
         self._length = len(values)
         self._offset = 0
-        self._bits = ArcPointer(
-            List[UInt8](length=(len(values) + 7) // 8, fill=255)
-        )
+        self._bits = ArcPointer(List[UInt8]())
         self._data = ArcPointer(values^)
 
     def __init__(out self, var values: List[Self.T], valid: List[Bool]) raises:
@@ -148,15 +146,17 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         ref bits = self._bits[]
         var base = self._offset
         var values = List[Self.T](capacity=len(indices))
+        if len(bits) == 0:
+            for k in range(len(indices)):
+                values.append(data[base + indices[k]].copy())
+            return Self(values=values^, bits=List[UInt8]())
         var out_bits = List[UInt8](length=(len(indices) + 7) // 8, fill=0)
         for k in range(len(indices)):
             var row = base + indices[k]
             values.append(data[row].copy())
             if _validity_bit(bits, row):
                 out_bits[k // 8] |= UInt8(1) << UInt8(k % 8)
-        var result = Self(values^)
-        result._bits = ArcPointer(out_bits^)
-        return result^
+        return Self(values=values^, bits=out_bits^)
 
     def take_or_null(self, indices: List[Int], fill: Self.T) raises -> Self:
         """Gather rows, treating only -1 as a missing row (for outer joins)."""
