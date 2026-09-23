@@ -223,9 +223,7 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
     var i = 0
     while i < rows and taken < sample:
         for j in range(len(keys)):
-            _hash_column(
-                keys[j], i, i + 1, address, j == 0, output_offset=i
-            )
+            _hash_column(keys[j], i, i + 1, address, j == 0, output_offset=i)
         var slot = Int(hash[0] >> UInt64(_SLOT_SHIFT))
         if not seen[slot]:
             seen[slot] = True
