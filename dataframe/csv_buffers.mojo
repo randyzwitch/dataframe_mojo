@@ -1,8 +1,8 @@
-"""Typed CSV buffers mapped to Polars 1.44.2 csv/read/builder.rs.
+"""Typed CSV buffers.
 
 Numeric values are built in their output dtype and validity is packed during
 append. Variant payloads are swapped out at finish, transferring ownership.
-Strings use Polars' 16-byte views with inline short values and retained blocks.
+Strings use 16-byte views with inline short values and retained blocks.
 """
 from std.memory import ArcPointer
 from std.utils import Variant

@@ -132,6 +132,44 @@ def test_dense_right_join_matches_fallback_with_nulls_and_chunks() raises:
     assert_equal(key_only.width(), 2)
 
 
+def test_parallel_unique_right_preserves_left_buffers() raises:
+    var left_keys = List[Int64](capacity=LEFT_ROWS)
+    var left_values = List[Int64](capacity=LEFT_ROWS)
+    for i in range(LEFT_ROWS):
+        left_keys.append(Int64(i % 50003))
+        left_values.append(Int64(i))
+    var right_keys = List[Int64](capacity=50003)
+    var right_values = List[Int64](capacity=50003)
+    for i in range(50003):
+        right_keys.append(Int64(i))
+        right_values.append(Int64(i * 2))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](left_keys^)),
+            Series("v", Column[Int64](left_values^)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64](right_keys^)),
+            Series("r", Column[Int64](right_values^)),
+        ]
+    )
+    _set_threads(32)
+    assert_true(worker_count(left.height()) > 1)
+    var joined = left.join(right, "k")
+    assert_equal(joined.height(), LEFT_ROWS)
+    assert_true(
+        joined.column("v")
+        .int64()
+        ._shares_buffers_with(left.column("v").int64())
+    )
+    for i in [0, 1, 50002, 50003, LEFT_ROWS - 1]:
+        assert_equal(joined.item(i, "v").int64(), Int64(i))
+        assert_equal(joined.item(i, "r").int64(), Int64((i % 50003) * 2))
+    _set_threads(1)
+
+
 def test_parallel_csr_stability_and_empty_groups() raises:
     _set_threads(32)
     for groups in [0, 1, 3, 33, 1009]:

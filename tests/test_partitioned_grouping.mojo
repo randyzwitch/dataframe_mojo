@@ -117,6 +117,19 @@ def test_every_key_dtype_high_cardinality() raises:
         check_keys(df, [key])
 
 
+def test_parallel_string_groups_across_misaligned_chunks() raises:
+    var df = frame(2 * MIN_ROWS_PER_WORKER, 16)
+    var key = df.column("s")
+    var pieces = Series._from_chunks(
+        [
+            key.slice(0, 17001),
+            key.slice(17001, 60000),
+            key.slice(77001, len(key) - 77001),
+        ]
+    )
+    check_keys(df.with_column(pieces^), ["s"])
+
+
 def test_composite_keys() raises:
     var df = frame(ROWS, 300)
     check_keys(df, ["i64", "s"])

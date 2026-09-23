@@ -26,7 +26,7 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
-from .hashing import RowKeys, encode_rows
+from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
 from .groups import GroupIndices
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
@@ -728,9 +728,19 @@ struct DataFrame(Copyable, Sized, Writable):
         var left_sources = List[Series](capacity=self.width())
         for c in range(self.width()):
             left_sources.append(self._columns[c].copy())
-        var columns = take_parallel(
-            left_sources, left_rows.copy(), gather_workers, or_null=True
-        )
+        # When every left row appears once in input order, its columns are
+        # already the exact output. Sharing them avoids a full-frame gather.
+        var left_identity = len(left_rows) == self.height()
+        if left_identity:
+            for i in range(len(left_rows)):
+                if left_rows[i] != i:
+                    left_identity = False
+                    break
+        var columns = left_sources^
+        if not left_identity:
+            columns = take_parallel(
+                columns^, left_rows.copy(), gather_workers, or_null=True
+            )
 
         # Right-side columns: the non-key output columns, plus any key
         # column that has to be coalesced with its left counterpart.
@@ -2472,7 +2482,13 @@ struct GroupBy(Copyable):
         self, bound: List[BoundExpr], batch_size: Int
     ) raises -> DataFrame:
         """Serial key encoding, then the parallel per-group reduce."""
-        var groups = encode_rows(self._keys, nulls_equal=True)
+        var groups: RowKeys
+        if len(self._keys) == 1 and self._keys[0]._data.isa[StringColumn]():
+            groups = encode_string_rows_parallel(
+                self._keys[0], True, worker_count(self._frame.height())
+            )
+        else:
+            groups = encode_rows(self._keys, nulls_equal=True)
         # First-occurrence representatives are ordered by source row.
         var columns = take_sorted_chunked(
             self._keys, groups.representatives.copy(), 1

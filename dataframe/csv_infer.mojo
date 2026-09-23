@@ -1,14 +1,13 @@
-"""Polars 1.44.2-style CSV schema inference for the clean reader.
+"""CSV schema inference for the reader.
 
-This maps ``csv/read/schema_inference.rs`` and the pre-inference states in
-``csv/read/streaming.rs``.  The clean reader supplies the resulting schema
+The clean reader supplies the resulting schema
 and ``data_offset`` to its chunk pipeline; this module deliberately does not
 open files or decode rows.
 
 The current CSV API infers Bool, Int64, Float64, and String. With
 ``try_parse_dates=True``, it also infers the supported ISO Date,
-Datetime[us], and Time forms. This follows Polars' opt-in date inference:
-the pinned default is false. Decimal-comma, Null, optional Int128, per-column
+Datetime[us], and Time forms. Date inference is opt-in and defaults to false.
+Decimal-comma, Null, optional Int128, per-column
 null values, and column-name replacement are outside this API; ``CsvOptions``
 has all-column null tokens and ``schema_overrides`` is the existing
 name-to-dtype adapter. As in Polars, header names are always converted with
