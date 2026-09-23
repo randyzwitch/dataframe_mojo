@@ -1,5 +1,6 @@
 """Differential coverage for consumers of multi-array Series values."""
 from std.testing import TestSuite, assert_equal, assert_true
+from dataframe.gather import take_parallel
 from dataframe import (
     Column,
     DataFrame,
@@ -235,6 +236,17 @@ def test_chunked_strings_hash_sort_display_and_gather() raises:
         whole.column("s").to_string(max_rows=4),
     )
     assert_equal(to_csv_string(parts), to_csv_string(whole))
+
+
+def test_parallel_gather_rechunks_misaligned_inputs() raises:
+    var source = chunked()
+    var rows: List[Int] = [7, 0, 3, 6, 1]
+    var gathered = take_parallel(source._columns, rows.copy(), 3)
+    assert_same(
+        DataFrame(gathered^),
+        contiguous().take(rows),
+        "parallel gather from misaligned chunks",
+    )
 
 
 def test_large_chunked_filter_with_misaligned_columns_and_null_mask() raises:
