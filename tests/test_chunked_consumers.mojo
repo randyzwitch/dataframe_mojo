@@ -312,6 +312,8 @@ def test_partitioned_sorted_chunk_gather_preserves_order_and_nulls() raises:
     assert_same(actual, expected, "partitioned sorted chunk gather")
     assert_true(actual.column("id").is_chunked())
     assert_true(actual.column("label").is_chunked())
+
+
 def test_parallel_expression_output_stays_chunked_and_reduces() raises:
     var values = List[Float64]()
     var valid = List[Bool]()
