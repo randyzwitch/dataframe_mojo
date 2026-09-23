@@ -163,6 +163,24 @@ def test_conversion_errors_and_nullable_metadata() raises:
             _ = read_csv(CSV_PATH, one_bool)
 
 
+def test_conversion_errors_keep_record_and_field_order_across_decode_batches() raises:
+    var schema = CsvSchema([CsvField.int64("a"), CsvField.int64("b")])
+    var source = String("a,b\n")
+    for row in range(300):
+        if row == 254:
+            source += "1,bad\n"
+        elif row == 255:
+            source += "bad,2\n"
+        else:
+            source += "1,2\n"
+    _write(source)
+    try:
+        _ = read_csv(CSV_PATH, schema)
+        assert_true(False, "expected the first conversion error")
+    except error:
+        assert_true(String(error).find("field 'b'") >= 0)
+
+
 def test_malformed_csv_and_positional_explicit_schema() raises:
     var schema = CsvSchema([CsvField.string("a"), CsvField.string("b")])
     for bad in [

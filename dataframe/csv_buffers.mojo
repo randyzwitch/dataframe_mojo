@@ -172,6 +172,14 @@ def _ascii_equal(
     return True
 
 
+@fieldwise_init
+struct CsvCell(Copyable):
+    var start: Int
+    var length: Int
+    var needs_escaping: Bool
+    var record: Int
+
+
 struct CsvBuffer(Movable):
     var field: CsvField
     var storage: _Buffers
@@ -269,6 +277,81 @@ struct CsvBuffer(Movable):
                 self.add_null()
             else:
                 raise e^
+
+    def add_many(
+        mut self,
+        bytes: Span[UInt8, ImmutAnyOrigin],
+        cells: List[CsvCell],
+        ignore_errors: Bool,
+    ) raises -> Tuple[Int, String]:
+        var first_record = -1
+        var first_message = String()
+        # Select the numeric representation once for the whole chunk column.
+        # The row scanner records byte ranges; this loop parses one dtype.
+        if not self.field.dtype.is_temporal():
+            comptime for i in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[i]
+                if self.storage.isa[_NumericBuffer[D]]():
+                    for cell in cells:
+                        if cell.start < 0:
+                            self.storage[_NumericBuffer[D]].append(0, False)
+                            continue
+                        var value = Span[UInt8, ImmutAnyOrigin](
+                            unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(
+                                cell.start
+                            ),
+                            length=cell.length,
+                        )
+                        if cell.needs_escaping and len(value) >= 2:
+                            value = value[1 : len(value) - 1]
+                        var start = 0
+                        while start < len(value) and (
+                            value[start] == 32 or value[start] == 9
+                        ):
+                            start += 1
+                        value = value[start:]
+                        if len(value) == 0:
+                            self.storage[_NumericBuffer[D]].append(0, False)
+                            continue
+                        try:
+                            var text = StringSlice(unsafe_from_utf8=value)
+                            comptime if D == DType.float32:
+                                self.storage[_NumericBuffer[D]].append(
+                                    parse_csv_float32(text).cast[D](), True
+                                )
+                            elif D == DType.float64:
+                                self.storage[_NumericBuffer[D]].append(
+                                    parse_csv_float64(text).cast[D](), True
+                                )
+                            else:
+                                self.storage[_NumericBuffer[D]].append(
+                                    parse_csv_integer[D](text), True
+                                )
+                        except error:
+                            if ignore_errors:
+                                self.storage[_NumericBuffer[D]].append(0, False)
+                            else:
+                                self.storage[_NumericBuffer[D]].append(0, False)
+                                if first_record < 0:
+                                    first_record = cell.record
+                                    first_message = String(error)
+                    return (first_record, first_message)
+        for cell in cells:
+            if cell.start < 0:
+                self.add_null()
+                continue
+            var value = Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(cell.start),
+                length=cell.length,
+            )
+            try:
+                self.add(value, cell.needs_escaping, ignore_errors)
+            except error:
+                self.add_null()
+                if first_record < 0:
+                    first_record = cell.record
+                    first_message = String(error)
+        return (first_record, first_message)
 
     def finish(mut self) raises -> Series:
         comptime for i in range(len(NUMERIC_DTYPES)):
