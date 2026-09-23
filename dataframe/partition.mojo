@@ -215,22 +215,21 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
         return True
     var sample = min(rows, _SAMPLE_ROWS)
     var stride = max(1, rows // sample)
-    var hashes = List[UInt64](length=rows, fill=0)
-    var address = Int(hashes.unsafe_ptr())
+    var hash = List[UInt64](length=1, fill=0)
+    var address = Int(hash.unsafe_ptr())
     var seen = List[Bool](length=_SLOTS, fill=False)
     var occupied = 0
     var taken = 0
     var i = 0
     while i < rows and taken < sample:
         for j in range(len(keys)):
-            _hash_column(keys[j], i, i + 1, address, j == 0)
-        var slot = Int(hashes[i] >> UInt64(_SLOT_SHIFT))
+            _hash_column(keys[j], i, i + 1, address, j == 0, output_offset=i)
+        var slot = Int(hash[0] >> UInt64(_SLOT_SHIFT))
         if not seen[slot]:
             seen[slot] = True
             occupied += 1
         taken += 1
         i += stride
-    _ = hashes^
     # Scattering and gathering cost more than serial encoding when fewer
     # than half the reachable hash slots are occupied.
     var reachable = min(sample, _SLOTS)
@@ -287,6 +286,7 @@ struct Partitioner(Movable):
 
     var hashes: List[UInt64]
     var histogram: List[Int]
+    var worker_histograms: List[List[Int]]
     var rows: Int
 
     def __init__(out self, keys: List[Series], workers: Int) raises:
@@ -296,6 +296,7 @@ struct Partitioner(Movable):
         self.rows = len(contiguous[0])
         self.hashes = List[UInt64](length=self.rows, fill=0)
         self.histogram = List[Int](length=_SLOTS, fill=0)
+        self.worker_histograms = List[List[Int]](capacity=workers)
         var bounds = partitions(self.rows, workers, 64)
         var jobs = List[_HashJob](capacity=workers)
         for w in range(workers):
@@ -309,8 +310,10 @@ struct Partitioner(Movable):
             )
         run_jobs(jobs)
         for w in range(workers):
+            var counts = jobs[w].histogram.copy()
             for s in range(_SLOTS):
-                self.histogram[s] += jobs[w].histogram[s]
+                self.histogram[s] += counts[s]
+            self.worker_histograms.append(counts^)
 
     def scatter(mut self, workers: Int) raises -> Partitioned:
         """Build the stable permutation, folding slots into buckets."""
@@ -332,13 +335,8 @@ struct Partitioner(Movable):
         var per_worker = List[List[Int]](capacity=workers)
         for w in range(workers):
             var counts = List[Int](length=buckets, fill=0)
-            var p = Pointer[UInt64, MutAnyOrigin](
-                unsafe_from_address=Int(self.hashes.unsafe_ptr())
-            )
-            for i in range(bounds[w], bounds[w + 1]):
-                counts[
-                    Int(p.unsafe_offset(i)[] >> UInt64(_SLOT_SHIFT)) >> fold
-                ] += 1
+            for s in range(_SLOTS):
+                counts[s >> fold] += self.worker_histograms[w][s]
             per_worker.append(counts^)
         var order = List[Int](length=self.rows, fill=0)
         var cursor = starts.copy()

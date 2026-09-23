@@ -391,6 +391,17 @@ struct _ReduceJob[width: Int](Job):
         return self.reducer^
 
     def run(mut self) raises:
+        if _direct_grouped_count(
+            self.reducer,
+            self.bound,
+            self.columns,
+            self.node,
+            self.start,
+            self.end,
+            self.grouped,
+            self.groups[],
+        ):
+            return
         if _direct_numeric_reduction(
             self.reducer,
             self.bound,
@@ -465,39 +476,116 @@ struct _RowsJob[width: Int](Job):
             self.result._append_series(chunk)
 
 
+def _direct_grouped_count_part(
+    mut reducer: Reducer,
+    part: Series,
+    groups: List[Int],
+    offset: Int,
+    start: Int,
+    end: Int,
+):
+    """Count valid source values by group without constructing row batches."""
+    if part.null_count() == 0:
+        for i in range(start, end):
+            reducer.counts[groups[offset + i]] += 1
+        return
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if part._data.isa[Column[Scalar[D]]]():
+            ref column = part._data[Column[Scalar[D]]]
+            for i in range(start, end):
+                if column._valid(i):
+                    reducer.counts[groups[offset + i]] += 1
+            return
+    if part._data.isa[BoolColumn]():
+        ref column = part._data[BoolColumn]
+        for i in range(start, end):
+            if column._valid(i):
+                reducer.counts[groups[offset + i]] += 1
+        return
+    ref column = part._data[StringColumn]
+    for i in range(start, end):
+        if column._valid(i):
+            reducer.counts[groups[offset + i]] += 1
+
+
+def _direct_grouped_count(
+    mut reducer: Reducer,
+    bound: BoundExpr,
+    columns: List[Series],
+    node: Node,
+    start: Int,
+    end: Int,
+    grouped: Bool,
+    groups: List[Int],
+) -> Bool:
+    if (
+        not grouped
+        or node.op != COUNT
+        or bound.expr._nodes[node.left].op != COL
+    ):
+        return False
+    ref source = columns[bound.sources[node.left]]
+    var chunk_start = 0
+    for part in source.chunks():
+        var chunk_end = chunk_start + len(part)
+        var lo = max(start, chunk_start)
+        var hi = min(end, chunk_end)
+        if lo < hi:
+            _direct_grouped_count_part(
+                reducer,
+                part,
+                groups,
+                chunk_start,
+                lo - chunk_start,
+                hi - chunk_start,
+            )
+        chunk_start = chunk_end
+        if chunk_start >= end:
+            break
+    return True
+
+
 def _direct_float_column_sum(
     mut reducer: Reducer, column: Column[Float64], start: Int, end: Int
 ):
     """Accumulate a contiguous Float64 interval into one reducer state."""
     var values = column.unsafe_values()
-    var total = SIMD[DType.float64, 4](0)
+    var total = SIMD[DType.float64, 8](0)
     var count = _count_valid(
         column._bits[], column._offset + start, end - start
     )
     var i = start
     if count == end - start:
-        while i + 4 <= end:
-            total += values.unsafe_load[width=4](i)
-            i += 4
+        while i + 8 <= end:
+            total += values.unsafe_load[width=8](i)
+            i += 8
     else:
         var bits = column.unsafe_validity()
-        while i + 4 <= end:
+        while i + 8 <= end:
             var bit = column._offset + i
             var mask = UInt16(bits.unsafe_load(bit // 8)) >> UInt16(bit % 8)
-            if bit % 8 > 4:
+            if bit % 8 > 0:
                 mask |= UInt16(bits.unsafe_load(bit // 8 + 1)) << UInt16(
                     8 - bit % 8
                 )
             var valid = (
-                SIMD[DType.uint64, 4](
-                    UInt64(mask), UInt64(mask), UInt64(mask), UInt64(mask)
+                SIMD[DType.uint64, 8](
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
                 )
-                & SIMD[DType.uint64, 4](1, 2, 4, 8)
-            ).ne(SIMD[DType.uint64, 4](0))
+                & SIMD[DType.uint64, 8](1, 2, 4, 8, 16, 32, 64, 128)
+            ).ne(SIMD[DType.uint64, 8](0))
             total += valid.select(
-                values.unsafe_load[width=4](i), SIMD[DType.float64, 4](0)
+                values.unsafe_load[width=8](i), SIMD[DType.float64, 8](0)
             )
-            i += 4
+            i += 8
     reducer.float_sums[0].total += total.reduce_add()
     reducer.float_sums[0].count += Int64(count)
     while i < end:
@@ -530,21 +618,29 @@ def _direct_float_sum(
             reducer, series._data[Column[Float64]], start, end
         )
         return True
-    var chunk_start = 0
-    for part in series.chunks():
-        var chunk_end = chunk_start + len(part)
+    ref chunks = series._chunked.value()[]
+    var first = 0
+    var upper = len(chunks.ends)
+    while first < upper:
+        var mid = (first + upper) // 2
+        if chunks.ends[mid] <= start:
+            first = mid + 1
+        else:
+            upper = mid
+    for index in range(first, len(chunks.ends)):
+        var chunk_start = 0 if index == 0 else chunks.ends[index - 1]
+        if chunk_start >= end:
+            break
+        var chunk_end = chunks.ends[index]
         var lo = max(start, chunk_start)
         var hi = min(end, chunk_end)
         if lo < hi:
             _direct_float_column_sum(
                 reducer,
-                part._data[Column[Float64]],
+                chunks.arrays[index][Column[Float64]],
                 lo - chunk_start,
                 hi - chunk_start,
             )
-        chunk_start = chunk_end
-        if chunk_start >= end:
-            break
     return True
 
 
@@ -694,6 +790,10 @@ def _reduce[
         workers = min(workers, max(1, height // max(1, 4 * group_count)))
     if workers <= 1:
         var reducer = _new_reducer(bound, node, group_count)
+        if _direct_grouped_count(
+            reducer, bound, columns, node, 0, height, grouped, groups
+        ):
+            return reducer^
         if _direct_numeric_reduction(
             reducer, bound, columns, node, 0, height, grouped
         ):

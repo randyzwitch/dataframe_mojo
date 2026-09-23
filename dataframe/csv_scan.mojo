@@ -1,9 +1,7 @@
-"""Polars 1.44.2 CSV record scanning primitives.
+"""CSV record scanning primitives.
 
-This mirrors ``CountLines::count`` and ``CountLines::find_next`` in
-``polars-io/src/csv/read/parser.rs``. It identifies only LF terminators that
-are outside quote parity; callers retain CR trimming and CSV field validation.
-``chunk_size`` follows ``read_impl.rs``' thread/width allocation budget.
+Identify LF terminators outside quote parity. Callers retain CR trimming and
+CSV field validation. Chunk sizing uses a thread and width allocation budget.
 """
 from std.bit import count_leading_zeros, pop_count
 from .csv_bits import _mask64, _prefix_xor_inclusive
