@@ -5,6 +5,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Expr, Series, col
 from dataframe.parallel import MIN_ROWS_PER_WORKER, worker_count
+from dataframe.partition import low_cardinality
 
 comptime ROWS = 200_000
 
@@ -190,3 +191,39 @@ def test_all_null_keys_and_single_group() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_chunked_cardinality_sample_matches_rechunked() raises:
+    var rows = 8192
+    for cardinality in [16, 1000]:
+        var strings = List[String](capacity=rows)
+        var numbers = List[Int64](capacity=rows)
+        var valid = List[Bool](capacity=rows)
+        for i in range(rows):
+            strings.append("key_" + String(i % cardinality))
+            numbers.append(Int64((i * 17) % cardinality))
+            valid.append(i % 13 != 4)
+        var string_key = Series("s", Column[String](strings^, valid.copy()))
+        var number_key = Series("n", Column[Int64](numbers^, valid^))
+        var chunked_strings = Series._from_chunks(
+            [
+                string_key.slice(0, 1371),
+                string_key.slice(1371, 3629),
+                string_key.slice(5000, rows - 5000),
+            ]
+        )
+        var chunked_numbers = Series._from_chunks(
+            [
+                number_key.slice(0, 701),
+                number_key.slice(701, 2299),
+                number_key.slice(3000, rows - 3000),
+            ]
+        )
+        assert_equal(
+            low_cardinality([chunked_strings.copy()]),
+            low_cardinality([string_key.copy()]),
+        )
+        assert_equal(
+            low_cardinality([chunked_strings.copy(), chunked_numbers.copy()]),
+            low_cardinality([string_key.copy(), number_key.copy()]),
+        )

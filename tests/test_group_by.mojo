@@ -13,10 +13,12 @@ from dataframe import (
     DataFrame,
     Expr,
     Series,
+    StringColumn,
     col,
     lit,
 )
 from dataframe.hashing import encode_rows
+from dataframe.string_view import StringViewBuilder
 
 
 def nan() -> Float64:
@@ -257,3 +259,56 @@ def test_many_groups() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_single_string_key_across_view_and_legacy_chunks() raises:
+    var first = StringViewBuilder()
+    first.append_null()
+    first.append(StringSlice("short"))
+    first.append(StringSlice("thirteen-bytes"))
+    first.append(StringSlice("short"))
+    var second = StringViewBuilder()
+    for i in range(300):
+        var value = String(i)
+        second.append(StringSlice(value))
+    second.append(StringSlice("short"))
+    second.append(StringSlice("thirteen-bytes"))
+    second.append_null()
+    var key = Series._from_chunks(
+        [
+            Series("s", StringColumn(first^.finish())),
+            Series("s", StringColumn(second^.finish())),
+            Series(
+                "s",
+                StringColumn(
+                    ["short", "thirteen-bytes", "new", ""],
+                    [True, True, True, False],
+                ),
+            ),
+        ]
+    )
+    var equal = encode_rows([key.copy()], nulls_equal=True)
+    assert_equal(equal.count(), 304)
+    assert_equal(equal.ids[0], 0)
+    assert_equal(equal.ids[1], 1)
+    assert_equal(equal.ids[2], 2)
+    assert_equal(equal.ids[3], 1)
+    assert_equal(equal.ids[4], 3)
+    assert_equal(equal.ids[303], 302)
+    assert_equal(equal.ids[304], 1)
+    assert_equal(equal.ids[305], 2)
+    assert_equal(equal.ids[306], 0)
+    assert_equal(equal.ids[307], 1)
+    assert_equal(equal.ids[308], 2)
+    assert_equal(equal.ids[309], 303)
+    assert_equal(equal.ids[310], 0)
+    assert_equal(equal.representatives[0], 0)
+    assert_equal(equal.representatives[303], 309)
+    var strict = encode_rows([key.copy()], nulls_equal=False)
+    assert_equal(strict.count(), 303)
+    assert_equal(strict.ids[0], -1)
+    assert_equal(strict.ids[1], 0)
+    assert_equal(strict.ids[2], 1)
+    assert_equal(strict.ids[306], -1)
+    assert_equal(strict.ids[309], 302)
+    assert_equal(strict.ids[310], -1)
