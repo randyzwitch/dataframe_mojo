@@ -286,6 +286,7 @@ struct Partitioner(Movable):
 
     var hashes: List[UInt64]
     var histogram: List[Int]
+    var worker_histograms: List[List[Int]]
     var rows: Int
 
     def __init__(out self, keys: List[Series], workers: Int) raises:
@@ -295,6 +296,7 @@ struct Partitioner(Movable):
         self.rows = len(contiguous[0])
         self.hashes = List[UInt64](length=self.rows, fill=0)
         self.histogram = List[Int](length=_SLOTS, fill=0)
+        self.worker_histograms = List[List[Int]](capacity=workers)
         var bounds = partitions(self.rows, workers, 64)
         var jobs = List[_HashJob](capacity=workers)
         for w in range(workers):
@@ -308,8 +310,10 @@ struct Partitioner(Movable):
             )
         run_jobs(jobs)
         for w in range(workers):
+            var counts = jobs[w].histogram.copy()
             for s in range(_SLOTS):
-                self.histogram[s] += jobs[w].histogram[s]
+                self.histogram[s] += counts[s]
+            self.worker_histograms.append(counts^)
 
     def scatter(mut self, workers: Int) raises -> Partitioned:
         """Build the stable permutation, folding slots into buckets."""
@@ -331,13 +335,8 @@ struct Partitioner(Movable):
         var per_worker = List[List[Int]](capacity=workers)
         for w in range(workers):
             var counts = List[Int](length=buckets, fill=0)
-            var p = Pointer[UInt64, MutAnyOrigin](
-                unsafe_from_address=Int(self.hashes.unsafe_ptr())
-            )
-            for i in range(bounds[w], bounds[w + 1]):
-                counts[
-                    Int(p.unsafe_offset(i)[] >> UInt64(_SLOT_SHIFT)) >> fold
-                ] += 1
+            for s in range(_SLOTS):
+                counts[s >> fold] += self.worker_histograms[w][s]
             per_worker.append(counts^)
         var order = List[Int](length=self.rows, fill=0)
         var cursor = starts.copy()
