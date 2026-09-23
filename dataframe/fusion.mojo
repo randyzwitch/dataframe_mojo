@@ -12,7 +12,7 @@ unfused kernels, which remain available with bind(..., fuse=False).
 from .dtype import DataType
 from .binding import BoundExpr
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _pack_bits
 from .expr import COL, LIT_FLOAT, ADD, SUB, MUL, DIV, GT, LT, GE, LE, EQ, NE
 from .series import Series
 
@@ -173,12 +173,22 @@ def fused[
             cursor = segment_end
         return output^
     var predicate = bound.dtypes[root] == DataType.BOOL
-    var valid = List[Bool](length=length, fill=True)
+    var packed_valid = List[UInt8](length=(length + 7) // 8, fill=255)
     for step in steps:
         if step.op == COL:
             ref column = columns[step.source]._data[Column[Float64]]
-            for i in range(length):
-                valid[i] = valid[i] and column._valid(offset + i)
+            ref source_bits = column._bits[]
+            if len(source_bits) == 0:
+                continue
+            var base = column._offset + offset
+            for byte in range(len(packed_valid)):
+                var bit = base + byte * 8
+                var index = bit // 8
+                var shift = bit % 8
+                var value = UInt16(source_bits[index]) >> UInt16(shift)
+                if shift > 0 and index + 1 < len(source_bits):
+                    value |= UInt16(source_bits[index + 1]) << UInt16(8 - shift)
+                packed_valid[byte] &= UInt8(value & UInt16(255))
     var values = List[Float64](length=0 if predicate else length, fill=0)
     var flags = List[Bool](length=length if predicate else 0, fill=False)
     var last = len(steps) - 1
@@ -209,12 +219,23 @@ def fused[
             )[0]
         else:
             values[i] = narrow[last][0]
-    for i in range(length):
-        if not valid[i]:
-            if predicate:
-                flags[i] = False
-            else:
-                values[i] = 0
+    for byte in range(len(packed_valid)):
+        if packed_valid[byte] == 255:
+            continue
+        for lane in range(8):
+            var i = byte * 8 + lane
+            if i >= length:
+                break
+            if packed_valid[byte] & (UInt8(1) << UInt8(lane)) == 0:
+                if predicate:
+                    flags[i] = False
+                else:
+                    values[i] = 0
     if predicate:
-        return Series("", BoolColumn(flags^, valid))
-    return Series("", Column[Float64](values^, valid))
+        return Series(
+            "",
+            BoolColumn(
+                values=_pack_bits(flags^), bits=packed_valid^, length=length
+            ),
+        )
+    return Series("", Column[Float64](values=values^, bits=packed_valid^))

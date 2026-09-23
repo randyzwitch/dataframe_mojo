@@ -1,20 +1,8 @@
-"""Strict CSV integer conversion ported from atoi_simd 0.18.1.
+"""Strict CSV integer conversion for the CSV primitive builders.
 
-Polars 1.44.2 pins atoi_simd 0.18.1.  This module implements the complete
-`parse::<_, true, true>` contract for the CSV primitive builders: optional `+`,
-signed `-` for signed destinations, unlimited leading-zero skipping, complete
-input validation, and destination-range checks. It is CSV-only and does not
-change dataframe.parse's cast semantics.
-
-Source mapping:
-* `short.rs` supplies the 1..3 byte scalar route.
-* `fallback.rs::{load_8,check_len_8,process_8,process_16}` supplies the
-  bounds-safe packed fallback.
-* `simd/sse_avx.rs::parse_simd_sse` supplies the 16-byte vector validation and
-  pair/group reduction shape. The actual intrinsic path is compile-time gated
-  for x86 SSSE3/SSE4.1 (and AVX2 for 17..20-digit 64-bit values); other targets
-  use the packed SWAR fallback. A dedicated Neon madd reduction is not exposed
-  by this module yet, so it is intentionally not described as a SIMD backend.
+Accept optional `+`, signed `-` for signed destinations, unlimited leading
+zeroes, and check the complete input and destination range. This CSV parser
+does not change dataframe.parse's cast semantics.
 """
 from std.memory import bitcast, pack_bits
 from std.bit import count_trailing_zeros
@@ -24,7 +12,7 @@ from std.sys.info import is_little_endian
 
 @always_inline
 def _load_8(bytes: Span[UInt8, _], start: Int, digits: Int) -> UInt64:
-    """atoi_simd fallback::load_8, with ASCII-zero padding outside input."""
+    """Load up to eight bytes, with ASCII-zero padding outside input."""
     if digits == 8:
         return bitcast[DType.uint64, 1](
             bytes.unsafe_ptr().unsafe_load[width=8](start)
@@ -49,7 +37,7 @@ def _all_digits_8(word: UInt64) -> Bool:
 
 @always_inline
 def _process_8(word: UInt64, digits: Int) raises -> UInt64:
-    """atoi_simd fallback::process_8 after its full-byte digit check."""
+    """Parse eight packed digits after checking every byte."""
     if not _all_digits_8(word):
         raise Error("invalid CSV integer byte")
     var value = word << UInt64((8 - digits) * 8)
@@ -62,7 +50,7 @@ def _process_8(word: UInt64, digits: Int) raises -> UInt64:
 def _parse_short(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt64:
-    """atoi_simd short::{parse_short_pos,parse_short_neg}'s 1..3-byte route."""
+    """Scalar path for one to three digits."""
     var value = UInt64(0)
     for i in range(digits):
         var byte = bytes[start + i]
@@ -76,7 +64,7 @@ def _parse_short(
 def _parse_swar_at_most_16(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt64:
-    """fallback::parse_16_by_8 for a known strict, nonempty suffix."""
+    """Parse a known nonempty suffix of at most 16 digits."""
     if digits <= 8:
         return _process_8(_load_8(bytes, start, digits), digits)
     var low = _process_8(_load_8(bytes, start, 8), 8)
@@ -87,7 +75,7 @@ def _parse_swar_at_most_16(
 
 @always_inline
 def _load_le_up_to_8(bytes: Span[UInt8, _], start: Int, digits: Int) -> UInt64:
-    """The bounded 0..8-byte half of sse_avx.rs::load's sized switch."""
+    """Bounded load of up to eight bytes."""
     if digits == 0:
         return 0
     if digits == 1:
@@ -160,7 +148,7 @@ def _load_le_up_to_8(bytes: Span[UInt8, _], start: Int, digits: Int) -> UInt64:
 def _load_sse_lanes(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) -> Tuple[UInt128, SIMD[DType.uint8, 16]]:
-    """sse_avx.rs::load for a bounded 1..16 byte field, zero padded above."""
+    """Bounded load of up to 16 bytes, zero padded above."""
     if digits <= 8:
         var raw = UInt128(_load_le_up_to_8(bytes, start, digits))
         return (raw, bitcast[DType.uint8, 16](raw))
@@ -174,7 +162,7 @@ def _load_sse_lanes(
 def _parse_sse_madd(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt64:
-    """Literal SSE `load_len` + maddubs/madd/pack/madd reduction from atoi_simd.
+    """SSE sized load and maddubs/madd/pack/madd reduction.
 
     The sized-load switch supplies a zero-padded vector. Its packed bad-byte
     mask yields the same prefix length as `_mm_movemask_epi8(...).trailing_zeros`.
@@ -226,7 +214,7 @@ def _parse_sse_madd(
 def _parse_avx_17_to_20(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt128:
-    """atoi_simd sse_avx::{load_avx_len,process_avx} for its 17..20 route."""
+    """AVX2 path for 17 to 20 digits."""
     var first = _load_sse_lanes(bytes, start, 16)
     var first64 = bitcast[DType.uint64, 2](first[1])
     var tail = _load_le_up_to_8(bytes, start + 16, digits - 16)
@@ -409,7 +397,7 @@ def _pow10(digits: Int) -> UInt64:
 def _parse_magnitude_u64[
     wide: Bool
 ](bytes: Span[UInt8, _], start: Int, digits: Int) raises -> UInt64:
-    """Monomorphized u64 normal route from atoi_simd's checked parsers."""
+    """Unsigned 64-bit checked parsing route."""
     comptime assert is_little_endian(), "atoi_simd packed path requires LE"
     comptime if _has_x86_atoi_simd_backend():
         comptime if wide:
@@ -435,7 +423,7 @@ def _parse_magnitude_u64[
 def _parse_wide_fallback_17_to_20(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt128:
-    """fallback::parse_fb_64_pos's 16-byte block plus bounded tail."""
+    """Parse a 16-byte block followed by a bounded tail."""
     var low = _parse_swar_at_most_16(bytes, start, 16)
     var tail_digits = digits - 16
     var tail = _parse_swar_at_most_16(bytes, start + 16, tail_digits)
@@ -446,7 +434,7 @@ def _parse_wide_fallback_17_to_20(
 def _parse_wide_17_to_20(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt128:
-    """Compile-time AVX2/fallback selection for atoi_simd's wide route."""
+    """Compile-time AVX2 or packed fallback selection."""
     comptime if _has_wide_atoi_simd_backend():
         return _parse_avx_17_to_20(bytes, start, digits)
     return _parse_wide_fallback_17_to_20(bytes, start, digits)
@@ -464,7 +452,7 @@ def _skip_zeroes(bytes: Span[UInt8, _], mut index: Int) -> Int:
 def _parse_csv_unsigned[
     wide: Bool
 ](text: StringSlice, maximum: UInt64) raises -> UInt64:
-    """Typed atoi_simd unsigned front end; the normal route returns a u64."""
+    """Typed unsigned parser; the normal route returns a u64."""
     var bytes = text.as_bytes()
     if len(bytes) == 0:
         raise Error("empty CSV integer")
@@ -533,7 +521,7 @@ def _parse_csv_unsigned[
 def _parse_csv_signed[
     wide: Bool
 ](text: StringSlice, maximum: UInt64) raises -> Int64:
-    """Typed atoi_simd signed front end; the normal route returns an i64."""
+    """Typed signed parser; the normal route returns an i64."""
     var bytes = text.as_bytes()
     if len(bytes) == 0:
         raise Error("empty CSV integer")
@@ -600,17 +588,17 @@ def _parse_csv_signed[
 
 
 def parse_csv_uint64(text: StringSlice) raises -> UInt64:
-    """atoi_simd::parse::<u64, true, true> with strict full consumption."""
+    """Parse unsigned CSV integers with strict full consumption."""
     return _parse_csv_unsigned[True](text, UInt64.MAX)
 
 
 def parse_csv_int64(text: StringSlice) raises -> Int64:
-    """atoi_simd::parse::<i64, true, true> with strict full consumption."""
+    """Parse signed CSV integers with strict full consumption."""
     return _parse_csv_signed[True](text, UInt64(9223372036854775807))
 
 
 def parse_csv_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
-    """CSV-only atoi_simd parse for the native 8/16/32/64 integer dtypes."""
+    """CSV-only parse for native 8/16/32/64-bit integer dtypes."""
     comptime assert D.is_integral(), "parse_csv_integer needs an integer dtype"
     comptime if D == DType.int64:
         return rebind[Scalar[D]](parse_csv_int64(text))

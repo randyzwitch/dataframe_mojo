@@ -156,6 +156,22 @@ def test_fused_direct_chunk_windows_match_unfused_misaligned_inputs() raises:
         assert_true(bitwise_equal(actual, expected))
 
 
+def test_fused_packed_validity_handles_bit_offsets_and_all_valid_sources() raises:
+    var values = List[Float64]()
+    var valid = List[Bool]()
+    for i in range(40):
+        values.append(Float64(i) - 20.0)
+        valid.append(i % 5 != 0)
+    var x = Column[Float64](values.copy(), valid^).slice(3, 29)
+    var y = Column[Float64](values=values^, bits=List[UInt8]()).slice(2, 29)
+    var df = DataFrame([Series("x", x^), Series("y", y^)])
+    var expr = (col("x") + col("y")) > lit(Float64(0))
+    for batch in [1, 3, 8, 64]:
+        var expected = run[4](df, expr, False, batch)
+        assert_true(bitwise_equal(run[4](df, expr, True, batch), expected))
+        assert_true(bitwise_equal(run[8](df, expr, True, batch), expected))
+
+
 def test_fusible_analysis() raises:
     var df = frame(4)
     var chain = bind((col("x") + lit(Float64(1))) * col("y"), df._columns)

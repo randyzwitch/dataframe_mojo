@@ -1,5 +1,6 @@
 """Differential coverage for consumers of multi-array Series values."""
 from std.testing import TestSuite, assert_equal, assert_true
+from dataframe.gather import take_parallel
 from dataframe import (
     Column,
     DataFrame,
@@ -237,6 +238,17 @@ def test_chunked_strings_hash_sort_display_and_gather() raises:
     assert_equal(to_csv_string(parts), to_csv_string(whole))
 
 
+def test_parallel_gather_rechunks_misaligned_inputs() raises:
+    var source = chunked()
+    var rows: List[Int] = [7, 0, 3, 6, 1]
+    var gathered = take_parallel(source._columns, rows.copy(), 3)
+    assert_same(
+        DataFrame(gathered^),
+        contiguous().take(rows),
+        "parallel gather from misaligned chunks",
+    )
+
+
 def test_large_chunked_filter_with_misaligned_columns_and_null_mask() raises:
     var ids = List[Int64]()
     var labels = List[String]()
@@ -263,6 +275,31 @@ def test_large_chunked_filter_with_misaligned_columns_and_null_mask() raises:
     var reject_all = Column[Bool](List[Bool](length=1024, fill=False))
     assert_same(
         parts.filter(reject_all), whole.filter(reject_all), "empty filter"
+    )
+
+
+def test_parallel_float_sum_across_many_nullable_chunks() raises:
+    # Worker partitions can start and end inside different physical chunks.
+    var parts = List[Series]()
+    var expected = 0
+    for chunk in range(70):
+        var values = List[Float64](length=4096, fill=1.0)
+        var valid = List[Bool](length=4096, fill=True)
+        for i in range(4096):
+            valid[i] = (chunk + i) % 7 != 0
+            expected += Int(valid[i])
+        parts.append(Series("x", Column[Float64](values^, valid^)))
+    parts.append(
+        Series(
+            "x",
+            Column[Float64]([1.0, 1.0, 1.0], [False, True, True]),
+        )
+    )
+    expected += 2
+    var frame = DataFrame([Series._from_chunks(parts^)])
+    assert_true(frame.column("x").n_chunks() == 71)
+    assert_equal(
+        frame.select(col("x").sum()).item().float64(), Float64(expected)
     )
 
 
