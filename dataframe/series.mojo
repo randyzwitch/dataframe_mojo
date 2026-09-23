@@ -1353,42 +1353,51 @@ struct _MergeJob(Job):
 def _radix_sort_bucket(
     ranks: List[List[Int]], var rows: List[Int]
 ) -> List[Int]:
-    """Stable LSD radix order for rows sharing the first of three words."""
+    """Stable LSD radix order within one first-key bucket."""
     var count = len(rows)
     if count < 2:
         return rows^
     var scratch = List[Int](length=count, fill=0)
     var offsets = List[Int](length=256, fill=0)
-    # Sort the final word first, then the middle word. Each pass preserves
-    # the source row order, which is the final tie-break in _rank_less.
-    for word in [2, 1]:
-        ref keys = ranks[word]
-        var first = UInt64(keys[rows[0]]) ^ UInt64(0x8000000000000000)
-        var changed = UInt64(0)
+    # Keep the current key next to each row during every pass. Looking up
+    # ranks[word][row] for every histogram/scatter has random access across
+    # the full input, even though each bucket fits in a much smaller buffer.
+    for word in range(len(ranks) - 1, 0, -1):
+        ref source_keys = ranks[word]
+        var keys = List[UInt64](capacity=count)
         for row in rows:
-            changed |= first ^ (UInt64(keys[row]) ^ UInt64(0x8000000000000000))
+            keys.append(UInt64(source_keys[row]) ^ UInt64(0x8000000000000000))
+        var scratch_keys = List[UInt64](length=count, fill=0)
+        var first = keys[0]
+        var changed = UInt64(0)
+        for key in keys:
+            changed |= first ^ key
         for byte in range(8):
             var shift = UInt64(8 * byte)
             if ((changed >> shift) & UInt64(255)) == 0:
                 continue
             for i in range(256):
                 offsets[i] = 0
-            for row in rows:
-                var key = UInt64(keys[row]) ^ UInt64(0x8000000000000000)
+            for key in keys:
                 offsets[Int((key >> shift) & UInt64(255))] += 1
             var next = 0
             for i in range(256):
                 var size = offsets[i]
                 offsets[i] = next
                 next += size
-            for row in rows:
-                var key = UInt64(keys[row]) ^ UInt64(0x8000000000000000)
+            for i in range(count):
+                var key = keys[i]
                 var digit = Int((key >> shift) & UInt64(255))
-                scratch[offsets[digit]] = row
-                offsets[digit] += 1
-            var old = rows^
+                var dest = offsets[digit]
+                scratch[dest] = rows[i]
+                scratch_keys[dest] = key
+                offsets[digit] = dest + 1
+            var old_rows = rows^
             rows = scratch^
-            scratch = old^
+            scratch = old_rows^
+            var old_keys = keys^
+            keys = scratch_keys^
+            scratch_keys = old_keys^
     return rows^
 
 
@@ -1488,9 +1497,9 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
         n >= 8192
         and len(ranks) > 1
         and configured_workers() > 1
-        and (n <= 200_000 or len(ranks) == 3)
+        and (n <= 200_000 or len(ranks) <= 3)
     ):
-        var bucket_order = _low_card_first_sort(ranks, n > 200_000)
+        var bucket_order = _low_card_first_sort(ranks, True)
         if len(bucket_order) == n:
             return bucket_order^
     # One run per thread, not one per MIN_ROWS_PER_WORKER rows: that minimum
