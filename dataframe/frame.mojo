@@ -2329,10 +2329,20 @@ struct GroupBy(Copyable):
         var partitioner = Partitioner(self._keys, workers)
         var parts = partitioner.scatter(workers)
         var buckets = parts.buckets()
-        var keys = take_parallel(self._keys, parts.order.copy(), workers)
-        var columns = take_parallel(
-            self._referenced(bound), parts.order.copy(), workers
-        )
+        var referenced = self._referenced(bound)
+        var sources = List[Series](capacity=len(self._keys) + len(referenced))
+        for key in self._keys:
+            sources.append(key.copy())
+        for column in referenced:
+            sources.append(column.copy())
+        var gathered = take_parallel(sources, parts.order.copy(), workers)
+        var keys = List[Series](capacity=len(self._keys))
+        var columns = List[Series](capacity=len(referenced))
+        for i in range(len(gathered)):
+            if i < len(self._keys):
+                keys.append(gathered[i].copy())
+            else:
+                columns.append(gathered[i].copy())
         # Heavy: a bucket big enough to serialize the batch on its own. It
         # must be large relative to the frame, not only to its share, or
         # low cardinality (few occupied buckets) would count as heavy.
