@@ -26,7 +26,7 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
-from .hashing import RowKeys, encode_rows
+from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
 from .groups import GroupIndices
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
@@ -2400,7 +2400,13 @@ struct GroupBy(Copyable):
         self, bound: List[BoundExpr], batch_size: Int
     ) raises -> DataFrame:
         """Serial key encoding, then the parallel per-group reduce."""
-        var groups = encode_rows(self._keys, nulls_equal=True)
+        var groups: RowKeys
+        if len(self._keys) == 1 and self._keys[0]._data.isa[StringColumn]():
+            groups = encode_string_rows_parallel(
+                self._keys[0], True, worker_count(self._frame.height())
+            )
+        else:
+            groups = encode_rows(self._keys, nulls_equal=True)
         # First-occurrence representatives are ordered by source row.
         var columns = take_sorted_chunked(
             self._keys, groups.representatives.copy(), 1
