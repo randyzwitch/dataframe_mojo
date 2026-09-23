@@ -96,5 +96,18 @@ def test_empty_column_has_a_length_of_zero() raises:
     assert_equal(len(c.to_list()), 0)
 
 
+def test_all_valid_take_keeps_absent_validity() raises:
+    var source = Column[Int64]([10, 20, 30, 40])
+    assert_equal(len(source._bits[]), 0)
+    var selected = source.slice(1, 3).take([2, 0, 2])
+    assert_equal(selected.to_list(), [Int64(40), 20, 40])
+    assert_equal(selected.null_count(), 0)
+    assert_equal(len(selected._bits[]), 0)
+    var nullable = Column[Int64]([10, 20, 30], [True, False, True])
+    var selected_nullable = nullable.take([2, 1, 0])
+    assert_equal(selected_nullable.null_count(), 1)
+    assert_false(selected_nullable.is_valid(1))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

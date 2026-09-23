@@ -23,6 +23,8 @@ from .expr import (
     LE,
     EQ,
     NE,
+    SUM,
+    COUNT,
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
@@ -45,6 +47,7 @@ from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
 from .lazy import LazyFrame
 from .display import render_frame, render_glimpse
+from .reductions import FloatSumState
 
 
 @fieldwise_init
@@ -2310,6 +2313,118 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
     return RowKeys(ids^, representatives^)
 
 
+struct _DirectSumCountBucketJob(Job):
+    """Reduce one hash bucket by source row ID without gathering columns."""
+
+    var key: Series
+    var values: Series
+    var counted: Series
+    var aligned: Bool
+    var order: ArcPointer[List[Int]]
+    var start: Int
+    var end: Int
+    var keys: List[Int64]
+    var key_valid: List[Bool]
+    var sums: List[FloatSumState]
+    var counts: List[Int64]
+    var firsts: List[Int]
+
+    def __init__(
+        out self,
+        key: Series,
+        values: Series,
+        counted: Series,
+        aligned: Bool,
+        order: ArcPointer[List[Int]],
+        start: Int,
+        end: Int,
+    ):
+        self.key = key.copy()
+        self.values = values.copy()
+        self.counted = counted.copy()
+        self.aligned = aligned
+        self.order = order.copy()
+        self.start = start
+        self.end = end
+        self.keys = List[Int64]()
+        self.key_valid = List[Bool]()
+        self.sums = List[FloatSumState]()
+        self.counts = List[Int64]()
+        self.firsts = List[Int]()
+
+    @always_inline
+    def _add_row(
+        mut self,
+        key: Column[Int64],
+        values: Column[Float64],
+        counted: Column[Int64],
+        local: Int,
+        row: Int,
+        mut lookup: Dict[Int64, Int],
+        mut null_group: Int,
+    ):
+        var valid = key._valid(local)
+        var group = lookup.get(key._get(local), -1) if valid else null_group
+        if group < 0:
+            group = len(self.keys)
+            if valid:
+                var value = key._get(local).copy()
+                lookup[value] = group
+                self.keys.append(value)
+            else:
+                null_group = group
+                self.keys.append(0)
+            self.key_valid.append(valid)
+            self.sums.append(FloatSumState())
+            self.counts.append(0)
+            self.firsts.append(row)
+        if values._valid(local):
+            self.sums[group].add(values._get(local))
+        if counted._valid(local):
+            self.counts[group] += 1
+
+    def run(mut self) raises:
+        var bucket_rows = self.end - self.start
+        var capacity = (
+            min(65_536, bucket_rows // 8) if bucket_rows >= 100_000 else 16
+        )
+        var lookup = Dict[Int64, Int](capacity=capacity)
+        var null_group = -1
+        var key_source = self.key.copy()
+        var value_source = self.values.copy()
+        var count_source = self.counted.copy()
+        ref order = self.order[]
+        if not self.aligned:
+            ref key = key_source._data[Column[Int64]]
+            ref values = value_source._data[Column[Float64]]
+            ref counted = count_source._data[Column[Int64]]
+            for i in range(self.start, self.end):
+                var row = order[i]
+                self._add_row(
+                    key, values, counted, row, row, lookup, null_group
+                )
+            return
+        ref key_chunks = key_source._chunked.value()[]
+        ref value_chunks = value_source._chunked.value()[]
+        ref count_chunks = count_source._chunked.value()[]
+        var i = self.start
+        var base = 0
+        for c in range(len(key_chunks.ends)):
+            var end = key_chunks.ends[c]
+            ref key = key_chunks.arrays[c][Column[Int64]]
+            ref values = value_chunks.arrays[c][Column[Float64]]
+            ref counted = count_chunks.arrays[c][Column[Int64]]
+            while i < self.end and order[i] < end:
+                var row = order[i]
+                self._add_row(
+                    key, values, counted, row - base, row, lookup, null_group
+                )
+                i += 1
+            if i == self.end:
+                break
+            base = end
+
+
 struct _BucketJob(Job):
     """Group one hash bucket on its own: encode its keys, evaluate the
     aggregates, and remember each group's first row for reordering."""
@@ -2458,6 +2573,34 @@ struct GroupBy(Copyable):
         # on a low-cardinality key the serial encode it replaces is cheap.
         if low_cardinality(self._keys):
             return self._agg_whole(bound, batch_size)
+        # This common reduction shape can read original rows by hash bucket
+        # instead of gathering the key and both value columns first.
+        if (
+            len(self._keys) == 1
+            and self._keys[0].dtype() == DataType.INT64
+            and len(bound) == 2
+        ):
+            var sum_expr = -1
+            var count_expr = -1
+            for e in range(2):
+                ref nodes = bound[e].expr._nodes
+                if len(nodes) != 2 or nodes[0].op != COL or nodes[1].left != 0:
+                    continue
+                if (
+                    nodes[1].op == SUM
+                    and nodes[1].min_count == 0
+                    and bound[e].dtypes[0] == DataType.FLOAT64
+                ):
+                    sum_expr = e
+                elif (
+                    nodes[1].op == COUNT
+                    and bound[e].dtypes[0] == DataType.INT64
+                ):
+                    count_expr = e
+            if sum_expr >= 0 and count_expr >= 0:
+                return self._agg_direct_sum_count(
+                    bound, sum_expr, count_expr, workers
+                )
         var partitioner = Partitioner(self._keys, workers)
         var parts = partitioner.scatter(workers)
         var buckets = parts.buckets()
@@ -2527,6 +2670,76 @@ struct GroupBy(Copyable):
         if not self._maintain_order:
             return result^
         return result.take(sort_indices([firsts^]))
+
+    def _agg_direct_sum_count(
+        self,
+        bound: List[BoundExpr],
+        sum_expr: Int,
+        count_expr: Int,
+        workers: Int,
+    ) raises -> DataFrame:
+        var partitioner = Partitioner(self._keys, workers)
+        var parts = partitioner.scatter(workers)
+        var key = self._keys[0].copy()
+        var values = self._frame._columns[bound[sum_expr].sources[0]].copy()
+        var counted = self._frame._columns[bound[count_expr].sources[0]].copy()
+        var aligned = can_filter_float_chunks(
+            [key.copy(), values.copy(), counted.copy()]
+        )
+        if not aligned:
+            key = key.rechunk()
+            values = values.rechunk()
+            counted = counted.rechunk()
+        var bucket_count = parts.buckets()
+        var bounds = parts.bounds.copy()
+        var order = ArcPointer(parts.order.copy())
+        var jobs = List[_DirectSumCountBucketJob]()
+        for b in range(bucket_count):
+            var lo = bounds[b]
+            var hi = bounds[b + 1]
+            if hi > lo:
+                jobs.append(
+                    _DirectSumCountBucketJob(
+                        key, values, counted, aligned, order, lo, hi
+                    )
+                )
+        run_jobs(jobs)
+        var key_values = List[Int64]()
+        var key_valid = List[Bool]()
+        var sum_values = List[Float64]()
+        var count_values = List[Int64]()
+        var firsts = List[Int]()
+        for j in range(len(jobs)):
+            ref job = jobs[j]
+            for g in range(len(job.keys)):
+                key_values.append(job.keys[g])
+                key_valid.append(job.key_valid[g])
+                sum_values.append(job.sums[g].total)
+                count_values.append(job.counts[g])
+                firsts.append(job.firsts[g])
+        var output = List[Series](capacity=3)
+        output.append(
+            Series(self._keys[0].name(), Column[Int64](key_values^, key_valid^))
+        )
+        for e in range(2):
+            if e == sum_expr:
+                output.append(
+                    Series(
+                        bound[e].expr._name,
+                        Column[Float64](sum_values.copy()),
+                    )
+                )
+            else:
+                output.append(
+                    Series(
+                        bound[e].expr._name,
+                        Column[Int64](count_values.copy()),
+                    )
+                )
+        var result = DataFrame(output^, height=len(firsts))
+        if self._maintain_order:
+            return result.take(sort_indices([firsts^]))
+        return result^
 
     def _agg_whole(
         self, bound: List[BoundExpr], batch_size: Int

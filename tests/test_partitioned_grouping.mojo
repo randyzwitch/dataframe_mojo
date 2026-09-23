@@ -262,3 +262,76 @@ def test_skewed_small_domain_uses_whole_encoding() raises:
     )
     assert_true(low_cardinality([small_chunks^]))
     assert_true(not low_cardinality([unique_chunks^]))
+
+
+def test_direct_numeric_sum_count_matches_serial_with_nulls() raises:
+    var df = frame(ROWS, ROWS // 10)
+    var n_values = df.column("n").int64().to_list()
+    var n_valid = List[Bool](capacity=ROWS)
+    for i in range(ROWS):
+        n_valid.append(i % 5 != 2)
+    df = df.with_column(Series("n", Column[Int64](n_values^, n_valid^)))
+    var key = df.column("i64")
+    var value = df.column("v")
+    df = df.with_column(
+        Series._from_chunks(
+            [key.slice(0, 37_001), key.slice(37_001, ROWS - 37_001)]
+        )
+    ).with_column(
+        Series._from_chunks(
+            [value.slice(0, 61_003), value.slice(61_003, ROWS - 61_003)]
+        )
+    )
+    var expressions: List[Expr] = [
+        col("v").sum().alias("sum"),
+        col("n").count().alias("count"),
+    ]
+    for reversed in [False, True]:
+        if reversed:
+            expressions.reverse()
+        set_threads(1)
+        var serial = df.group_by("i64", maintain_order=True).agg(expressions)
+        set_threads(32)
+        var parallel = df.group_by("i64", maintain_order=True).agg(expressions)
+        assert_true(serial.equals(parallel), "direct grouped result differs")
+        var unordered = df.group_by("i64").agg(expressions)
+        assert_true(
+            serial.sort("i64").equals(unordered.sort("i64")),
+            "direct unordered grouped result differs",
+        )
+    set_threads(32)
+
+
+def test_direct_numeric_sum_count_reads_aligned_chunks() raises:
+    var df = frame(ROWS, ROWS // 10)
+    var n_values = df.column("n").int64().to_list()
+    var n_valid = List[Bool](capacity=ROWS)
+    for i in range(ROWS):
+        n_valid.append(i % 5 != 2)
+    df = df.with_column(Series("n", Column[Int64](n_values^, n_valid^)))
+    for name in ["i64", "v", "n"]:
+        var source = df.column(name)
+        df = df.with_column(
+            Series._from_chunks(
+                [
+                    source.slice(0, 37_001),
+                    source.slice(37_001, ROWS - 37_001),
+                ]
+            )
+        )
+    var expressions: List[Expr] = [
+        col("v").sum().alias("sum"),
+        col("n").count().alias("count"),
+    ]
+    set_threads(1)
+    var serial = df.group_by("i64", maintain_order=True).agg(expressions)
+    set_threads(32)
+    var parallel = df.group_by("i64", maintain_order=True).agg(expressions)
+    assert_true(
+        serial.equals(parallel), "aligned direct grouped result differs"
+    )
+    var unordered = df.group_by("i64").agg(expressions)
+    assert_true(
+        serial.sort("i64").equals(unordered.sort("i64")),
+        "aligned direct unordered grouped result differs",
+    )
