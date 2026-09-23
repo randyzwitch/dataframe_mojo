@@ -32,6 +32,8 @@ from .gather import (
     take_sorted_chunked,
     true_rows,
     float_compare_rows,
+    can_filter_float_chunks,
+    filter_float_chunks,
 )
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
@@ -909,6 +911,16 @@ struct DataFrame(Copyable, Sized, Writable):
                 and self._columns[bound.sources[node.left]].dtype()
                 == DataType.FLOAT64
             ):
+                if self._height >= 2_000_000 and can_filter_float_chunks(
+                    self._columns
+                ):
+                    var filtered = filter_float_chunks(
+                        self._columns,
+                        bound.sources[node.left],
+                        node.op,
+                        bound.expr._nodes[node.right].floating,
+                    )
+                    return Self(filtered^)
                 return self._filter_rows(
                     float_compare_rows(
                         self._columns[bound.sources[node.left]],

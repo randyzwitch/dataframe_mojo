@@ -22,6 +22,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .expr import GT, LT, GE, LE, EQ, NE
 from .parallel import (
     Job,
+    Pool,
     configured_workers,
     partitions,
     run_jobs,
@@ -203,6 +204,109 @@ def float_compare_rows(
     while len(jobs) > 0:
         rows.extend(Span(jobs.pop(0).into_rows()))
     return rows^
+
+
+def can_filter_float_chunks(columns: List[Series]) -> Bool:
+    """Whether all columns share physical row boundaries for local filtering."""
+    if len(columns) == 0 or not columns[0].is_chunked():
+        return False
+    ref first = columns[0]._chunked.value()[].ends
+    if len(first) < 2:
+        return False
+    for c in range(1, len(columns)):
+        if not columns[c].is_chunked():
+            return False
+        ref ends = columns[c]._chunked.value()[].ends
+        if len(ends) != len(first):
+            return False
+        for i in range(len(first)):
+            if ends[i] != first[i]:
+                return False
+    return True
+
+
+struct _FloatChunkFilterJob(Job):
+    """Scan one predicate chunk and gather its columns from local row IDs."""
+
+    var columns: ArcPointer[List[Series]]
+    var predicate: Int
+    var chunk: Int
+    var op: Int
+    var literal: Float64
+    var selected: List[Series]
+
+    def __init__(
+        out self,
+        columns: ArcPointer[List[Series]],
+        predicate: Int,
+        chunk: Int,
+        op: Int,
+        literal: Float64,
+    ):
+        self.columns = columns.copy()
+        self.predicate = predicate
+        self.chunk = chunk
+        self.op = op
+        self.literal = literal
+        self.selected = List[Series]()
+
+    def run(mut self) raises:
+        ref columns = self.columns[]
+        var pred = Series(
+            columns[self.predicate].name(),
+            columns[self.predicate]
+            ._chunked.value()[]
+            .arrays[self.chunk]
+            .copy(),
+            columns[self.predicate].dtype(),
+        )
+        var rows = List[Int]()
+        _scan_float_compare(
+            rows,
+            pred._data[Column[Float64]],
+            0,
+            0,
+            len(pred),
+            self.op,
+            self.literal,
+        )
+        var selected = List[Series](capacity=len(columns))
+        for column in columns:
+            var part = Series(
+                column.name(),
+                column._chunked.value()[].arrays[self.chunk].copy(),
+                column.dtype(),
+            )
+            if len(rows) > 0:
+                selected.append(part.take(rows.copy()))
+            else:
+                selected.append(part.slice(0, 0))
+        self.selected = selected^
+
+
+def filter_float_chunks(
+    columns: List[Series], predicate: Int, op: Int, literal: Float64
+) raises -> List[Series]:
+    """Filter aligned source chunks independently, keeping their row order."""
+    var shared = ArcPointer(columns.copy())
+    var jobs = List[_FloatChunkFilterJob]()
+    for i in range(columns[0].n_chunks()):
+        jobs.append(_FloatChunkFilterJob(shared, predicate, i, op, literal))
+    var pool = Pool(min(configured_workers(), len(jobs)))
+    pool.run(jobs)
+    pool.release()
+    var output = List[Series](capacity=len(columns))
+    for c in range(len(columns)):
+        var pieces = List[Series]()
+        for i in range(len(jobs)):
+            ref part = jobs[i].selected[c]
+            if len(part) > 0:
+                pieces.append(part.copy())
+        if len(pieces) == 0:
+            output.append(columns[c].slice(0, 0))
+        else:
+            output.append(Series._from_chunks(pieces^))
+    return output^
 
 
 struct _SortedChunkTakeJob(Job):
