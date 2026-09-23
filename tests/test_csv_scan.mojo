@@ -78,9 +78,12 @@ def test_find_next_doubles_only_until_a_record() raises:
     _ = owned^
 
 
-def test_chunk_size_matches_polars_budget_formula() raises:
+def test_chunk_size_scales_with_input_and_width_budget() raises:
     assert_equal(chunk_size(0, 32, 8), 4096)
-    assert_equal(chunk_size(1_000_000, 1, 1), 62_500)
+    assert_equal(chunk_size(1_000_000, 1, 1), 250_000)
+    # Small inputs use four ranges per worker; large inputs grow to sixteen.
+    assert_equal(chunk_size(64 * 1024 * 1024, 32, 8), 512 * 1024)
+    assert_equal(chunk_size(512 * 1024 * 1024, 32, 8), 1024 * 1024)
     # Width caps the number of chunks at 500k / width, but never below
     # the worker count.
     assert_equal(chunk_size(1_000_000, 32, 100_000), 31_250)

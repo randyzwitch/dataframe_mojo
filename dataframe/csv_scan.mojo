@@ -102,10 +102,16 @@ struct CountLines:
 
 
 def chunk_size(bytes: Int, threads: Int, projected_width: Int) -> Int:
-    """Polars read_impl chunk hint: 16x threads, width cap, 4 KiB minimum."""
+    """Decode chunk hint: 4–16x threads, width cap, 4 KiB minimum."""
     var workers = max(1, threads)
     var width = max(1, projected_width)
     var allocation_limit = _ALLOCATION_BUDGET // width
+    # Keep small decode ranges from becoming tiny physical Arrow chunks.
+    # Grow from four to sixteen ranges per worker as the file grows, while
+    # respecting the projected-width allocation budget.
     var parts_hint = min(workers * 16, max(allocation_limit, workers))
+    if bytes < workers * 16 * 512 * 1024:
+        var target_parts = max(workers * 4, max(0, bytes) // (512 * 1024))
+        parts_hint = min(parts_hint, target_parts)
     var initial = min(max(0, bytes) // max(1, parts_hint), _MAX_CHUNK)
     return max(initial, _MIN_CHUNK)
