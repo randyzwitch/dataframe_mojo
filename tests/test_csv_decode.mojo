@@ -217,5 +217,45 @@ def test_primitive_whitespace_follows_polars_builder() raises:
         _ = decode('"12 "\n', schema, options(), [True])
 
 
+def test_short_plain_vector_path_with_projection_and_options() raises:
+    var text = String('# skip\n1,NA,1.5\r\n2,"two\nparts",2.5\n3,ok,3.5\n')
+    for i in range(20):
+        text += String(i + 4) + ",pad,4.5\n"
+    var all_columns = decode(
+        text,
+        three_schema(),
+        options(comment_prefix="#", null_values=["NA"]),
+        [True, True, True],
+    )
+    assert_equal(all_columns.height(), 23)
+    assert_true(all_columns.column("name").string().is_null(0))
+    assert_equal(all_columns.column("name").string().value(1), "two\nparts")
+    assert_equal(all_columns.column("score").float64().value(2), 3.5)
+    var projected = decode(
+        text,
+        three_schema(),
+        options(comment_prefix="#", null_values=["NA"]),
+        [True, False, True],
+    )
+    assert_equal(projected.height(), 23)
+    assert_equal(projected.width(), 2)
+    assert_equal(projected.column("id").int64().value(0), Int64(1))
+    assert_equal(projected.column("score").float64().value(1), 2.5)
+
+    var ragged = String("1,a,1,extra\n")
+    for i in range(20):
+        ragged += String(i + 2) + ",pad,4.5\n"
+    with assert_raises(contains="more fields than defined"):
+        _ = decode(ragged, three_schema(), options(), [True, True, True])
+    var truncated = decode(
+        ragged,
+        three_schema(),
+        options(truncate_ragged_lines=True),
+        [True, True, True],
+    )
+    assert_equal(truncated.height(), 21)
+    assert_equal(truncated.column("id").int64().value(0), Int64(1))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
