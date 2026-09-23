@@ -72,6 +72,66 @@ def test_parallel_inner_exactly_matches_serial() raises:
     _set_threads(1)
 
 
+def test_dense_right_join_matches_fallback_with_nulls_and_chunks() raises:
+    var left_key = Series(
+        "k",
+        Column[Int64](
+            [11, 9, 11, 13, 12, 10], [True, True, True, True, False, True]
+        ),
+    )
+    var left = DataFrame(
+        [
+            Series._from_chunks([left_key.slice(0, 2), left_key.slice(2, 4)]),
+            Series("left_row", Column[Int64]([0, 1, 2, 3, 4, 5])),
+        ]
+    )
+    var right_key = Series("k", Column[Int64]([10, 11, 12]))
+    var dense = DataFrame(
+        [
+            Series._from_chunks([right_key.slice(0, 1), right_key.slice(1, 2)]),
+            Series("right_value", Column[Int64]([100, 110, 120])),
+        ]
+    )
+    var shuffled = DataFrame(
+        [
+            Series("k", Column[Int64]([12, 10, 11])),
+            Series("right_value", Column[Int64]([120, 100, 110])),
+        ]
+    )
+    var actual = left.join(dense, "k")
+    var expected = left.join(shuffled, "k")
+    assert_true(actual.equals(expected))
+    assert_equal(actual.height(), 3)
+    assert_equal(actual.item(0, "left_row").int64(), 0)
+    assert_equal(actual.item(1, "left_row").int64(), 2)
+    assert_equal(actual.item(2, "left_row").int64(), 5)
+    assert_equal(actual.item(0, "right_value").int64(), 110)
+    assert_equal(actual.item(2, "right_value").int64(), 100)
+
+    var high = DataFrame(
+        [
+            Series("k", Column[Int64]([Int64.MAX - 1, Int64.MAX])),
+            Series("right_value", Column[Int64]([1, 2])),
+        ]
+    )
+    var near_max = DataFrame(
+        [
+            Series("k", Column[Int64]([Int64.MAX, Int64.MAX - 1])),
+            Series("left_row", Column[Int64]([0, 1])),
+        ]
+    )
+    var edge = near_max.join(high, "k")
+    assert_equal(edge.item(0, "right_value").int64(), 2)
+    assert_equal(edge.item(1, "right_value").int64(), 1)
+
+    var key_only = near_max.join(
+        DataFrame([Series("k", Column[Int64]([Int64.MAX - 1, Int64.MAX]))]),
+        "k",
+    )
+    assert_equal(key_only.height(), 2)
+    assert_equal(key_only.width(), 2)
+
+
 def test_parallel_unique_right_preserves_left_buffers() raises:
     var left_keys = List[Int64](capacity=LEFT_ROWS)
     var left_values = List[Int64](capacity=LEFT_ROWS)

@@ -128,20 +128,50 @@ def fused[
     length: Int,
 ) raises -> Series:
     var steps = _program(bound, root)
-    # Only columns referenced by this fused subtree need contiguous buffers.
-    # evaluate prepares them once; this fallback also keeps direct callers safe.
+    # Evaluate inside physical source chunks when a large caller leaves them
+    # chunked. Each local window starts at row zero, even if source chunk
+    # boundaries differ between columns.
+    var chunked = False
     for step in steps:
         if step.op == COL and columns[step.source].is_chunked():
-            var contiguous = columns.copy()
-            for source_step in steps:
-                if (
-                    source_step.op == COL
-                    and contiguous[source_step.source].is_chunked()
-                ):
-                    contiguous[source_step.source] = contiguous[
-                        source_step.source
-                    ].rechunk()
-            return fused[width](bound, contiguous^, root, offset, length)
+            chunked = True
+            break
+    if chunked and length > 0:
+        var output = Series("", BoolColumn(List[Bool]())) if bound.dtypes[
+            root
+        ] == DataType.BOOL else Series("", Column[Float64]([]))
+        var cursor = offset
+        var end = offset + length
+        while cursor < end:
+            var local_columns = columns.copy()
+            var local_offsets = List[Int](length=len(columns), fill=cursor)
+            var segment_end = end
+            for step in steps:
+                if step.op != COL:
+                    continue
+                var source = step.source
+                if columns[source].is_chunked():
+                    var part = columns[source]._chunk_at(cursor)
+                    segment_end = min(
+                        segment_end, cursor + len(part[0]) - part[1]
+                    )
+                    local_columns[source] = part[0].copy()
+                    local_offsets[source] = part[1]
+            var segment_length = segment_end - cursor
+            for step in steps:
+                if step.op == COL:
+                    var source = step.source
+                    local_columns[source] = local_columns[source].slice(
+                        local_offsets[source], segment_length
+                    )
+            var piece = fused[width](
+                bound, local_columns^, root, 0, segment_length
+            )
+            if cursor == offset and segment_end == end:
+                return piece^
+            output._append_series(piece)
+            cursor = segment_end
+        return output^
     var predicate = bound.dtypes[root] == DataType.BOOL
     var packed_valid = List[UInt8](length=(length + 7) // 8, fill=255)
     for step in steps:

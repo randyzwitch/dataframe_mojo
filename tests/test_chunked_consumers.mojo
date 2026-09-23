@@ -1,5 +1,5 @@
 """Differential coverage for consumers of multi-array Series values."""
-from std.testing import TestSuite, assert_equal, assert_true
+from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 from dataframe.gather import _take_sorted_chunked_partitioned, take_parallel
 from dataframe import (
     Column,
@@ -312,6 +312,51 @@ def test_partitioned_sorted_chunk_gather_preserves_order_and_nulls() raises:
     assert_same(actual, expected, "partitioned sorted chunk gather")
     assert_true(actual.column("id").is_chunked())
     assert_true(actual.column("label").is_chunked())
+
+
+def test_direct_float_filter_matches_boolean_mask() raises:
+    var nan = Float64(0) / Float64(0)
+    var x = Series._from_chunks(
+        [
+            Series("x", Column[Float64]([nan, -2.0], [True, True])),
+            Series("x", Column[Float64]([-0.0, 0.0], [True, False])),
+            Series("x", Column[Float64]([2.0, 3.0], [True, True])),
+        ]
+    )
+    var frame = DataFrame(
+        [x^, Series("row", Column[Int64]([0, 1, 2, 3, 4, 5]))]
+    )
+    var predicates = List[Expr]()
+    predicates.append(col("x") > lit(Float64(0)))
+    predicates.append(col("x") < lit(Float64(0)))
+    predicates.append(col("x") >= lit(Float64(0)))
+    predicates.append(col("x") <= lit(Float64(0)))
+    predicates.append(col("x") == lit(Float64(0)))
+    predicates.append(col("x") != lit(Float64(0)))
+    for predicate in predicates:
+        var mask = frame.select(predicate.alias("mask")).column("mask").bool()
+        assert_same(
+            frame.filter(predicate), frame.filter(mask), "Float64 filter"
+        )
+    with assert_raises():
+        _ = frame.filter(predicates[0], batch_size=0)
+
+
+def test_direct_float_filter_crosses_parallel_chunk_boundaries() raises:
+    var parts = List[Series]()
+    for chunk in range(132):
+        var values = List[Float64]()
+        var valid = List[Bool]()
+        for i in range(1024):
+            values.append(Float64((chunk + i) % 31) - 15.0)
+            valid.append((chunk + i) % 13 != 0)
+        parts.append(Series("x", Column[Float64](values^, valid^)))
+    var frame = DataFrame([Series._from_chunks(parts^)])
+    var predicate = col("x") > lit(Float64(0))
+    var mask = frame.select(predicate.alias("mask")).column("mask").bool()
+    assert_same(
+        frame.filter(predicate), frame.filter(mask), "parallel Float64 filter"
+    )
 
 
 def test_parallel_float_sum_across_many_nullable_chunks() raises:

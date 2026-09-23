@@ -951,15 +951,17 @@ def evaluate[
         raise Error("Invalid group mapping")
     var count = len(bound.expr._nodes)
     var root = count - 1
-    # Fused kernels read source buffers directly. Rechunk their Float64 inputs
-    # once for the whole expression, not once for every 1,024-row batch.
+    # Fused kernels read source buffers directly. Small chunked inputs are
+    # made contiguous once; large inputs use source chunk windows.
     var prepared_columns = columns.copy()
     var has_fused = False
     for i in range(count):
         if bound.fusible[i] and bound.expr._nodes[i].left >= 0:
             has_fused = True
             break
-    if has_fused:
+    # Small frames repay one contiguous copy through lower per-batch overhead.
+    # At millions of rows, keep source chunks and use bounded windows in fused().
+    if has_fused and height < 2_000_000:
         for i in range(count):
             if bound.expr._nodes[i].op == COL:
                 var source = bound.sources[i]
