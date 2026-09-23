@@ -911,7 +911,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 and self._columns[bound.sources[node.left]].dtype()
                 == DataType.FLOAT64
             ):
-                if self._height >= 2_000_000 and can_filter_float_chunks(
+                if self._height >= 100_000 and can_filter_float_chunks(
                     self._columns
                 ):
                     var filtered = filter_float_chunks(
