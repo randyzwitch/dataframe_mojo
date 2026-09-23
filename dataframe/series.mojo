@@ -1350,21 +1350,71 @@ struct _MergeJob(Job):
         )
 
 
+def _radix_sort_bucket(
+    ranks: List[List[Int]], var rows: List[Int]
+) -> List[Int]:
+    """Stable LSD radix order for rows sharing the first of three words."""
+    var count = len(rows)
+    if count < 2:
+        return rows^
+    var scratch = List[Int](length=count, fill=0)
+    var offsets = List[Int](length=256, fill=0)
+    # Sort the final word first, then the middle word. Each pass preserves
+    # the source row order, which is the final tie-break in _rank_less.
+    for word in [2, 1]:
+        ref keys = ranks[word]
+        var first = UInt64(keys[rows[0]]) ^ UInt64(0x8000000000000000)
+        var changed = UInt64(0)
+        for row in rows:
+            changed |= first ^ (UInt64(keys[row]) ^ UInt64(0x8000000000000000))
+        for byte in range(8):
+            var shift = UInt64(8 * byte)
+            if ((changed >> shift) & UInt64(255)) == 0:
+                continue
+            for i in range(256):
+                offsets[i] = 0
+            for row in rows:
+                var key = UInt64(keys[row]) ^ UInt64(0x8000000000000000)
+                offsets[Int((key >> shift) & UInt64(255))] += 1
+            var next = 0
+            for i in range(256):
+                var size = offsets[i]
+                offsets[i] = next
+                next += size
+            for row in rows:
+                var key = UInt64(keys[row]) ^ UInt64(0x8000000000000000)
+                var digit = Int((key >> shift) & UInt64(255))
+                scratch[offsets[digit]] = row
+                offsets[digit] += 1
+            var old = rows^
+            rows = scratch^
+            scratch = old^
+    return rows^
+
+
 struct _KeyBucketSortJob(Job):
     """Sort rows that share one first-key rank by the remaining ranks."""
 
     var ranks: ArcPointer[List[List[Int]]]
     var rows: List[Int]
+    var radix: Bool
 
     def __init__(
-        out self, ranks: ArcPointer[List[List[Int]]], var rows: List[Int]
+        out self,
+        ranks: ArcPointer[List[List[Int]]],
+        var rows: List[Int],
+        radix: Bool = False,
     ):
         self.ranks = ranks.copy()
         self.rows = rows^
+        self.radix = radix
 
     def run(mut self) raises:
         var shared = self.ranks.copy()
         ref ranks = shared[]
+        if self.radix:
+            self.rows = _radix_sort_bucket(ranks, self.rows^)
+            return
 
         def less(a: Int, b: Int) {imm ranks} -> Bool:
             return _rank_less(ranks, a, b)
@@ -1374,7 +1424,9 @@ struct _KeyBucketSortJob(Job):
         self.rows = rows^
 
 
-def _low_card_first_sort(ranks: List[List[Int]]) raises -> List[Int]:
+def _low_card_first_sort(
+    ranks: List[List[Int]], radix: Bool = False
+) raises -> List[Int]:
     """Sort independent first-key buckets without global merge rounds."""
     var n = len(ranks[0])
     ref first = ranks[0]
@@ -1406,7 +1458,7 @@ def _low_card_first_sort(ranks: List[List[Int]]) raises -> List[Int]:
     while len(buckets) > 0:
         var rows = buckets.pop(0)
         if len(rows) > 0:
-            jobs.append(_KeyBucketSortJob(shared, rows^))
+            jobs.append(_KeyBucketSortJob(shared, rows^, radix))
     var pool = Pool(min(configured_workers(), len(jobs)))
     pool.run(jobs)
     pool.release()
@@ -1434,11 +1486,11 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
     var n = len(ranks[0])
     if (
         n >= 8192
-        and n <= 200_000
         and len(ranks) > 1
         and configured_workers() > 1
+        and (n <= 200_000 or len(ranks) == 3)
     ):
-        var bucket_order = _low_card_first_sort(ranks)
+        var bucket_order = _low_card_first_sort(ranks, n > 200_000)
         if len(bucket_order) == n:
             return bucket_order^
     # One run per thread, not one per MIN_ROWS_PER_WORKER rows: that minimum
