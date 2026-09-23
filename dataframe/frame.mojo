@@ -17,11 +17,22 @@ from .expr import (
     LIT_BOOL,
     LIT_STRING,
     LIT_NULL,
+    GT,
+    LT,
+    GE,
+    LE,
+    EQ,
+    NE,
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
-from .gather import take_parallel, take_sorted_chunked, true_rows
+from .gather import (
+    take_parallel,
+    take_sorted_chunked,
+    true_rows,
+    float_compare_rows,
+)
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
 from .row_encode import encodable, encode_sort_keys
@@ -342,7 +353,9 @@ struct DataFrame(Copyable, Sized, Writable):
         """Keep true rows, dropping false and null mask entries, in input order."""
         if len(mask) != self._height:
             raise Error("Filter mask must match dataframe height")
-        var rows = true_rows(mask)
+        return self._filter_rows(true_rows(mask))
+
+    def _filter_rows(self, var rows: List[Int]) raises -> Self:
         var max_chunks = 1
         for column in self._columns:
             max_chunks = max(max_chunks, column.n_chunks())
@@ -856,6 +869,31 @@ struct DataFrame(Copyable, Sized, Writable):
         var bound = bind(predicates[0], self._columns)
         if bound.dtypes[len(bound.dtypes) - 1] != DataType.BOOL:
             raise Error("Filter expression must return Boolean values")
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        if len(bound.expr._nodes) == 3:
+            ref node = bound.expr._nodes[2]
+            if (
+                (
+                    node.op == GT
+                    or node.op == LT
+                    or node.op == GE
+                    or node.op == LE
+                    or node.op == EQ
+                    or node.op == NE
+                )
+                and bound.expr._nodes[node.left].op == COL
+                and bound.expr._nodes[node.right].op == LIT_FLOAT
+                and self._columns[bound.sources[node.left]].dtype()
+                == DataType.FLOAT64
+            ):
+                return self._filter_rows(
+                    float_compare_rows(
+                        self._columns[bound.sources[node.left]],
+                        node.op,
+                        bound.expr._nodes[node.right].floating,
+                    )
+                )
         var result = evaluate(
             bound, self._columns, self._height, batch_size=batch_size
         )
