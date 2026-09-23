@@ -1277,7 +1277,20 @@ struct _SortRangeJob(Job):
         self.rows = List[Int]()
 
     def run(mut self) raises:
-        self.rows = _sort_range(self.ranks[], self.start, self.end)
+        # The standard sorter costs less than full merge passes within a
+        # worker's private run. _rank_less uses row indices to break ties,
+        # so its result is stable even if the sorter itself is not.
+        var rows = List[Int](capacity=self.end - self.start)
+        for i in range(self.start, self.end):
+            rows.append(i)
+        var shared = self.ranks.copy()
+        ref ranks = shared[]
+
+        def less(a: Int, b: Int) {imm ranks} -> Bool:
+            return _rank_less(ranks, a, b)
+
+        sort(rows, less)
+        self.rows = rows^
 
 
 struct _MergeJob(Job):
