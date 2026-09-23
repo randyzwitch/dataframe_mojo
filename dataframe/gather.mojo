@@ -257,10 +257,12 @@ def take_parallel(
     var result = List[Series](capacity=len(columns))
     for c in range(len(columns)):
         if columns[c]._data.isa[StringColumn]():
-            var assembled = jobs[c * workers].piece.copy()
-            for w in range(1, workers):
-                assembled._append_series(jobs[c * workers + w].piece)
-            result.append(assembled^)
+            # Keep each worker's gathered view as a physical chunk. Appending
+            # views here repeatedly copies the growing descriptor array.
+            var pieces = List[Series](capacity=workers)
+            for w in range(workers):
+                pieces.append(jobs[c * workers + w].piece.copy())
+            result.append(Series._from_chunks(pieces^))
             continue
         var output = outputs[c].copy()
         _set_bits(output, bits[c].copy())

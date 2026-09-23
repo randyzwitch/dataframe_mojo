@@ -9,7 +9,7 @@ from dataframe.frame import (
     _JoinCountJob,
 )
 
-from dataframe import Column, DataFrame, Series
+from dataframe import Column, DataFrame, Series, StringColumn
 from dataframe.parallel import worker_count
 
 
@@ -38,6 +38,8 @@ def _side(rows: Int, seed: UInt64, name: String) raises -> DataFrame:
     var keys = List[Int64](capacity=rows)
     var payload = List[Int64](capacity=rows)
     var valid = List[Bool](capacity=rows)
+    var texts = List[String](capacity=rows)
+    var text_valid = List[Bool](capacity=rows)
     var state = seed
     for row in range(rows):
         state = state * 6364136223846793005 + 1442695040888963407
@@ -45,10 +47,13 @@ def _side(rows: Int, seed: UInt64, name: String) raises -> DataFrame:
         keys.append(Int64((state >> 24) % 40_009))
         payload.append(Int64(row))
         valid.append(row % 71 != 0)
+        texts.append("value_" + String(row % 101))
+        text_valid.append(row % 37 != 0)
     return DataFrame(
         [
             Series("k", Column[Int64](keys^, valid^)),
             Series(name, Column[Int64](payload^)),
+            Series(name + "_text", StringColumn(texts^, text_valid^)),
         ]
     )
 
@@ -62,6 +67,8 @@ def test_parallel_inner_exactly_matches_serial() raises:
     assert_true(worker_count(left.height()) > 1, "parallel path not reached")
     var parallel = left.join(right, "k")
     assert_true(parallel.equals(serial), "inner join row order differs")
+    assert_true(parallel.column("left_row_text").n_chunks() > 1)
+    assert_true(parallel.column("right_row_text").n_chunks() > 1)
     _set_threads(1)
 
 
