@@ -458,6 +458,7 @@ struct _RowsJob[width: Int](Job):
         self.batch_size = batch_size
         self.grouped = grouped
         self.result = _empty(bound.dtypes[root])
+        self.result._reserve_rows(end - start, 0)
 
     def into_result(deinit self) -> Series:
         return self.result^
@@ -1039,6 +1040,7 @@ def evaluate[
     )
     var workers = worker_count(size) if bound.shape() == ROWS else 1
     if workers <= 1:
+        result._reserve_rows(size, 0)
         for offset in range(0, size, batch_size):
             var chunk = _batch[width](
                 bound,
