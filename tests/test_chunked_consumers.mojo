@@ -266,5 +266,30 @@ def test_large_chunked_filter_with_misaligned_columns_and_null_mask() raises:
     )
 
 
+def test_parallel_float_sum_across_many_nullable_chunks() raises:
+    # Worker partitions can start and end inside different physical chunks.
+    var parts = List[Series]()
+    var expected = 0
+    for chunk in range(70):
+        var values = List[Float64](length=4096, fill=1.0)
+        var valid = List[Bool](length=4096, fill=True)
+        for i in range(4096):
+            valid[i] = (chunk + i) % 7 != 0
+            expected += Int(valid[i])
+        parts.append(Series("x", Column[Float64](values^, valid^)))
+    parts.append(
+        Series(
+            "x",
+            Column[Float64]([1.0, 1.0, 1.0], [False, True, True]),
+        )
+    )
+    expected += 2
+    var frame = DataFrame([Series._from_chunks(parts^)])
+    assert_true(frame.column("x").n_chunks() == 71)
+    assert_equal(
+        frame.select(col("x").sum()).item().float64(), Float64(expected)
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

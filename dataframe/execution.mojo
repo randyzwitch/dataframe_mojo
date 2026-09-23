@@ -530,21 +530,29 @@ def _direct_float_sum(
             reducer, series._data[Column[Float64]], start, end
         )
         return True
-    var chunk_start = 0
-    for part in series.chunks():
-        var chunk_end = chunk_start + len(part)
+    ref chunks = series._chunked.value()[]
+    var first = 0
+    var upper = len(chunks.ends)
+    while first < upper:
+        var mid = (first + upper) // 2
+        if chunks.ends[mid] <= start:
+            first = mid + 1
+        else:
+            upper = mid
+    for index in range(first, len(chunks.ends)):
+        var chunk_start = 0 if index == 0 else chunks.ends[index - 1]
+        if chunk_start >= end:
+            break
+        var chunk_end = chunks.ends[index]
         var lo = max(start, chunk_start)
         var hi = min(end, chunk_end)
         if lo < hi:
             _direct_float_column_sum(
                 reducer,
-                part._data[Column[Float64]],
+                chunks.arrays[index][Column[Float64]],
                 lo - chunk_start,
                 hi - chunk_start,
             )
-        chunk_start = chunk_end
-        if chunk_start >= end:
-            break
     return True
 
 
