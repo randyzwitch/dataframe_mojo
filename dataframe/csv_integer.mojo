@@ -50,7 +50,7 @@ def _process_8(word: UInt64, digits: Int) raises -> UInt64:
 def _parse_short(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt64:
-    """Scalar path for one to three digits."""
+    """Scalar path for short integers where SIMD setup costs more."""
     var value = UInt64(0)
     for i in range(digits):
         var byte = bytes[start + i]
@@ -402,7 +402,7 @@ def _parse_magnitude_u64[
     comptime if _has_x86_atoi_simd_backend():
         comptime if wide:
             comptime if _has_wide_atoi_simd_backend():
-                if digits < 4:
+                if digits < 8:
                     return _parse_short(bytes, start, digits)
                 return _parse_simd_at_most_16(bytes, start, digits)
             else:
@@ -410,7 +410,7 @@ def _parse_magnitude_u64[
                     return _parse_short(bytes, start, digits)
                 return _parse_swar_at_most_16(bytes, start, digits)
         else:
-            if digits < 4:
+            if digits < 8:
                 return _parse_short(bytes, start, digits)
             return _parse_simd_at_most_16(bytes, start, digits)
     else:
