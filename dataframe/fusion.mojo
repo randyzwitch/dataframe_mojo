@@ -9,10 +9,11 @@ leaf columns' validity, which matches null propagation through every fused
 operation; null rows get a zero payload. Results are identical to the
 unfused kernels, which remain available with bind(..., fuse=False).
 """
+from std.memory import pack_bits
 from .dtype import DataType
 from .binding import BoundExpr
 from .bool_column import BoolColumn
-from .column import Column, _pack_bits
+from .column import Column
 from .expr import COL, LIT_FLOAT, ADD, SUB, MUL, DIV, GT, LT, GE, LE, EQ, NE
 from .series import Series
 
@@ -190,7 +191,9 @@ def fused[
                     value |= UInt16(source_bits[index + 1]) << UInt16(8 - shift)
                 packed_valid[byte] &= UInt8(value & UInt16(255))
     var values = List[Float64](length=0 if predicate else length, fill=0)
-    var flags = List[Bool](length=length if predicate else 0, fill=False)
+    var packed_values = List[UInt8](
+        length=(length + 7) // 8 if predicate else 0, fill=0
+    )
     var last = len(steps) - 1
     var wide = List[SIMD[DType.float64, width]](
         length=len(steps), fill=SIMD[DType.float64, width](0)
@@ -205,18 +208,26 @@ def fused[
             var result = _compare[width](
                 steps[last].op, wide[steps[last].left], wide[steps[last].right]
             )
-            comptime for lane in range(width):
-                flags[start + lane] = result[lane]
+            comptime if width == 8:
+                packed_values[start // 8] |= UInt8(
+                    pack_bits[DType.uint8](result)
+                ) << UInt8(start % 8)
+            else:
+                comptime for lane in range(width):
+                    if result[lane]:
+                        var row = start + lane
+                        packed_values[row // 8] |= UInt8(1) << UInt8(row % 8)
         else:
             values.unsafe_ptr().unsafe_offset(start).unsafe_store(wide[last])
     for i in range(main, length):
         _run[1](steps, columns, offset + i, narrow)
         if predicate:
-            flags[i] = _compare[1](
+            if _compare[1](
                 steps[last].op,
                 narrow[steps[last].left],
                 narrow[steps[last].right],
-            )[0]
+            )[0]:
+                packed_values[i // 8] |= UInt8(1) << UInt8(i % 8)
         else:
             values[i] = narrow[last][0]
     for byte in range(len(packed_valid)):
@@ -227,15 +238,15 @@ def fused[
             if i >= length:
                 break
             if packed_valid[byte] & (UInt8(1) << UInt8(lane)) == 0:
-                if predicate:
-                    flags[i] = False
-                else:
+                if not predicate:
                     values[i] = 0
     if predicate:
+        for byte in range(len(packed_values)):
+            packed_values[byte] &= packed_valid[byte]
         return Series(
             "",
             BoolColumn(
-                values=_pack_bits(flags^), bits=packed_valid^, length=length
+                values=packed_values^, bits=packed_valid^, length=length
             ),
         )
     return Series("", Column[Float64](values=values^, bits=packed_valid^))
