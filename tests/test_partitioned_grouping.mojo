@@ -240,3 +240,25 @@ def test_chunked_cardinality_sample_matches_rechunked() raises:
             low_cardinality([chunked_strings.copy(), chunked_numbers.copy()]),
             low_cardinality([string_key.copy(), number_key.copy()]),
         )
+
+
+def test_skewed_small_domain_uses_whole_encoding() raises:
+    # A hot key with a small remaining domain is cheaper without scattering.
+    # The same hot key plus unique trailing values still needs partitioning.
+    var small_values = List[Int64](capacity=100_000)
+    var unique_values = List[Int64](capacity=100_000)
+    for i in range(100_000):
+        small_values.append(Int64(0 if i % 2 == 0 else i % 1000))
+        unique_values.append(Int64(0 if i % 2 == 0 else i))
+    var small = Series("small", Column[Int64](small_values^))
+    var unique = Series("unique", Column[Int64](unique_values^))
+    assert_true(low_cardinality([small.copy()]))
+    assert_true(not low_cardinality([unique.copy()]))
+    var small_chunks = Series._from_chunks(
+        [small.slice(0, 37_001), small.slice(37_001, 62_999)]
+    )
+    var unique_chunks = Series._from_chunks(
+        [unique.slice(0, 37_001), unique.slice(37_001, 62_999)]
+    )
+    assert_true(low_cardinality([small_chunks^]))
+    assert_true(not low_cardinality([unique_chunks^]))
