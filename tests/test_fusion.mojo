@@ -12,6 +12,7 @@ from dataframe import (
 )
 from dataframe.binding import bind
 from dataframe.execution import evaluate
+from dataframe.fusion import fused
 
 
 def nan() -> Float64:
@@ -129,6 +130,30 @@ def test_fused_chunked_inputs_match_contiguous() raises:
             assert_true(
                 bitwise_equal(run[4](chunked, expr, True, batch), expected)
             )
+
+
+def test_fused_direct_chunk_windows_match_unfused_misaligned_inputs() raises:
+    var whole = frame(25)
+    var x = whole.column("x")
+    var y = whole.column("y")
+    var df = DataFrame(
+        [
+            Series._from_chunks(
+                [x.slice(0, 7), x.slice(7, 10), x.slice(17, 8)]
+            ),
+            Series._from_chunks([y.slice(0, 9), y.slice(9, 9), y.slice(18, 7)]),
+        ]
+    )
+    for expr in [
+        (col("x") + lit(Float64(3))) * (col("y") - lit(Float64(2))),
+        col("x") > col("y"),
+    ]:
+        var bound = bind(expr, df._columns)
+        var actual = fused[4](
+            bound, df._columns, len(bound.expr._nodes) - 1, 2, 20
+        )
+        var expected = run[4](df, expr, False, 7).slice(2, 20)
+        assert_true(bitwise_equal(actual, expected))
 
 
 def test_fusible_analysis() raises:
