@@ -1,4 +1,4 @@
-"""CSV orchestration port of Polars py-1.44.2 read_impl::parse_csv.
+"""CSV reader orchestration.
 
 Both public read_csv overloads use this pipeline. This module owns mapping,
 header removal, CountLines range discovery, immediate decode publication, and
@@ -130,7 +130,7 @@ def _line_end(
 def _comment_at(
     bytes: Span[UInt8, ImmutAnyOrigin], start: Int, prefix: String
 ) -> Bool:
-    """Port parser.rs ``is_comment_line`` at a record boundary."""
+    """Check for a comment line at a record boundary."""
     var value = prefix.as_bytes()
     if len(value) == 0 or start + len(value) > len(bytes):
         return False

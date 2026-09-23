@@ -1,15 +1,14 @@
-"""Polars 1.44.2 ``MutableBinaryViewArray`` storage for CSV strings.
+"""Binary view storage for CSV strings.
 
-This is a direct port of the append path in
-``polars-arrow/src/array/binview/{view,mutable}.rs``.  Each view is four
+Each view is four
 32-bit words: length; then inline bytes for strings through 12 bytes, or the
 first-four-byte prefix, buffer index, and byte offset for longer strings.
 Long values append to growing blocks.  A full block is moved into an
 Arc-owned buffer so a finished storage object never copies string payloads.
 
-The block policy matches Polars 1.44.2 exactly: 8 KiB initial growth and a
+The block policy uses: 8 KiB initial growth and a
 16 MiB exponential-growth ceiling.  Validity stays absent until the first
-null, as Arrow/Polars validity bitmaps do.
+null, as in validity bitmaps.
 """
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 from .column import _append_validity_bit, _count_valid, _validity_bit

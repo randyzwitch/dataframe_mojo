@@ -1,9 +1,8 @@
-"""Chunk-local CSV decoding mapped directly to Polars 1.44.2 parse_lines.
+"""Chunk-local CSV decoding.
 
 ``decode_chunk`` receives record-aligned, header-free input from read_impl.
 It holds only projected CsvBuffer instances, forwards borrowed SplitFields
-spans to builder.rs-style ``add``, and delegates omitted tails to the same
-quote-aware ``skip_this_line`` rule. Prelude removal and global n_rows bounds
+spans to typed buffers, and delegates omitted tails to a quote-aware skip rule. Prelude removal and global n_rows bounds
 belong to orchestration, never to an individual chunk.
 """
 from .csv_types import CsvOptions, CsvSchema
@@ -17,7 +16,7 @@ from .series import Series
 def _skip_projected_tail(
     bytes: Span[UInt8, ImmutAnyOrigin], start: Int, quote: UInt8, quoting: Bool
 ) -> Int:
-    """Port parser.rs ``skip_this_line`` after final projected input."""
+    """Skip unprojected fields after the final projected input."""
     var in_quotes = False
     var i = start
     while i < len(bytes):
@@ -50,11 +49,11 @@ def decode_chunk(
     rows: Int,
     record_start: Int = 1,
 ) raises -> DataFrame:
-    """Port parser.rs ``parse_lines`` over one record-aligned source range.
+    """Decode one record-aligned source range.
 
     ``rows`` is CountLines' capacity hint. Buffers reserve ``rows + 1`` like
-    Polars builders. `skip_rows` and `n_rows` are intentionally ignored here:
-    read_impl has already removed the prelude and limits the concatenated
+    typed buffers. `skip_rows` and `n_rows` are intentionally ignored here:
+    the reader has already removed the prelude and limits the concatenated
     result, avoiding a chunk-boundary-dependent global row limit.
     """
     # The reader validates options once before chunk publication.
