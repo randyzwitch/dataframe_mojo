@@ -17,16 +17,27 @@ from .expr import (
     LIT_BOOL,
     LIT_STRING,
     LIT_NULL,
+    GT,
+    LT,
+    GE,
+    LE,
+    EQ,
+    NE,
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
-from .gather import take_parallel, take_sorted_chunked, true_rows
+from .gather import (
+    take_parallel,
+    take_sorted_chunked,
+    true_rows,
+    float_compare_rows,
+)
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
-from .hashing import RowKeys, encode_rows
+from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
 from .groups import GroupIndices
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
@@ -342,7 +353,9 @@ struct DataFrame(Copyable, Sized, Writable):
         """Keep true rows, dropping false and null mask entries, in input order."""
         if len(mask) != self._height:
             raise Error("Filter mask must match dataframe height")
-        var rows = true_rows(mask)
+        return self._filter_rows(true_rows(mask))
+
+    def _filter_rows(self, var rows: List[Int]) raises -> Self:
         var max_chunks = 1
         for column in self._columns:
             max_chunks = max(max_chunks, column.n_chunks())
@@ -629,6 +642,28 @@ struct DataFrame(Copyable, Sized, Writable):
                 names[name] = True
                 right_output.append(i)
                 right_names.append(name)
+        if how == "inner" and len(left_keys) == 1:
+            var dense = _dense_right_int64_rows(
+                self._columns[left_keys[0]], right._columns[right_keys[0]]
+            )
+            if dense[0]:
+                var left_rows = dense[1].copy()
+                var right_rows = dense[2].copy()
+                var workers = worker_count(len(left_rows))
+                var columns = self._columns.copy()
+                if len(left_rows) != self.height():
+                    columns = take_parallel(
+                        columns^, left_rows.copy(), workers, or_null=True
+                    )
+                var right_sources = List[Series]()
+                for c in right_output:
+                    right_sources.append(right._columns[c].copy())
+                var gathered = take_parallel(
+                    right_sources, right_rows^, workers, or_null=True
+                )
+                for k in range(len(right_output)):
+                    columns.append(gathered[k].renamed(right_names[k]))
+                return Self(columns^, height=len(left_rows))
         var ids = _joint_key_ids(self, right, left_keys, right_keys)
         var left_ids = ids[0].copy()
         var right_ids = ids[1].copy()
@@ -856,6 +891,31 @@ struct DataFrame(Copyable, Sized, Writable):
         var bound = bind(predicates[0], self._columns)
         if bound.dtypes[len(bound.dtypes) - 1] != DataType.BOOL:
             raise Error("Filter expression must return Boolean values")
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        if len(bound.expr._nodes) == 3:
+            ref node = bound.expr._nodes[2]
+            if (
+                (
+                    node.op == GT
+                    or node.op == LT
+                    or node.op == GE
+                    or node.op == LE
+                    or node.op == EQ
+                    or node.op == NE
+                )
+                and bound.expr._nodes[node.left].op == COL
+                and bound.expr._nodes[node.right].op == LIT_FLOAT
+                and self._columns[bound.sources[node.left]].dtype()
+                == DataType.FLOAT64
+            ):
+                return self._filter_rows(
+                    float_compare_rows(
+                        self._columns[bound.sources[node.left]],
+                        node.op,
+                        bound.expr._nodes[node.right].floating,
+                    )
+                )
         var result = evaluate(
             bound, self._columns, self._height, batch_size=batch_size
         )
@@ -1321,6 +1381,56 @@ def _group_index(ids: List[Int], count: Int) -> List[Int]:
     for g in range(count):
         starts[g + 1] += starts[g]
     return starts^
+
+
+def _dense_right_int64_rows(
+    left: Series, right: Series
+) -> Tuple[Bool, List[Int], List[Int]]:
+    """Direct inner matches when right keys are a dense ascending Int64 range."""
+    if right.dtype() != DataType.INT64 or left.dtype() != DataType.INT64:
+        return (False, List[Int](), List[Int]())
+    if len(right) == 0:
+        return (False, List[Int](), List[Int]())
+    var base = Int64(0)
+    var row = 0
+    for part in right.chunks():
+        ref column = part._data[Column[Int64]]
+        for i in range(len(column)):
+            if not column._valid(i):
+                return (False, List[Int](), List[Int]())
+            var value = column._get(i)
+            if row == 0:
+                base = value
+            elif value < base or UInt64(value) - UInt64(base) != UInt64(row):
+                return (False, List[Int](), List[Int]())
+            row += 1
+    var right_limit = UInt64(len(right))
+    var left_rows = List[Int](capacity=len(left))
+    var right_rows = List[Int](capacity=len(left))
+    row = 0
+    for part in left.chunks():
+        ref column = part._data[Column[Int64]]
+        var values = column.unsafe_values()
+        if len(column._bits[]) == 0:
+            for i in range(len(column)):
+                var value = values.unsafe_load(i)
+                if value >= base:
+                    var index = UInt64(value) - UInt64(base)
+                    if index < right_limit:
+                        left_rows.append(row)
+                        right_rows.append(Int(index))
+                row += 1
+        else:
+            for i in range(len(column)):
+                if column._valid(i):
+                    var value = values.unsafe_load(i)
+                    if value >= base:
+                        var index = UInt64(value) - UInt64(base)
+                        if index < right_limit:
+                            left_rows.append(row)
+                            right_rows.append(Int(index))
+                row += 1
+    return (True, left_rows^, right_rows^)
 
 
 def _group_rows(ids: List[Int], starts: List[Int]) -> List[Int]:
@@ -2410,7 +2520,13 @@ struct GroupBy(Copyable):
         self, bound: List[BoundExpr], batch_size: Int
     ) raises -> DataFrame:
         """Serial key encoding, then the parallel per-group reduce."""
-        var groups = encode_rows(self._keys, nulls_equal=True)
+        var groups: RowKeys
+        if len(self._keys) == 1 and self._keys[0]._data.isa[StringColumn]():
+            groups = encode_string_rows_parallel(
+                self._keys[0], True, worker_count(self._frame.height())
+            )
+        else:
+            groups = encode_rows(self._keys, nulls_equal=True)
         # First-occurrence representatives are ordered by source row.
         var columns = take_sorted_chunked(
             self._keys, groups.representatives.copy(), 1
