@@ -263,6 +263,7 @@ def test_skewed_small_domain_uses_whole_encoding() raises:
     assert_true(low_cardinality([small_chunks^]))
     assert_true(not low_cardinality([unique_chunks^]))
 
+
 def test_direct_numeric_sum_count_matches_serial_with_nulls() raises:
     var df = frame(ROWS, ROWS // 10)
     var n_values = df.column("n").int64().to_list()
