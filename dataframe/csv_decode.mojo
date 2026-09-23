@@ -5,6 +5,8 @@ It holds only projected CsvBuffer instances, forwards borrowed SplitFields
 spans to typed buffers, and delegates omitted tails to a quote-aware skip rule. Prelude removal and global n_rows bounds
 belong to orchestration, never to an individual chunk.
 """
+from std.bit import count_trailing_zeros
+from .csv_bits import _mask64
 from .csv_types import CsvOptions, CsvSchema
 from .csv_buffers import CsvBuffer
 from .csv_splitfields import CsvSplitFields
@@ -99,13 +101,110 @@ def decode_chunk(
     var record = record_start
     var output_rows = 0
     var separator = options.separator.as_bytes()[0]
+    var simd_separator = SIMD[DType.uint8, 64](separator)
+    var simd_eol = SIMD[DType.uint8, 64](10)
+    var simd_quote = SIMD[DType.uint8, 64](quote)
+    var has_comments = options.comment_prefix.byte_length() != 0
     while offset < len(bytes):
-        if _comment_at(bytes, offset, options.comment_prefix):
+        if has_comments and _comment_at(bytes, offset, options.comment_prefix):
             while offset < len(bytes) and bytes[offset] != 10:
                 offset += 1
             if offset < len(bytes):
                 offset += 1
             continue
+
+        # A record ending in this vector can use its separator mask directly.
+        # A quote before LF sends the whole record to the general splitter,
+        # which handles quoted separators and embedded newlines.
+        if len(bytes) - offset >= 64:
+            var block = bytes.unsafe_ptr().unsafe_load[width=64](offset)
+            var eols = _mask64(block.eq(simd_eol))
+            if eols != 0:
+                var last = Int(count_trailing_zeros(eols))
+                var before_eol = (UInt64(1) << UInt64(last)) - 1
+                if (
+                    not quoting
+                    or _mask64(block.eq(simd_quote)) & before_eol == 0
+                ):
+                    var delimiters = (
+                        _mask64(block.eq(simd_separator)) & before_eol
+                    )
+                    var field_start = offset
+                    var source_index = 0
+                    var processed = 0
+                    var next_selected = projection.unsafe_ptr()[]
+                    var ended_with_separator = False
+                    while processed < selected:
+                        var end = offset + last
+                        ended_with_separator = delimiters != 0
+                        if ended_with_separator:
+                            var bit = Int(count_trailing_zeros(delimiters))
+                            end = offset + bit
+                            delimiters &= delimiters - 1
+                        if source_index == next_selected:
+                            var field_end = end
+                            if (
+                                field_end > field_start
+                                and bytes[field_end - 1] == 13
+                            ):
+                                field_end -= 1
+                            var raw = Span[UInt8, ImmutAnyOrigin](
+                                unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(
+                                    field_start
+                                ),
+                                length=field_end - field_start,
+                            )
+                            var is_null = False
+                            if len(options.null_values) != 0:
+                                for marker in options.null_values:
+                                    if raw == marker.as_bytes():
+                                        is_null = True
+                                        break
+                            if is_null:
+                                buffers.unsafe_ptr().unsafe_offset(
+                                    processed
+                                )[].add_null()
+                            else:
+                                try:
+                                    buffers.unsafe_ptr().unsafe_offset(
+                                        processed
+                                    )[].add(raw, False, options.ignore_errors)
+                                except error:
+                                    raise Error(
+                                        "CSV record "
+                                        + String(record)
+                                        + ", field '"
+                                        + schema._fields[source_index].name
+                                        + "': "
+                                        + String(error)
+                                    )
+                            processed += 1
+                            if processed < selected:
+                                next_selected = (
+                                    projection.unsafe_ptr().unsafe_offset(
+                                        processed
+                                    )[]
+                                )
+                        source_index += 1
+                        field_start = end + 1
+                        if not ended_with_separator:
+                            break
+                    if (
+                        processed == selected
+                        and ended_with_separator
+                        and not partial_projection
+                        and not options.truncate_ragged_lines
+                    ):
+                        raise Error("found more fields than defined in schema")
+                    while processed < selected:
+                        buffers.unsafe_ptr().unsafe_offset(
+                            processed
+                        )[].add_null()
+                        processed += 1
+                    offset += last + 1
+                    output_rows += 1
+                    record += 1
+                    continue
 
         var record_offset = offset
         # `offset` is initially zero and thereafter is `record_offset +
