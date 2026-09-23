@@ -470,34 +470,41 @@ def _direct_float_column_sum(
 ):
     """Accumulate a contiguous Float64 interval into one reducer state."""
     var values = column.unsafe_values()
-    var total = SIMD[DType.float64, 4](0)
+    var total = SIMD[DType.float64, 8](0)
     var count = _count_valid(
         column._bits[], column._offset + start, end - start
     )
     var i = start
     if count == end - start:
-        while i + 4 <= end:
-            total += values.unsafe_load[width=4](i)
-            i += 4
+        while i + 8 <= end:
+            total += values.unsafe_load[width=8](i)
+            i += 8
     else:
         var bits = column.unsafe_validity()
-        while i + 4 <= end:
+        while i + 8 <= end:
             var bit = column._offset + i
             var mask = UInt16(bits.unsafe_load(bit // 8)) >> UInt16(bit % 8)
-            if bit % 8 > 4:
+            if bit % 8 > 0:
                 mask |= UInt16(bits.unsafe_load(bit // 8 + 1)) << UInt16(
                     8 - bit % 8
                 )
             var valid = (
-                SIMD[DType.uint64, 4](
-                    UInt64(mask), UInt64(mask), UInt64(mask), UInt64(mask)
+                SIMD[DType.uint64, 8](
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
+                    UInt64(mask),
                 )
-                & SIMD[DType.uint64, 4](1, 2, 4, 8)
-            ).ne(SIMD[DType.uint64, 4](0))
+                & SIMD[DType.uint64, 8](1, 2, 4, 8, 16, 32, 64, 128)
+            ).ne(SIMD[DType.uint64, 8](0))
             total += valid.select(
-                values.unsafe_load[width=4](i), SIMD[DType.float64, 4](0)
+                values.unsafe_load[width=8](i), SIMD[DType.float64, 8](0)
             )
-            i += 4
+            i += 8
     reducer.float_sums[0].total += total.reduce_add()
     reducer.float_sums[0].count += Int64(count)
     while i < end:
