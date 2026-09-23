@@ -1,20 +1,16 @@
-"""Borrowed CSV field splitting, structured after Polars 1.44.2 SplitFields.
+"""Borrowed CSV field splitting.
 
-Mapping to ``polars-io/src/csv/read/splitfields.rs``:
-
-* ``CsvSplitFields.next`` follows ``SplitFields::next``: a plain field scans
+* ``CsvSplitFields.next``: a plain field scans
   for separator/LF, while a field beginning with the quote character runs a
   quote-parity scan and returns the raw field with ``needs_escaping=True``.
-* ``_prefix_xor_inclusive`` is the same inclusive quote-prefix parity used by
-  Polars' SIMD implementation. ``cached_ends`` is its relative
-  ``previous_valid_ends`` cache, shifted after each returned field.
+* ``_prefix_xor_inclusive`` computes inclusive quote-prefix parity.
+  ``cached_ends`` is its relative end-position cache, shifted after each field.
 * ``CsvFieldSpan.bytes`` is the Mojo borrowing handoff. It yields a view into
   caller-owned bytes and never copies the field.
 
-Deliberate deviations: this primitive returns offsets rather than retaining a
-Rust lifetime in the iterator, keeps a CR before LF for the decoder to trim,
-and does not validate quote grammar or unescape doubled quotes. The typed
-CSV builders own those operations, as in Polars. The splitter only recognizes
+This primitive returns offsets, keeps a CR before LF for the decoder to trim,
+and leaves quote validation and unescaping to the typed CSV buffers. The
+splitter only recognizes
 quote parity for fields that start with a quote.
 """
 from std.bit import count_trailing_zeros
@@ -47,7 +43,7 @@ struct CsvFieldSpan(Copyable):
         """Borrow an iterator-produced field without rechecking its range.
 
         `CsvSplitFields.next` establishes `0 <= start <= end <= len(input)`
-        before it returns a span. This mirrors SplitFields' internal
+        before it returns a span. This uses the
         `get_unchecked(..pos)` handoff in Polars. Keep `bytes` above as the
         checked API for independently constructed spans.
         """
