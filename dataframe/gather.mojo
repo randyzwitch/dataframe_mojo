@@ -69,7 +69,10 @@ def true_rows(mask: BoolColumn) raises -> List[Int]:
         jobs[0].run()
     else:
         run_jobs(jobs)
-    var rows = jobs.pop(0).into_rows()
+    var count = 0
+    for i in range(len(jobs)):
+        count += len(jobs[i].rows)
+    var rows = List[Int](capacity=count)
     while len(jobs) > 0:
         rows.extend(Span(jobs.pop(0).into_rows()))
     return rows^
@@ -193,7 +196,10 @@ def float_compare_rows(
         jobs[0].run()
     else:
         run_jobs(jobs)
-    var rows = jobs.pop(0).into_rows()
+    var count = 0
+    for i in range(len(jobs)):
+        count += len(jobs[i].rows)
+    var rows = List[Int](capacity=count)
     while len(jobs) > 0:
         rows.extend(Span(jobs.pop(0).into_rows()))
     return rows^
