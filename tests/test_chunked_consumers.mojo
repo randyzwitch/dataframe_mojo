@@ -378,6 +378,56 @@ def test_direct_float_filter_crosses_parallel_chunk_boundaries() raises:
     )
 
 
+def test_direct_float_filter_aligned_columns_and_nulls() raises:
+    var xs = List[Series]()
+    var ys = List[Series]()
+    var labels = List[Series]()
+    for chunk in range(4):
+        xs.append(
+            Series(
+                "x",
+                Column[Float64](
+                    [-2.0, 1.0, 3.0],
+                    [True, chunk != 1, True],
+                ),
+            )
+        )
+        ys.append(
+            Series(
+                "y",
+                Column[Int64](
+                    [
+                        Int64(chunk * 3),
+                        Int64(chunk * 3 + 1),
+                        Int64(chunk * 3 + 2),
+                    ],
+                    [True, True, chunk != 2],
+                ),
+            )
+        )
+        labels.append(
+            Series(
+                "label",
+                Column[String](
+                    ["low", "middle", "high"], [True, chunk != 3, True]
+                ),
+            )
+        )
+    var frame = DataFrame(
+        [
+            Series._from_chunks(xs^),
+            Series._from_chunks(ys^),
+            Series._from_chunks(labels^),
+        ]
+    )
+    var predicate = col("x") > lit(Float64(0))
+    var mask = frame.select(predicate.alias("mask")).column("mask").bool()
+    assert_same(frame.filter(predicate), frame.filter(mask), "aligned chunks")
+    var none = col("x") > lit(Float64(100))
+    var empty_mask = frame.select(none.alias("mask")).column("mask").bool()
+    assert_same(frame.filter(none), frame.filter(empty_mask), "empty chunks")
+
+
 def test_parallel_float_sum_across_many_nullable_chunks() raises:
     # Worker partitions can start and end inside different physical chunks.
     var parts = List[Series]()
