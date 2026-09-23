@@ -19,6 +19,7 @@ from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
 from .column import Column, _bit, _validity_bit
 from .dtype import DataType, NUMERIC_DTYPES
+from .expr import GT, LT, GE, LE, EQ, NE
 from .parallel import Job, partitions, run_jobs, worker_count
 from .series import Series
 from .string_column import StringColumn
@@ -58,6 +59,130 @@ def true_rows(mask: BoolColumn) raises -> List[Int]:
     var bounds = partitions(n, workers, 64)
     for w in range(workers):
         jobs.append(_MaskJob(mask, bounds[w], bounds[w + 1]))
+    if workers == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    var rows = jobs.pop(0).into_rows()
+    while len(jobs) > 0:
+        rows.extend(Span(jobs.pop(0).into_rows()))
+    return rows^
+
+
+def _float_compare(op: Int, value: Float64, literal: Float64) -> Bool:
+    if op == GT:
+        return value > literal
+    if op == LT:
+        return value < literal
+    if op == GE:
+        return value >= literal
+    if op == LE:
+        return value <= literal
+    if op == EQ:
+        return value == literal
+    return value != literal
+
+
+def _scan_float_compare(
+    mut rows: List[Int],
+    column: Column[Float64],
+    offset: Int,
+    lo: Int,
+    hi: Int,
+    op: Int,
+    literal: Float64,
+):
+    var values = column.unsafe_values()
+    for row in range(lo, hi):
+        var local = row - offset
+        if column._valid(local) and _float_compare(
+            op, values.unsafe_load(local), literal
+        ):
+            rows.append(row)
+
+
+struct _FloatCompareRowsJob(Job):
+    """Select matching Float64 rows from one contiguous row partition."""
+
+    var source: Series
+    var start: Int
+    var end: Int
+    var op: Int
+    var literal: Float64
+    var rows: List[Int]
+
+    def __init__(
+        out self,
+        source: Series,
+        start: Int,
+        end: Int,
+        op: Int,
+        literal: Float64,
+    ):
+        self.source = source.copy()
+        self.start = start
+        self.end = end
+        self.op = op
+        self.literal = literal
+        self.rows = List[Int]()
+
+    def run(mut self) raises:
+        var source = self.source.copy()
+        var rows = List[Int]()
+        var op = self.op
+        var literal = self.literal
+        if not source.is_chunked():
+            _scan_float_compare(
+                rows,
+                source._data[Column[Float64]],
+                0,
+                self.start,
+                self.end,
+                op,
+                literal,
+            )
+            self.rows = rows^
+            return
+        ref chunks = source._chunked.value()[]
+        var first = 0
+        var upper = len(chunks.ends)
+        while first < upper:
+            var mid = (first + upper) // 2
+            if chunks.ends[mid] <= self.start:
+                first = mid + 1
+            else:
+                upper = mid
+        for i in range(first, len(chunks.ends)):
+            var offset = 0 if i == 0 else chunks.ends[i - 1]
+            if offset >= self.end:
+                break
+            _scan_float_compare(
+                rows,
+                chunks.arrays[i][Column[Float64]],
+                offset,
+                max(self.start, offset),
+                min(self.end, chunks.ends[i]),
+                op,
+                literal,
+            )
+        self.rows = rows^
+
+    def into_rows(deinit self) -> List[Int]:
+        return self.rows^
+
+
+def float_compare_rows(
+    source: Series, op: Int, literal: Float64
+) raises -> List[Int]:
+    """Select valid Float64 rows without materializing a Boolean column."""
+    var n = len(source)
+    var workers = worker_count(n)
+    var bounds = partitions(n, workers, 1)
+    var jobs = List[_FloatCompareRowsJob](capacity=workers)
+    for w in range(workers):
+        jobs.append(
+            _FloatCompareRowsJob(source, bounds[w], bounds[w + 1], op, literal)
+        )
     if workers == 1:
         jobs[0].run()
     else:
