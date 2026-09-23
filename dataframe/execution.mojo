@@ -391,6 +391,17 @@ struct _ReduceJob[width: Int](Job):
         return self.reducer^
 
     def run(mut self) raises:
+        if _direct_grouped_count(
+            self.reducer,
+            self.bound,
+            self.columns,
+            self.node,
+            self.start,
+            self.end,
+            self.grouped,
+            self.groups[],
+        ):
+            return
         if _direct_numeric_reduction(
             self.reducer,
             self.bound,
@@ -463,6 +474,76 @@ struct _RowsJob[width: Int](Job):
                 self.grouped,
             )
             self.result._append_series(chunk)
+
+
+def _direct_grouped_count_part(
+    mut reducer: Reducer,
+    part: Series,
+    groups: List[Int],
+    offset: Int,
+    start: Int,
+    end: Int,
+):
+    """Count valid source values by group without constructing row batches."""
+    if part.null_count() == 0:
+        for i in range(start, end):
+            reducer.counts[groups[offset + i]] += 1
+        return
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if part._data.isa[Column[Scalar[D]]]():
+            ref column = part._data[Column[Scalar[D]]]
+            for i in range(start, end):
+                if column._valid(i):
+                    reducer.counts[groups[offset + i]] += 1
+            return
+    if part._data.isa[BoolColumn]():
+        ref column = part._data[BoolColumn]
+        for i in range(start, end):
+            if column._valid(i):
+                reducer.counts[groups[offset + i]] += 1
+        return
+    ref column = part._data[StringColumn]
+    for i in range(start, end):
+        if column._valid(i):
+            reducer.counts[groups[offset + i]] += 1
+
+
+def _direct_grouped_count(
+    mut reducer: Reducer,
+    bound: BoundExpr,
+    columns: List[Series],
+    node: Node,
+    start: Int,
+    end: Int,
+    grouped: Bool,
+    groups: List[Int],
+) -> Bool:
+    if (
+        not grouped
+        or node.op != COUNT
+        or bound.expr._nodes[node.left].op != COL
+    ):
+        return False
+    ref source = columns[bound.sources[node.left]]
+    var chunk_start = 0
+    for part in source.chunks():
+        var chunk_end = chunk_start + len(part)
+        var lo = max(start, chunk_start)
+        var hi = min(end, chunk_end)
+        if lo < hi:
+            _direct_grouped_count_part(
+                reducer,
+                part,
+                groups,
+                chunk_start,
+                lo - chunk_start,
+                hi - chunk_start,
+            )
+        chunk_start = chunk_end
+        if chunk_start >= end:
+            break
+    return True
 
 
 def _direct_float_column_sum(
@@ -694,6 +775,10 @@ def _reduce[
         workers = min(workers, max(1, height // max(1, 4 * group_count)))
     if workers <= 1:
         var reducer = _new_reducer(bound, node, group_count)
+        if _direct_grouped_count(
+            reducer, bound, columns, node, 0, height, grouped, groups
+        ):
+            return reducer^
         if _direct_numeric_reduction(
             reducer, bound, columns, node, 0, height, grouped
         ):
