@@ -312,6 +312,23 @@ def test_partitioned_sorted_chunk_gather_preserves_order_and_nulls() raises:
     assert_same(actual, expected, "partitioned sorted chunk gather")
     assert_true(actual.column("id").is_chunked())
     assert_true(actual.column("label").is_chunked())
+def test_parallel_expression_output_stays_chunked_and_reduces() raises:
+    var values = List[Float64]()
+    var valid = List[Bool]()
+    var expected = 0.0
+    for i in range(131072):
+        var value = Float64(i % 31)
+        var is_valid = i % 17 != 0
+        values.append(value)
+        valid.append(is_valid)
+        if is_valid:
+            expected += value + 2.0
+    var frame = DataFrame([Series("x", Column[Float64](values^, valid^))])
+    var result = frame.with_columns((col("x") + lit(Float64(2))).alias("out"))
+    assert_true(result.column("out").is_chunked())
+    assert_equal(result.column("out").n_chunks(), 2)
+    assert_equal(result.column("out").get(65536).float64(), 4.0)
+    assert_equal(result.select(col("out").sum()).item().float64(), expected)
 
 
 def test_direct_float_filter_matches_boolean_mask() raises:

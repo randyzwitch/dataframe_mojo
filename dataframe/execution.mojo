@@ -1071,8 +1071,9 @@ def evaluate[
                 )
             )
         run_jobs(jobs)
-        result = jobs.pop(0).into_result()
+        var parts = List[Series](capacity=len(jobs))
         while len(jobs) > 0:
-            result._append_series(jobs.pop(0).into_result())
+            parts.append(jobs.pop(0).into_result())
+        result = Series._from_chunks(parts^)
     result._name = bound.expr._name
     return result^
