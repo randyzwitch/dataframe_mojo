@@ -51,9 +51,11 @@ def _parse_short(
     bytes: Span[UInt8, _], start: Int, digits: Int
 ) raises -> UInt64:
     """Scalar path for short integers where SIMD setup costs more."""
+    # Callers derive digits from this same span, so start + digits is in bounds.
     var value = UInt64(0)
+    var data = bytes.unsafe_ptr()
     for i in range(digits):
-        var byte = bytes[start + i]
+        var byte = data.unsafe_load(start + i)
         if byte < 48 or byte > 57:
             raise Error("invalid CSV integer byte")
         value = value * 10 + UInt64(byte - 48)
