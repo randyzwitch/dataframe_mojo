@@ -1337,6 +1337,72 @@ struct _MergeJob(Job):
         )
 
 
+struct _KeyBucketSortJob(Job):
+    """Sort rows that share one first-key rank by the remaining ranks."""
+
+    var ranks: ArcPointer[List[List[Int]]]
+    var rows: List[Int]
+
+    def __init__(
+        out self, ranks: ArcPointer[List[List[Int]]], var rows: List[Int]
+    ):
+        self.ranks = ranks.copy()
+        self.rows = rows^
+
+    def run(mut self) raises:
+        var shared = self.ranks.copy()
+        ref ranks = shared[]
+
+        def less(a: Int, b: Int) {imm ranks} -> Bool:
+            return _rank_less(ranks, a, b)
+
+        var rows = self.rows^
+        sort(rows, less)
+        self.rows = rows^
+
+
+def _low_card_first_sort(ranks: List[List[Int]]) raises -> List[Int]:
+    """Sort independent first-key buckets without global merge rounds."""
+    var n = len(ranks[0])
+    ref first = ranks[0]
+    var low = first[0]
+    var high = low
+    for value in first:
+        low = min(low, value)
+        high = max(high, value)
+    var span = UInt64(high) - UInt64(low)
+    if span > 63:
+        return List[Int]()
+    var counts = List[Int](length=Int(span) + 1, fill=0)
+    for value in first:
+        counts[Int(UInt64(value) - UInt64(low))] += 1
+    var occupied = 0
+    var largest = 0
+    for count in counts:
+        occupied += Int(count > 0)
+        largest = max(largest, count)
+    if occupied < 4 or largest > n // 4:
+        return List[Int]()
+    var buckets = List[List[Int]]()
+    for count in counts:
+        buckets.append(List[Int](capacity=count))
+    for row in range(n):
+        buckets[Int(UInt64(first[row]) - UInt64(low))].append(row)
+    var shared = ArcPointer(ranks.copy())
+    var jobs = List[_KeyBucketSortJob]()
+    while len(buckets) > 0:
+        var rows = buckets.pop(0)
+        if len(rows) > 0:
+            jobs.append(_KeyBucketSortJob(shared, rows^))
+    var pool = Pool(min(configured_workers(), len(jobs)))
+    pool.run(jobs)
+    pool.release()
+    var order = List[Int](capacity=n)
+    for i in range(len(jobs)):
+        order.extend(Span(jobs[i].rows))
+    return order^
+
+
 # Below this many rows a run is not worth its own thread, whatever the core
 # count. Sorting is n log n per run, so this is far under MIN_ROWS_PER_WORKER.
 comptime _MIN_ROWS_PER_RUN = 8192
@@ -1353,6 +1419,15 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
     if len(ranks) == 0:
         raise Error("Sorting requires at least one key")
     var n = len(ranks[0])
+    if (
+        n >= 8192
+        and n <= 200_000
+        and len(ranks) > 1
+        and configured_workers() > 1
+    ):
+        var bucket_order = _low_card_first_sort(ranks)
+        if len(bucket_order) == n:
+            return bucket_order^
     # One run per thread, not one per MIN_ROWS_PER_WORKER rows: that minimum
     # is sized for a linear scan, and it both caps a 1M-row sort at 15 runs
     # however many cores are free and leaves a 100k-row sort entirely serial.
