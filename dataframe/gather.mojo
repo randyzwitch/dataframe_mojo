@@ -292,7 +292,11 @@ def filter_float_chunks(
     var jobs = List[_FloatChunkFilterJob]()
     for i in range(columns[0].n_chunks()):
         jobs.append(_FloatChunkFilterJob(shared, predicate, i, op, literal))
-    var pool = Pool(min(configured_workers(), len(jobs)))
+    # Small filters repay fewer worker startups; large ones need every core.
+    var workers = min(configured_workers(), len(jobs))
+    if len(columns[0]) <= 1_000_000:
+        workers = min(workers, 8)
+    var pool = Pool(workers)
     pool.run(jobs)
     pool.release()
     var output = List[Series](capacity=len(columns))
