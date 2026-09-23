@@ -320,7 +320,11 @@ struct DataFrame(Copyable, Sized, Writable):
             if i < 0 or i >= self._height:
                 raise Error("Row index out of bounds")
         var workers = worker_count(len(indices))
-        if workers > 1 and self.width() > 0:
+        # At medium row counts, columns can run independently even when
+        # there are too few rows to split each column across workers.
+        if self.width() > 0 and (
+            workers > 1 or (len(indices) >= 65536 and self.width() >= 4)
+        ):
             return Self(
                 take_parallel(self._columns, indices.copy(), workers),
                 height=len(indices),
