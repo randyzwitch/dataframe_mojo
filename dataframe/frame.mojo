@@ -642,6 +642,28 @@ struct DataFrame(Copyable, Sized, Writable):
                 names[name] = True
                 right_output.append(i)
                 right_names.append(name)
+        if how == "inner" and len(left_keys) == 1:
+            var dense = _dense_right_int64_rows(
+                self._columns[left_keys[0]], right._columns[right_keys[0]]
+            )
+            if dense[0]:
+                var left_rows = dense[1].copy()
+                var right_rows = dense[2].copy()
+                var workers = worker_count(len(left_rows))
+                var columns = self._columns.copy()
+                if len(left_rows) != self.height():
+                    columns = take_parallel(
+                        columns^, left_rows.copy(), workers, or_null=True
+                    )
+                var right_sources = List[Series]()
+                for c in right_output:
+                    right_sources.append(right._columns[c].copy())
+                var gathered = take_parallel(
+                    right_sources, right_rows^, workers, or_null=True
+                )
+                for k in range(len(right_output)):
+                    columns.append(gathered[k].renamed(right_names[k]))
+                return Self(columns^, height=len(left_rows))
         var ids = _joint_key_ids(self, right, left_keys, right_keys)
         var left_ids = ids[0].copy()
         var right_ids = ids[1].copy()
@@ -1359,6 +1381,56 @@ def _group_index(ids: List[Int], count: Int) -> List[Int]:
     for g in range(count):
         starts[g + 1] += starts[g]
     return starts^
+
+
+def _dense_right_int64_rows(
+    left: Series, right: Series
+) -> Tuple[Bool, List[Int], List[Int]]:
+    """Direct inner matches when right keys are a dense ascending Int64 range."""
+    if right.dtype() != DataType.INT64 or left.dtype() != DataType.INT64:
+        return (False, List[Int](), List[Int]())
+    if len(right) == 0:
+        return (False, List[Int](), List[Int]())
+    var base = Int64(0)
+    var row = 0
+    for part in right.chunks():
+        ref column = part._data[Column[Int64]]
+        for i in range(len(column)):
+            if not column._valid(i):
+                return (False, List[Int](), List[Int]())
+            var value = column._get(i)
+            if row == 0:
+                base = value
+            elif value < base or UInt64(value) - UInt64(base) != UInt64(row):
+                return (False, List[Int](), List[Int]())
+            row += 1
+    var right_limit = UInt64(len(right))
+    var left_rows = List[Int](capacity=len(left))
+    var right_rows = List[Int](capacity=len(left))
+    row = 0
+    for part in left.chunks():
+        ref column = part._data[Column[Int64]]
+        var values = column.unsafe_values()
+        if len(column._bits[]) == 0:
+            for i in range(len(column)):
+                var value = values.unsafe_load(i)
+                if value >= base:
+                    var index = UInt64(value) - UInt64(base)
+                    if index < right_limit:
+                        left_rows.append(row)
+                        right_rows.append(Int(index))
+                row += 1
+        else:
+            for i in range(len(column)):
+                if column._valid(i):
+                    var value = values.unsafe_load(i)
+                    if value >= base:
+                        var index = UInt64(value) - UInt64(base)
+                        if index < right_limit:
+                            left_rows.append(row)
+                            right_rows.append(Int(index))
+                row += 1
+    return (True, left_rows^, right_rows^)
 
 
 def _group_rows(ids: List[Int], starts: List[Int]) -> List[Int]:
