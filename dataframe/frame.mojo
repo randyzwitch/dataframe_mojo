@@ -670,6 +670,14 @@ struct DataFrame(Copyable, Sized, Writable):
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
                 return Self(columns^, height=len(left_rows))
+        if (how == "semi" or how == "anti") and len(left_keys) == 1:
+            var membership = _range_int64_membership_rows(
+                self._columns[left_keys[0]],
+                right._columns[right_keys[0]],
+                how == "semi",
+            )
+            if membership[0]:
+                return self.take(membership[1])
         var ids = _joint_key_ids(self, right, left_keys, right_keys)
         var left_ids = ids[0].copy()
         var right_ids = ids[1].copy()
@@ -1481,6 +1489,61 @@ def _range_join_span_fits(low: Int64, high: Int64, cap: Int) -> Bool:
     if low == Int64.MIN:
         return False
     return UInt64(high) + UInt64(-low) < UInt64(cap)
+
+
+def _range_int64_membership_rows(
+    left: Series, right: Series, want_match: Bool
+) raises -> Tuple[Bool, List[Int]]:
+    """Direct-address membership for a bounded Int64 key range.
+
+    Existence joins need only a presence flag per key, not a grouped
+    right-row index. Duplicates in right are naturally idempotent.
+    """
+    if (
+        left.dtype().physical() != DataType.INT64
+        or right.dtype().physical() != DataType.INT64
+    ):
+        return (False, List[Int]())
+    var right_values = right.int64()
+    var left_values = left.int64()
+    var found = False
+    var low = Int64(0)
+    var high = Int64(0)
+    for row in range(len(right_values)):
+        if not right_values._valid(row):
+            continue
+        var value = right_values._get(row)
+        if not found:
+            low = value
+            high = value
+            found = True
+        else:
+            low = min(low, value)
+            high = max(high, value)
+    var rows = List[Int](capacity=len(left_values))
+    if not found:
+        if not want_match:
+            for row in range(len(left_values)):
+                rows.append(row)
+        return (True, rows^)
+    var cap = 64_000_000
+    if len(right_values) < cap // 4:
+        cap = len(right_values) * 4
+    if not _range_join_span_fits(low, high, cap):
+        return (False, List[Int]())
+    var present = List[UInt8](length=Int(high - low) + 1, fill=0)
+    for row in range(len(right_values)):
+        if right_values._valid(row):
+            present[Int(right_values._get(row) - low)] = 1
+    for row in range(len(left_values)):
+        var matched = False
+        if left_values._valid(row):
+            var value = left_values._get(row)
+            if value >= low and value <= high:
+                matched = present[Int(value - low)] != 0
+        if matched == want_match:
+            rows.append(row)
+    return (True, rows^)
 
 
 def _bounded_int64_join_ids(
