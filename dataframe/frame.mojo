@@ -1603,12 +1603,14 @@ def _group_index(ids: List[Int], count: Int) -> List[Int]:
 def _dense_right_int64_rows(
     left: Series, right: Series, include_unmatched: Bool = False
 ) -> Tuple[Bool, List[Int], List[Int]]:
-    """Direct matches when right keys are a dense ascending Int64 range."""
+    """Direct matches when right keys form an ascending Int64 progression."""
     if right.dtype() != DataType.INT64 or left.dtype() != DataType.INT64:
         return (False, List[Int](), List[Int]())
     if len(right) == 0:
         return (False, List[Int](), List[Int]())
     var base = Int64(0)
+    var previous = Int64(0)
+    var stride = UInt64(1)
     var row = 0
     for part in right.chunks():
         ref column = part._data[Column[Int64]]
@@ -1618,9 +1620,50 @@ def _dense_right_int64_rows(
             var value = column._get(i)
             if row == 0:
                 base = value
-            elif value < base or UInt64(value) - UInt64(base) != UInt64(row):
-                return (False, List[Int](), List[Int]())
+            else:
+                if value <= previous:
+                    return (False, List[Int](), List[Int]())
+                var distance = _int64_distance(previous, value)
+                if row == 1:
+                    stride = distance
+                elif distance != stride:
+                    return (False, List[Int](), List[Int]())
+            previous = value
             row += 1
+    if stride == 1:
+        var right_limit = UInt64(len(right))
+        var left_rows = List[Int](capacity=len(left))
+        var right_rows = List[Int](capacity=len(left))
+        row = 0
+        for part in left.chunks():
+            ref column = part._data[Column[Int64]]
+            var values = column.unsafe_values()
+            if len(column._bits[]) == 0:
+                for i in range(len(column)):
+                    var matched_row = -1
+                    var value = values.unsafe_load(i)
+                    if value >= base:
+                        var index = UInt64(value) - UInt64(base)
+                        if index < right_limit:
+                            matched_row = Int(index)
+                    if matched_row >= 0 or include_unmatched:
+                        left_rows.append(row)
+                        right_rows.append(matched_row)
+                    row += 1
+            else:
+                for i in range(len(column)):
+                    var matched_row = -1
+                    if column._valid(i):
+                        var value = values.unsafe_load(i)
+                        if value >= base:
+                            var index = UInt64(value) - UInt64(base)
+                            if index < right_limit:
+                                matched_row = Int(index)
+                    if matched_row >= 0 or include_unmatched:
+                        left_rows.append(row)
+                        right_rows.append(matched_row)
+                    row += 1
+        return (True, left_rows^, right_rows^)
     var right_limit = UInt64(len(right))
     var left_rows = List[Int](capacity=len(left))
     var right_rows = List[Int](capacity=len(left))
@@ -1633,9 +1676,11 @@ def _dense_right_int64_rows(
                 var matched_row = -1
                 var value = values.unsafe_load(i)
                 if value >= base:
-                    var index = UInt64(value) - UInt64(base)
-                    if index < right_limit:
-                        matched_row = Int(index)
+                    var distance = _int64_distance(base, value)
+                    if distance % stride == 0:
+                        var index = distance // stride
+                        if index < right_limit:
+                            matched_row = Int(index)
                 if matched_row >= 0 or include_unmatched:
                     left_rows.append(row)
                     right_rows.append(matched_row)
@@ -1646,9 +1691,11 @@ def _dense_right_int64_rows(
                 if column._valid(i):
                     var value = values.unsafe_load(i)
                     if value >= base:
-                        var index = UInt64(value) - UInt64(base)
-                        if index < right_limit:
-                            matched_row = Int(index)
+                        var distance = _int64_distance(base, value)
+                        if distance % stride == 0:
+                            var index = distance // stride
+                            if index < right_limit:
+                                matched_row = Int(index)
                 if matched_row >= 0 or include_unmatched:
                     left_rows.append(row)
                     right_rows.append(matched_row)
