@@ -2322,6 +2322,7 @@ struct _DirectSumCountBucketJob(Job):
     var aligned: Bool
     var order: ArcPointer[List[Int]]
     var identity: Bool
+    var count_all_valid: Bool
     var start: Int
     var end: Int
     var keys: List[Int64]
@@ -2340,6 +2341,7 @@ struct _DirectSumCountBucketJob(Job):
         start: Int,
         end: Int,
         identity: Bool = False,
+        count_all_valid: Bool = False,
     ):
         self.key = key.copy()
         self.values = values.copy()
@@ -2347,6 +2349,7 @@ struct _DirectSumCountBucketJob(Job):
         self.aligned = aligned
         self.order = order.copy()
         self.identity = identity
+        self.count_all_valid = count_all_valid
         self.start = start
         self.end = end
         self.keys = List[Int64]()
@@ -2360,7 +2363,7 @@ struct _DirectSumCountBucketJob(Job):
         mut self,
         key: Column[Int64],
         values: Column[Float64],
-        counted: Column[Int64],
+        count_valid: Bool,
         local: Int,
         row: Int,
         mut lookup: Dict[Int64, Int],
@@ -2383,7 +2386,7 @@ struct _DirectSumCountBucketJob(Job):
             self.firsts.append(row)
         if values._valid(local):
             self.sums[group].add(values._get(local))
-        if counted._valid(local):
+        if count_valid:
             self.counts[group] += 1
 
     def run(mut self) raises:
@@ -2400,12 +2403,25 @@ struct _DirectSumCountBucketJob(Job):
         if not self.aligned:
             ref key = key_source._data[Column[Int64]]
             ref values = value_source._data[Column[Float64]]
-            ref counted = count_source._data[Column[Int64]]
-            for i in range(self.start, self.end):
-                var row = i if self.identity else order[i]
-                self._add_row(
-                    key, values, counted, row, row, lookup, null_group
-                )
+            if self.count_all_valid:
+                for i in range(self.start, self.end):
+                    var row = i if self.identity else order[i]
+                    self._add_row(
+                        key, values, True, row, row, lookup, null_group
+                    )
+            else:
+                ref counted = count_source._data[Column[Int64]]
+                for i in range(self.start, self.end):
+                    var row = i if self.identity else order[i]
+                    self._add_row(
+                        key,
+                        values,
+                        counted._valid(row),
+                        row,
+                        row,
+                        lookup,
+                        null_group,
+                    )
             return
         ref key_chunks = key_source._chunked.value()[]
         ref value_chunks = value_source._chunked.value()[]
@@ -2416,13 +2432,33 @@ struct _DirectSumCountBucketJob(Job):
             var end = key_chunks.ends[c]
             ref key = key_chunks.arrays[c][Column[Int64]]
             ref values = value_chunks.arrays[c][Column[Float64]]
-            ref counted = count_chunks.arrays[c][Column[Int64]]
-            while i < self.end and (i if self.identity else order[i]) < end:
-                var row = i if self.identity else order[i]
-                self._add_row(
-                    key, values, counted, row - base, row, lookup, null_group
-                )
-                i += 1
+            if self.count_all_valid:
+                while i < self.end and (i if self.identity else order[i]) < end:
+                    var row = i if self.identity else order[i]
+                    self._add_row(
+                        key,
+                        values,
+                        True,
+                        row - base,
+                        row,
+                        lookup,
+                        null_group,
+                    )
+                    i += 1
+            else:
+                ref counted = count_chunks.arrays[c][Column[Int64]]
+                while i < self.end and (i if self.identity else order[i]) < end:
+                    var row = i if self.identity else order[i]
+                    self._add_row(
+                        key,
+                        values,
+                        counted._valid(row - base),
+                        row - base,
+                        row,
+                        lookup,
+                        null_group,
+                    )
+                    i += 1
             if i == self.end:
                 break
             base = end
@@ -2599,8 +2635,14 @@ struct GroupBy(Copyable):
                 elif (
                     nodes[1].op == COUNT
                     and bound[e].dtypes[0] == DataType.INT64
-                    and self._frame._columns[bound[e].sources[0]].dtype()
-                    == DataType.INT64
+                    and (
+                        self._frame._columns[bound[e].sources[0]].dtype()
+                        == DataType.INT64
+                        or self._frame._columns[
+                            bound[e].sources[0]
+                        ].null_count()
+                        == 0
+                    )
                 ):
                     count_expr = e
             if sum_expr >= 0 and count_expr >= 0:
@@ -2695,6 +2737,7 @@ struct GroupBy(Copyable):
         var key = self._keys[0].copy()
         var values = self._frame._columns[bound[sum_expr].sources[0]].copy()
         var counted = self._frame._columns[bound[count_expr].sources[0]].copy()
+        var count_all_valid = counted.null_count() == 0
         var aligned = can_filter_float_chunks(
             [key.copy(), values.copy(), counted.copy()]
         )
@@ -2717,6 +2760,7 @@ struct GroupBy(Copyable):
                         row_bounds[w],
                         row_bounds[w + 1],
                         identity=True,
+                        count_all_valid=count_all_valid,
                     )
                 )
         else:
@@ -2731,7 +2775,14 @@ struct GroupBy(Copyable):
                 if hi > lo:
                     jobs.append(
                         _DirectSumCountBucketJob(
-                            key, values, counted, aligned, order, lo, hi
+                            key,
+                            values,
+                            counted,
+                            aligned,
+                            order,
+                            lo,
+                            hi,
+                            count_all_valid=count_all_valid,
                         )
                     )
         run_jobs(jobs)

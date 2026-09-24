@@ -309,7 +309,20 @@ def test_fused_low_cardinality_sum_count_matches_serial() raises:
                 serial.equals(unordered),
                 "fused low-cardinality order differs",
             )
-    # Counting a Float64 column keeps the general reduction path.
+    # All-valid COUNT needs no payload read, regardless of its dtype.
+    for counted_name in ["b", "s"]:
+        var generic_count: List[Expr] = [
+            col("v").sum().alias("sum"),
+            col(counted_name).count().alias("count"),
+        ]
+        set_threads(1)
+        var serial_generic = source.group_by("i64").agg(generic_count)
+        set_threads(32)
+        assert_true(
+            serial_generic.equals(source.group_by("i64").agg(generic_count)),
+            "all-valid generic count differs",
+        )
+    # Counting a nullable Float64 column keeps the general reduction path.
     var float_count: List[Expr] = [
         col("v").sum().alias("sum"),
         col("v").count().alias("count"),
