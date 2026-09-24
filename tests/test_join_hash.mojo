@@ -45,6 +45,29 @@ def test_integer_duplicates_nulls_and_unmatched() raises:
     assert_equal(outer[1], [0, 1, 2, 0, 1, -1, -1])
 
 
+def test_packed_int64_hash_keys_keep_extremes_and_nulls() raises:
+    var left = Series(
+        "k",
+        Column[Int64](
+            [Int64.MIN, -17, Int64.MAX, 0],
+            [True, True, True, False],
+        ),
+    )
+    var right = Series(
+        "k",
+        Column[Int64](
+            [Int64.MAX, Int64.MIN, Int64.MIN, -17, 0],
+            [True, True, True, True, False],
+        ),
+    )
+    var inner = direct_hash_join_rows([left.copy()], [right.copy()], False)
+    assert_equal(inner[0], [0, 0, 1, 2])
+    assert_equal(inner[1], [1, 2, 3, 0])
+    var outer = direct_hash_join_rows([left.copy()], [right.copy()], True)
+    assert_equal(outer[0], [0, 0, 1, 2, 3])
+    assert_equal(outer[1], [1, 2, 3, 0, -1])
+
+
 def test_hash_slot_collision_does_not_match_different_values() raises:
     var values = List[Int64]()
     for i in range(1_000):
@@ -139,6 +162,74 @@ def test_large_sparse_join_uses_exact_index_in_frame() raises:
             assert_equal(outer.item(i, "r").int64(), Int64(i * 3))
         else:
             assert_equal(outer.item(i, "r").is_null(), True)
+
+
+def test_direct_join_gathers_nonidentity_rows_at_equal_output_height() raises:
+    var left_keys = List[Int64]()
+    var left_values = List[Int64]()
+    var right_keys = List[Int64]()
+    var right_values = List[Int64]()
+    for i in range(140_000):
+        left_keys.append(Int64(i))
+        left_values.append(Int64(i))
+        right_keys.append(Int64(i // 2))
+        right_values.append(Int64(i))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](left_keys^)),
+            Series("v", Column[Int64](left_values^)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64](right_keys^)),
+            Series("r", Column[Int64](right_values^)),
+        ]
+    )
+    var inner = left.join(right, "k")
+    assert_equal(inner.height(), left.height())
+    for i in range(70_000):
+        assert_equal(inner.item(2 * i, "v").int64(), Int64(i))
+        assert_equal(inner.item(2 * i + 1, "v").int64(), Int64(i))
+        assert_equal(inner.item(2 * i, "r").int64(), Int64(2 * i))
+        assert_equal(inner.item(2 * i + 1, "r").int64(), Int64(2 * i + 1))
+
+
+def test_high_cardinality_right_join_preserves_right_order() raises:
+    var left_keys = List[Int64]()
+    var left_values = List[Int64]()
+    var right_keys = List[Int64]()
+    var right_values = List[Int64]()
+    for i in range(140_000):
+        left_keys.append(Int64((i // 2) * 17))
+        left_values.append(Int64(i))
+        right_keys.append(Int64(i * 17))
+        right_values.append(Int64(i))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](left_keys^)),
+            Series("v", Column[Int64](left_values^)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64](right_keys^)),
+            Series("r", Column[Int64](right_values^)),
+        ]
+    )
+    var result = left.join(right, "k", how="right")
+    assert_equal(result.height(), 210_000)
+    for i in range(70_000):
+        assert_equal(result.item(2 * i, "k").int64(), Int64(i * 17))
+        assert_equal(result.item(2 * i, "v").int64(), Int64(2 * i))
+        assert_equal(result.item(2 * i + 1, "v").int64(), Int64(2 * i + 1))
+        assert_equal(result.item(2 * i, "r").int64(), Int64(i))
+        assert_equal(result.item(2 * i + 1, "r").int64(), Int64(i))
+    for i in range(70_000, 140_000):
+        var at = i + 70_000
+        assert_equal(result.item(at, "k").int64(), Int64(i * 17))
+        assert_equal(result.item(at, "r").int64(), Int64(i))
+        assert_equal(result.item(at, "v").is_null(), True)
 
 
 def main() raises:

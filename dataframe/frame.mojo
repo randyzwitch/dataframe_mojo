@@ -668,13 +668,13 @@ struct DataFrame(Copyable, Sized, Writable):
                             break
                 if not left_identity:
                     columns = take_parallel(
-                        columns^, left_rows.copy(), workers, or_null=True
+                        columns^, left_rows.copy(), workers, or_null=False
                     )
                 var right_sources = List[Series]()
                 for c in right_output:
                     right_sources.append(right._columns[c].copy())
                 var gathered = take_parallel(
-                    right_sources, right_rows^, workers, or_null=True
+                    right_sources, right_rows^, workers, or_null=how == "left"
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
@@ -719,111 +719,203 @@ struct DataFrame(Copyable, Sized, Writable):
             if direct:
                 var workers = worker_count(len(left_rows))
                 var columns = self._columns.copy()
-                if len(left_rows) != self.height():
+                var left_identity = len(left_rows) == self.height()
+                if left_identity:
+                    for i in range(len(left_rows)):
+                        if left_rows[i] != i:
+                            left_identity = False
+                            break
+                if not left_identity:
                     columns = take_parallel(
-                        columns^, left_rows.copy(), workers, or_null=True
+                        columns^, left_rows.copy(), workers, or_null=False
                     )
                 var right_output_sources = List[Series]()
                 for c in right_output:
                     right_output_sources.append(right._columns[c].copy())
                 var gathered = take_parallel(
-                    right_output_sources, right_rows^, workers, or_null=True
+                    right_output_sources,
+                    right_rows^,
+                    workers,
+                    or_null=how == "left",
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
                 return Self(columns^, height=len(left_rows))
-        var ids = _joint_key_ids(self, right, left_keys, right_keys)
-        var left_ids = ids[0].copy()
-        var right_ids = ids[1].copy()
-        var count = ids[2]
-        # Rows per key id in a flat CSR layout: one list per distinct key
-        # would be hundreds of thousands of heap allocations on a
-        # high-cardinality join. Ids appear in increasing row order, so a
-        # counting sort preserves the match order the contract documents.
-        var right_starts = List[Int]()
-        var right_flat = List[Int]()
-        if how != "right":
-            right_starts = _group_index(right_ids, count)
-            var csr_workers = worker_count(len(right_ids))
-            # The stable range scatter adds an order list and one cursor per
-            # key. Keep the compact serial CSR below the 2M-row crossover.
-            right_flat = _parallel_group_rows(
-                right_ids, right_starts, csr_workers
-            ) if (
-                how == "inner"
-                and csr_workers > 1
-                and len(right_ids) >= 2_000_000
-            ) else _group_rows(
-                right_ids, right_starts
-            )
+        # A right join is a left-major probe from the right input. Build on
+        # the original left rows for high-cardinality keys, then swap the
+        # resulting row lists back to the public output column order.
         var left_rows = List[Int]()
         var right_rows = List[Int]()
-        if how == "semi" or how == "anti":
-            for i in range(len(left_ids)):
-                var id = left_ids[i]
-                var matched = (
-                    id >= 0 and right_starts[id + 1] > right_starts[id]
+        var direct_right = False
+        if how == "right" and worker_count(right.height()) > 1:
+            var right_probe_keys = List[Series](capacity=len(right_keys))
+            var left_build_keys = List[Series](capacity=len(left_keys))
+            for k in range(len(left_keys)):
+                right_probe_keys.append(right._columns[right_keys[k]].copy())
+                left_build_keys.append(self._columns[left_keys[k]].copy())
+            if len(left_keys) == 1:
+                var range_rows = _bounded_int64_join_rows(
+                    right_probe_keys[0], left_build_keys[0], True
                 )
-                if matched == (how == "semi"):
-                    left_rows.append(i)
-            return self.take(left_rows)
-        if how == "right":
-            var left_starts = _group_index(left_ids, count)
-            var left_workers = worker_count(len(left_ids))
-            var left_flat = _parallel_group_rows(
-                left_ids, left_starts, left_workers
-            ) if (
-                left_workers > 1 and len(left_ids) >= 2_000_000
-            ) else _group_rows(
-                left_ids, left_starts
-            )
-            var right_workers = worker_count(len(right_ids))
-            if right_workers > 1:
-                var pairs = _parallel_join_rows(
-                    right_ids, left_starts, left_flat, right_workers, True
+                if range_rows[0]:
+                    direct_right = True
+                    right_rows = range_rows[1].copy()
+                    left_rows = range_rows[2].copy()
+            if not direct_right and not low_cardinality(left_build_keys):
+                var pairs = direct_hash_join_rows(
+                    right_probe_keys, left_build_keys, True
                 )
+                direct_right = True
                 right_rows = pairs[0].copy()
                 left_rows = pairs[1].copy()
-            else:
-                for j in range(len(right_ids)):
-                    var id = right_ids[j]
-                    if id >= 0 and left_starts[id + 1] > left_starts[id]:
-                        for k in range(left_starts[id], left_starts[id + 1]):
-                            left_rows.append(left_flat[k])
-                            right_rows.append(j)
-                    else:
-                        left_rows.append(-1)
-                        right_rows.append(j)
-        elif (how == "inner" or how == "left") and worker_count(
-            len(left_ids)
-        ) > 1:
-            var pairs = _parallel_join_rows(
-                left_ids,
-                right_starts,
-                right_flat,
-                worker_count(len(left_ids)),
-                how == "left",
-            )
-            left_rows = pairs[0].copy()
-            right_rows = pairs[1].copy()
-        else:
-            var right_matched = List[Bool](length=len(right_ids), fill=False)
-            for i in range(len(left_ids)):
-                var id = left_ids[i]
-                if id >= 0 and right_starts[id + 1] > right_starts[id]:
-                    for k in range(right_starts[id], right_starts[id + 1]):
-                        var j = right_flat[k]
+        if not direct_right:
+            var ids = _joint_key_ids(self, right, left_keys, right_keys)
+            var left_ids = ids[0].copy()
+            var right_ids = ids[1].copy()
+            var count = ids[2]
+            # Rows per key id in a flat CSR layout: one list per distinct key
+            # would be hundreds of thousands of heap allocations on a
+            # high-cardinality join. Ids appear in increasing row order, so a
+            # counting sort preserves the match order the contract documents.
+            var right_starts = List[Int]()
+            var right_flat = List[Int]()
+            if how != "right":
+                right_starts = _group_index(right_ids, count)
+                var csr_workers = worker_count(len(right_ids))
+                # The stable range scatter adds an order list and one cursor per
+                # key. Keep the compact serial CSR below the 2M-row crossover.
+                right_flat = _parallel_group_rows(
+                    right_ids, right_starts, csr_workers
+                ) if (
+                    how == "inner"
+                    and csr_workers > 1
+                    and len(right_ids) >= 2_000_000
+                ) else _group_rows(
+                    right_ids, right_starts
+                )
+            if how == "semi" or how == "anti":
+                for i in range(len(left_ids)):
+                    var id = left_ids[i]
+                    var matched = (
+                        id >= 0 and right_starts[id + 1] > right_starts[id]
+                    )
+                    if matched == (how == "semi"):
                         left_rows.append(i)
-                        right_rows.append(j)
-                        right_matched[j] = True
-                elif how != "inner":
-                    left_rows.append(i)
-                    right_rows.append(-1)
-            if how == "full":
-                for j in range(len(right_ids)):
-                    if not right_matched[j]:
-                        left_rows.append(-1)
-                        right_rows.append(j)
+                return self.take(left_rows)
+            if how == "right":
+                var left_starts = _group_index(left_ids, count)
+                var left_workers = worker_count(len(left_ids))
+                var left_flat = _parallel_group_rows(
+                    left_ids, left_starts, left_workers
+                ) if (
+                    left_workers > 1 and len(left_ids) >= 2_000_000
+                ) else _group_rows(
+                    left_ids, left_starts
+                )
+                var right_workers = worker_count(len(right_ids))
+                if right_workers > 1:
+                    var pairs = _parallel_join_rows(
+                        right_ids, left_starts, left_flat, right_workers, True
+                    )
+                    right_rows = pairs[0].copy()
+                    left_rows = pairs[1].copy()
+                else:
+                    for j in range(len(right_ids)):
+                        var id = right_ids[j]
+                        if id >= 0 and left_starts[id + 1] > left_starts[id]:
+                            for k in range(
+                                left_starts[id], left_starts[id + 1]
+                            ):
+                                left_rows.append(left_flat[k])
+                                right_rows.append(j)
+                        else:
+                            left_rows.append(-1)
+                            right_rows.append(j)
+            elif (how == "inner" or how == "left") and worker_count(
+                len(left_ids)
+            ) > 1:
+                var pairs = _parallel_join_rows(
+                    left_ids,
+                    right_starts,
+                    right_flat,
+                    worker_count(len(left_ids)),
+                    how == "left",
+                )
+                left_rows = pairs[0].copy()
+                right_rows = pairs[1].copy()
+            else:
+                var right_matched = List[Bool](
+                    length=len(right_ids), fill=False
+                )
+                for i in range(len(left_ids)):
+                    var id = left_ids[i]
+                    if id >= 0 and right_starts[id + 1] > right_starts[id]:
+                        for k in range(right_starts[id], right_starts[id + 1]):
+                            var j = right_flat[k]
+                            left_rows.append(i)
+                            right_rows.append(j)
+                            right_matched[j] = True
+                    elif how != "inner":
+                        left_rows.append(i)
+                        right_rows.append(-1)
+                if how == "full":
+                    for j in range(len(right_ids)):
+                        if not right_matched[j]:
+                            left_rows.append(-1)
+                            right_rows.append(j)
+        if how == "right":
+            # Every output row has a right row. Its key is the coalesced key
+            # even when no left row matched, so never gather a left key or
+            # choose between duplicate key columns after materialization.
+            var gather_workers = worker_count(len(left_rows))
+            var left_sources = List[Series]()
+            for c in range(self.width()):
+                if c not in left_keys:
+                    left_sources.append(self._columns[c].copy())
+            var left_identity = len(left_rows) == self.height()
+            if left_identity:
+                for i in range(len(left_rows)):
+                    if left_rows[i] != i:
+                        left_identity = False
+                        break
+            var left_gathered = left_sources^
+            if not left_identity:
+                left_gathered = take_parallel(
+                    left_gathered^,
+                    left_rows.copy(),
+                    gather_workers,
+                    or_null=True,
+                )
+            var right_sources = List[Series]()
+            for k in range(len(right_keys)):
+                right_sources.append(right._columns[right_keys[k]].copy())
+            for c in right_output:
+                right_sources.append(right._columns[c].copy())
+            var right_gathered = take_parallel(
+                right_sources, right_rows^, gather_workers, or_null=False
+            )
+            var columns = List[Series](
+                capacity=self.width() + len(right_output)
+            )
+            var left_source = 0
+            for c in range(self.width()):
+                var key = -1
+                for k in range(len(left_keys)):
+                    if left_keys[k] == c:
+                        key = k
+                        break
+                if key >= 0:
+                    columns.append(
+                        right_gathered[key].renamed(self._columns[c].name())
+                    )
+                else:
+                    columns.append(left_gathered[left_source].copy())
+                    left_source += 1
+            for k in range(len(right_output)):
+                columns.append(
+                    right_gathered[len(right_keys) + k].renamed(right_names[k])
+                )
+            return Self(columns^, height=len(left_rows))
         # Assembling the output is about half of a join, and it used to
         # gather one column at a time on the calling thread. take_parallel
         # writes disjoint output ranges, so every column of both sides goes
@@ -845,7 +937,10 @@ struct DataFrame(Copyable, Sized, Writable):
         var columns = left_sources^
         if not left_identity:
             columns = take_parallel(
-                columns^, left_rows.copy(), gather_workers, or_null=True
+                columns^,
+                left_rows.copy(),
+                gather_workers,
+                or_null=sides_mixed,
             )
 
         # Right-side columns: the non-key output columns, plus any key
@@ -860,7 +955,10 @@ struct DataFrame(Copyable, Sized, Writable):
         for k in range(len(right_output)):
             right_sources.append(right._columns[right_output[k]].copy())
         var from_right = take_parallel(
-            right_sources, right_rows.copy(), gather_workers, or_null=True
+            right_sources,
+            right_rows.copy(),
+            gather_workers,
+            or_null=how == "left" or how == "full",
         )
 
         for j in range(len(coalesced)):
