@@ -8,6 +8,7 @@ the plan before execution:
   produce the columns they read, below a sort when they are row-local, and
   into the side of an inner join (or the left side of a left/semi/anti join)
   that owns every column they read;
+  row-local filters directly above unrestricted CSV scans run per decode range;
 - projection pushdown: scans read only the columns the rest of the plan uses
   (CSV scans decode only those fields);
 - slice pushdown: a head/slice directly over a CSV scan becomes `n_rows`.
@@ -17,6 +18,7 @@ because that would change which rows those operators see.
 """
 from std.collections import Dict, Optional
 from .csv import CsvSchema, read_csv
+from .csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import COL, OVER, SELECTOR, Expr, col, is_reduction, is_window
 from .frame import DataFrame, GroupBy
 from .series import Series
@@ -322,6 +324,24 @@ struct LazyFrame(Copyable):
                         nulls_last=nulls_last,
                     )
                     return source.select_exprs(node.exprs).take(order^)
+        # Filter each decoded CSV range before assembling the scan result.
+        # A row limit and a whole-column predicate require the original
+        # materialization order, so retain the eager path for those cases.
+        if node.kind == FILTER and not empty and _row_local(node.exprs):
+            ref source = self._nodes[node.left]
+            if source.kind == SCAN_CSV and source.length < 0:
+                if self._schemas[source.offset]:
+                    return read_csv_explicit(
+                        source.text,
+                        self._schemas[source.offset].value(),
+                        columns=source.names,
+                        predicate=Optional(node.exprs[0].copy()),
+                    )
+                return read_csv_inferred(
+                    source.text,
+                    columns=source.names,
+                    predicate=Optional(node.exprs[0].copy()),
+                )
         var input = self._execute(node.left, empty)
         if node.kind == FILTER:
             return input.filter(node.exprs[0])

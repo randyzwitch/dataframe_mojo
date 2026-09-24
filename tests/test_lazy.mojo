@@ -190,6 +190,22 @@ def test_projection_and_slice_pushdown_into_csv() raises:
     )
     assert_true(typed.explain().endswith("[project w, note]\n"))
     assert_equal(typed.collect().height(), 4)
+    assert_true(
+        typed.collect().equals(
+            frame().filter(col("w") > lit(Float64(2))).select(["note"])
+        )
+    )
+    # Both inferred and explicit scans filter before joining decoded ranges.
+    var inferred = (
+        scan_csv(PATH).filter(col("w") > lit(Float64(2))).select(["note"])
+    )
+    assert_true(
+        inferred.collect().equals(
+            frame().filter(col("w") > lit(Float64(2))).select(["note"])
+        )
+    )
+    var empty = scan_csv(PATH, schema).filter(col("w") > lit(Float64(99)))
+    assert_equal(empty.collect().height(), 0)
 
 
 def test_laziness_and_schema() raises:

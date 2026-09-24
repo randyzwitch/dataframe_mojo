@@ -5,7 +5,7 @@ header removal, CountLines range discovery, immediate decode publication, and
 array-reference reassembly.
 """
 from std.atomic import Atomic
-from std.collections import Dict
+from std.collections import Dict, Optional
 from .csv_infer import infer_csv_schema
 from std.memory import ArcPointer, Pointer
 from .csv_types import (
@@ -20,6 +20,7 @@ from .csv_decode import decode_chunk
 from .csv_scan import CountLines, chunk_size
 from .csv_splitfields import CsvSplitFields
 from .frame import DataFrame, concat
+from .expr import Expr
 from .series import Series
 from .parallel import Job, Pool, _ProducedJobs, configured_workers
 
@@ -28,14 +29,20 @@ struct _ReadContext(Movable):
     var schema: CsvSchema
     var options: CsvOptions
     var keep: List[Bool]
+    var predicate: Optional[Expr]
     var decoded_rows: Atomic[Int64]
 
     def __init__(
-        out self, schema: CsvSchema, options: CsvOptions, keep: List[Bool]
+        out self,
+        schema: CsvSchema,
+        options: CsvOptions,
+        keep: List[Bool],
+        predicate: Optional[Expr],
     ):
         self.schema = schema.copy()
         self.options = options.copy()
         self.keep = keep.copy()
+        self.predicate = predicate.copy()
         self.decoded_rows = Atomic[Int64](0)
 
 
@@ -105,6 +112,8 @@ struct _DecodeJob(Job):
         # its probabilistic early stop.
         if self.context[].options.n_rows >= 0:
             _ = self.context[].decoded_rows.fetch_add(Int64(actual))
+        if self.context[].predicate:
+            self.result = self.result.filter(self.context[].predicate.value())
 
     def into_frame(deinit self) -> DataFrame:
         return self.result^
@@ -300,6 +309,7 @@ def read_csv_explicit(
     truncate_ragged_lines: Bool = False,
     encoding: String = "utf8",
     buffer_size: Int = 65536,
+    predicate: Optional[Expr] = Optional[Expr](),
 ) raises -> DataFrame:
     """Read an explicit schema through the source-mapped CSV pipeline.
 
@@ -327,11 +337,14 @@ def read_csv_explicit(
         # would incorrectly emit a BOM/header/skipped records as data.
         with open(path, "r") as file:
             var input = file.read_bytes()
-            return _decode_unmapped(input^, schema, options, keep, has_header)
+            var result = _decode_unmapped(
+                input^, schema, options, keep, has_header
+            )
+            return result.filter(predicate.value()) if predicate else result^
     _validate_explicit_header(mapping.span(), schema, options, has_header)
     var prelude = _prelude(mapping.span(), options, has_header)
     return _read_mapped_body(
-        mapping^, schema, options, keep, prelude[0], prelude[1]
+        mapping^, schema, options, keep, prelude[0], prelude[1], predicate
     )
 
 
@@ -342,14 +355,16 @@ def _read_mapped_body(
     keep: List[Bool],
     var offset: Int,
     var record: Int,
+    predicate: Optional[Expr] = Optional[Expr](),
 ) raises -> DataFrame:
     var n_rows = options.n_rows
     var quote_char = options.quote_char
     var bytes = mapping.span()
     if offset == len(bytes):
-        return decode_chunk(
+        var empty = decode_chunk(
             bytes[len(bytes) :], schema, options, keep, 0, record
         )
+        return empty.filter(predicate.value()) if predicate else empty^
     # Give each decode worker enough input to amortize pool startup.
     # Large mapped files still use every configured worker.
     var workers = min(
@@ -365,7 +380,7 @@ def _read_mapped_body(
     # read_impl's EOF branch asks whether the whole post-prelude body, not
     # the final chunk, begins with a comment prefix.
     var body_is_comment = _comment_at(bytes, offset, options.comment_prefix)
-    var context = ArcPointer(_ReadContext(schema, options, keep))
+    var context = ArcPointer(_ReadContext(schema, options, keep, predicate))
     # Each pair of adjacent ranges spans at least one initial window;
     # otherwise find_next would have included the second boundary in the
     # first range. Doubling the hint only reduces the maximum job count.
@@ -431,6 +446,7 @@ def read_csv_inferred(
     encoding: String = "utf8",
     buffer_size: Int = 65536,
     try_parse_dates: Bool = False,
+    predicate: Optional[Expr] = Optional[Expr](),
 ) raises -> DataFrame:
     """Infer and decode using one mapped input and one prelude traversal.
 
@@ -471,6 +487,7 @@ def read_csv_inferred(
             keep,
             inferred.data_offset,
             inferred.record_start,
+            predicate,
         )
     with open(path, "r") as file:
         var input = file.read_bytes()
@@ -501,5 +518,7 @@ def read_csv_inferred(
         )
         if n_rows >= 0 and result.height() > n_rows:
             result = result.head(n_rows)
+        if predicate:
+            result = result.filter(predicate.value())
         _ = input^
         return result^
