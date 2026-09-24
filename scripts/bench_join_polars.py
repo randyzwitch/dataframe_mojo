@@ -19,7 +19,7 @@ from bench_polars import ROOT, best_of, generate, physical_cores
 CASES = [
     "inner_dense", "lazy_narrow", "inner_sparse", "inner_string",
     "inner_multi", "left_unmatched", "right_unmatched", "full_unmatched",
-    "semi_unmatched", "anti_unmatched", "left_sparse", "inner_duplicate",
+    "semi_unmatched", "anti_unmatched", "left_sparse", "right_sparse", "inner_duplicate",
 ]
 
 
@@ -128,6 +128,11 @@ def run_polars(data_dir: Path, rows: int, reps: int) -> dict:
     time_case(
         "left_sparse",
         lambda: sparse_left.join(sparse_shifted, on="jk", how="left"),
+        "r",
+    )
+    time_case(
+        "right_sparse",
+        lambda: sparse_left.join(sparse_shifted, on="jk", how="right", coalesce=True),
         "r",
     )
     del sparse_left, sparse_shifted
