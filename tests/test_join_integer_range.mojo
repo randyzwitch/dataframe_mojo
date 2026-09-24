@@ -70,7 +70,7 @@ def test_all_null_int64_keys_have_no_hidden_group() raises:
     assert_left_rows(left.join(right, "k", "anti"), [0, 1])
 
 
-def test_extreme_span_and_multi_key_keep_dictionary_fallback() raises:
+def test_extreme_span_and_multi_key_join_correctness() raises:
     var left = side([Int64.MIN, 0], [True, True], "left_row")
     var right = side([Int64.MAX, 0], [True, True], "right_row")
     assert_rows(left.join(right, "k"), [1], [1])
@@ -78,6 +78,37 @@ def test_extreme_span_and_multi_key_keep_dictionary_fallback() raises:
     var left_two = left.with_column(Series("z", Column[Int64]([1, 2])))
     var right_two = right.with_column(Series("z", Column[Int64]([2, 2])))
     assert_equal(left_two.join(right_two, on=["k", "z"]).height(), 1)
+
+
+def test_strided_keys_reject_off_grid_probes_and_keep_duplicates() raises:
+    var left = side(
+        [-120, -119, -60, 0, 60, 0],
+        [True, True, True, True, True, False],
+        "left_row",
+    )
+    var right = side(
+        [-120, -60, 0, 0, 99],
+        [True, True, True, True, False],
+        "right_row",
+    )
+    assert_rows(left.join(right, "k"), [0, 2, 3, 3], [0, 1, 2, 3])
+    assert_rows(
+        left.join(right, "k", "left"),
+        [0, 1, 2, 3, 3, 4, 5],
+        [0, -1, 1, 2, 3, -1, -1],
+    )
+    assert_rows(
+        left.join(right, "k", "right"),
+        [0, 2, 3, 3, -1],
+        [0, 1, 2, 3, 4],
+    )
+    var extremes_left = side(
+        [Int64.MIN, -1, Int64.MAX],
+        [True, True, True],
+        "left_row",
+    )
+    var extremes_right = side([Int64.MIN, Int64.MAX], [True, True], "right_row")
+    assert_rows(extremes_left.join(extremes_right, "k"), [0, 2], [0, 1])
 
 
 def test_temporal_physical_int64_uses_the_same_dense_range() raises:
