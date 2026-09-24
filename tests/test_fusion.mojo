@@ -114,6 +114,22 @@ def test_fused_matches_unfused() raises:
                 )
 
 
+def test_default_with_columns_batch_matches_smaller_batches() raises:
+    var pieces = List[DataFrame]()
+    for _ in range(80):
+        pieces.append(frame(251))
+    var source = concat(pieces)
+    for expr in [
+        (col("x") + lit(Float64(3)))
+        * (col("y") - lit(Float64(2)))
+        / lit(Float64(4)),
+        col("x") > col("y"),
+    ]:
+        var default = source.with_columns(expr.alias("out"))
+        var small = source.with_columns(expr.alias("out"), batch_size=1024)
+        assert_true(bitwise_equal(default.column("out"), small.column("out")))
+
+
 def test_fused_chunked_inputs_match_contiguous() raises:
     var pieces = List[DataFrame]()
     for _ in range(20):

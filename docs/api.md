@@ -293,8 +293,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Cross join: every left row paired with every right row, left-major.
 - `def select_exprs(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> Self`
   Evaluate against the original frame. Scalar-only output has one row.
-- `def with_columns(self, expression: Expr, *, batch_size: Int = Int(1024)) -> Self`
-- `def with_columns(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> Self`
+- `def with_columns(self, expression: Expr, *, batch_size: Int = Int(8192)) -> Self`
+- `def with_columns(self, expressions: List[Expr], *, batch_size: Int = Int(8192)) -> Self`
   All siblings see the original schema and data; aliases are outputs.
 - `def unpivot(self, on: List[String] = List(), index: List[String] = List(), *, variable_name: String = "variable", value_name: String = "value") -> Self`
   Wide to long: one row per (input row, `on` column).

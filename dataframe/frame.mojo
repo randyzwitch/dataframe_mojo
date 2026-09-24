@@ -860,14 +860,18 @@ struct DataFrame(Copyable, Sized, Writable):
         return Self(columns^, height=height)
 
     def with_columns(
-        self, expression: Expr, *, batch_size: Int = 1024
+        self, expression: Expr, *, batch_size: Int = 8192
     ) raises -> Self:
         return self.with_columns([expression.copy()], batch_size=batch_size)
 
     def with_columns(
-        self, expressions: List[Expr], *, batch_size: Int = 1024
+        self, expressions: List[Expr], *, batch_size: Int = 8192
     ) raises -> Self:
-        """All siblings see the original schema and data; aliases are outputs."""
+        """All siblings see the original schema and data; aliases are outputs.
+
+        The bounded default batch amortizes fused expression setup on large
+        inputs. Callers can still choose a smaller batch_size explicitly.
+        """
         var bound = _bind_all(expressions, self._columns)
         if batch_size <= 0:
             raise Error("batch_size must be positive")
