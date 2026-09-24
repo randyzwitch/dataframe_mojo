@@ -2634,7 +2634,7 @@ struct GroupBy(Copyable):
                     sum_expr = e
                 elif (
                     nodes[1].op == COUNT
-                    and bound[e].dtypes[0] == DataType.INT64
+                    and bound[e].dtypes[1] == DataType.INT64
                     and (
                         self._frame._columns[bound[e].sources[0]].dtype()
                         == DataType.INT64
