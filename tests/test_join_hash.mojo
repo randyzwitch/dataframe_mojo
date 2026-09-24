@@ -2,7 +2,32 @@
 from std.testing import TestSuite, assert_equal
 from dataframe import Column, DataFrame, Series
 from dataframe.join_hash import direct_hash_join_rows
+from dataframe.frame import _bounded_int64_join_rows
 from dataframe.partition import Partitioner
+
+
+def test_bounded_int64_rows_keep_duplicates_nulls_and_extremes() raises:
+    var low = Int64.MIN
+    var left = Series(
+        "k",
+        Column[Int64](
+            [low, low + 1, low + 2, Int64.MAX, 0],
+            [True, True, True, True, False],
+        ),
+    )
+    var right = Series(
+        "k",
+        Column[Int64]([low, low, low + 2, 0], [True, True, True, False]),
+    )
+    var inner = _bounded_int64_join_rows(left, right, False)
+    assert_equal(inner[0], True)
+    assert_equal(inner[1], [0, 0, 2])
+    assert_equal(inner[2], [0, 1, 2])
+    var outer = _bounded_int64_join_rows(left, right, True)
+    assert_equal(outer[1], [0, 0, 1, 2, 3, 4])
+    assert_equal(outer[2], [0, 1, -1, 2, -1, -1])
+    var wide = Series("k", Column[Int64]([Int64.MIN, Int64.MAX]))
+    assert_equal(_bounded_int64_join_rows(left, wide, False)[0], False)
 
 
 def test_integer_duplicates_nulls_and_unmatched() raises:
