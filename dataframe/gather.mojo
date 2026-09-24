@@ -334,6 +334,18 @@ struct _SortedChunkTakeJob(Job):
         var next_row = 0
         for chunk in self.source.chunks():
             var end = offset + len(chunk)
+            # Filter indices are strictly increasing. Matching both endpoints
+            # proves that this entire chunk is selected; retain its storage.
+            if (
+                len(chunk) > 0
+                and next_row + len(chunk) <= len(rows)
+                and rows[next_row] == offset
+                and rows[next_row + len(chunk) - 1] == end - 1
+            ):
+                selected.append(chunk.copy())
+                next_row += len(chunk)
+                offset = end
+                continue
             var local = List[Int]()
             while next_row < len(rows) and rows[next_row] < end:
                 local.append(rows[next_row] - offset)
@@ -385,6 +397,23 @@ struct _SortedChunkPartJob(Job):
         var selected = List[Series]()
         for i in range(self.first, self.last):
             var end = chunks.ends[i]
+            var size = end - chunk_start
+            if (
+                size > 0
+                and next_row + size <= len(rows)
+                and rows[next_row] == chunk_start
+                and rows[next_row + size - 1] == end - 1
+            ):
+                selected.append(
+                    Series(
+                        self.source.name(),
+                        chunks.arrays[i].copy(),
+                        self.source.dtype(),
+                    )
+                )
+                next_row += size
+                chunk_start = end
+                continue
             var local = List[Int]()
             while next_row < len(rows) and rows[next_row] < end:
                 local.append(rows[next_row] - chunk_start)
@@ -503,12 +532,12 @@ struct _GatherJob(Job):
     def run(mut self) raises:
         ref rows = self.indices[]
         if self.source._data.isa[StringColumn]():
-            var subset = List[Int](capacity=self.end - self.start)
-            for k in range(self.start, self.end):
-                subset.append(rows[k])
-            self.piece = self.source.take_or_null(
-                subset
-            ) if self.or_null else self.source.take(subset)
+            self.piece = Series(
+                self.source.name(),
+                self.source._data[StringColumn]._take_range(
+                    rows, self.start, self.end, self.or_null
+                ),
+            )
             return
         var out_bits = Pointer[UInt8, MutAnyOrigin](
             unsafe_from_address=self.bits

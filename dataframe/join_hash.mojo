@@ -1,11 +1,12 @@
 """Right-side hash index for high-cardinality inner and left joins.
 
 The index stores row positions, rather than dense key codes. A slot holds a
-chain of right rows in input order. Hash equality narrows candidate rows, and
-column equality resolves collisions exactly. Workers probe disjoint left row
+chain of right rows in input order. Each entry keeps a row number, next link,
+and either its hash or exact Int64 key together for locality. Hash equality
+narrows generic candidates; column equality resolves collisions exactly. Workers probe disjoint left row
 ranges, so concatenating their results preserves the join's left-major order.
 """
-from std.memory import ArcPointer
+from std.memory import ArcPointer, bitcast
 
 from .aggregate import float_key
 from .bool_column import BoolColumn
@@ -48,10 +49,16 @@ def _row_equal(left: List[Series], right: List[Series], i: Int, j: Int) -> Bool:
 
 
 @fieldwise_init
+struct _HashEntry(Copyable):
+    var row: Int
+    var hash: UInt64
+    var next_position: Int
+
+
+@fieldwise_init
 struct _HashBucket(Copyable):
-    var first: Int
     var heads: List[Int]
-    var next_rows: List[Int]
+    var entries: List[_HashEntry]
 
     def mask(self) -> Int:
         return len(self.heads) - 1
@@ -62,6 +69,8 @@ struct _HashBuildJob(Job):
 
     var hashes: ArcPointer[List[UInt64]]
     var order: ArcPointer[List[Int]]
+    var right_key: Series
+    var typed_int: Bool
     var first: Int
     var last: Int
     var result: _HashBucket
@@ -70,27 +79,49 @@ struct _HashBuildJob(Job):
         out self,
         hashes: ArcPointer[List[UInt64]],
         order: ArcPointer[List[Int]],
+        right_key: Series,
+        typed_int: Bool,
         first: Int,
         last: Int,
     ):
         self.hashes = hashes.copy()
         self.order = order.copy()
+        self.right_key = right_key.copy()
+        self.typed_int = typed_int
         self.first = first
         self.last = last
-        self.result = _HashBucket(first, List[Int](), List[Int]())
+        self.result = _HashBucket(List[Int](), List[_HashEntry]())
 
     def run(mut self) raises:
         var size = 2
         while size < 2 * (self.last - self.first):
             size *= 2
         var heads = List[Int](length=size, fill=-1)
-        var next_rows = List[Int](length=self.last - self.first, fill=-1)
-        for position in range(self.last - 1, self.first - 1, -1):
-            var row = self.order[][position]
-            var slot = Int(self.hashes[][row] & UInt64(size - 1))
-            next_rows[position - self.first] = heads[slot]
-            heads[slot] = position
-        self.result = _HashBucket(self.first, heads^, next_rows^)
+        var entries = List[_HashEntry](
+            length=self.last - self.first,
+            fill=_HashEntry(-1, 0, -1),
+        )
+        if self.typed_int:
+            ref key = self.right_key._data[Column[Int64]]
+            for position in range(self.last - 1, self.first - 1, -1):
+                var row = self.order[][position]
+                if not key._valid(row):
+                    continue
+                var hash = self.hashes[][row]
+                var slot = Int(hash & UInt64(size - 1))
+                var local = position - self.first
+                var stored_key = bitcast[DType.uint64](key._get(row))
+                entries[local] = _HashEntry(row, stored_key, heads[slot])
+                heads[slot] = local
+        else:
+            for position in range(self.last - 1, self.first - 1, -1):
+                var row = self.order[][position]
+                var hash = self.hashes[][row]
+                var slot = Int(hash & UInt64(size - 1))
+                var local = position - self.first
+                entries[local] = _HashEntry(row, hash, heads[slot])
+                heads[slot] = local
+        self.result = _HashBucket(heads^, entries^)
 
     def into_result(deinit self) -> _HashBucket:
         return self.result^
@@ -100,8 +131,6 @@ struct _HashProbeJob(Job):
     var left_keys: List[Series]
     var right_keys: List[Series]
     var left_hashes: ArcPointer[List[UInt64]]
-    var right_hashes: ArcPointer[List[UInt64]]
-    var order: ArcPointer[List[Int]]
     var buckets: ArcPointer[List[_HashBucket]]
     var fold: Int
     var start: Int
@@ -115,8 +144,6 @@ struct _HashProbeJob(Job):
         left_keys: List[Series],
         right_keys: List[Series],
         left_hashes: ArcPointer[List[UInt64]],
-        right_hashes: ArcPointer[List[UInt64]],
-        order: ArcPointer[List[Int]],
         buckets: ArcPointer[List[_HashBucket]],
         fold: Int,
         start: Int,
@@ -126,8 +153,6 @@ struct _HashProbeJob(Job):
         self.left_keys = left_keys.copy()
         self.right_keys = right_keys.copy()
         self.left_hashes = left_hashes.copy()
-        self.right_hashes = right_hashes.copy()
-        self.order = order.copy()
         self.buckets = buckets.copy()
         self.fold = fold
         self.start = start
@@ -137,6 +162,37 @@ struct _HashProbeJob(Job):
         self.right_rows = List[Int](capacity=end - start)
 
     def run(mut self) raises:
+        if (
+            len(self.left_keys) == 1
+            and self.left_keys[0]._data.isa[Column[Int64]]()
+        ):
+            ref left = self.left_keys[0]._data[Column[Int64]]
+            var left_all_valid = len(left._bits[]) == 0
+            for i in range(self.start, self.end):
+                var valid = left_all_valid or left._valid(i)
+                if not valid:
+                    if self.include_unmatched:
+                        self.left_rows.append(i)
+                        self.right_rows.append(-1)
+                    continue
+                var hash = self.left_hashes[][i]
+                var bucket = Int(hash >> 56) >> self.fold
+                ref index = self.buckets[][bucket]
+                var position = index.heads[Int(hash & UInt64(index.mask()))]
+                var matched = False
+                var value = left._get(i)
+                while position >= 0:
+                    ref entry = index.entries[position]
+                    var j = entry.row
+                    if value == bitcast[DType.int64](entry.hash):
+                        self.left_rows.append(i)
+                        self.right_rows.append(j)
+                        matched = True
+                    position = entry.next_position
+                if not matched and self.include_unmatched:
+                    self.left_rows.append(i)
+                    self.right_rows.append(-1)
+            return
         for i in range(self.start, self.end):
             var hash = self.left_hashes[][i]
             var bucket = Int(hash >> 56) >> self.fold
@@ -144,14 +200,15 @@ struct _HashProbeJob(Job):
             var position = index.heads[Int(hash & UInt64(index.mask()))]
             var matched = False
             while position >= 0:
-                var j = self.order[][position]
-                if hash == self.right_hashes[][j] and _row_equal(
+                ref entry = index.entries[position]
+                var j = entry.row
+                if hash == entry.hash and _row_equal(
                     self.left_keys, self.right_keys, i, j
                 ):
                     self.left_rows.append(i)
                     self.right_rows.append(j)
                     matched = True
-                position = index.next_rows[position - index.first]
+                position = entry.next_position
             if not matched and self.include_unmatched:
                 self.left_rows.append(i)
                 self.right_rows.append(-1)
@@ -176,12 +233,15 @@ def direct_hash_join_rows(
     var shared_left_hashes = ArcPointer(left_hashes.hashes.copy())
     var shared_right_hashes = ArcPointer(right_hashes.hashes.copy())
     var shared_order = ArcPointer(right_parts.order.copy())
+    var typed_int = len(right) == 1 and right[0]._data.isa[Column[Int64]]()
     var builders = List[_HashBuildJob](capacity=right_parts.buckets())
     for bucket in range(right_parts.buckets()):
         builders.append(
             _HashBuildJob(
                 shared_right_hashes,
                 shared_order,
+                right[0],
+                typed_int,
                 right_parts.bounds[bucket],
                 right_parts.bounds[bucket + 1],
             )
@@ -204,8 +264,6 @@ def direct_hash_join_rows(
                 left,
                 right,
                 shared_left_hashes,
-                shared_right_hashes,
-                shared_order,
                 shared_indexes,
                 fold,
                 bounds[worker],
