@@ -45,6 +45,29 @@ def test_integer_duplicates_nulls_and_unmatched() raises:
     assert_equal(outer[1], [0, 1, 2, 0, 1, -1, -1])
 
 
+def test_packed_int64_hash_keys_keep_extremes_and_nulls() raises:
+    var left = Series(
+        "k",
+        Column[Int64](
+            [Int64.MIN, -17, Int64.MAX, 0],
+            [True, True, True, False],
+        ),
+    )
+    var right = Series(
+        "k",
+        Column[Int64](
+            [Int64.MAX, Int64.MIN, Int64.MIN, -17, 0],
+            [True, True, True, True, False],
+        ),
+    )
+    var inner = direct_hash_join_rows([left.copy()], [right.copy()], False)
+    assert_equal(inner[0], [0, 0, 1, 2])
+    assert_equal(inner[1], [1, 2, 3, 0])
+    var outer = direct_hash_join_rows([left.copy()], [right.copy()], True)
+    assert_equal(outer[0], [0, 0, 1, 2, 3])
+    assert_equal(outer[1], [1, 2, 3, 0, -1])
+
+
 def test_hash_slot_collision_does_not_match_different_values() raises:
     var values = List[Int64]()
     for i in range(1_000):
