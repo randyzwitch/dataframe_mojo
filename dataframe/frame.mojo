@@ -1825,6 +1825,54 @@ struct _RangeJoinProbeJob(Job):
                 self.right_rows.append(-1)
 
 
+struct _RangeIndexBuildJob(Job):
+    """Own a disjoint slot range while scanning build rows in reverse order."""
+
+    var values: Column[Int64]
+    var heads: Int
+    var next_rows: Int
+    var low: Int64
+    var first_slot: Int
+    var last_slot: Int
+    var unique_keys: Bool
+
+    def __init__(
+        out self,
+        values: Column[Int64],
+        heads: Int,
+        next_rows: Int,
+        low: Int64,
+        first_slot: Int,
+        last_slot: Int,
+    ):
+        self.values = values.copy()
+        self.heads = heads
+        self.next_rows = next_rows
+        self.low = low
+        self.first_slot = first_slot
+        self.last_slot = last_slot
+        self.unique_keys = True
+
+    def run(mut self) raises:
+        ref heads = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.heads
+        )[]
+        ref next_rows = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.next_rows
+        )[]
+        for j in range(len(self.values) - 1, -1, -1):
+            if self.values._valid(j):
+                var value = self.values._get(j)
+                if value < self.low:
+                    continue
+                var slot = Int(value - self.low)
+                if slot >= self.first_slot and slot < self.last_slot:
+                    if heads[slot] >= 0:
+                        self.unique_keys = False
+                    next_rows[j] = heads[slot]
+                    heads[slot] = j
+
+
 def _bounded_int64_join_rows(
     left: Series, right: Series, include_unmatched: Bool
 ) raises -> Tuple[Bool, List[Int], List[Int]]:
@@ -1933,7 +1981,28 @@ def _bounded_int64_join_rows(
     )
     var next_rows = List[Int](length=len(right_values), fill=-1)
     var unique_keys = True
-    if dense:
+    var build_workers = (
+        min(16, worker_count(len(right_values))) if dense
+        and (len(right_values) >= 2_000_000 and len(heads) >= 2_000_000) else 1
+    )
+    if build_workers > 1:
+        var slot_bounds = partitions(len(heads), build_workers, 1)
+        var build_jobs = List[_RangeIndexBuildJob](capacity=build_workers)
+        for worker in range(build_workers):
+            build_jobs.append(
+                _RangeIndexBuildJob(
+                    right_values,
+                    Int(Pointer(to=heads)),
+                    Int(Pointer(to=next_rows)),
+                    low,
+                    slot_bounds[worker],
+                    slot_bounds[worker + 1],
+                )
+            )
+        run_jobs(build_jobs)
+        for worker in range(build_workers):
+            unique_keys = unique_keys and build_jobs[worker].unique_keys
+    elif dense:
         for j in range(len(right_values) - 1, -1, -1):
             if right_values._valid(j):
                 var slot = Int(right_values._get(j) - low)
