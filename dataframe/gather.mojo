@@ -334,6 +334,18 @@ struct _SortedChunkTakeJob(Job):
         var next_row = 0
         for chunk in self.source.chunks():
             var end = offset + len(chunk)
+            # Filter indices are strictly increasing. Matching both endpoints
+            # proves that this entire chunk is selected; retain its storage.
+            if (
+                len(chunk) > 0
+                and next_row + len(chunk) <= len(rows)
+                and rows[next_row] == offset
+                and rows[next_row + len(chunk) - 1] == end - 1
+            ):
+                selected.append(chunk.copy())
+                next_row += len(chunk)
+                offset = end
+                continue
             var local = List[Int]()
             while next_row < len(rows) and rows[next_row] < end:
                 local.append(rows[next_row] - offset)
@@ -385,6 +397,23 @@ struct _SortedChunkPartJob(Job):
         var selected = List[Series]()
         for i in range(self.first, self.last):
             var end = chunks.ends[i]
+            var size = end - chunk_start
+            if (
+                size > 0
+                and next_row + size <= len(rows)
+                and rows[next_row] == chunk_start
+                and rows[next_row + size - 1] == end - 1
+            ):
+                selected.append(
+                    Series(
+                        self.source.name(),
+                        chunks.arrays[i].copy(),
+                        self.source.dtype(),
+                    )
+                )
+                next_row += size
+                chunk_start = end
+                continue
             var local = List[Int]()
             while next_row < len(rows) and rows[next_row] < end:
                 local.append(rows[next_row] - chunk_start)
