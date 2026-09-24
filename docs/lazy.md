@@ -20,11 +20,16 @@ scan without a schema still samples the file to infer types).
   it reads none of the columns that node produces (for `select`, only plain
   column selections), and into the side of a join that owns every column it
   reads: either side of an inner join, the left side of left, semi, and anti
-  joins. Filters never move past a slice, sort, unique, group_by, or right/full
+  joins. Row-local filters also move below a stable sort, since filtering the
+  sorted rows preserves their relative order. Whole-column filters stay above
+  the sort. Filters never move past a slice, unique, group_by, or right/full
   join, since that would change which rows those operators see.
 - **Projection pushdown.** Scans read only the columns some operator above them
   uses; CSV scans pass them as `columns=`, so other fields are never decoded.
-  Selectors and joins conservatively keep every column.
+  Selectors and joins conservatively keep every column. A plain column
+  projection directly after a sort keeps the sorted row permutation and gathers
+  only the selected output columns; sort-only key columns are not materialized
+  in the result.
 - **Slice pushdown.** `head(n)` moves below row-local `select`/`with_columns`
   (no reductions, windows, or `over`), and a leading slice directly over a CSV
   scan becomes the reader's `n_rows`, so the rest of the file is not read.

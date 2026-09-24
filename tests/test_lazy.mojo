@@ -135,6 +135,30 @@ def test_predicate_pushdown_rules() raises:
         .filter(col("label").eq(lit(String("A"))))
     )
     assert_true(left.explain().startswith("FILTER\n  JOIN left"))
+    var sorted = df.lazy().sort(["w"]).filter(col("v") > lit(Int64(2)))
+    assert_true(sorted.explain().startswith("SORT w\n  FILTER"))
+    assert_true(
+        sorted.collect().equals(df.sort(["w"]).filter(col("v") > lit(Int64(2))))
+    )
+    var whole_column = df.lazy().sort(["w"]).filter(col("w") > col("w").mean())
+    assert_true(whole_column.explain().startswith("FILTER\n  SORT"))
+    assert_true(
+        whole_column.collect().equals(
+            df.sort(["w"]).filter(col("w") > col("w").mean())
+        )
+    )
+    var projected = (
+        df.lazy()
+        .sort(["w"], descending=True)
+        .select_exprs([col("note").alias("renamed")])
+    )
+    assert_true(
+        projected.collect().equals(
+            df.sort(["w"], descending=True).select_exprs(
+                [col("note").alias("renamed")]
+            )
+        )
+    )
 
 
 def test_projection_and_slice_pushdown_into_csv() raises:
