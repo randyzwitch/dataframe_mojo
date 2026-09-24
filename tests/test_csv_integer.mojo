@@ -145,5 +145,142 @@ def test_lengths_signs_and_invalid_byte_positions() raises:
         _fails_u64(text)
 
 
+# Tests from test_csv_decimal.mojo.
+# Focused behavior checks for the fast-float2 decimal.rs port.
+from std.testing import TestSuite, assert_equal, assert_true
+from dataframe.csv_decimal import CsvDecimal, parse_csv_decimal
+
+
+def digits(d: CsvDecimal) -> List[UInt8]:
+    var result = List[UInt8]()
+    for i in range(d.num_digits):
+        result.append(d.digits[i])
+    return result^
+
+
+def test_parse_decimal_point_and_trailing_zero_rules() raises:
+    var integer = parse_csv_decimal("0012300")
+    assert_equal(digits(integer), [UInt8(1), 2, 3])
+    assert_equal(integer.decimal_point, 5)
+    assert_equal(integer.round(), UInt64(12300))
+
+    var fractional = parse_csv_decimal("000.0012300")
+    assert_equal(digits(fractional), [UInt8(1), 2, 3])
+    assert_equal(fractional.decimal_point, -2)
+    assert_equal(fractional.round(), UInt64(0))
+
+    var exponent = parse_csv_decimal("100e-2")
+    assert_equal(digits(exponent), [UInt8(1)])
+    assert_equal(exponent.decimal_point, 1)
+    assert_equal(exponent.round(), UInt64(1))
+
+
+def test_batched_binary_shifts_and_half_even_rounding() raises:
+    var left = parse_csv_decimal("123")
+    left.left_shift(10)
+    assert_equal(digits(left), [UInt8(1), 2, 5, 9, 5, 2])
+    assert_equal(left.decimal_point, 6)
+    assert_equal(left.round(), UInt64(125952))
+
+    var right = parse_csv_decimal("1")
+    right.right_shift(1)
+    assert_equal(digits(right), [UInt8(5)])
+    assert_equal(right.decimal_point, 0)
+
+    assert_equal(parse_csv_decimal("2.5").round(), UInt64(2))
+    assert_equal(parse_csv_decimal("3.5").round(), UInt64(4))
+    var truncated = CsvDecimal()
+    truncated.num_digits = 2
+    truncated.decimal_point = 1
+    truncated.digits[0] = 2
+    truncated.digits[1] = 5
+    truncated.truncated = True
+    assert_equal(truncated.round(), UInt64(3))
+    assert_true(left.num_digits <= 768)
+
+
+# Tests from test_parse_integer.mojo.
+# Integer parser boundaries for every CSV/cast storage dtype.
+from std.testing import TestSuite, assert_equal, assert_raises
+
+from dataframe.parse import parse_int64, parse_integer
+
+
+def accepts[D: DType](text: String, expected: Scalar[D]) raises:
+    assert_equal(parse_integer[D](StringSlice(text)), expected, msg=text)
+
+
+def rejects[D: DType](text: String) raises:
+    with assert_raises():
+        _ = parse_integer[D](StringSlice(text))
+
+
+def test_int64_exact_boundaries_and_syntax() raises:
+    assert_equal(parse_int64("9223372036854775807"), Int64.MAX)
+    assert_equal(
+        parse_int64("-9223372036854775808"), Int64(-9223372036854775807) - 1
+    )
+    for text in [
+        "9223372036854775808",
+        "-9223372036854775809",
+        "",
+        "+",
+        "-",
+        "1.0",
+        " 1",
+        "1 ",
+    ]:
+        with assert_raises():
+            _ = parse_int64(text)
+
+
+def test_short_integer_path_preserves_signs_and_bad_byte_rejection() raises:
+    assert_equal(parse_int64("+42"), Int64(42))
+    assert_equal(parse_int64("-7654321"), Int64(-7654321))
+    assert_equal(parse_int64("00000123"), Int64(123))
+    for text in ["12x", "1_2", "12 ", " 12"]:
+        with assert_raises(contains="non-decimal integer byte"):
+            _ = parse_int64(text)
+
+
+def test_signed_width_boundaries() raises:
+    accepts[DType.int8]("-128", Int8.MIN)
+    accepts[DType.int8]("127", Int8.MAX)
+    rejects[DType.int8]("-129")
+    rejects[DType.int8]("128")
+
+    accepts[DType.int16]("-32768", Int16.MIN)
+    accepts[DType.int16]("32767", Int16.MAX)
+    rejects[DType.int16]("-32769")
+    rejects[DType.int16]("32768")
+
+    accepts[DType.int32]("-2147483648", Int32.MIN)
+    accepts[DType.int32]("2147483647", Int32.MAX)
+    rejects[DType.int32]("-2147483649")
+    rejects[DType.int32]("2147483648")
+
+    accepts[DType.int64]("-9223372036854775808", Int64.MIN)
+    accepts[DType.int64]("9223372036854775807", Int64.MAX)
+    rejects[DType.int64]("-9223372036854775809")
+    rejects[DType.int64]("9223372036854775808")
+
+
+def test_unsigned_width_boundaries_and_negative_zero() raises:
+    accepts[DType.uint8]("0", UInt8(0))
+    accepts[DType.uint8]("255", UInt8.MAX)
+    accepts[DType.uint8]("-0", UInt8(0))
+    rejects[DType.uint8]("256")
+    rejects[DType.uint8]("-1")
+
+    accepts[DType.uint16]("65535", UInt16.MAX)
+    rejects[DType.uint16]("65536")
+
+    accepts[DType.uint32]("4294967295", UInt32.MAX)
+    rejects[DType.uint32]("4294967296")
+
+    accepts[DType.uint64]("18446744073709551615", UInt64.MAX)
+    rejects[DType.uint64]("18446744073709551616")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
