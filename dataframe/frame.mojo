@@ -648,9 +648,11 @@ struct DataFrame(Copyable, Sized, Writable):
                 names[name] = True
                 right_output.append(i)
                 right_names.append(name)
-        if how == "inner" and len(left_keys) == 1:
+        if (how == "inner" or how == "left") and len(left_keys) == 1:
             var dense = _dense_right_int64_rows(
-                self._columns[left_keys[0]], right._columns[right_keys[0]]
+                self._columns[left_keys[0]],
+                right._columns[right_keys[0]],
+                how == "left",
             )
             if dense[0]:
                 var left_rows = dense[1].copy()
@@ -721,9 +723,15 @@ struct DataFrame(Copyable, Sized, Writable):
                 else:
                     left_rows.append(-1)
                     right_rows.append(j)
-        elif how == "inner" and worker_count(len(left_ids)) > 1:
-            var pairs = _parallel_inner_rows(
-                left_ids, right_starts, right_flat, worker_count(len(left_ids))
+        elif (how == "inner" or how == "left") and worker_count(
+            len(left_ids)
+        ) > 1:
+            var pairs = _parallel_join_rows(
+                left_ids,
+                right_starts,
+                right_flat,
+                worker_count(len(left_ids)),
+                how == "left",
             )
             left_rows = pairs[0].copy()
             right_rows = pairs[1].copy()
@@ -1412,9 +1420,9 @@ def _group_index(ids: List[Int], count: Int) -> List[Int]:
 
 
 def _dense_right_int64_rows(
-    left: Series, right: Series
+    left: Series, right: Series, include_unmatched: Bool = False
 ) -> Tuple[Bool, List[Int], List[Int]]:
-    """Direct inner matches when right keys are a dense ascending Int64 range."""
+    """Direct matches when right keys are a dense ascending Int64 range."""
     if right.dtype() != DataType.INT64 or left.dtype() != DataType.INT64:
         return (False, List[Int](), List[Int]())
     if len(right) == 0:
@@ -1441,22 +1449,28 @@ def _dense_right_int64_rows(
         var values = column.unsafe_values()
         if len(column._bits[]) == 0:
             for i in range(len(column)):
+                var matched_row = -1
                 var value = values.unsafe_load(i)
                 if value >= base:
                     var index = UInt64(value) - UInt64(base)
                     if index < right_limit:
-                        left_rows.append(row)
-                        right_rows.append(Int(index))
+                        matched_row = Int(index)
+                if matched_row >= 0 or include_unmatched:
+                    left_rows.append(row)
+                    right_rows.append(matched_row)
                 row += 1
         else:
             for i in range(len(column)):
+                var matched_row = -1
                 if column._valid(i):
                     var value = values.unsafe_load(i)
                     if value >= base:
                         var index = UInt64(value) - UInt64(base)
                         if index < right_limit:
-                            left_rows.append(row)
-                            right_rows.append(Int(index))
+                            matched_row = Int(index)
+                if matched_row >= 0 or include_unmatched:
+                    left_rows.append(row)
+                    right_rows.append(matched_row)
                 row += 1
     return (True, left_rows^, right_rows^)
 
@@ -1910,6 +1924,7 @@ struct _JoinCountJob(Job):
     var start: Int
     var end: Int
     var count: Int
+    var include_unmatched: Bool
 
     def __init__(
         out self,
@@ -1917,23 +1932,28 @@ struct _JoinCountJob(Job):
         right_starts: ArcPointer[List[Int]],
         start: Int,
         end: Int,
+        include_unmatched: Bool = False,
     ):
         self.left_ids = left_ids.copy()
         self.right_starts = right_starts.copy()
         self.start = start
         self.end = end
         self.count = 0
+        self.include_unmatched = include_unmatched
 
     def run(mut self) raises:
         for row in range(self.start, self.end):
             var key = self.left_ids[][row]
+            var matches = 0
             if key >= 0:
-                var matches = (
+                matches = (
                     self.right_starts[][key + 1] - self.right_starts[][key]
                 )
-                if matches > Int.MAX - self.count:
-                    raise Error("Join output row count overflows")
-                self.count += matches
+            if matches == 0 and self.include_unmatched:
+                matches = 1
+            if matches > Int.MAX - self.count:
+                raise Error("Join output row count overflows")
+            self.count += matches
 
 
 struct _JoinFillJob(Job):
@@ -1947,6 +1967,7 @@ struct _JoinFillJob(Job):
     var output: Int
     var left_output: Int
     var right_output: Int
+    var include_unmatched: Bool
 
     def __init__(
         out self,
@@ -1958,6 +1979,7 @@ struct _JoinFillJob(Job):
         output: Int,
         left_output: Int,
         right_output: Int,
+        include_unmatched: Bool,
     ):
         self.left_ids = left_ids.copy()
         self.right_starts = right_starts.copy()
@@ -1967,6 +1989,7 @@ struct _JoinFillJob(Job):
         self.output = output
         self.left_output = left_output
         self.right_output = right_output
+        self.include_unmatched = include_unmatched
 
     def run(mut self) raises:
         ref left_rows = Pointer[List[Int], MutAnyOrigin](
@@ -1978,22 +2001,30 @@ struct _JoinFillJob(Job):
         var output = self.output
         for row in range(self.start, self.end):
             var key = self.left_ids[][row]
-            if key >= 0:
+            if (
+                key >= 0
+                and self.right_starts[][key + 1] > self.right_starts[][key]
+            ):
                 for at in range(
                     self.right_starts[][key], self.right_starts[][key + 1]
                 ):
                     left_rows[output] = row
                     right_rows[output] = self.right_flat[][at]
                     output += 1
+            elif self.include_unmatched:
+                left_rows[output] = row
+                right_rows[output] = -1
+                output += 1
 
 
-def _parallel_inner_rows(
+def _parallel_join_rows(
     left_ids: List[Int],
     right_starts: List[Int],
     right_flat: List[Int],
     workers: Int,
+    include_unmatched: Bool,
 ) raises -> Tuple[List[Int], List[Int]]:
-    """Inner pairs in the same left-major order as the serial loop.
+    """Inner or left pairs in the same left-major order as the serial loop.
 
     Each worker owns a contiguous left-row range. Counting it first assigns
     a disjoint output span; prefixing spans in left-range order preserves
@@ -2011,6 +2042,7 @@ def _parallel_inner_rows(
                 shared_starts,
                 bounds[worker],
                 bounds[worker + 1],
+                include_unmatched,
             )
         )
     run_jobs(counts)
@@ -2035,6 +2067,7 @@ def _parallel_inner_rows(
                 outputs[worker],
                 Int(Pointer(to=left_rows)),
                 Int(Pointer(to=right_rows)),
+                include_unmatched,
             )
         )
     run_jobs(fills)

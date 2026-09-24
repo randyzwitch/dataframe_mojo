@@ -380,5 +380,79 @@ def test_parallel_bounded_membership_preserves_order_and_nulls() raises:
     assert_equal(anti.height(), anti_at)
 
 
+def test_dense_right_left_join_handles_nulls_and_int64_bounds() raises:
+    var lowest = Int64.MIN
+    var left = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Int64](
+                    [lowest, lowest + 2, 0, Int64.MAX],
+                    [True, True, False, True],
+                ),
+            ),
+            Series("row", Column[Int64]([0, 1, 2, 3])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64]([lowest, lowest + 1, lowest + 2])),
+            Series("payload", Column[Int64]([10, 11, 12])),
+        ]
+    )
+    var joined = left.join(right, "k", how="left")
+    assert_equal(joined.height(), 4)
+    assert_equal(joined.item(0, "payload").int64(), Int64(10))
+    assert_equal(joined.item(1, "payload").int64(), Int64(12))
+    assert_true(joined.item(2, "payload").is_null())
+    assert_true(joined.item(3, "payload").is_null())
+
+
+def test_parallel_left_join_preserves_match_and_unmatched_order() raises:
+    var keys = List[Int64]()
+    var valid = List[Bool]()
+    var positions = List[Int64]()
+    for i in range(140_000):
+        keys.append(Int64(i % 16))
+        valid.append(i % 17 != 0)
+        positions.append(Int64(i))
+    var key = Series("k", Column[Int64](keys^, valid^))
+    var row = Series("row", Column[Int64](positions^))
+    var left = DataFrame(
+        [
+            key.slice(0, 70_000).append(key.slice(70_000, 70_000)),
+            row.slice(0, 70_000).append(row.slice(70_000, 70_000)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Int64](
+                    [Int64(2), 2, 4, 4, 6, 6],
+                    [True, False, True, True, True, True],
+                ),
+            ),
+            Series("right_row", Column[Int64]([0, 1, 2, 3, 4, 5])),
+        ]
+    )
+    var result = left.join(right, "k", how="left")
+    var at = 0
+    for i in range(140_000):
+        var matched = False
+        for j in range(6):
+            var right_key = (j // 2 + 1) * 2
+            if i % 17 != 0 and i % 16 == right_key and j != 1:
+                assert_equal(result.item(at, "row").int64(), Int64(i))
+                assert_equal(result.item(at, "right_row").int64(), Int64(j))
+                at += 1
+                matched = True
+        if not matched:
+            assert_equal(result.item(at, "row").int64(), Int64(i))
+            assert_true(result.item(at, "right_row").is_null())
+            at += 1
+    assert_equal(result.height(), at)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
