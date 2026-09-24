@@ -276,6 +276,87 @@ def test_many_groups() raises:
     assert_equal(result.item(7918, "k").int64(), Int64(7918))
 
 
+def test_fused_float_aggregates_match_general_reducer() raises:
+    var rows = 1_000_000
+    var keys = List[Int64](capacity=rows)
+    var key_valid = List[Bool](capacity=rows)
+    var x = List[Float64](capacity=rows)
+    var x_valid = List[Bool](capacity=rows)
+    var y = List[Float64](capacity=rows)
+    for i in range(rows):
+        var key = i % 17
+        keys.append(Int64(key))
+        key_valid.append(i % 23 != 0)
+        x.append(Float64(i % 1000) * 0.125)
+        x_valid.append(key != 0 and i % 11 != 0)
+        y.append(Float64((i * 37) % 1000) * 0.25)
+    var data = DataFrame(
+        [
+            Series("key", Column[Int64](keys^, key_valid^)),
+            Series("x", Column[Float64](x^, x_valid^)),
+            Series("y", Column[Float64](y^)),
+        ]
+    )
+    var exprs: List[Expr] = [
+        col("x").sum().alias("sx"),
+        col("y").sum().alias("sy"),
+        col("x").count().alias("cx"),
+        col("y").mean().alias("my"),
+        col("x").mean().alias("mx"),
+    ]
+    var reference_exprs = exprs.copy()
+    reference_exprs.append(col("x").min().alias("minimum"))
+    var expected = (
+        data.group_by("key", maintain_order=True)
+        .agg(reference_exprs)
+        .drop(["minimum"])
+    )
+    var actual = data.group_by("key", maintain_order=True).agg(exprs)
+    assert_true(actual.equals(expected))
+    var cut = 123_457
+    var chunks = List[Series]()
+    for name in [String("key"), "x", "y"]:
+        var source = data.column(name)
+        chunks.append(
+            Series._from_chunks(
+                [source.slice(0, cut), source.slice(cut, rows - cut)]
+            )
+        )
+    var chunked = DataFrame(chunks^)
+    assert_true(chunked.column("key").is_chunked())
+    assert_true(
+        chunked.group_by("key", maintain_order=True).agg(exprs).equals(expected)
+    )
+
+
+def test_fused_group_state_limit_falls_back() raises:
+    # The sample sees only key zero, but each worker range has many distinct
+    # keys. Reaching the state cap must execute the general reducer.
+    var rows = 262_144
+    var keys = List[Int64](capacity=rows)
+    var values = List[Float64](capacity=rows)
+    for i in range(rows):
+        keys.append(Int64(0 if i % 64 == 0 else i))
+        values.append(Float64(1))
+    var data = DataFrame(
+        [
+            Series("key", Column[Int64](keys^)),
+            Series("x", Column[Float64](values^)),
+        ]
+    )
+    var exprs: List[Expr] = [
+        col("x").sum().alias("sum"),
+        col("x").count().alias("count"),
+        col("x").mean().alias("mean"),
+        col("x").sum().alias("sum2"),
+    ]
+    var result = data.group_by("key").agg(exprs)
+    assert_equal(result.height(), rows - rows // 64 + 1)
+    var zero = result.filter(col("key") == lit(Int64(0)))
+    assert_equal(zero.item(0, "count").int64(), Int64(rows // 64))
+    assert_equal(zero.item(0, "sum").float64(), Float64(rows // 64))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 

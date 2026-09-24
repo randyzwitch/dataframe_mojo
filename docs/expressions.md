@@ -373,8 +373,16 @@ special values, nulls, SIMD widths, and batch sizes. Integer arithmetic is not
 fused, because its checked overflow and branch masks need the per-row kernels;
 reductions, windows, strings, and conditionals are fusion boundaries.
 
-Outside fused subtrees the evaluator still allocates/copies intermediate batch columns, keeps
-node outputs until the batch ends, and scans separately for each aggregate.
+For one Int64 grouping key and three or more simple Float64
+`sum`, `count`, or `mean` expressions, the group executor uses one
+range-local pass for all aggregates, then merges worker states. Contiguous
+columns and columns with matching chunk boundaries use this path without
+rechunking. A sample limits
+the path to bounded cardinality; if a worker discovers more groups than its
+state budget permits, execution falls back to the standard grouped reducer.
+Other grouped aggregate shapes still scan separately for each aggregate.
+Outside fused subtrees the evaluator still allocates/copies intermediate batch
+columns and keeps node outputs until the batch ends.
 SIMD loads/stores are assembled by lane rather than a zero-copy buffer view.
 There is no shared-expression elimination, parallel scheduler, or measured end-to-end speedup claim yet. Those are execution
 improvements to pursue with benchmarks, not reasons to change expression semantics.
