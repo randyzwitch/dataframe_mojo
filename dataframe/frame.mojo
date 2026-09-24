@@ -863,6 +863,59 @@ struct DataFrame(Copyable, Sized, Writable):
                         if not right_matched[j]:
                             left_rows.append(-1)
                             right_rows.append(j)
+        if how == "right":
+            # Every output row has a right row. Its key is the coalesced key
+            # even when no left row matched, so never gather a left key or
+            # choose between duplicate key columns after materialization.
+            var gather_workers = worker_count(len(left_rows))
+            var left_sources = List[Series]()
+            for c in range(self.width()):
+                if c not in left_keys:
+                    left_sources.append(self._columns[c].copy())
+            var left_identity = len(left_rows) == self.height()
+            if left_identity:
+                for i in range(len(left_rows)):
+                    if left_rows[i] != i:
+                        left_identity = False
+                        break
+            var left_gathered = left_sources^
+            if not left_identity:
+                left_gathered = take_parallel(
+                    left_gathered^,
+                    left_rows.copy(),
+                    gather_workers,
+                    or_null=True,
+                )
+            var right_sources = List[Series]()
+            for k in range(len(right_keys)):
+                right_sources.append(right._columns[right_keys[k]].copy())
+            for c in right_output:
+                right_sources.append(right._columns[c].copy())
+            var right_gathered = take_parallel(
+                right_sources, right_rows^, gather_workers, or_null=False
+            )
+            var columns = List[Series](
+                capacity=self.width() + len(right_output)
+            )
+            var left_source = 0
+            for c in range(self.width()):
+                var key = -1
+                for k in range(len(left_keys)):
+                    if left_keys[k] == c:
+                        key = k
+                        break
+                if key >= 0:
+                    columns.append(
+                        right_gathered[key].renamed(self._columns[c].name())
+                    )
+                else:
+                    columns.append(left_gathered[left_source].copy())
+                    left_source += 1
+            for k in range(len(right_output)):
+                columns.append(
+                    right_gathered[len(right_keys) + k].renamed(right_names[k])
+                )
+            return Self(columns^, height=len(left_rows))
         # Assembling the output is about half of a join, and it used to
         # gather one column at a time on the calling thread. take_parallel
         # writes disjoint output ranges, so every column of both sides goes
