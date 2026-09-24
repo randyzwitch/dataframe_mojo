@@ -925,8 +925,10 @@ def _over[
     return result.take(partitions.ids)
 
 
+# Eight lanes amortize expression-step dispatch across two AVX2 vectors and
+# align fused comparisons with their packed output byte.
 def evaluate[
-    width: Int = 4
+    width: Int = 8
 ](
     bound: BoundExpr,
     columns: List[Series],
