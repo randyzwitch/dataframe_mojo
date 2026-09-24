@@ -50,3 +50,15 @@ merged across every split point and association order in
 `tests/test_expr_reductions.mojo`: integer results must be identical and float
 results equal within tolerance. These are the properties parallel execution
 relies on.
+
+## Broad join comparison
+
+`pixi run -e oracle bench-joins-polars --sizes 1000000,10000000 --threads 32`
+compares eleven join shapes with the installed Polars version. It includes dense
+and sparse Int64 keys, string and composite keys, unmatched left/right/full
+joins, semi/anti joins, duplicate matches, and a lazy join followed by a narrow
+projection. Both engines use the same generated CSV input; frame construction
+is outside join timing, and row counts and numeric totals must agree.
+
+For CPU profiling, build `benchmarks/bench_join_matrix.mojo` and pass a case
+name as its fourth argument to run only that case.
