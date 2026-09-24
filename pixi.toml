@@ -67,6 +67,7 @@ bench-concat = "mojo run -I . benchmarks/bench_concat.mojo"
 bench-sort = "mojo run -I . benchmarks/bench_sort.mojo"
 bench-group-by = "mojo run -I . benchmarks/bench_group_by.mojo"
 bench-join = "mojo run -I . benchmarks/bench_join.mojo"
+bench-joins-polars = "python3 scripts/bench_join_polars.py"
 
 [feature.oracle.dependencies]
 polars = ">=1.0"
