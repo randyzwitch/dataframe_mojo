@@ -339,5 +339,46 @@ def test_validation() raises:
         _ = left.join(clash, "k1")
 
 
+def test_parallel_bounded_membership_preserves_order_and_nulls() raises:
+    var keys = List[Int64]()
+    var valid = List[Bool]()
+    var positions = List[Int64]()
+    for i in range(140_000):
+        keys.append(Int64(i % 512))
+        valid.append(i % 13 != 0)
+        positions.append(Int64(i))
+    var key = Series("k", Column[Int64](keys^, valid^))
+    var row = Series("row", Column[Int64](positions^))
+    var left = DataFrame(
+        [
+            key.slice(0, 70_000).append(key.slice(70_000, 70_000)),
+            row.slice(0, 70_000).append(row.slice(70_000, 70_000)),
+        ]
+    )
+    var right_keys = List[Int64]()
+    var right_valid = List[Bool]()
+    for i in range(1_024):
+        right_keys.append(Int64((i % 128) * 2))
+        right_valid.append(i % 11 != 0)
+    var right = DataFrame(
+        [Series("k", Column[Int64](right_keys^, right_valid^))]
+    )
+    var semi = left.join(right, "k", how="semi")
+    var anti = left.join(right, "k", how="anti")
+    var semi_at = 0
+    var anti_at = 0
+    for i in range(140_000):
+        var key_value = i % 512
+        var matched = i % 13 != 0 and key_value < 256 and key_value % 2 == 0
+        if matched:
+            assert_equal(semi.item(semi_at, "row").int64(), Int64(i))
+            semi_at += 1
+        else:
+            assert_equal(anti.item(anti_at, "row").int64(), Int64(i))
+            anti_at += 1
+    assert_equal(semi.height(), semi_at)
+    assert_equal(anti.height(), anti_at)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

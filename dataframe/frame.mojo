@@ -677,7 +677,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 how == "semi",
             )
             if membership[0]:
-                return self.take(membership[1])
+                return self._filter_rows(membership[1].copy())
         var ids = _joint_key_ids(self, right, left_keys, right_keys)
         var left_ids = ids[0].copy()
         var right_ids = ids[1].copy()
@@ -1491,6 +1491,48 @@ def _range_join_span_fits(low: Int64, high: Int64, cap: Int) -> Bool:
     return UInt64(high) + UInt64(-low) < UInt64(cap)
 
 
+struct _RangeMembershipJob(Job):
+    """Select one contiguous left range using a shared presence table."""
+
+    var left: Column[Int64]
+    var present: ArcPointer[List[UInt8]]
+    var low: Int64
+    var high: Int64
+    var want_match: Bool
+    var start: Int
+    var end: Int
+    var rows: List[Int]
+
+    def __init__(
+        out self,
+        left: Column[Int64],
+        present: ArcPointer[List[UInt8]],
+        low: Int64,
+        high: Int64,
+        want_match: Bool,
+        start: Int,
+        end: Int,
+    ):
+        self.left = left.copy()
+        self.present = present.copy()
+        self.low = low
+        self.high = high
+        self.want_match = want_match
+        self.start = start
+        self.end = end
+        self.rows = List[Int]()
+
+    def run(mut self) raises:
+        for row in range(self.start, self.end):
+            var matched = False
+            if self.left._valid(row):
+                var value = self.left._get(row)
+                if value >= self.low and value <= self.high:
+                    matched = self.present[][Int(value - self.low)] != 0
+            if matched == self.want_match:
+                self.rows.append(row)
+
+
 def _range_int64_membership_rows(
     left: Series, right: Series, want_match: Bool
 ) raises -> Tuple[Bool, List[Int]]:
@@ -1535,13 +1577,35 @@ def _range_int64_membership_rows(
     for row in range(len(right_values)):
         if right_values._valid(row):
             present[Int(right_values._get(row) - low)] = 1
-    for row in range(len(left_values)):
-        var matched = False
-        if left_values._valid(row):
-            var value = left_values._get(row)
-            if value >= low and value <= high:
-                matched = present[Int(value - low)] != 0
-        if matched == want_match:
+    var workers = worker_count(len(left_values))
+    if workers == 1:
+        for row in range(len(left_values)):
+            var matched = False
+            if left_values._valid(row):
+                var value = left_values._get(row)
+                if value >= low and value <= high:
+                    matched = present[Int(value - low)] != 0
+            if matched == want_match:
+                rows.append(row)
+        return (True, rows^)
+    var shared = ArcPointer(present^)
+    var bounds = partitions(len(left_values), workers, 1)
+    var jobs = List[_RangeMembershipJob](capacity=workers)
+    for worker in range(workers):
+        jobs.append(
+            _RangeMembershipJob(
+                left_values,
+                shared,
+                low,
+                high,
+                want_match,
+                bounds[worker],
+                bounds[worker + 1],
+            )
+        )
+    run_jobs(jobs)
+    for worker in range(workers):
+        for row in jobs[worker].rows:
             rows.append(row)
     return (True, rows^)
 
