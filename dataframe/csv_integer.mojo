@@ -589,16 +589,21 @@ def _parse_csv_signed[
     raise Error("CSV integer overflow")
 
 
+# CSV column batches call these entry points for every field. Inlining lets
+# the typed batch loop share the parser's bounds and output checks.
+@always_inline
 def parse_csv_uint64(text: StringSlice) raises -> UInt64:
     """Parse unsigned CSV integers with strict full consumption."""
     return _parse_csv_unsigned[True](text, UInt64.MAX)
 
 
+@always_inline
 def parse_csv_int64(text: StringSlice) raises -> Int64:
     """Parse signed CSV integers with strict full consumption."""
     return _parse_csv_signed[True](text, UInt64(9223372036854775807))
 
 
+@always_inline
 def parse_csv_integer[D: DType](text: StringSlice) raises -> Scalar[D]:
     """CSV-only parse for native 8/16/32/64-bit integer dtypes."""
     comptime assert D.is_integral(), "parse_csv_integer needs an integer dtype"
