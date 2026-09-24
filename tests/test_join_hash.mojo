@@ -33,6 +33,20 @@ def test_bounded_int64_rows_keep_duplicates_nulls_and_extremes() raises:
     assert_equal(extreme[2], [0, 1])
 
 
+def test_parallel_bounded_index_keeps_duplicate_row_order() raises:
+    var keys = List[Int64](capacity=2_100_000)
+    var valid = List[Bool](capacity=2_100_000)
+    for row in range(2_100_000):
+        keys.append(Int64(row if row < 2_000_000 else row - 2_000_000))
+        valid.append(row != 2_000_001)
+    var build = Series("k", Column[Int64](keys^, valid^))
+    var probe = Series("k", Column[Int64]([0, 1, 99_999, 1_999_999, 2_000_000]))
+    var rows = _bounded_int64_join_rows(probe, build, True)
+    assert_equal(rows[0], True)
+    assert_equal(rows[1], [0, 0, 1, 2, 2, 3, 4])
+    assert_equal(rows[2], [0, 2_000_000, 1, 99_999, 2_099_999, 1_999_999, -1])
+
+
 def test_integer_duplicates_nulls_and_unmatched() raises:
     var left = Series(
         "k", Column[Int64]([5, 1, 5, 9, 0], [True, True, True, False, True])
