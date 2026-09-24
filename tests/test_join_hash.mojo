@@ -2,6 +2,7 @@
 from std.testing import TestSuite, assert_equal
 from dataframe import Column, DataFrame, Series
 from dataframe.join_hash import direct_hash_join_rows
+from dataframe.partition import Partitioner
 
 
 def test_integer_duplicates_nulls_and_unmatched() raises:
@@ -17,6 +18,29 @@ def test_integer_duplicates_nulls_and_unmatched() raises:
     var outer = direct_hash_join_rows([left.copy()], [right.copy()], True)
     assert_equal(outer[0], [0, 0, 1, 2, 2, 3, 4])
     assert_equal(outer[1], [0, 1, 2, 0, 1, -1, -1])
+
+
+def test_hash_slot_collision_does_not_match_different_values() raises:
+    var values = List[Int64]()
+    for i in range(1_000):
+        values.append(Int64(i))
+    var source = Series("k", Column[Int64](values^))
+    var hashes = Partitioner([source.copy()], 1)
+    var collision = -1
+    for i in range(1, 1_000):
+        if hashes.hashes[i] >> 63 == hashes.hashes[0] >> 63 and hashes.hashes[
+            i
+        ] & UInt64(1) == hashes.hashes[0] & UInt64(1):
+            collision = i
+            break
+    assert_equal(collision >= 0, True)
+    var left = Series("k", Column[Int64]([Int64(collision)]))
+    var right = Series("k", Column[Int64]([0]))
+    var inner = direct_hash_join_rows([left.copy()], [right.copy()], False)
+    assert_equal(len(inner[0]), 0)
+    var outer = direct_hash_join_rows([left.copy()], [right.copy()], True)
+    assert_equal(outer[0], [0])
+    assert_equal(outer[1], [-1])
 
 
 def test_string_keys_are_exact_and_nulls_do_not_match() raises:
