@@ -688,18 +688,22 @@ struct DataFrame(Copyable, Sized, Writable):
         # would be hundreds of thousands of heap allocations on a
         # high-cardinality join. Ids appear in increasing row order, so a
         # counting sort preserves the match order the contract documents.
-        var right_starts = _group_index(right_ids, count)
-        var csr_workers = worker_count(len(right_ids))
-        # The stable range scatter adds an order list and one cursor per key.
-        # It wins only once its parallel scatter repays those buffers; keep
-        # the compact serial CSR below the measured 2M-right-row crossover.
-        var right_flat = _parallel_group_rows(
-            right_ids, right_starts, csr_workers
-        ) if (
-            how == "inner" and csr_workers > 1 and len(right_ids) >= 2_000_000
-        ) else _group_rows(
-            right_ids, right_starts
-        )
+        var right_starts = List[Int]()
+        var right_flat = List[Int]()
+        if how != "right":
+            right_starts = _group_index(right_ids, count)
+            var csr_workers = worker_count(len(right_ids))
+            # The stable range scatter adds an order list and one cursor per
+            # key. Keep the compact serial CSR below the 2M-row crossover.
+            right_flat = _parallel_group_rows(
+                right_ids, right_starts, csr_workers
+            ) if (
+                how == "inner"
+                and csr_workers > 1
+                and len(right_ids) >= 2_000_000
+            ) else _group_rows(
+                right_ids, right_starts
+            )
         var left_rows = List[Int]()
         var right_rows = List[Int]()
         if how == "semi" or how == "anti":
@@ -713,16 +717,31 @@ struct DataFrame(Copyable, Sized, Writable):
             return self.take(left_rows)
         if how == "right":
             var left_starts = _group_index(left_ids, count)
-            var left_flat = _group_rows(left_ids, left_starts)
-            for j in range(len(right_ids)):
-                var id = right_ids[j]
-                if id >= 0 and left_starts[id + 1] > left_starts[id]:
-                    for k in range(left_starts[id], left_starts[id + 1]):
-                        left_rows.append(left_flat[k])
+            var left_workers = worker_count(len(left_ids))
+            var left_flat = _parallel_group_rows(
+                left_ids, left_starts, left_workers
+            ) if (
+                left_workers > 1 and len(left_ids) >= 2_000_000
+            ) else _group_rows(
+                left_ids, left_starts
+            )
+            var right_workers = worker_count(len(right_ids))
+            if right_workers > 1:
+                var pairs = _parallel_join_rows(
+                    right_ids, left_starts, left_flat, right_workers, True
+                )
+                right_rows = pairs[0].copy()
+                left_rows = pairs[1].copy()
+            else:
+                for j in range(len(right_ids)):
+                    var id = right_ids[j]
+                    if id >= 0 and left_starts[id + 1] > left_starts[id]:
+                        for k in range(left_starts[id], left_starts[id + 1]):
+                            left_rows.append(left_flat[k])
+                            right_rows.append(j)
+                    else:
+                        left_rows.append(-1)
                         right_rows.append(j)
-                else:
-                    left_rows.append(-1)
-                    right_rows.append(j)
         elif (how == "inner" or how == "left") and worker_count(
             len(left_ids)
         ) > 1:
