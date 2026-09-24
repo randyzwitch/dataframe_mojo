@@ -264,6 +264,79 @@ def test_skewed_small_domain_uses_whole_encoding() raises:
     assert_true(not low_cardinality([unique_chunks^]))
 
 
+def test_fused_low_cardinality_sum_count_matches_serial() raises:
+    var source = frame(ROWS, 16)
+    var n_values = source.column("n").int64().to_list()
+    var n_valid = List[Bool](capacity=ROWS)
+    for i in range(ROWS):
+        n_valid.append(i % 5 != 2)
+    source = source.with_column(Series("n", Column[Int64](n_values^, n_valid^)))
+    for chunked in [False, True]:
+        var df = source.copy()
+        if chunked:
+            for name in ["i64", "v", "n"]:
+                var column = df.column(name)
+                var split = 37_001 if name != "v" else 61_003
+                df = df.with_column(
+                    Series._from_chunks(
+                        [
+                            column.slice(0, split),
+                            column.slice(split, ROWS - split),
+                        ]
+                    )
+                )
+        var expressions: List[Expr] = [
+            col("v").sum().alias("sum"),
+            col("n").count().alias("count"),
+        ]
+        for reversed in [False, True]:
+            if reversed:
+                expressions.reverse()
+            set_threads(1)
+            var serial = df.group_by("i64", maintain_order=True).agg(
+                expressions
+            )
+            set_threads(32)
+            var parallel = df.group_by("i64", maintain_order=True).agg(
+                expressions
+            )
+            assert_true(
+                serial.equals(parallel),
+                "fused low-cardinality result differs",
+            )
+            var unordered = df.group_by("i64").agg(expressions)
+            assert_true(
+                serial.equals(unordered),
+                "fused low-cardinality order differs",
+            )
+    # All-valid COUNT needs no payload read, regardless of its dtype.
+    for counted_name in ["b", "s"]:
+        var generic_count: List[Expr] = [
+            col("v").sum().alias("sum"),
+            col(counted_name).count().alias("count"),
+        ]
+        set_threads(1)
+        var serial_generic = source.group_by("i64").agg(generic_count)
+        set_threads(32)
+        assert_true(
+            serial_generic.equals(source.group_by("i64").agg(generic_count)),
+            "all-valid generic count differs",
+        )
+    # Counting a nullable Float64 column keeps the general reduction path.
+    var float_count: List[Expr] = [
+        col("v").sum().alias("sum"),
+        col("v").count().alias("count"),
+    ]
+    set_threads(1)
+    var serial_float_count = source.group_by("i64").agg(float_count)
+    set_threads(32)
+    assert_true(
+        serial_float_count.equals(source.group_by("i64").agg(float_count)),
+        "float count fallback differs",
+    )
+    set_threads(32)
+
+
 def test_direct_numeric_sum_count_matches_serial_with_nulls() raises:
     var df = frame(ROWS, ROWS // 10)
     var n_values = df.column("n").int64().to_list()

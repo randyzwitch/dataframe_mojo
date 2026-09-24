@@ -2318,13 +2318,15 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
 
 
 struct _DirectSumCountBucketJob(Job):
-    """Reduce one hash bucket by source row ID without gathering columns."""
+    """Reduce one hash bucket or input range without gathering columns."""
 
     var key: Series
     var values: Series
     var counted: Series
     var aligned: Bool
     var order: ArcPointer[List[Int]]
+    var identity: Bool
+    var count_all_valid: Bool
     var start: Int
     var end: Int
     var keys: List[Int64]
@@ -2342,12 +2344,16 @@ struct _DirectSumCountBucketJob(Job):
         order: ArcPointer[List[Int]],
         start: Int,
         end: Int,
+        identity: Bool = False,
+        count_all_valid: Bool = False,
     ):
         self.key = key.copy()
         self.values = values.copy()
         self.counted = counted.copy()
         self.aligned = aligned
         self.order = order.copy()
+        self.identity = identity
+        self.count_all_valid = count_all_valid
         self.start = start
         self.end = end
         self.keys = List[Int64]()
@@ -2361,7 +2367,7 @@ struct _DirectSumCountBucketJob(Job):
         mut self,
         key: Column[Int64],
         values: Column[Float64],
-        counted: Column[Int64],
+        count_valid: Bool,
         local: Int,
         row: Int,
         mut lookup: Dict[Int64, Int],
@@ -2384,7 +2390,7 @@ struct _DirectSumCountBucketJob(Job):
             self.firsts.append(row)
         if values._valid(local):
             self.sums[group].add(values._get(local))
-        if counted._valid(local):
+        if count_valid:
             self.counts[group] += 1
 
     def run(mut self) raises:
@@ -2401,12 +2407,25 @@ struct _DirectSumCountBucketJob(Job):
         if not self.aligned:
             ref key = key_source._data[Column[Int64]]
             ref values = value_source._data[Column[Float64]]
-            ref counted = count_source._data[Column[Int64]]
-            for i in range(self.start, self.end):
-                var row = order[i]
-                self._add_row(
-                    key, values, counted, row, row, lookup, null_group
-                )
+            if self.count_all_valid:
+                for i in range(self.start, self.end):
+                    var row = i if self.identity else order[i]
+                    self._add_row(
+                        key, values, True, row, row, lookup, null_group
+                    )
+            else:
+                ref counted = count_source._data[Column[Int64]]
+                for i in range(self.start, self.end):
+                    var row = i if self.identity else order[i]
+                    self._add_row(
+                        key,
+                        values,
+                        counted._valid(row),
+                        row,
+                        row,
+                        lookup,
+                        null_group,
+                    )
             return
         ref key_chunks = key_source._chunked.value()[]
         ref value_chunks = value_source._chunked.value()[]
@@ -2417,13 +2436,33 @@ struct _DirectSumCountBucketJob(Job):
             var end = key_chunks.ends[c]
             ref key = key_chunks.arrays[c][Column[Int64]]
             ref values = value_chunks.arrays[c][Column[Float64]]
-            ref counted = count_chunks.arrays[c][Column[Int64]]
-            while i < self.end and order[i] < end:
-                var row = order[i]
-                self._add_row(
-                    key, values, counted, row - base, row, lookup, null_group
-                )
-                i += 1
+            if self.count_all_valid:
+                while i < self.end and (i if self.identity else order[i]) < end:
+                    var row = i if self.identity else order[i]
+                    self._add_row(
+                        key,
+                        values,
+                        True,
+                        row - base,
+                        row,
+                        lookup,
+                        null_group,
+                    )
+                    i += 1
+            else:
+                ref counted = count_chunks.arrays[c][Column[Int64]]
+                while i < self.end and (i if self.identity else order[i]) < end:
+                    var row = i if self.identity else order[i]
+                    self._add_row(
+                        key,
+                        values,
+                        counted._valid(row - base),
+                        row - base,
+                        row,
+                        lookup,
+                        null_group,
+                    )
+                    i += 1
             if i == self.end:
                 break
             base = end
@@ -2575,8 +2614,7 @@ struct GroupBy(Copyable):
         var height = self._frame.height()
         # A sampled estimate decides whether scattering is worth its gather;
         # on a low-cardinality key the serial encode it replaces is cheap.
-        if low_cardinality(self._keys):
-            return self._agg_whole(bound, batch_size)
+        var whole = low_cardinality(self._keys)
         # This common reduction shape can read original rows by hash bucket
         # instead of gathering the key and both value columns first.
         if (
@@ -2594,17 +2632,29 @@ struct GroupBy(Copyable):
                     nodes[1].op == SUM
                     and nodes[1].min_count == 0
                     and bound[e].dtypes[0] == DataType.FLOAT64
+                    and self._frame._columns[bound[e].sources[0]].dtype()
+                    == DataType.FLOAT64
                 ):
                     sum_expr = e
                 elif (
                     nodes[1].op == COUNT
-                    and bound[e].dtypes[0] == DataType.INT64
+                    and bound[e].dtypes[1] == DataType.INT64
+                    and (
+                        self._frame._columns[bound[e].sources[0]].dtype()
+                        == DataType.INT64
+                        or self._frame._columns[
+                            bound[e].sources[0]
+                        ].null_count()
+                        == 0
+                    )
                 ):
                     count_expr = e
             if sum_expr >= 0 and count_expr >= 0:
                 return self._agg_direct_sum_count(
-                    bound, sum_expr, count_expr, workers
+                    bound, sum_expr, count_expr, workers, identity=whole
                 )
+        if whole:
+            return self._agg_whole(bound, batch_size)
         var partitioner = Partitioner(self._keys, workers)
         var parts = partitioner.scatter(workers)
         var buckets = parts.buckets()
@@ -2681,12 +2731,17 @@ struct GroupBy(Copyable):
         sum_expr: Int,
         count_expr: Int,
         workers: Int,
+        identity: Bool = False,
     ) raises -> DataFrame:
-        var partitioner = Partitioner(self._keys, workers)
-        var parts = partitioner.scatter(workers)
+        """Fuse sum and count over input ranges for small key domains.
+
+        High-cardinality keys still use disjoint hash buckets. Input-range
+        workers merge only one state per local group afterward.
+        """
         var key = self._keys[0].copy()
         var values = self._frame._columns[bound[sum_expr].sources[0]].copy()
         var counted = self._frame._columns[bound[count_expr].sources[0]].copy()
+        var count_all_valid = counted.null_count() == 0
         var aligned = can_filter_float_chunks(
             [key.copy(), values.copy(), counted.copy()]
         )
@@ -2694,33 +2749,85 @@ struct GroupBy(Copyable):
             key = key.rechunk()
             values = values.rechunk()
             counted = counted.rechunk()
-        var bucket_count = parts.buckets()
-        var bounds = parts.bounds.copy()
-        var order = ArcPointer(parts.order.copy())
         var jobs = List[_DirectSumCountBucketJob]()
-        for b in range(bucket_count):
-            var lo = bounds[b]
-            var hi = bounds[b + 1]
-            if hi > lo:
+        if identity:
+            var empty_order = ArcPointer(List[Int]())
+            var row_bounds = partitions(self._frame.height(), workers, 64)
+            for w in range(workers):
                 jobs.append(
                     _DirectSumCountBucketJob(
-                        key, values, counted, aligned, order, lo, hi
+                        key,
+                        values,
+                        counted,
+                        aligned,
+                        empty_order,
+                        row_bounds[w],
+                        row_bounds[w + 1],
+                        identity=True,
+                        count_all_valid=count_all_valid,
                     )
                 )
+        else:
+            var partitioner = Partitioner(self._keys, workers)
+            var parts = partitioner.scatter(workers)
+            var bucket_count = parts.buckets()
+            var bounds = parts.bounds.copy()
+            var order = ArcPointer(parts.order.copy())
+            for b in range(bucket_count):
+                var lo = bounds[b]
+                var hi = bounds[b + 1]
+                if hi > lo:
+                    jobs.append(
+                        _DirectSumCountBucketJob(
+                            key,
+                            values,
+                            counted,
+                            aligned,
+                            order,
+                            lo,
+                            hi,
+                            count_all_valid=count_all_valid,
+                        )
+                    )
         run_jobs(jobs)
         var key_values = List[Int64]()
         var key_valid = List[Bool]()
         var sum_values = List[Float64]()
         var count_values = List[Int64]()
         var firsts = List[Int]()
-        for j in range(len(jobs)):
-            ref job = jobs[j]
-            for g in range(len(job.keys)):
-                key_values.append(job.keys[g])
-                key_valid.append(job.key_valid[g])
-                sum_values.append(job.sums[g].total)
-                count_values.append(job.counts[g])
-                firsts.append(job.firsts[g])
+        if identity:
+            var lookup = Dict[Int64, Int]()
+            var null_group = -1
+            for j in range(len(jobs)):
+                ref job = jobs[j]
+                for g in range(len(job.keys)):
+                    var valid = job.key_valid[g]
+                    var group = lookup.get(
+                        job.keys[g], -1
+                    ) if valid else null_group
+                    if group < 0:
+                        group = len(key_values)
+                        if valid:
+                            lookup[job.keys[g]] = group
+                        else:
+                            null_group = group
+                        key_values.append(job.keys[g])
+                        key_valid.append(valid)
+                        sum_values.append(0)
+                        count_values.append(0)
+                        firsts.append(job.firsts[g])
+                    sum_values[group] += job.sums[g].total
+                    count_values[group] += job.counts[g]
+                    firsts[group] = min(firsts[group], job.firsts[g])
+        else:
+            for j in range(len(jobs)):
+                ref job = jobs[j]
+                for g in range(len(job.keys)):
+                    key_values.append(job.keys[g])
+                    key_valid.append(job.key_valid[g])
+                    sum_values.append(job.sums[g].total)
+                    count_values.append(job.counts[g])
+                    firsts.append(job.firsts[g])
         var output = List[Series](capacity=3)
         output.append(
             Series(self._keys[0].name(), Column[Int64](key_values^, key_valid^))
@@ -2741,7 +2848,7 @@ struct GroupBy(Copyable):
                     )
                 )
         var result = DataFrame(output^, height=len(firsts))
-        if self._maintain_order:
+        if self._maintain_order or identity:
             return result.take(sort_indices([firsts^]))
         return result^
 
