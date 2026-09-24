@@ -314,11 +314,18 @@ struct _SortedChunkTakeJob(Job):
 
     var source: Series
     var indices: ArcPointer[List[Int]]
+    var allow_repeats: Bool
     var result: Series
 
-    def __init__(out self, source: Series, indices: ArcPointer[List[Int]]):
+    def __init__(
+        out self,
+        source: Series,
+        indices: ArcPointer[List[Int]],
+        allow_repeats: Bool,
+    ):
         self.source = source.copy()
         self.indices = indices.copy()
+        self.allow_repeats = allow_repeats
         self.result = source.copy()
 
     def run(mut self) raises:
@@ -337,7 +344,8 @@ struct _SortedChunkTakeJob(Job):
             # Filter indices are strictly increasing. Matching both endpoints
             # proves that this entire chunk is selected; retain its storage.
             if (
-                len(chunk) > 0
+                not self.allow_repeats
+                and len(chunk) > 0
                 and next_row + len(chunk) <= len(rows)
                 and rows[next_row] == offset
                 and rows[next_row + len(chunk) - 1] == end - 1
@@ -366,6 +374,7 @@ struct _SortedChunkPartJob(Job):
     var indices: ArcPointer[List[Int]]
     var first: Int
     var last: Int
+    var allow_repeats: Bool
     var result: Series
 
     def __init__(
@@ -374,11 +383,13 @@ struct _SortedChunkPartJob(Job):
         indices: ArcPointer[List[Int]],
         first: Int,
         last: Int,
+        allow_repeats: Bool,
     ):
         self.source = source.copy()
         self.indices = indices.copy()
         self.first = first
         self.last = last
+        self.allow_repeats = allow_repeats
         self.result = source.copy()
 
     def run(mut self) raises:
@@ -399,7 +410,8 @@ struct _SortedChunkPartJob(Job):
             var end = chunks.ends[i]
             var size = end - chunk_start
             if (
-                size > 0
+                not self.allow_repeats
+                and size > 0
                 and next_row + size <= len(rows)
                 and rows[next_row] == chunk_start
                 and rows[next_row + size - 1] == end - 1
@@ -433,7 +445,10 @@ struct _SortedChunkPartJob(Job):
 
 
 def _take_sorted_chunked_partitioned(
-    columns: List[Series], var indices: List[Int], parts: Int
+    columns: List[Series],
+    var indices: List[Int],
+    parts: Int,
+    allow_repeats: Bool = False,
 ) raises -> List[Series]:
     var shared = ArcPointer(indices^)
     var jobs = List[_SortedChunkPartJob](capacity=len(columns) * parts)
@@ -441,7 +456,9 @@ def _take_sorted_chunked_partitioned(
         var bounds = partitions(column.n_chunks(), parts, 1)
         for p in range(parts):
             jobs.append(
-                _SortedChunkPartJob(column, shared, bounds[p], bounds[p + 1])
+                _SortedChunkPartJob(
+                    column, shared, bounds[p], bounds[p + 1], allow_repeats
+                )
             )
     run_jobs(jobs)
     var result = List[Series](capacity=len(columns))
@@ -459,7 +476,10 @@ def _take_sorted_chunked_partitioned(
 
 
 def take_sorted_chunked(
-    columns: List[Series], var indices: List[Int], workers: Int
+    columns: List[Series],
+    var indices: List[Int],
+    workers: Int,
+    allow_repeats: Bool = False,
 ) raises -> List[Series]:
     """Filter source-ordered rows within physical chunks.
 
@@ -476,12 +496,12 @@ def take_sorted_chunked(
                     break
             if chunked:
                 return _take_sorted_chunked_partitioned(
-                    columns, indices^, parts
+                    columns, indices^, parts, allow_repeats
                 )
     var jobs = List[_SortedChunkTakeJob](capacity=len(columns))
     var shared = ArcPointer(indices^)
     for column in columns:
-        jobs.append(_SortedChunkTakeJob(column, shared))
+        jobs.append(_SortedChunkTakeJob(column, shared, allow_repeats))
     if workers > 1 and len(jobs) > 1:
         run_jobs(jobs)
     else:

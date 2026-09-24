@@ -726,9 +726,21 @@ struct DataFrame(Copyable, Sized, Writable):
                             left_identity = False
                             break
                 if not left_identity:
-                    columns = take_parallel(
-                        columns^, left_rows.copy(), workers, or_null=False
-                    )
+                    var ordered_chunks = how == "inner"
+                    for column in columns:
+                        if not column.is_chunked() or column.n_chunks() < 16:
+                            ordered_chunks = False
+                    if ordered_chunks:
+                        columns = take_sorted_chunked(
+                            columns^,
+                            left_rows.copy(),
+                            workers,
+                            allow_repeats=True,
+                        )
+                    else:
+                        columns = take_parallel(
+                            columns^, left_rows.copy(), workers, or_null=False
+                        )
                 var right_output_sources = List[Series]()
                 for c in right_output:
                     right_output_sources.append(right._columns[c].copy())
