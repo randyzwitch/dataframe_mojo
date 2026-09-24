@@ -1,0 +1,96 @@
+"""Exact row-hash join matches across nulls, duplicates, and key dtypes."""
+from std.testing import TestSuite, assert_equal
+from dataframe import Column, DataFrame, Series
+from dataframe.join_hash import direct_hash_join_rows
+
+
+def test_integer_duplicates_nulls_and_unmatched() raises:
+    var left = Series(
+        "k", Column[Int64]([5, 1, 5, 9, 0], [True, True, True, False, True])
+    )
+    var right = Series(
+        "k", Column[Int64]([5, 5, 1, 9], [True, True, True, False])
+    )
+    var inner = direct_hash_join_rows([left.copy()], [right.copy()], False)
+    assert_equal(inner[0], [0, 0, 1, 2, 2])
+    assert_equal(inner[1], [0, 1, 2, 0, 1])
+    var outer = direct_hash_join_rows([left.copy()], [right.copy()], True)
+    assert_equal(outer[0], [0, 0, 1, 2, 2, 3, 4])
+    assert_equal(outer[1], [0, 1, 2, 0, 1, -1, -1])
+
+
+def test_string_keys_are_exact_and_nulls_do_not_match() raises:
+    var left = Series(
+        "k",
+        Column[String](
+            ["a", "a much longer string", "a", "", "missing"],
+            [True, True, False, True, True],
+        ),
+    )
+    var right = Series(
+        "k",
+        Column[String](
+            ["a much longer string", "a", "", "a"],
+            [True, True, True, False],
+        ),
+    )
+    var rows = direct_hash_join_rows([left.copy()], [right.copy()], True)
+    assert_equal(rows[0], [0, 1, 2, 3, 4])
+    assert_equal(rows[1], [1, 0, -1, 2, -1])
+
+
+def test_composite_float_nan_and_signed_zero() raises:
+    var nan = Float64(0) / Float64(0)
+    var left_float = Series("f", Column[Float64]([nan, -0.0, 0.0, 1.0]))
+    var right_float = Series("f", Column[Float64]([nan, 0.0, -0.0, 1.0]))
+    var left_text = Series("s", Column[String](["x", "x", "y", "z"]))
+    var right_text = Series("s", Column[String](["x", "x", "y", "z"]))
+    var rows = direct_hash_join_rows(
+        [left_float.copy(), left_text.copy()],
+        [right_float.copy(), right_text.copy()],
+        False,
+    )
+    assert_equal(rows[0], [0, 1, 2, 3])
+    assert_equal(rows[1], [0, 1, 2, 3])
+
+
+def test_large_sparse_join_uses_exact_index_in_frame() raises:
+    var left_keys = List[Int64]()
+    var left_values = List[Int64]()
+    for i in range(140_000):
+        left_keys.append(Int64(i * 17))
+        left_values.append(Int64(i))
+    var right_keys = List[Int64]()
+    var right_values = List[Int64]()
+    for i in range(70_000):
+        right_keys.append(Int64(i * 17))
+        right_values.append(Int64(i * 3))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](left_keys^)),
+            Series("v", Column[Int64](left_values^)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64](right_keys^)),
+            Series("r", Column[Int64](right_values^)),
+        ]
+    )
+    var inner = left.join(right, "k")
+    assert_equal(inner.height(), 70_000)
+    for i in range(inner.height()):
+        assert_equal(inner.item(i, "v").int64(), Int64(i))
+        assert_equal(inner.item(i, "r").int64(), Int64(i * 3))
+    var outer = left.join(right, "k", how="left")
+    assert_equal(outer.height(), 140_000)
+    for i in range(outer.height()):
+        assert_equal(outer.item(i, "v").int64(), Int64(i))
+        if i < 70_000:
+            assert_equal(outer.item(i, "r").int64(), Int64(i * 3))
+        else:
+            assert_equal(outer.item(i, "r").is_null(), True)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
