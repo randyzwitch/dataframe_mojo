@@ -40,6 +40,7 @@ from .gather import (
 )
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
+from .join_hash import direct_hash_join_rows
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
@@ -659,7 +660,13 @@ struct DataFrame(Copyable, Sized, Writable):
                 var right_rows = dense[2].copy()
                 var workers = worker_count(len(left_rows))
                 var columns = self._columns.copy()
-                if len(left_rows) != self.height():
+                var left_identity = len(left_rows) == self.height()
+                if left_identity:
+                    for i in range(len(left_rows)):
+                        if left_rows[i] != i:
+                            left_identity = False
+                            break
+                if not left_identity:
                     columns = take_parallel(
                         columns^, left_rows.copy(), workers, or_null=True
                     )
@@ -680,6 +687,38 @@ struct DataFrame(Copyable, Sized, Writable):
             )
             if membership[0]:
                 return self._filter_rows(membership[1].copy())
+        # Dense ids over both inputs materialize and re-encode every key.
+        # For high-cardinality right keys, a row index probes the original
+        # columns directly and preserves exact equality across collisions.
+        if (how == "inner" or how == "left") and worker_count(
+            self.height()
+        ) > 1:
+            var left_sources = List[Series](capacity=len(left_keys))
+            var right_sources = List[Series](capacity=len(right_keys))
+            for k in range(len(left_keys)):
+                left_sources.append(self._columns[left_keys[k]].copy())
+                right_sources.append(right._columns[right_keys[k]].copy())
+            if not low_cardinality(right_sources):
+                var pairs = direct_hash_join_rows(
+                    left_sources, right_sources, how == "left"
+                )
+                var left_rows = pairs[0].copy()
+                var right_rows = pairs[1].copy()
+                var workers = worker_count(len(left_rows))
+                var columns = self._columns.copy()
+                if len(left_rows) != self.height():
+                    columns = take_parallel(
+                        columns^, left_rows.copy(), workers, or_null=True
+                    )
+                var right_output_sources = List[Series]()
+                for c in right_output:
+                    right_output_sources.append(right._columns[c].copy())
+                var gathered = take_parallel(
+                    right_output_sources, right_rows^, workers, or_null=True
+                )
+                for k in range(len(right_output)):
+                    columns.append(gathered[k].renamed(right_names[k]))
+                return Self(columns^, height=len(left_rows))
         var ids = _joint_key_ids(self, right, left_keys, right_keys)
         var left_ids = ids[0].copy()
         var right_ids = ids[1].copy()
