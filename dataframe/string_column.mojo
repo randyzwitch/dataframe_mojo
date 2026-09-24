@@ -125,6 +125,29 @@ struct StringColumn(Copyable, Sized):
             )
         )
 
+    def _equal_at(self, other: Self, i: Int, j: Int) -> Bool:
+        """Compare two valid row values without building borrowed slices."""
+        if not self._valid(i) or not other._valid(j):
+            return False
+        if self._is_view_storage() or other._is_view_storage():
+            return self._get(i) == other._get(j)
+        var left_start = Int(self._offsets[][self._offset + i])
+        var left_end = Int(self._offsets[][self._offset + i + 1])
+        var right_start = Int(other._offsets[][other._offset + j])
+        var right_end = Int(other._offsets[][other._offset + j + 1])
+        var length = left_end - left_start
+        if length != right_end - right_start:
+            return False
+        var left_bytes = self._bytes[].unsafe_ptr().unsafe_offset(left_start)
+        var right_bytes = other._bytes[].unsafe_ptr().unsafe_offset(right_start)
+        for at in range(length):
+            if (
+                left_bytes.unsafe_offset(at)[]
+                != right_bytes.unsafe_offset(at)[]
+            ):
+                return False
+        return True
+
     def _base(self) -> Pointer[UInt8, ImmutAnyOrigin]:
         assert not self._is_view_storage()
         return (
