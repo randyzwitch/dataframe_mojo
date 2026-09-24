@@ -1748,6 +1748,7 @@ struct _RangeJoinProbeJob(Job):
     var low: Int64
     var high: Int64
     var stride: UInt64
+    var unique_keys: Bool
     var start: Int
     var end: Int
     var include_unmatched: Bool
@@ -1762,6 +1763,7 @@ struct _RangeJoinProbeJob(Job):
         low: Int64,
         high: Int64,
         stride: UInt64,
+        unique_keys: Bool,
         start: Int,
         end: Int,
         include_unmatched: Bool,
@@ -1772,6 +1774,7 @@ struct _RangeJoinProbeJob(Job):
         self.low = low
         self.high = high
         self.stride = stride
+        self.unique_keys = unique_keys
         self.start = start
         self.end = end
         self.include_unmatched = include_unmatched
@@ -1788,10 +1791,14 @@ struct _RangeJoinProbeJob(Job):
                     if value >= self.low and value <= self.high:
                         j = self.heads[][Int(value - self.low)]
                 if j >= 0:
-                    while j >= 0:
+                    if self.unique_keys:
                         self.left_rows.append(i)
                         self.right_rows.append(j)
-                        j = self.next_rows[][j]
+                    else:
+                        while j >= 0:
+                            self.left_rows.append(i)
+                            self.right_rows.append(j)
+                            j = self.next_rows[][j]
                 elif self.include_unmatched:
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
@@ -1805,10 +1812,14 @@ struct _RangeJoinProbeJob(Job):
                     if distance % self.stride == 0:
                         j = self.heads[][Int(distance // self.stride)]
             if j >= 0:
-                while j >= 0:
+                if self.unique_keys:
                     self.left_rows.append(i)
                     self.right_rows.append(j)
-                    j = self.next_rows[][j]
+                else:
+                    while j >= 0:
+                        self.left_rows.append(i)
+                        self.right_rows.append(j)
+                        j = self.next_rows[][j]
             elif self.include_unmatched:
                 self.left_rows.append(i)
                 self.right_rows.append(-1)
@@ -1921,10 +1932,13 @@ def _bounded_int64_join_rows(
         fill=-1,
     )
     var next_rows = List[Int](length=len(right_values), fill=-1)
+    var unique_keys = True
     if dense:
         for j in range(len(right_values) - 1, -1, -1):
             if right_values._valid(j):
                 var slot = Int(right_values._get(j) - low)
+                if heads[slot] >= 0:
+                    unique_keys = False
                 next_rows[j] = heads[slot]
                 heads[slot] = j
     else:
@@ -1933,6 +1947,8 @@ def _bounded_int64_join_rows(
                 var slot = Int(
                     _int64_distance(low, right_values._get(j)) // stride
                 )
+                if heads[slot] >= 0:
+                    unique_keys = False
                 next_rows[j] = heads[slot]
                 heads[slot] = j
     var left_values = left.int64()
@@ -1950,6 +1966,7 @@ def _bounded_int64_join_rows(
                 low,
                 high,
                 stride,
+                unique_keys,
                 bounds[worker],
                 bounds[worker + 1],
                 include_unmatched,
