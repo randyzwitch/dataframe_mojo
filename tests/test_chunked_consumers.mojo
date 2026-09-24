@@ -1,6 +1,10 @@
 """Differential coverage for consumers of multi-array Series values."""
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
-from dataframe.gather import _take_sorted_chunked_partitioned, take_parallel
+from dataframe.gather import (
+    _take_sorted_chunked_partitioned,
+    take_parallel,
+    take_sorted_chunked,
+)
 from dataframe import (
     Column,
     DataFrame,
@@ -341,6 +345,29 @@ def test_partitioned_sorted_chunk_gather_preserves_order_and_nulls() raises:
     assert_same(actual, expected, "partitioned sorted chunk gather")
     assert_true(actual.column("id").is_chunked())
     assert_true(actual.column("label").is_chunked())
+
+    # The first chunk has exactly 64 selected positions and matching
+    # endpoints, but row 0 repeats and row 1 is absent. It cannot be shared
+    # as a whole chunk merely because its endpoints match.
+    var repeated = List[Int]([0, 0])
+    for i in range(2, 64):
+        repeated.append(i)
+    repeated.append(64)
+    repeated.append(64)
+    repeated.append(1023)
+    var repeat_expected = whole.take(repeated.copy())
+    var repeat_serial = DataFrame(
+        take_sorted_chunked(parts._columns, repeated.copy(), 4, True)
+    )
+    var repeat_partitioned = DataFrame(
+        _take_sorted_chunked_partitioned(parts._columns, repeated^, 4, True)
+    )
+    assert_same(repeat_serial, repeat_expected, "ordered repeated chunk gather")
+    assert_same(
+        repeat_partitioned,
+        repeat_expected,
+        "partitioned ordered repeated chunk gather",
+    )
 
 
 def test_parallel_expression_output_stays_chunked_and_reduces() raises:

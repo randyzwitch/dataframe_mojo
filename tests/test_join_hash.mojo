@@ -191,10 +191,17 @@ def test_direct_join_gathers_nonidentity_rows_at_equal_output_height() raises:
         left_values.append(Int64(i))
         right_keys.append(Int64(i // 2))
         right_values.append(Int64(i))
+    var key = Series("k", Column[Int64](left_keys^))
+    var value = Series("v", Column[Int64](left_values^))
+    var key_chunks = List[Series]()
+    var value_chunks = List[Series]()
+    for chunk in range(16):
+        key_chunks.append(key.slice(chunk * 8750, 8750))
+        value_chunks.append(value.slice(chunk * 8750, 8750))
     var left = DataFrame(
         [
-            Series("k", Column[Int64](left_keys^)),
-            Series("v", Column[Int64](left_values^)),
+            Series._from_chunks(key_chunks^),
+            Series._from_chunks(value_chunks^),
         ]
     )
     var right = DataFrame(
