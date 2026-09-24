@@ -177,22 +177,33 @@ def main() raises:
                 column,
             )
 
-    if only == "" or only == "left_sparse":
+    if only == "" or only == "left_sparse" or only == "right_sparse":
         var sparse_left = left.with_columns(
             (col("jk") * lit(Int64(17))).alias("jk")
         )
         var sparse_right = right.with_columns(
             ((col("jk") + lit(Int64(rows // 4))) * lit(Int64(17))).alias("jk")
         )
-        timed(
-            sparse_left,
-            sparse_right,
-            "left_sparse",
-            ["jk"],
-            "left",
-            repetitions,
-            "r",
-        )
+        if only == "" or only == "left_sparse":
+            timed(
+                sparse_left,
+                sparse_right,
+                "left_sparse",
+                ["jk"],
+                "left",
+                repetitions,
+                "r",
+            )
+        if only == "" or only == "right_sparse":
+            timed(
+                sparse_left,
+                sparse_right,
+                "right_sparse",
+                ["jk"],
+                "right",
+                repetitions,
+                "r",
+            )
 
     if only == "" or only == "inner_duplicate":
         var duplicates = right.with_columns(
