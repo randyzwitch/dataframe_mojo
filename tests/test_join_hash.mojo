@@ -141,5 +141,36 @@ def test_large_sparse_join_uses_exact_index_in_frame() raises:
             assert_equal(outer.item(i, "r").is_null(), True)
 
 
+def test_direct_join_gathers_nonidentity_rows_at_equal_output_height() raises:
+    var left_keys = List[Int64]()
+    var left_values = List[Int64]()
+    var right_keys = List[Int64]()
+    var right_values = List[Int64]()
+    for i in range(140_000):
+        left_keys.append(Int64(i))
+        left_values.append(Int64(i))
+        right_keys.append(Int64(i // 2))
+        right_values.append(Int64(i))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](left_keys^)),
+            Series("v", Column[Int64](left_values^)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64](right_keys^)),
+            Series("r", Column[Int64](right_values^)),
+        ]
+    )
+    var inner = left.join(right, "k")
+    assert_equal(inner.height(), left.height())
+    for i in range(70_000):
+        assert_equal(inner.item(2 * i, "v").int64(), Int64(i))
+        assert_equal(inner.item(2 * i + 1, "v").int64(), Int64(i))
+        assert_equal(inner.item(2 * i, "r").int64(), Int64(2 * i))
+        assert_equal(inner.item(2 * i + 1, "r").int64(), Int64(2 * i + 1))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

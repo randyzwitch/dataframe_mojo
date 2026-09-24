@@ -668,13 +668,13 @@ struct DataFrame(Copyable, Sized, Writable):
                             break
                 if not left_identity:
                     columns = take_parallel(
-                        columns^, left_rows.copy(), workers, or_null=True
+                        columns^, left_rows.copy(), workers, or_null=False
                     )
                 var right_sources = List[Series]()
                 for c in right_output:
                     right_sources.append(right._columns[c].copy())
                 var gathered = take_parallel(
-                    right_sources, right_rows^, workers, or_null=True
+                    right_sources, right_rows^, workers, or_null=how == "left"
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
@@ -719,15 +719,24 @@ struct DataFrame(Copyable, Sized, Writable):
             if direct:
                 var workers = worker_count(len(left_rows))
                 var columns = self._columns.copy()
-                if len(left_rows) != self.height():
+                var left_identity = len(left_rows) == self.height()
+                if left_identity:
+                    for i in range(len(left_rows)):
+                        if left_rows[i] != i:
+                            left_identity = False
+                            break
+                if not left_identity:
                     columns = take_parallel(
-                        columns^, left_rows.copy(), workers, or_null=True
+                        columns^, left_rows.copy(), workers, or_null=False
                     )
                 var right_output_sources = List[Series]()
                 for c in right_output:
                     right_output_sources.append(right._columns[c].copy())
                 var gathered = take_parallel(
-                    right_output_sources, right_rows^, workers, or_null=True
+                    right_output_sources,
+                    right_rows^,
+                    workers,
+                    or_null=how == "left",
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
@@ -845,7 +854,10 @@ struct DataFrame(Copyable, Sized, Writable):
         var columns = left_sources^
         if not left_identity:
             columns = take_parallel(
-                columns^, left_rows.copy(), gather_workers, or_null=True
+                columns^,
+                left_rows.copy(),
+                gather_workers,
+                or_null=sides_mixed,
             )
 
         # Right-side columns: the non-key output columns, plus any key
@@ -860,7 +872,10 @@ struct DataFrame(Copyable, Sized, Writable):
         for k in range(len(right_output)):
             right_sources.append(right._columns[right_output[k]].copy())
         var from_right = take_parallel(
-            right_sources, right_rows.copy(), gather_workers, or_null=True
+            right_sources,
+            right_rows.copy(),
+            gather_workers,
+            or_null=how == "left" or how == "full",
         )
 
         for j in range(len(coalesced)):
