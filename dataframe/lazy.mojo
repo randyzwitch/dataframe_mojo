@@ -5,14 +5,15 @@ precede parents). Nothing reads data until `collect`. Optimization rewrites
 the plan before execution:
 
 - predicate pushdown: filters move below with_columns/select that do not
-  produce the columns they read, and into the side of an inner join (or the
-  left side of a left/semi/anti join) that owns every column they read;
+  produce the columns they read, below a sort when they are row-local, and
+  into the side of an inner join (or the left side of a left/semi/anti join)
+  that owns every column they read;
   row-local filters directly above unrestricted CSV scans run per decode range;
 - projection pushdown: scans read only the columns the rest of the plan uses
   (CSV scans decode only those fields);
 - slice pushdown: a head/slice directly over a CSV scan becomes `n_rows`.
 
-Filters never move past a slice, sort, unique, group_by, or right/full join,
+Filters never move past a slice, unique, group_by, or right/full join,
 because that would change which rows those operators see.
 """
 from std.collections import Dict, Optional
@@ -299,6 +300,30 @@ struct LazyFrame(Copyable):
                     columns=node.names,
                 )
             return read_csv(node.text, n_rows=rows, columns=node.names)
+        # Keep a sort's row permutation until after a plain projection, so
+        # columns used only as sort keys are never gathered into output.
+        if node.kind == SELECT and not empty:
+            ref sorted = self._nodes[node.left]
+            if sorted.kind == SORT:
+                var plain = True
+                for expression in node.exprs:
+                    plain = plain and len(expression._nodes) == 1
+                    if len(expression._nodes) == 1:
+                        plain = plain and expression._nodes[0].op == COL
+                if plain:
+                    var source = self._execute(sorted.left, False)
+                    var n = len(sorted.names)
+                    var descending = List[Bool]()
+                    var nulls_last = List[Bool]()
+                    for i in range(n):
+                        descending.append(sorted.flags[i])
+                        nulls_last.append(sorted.flags[n + i])
+                    var order = source.arg_sort(
+                        sorted.names,
+                        descending=descending,
+                        nulls_last=nulls_last,
+                    )
+                    return source.select_exprs(node.exprs).take(order^)
         # Filter each decoded CSV range before assembling the scan result.
         # A row limit and a whole-column predicate require the original
         # materialization order, so retain the eager path for those cases.
@@ -405,6 +430,12 @@ struct LazyFrame(Copyable):
                         self._swap_down(i, child, False)
                         changed = True
                         break
+                elif below.kind == SORT and _row_local(self._nodes[i].exprs):
+                    # Stable sorting and a row-local filter commute: the
+                    # surviving rows retain the same relative sort order.
+                    self._swap_down(i, child, False)
+                    changed = True
+                    break
                 elif below.kind == JOIN and (
                     below.text == "inner"
                     or below.text == "left"
