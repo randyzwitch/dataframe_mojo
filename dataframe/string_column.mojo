@@ -274,6 +274,33 @@ struct StringColumn(Copyable, Sized):
                 builder._append_row(self, i)
         return builder^.finish()
 
+    def _take_range(
+        self,
+        indices: List[Int],
+        first: Int,
+        last: Int,
+        allow_missing: Bool,
+    ) raises -> Self:
+        """Gather a validated output range without copying its row indices."""
+        if self._is_view_storage():
+            var gathered = self._view_storage.value()._gather_range(
+                indices, first, last, self._offset, allow_missing
+            )
+            return Self(gathered^)
+        var total = 0
+        for at in range(first, last):
+            var row = indices[at]
+            if row != -1 or not allow_missing:
+                total += self._byte_length(row)
+        var builder = StringBuilder(last - first, total)
+        for at in range(first, last):
+            var row = indices[at]
+            if row == -1 and allow_missing:
+                builder.append_null()
+            else:
+                builder._append_row(self, row)
+        return builder^.finish()
+
     def slice(self, offset: Int, length: Int) raises -> Self:
         """A zero-copy window sharing this column's buffers."""
         if (

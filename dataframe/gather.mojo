@@ -503,12 +503,12 @@ struct _GatherJob(Job):
     def run(mut self) raises:
         ref rows = self.indices[]
         if self.source._data.isa[StringColumn]():
-            var subset = List[Int](capacity=self.end - self.start)
-            for k in range(self.start, self.end):
-                subset.append(rows[k])
-            self.piece = self.source.take_or_null(
-                subset
-            ) if self.or_null else self.source.take(subset)
+            self.piece = Series(
+                self.source.name(),
+                self.source._data[StringColumn]._take_range(
+                    rows, self.start, self.end, self.or_null
+                ),
+            )
             return
         var out_bits = Pointer[UInt8, MutAnyOrigin](
             unsafe_from_address=self.bits

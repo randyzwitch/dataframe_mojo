@@ -1,6 +1,8 @@
 """Focused Polars binary-view string layout and ownership checks."""
 from std.sys import size_of
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from dataframe import Series, StringColumn
+from dataframe.gather import take_parallel
 from dataframe.string_view import (
     STRING_VIEW_INLINE_BYTES,
     StringView,
@@ -88,6 +90,41 @@ def test_block_flush_preserves_prior_views_without_payload_copy() raises:
     var right = copied.buffers_arc()
     assert_equal(Int(left[][0][].unsafe_ptr()), Int(right[][0][].unsafe_ptr()))
     assert_equal(Int(left[][1][].unsafe_ptr()), Int(right[][1][].unsafe_ptr()))
+
+
+def test_parallel_view_gather_uses_index_ranges_and_keeps_nulls() raises:
+    var builder = StringViewBuilder(5)
+    append(builder, "zero")
+    append(builder, "thirteen-bytes")
+    builder.append_null()
+    append(builder, "three")
+    append(builder, "another long string")
+    var source = Series("s", StringColumn(builder^.finish()))
+    var rows: List[Int] = [
+        0,
+        1,
+        -1,
+        2,
+        3,
+        4,
+        -1,
+        1,
+        3,
+        0,
+        2,
+        4,
+        -1,
+        3,
+        1,
+        0,
+        4,
+        2,
+        -1,
+    ]
+    var gathered = take_parallel([source.copy()], rows.copy(), 3, or_null=True)
+    var expected = source.take_or_null(rows)
+    assert_true(gathered[0].equals(expected))
+    assert_equal(gathered[0].null_count(), expected.null_count())
 
 
 def main() raises:
