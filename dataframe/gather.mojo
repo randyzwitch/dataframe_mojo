@@ -477,6 +477,7 @@ struct _GatherJob(Job):
     var piece: Series  # string columns: the gathered range
     # A join's unmatched rows carry index -1, meaning "no row on this side".
     var or_null: Bool
+    var skip_validity: Bool
 
     def __init__(
         out self,
@@ -487,6 +488,7 @@ struct _GatherJob(Job):
         values: Int,
         bits: Int,
         or_null: Bool = False,
+        skip_validity: Bool = False,
     ):
         self.source = source.copy()
         self.indices = indices
@@ -496,6 +498,7 @@ struct _GatherJob(Job):
         self.bits = bits
         self.piece = source.copy()
         self.or_null = or_null
+        self.skip_validity = skip_validity
 
     def run(mut self) raises:
         ref rows = self.indices[]
@@ -516,6 +519,11 @@ struct _GatherJob(Job):
             var out = Pointer[UInt8, MutAnyOrigin](
                 unsafe_from_address=self.values
             )
+            if self.skip_validity:
+                for k in range(self.start, self.end):
+                    if column._get(rows[k]):
+                        out.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(k % 8)
+                return
             for k in range(self.start, self.end):
                 var row = rows[k]
                 if self.or_null and row < 0:
@@ -533,11 +541,17 @@ struct _GatherJob(Job):
                 var out = Pointer[Scalar[D], MutAnyOrigin](
                     unsafe_from_address=self.values
                 )
+                # Callers validate indices or construct them from source row positions.
+                var input = column._ptr()
+                if self.skip_validity:
+                    for k in range(self.start, self.end):
+                        out.unsafe_offset(k)[] = input.unsafe_offset(rows[k])[]
+                    return
                 for k in range(self.start, self.end):
                     var row = rows[k]
                     if self.or_null and row < 0:
                         continue
-                    out.unsafe_offset(k)[] = column._get(row)
+                    out.unsafe_offset(k)[] = input.unsafe_offset(row)[]
                     if column._valid(row):
                         out_bits.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(
                             k % 8
@@ -597,8 +611,17 @@ def take_parallel(
     # Preallocate each fixed-width output; strings are assembled from pieces.
     var outputs = List[Series](capacity=len(columns))
     var bits = List[List[UInt8]](capacity=len(columns))
+    var skip_validity = List[Bool](capacity=len(columns))
     for column in columns:
-        bits.append(List[UInt8](length=(m + 7) // 8, fill=0))
+        # An absent output bitmap means every gathered row is valid. Check
+        # once per column instead of reading and writing validity per row.
+        var all_valid = not or_null and column.null_count() == 0
+        skip_validity.append(all_valid)
+        bits.append(
+            List[UInt8]() if all_valid else List[UInt8](
+                length=(m + 7) // 8, fill=0
+            )
+        )
         outputs.append(_allocate(column, m))
     var jobs = List[_GatherJob](capacity=len(columns) * workers)
     for c in range(len(columns)):
@@ -613,6 +636,7 @@ def take_parallel(
                     values,
                     Int(bits[c].unsafe_ptr()),
                     or_null,
+                    skip_validity[c],
                 )
             )
     run_jobs(jobs)
