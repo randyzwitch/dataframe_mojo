@@ -278,6 +278,35 @@ def test_large_chunked_filter_with_misaligned_columns_and_null_mask() raises:
     )
 
 
+def test_filter_reuses_fully_selected_chunks() raises:
+    var numbers = List[Int64]()
+    var labels = List[String]()
+    var keep = List[Bool]()
+    for i in range(1536):
+        numbers.append(Int64(i))
+        labels.append(String("item_", i))
+        keep.append(i >= 512 and i < 1100)
+    var id = Series("id", Column[Int64](numbers^))
+    var label = Series("label", Column[String](labels^))
+    var whole = DataFrame([id.copy(), label.copy()])
+    var parts = DataFrame(
+        [
+            Series._from_chunks(
+                [id.slice(0, 512), id.slice(512, 512), id.slice(1024, 512)]
+            ),
+            Series._from_chunks(
+                [
+                    label.slice(0, 512),
+                    label.slice(512, 512),
+                    label.slice(1024, 512),
+                ]
+            ),
+        ]
+    )
+    var mask = Column[Bool](keep^)
+    assert_same(parts.filter(mask), whole.filter(mask), "whole chunk filter")
+
+
 def test_partitioned_sorted_chunk_gather_preserves_order_and_nulls() raises:
     var numbers = List[Int64]()
     var labels = List[String]()
@@ -303,7 +332,7 @@ def test_partitioned_sorted_chunk_gather_preserves_order_and_nulls() raises:
     )
     var rows = List[Int]()
     for i in range(1024):
-        if i % 3 == 0 or i == 1023:
+        if i % 3 == 0 or (256 <= i and i < 320) or i == 1023:
             rows.append(i)
     var expected = whole.take(rows.copy())
     var actual = DataFrame(
