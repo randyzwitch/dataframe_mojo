@@ -27,7 +27,10 @@ def test_bounded_int64_rows_keep_duplicates_nulls_and_extremes() raises:
     assert_equal(outer[1], [0, 0, 1, 2, 3, 4])
     assert_equal(outer[2], [0, 1, -1, 2, -1, -1])
     var wide = Series("k", Column[Int64]([Int64.MIN, Int64.MAX]))
-    assert_equal(_bounded_int64_join_rows(left, wide, False)[0], False)
+    var extreme = _bounded_int64_join_rows(left, wide, False)
+    assert_equal(extreme[0], True)
+    assert_equal(extreme[1], [0, 3])
+    assert_equal(extreme[2], [0, 1])
 
 
 def test_integer_duplicates_nulls_and_unmatched() raises:

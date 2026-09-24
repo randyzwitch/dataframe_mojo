@@ -1674,6 +1674,29 @@ def _range_join_span_fits(low: Int64, high: Int64, cap: Int) -> Bool:
     return UInt64(high) + UInt64(-low) < UInt64(cap)
 
 
+def _int64_distance(low: Int64, high: Int64) -> UInt64:
+    """Nonnegative distance between ordered Int64 values, without overflow."""
+    if low >= 0 or high < 0:
+        return UInt64(high - low)
+    return UInt64(-(low + 1)) + UInt64(high) + 1
+
+
+def _gcd_u64(a: UInt64, b: UInt64) -> UInt64:
+    var left = a
+    var right = b
+    while right != 0:
+        var remainder = left % right
+        left = right
+        right = remainder
+    return left
+
+
+def _strided_range_fits(
+    low: Int64, high: Int64, stride: UInt64, cap: Int
+) -> Bool:
+    return cap > 0 and _int64_distance(low, high) // stride < UInt64(cap)
+
+
 struct _RangeMembershipJob(Job):
     """Select one contiguous left range using a shared presence table."""
 
@@ -1724,6 +1747,7 @@ struct _RangeJoinProbeJob(Job):
     var next_rows: ArcPointer[List[Int]]
     var low: Int64
     var high: Int64
+    var stride: UInt64
     var start: Int
     var end: Int
     var include_unmatched: Bool
@@ -1737,6 +1761,7 @@ struct _RangeJoinProbeJob(Job):
         next_rows: ArcPointer[List[Int]],
         low: Int64,
         high: Int64,
+        stride: UInt64,
         start: Int,
         end: Int,
         include_unmatched: Bool,
@@ -1746,6 +1771,7 @@ struct _RangeJoinProbeJob(Job):
         self.next_rows = next_rows.copy()
         self.low = low
         self.high = high
+        self.stride = stride
         self.start = start
         self.end = end
         self.include_unmatched = include_unmatched
@@ -1754,12 +1780,30 @@ struct _RangeJoinProbeJob(Job):
 
     def run(mut self) raises:
         var all_valid = len(self.left._bits[]) == 0
+        if self.stride == 1:
+            for i in range(self.start, self.end):
+                var j = -1
+                if all_valid or self.left._valid(i):
+                    var value = self.left._get(i)
+                    if value >= self.low and value <= self.high:
+                        j = self.heads[][Int(value - self.low)]
+                if j >= 0:
+                    while j >= 0:
+                        self.left_rows.append(i)
+                        self.right_rows.append(j)
+                        j = self.next_rows[][j]
+                elif self.include_unmatched:
+                    self.left_rows.append(i)
+                    self.right_rows.append(-1)
+            return
         for i in range(self.start, self.end):
             var j = -1
             if all_valid or self.left._valid(i):
                 var value = self.left._get(i)
                 if value >= self.low and value <= self.high:
-                    j = self.heads[][Int(value - self.low)]
+                    var distance = _int64_distance(self.low, value)
+                    if distance % self.stride == 0:
+                        j = self.heads[][Int(distance // self.stride)]
             if j >= 0:
                 while j >= 0:
                     self.left_rows.append(i)
@@ -1785,11 +1829,14 @@ def _bounded_int64_join_rows(
         cap = len(right) * 4
     # A sample can prove a domain is too wide without rechunking or
     # scanning the full right key. The exact scan below still decides hits.
+    var sample_wide = False
     if right.dtype() == DataType.INT64:
         var sample_found = False
         var sample_low = Int64(0)
         var sample_high = Int64(0)
-        var stride = max(1, len(right) // 256)
+        var sample_anchor = Int64(0)
+        var sample_gcd = UInt64(0)
+        var sample_step = max(1, len(right) // 256)
         var row = 0
         while row < len(right):
             var cell = right.get(row)
@@ -1798,17 +1845,36 @@ def _bounded_int64_join_rows(
                 if not sample_found:
                     sample_low = value
                     sample_high = value
+                    sample_anchor = value
                     sample_found = True
                 else:
                     sample_low = min(sample_low, value)
                     sample_high = max(sample_high, value)
+                    sample_gcd = _gcd_u64(
+                        sample_gcd,
+                        _int64_distance(
+                            min(sample_anchor, value),
+                            max(sample_anchor, value),
+                        ),
+                    )
+                # A larger build side is better handled by the parallel
+                # hash index. Reject its wide raw domain before rechunking or
+                # scanning the whole column.
                 if not _range_join_span_fits(sample_low, sample_high, cap):
+                    sample_wide = True
+                    if len(left) < len(right):
+                        return (False, List[Int](), List[Int]())
+                if not _strided_range_fits(
+                    sample_low, sample_high, max(sample_gcd, UInt64(1)), cap
+                ):
                     return (False, List[Int](), List[Int]())
-            row += stride
+            row += sample_step
     var right_values = right.int64()
     var found = False
     var low = Int64(0)
     var high = Int64(0)
+    var anchor = Int64(0)
+    var gcd = UInt64(0)
     for j in range(len(right_values)):
         if not right_values._valid(j):
             continue
@@ -1816,21 +1882,59 @@ def _bounded_int64_join_rows(
         if not found:
             low = value
             high = value
+            anchor = value
             found = True
         else:
             low = min(low, value)
             high = max(high, value)
+            if sample_wide:
+                gcd = _gcd_u64(
+                    gcd,
+                    _int64_distance(min(anchor, value), max(anchor, value)),
+                )
     if not found:
         return (False, List[Int](), List[Int]())
-    if not _range_join_span_fits(low, high, cap):
-        return (False, List[Int](), List[Int]())
-    var heads = List[Int](length=Int(high - low) + 1, fill=-1)
+    var stride = UInt64(1)
+    var dense = _range_join_span_fits(low, high, cap)
+    if not dense:
+        # A strided index repays its extra scan only when the probe side is
+        # at least as large as the build side. Otherwise use the parallel
+        # hash index, which builds from larger inputs more efficiently.
+        if len(left) < len(right):
+            return (False, List[Int](), List[Int]())
+        if not sample_wide:
+            # The sample missed an extreme key; calculate the stride now.
+            for j in range(len(right_values)):
+                if right_values._valid(j):
+                    var value = right_values._get(j)
+                    gcd = _gcd_u64(
+                        gcd,
+                        _int64_distance(min(anchor, value), max(anchor, value)),
+                    )
+        stride = max(gcd, UInt64(1))
+        if not _strided_range_fits(low, high, stride, cap):
+            return (False, List[Int](), List[Int]())
+    var heads = List[Int](
+        length=(Int(high - low) + 1) if dense else (
+            Int(_int64_distance(low, high) // stride) + 1
+        ),
+        fill=-1,
+    )
     var next_rows = List[Int](length=len(right_values), fill=-1)
-    for j in range(len(right_values) - 1, -1, -1):
-        if right_values._valid(j):
-            var slot = Int(right_values._get(j) - low)
-            next_rows[j] = heads[slot]
-            heads[slot] = j
+    if dense:
+        for j in range(len(right_values) - 1, -1, -1):
+            if right_values._valid(j):
+                var slot = Int(right_values._get(j) - low)
+                next_rows[j] = heads[slot]
+                heads[slot] = j
+    else:
+        for j in range(len(right_values) - 1, -1, -1):
+            if right_values._valid(j):
+                var slot = Int(
+                    _int64_distance(low, right_values._get(j)) // stride
+                )
+                next_rows[j] = heads[slot]
+                heads[slot] = j
     var left_values = left.int64()
     var workers = worker_count(len(left_values))
     var bounds = partitions(len(left_values), workers, 1)
@@ -1845,6 +1949,7 @@ def _bounded_int64_join_rows(
                 shared_next,
                 low,
                 high,
+                stride,
                 bounds[worker],
                 bounds[worker + 1],
                 include_unmatched,
