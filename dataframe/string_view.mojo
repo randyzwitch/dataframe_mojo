@@ -180,13 +180,26 @@ struct StringViewStorage(Copyable, Sized):
     def _gather(
         self, indices: List[Int], offset: Int, allow_missing: Bool = False
     ) raises -> Self:
+        return self._gather_range(
+            indices, 0, len(indices), offset, allow_missing
+        )
+
+    def _gather_range(
+        self,
+        indices: List[Int],
+        first: Int,
+        last: Int,
+        offset: Int,
+        allow_missing: Bool = False,
+    ) raises -> Self:
         """Copy descriptors/validity while retaining every referenced block.
 
         Arrow view descriptors use storage-local buffer indexes, so retaining
         the complete Arc buffer list leaves external descriptors unchanged.
         This is the zero-payload-copy gather route used by StringColumn.
         """
-        var views = List[StringView](capacity=len(indices))
+        var count = last - first
+        var views = List[StringView](capacity=count)
         var buffers = List[ArcPointer[List[UInt8]]](
             capacity=len(self._buffers[])
         )
@@ -195,9 +208,10 @@ struct StringViewStorage(Copyable, Sized):
         var bits = List[UInt8]()
         var total_bytes = 0
         var total_buffer_bytes = 0
-        for index in indices:
+        for at in range(first, last):
+            var index = indices[at]
             if index == -1 and allow_missing:
-                _append_validity_bit(bits, len(views), False, len(indices))
+                _append_validity_bit(bits, len(views), False, count)
                 views.append(StringView(0, 0, 0, 0))
                 continue
             if index < 0 or index >= self._length - offset:
@@ -208,7 +222,7 @@ struct StringViewStorage(Copyable, Sized):
                 bits,
                 len(views),
                 _validity_bit(self._bits[], source),
-                len(indices),
+                count,
             )
             total_bytes += Int(view.length)
             if not view.is_inline():
@@ -218,7 +232,7 @@ struct StringViewStorage(Copyable, Sized):
             views^,
             buffers^,
             bits^,
-            len(indices),
+            count,
             total_bytes,
             total_buffer_bytes,
         )
