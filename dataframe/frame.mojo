@@ -698,12 +698,25 @@ struct DataFrame(Copyable, Sized, Writable):
             for k in range(len(left_keys)):
                 left_sources.append(self._columns[left_keys[k]].copy())
                 right_sources.append(right._columns[right_keys[k]].copy())
-            if not low_cardinality(right_sources):
+            var left_rows = List[Int]()
+            var right_rows = List[Int]()
+            var direct = False
+            if len(left_keys) == 1:
+                var range_rows = _bounded_int64_join_rows(
+                    left_sources[0], right_sources[0], how == "left"
+                )
+                if range_rows[0]:
+                    direct = True
+                    left_rows = range_rows[1].copy()
+                    right_rows = range_rows[2].copy()
+            if not direct and not low_cardinality(right_sources):
                 var pairs = direct_hash_join_rows(
                     left_sources, right_sources, how == "left"
                 )
-                var left_rows = pairs[0].copy()
-                var right_rows = pairs[1].copy()
+                direct = True
+                left_rows = pairs[0].copy()
+                right_rows = pairs[1].copy()
+            if direct:
                 var workers = worker_count(len(left_rows))
                 var columns = self._columns.copy()
                 if len(left_rows) != self.height():
@@ -1603,6 +1616,153 @@ struct _RangeMembershipJob(Job):
                     matched = self.present[][Int(value - self.low)] != 0
             if matched == self.want_match:
                 self.rows.append(row)
+
+
+struct _RangeJoinProbeJob(Job):
+    """Match one left-row range against a bounded right Int64 index."""
+
+    var left: Column[Int64]
+    var heads: ArcPointer[List[Int]]
+    var next_rows: ArcPointer[List[Int]]
+    var low: Int64
+    var high: Int64
+    var start: Int
+    var end: Int
+    var include_unmatched: Bool
+    var left_rows: List[Int]
+    var right_rows: List[Int]
+
+    def __init__(
+        out self,
+        left: Column[Int64],
+        heads: ArcPointer[List[Int]],
+        next_rows: ArcPointer[List[Int]],
+        low: Int64,
+        high: Int64,
+        start: Int,
+        end: Int,
+        include_unmatched: Bool,
+    ):
+        self.left = left.copy()
+        self.heads = heads.copy()
+        self.next_rows = next_rows.copy()
+        self.low = low
+        self.high = high
+        self.start = start
+        self.end = end
+        self.include_unmatched = include_unmatched
+        self.left_rows = List[Int](capacity=end - start)
+        self.right_rows = List[Int](capacity=end - start)
+
+    def run(mut self) raises:
+        var all_valid = len(self.left._bits[]) == 0
+        for i in range(self.start, self.end):
+            var j = -1
+            if all_valid or self.left._valid(i):
+                var value = self.left._get(i)
+                if value >= self.low and value <= self.high:
+                    j = self.heads[][Int(value - self.low)]
+            if j >= 0:
+                while j >= 0:
+                    self.left_rows.append(i)
+                    self.right_rows.append(j)
+                    j = self.next_rows[][j]
+            elif self.include_unmatched:
+                self.left_rows.append(i)
+                self.right_rows.append(-1)
+
+
+def _bounded_int64_join_rows(
+    left: Series, right: Series, include_unmatched: Bool
+) raises -> Tuple[Bool, List[Int], List[Int]]:
+    """Direct-address right-row chains when its Int64 domain is compact."""
+    if (
+        left.dtype().physical() != DataType.INT64
+        or right.dtype().physical() != DataType.INT64
+        or len(right) == 0
+    ):
+        return (False, List[Int](), List[Int]())
+    var cap = 64_000_000
+    if len(right) < cap // 4:
+        cap = len(right) * 4
+    # A sample can prove a domain is too wide without rechunking or
+    # scanning the full right key. The exact scan below still decides hits.
+    if right.dtype() == DataType.INT64:
+        var sample_found = False
+        var sample_low = Int64(0)
+        var sample_high = Int64(0)
+        var stride = max(1, len(right) // 256)
+        var row = 0
+        while row < len(right):
+            var cell = right.get(row)
+            if not cell.is_null():
+                var value = cell.int64()
+                if not sample_found:
+                    sample_low = value
+                    sample_high = value
+                    sample_found = True
+                else:
+                    sample_low = min(sample_low, value)
+                    sample_high = max(sample_high, value)
+                if not _range_join_span_fits(sample_low, sample_high, cap):
+                    return (False, List[Int](), List[Int]())
+            row += stride
+    var right_values = right.int64()
+    var found = False
+    var low = Int64(0)
+    var high = Int64(0)
+    for j in range(len(right_values)):
+        if not right_values._valid(j):
+            continue
+        var value = right_values._get(j)
+        if not found:
+            low = value
+            high = value
+            found = True
+        else:
+            low = min(low, value)
+            high = max(high, value)
+    if not found:
+        return (False, List[Int](), List[Int]())
+    if not _range_join_span_fits(low, high, cap):
+        return (False, List[Int](), List[Int]())
+    var heads = List[Int](length=Int(high - low) + 1, fill=-1)
+    var next_rows = List[Int](length=len(right_values), fill=-1)
+    for j in range(len(right_values) - 1, -1, -1):
+        if right_values._valid(j):
+            var slot = Int(right_values._get(j) - low)
+            next_rows[j] = heads[slot]
+            heads[slot] = j
+    var left_values = left.int64()
+    var workers = worker_count(len(left_values))
+    var bounds = partitions(len(left_values), workers, 1)
+    var shared_heads = ArcPointer(heads^)
+    var shared_next = ArcPointer(next_rows^)
+    var jobs = List[_RangeJoinProbeJob](capacity=workers)
+    for worker in range(workers):
+        jobs.append(
+            _RangeJoinProbeJob(
+                left_values,
+                shared_heads,
+                shared_next,
+                low,
+                high,
+                bounds[worker],
+                bounds[worker + 1],
+                include_unmatched,
+            )
+        )
+    run_jobs(jobs)
+    var total = 0
+    for worker in range(workers):
+        total += len(jobs[worker].left_rows)
+    var left_rows = List[Int](capacity=total)
+    var right_rows = List[Int](capacity=total)
+    for worker in range(workers):
+        for i in range(len(jobs[worker].left_rows)):
+            left_rows.append(jobs[worker].left_rows[i])
+            right_rows.append(jobs[worker].right_rows[i])
+    return (True, left_rows^, right_rows^)
 
 
 def _range_int64_membership_rows(
