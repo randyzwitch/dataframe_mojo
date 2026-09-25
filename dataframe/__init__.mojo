@@ -8,7 +8,7 @@ from .groups import GroupIndices
 from .value import AnyValue
 from .dtype import DataType
 from .temporal_kernels import date_range, datetime_range
-from .lazy import LazyFrame, LazyGroupBy, scan_csv
+from .lazy import LazyFrame, LazyGroupBy, scan_csv, scan_parquet
 
 from .expr import (
     Expr,
@@ -48,5 +48,6 @@ from .csv import (
 from .parquet import (
     parquet_backend_version,
     parquet_library_candidates,
+    parquet_row_group_statistics,
     read_parquet,
 )

@@ -135,15 +135,28 @@ Float64 accepts the standard parser's values, including `nan`, and only explicit
 ## Parquet ingestion
 
 `read_parquet(path)` reads a local Parquet file; `columns=[...]` selects
-fields in the order given. Integer and float widths, strings, booleans,
-dates and timestamps carry over with their nulls; nested columns and
-decimals are not supported yet.
+fields in the order given and `row_groups=[...]` selects row groups.
+Integer and float widths, strings, booleans, dates and timestamps carry
+over with their nulls. Dictionary columns arrive as plain strings, float16
+as float32, and a timestamp with a time zone as the same UTC instants
+without the zone. Nested columns, decimals and binary are not supported yet.
 
 ```mojo
-from dataframe import read_parquet
+from dataframe import read_parquet, scan_parquet, col, lit
 
 var frame = read_parquet("sales.parquet", columns=["region", "amount"])
+var recent = (
+    scan_parquet("sales.parquet")
+    .filter(col("amount") > lit(1000.0))
+    .select(["region", "amount"])
+    .collect()
+)
 ```
+
+`scan_parquet` defers the read to `collect()`: only the columns the plan
+uses are decoded, and a filter with constant bounds reads the footer's
+row-group statistics first and skips row groups that cannot match.
+`parquet_row_group_statistics(path)` returns those bounds as a frame.
 
 The reader is Arrow C++'s, built with only its Parquet parts and bundled
 codecs into `libdfparquet`, a 15 MB shared library with no dependencies

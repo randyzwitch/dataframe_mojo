@@ -832,6 +832,14 @@ Where `read_parquet` looks for its reader library, in order.
 def parquet_library_candidates() -> List[String]
 ```
 
+## `parquet_row_group_statistics`
+
+One row per row group of `path`, without decoding any data.
+
+```mojo
+def parquet_row_group_statistics(path: String) -> DataFrame
+```
+
 ## `read_csv`
 
 Read CSV through the Polars-derived scanner and typed builders.
@@ -849,7 +857,7 @@ def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overri
 Read a local Parquet file into a DataFrame.
 
 ```mojo
-def read_parquet(path: String, *, columns: List[String] = List(), use_threads: Bool = True) -> DataFrame
+def read_parquet(path: String, *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True) -> DataFrame
 ```
 
 ## `scan_csv`
@@ -862,6 +870,14 @@ def scan_csv(path: String) -> LazyFrame
 
 ```mojo
 def scan_csv(path: String, schema: CsvSchema) -> LazyFrame
+```
+
+## `scan_parquet`
+
+Lazily read a Parquet file. Nothing is read until collect; projection is pushed into the reader, and a filter directly above the scan decodes only the row groups whose footer statistics can hold a match.
+
+```mojo
+def scan_parquet(path: String) -> LazyFrame
 ```
 
 ## `Series`

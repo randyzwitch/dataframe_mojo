@@ -1,6 +1,6 @@
 # Lazy queries
 
-`frame.lazy()` or `scan_csv(path[, schema])` starts a `LazyFrame`. Its methods
+`frame.lazy()`, `scan_csv(path[, schema])` or `scan_parquet(path)` starts a `LazyFrame`. Its methods
 (`filter`, `select`, `select_exprs`, `with_columns`, `group_by(...).agg(...)`,
 `join`, `sort`, `slice`, `head`, `limit`, `unique`, `drop`) only record plan
 nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
@@ -36,6 +36,14 @@ scan without a schema still samples the file to infer types).
 - **Slice pushdown.** `head(n)` moves below row-local `select`/`with_columns`
   (no reductions, windows, or `over`), and a leading slice directly over a CSV
   scan becomes the reader's `n_rows`, so the rest of the file is not read.
+- **Row-group pruning.** A row-local filter directly above a Parquet scan
+  first reads the file's footer statistics (`parquet_row_group_statistics`)
+  and decodes only the row groups whose minimum and maximum admit a match.
+  Bounds are used for `col <op> literal` with `<`, `<=`, `>`, `>=`, `==` on
+  numbers and strings, joined with `&` and `|`; any other predicate, a
+  column without statistics, or a text bound the writer did not mark exact
+  keeps every group. The filter still runs on the rows that were read, so
+  pruning only changes how much is decoded, never the result.
 
 Tests check that optimized and unoptimized plans produce identical results for
 every rewrite. Other plan nodes still materialize their output through the eager API.
