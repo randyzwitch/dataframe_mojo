@@ -3,11 +3,63 @@ null pattern and cardinality, in order when asked and as a set otherwise."""
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_true
 
-from dataframe import Column, DataFrame, Expr, Series, col
+from dataframe import Column, DataFrame, Expr, Series, StringColumn, col
 from dataframe.parallel import MIN_ROWS_PER_WORKER, worker_count
-from dataframe.partition import low_cardinality
+from dataframe.partition import _hash_column, low_cardinality
+from dataframe.string_view import StringViewBuilder
 
 comptime ROWS = 200_000
+
+
+def test_string_hash_agrees_across_storage_and_slices() raises:
+    var texts: List[String] = [
+        "",
+        "a",
+        "ab",
+        "abc",
+        "abcd",
+        "abcde",
+        "abcdef",
+        "abcdefg",
+        "abcdefgh",
+        "abcdefghi",
+        "é",
+        "",
+        "abcdefgh",
+    ]
+    var valid: List[Bool] = [
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        True,
+        False,
+        True,
+    ]
+    var contiguous = Series("s", StringColumn(texts.copy(), valid.copy()))
+    var builder = StringViewBuilder(len(texts))
+    for i in range(len(texts)):
+        if valid[i]:
+            builder.append(StringSlice(texts[i]))
+        else:
+            builder.append_null()
+    var view = Series("s", StringColumn(builder^.finish()))
+    for offset in [0, 1, 5]:
+        var count = len(texts) - offset
+        var contiguous_slice = contiguous.slice(offset, count)
+        var view_slice = view.slice(offset, count)
+        var left = List[UInt64](length=count, fill=0)
+        var right = List[UInt64](length=count, fill=0)
+        _hash_column(contiguous_slice, 0, count, Int(left.unsafe_ptr()), True)
+        _hash_column(view_slice, 0, count, Int(right.unsafe_ptr()), True)
+        for i in range(count):
+            assert_equal(left[i], right[i])
 
 
 def c_string(text: String) -> List[UInt8]:
