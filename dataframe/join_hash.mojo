@@ -152,6 +152,8 @@ struct _HashProbeJob(Job):
     var start: Int
     var end: Int
     var include_unmatched: Bool
+    var omit_identity: Bool
+    var identity: Bool
     var left_rows: List[Int]
     var right_rows: List[Int]
 
@@ -165,6 +167,7 @@ struct _HashProbeJob(Job):
         start: Int,
         end: Int,
         include_unmatched: Bool,
+        omit_identity: Bool,
     ):
         self.left_keys = left_keys.copy()
         self.right_keys = right_keys.copy()
@@ -174,7 +177,15 @@ struct _HashProbeJob(Job):
         self.start = start
         self.end = end
         self.include_unmatched = include_unmatched
-        self.left_rows = List[Int](capacity=end - start)
+        self.omit_identity = (
+            omit_identity
+            and len(left_keys) == 1
+            and left_keys[0]._data.isa[StringColumn]()
+        )
+        self.identity = False
+        self.left_rows = List[Int](
+            capacity=0 if self.omit_identity else end - start
+        )
         self.right_rows = List[Int](capacity=end - start)
 
     def run(mut self) raises:
@@ -220,7 +231,50 @@ struct _HashProbeJob(Job):
         ):
             ref left = self.left_keys[0]._data[StringColumn]
             ref right = self.right_keys[0]._data[StringColumn]
-            for i in range(self.start, self.end):
+            var generic_start = self.start
+            # Emit only right positions while every input row has one output.
+            # Missing inner matches or duplicate right keys end this prefix.
+            if self.omit_identity:
+                var row = self.start
+                while row < self.end:
+                    if not left._valid(row):
+                        if self.include_unmatched:
+                            self.right_rows.append(-1)
+                            row += 1
+                            continue
+                        break
+                    var hash = self.left_hashes[][row]
+                    var bucket = Int(hash >> 56) >> self.fold
+                    ref index = self.buckets[][bucket]
+                    var position = Int(hash & UInt64(index.mask()))
+                    var matched_row = -1
+                    var duplicate = False
+                    while index.slots[position].row >= 0:
+                        ref slot = index.slots[position]
+                        var j = Int(slot.row)
+                        if hash == slot.key and left._equal_at(right, row, j):
+                            matched_row = j
+                            duplicate = slot.next_position >= 0
+                            break
+                        position = (position + 1) & index.mask()
+                    if matched_row >= 0 and not duplicate:
+                        self.right_rows.append(matched_row)
+                        row += 1
+                        continue
+                    if matched_row < 0 and self.include_unmatched:
+                        self.right_rows.append(-1)
+                        row += 1
+                        continue
+                    break
+                if row == self.end:
+                    self.identity = True
+                    return
+                # Materialize the prefix once, then use the ordinary path.
+                self.left_rows = List[Int](capacity=self.end - self.start)
+                for previous in range(self.start, row):
+                    self.left_rows.append(previous)
+                generic_start = row
+            for i in range(generic_start, self.end):
                 var hash = self.left_hashes[][i]
                 var bucket = Int(hash >> 56) >> self.fold
                 ref index = self.buckets[][bucket]
@@ -277,8 +331,13 @@ def direct_hash_join_rows(
     left_keys: List[Series],
     right_keys: List[Series],
     include_unmatched: Bool,
-) raises -> Tuple[List[Int], List[Int]]:
-    """Exact left-major matches through a read-only right-row hash index."""
+    omit_identity: Bool = False,
+) raises -> Tuple[List[Int], List[Int], Bool]:
+    """Exact left-major matches through a read-only right-row hash index.
+
+    The third result means every probe row appears exactly once in order;
+    when requested, the first list is then omitted as an implicit identity.
+    """
     if len(right_keys[0]) > Int(Int32.MAX):
         raise Error("Direct hash join exceeds 32-bit row index capacity")
     var left = List[Series](capacity=len(left_keys))
@@ -330,16 +389,25 @@ def direct_hash_join_rows(
                 bounds[worker],
                 bounds[worker + 1],
                 include_unmatched,
+                omit_identity,
             )
         )
     run_jobs(jobs)
     var total = 0
+    var identity = omit_identity
     for worker in range(len(jobs)):
-        total += len(jobs[worker].left_rows)
-    var left_rows = List[Int](capacity=total)
+        total += len(jobs[worker].right_rows)
+        identity = identity and jobs[worker].identity
+    var left_rows = List[Int](capacity=0 if identity else total)
     var right_rows = List[Int](capacity=total)
     for worker in range(len(jobs)):
-        for i in range(len(jobs[worker].left_rows)):
-            left_rows.append(jobs[worker].left_rows[i])
-            right_rows.append(jobs[worker].right_rows[i])
-    return (left_rows^, right_rows^)
+        if not identity:
+            if jobs[worker].identity:
+                for row in range(jobs[worker].start, jobs[worker].end):
+                    left_rows.append(row)
+            else:
+                for row in jobs[worker].left_rows:
+                    left_rows.append(row)
+        for row in jobs[worker].right_rows:
+            right_rows.append(row)
+    return (left_rows^, right_rows^, identity)
