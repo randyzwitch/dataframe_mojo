@@ -1986,7 +1986,7 @@ def _bounded_int64_join_rows(
                 # scanning the whole column.
                 if not _range_join_span_fits(sample_low, sample_high, cap):
                     sample_wide = True
-                    if len(left) < len(right):
+                    if len(left) < len(right) and len(right) >= 2_000_000:
                         return (False, List[Int](), List[Int]())
                 if not _strided_range_fits(
                     sample_low, sample_high, max(sample_gcd, UInt64(1)), cap
@@ -2021,10 +2021,10 @@ def _bounded_int64_join_rows(
     var stride = UInt64(1)
     var dense = _range_join_span_fits(low, high, cap)
     if not dense:
-        # A strided index repays its extra scan only when the probe side is
-        # at least as large as the build side. Otherwise use the parallel
-        # hash index, which builds from larger inputs more efficiently.
-        if len(left) < len(right):
+        # A small strided domain can use direct addressing even when the
+        # probe side is shorter. For larger builds the parallel hash index
+        # avoids the serial strided scatter.
+        if len(left) < len(right) and len(right) >= 2_000_000:
             return (False, List[Int](), List[Int]())
         if not sample_wide:
             # The sample missed an extreme key; calculate the stride now.
