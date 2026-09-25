@@ -132,6 +132,27 @@ Float64 accepts the standard parser's values, including `nan`, and only explicit
 `write_csv(frame, path)` writes the inverse format: reading it back with
 `CsvSchema.of(frame)` reproduces the frame exactly.
 
+## Parquet ingestion
+
+`read_parquet(path)` reads a local Parquet file; `columns=[...]` selects
+fields in the order given. Integer and float widths, strings, booleans,
+dates and timestamps carry over with their nulls; nested columns and
+decimals are not supported yet.
+
+```mojo
+from dataframe import read_parquet
+
+var frame = read_parquet("sales.parquet", columns=["region", "amount"])
+```
+
+The reader is Arrow C++'s, built with only its Parquet parts and bundled
+codecs into `libdfparquet`, a 15 MB shared library with no dependencies
+beyond libc. It is loaded at run time, so nothing else in the package needs
+it. `pixi run -e native build-dfparquet` builds it into `build/dfparquet/`
+(a C++20 compiler, cmake and ninja are needed); `DATAFRAME_PARQUET_LIBRARY`
+points `read_parquet` at a library elsewhere. See `native/dfparquet/` and
+`dataframe/parquet.mojo` for the boundary a Mojo-native reader would replace.
+
 The reader consumes bounded file buffers and retains tokenizer state across
 them. Its scalar structural scanner is the correctness reference for later SIMD
 scanning and record-boundary-aware parallel decoding. See the complete
@@ -231,7 +252,7 @@ the Arrow C Data Interface (see [Arrow interchange](docs/arrow.md)); most
 dtypes export zero-copy. There are no performance claims yet.
 The underscore-prefixed fields are internal and must not be mutated by callers.
 
-There is no thread scheduler, Parquet reader, GPU execution, index
+There is no thread scheduler, Parquet writer, GPU execution, index
 alignment, implicit dtype coercion, or dataframe backend
 adapter. Build input columns in memory for this first version.
 

@@ -45,3 +45,8 @@ from .csv import (
     to_csv_string,
     write_csv,
 )
+from .parquet import (
+    parquet_backend_version,
+    parquet_library_candidates,
+    read_parquet,
+)
