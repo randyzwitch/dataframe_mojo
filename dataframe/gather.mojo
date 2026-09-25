@@ -685,8 +685,14 @@ struct _GatherJob(Job):
             )
             if self.skip_validity:
                 for k in range(self.start, self.end):
-                    if column._get(rows[k]):
-                        out.unsafe_offset(k // 8)[] |= UInt8(1) << UInt8(k % 8)
+                    var row = rows[k]
+                    if self.or_null and row < 0:
+                        continue
+                    var mask = UInt8(1) << UInt8(k % 8)
+                    if column._get(row):
+                        out.unsafe_offset(k // 8)[] |= mask
+                    if self.or_null:
+                        out_bits.unsafe_offset(k // 8)[] |= mask
                 return
             for k in range(self.start, self.end):
                 var row = rows[k]
@@ -709,7 +715,14 @@ struct _GatherJob(Job):
                 var input = column._ptr()
                 if self.skip_validity:
                     for k in range(self.start, self.end):
-                        out.unsafe_offset(k)[] = input.unsafe_offset(rows[k])[]
+                        var row = rows[k]
+                        if self.or_null and row < 0:
+                            continue
+                        out.unsafe_offset(k)[] = input.unsafe_offset(row)[]
+                        if self.or_null:
+                            out_bits.unsafe_offset(k // 8)[] |= UInt8(
+                                1
+                            ) << UInt8(k % 8)
                     return
                 for k in range(self.start, self.end):
                     var row = rows[k]
@@ -779,12 +792,11 @@ def take_parallel(
     for column in columns:
         # An absent output bitmap means every gathered row is valid. Check
         # once per column instead of reading and writing validity per row.
-        var all_valid = not or_null and column.null_count() == 0
-        skip_validity.append(all_valid)
+        var source_all_valid = column.null_count() == 0
+        skip_validity.append(source_all_valid)
         bits.append(
-            List[UInt8]() if all_valid else List[UInt8](
-                length=(m + 7) // 8, fill=0
-            )
+            List[UInt8]() if source_all_valid
+            and not or_null else List[UInt8](length=(m + 7) // 8, fill=0)
         )
         outputs.append(_allocate(column, m))
     var jobs = List[_GatherJob](capacity=len(columns) * workers)
