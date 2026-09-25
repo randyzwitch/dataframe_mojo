@@ -41,6 +41,14 @@ def test_layout_is_arrow_large_utf8() raises:
     assert_equal(column._byte_length(4), 6)
     assert_equal(column._byte_length(5), 5)
     assert_equal(column._bits[][0], UInt8(0b10110111))
+    var other = StringColumn(["b", "héllO", "🔥y"])
+    assert_true(column._equal_at(column, 0, 0))
+    assert_true(column._equal_at(column.slice(2, 3), 2, 0))
+    assert_false(column._equal_at(other, 0, 0))
+    assert_false(column._equal_at(other, 2, 1))
+    assert_false(column._equal_at(other, 5, 2))
+    assert_false(column._equal_at(column, 3, 1))
+    assert_true(column._equal_at(column, 1, 7))
 
 
 def native_sample() -> StringColumn:
@@ -71,6 +79,9 @@ def test_native_views_slice_gather_and_rechunk_retain_byte_blocks() raises:
     var window = column.slice(1, 4)
     assert_true(window._is_view_storage())
     assert_true(window._shares_buffers_with(column))
+    assert_true(window._equal_at(column, 0, 1))
+    assert_false(window._equal_at(column, 0, 0))
+    assert_false(window._equal_at(column, 1, 2))
     assert_equal(
         expected(window),
         ["a string beyond inline", "<null>", 'quoted, "escaped" field', "日本"],

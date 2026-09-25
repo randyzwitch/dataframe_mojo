@@ -193,6 +193,30 @@ struct _HashProbeJob(Job):
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
             return
+        if (
+            len(self.left_keys) == 1
+            and self.left_keys[0]._data.isa[StringColumn]()
+        ):
+            ref left = self.left_keys[0]._data[StringColumn]
+            ref right = self.right_keys[0]._data[StringColumn]
+            for i in range(self.start, self.end):
+                var hash = self.left_hashes[][i]
+                var bucket = Int(hash >> 56) >> self.fold
+                ref index = self.buckets[][bucket]
+                var position = index.heads[Int(hash & UInt64(index.mask()))]
+                var matched = False
+                while position >= 0:
+                    ref entry = index.entries[position]
+                    var j = entry.row
+                    if hash == entry.hash and left._equal_at(right, i, j):
+                        self.left_rows.append(i)
+                        self.right_rows.append(j)
+                        matched = True
+                    position = entry.next_position
+                if not matched and self.include_unmatched:
+                    self.left_rows.append(i)
+                    self.right_rows.append(-1)
+            return
         for i in range(self.start, self.end):
             var hash = self.left_hashes[][i]
             var bucket = Int(hash >> 56) >> self.fold
