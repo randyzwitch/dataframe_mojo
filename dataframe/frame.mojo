@@ -1775,7 +1775,11 @@ def _dense_right_int64_rows(
             row += 1
     if repeat == 0:
         repeat = run_length
-    if repeat > 1:
+    # Parallel mapping pays for its rechunk and row-list merge on large
+    # strided inputs; smaller progressions stay on the direct serial path.
+    if repeat > 1 or (
+        stride > 1 and len(left) >= 2_000_000 and worker_count(len(left)) > 1
+    ):
         var pairs = _repeated_progression_rows(
             left, base, stride, repeat, len(right), include_unmatched
         )
