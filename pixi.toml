@@ -48,6 +48,7 @@ mojo = ">=1.2.0.dev2026092105,<1.3"
 [dependencies]
 # What CI runs, matching the package's host and run dependencies above.
 mojo = ">=1.2.0.dev2026092105,<1.3"
+max = "==26.7.0.dev2026092105"
 
 [tasks]
 test = "bash scripts/run_tests.sh"
