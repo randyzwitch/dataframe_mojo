@@ -151,6 +151,26 @@ def test_strided_keys_reject_off_grid_probes_and_keep_duplicates() raises:
     assert_rows(extremes_left.join(extremes_right, "k"), [0, 2], [0, 1])
 
 
+def test_ordered_strided_right_keys_map_rows_without_an_index() raises:
+    var left = side(
+        [-120, -119, -60, 0, 60, 120, 0],
+        [True, True, True, True, True, True, False],
+        "left_row",
+    )
+    var right = side([-120, -60, 0, 60], [True, True, True, True], "right_row")
+    assert_rows(left.join(right, "k"), [0, 2, 3, 4], [0, 1, 2, 3])
+    assert_rows(
+        left.join(right, "k", "left"),
+        [0, 1, 2, 3, 4, 5, 6],
+        [0, -1, 1, 2, 3, -1, -1],
+    )
+    var extreme_left = side(
+        [Int64.MIN, -1, Int64.MAX], [True, True, True], "left_row"
+    )
+    var extreme_right = side([Int64.MIN, Int64.MAX], [True, True], "right_row")
+    assert_rows(extreme_left.join(extreme_right, "k"), [0, 2], [0, 1])
+
+
 def test_temporal_physical_int64_uses_the_same_dense_range() raises:
     var left = DataFrame(
         [
