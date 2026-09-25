@@ -59,8 +59,23 @@ def _combine(seed: UInt64, key: UInt64) -> UInt64:
     return _mix(seed ^ (key + 0x9E3779B97F4A7C15 + (seed << 6) + (seed >> 2)))
 
 
+def _short_hash(word: UInt64, length: Int) -> UInt64:
+    """Hash up to eight little-endian bytes plus their exact length."""
+    var mask = UInt64.MAX
+    if length < 8:
+        mask = (UInt64(1) << UInt64(length * 8)) - 1
+    return _mix(
+        (word & mask) ^ (UInt64(length) << 56) ^ UInt64(0xCBF29CE484222325)
+    )
+
+
 def _hash_bytes(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt64:
-    """FNV-1a over the bytes, then mixed."""
+    """Hash short strings by one packed word, longer strings by FNV-1a."""
+    if len(bytes) <= 8:
+        var word = UInt64(0)
+        for k in range(len(bytes)):
+            word |= UInt64(bytes[k]) << UInt64(k * 8)
+        return _short_hash(word, len(bytes))
     var h = UInt64(0xCBF29CE484222325)
     for k in range(len(bytes)):
         h = (h ^ UInt64(bytes[k])) * 0x100000001B3
@@ -110,6 +125,24 @@ def _hash_column(
                 write(i, UInt64(1) if bools._get(i) else UInt64(2))
         return
     ref strings = series._data[StringColumn]
+    if not strings._is_view_storage():
+        ref data = strings._bytes[]
+        for i in range(start, end):
+            if not strings._valid(i):
+                write(i, _NULL_KEY)
+                continue
+            var byte_start = strings._start(i)
+            var length = strings._end(i) - byte_start
+            if length <= 8 and byte_start <= len(data) - 8:
+                var word = bitcast[DType.uint64, 1](
+                    data.unsafe_ptr()
+                    .unsafe_offset(byte_start)
+                    .unsafe_load[width=8]()
+                )
+                write(i, _short_hash(word, length))
+            else:
+                write(i, _hash_bytes(strings._get(i).as_bytes()))
+        return
     for i in range(start, end):
         if not strings._valid(i):
             write(i, _NULL_KEY)
