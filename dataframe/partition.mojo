@@ -60,13 +60,11 @@ def _combine(seed: UInt64, key: UInt64) -> UInt64:
 
 
 def _short_hash(word: UInt64, length: Int) -> UInt64:
-    """Hash up to eight little-endian bytes plus their exact length."""
+    """Encode up to eight bytes and their length before the final mix."""
     var mask = UInt64.MAX
     if length < 8:
         mask = (UInt64(1) << UInt64(length * 8)) - 1
-    return _mix(
-        (word & mask) ^ (UInt64(length) << 56) ^ UInt64(0xCBF29CE484222325)
-    )
+    return (word & mask) ^ (UInt64(length) << 56) ^ UInt64(0xCBF29CE484222325)
 
 
 def _hash_bytes(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt64:
@@ -79,7 +77,7 @@ def _hash_bytes(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt64:
     var h = UInt64(0xCBF29CE484222325)
     for k in range(len(bytes)):
         h = (h ^ UInt64(bytes[k])) * 0x100000001B3
-    return _mix(h)
+    return h
 
 
 def _hash_column(
