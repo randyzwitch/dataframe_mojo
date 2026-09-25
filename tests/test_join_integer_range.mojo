@@ -2,7 +2,11 @@
 from std.testing import TestSuite, assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series
-from dataframe.frame import _range_int64_membership_rows
+from dataframe.frame import (
+    _dense_right_int64_rows,
+    _range_int64_membership_rows,
+)
+from dataframe.parallel import worker_count
 
 
 def side(
@@ -256,6 +260,29 @@ def test_temporal_physical_int64_uses_the_same_dense_range() raises:
         ]
     )
     assert_rows(left.join(right, "d"), [0], [1])
+
+
+def test_large_parallel_strided_probe_preserves_all_left_rows() raises:
+    var rows = 2_000_003
+    assert_true(worker_count(rows) > 1)
+    var keys = List[Int64](capacity=rows)
+    var valid = List[Bool](capacity=rows)
+    for i in range(rows):
+        keys.append(Int64((i % 6 - 2) * 60))
+        valid.append(i % 29 != 0)
+    var whole = Series("k", Column[Int64](keys^, valid^))
+    var left = Series._from_chunks(
+        [whole.slice(0, 770_001), whole.slice(770_001, rows - 770_001)]
+    )
+    var right = Series("k", Column[Int64]([-120, -60, 0, 60]))
+    var result = _dense_right_int64_rows(left, right, True)
+    assert_true(result[0])
+    assert_equal(len(result[1]), rows)
+    assert_equal(len(result[2]), rows)
+    for i in range(rows):
+        assert_equal(result[1][i], i)
+        var expected = i % 6 if i % 29 != 0 and i % 6 < 4 else -1
+        assert_equal(result[2][i], expected)
 
 
 def main() raises:
