@@ -308,6 +308,52 @@ struct _HashProbeJob(Job):
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
             return
+        if (
+            len(self.left_keys) == 2
+            and self.left_keys[0]._data.isa[Column[Int64]]()
+            and self.left_keys[1]._data.isa[Column[Int64]]()
+        ):
+            ref left_first = self.left_keys[0]._data[Column[Int64]]
+            ref left_second = self.left_keys[1]._data[Column[Int64]]
+            ref right_first = self.right_keys[0]._data[Column[Int64]]
+            ref right_second = self.right_keys[1]._data[Column[Int64]]
+            if (
+                len(left_first._bits[]) == 0
+                and len(left_second._bits[]) == 0
+                and len(right_first._bits[]) == 0
+                and len(right_second._bits[]) == 0
+            ):
+                for i in range(self.start, self.end):
+                    var first = left_first._get(i)
+                    var second = left_second._get(i)
+                    var hash = self.left_hashes[][i]
+                    var bucket = Int(hash >> 56) >> self.fold
+                    ref index = self.buckets[][bucket]
+                    var position = Int(hash & UInt64(index.mask()))
+                    var matched = False
+                    while index.slots[position].row >= 0:
+                        ref slot = index.slots[position]
+                        var j = Int(slot.row)
+                        if (
+                            hash == slot.key
+                            and first == right_first._get(j)
+                            and second == right_second._get(j)
+                        ):
+                            self.left_rows.append(i)
+                            self.right_rows.append(j)
+                            var next = Int(slot.next_position)
+                            while next >= 0:
+                                ref entry = index.duplicates[next]
+                                self.left_rows.append(i)
+                                self.right_rows.append(Int(entry.row))
+                                next = Int(entry.next_position)
+                            matched = True
+                            break
+                        position = (position + 1) & index.mask()
+                    if not matched and self.include_unmatched:
+                        self.left_rows.append(i)
+                        self.right_rows.append(-1)
+                return
         for i in range(self.start, self.end):
             var hash = self.left_hashes[][i]
             var bucket = Int(hash >> 56) >> self.fold
