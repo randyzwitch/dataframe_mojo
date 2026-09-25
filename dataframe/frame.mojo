@@ -840,7 +840,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 right_flat = _parallel_group_rows(
                     right_ids, right_starts, csr_workers
                 ) if (
-                    how == "inner"
+                    (how == "inner" or how == "full")
                     and csr_workers > 1
                     and len(right_ids) >= 2_000_000
                 ) else _group_rows(
@@ -884,6 +884,17 @@ struct DataFrame(Copyable, Sized, Writable):
                         else:
                             left_rows.append(-1)
                             right_rows.append(j)
+            elif how == "full" and worker_count(len(left_ids)) > 1:
+                var pairs = _parallel_full_join_rows(
+                    left_ids,
+                    right_ids,
+                    right_starts,
+                    right_flat,
+                    count,
+                    worker_count(len(left_ids)),
+                )
+                left_rows = pairs[0].copy()
+                right_rows = pairs[1].copy()
             elif (how == "inner" or how == "left") and worker_count(
                 len(left_ids)
             ) > 1:
@@ -2864,6 +2875,169 @@ def _parallel_join_rows(
             )
         )
     run_jobs(fills)
+    return (left_rows^, right_rows^)
+
+
+struct _UnmatchedRightCountJob(Job):
+    """Count right rows whose key never occurred on the left."""
+
+    var right_ids: ArcPointer[List[Int]]
+    var left_present: ArcPointer[List[Bool]]
+    var start: Int
+    var end: Int
+    var count: Int
+
+    def __init__(
+        out self,
+        right_ids: ArcPointer[List[Int]],
+        left_present: ArcPointer[List[Bool]],
+        start: Int,
+        end: Int,
+    ):
+        self.right_ids = right_ids.copy()
+        self.left_present = left_present.copy()
+        self.start = start
+        self.end = end
+        self.count = 0
+
+    def run(mut self) raises:
+        for row in range(self.start, self.end):
+            var key = self.right_ids[][row]
+            if key < 0 or not self.left_present[][key]:
+                self.count += 1
+
+
+struct _UnmatchedRightFillJob(Job):
+    """Append unmatched right rows in their original input order."""
+
+    var right_ids: ArcPointer[List[Int]]
+    var left_present: ArcPointer[List[Bool]]
+    var start: Int
+    var end: Int
+    var output: Int
+    var left_output: Int
+    var right_output: Int
+
+    def __init__(
+        out self,
+        right_ids: ArcPointer[List[Int]],
+        left_present: ArcPointer[List[Bool]],
+        start: Int,
+        end: Int,
+        output: Int,
+        left_output: Int,
+        right_output: Int,
+    ):
+        self.right_ids = right_ids.copy()
+        self.left_present = left_present.copy()
+        self.start = start
+        self.end = end
+        self.output = output
+        self.left_output = left_output
+        self.right_output = right_output
+
+    def run(mut self) raises:
+        ref left_rows = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.left_output
+        )[]
+        ref right_rows = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.right_output
+        )[]
+        var output = self.output
+        for row in range(self.start, self.end):
+            var key = self.right_ids[][row]
+            if key < 0 or not self.left_present[][key]:
+                left_rows[output] = -1
+                right_rows[output] = row
+                output += 1
+
+
+def _parallel_full_join_rows(
+    left_ids: List[Int],
+    right_ids: List[Int],
+    right_starts: List[Int],
+    right_flat: List[Int],
+    count: Int,
+    workers: Int,
+) raises -> Tuple[List[Int], List[Int]]:
+    """Full pairs in left-major order, then unmatched right input order."""
+    var present = List[Bool](length=count, fill=False)
+    for key in left_ids:
+        if key >= 0:
+            present[key] = True
+    var shared_left = ArcPointer(left_ids.copy())
+    var shared_right = ArcPointer(right_ids.copy())
+    var shared_starts = ArcPointer(right_starts.copy())
+    var shared_flat = ArcPointer(right_flat.copy())
+    var shared_present = ArcPointer(present^)
+    var left_bounds = partitions(len(left_ids), workers, 1)
+    var right_bounds = partitions(len(right_ids), workers, 1)
+    var left_counts = List[_JoinCountJob](capacity=workers)
+    var right_counts = List[_UnmatchedRightCountJob](capacity=workers)
+    for worker in range(workers):
+        left_counts.append(
+            _JoinCountJob(
+                shared_left,
+                shared_starts,
+                left_bounds[worker],
+                left_bounds[worker + 1],
+                True,
+            )
+        )
+        right_counts.append(
+            _UnmatchedRightCountJob(
+                shared_right,
+                shared_present,
+                right_bounds[worker],
+                right_bounds[worker + 1],
+            )
+        )
+    run_jobs(left_counts)
+    run_jobs(right_counts)
+    var left_outputs = List[Int](capacity=workers)
+    var right_outputs = List[Int](capacity=workers)
+    var total = 0
+    for worker in range(workers):
+        left_outputs.append(total)
+        if left_counts[worker].count > Int.MAX - total:
+            raise Error("Join output row count overflows")
+        total += left_counts[worker].count
+    for worker in range(workers):
+        right_outputs.append(total)
+        if right_counts[worker].count > Int.MAX - total:
+            raise Error("Join output row count overflows")
+        total += right_counts[worker].count
+    var left_rows = List[Int](length=total, fill=0)
+    var right_rows = List[Int](length=total, fill=0)
+    var left_fills = List[_JoinFillJob](capacity=workers)
+    var right_fills = List[_UnmatchedRightFillJob](capacity=workers)
+    for worker in range(workers):
+        left_fills.append(
+            _JoinFillJob(
+                shared_left,
+                shared_starts,
+                shared_flat,
+                left_bounds[worker],
+                left_bounds[worker + 1],
+                left_outputs[worker],
+                Int(Pointer(to=left_rows)),
+                Int(Pointer(to=right_rows)),
+                True,
+            )
+        )
+        right_fills.append(
+            _UnmatchedRightFillJob(
+                shared_right,
+                shared_present,
+                right_bounds[worker],
+                right_bounds[worker + 1],
+                right_outputs[worker],
+                Int(Pointer(to=left_rows)),
+                Int(Pointer(to=right_rows)),
+            )
+        )
+    run_jobs(left_fills)
+    run_jobs(right_fills)
     return (left_rows^, right_rows^)
 
 

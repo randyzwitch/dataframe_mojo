@@ -500,5 +500,56 @@ def test_parallel_right_join_preserves_match_and_unmatched_order() raises:
     assert_equal(result.height(), at)
 
 
+def test_parallel_full_join_preserves_both_unmatched_sides() raises:
+    var keys = List[Int64]()
+    var valid = List[Bool]()
+    var positions = List[Int64]()
+    for i in range(140_000):
+        keys.append(Int64(i % 16))
+        valid.append(i % 17 != 0)
+        positions.append(Int64(i))
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64](keys^, valid^)),
+            Series("left_row", Column[Int64](positions^)),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Int64](
+                    [Int64(2), 2, 4, 4, 6, 6, 99, 0],
+                    [True, True, True, True, True, True, True, False],
+                ),
+            ),
+            Series("right_row", Column[Int64]([0, 1, 2, 3, 4, 5, 6, 7])),
+        ]
+    )
+    var result = left.join(right, "k", how="full")
+    var at = 0
+    for i in range(140_000):
+        var matched = False
+        for j in range(6):
+            if i % 17 != 0 and i % 16 == (j // 2 + 1) * 2:
+                assert_equal(result.item(at, "left_row").int64(), Int64(i))
+                assert_equal(result.item(at, "right_row").int64(), Int64(j))
+                at += 1
+                matched = True
+        if not matched:
+            assert_equal(result.item(at, "left_row").int64(), Int64(i))
+            assert_true(result.item(at, "right_row").is_null())
+            at += 1
+    assert_true(result.item(at, "left_row").is_null())
+    assert_equal(result.item(at, "k").int64(), Int64(99))
+    assert_equal(result.item(at, "right_row").int64(), Int64(6))
+    at += 1
+    assert_true(result.item(at, "left_row").is_null())
+    assert_true(result.item(at, "k").is_null())
+    assert_equal(result.item(at, "right_row").int64(), Int64(7))
+    at += 1
+    assert_equal(result.height(), at)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
