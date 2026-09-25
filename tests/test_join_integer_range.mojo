@@ -2,6 +2,7 @@
 from std.testing import TestSuite, assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series
+from dataframe.frame import _range_int64_membership_rows
 
 
 def side(
@@ -57,6 +58,45 @@ def test_negative_holes_null_ids_and_every_join_order() raises:
     )
     assert_left_rows(left.join(right, "k", "semi"), [0, 3, 4])
     assert_left_rows(left.join(right, "k", "anti"), [1, 2])
+
+    var interval_left = side(
+        [-2, -1, 0, 1, 2, 3, 0],
+        [True, True, True, True, True, True, False],
+        "left_row",
+    )
+    var interval_right = side(
+        [-1, 0, 1, 2], [True, True, True, True], "right_row"
+    )
+    assert_left_rows(
+        interval_left.join(interval_right, "k", "semi"), [1, 2, 3, 4]
+    )
+    assert_left_rows(interval_left.join(interval_right, "k", "anti"), [0, 5, 6])
+
+    var probes = List[Int64]()
+    var expected_semi = List[Int]()
+    var expected_anti = List[Int]()
+    for row in range(140_000):
+        var key = Int64(row % 400 - 200)
+        probes.append(key)
+        if key >= -100 and key <= 100:
+            expected_semi.append(row)
+        else:
+            expected_anti.append(row)
+    var build = List[Int64]()
+    for key in range(-100, 101):
+        build.append(Int64(key))
+    var probe_series = Series("k", Column[Int64](probes^))
+    var build_series = Series("k", Column[Int64](build^))
+    var semi_rows = _range_int64_membership_rows(
+        probe_series, build_series, True
+    )
+    var anti_rows = _range_int64_membership_rows(
+        probe_series, build_series, False
+    )
+    assert_true(semi_rows[0])
+    assert_true(anti_rows[0])
+    assert_equal(semi_rows[1], expected_semi)
+    assert_equal(anti_rows[1], expected_anti)
 
 
 def test_all_null_int64_keys_have_no_hidden_group() raises:

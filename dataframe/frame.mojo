@@ -1710,12 +1710,13 @@ def _strided_range_fits(
 
 
 struct _RangeMembershipJob(Job):
-    """Select one contiguous left range using a shared presence table."""
+    """Select one left range using either an interval or presence table."""
 
     var left: Column[Int64]
     var present: ArcPointer[List[UInt8]]
     var low: Int64
     var high: Int64
+    var consecutive: Bool
     var want_match: Bool
     var start: Int
     var end: Int
@@ -1727,6 +1728,7 @@ struct _RangeMembershipJob(Job):
         present: ArcPointer[List[UInt8]],
         low: Int64,
         high: Int64,
+        consecutive: Bool,
         want_match: Bool,
         start: Int,
         end: Int,
@@ -1735,18 +1737,22 @@ struct _RangeMembershipJob(Job):
         self.present = present.copy()
         self.low = low
         self.high = high
+        self.consecutive = consecutive
         self.want_match = want_match
         self.start = start
         self.end = end
         self.rows = List[Int]()
 
     def run(mut self) raises:
+        var all_valid = len(self.left._bits[]) == 0
         for row in range(self.start, self.end):
             var matched = False
-            if self.left._valid(row):
+            if all_valid or self.left._valid(row):
                 var value = self.left._get(row)
                 if value >= self.low and value <= self.high:
-                    matched = self.present[][Int(value - self.low)] != 0
+                    matched = self.consecutive or (
+                        self.present[][Int(value - self.low)] != 0
+                    )
             if matched == self.want_match:
                 self.rows.append(row)
 
@@ -2071,8 +2077,8 @@ def _range_int64_membership_rows(
 ) raises -> Tuple[Bool, List[Int]]:
     """Direct-address membership for a bounded Int64 key range.
 
-    Existence joins need only a presence flag per key, not a grouped
-    right-row index. Duplicates in right are naturally idempotent.
+    Consecutive sorted right keys need only two bounds. Other bounded
+    domains use one presence flag per key; duplicates are idempotent.
     """
     if (
         left.dtype().physical() != DataType.INT64
@@ -2084,8 +2090,12 @@ def _range_int64_membership_rows(
     var found = False
     var low = Int64(0)
     var high = Int64(0)
+    var previous = Int64(0)
+    # A valid ascending run with unit steps covers every key in [low, high].
+    var consecutive = True
     for row in range(len(right_values)):
         if not right_values._valid(row):
+            consecutive = False
             continue
         var value = right_values._get(row)
         if not found:
@@ -2093,8 +2103,11 @@ def _range_int64_membership_rows(
             high = value
             found = True
         else:
+            if previous == Int64.MAX or value != previous + 1:
+                consecutive = False
             low = min(low, value)
             high = max(high, value)
+        previous = value
     var rows = List[Int](capacity=len(left_values))
     if not found:
         if not want_match:
@@ -2104,20 +2117,23 @@ def _range_int64_membership_rows(
     var cap = 64_000_000
     if len(right_values) < cap // 4:
         cap = len(right_values) * 4
-    if not _range_join_span_fits(low, high, cap):
+    if not consecutive and not _range_join_span_fits(low, high, cap):
         return (False, List[Int]())
-    var present = List[UInt8](length=Int(high - low) + 1, fill=0)
-    for row in range(len(right_values)):
-        if right_values._valid(row):
-            present[Int(right_values._get(row) - low)] = 1
+    var present = List[UInt8]()
+    if not consecutive:
+        present = List[UInt8](length=Int(high - low) + 1, fill=0)
+        for row in range(len(right_values)):
+            if right_values._valid(row):
+                present[Int(right_values._get(row) - low)] = 1
     var workers = worker_count(len(left_values))
     if workers == 1:
+        var all_valid = len(left_values._bits[]) == 0
         for row in range(len(left_values)):
             var matched = False
-            if left_values._valid(row):
+            if all_valid or left_values._valid(row):
                 var value = left_values._get(row)
                 if value >= low and value <= high:
-                    matched = present[Int(value - low)] != 0
+                    matched = consecutive or (present[Int(value - low)] != 0)
             if matched == want_match:
                 rows.append(row)
         return (True, rows^)
@@ -2131,6 +2147,7 @@ def _range_int64_membership_rows(
                 shared,
                 low,
                 high,
+                consecutive,
                 want_match,
                 bounds[worker],
                 bounds[worker + 1],
