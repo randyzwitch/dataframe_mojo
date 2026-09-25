@@ -146,18 +146,20 @@ def run_polars(data_dir: Path, rows: int, reps: int) -> dict:
     return results
 
 
-def check(rows: int, mojo: dict, polars: dict) -> None:
+def check(rows: int, mojo: dict, polars: dict, other_name: str = "Polars") -> None:
     for case in CASES:
         m_time, m_height, m_total = mojo[case]
         p_time, p_height, p_total = polars[case]
         if m_height != p_height:
             raise RuntimeError(
-                f"{case} @ {rows}: row count differs: Mojo {m_height}, Polars {p_height}"
+                f"{case} @ {rows}: row count differs: Mojo {m_height}, "
+                f"{other_name} {p_height}"
             )
         tolerance = 1e-8 * max(abs(m_total), abs(p_total), 1.0)
         if abs(m_total - p_total) > tolerance:
             raise RuntimeError(
-                f"{case} @ {rows}: total differs: Mojo {m_total}, Polars {p_total}"
+                f"{case} @ {rows}: total differs: Mojo {m_total}, "
+                f"{other_name} {p_total}"
             )
 
 

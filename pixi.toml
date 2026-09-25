@@ -68,6 +68,7 @@ bench-sort = "mojo run -I . benchmarks/bench_sort.mojo"
 bench-group-by = "mojo run -I . benchmarks/bench_group_by.mojo"
 bench-join = "mojo run -I . benchmarks/bench_join.mojo"
 bench-joins-polars = "python3 scripts/bench_join_polars.py"
+bench-joins-duckdb = "python3 scripts/bench_join_duckdb.py"
 
 [feature.oracle.dependencies]
 polars = ">=1.0"
@@ -78,6 +79,9 @@ python = ">=3.11"
 oracle = "python3 scripts/oracle.py"
 oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo"
 bench-polars = "python3 scripts/bench_polars.py"
+
+[feature.oracle.pypi-dependencies]
+duckdb = ">=1.5.5, <2"
 
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }

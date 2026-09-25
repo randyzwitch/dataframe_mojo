@@ -54,11 +54,21 @@ relies on.
 ## Broad join comparison
 
 `pixi run -e oracle bench-joins-polars --sizes 1000000,10000000 --threads 32`
-compares eleven join shapes with the installed Polars version. It includes dense
-and sparse Int64 keys, string and composite keys, unmatched left/right/full
-joins, semi/anti joins, duplicate matches, and a lazy join followed by a narrow
-projection. Both engines use the same generated CSV input; frame construction
-is outside join timing, and row counts and numeric totals must agree.
+compares thirteen join shapes with the installed Polars version. It includes
+dense and sparse Int64 keys, string and composite keys, unmatched
+left/right/full joins, semi/anti joins, duplicate matches, and a lazy join
+followed by a narrow projection. Both engines use the same generated CSV input;
+frame construction is outside join timing, and row counts and numeric totals
+must agree.
+
+`pixi run -e oracle bench-joins-duckdb --sizes 1000000,10000000 --reps 5 --threads 32`
+adds DuckDB to the same matrix. DuckDB times `CREATE TEMP TABLE AS SELECT` for
+each join, so the full result is materialized in DuckDB's native format without
+Arrow export. Input tables and derived keys are prepared outside timing. The
+DuckDB result's columns are checked against the expected projection, and all
+three engines must agree on row counts and numeric totals before results print.
+The DuckDB time includes creating and filling a temporary table, while Mojo and
+Polars produce their native dataframe results.
 
 For CPU profiling, build `benchmarks/bench_join_matrix.mojo` and pass a case
 name as its fourth argument to run only that case.
