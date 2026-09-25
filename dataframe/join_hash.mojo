@@ -231,6 +231,7 @@ struct _HashProbeJob(Job):
         ):
             ref left = self.left_keys[0]._data[StringColumn]
             ref right = self.right_keys[0]._data[StringColumn]
+            var all_valid = len(left._bits[]) == 0 and len(right._bits[]) == 0
             var generic_start = self.start
             # Emit only right positions while every input row has one output.
             # Missing inner matches or duplicate right keys end this prefix.
@@ -252,7 +253,11 @@ struct _HashProbeJob(Job):
                     while index.slots[position].row >= 0:
                         ref slot = index.slots[position]
                         var j = Int(slot.row)
-                        if hash == slot.key and left._equal_at(right, row, j):
+                        if hash == slot.key and (
+                            left._equal_at_valid(
+                                right, row, j
+                            ) if all_valid else left._equal_at(right, row, j)
+                        ):
                             matched_row = j
                             duplicate = slot.next_position >= 0
                             break
@@ -283,7 +288,11 @@ struct _HashProbeJob(Job):
                 while index.slots[position].row >= 0:
                     ref slot = index.slots[position]
                     var j = Int(slot.row)
-                    if hash == slot.key and left._equal_at(right, i, j):
+                    if hash == slot.key and (
+                        left._equal_at_valid(
+                            right, i, j
+                        ) if all_valid else left._equal_at(right, i, j)
+                    ):
                         self.left_rows.append(i)
                         self.right_rows.append(j)
                         var next = Int(slot.next_position)
