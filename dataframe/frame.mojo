@@ -35,8 +35,9 @@ from .gather import (
     take_sorted_chunked,
     true_rows,
     float_compare_rows,
-    can_filter_float_chunks,
+    can_filter_aligned_chunks,
     filter_float_chunks,
+    filter_range_int64_chunks,
 )
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
@@ -692,13 +693,25 @@ struct DataFrame(Copyable, Sized, Writable):
                     columns.append(gathered[k].renamed(right_names[k]))
                 return Self(columns^, height=len(left_rows))
         if (how == "semi" or how == "anti") and len(left_keys) == 1:
-            var membership = _range_int64_membership_rows(
-                self._columns[left_keys[0]],
-                right._columns[right_keys[0]],
-                how == "semi",
-            )
-            if membership[0]:
-                return self._filter_rows(membership[1].copy())
+            var aligned_chunks = can_filter_aligned_chunks(self._columns)
+            if aligned_chunks:
+                var chunk_membership = _range_int64_membership_chunks(
+                    self,
+                    left_keys[0],
+                    right._columns[right_keys[0]],
+                    how == "semi",
+                )
+                if chunk_membership[0]:
+                    var selected = chunk_membership[1].copy()
+                    return Self(selected^, height=len(selected[0]))
+            else:
+                var membership = _range_int64_membership_rows(
+                    self._columns[left_keys[0]],
+                    right._columns[right_keys[0]],
+                    how == "semi",
+                )
+                if membership[0]:
+                    return self._filter_rows(membership[1].copy())
         # Dense ids over both inputs materialize and re-encode every key.
         # For high-cardinality right keys, a row index probes the original
         # columns directly and preserves exact equality across collisions.
@@ -713,6 +726,7 @@ struct DataFrame(Copyable, Sized, Writable):
             var left_rows = List[Int]()
             var right_rows = List[Int]()
             var direct = False
+            var direct_identity = False
             if len(left_keys) == 1:
                 var range_rows = _bounded_int64_join_rows(
                     left_sources[0], right_sources[0], how == "left"
@@ -727,16 +741,22 @@ struct DataFrame(Copyable, Sized, Writable):
                 and not low_cardinality(right_sources)
             ):
                 var pairs = direct_hash_join_rows(
-                    left_sources, right_sources, how == "left"
+                    left_sources,
+                    right_sources,
+                    how == "left",
+                    omit_identity=True,
                 )
                 direct = True
+                direct_identity = pairs[2]
                 left_rows = pairs[0].copy()
                 right_rows = pairs[1].copy()
             if direct:
-                var workers = worker_count(len(left_rows))
+                var workers = worker_count(len(right_rows))
                 var columns = self._columns.copy()
-                var left_identity = len(left_rows) == self.height()
-                if left_identity:
+                var left_identity = (
+                    direct_identity or len(left_rows) == self.height()
+                )
+                if left_identity and not direct_identity:
                     for i in range(len(left_rows)):
                         if left_rows[i] != i:
                             left_identity = False
@@ -760,6 +780,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 var right_output_sources = List[Series]()
                 for c in right_output:
                     right_output_sources.append(right._columns[c].copy())
+                var output_height = len(right_rows)
                 var gathered = take_parallel(
                     right_output_sources,
                     right_rows^,
@@ -768,7 +789,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
-                return Self(columns^, height=len(left_rows))
+                return Self(columns^, height=output_height)
         # A right join is a left-major probe from the right input. Build on
         # the original left rows for high-cardinality keys, then swap the
         # resulting row lists back to the public output column order.
@@ -1136,7 +1157,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 and self._columns[bound.sources[node.left]].dtype()
                 == DataType.FLOAT64
             ):
-                if self._height >= 2_000_000 and can_filter_float_chunks(
+                if self._height >= 2_000_000 and can_filter_aligned_chunks(
                     self._columns
                 ):
                     var filtered = filter_float_chunks(
@@ -1762,7 +1783,11 @@ def _dense_right_int64_rows(
             row += 1
     if repeat == 0:
         repeat = run_length
-    if repeat > 1:
+    # Parallel mapping pays for its rechunk and row-list merge on large
+    # strided inputs; smaller progressions stay on the direct serial path.
+    if repeat > 1 or (
+        stride > 1 and len(left) >= 2_000_000 and worker_count(len(left)) > 1
+    ):
         var pairs = _repeated_progression_rows(
             left, base, stride, repeat, len(right), include_unmatched
         )
@@ -2256,26 +2281,27 @@ def _bounded_int64_join_rows(
     return (True, left_rows^, right_rows^)
 
 
-def _range_int64_membership_rows(
-    left: Series, right: Series, want_match: Bool
-) raises -> Tuple[Bool, List[Int]]:
-    """Direct-address membership for a bounded Int64 key range.
+@fieldwise_init
+struct _RangeMembershipDomain(Copyable):
+    var supported: Bool
+    var found: Bool
+    var low: Int64
+    var high: Int64
+    var consecutive: Bool
+    var present: List[UInt8]
 
-    Consecutive sorted right keys need only two bounds. Other bounded
-    domains use one presence flag per key; duplicates are idempotent.
-    """
-    if (
-        left.dtype().physical() != DataType.INT64
-        or right.dtype().physical() != DataType.INT64
-    ):
-        return (False, List[Int]())
+
+def _range_int64_membership_domain(
+    right: Series,
+) raises -> _RangeMembershipDomain:
+    """Describe a bounded right-key set, or report a wide domain."""
+    if right.dtype().physical() != DataType.INT64:
+        return _RangeMembershipDomain(False, False, 0, 0, False, List[UInt8]())
     var right_values = right.int64()
-    var left_values = left.int64()
     var found = False
     var low = Int64(0)
     var high = Int64(0)
     var previous = Int64(0)
-    # A valid ascending run with unit steps covers every key in [low, high].
     var consecutive = True
     for row in range(len(right_values)):
         if not right_values._valid(row):
@@ -2292,23 +2318,70 @@ def _range_int64_membership_rows(
             low = min(low, value)
             high = max(high, value)
         previous = value
-    var rows = List[Int](capacity=len(left_values))
-    if not found:
-        if not want_match:
-            for row in range(len(left_values)):
-                rows.append(row)
-        return (True, rows^)
     var cap = 64_000_000
     if len(right_values) < cap // 4:
         cap = len(right_values) * 4
-    if not consecutive and not _range_join_span_fits(low, high, cap):
-        return (False, List[Int]())
+    if found and not consecutive and not _range_join_span_fits(low, high, cap):
+        return _RangeMembershipDomain(
+            False, found, low, high, consecutive, List[UInt8]()
+        )
     var present = List[UInt8]()
-    if not consecutive:
+    if found and not consecutive:
         present = List[UInt8](length=Int(high - low) + 1, fill=0)
         for row in range(len(right_values)):
             if right_values._valid(row):
                 present[Int(right_values._get(row) - low)] = 1
+    return _RangeMembershipDomain(True, found, low, high, consecutive, present^)
+
+
+def _range_int64_membership_chunks(
+    left: DataFrame, key_column: Int, right: Series, want_match: Bool
+) raises -> Tuple[Bool, List[Series]]:
+    """Filter aligned left chunks from a bounded right Int64 domain."""
+    if left._columns[key_column].dtype().physical() != DataType.INT64:
+        return (False, List[Series]())
+    var domain = _range_int64_membership_domain(right)
+    if not domain.supported:
+        return (False, List[Series]())
+    return (
+        True,
+        filter_range_int64_chunks(
+            left._columns,
+            key_column,
+            domain.present.copy(),
+            domain.low,
+            domain.high,
+            domain.consecutive,
+            domain.found,
+            want_match,
+        ),
+    )
+
+
+def _range_int64_membership_rows(
+    left: Series, right: Series, want_match: Bool
+) raises -> Tuple[Bool, List[Int]]:
+    """Direct-address membership for a bounded Int64 key range.
+
+    Consecutive sorted right keys need only two bounds. Other bounded
+    domains use one presence flag per key; duplicates are idempotent.
+    """
+    if left.dtype().physical() != DataType.INT64:
+        return (False, List[Int]())
+    var domain = _range_int64_membership_domain(right)
+    if not domain.supported:
+        return (False, List[Int]())
+    var left_values = left.int64()
+    var rows = List[Int](capacity=len(left_values))
+    if not domain.found:
+        if not want_match:
+            for row in range(len(left_values)):
+                rows.append(row)
+        return (True, rows^)
+    var low = domain.low
+    var high = domain.high
+    var consecutive = domain.consecutive
+    var present = domain.present.copy()
     var workers = worker_count(len(left_values))
     if workers == 1:
         var all_valid = len(left_values._bits[]) == 0
@@ -3602,7 +3675,7 @@ struct GroupBy(Copyable):
             if not chunked and source.is_chunked():
                 return False
             inputs.append(source.copy())
-        if chunked and not can_filter_float_chunks(inputs):
+        if chunked and not can_filter_aligned_chunks(inputs):
             return False
         # Bound private states for each range. A strided sample catches
         # high-cardinality keys without a full key encoding pass.
@@ -3889,7 +3962,7 @@ struct GroupBy(Copyable):
         var values = self._frame._columns[bound[sum_expr].sources[0]].copy()
         var counted = self._frame._columns[bound[count_expr].sources[0]].copy()
         var count_all_valid = counted.null_count() == 0
-        var aligned = can_filter_float_chunks(
+        var aligned = can_filter_aligned_chunks(
             [key.copy(), values.copy(), counted.copy()]
         )
         if not aligned:

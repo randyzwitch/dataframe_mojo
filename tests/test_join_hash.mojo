@@ -1,9 +1,10 @@
 """Exact row-hash join matches across nulls, duplicates, and key dtypes."""
-from std.testing import TestSuite, assert_equal
+from std.testing import TestSuite, assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
 from dataframe.join_hash import direct_hash_join_rows
 from dataframe.frame import _bounded_int64_join_rows
 from dataframe.partition import Partitioner
+from dataframe.parallel import worker_count
 
 
 def test_bounded_int64_rows_keep_duplicates_nulls_and_extremes() raises:
@@ -126,6 +127,78 @@ def test_string_keys_are_exact_and_nulls_do_not_match() raises:
     var rows = direct_hash_join_rows([left.copy()], [right.copy()], True)
     assert_equal(rows[0], [0, 1, 2, 3, 4])
     assert_equal(rows[1], [1, 0, -1, 2, -1])
+
+
+def test_string_join_omits_identity_rows_and_falls_back_exactly() raises:
+    var left = Series("k", Column[String](["a", "b", "c"]))
+    var right = Series("k", Column[String](["c", "a", "b"]))
+    var one_to_one = direct_hash_join_rows(
+        [left.copy()], [right.copy()], False, omit_identity=True
+    )
+    assert_true(one_to_one[2])
+    assert_equal(len(one_to_one[0]), 0)
+    assert_equal(one_to_one[1], [1, 2, 0])
+
+    var partial = Series("k", Column[String](["a", "missing", "b"]))
+    var inner = direct_hash_join_rows(
+        [partial.copy()], [right.copy()], False, omit_identity=True
+    )
+    assert_equal(inner[2], False)
+    assert_equal(inner[0], [0, 2])
+    assert_equal(inner[1], [1, 2])
+    var outer = direct_hash_join_rows(
+        [partial.copy()], [right.copy()], True, omit_identity=True
+    )
+    assert_true(outer[2])
+    assert_equal(len(outer[0]), 0)
+    assert_equal(outer[1], [1, -1, 2])
+
+    var repeated = Series("k", Column[String](["a", "a", "b"]))
+    var duplicates = direct_hash_join_rows(
+        [partial.copy()], [repeated.copy()], False, omit_identity=True
+    )
+    assert_equal(duplicates[2], False)
+    assert_equal(duplicates[0], [0, 0, 2])
+    assert_equal(duplicates[1], [0, 1, 2])
+
+
+def test_parallel_string_identity_and_late_missing_row() raises:
+    var rows = 140_001
+    assert_true(worker_count(rows) > 1)
+    var keys = List[String](capacity=rows)
+    var values = List[Int64](capacity=rows)
+    for i in range(rows):
+        keys.append("key_" + String(i))
+        values.append(Int64(i))
+    var left_key = Series("k", Column[String](keys^))
+    var left_value = Series("v", Column[Int64](values^))
+    var right_key = left_key.copy()
+    var exact = direct_hash_join_rows(
+        [left_key.copy()], [right_key.copy()], False, omit_identity=True
+    )
+    assert_true(exact[2])
+    assert_equal(len(exact[0]), 0)
+    assert_equal(len(exact[1]), rows)
+    var left = DataFrame([left_key.copy(), left_value.copy()])
+    var right = DataFrame([right_key.copy()])
+    var joined = left.join(right, "k")
+    assert_equal(joined.height(), rows)
+    assert_true(
+        joined.column("v").int64()._shares_buffers_with(left_value.int64())
+    )
+
+    var short_right = right_key.slice(0, rows - 1)
+    var partial = direct_hash_join_rows(
+        [left_key.copy()], [short_right.copy()], False, omit_identity=True
+    )
+    assert_equal(partial[2], False)
+    assert_equal(len(partial[0]), rows - 1)
+    assert_equal(partial[0][0], 0)
+    assert_equal(partial[0][rows - 2], rows - 2)
+    assert_equal(partial[1][rows - 2], rows - 2)
+    var filtered = left.join(DataFrame([short_right.copy()]), "k")
+    assert_equal(filtered.height(), rows - 1)
+    assert_equal(filtered.item(rows - 2, "v").int64(), Int64(rows - 2))
 
 
 def test_open_address_string_duplicates_preserve_right_order() raises:

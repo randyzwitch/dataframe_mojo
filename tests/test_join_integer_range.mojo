@@ -2,7 +2,11 @@
 from std.testing import TestSuite, assert_equal, assert_true
 
 from dataframe import Column, DataFrame, DataType, Series
-from dataframe.frame import _range_int64_membership_rows
+from dataframe.frame import (
+    _dense_right_int64_rows,
+    _range_int64_membership_rows,
+)
+from dataframe.parallel import worker_count
 
 
 def side(
@@ -197,6 +201,49 @@ def test_ordered_equal_runs_join_without_an_index() raises:
     assert_rows(extreme.join(one_key, "k"), [0, 0], [0, 1])
 
 
+def test_aligned_chunk_membership_matches_general_row_selection() raises:
+    var key = Series(
+        "k",
+        Column[Int64](
+            [1, 2, 3, 4, 5, 6],
+            [True, True, True, True, True, False],
+        ),
+    )
+    var row = Series("left_row", Column[Int64]([0, 1, 2, 3, 4, 5]))
+    var label = Series("label", Column[String](["a", "b", "c", "d", "e", "f"]))
+    var whole = DataFrame([key.copy(), row.copy(), label.copy()])
+    var aligned = DataFrame(
+        [
+            Series._from_chunks([key.slice(0, 3), key.slice(3, 3)]),
+            Series._from_chunks([row.slice(0, 3), row.slice(3, 3)]),
+            Series._from_chunks([label.slice(0, 3), label.slice(3, 3)]),
+        ]
+    )
+    var unaligned = DataFrame(
+        [
+            Series._from_chunks([key.slice(0, 3), key.slice(3, 3)]),
+            Series._from_chunks([row.slice(0, 2), row.slice(2, 4)]),
+            Series._from_chunks([label.slice(0, 3), label.slice(3, 3)]),
+        ]
+    )
+    var holes = side([2, 4], [True, True], "right_row")
+    var interval = side([2, 3, 4], [True, True, True], "right_row")
+    var empty = side([0], [False], "right_row")
+    var wide = side([Int64.MIN, Int64.MAX], [True, True], "right_row")
+    var rights = List[DataFrame]()
+    rights.append(holes.copy())
+    rights.append(interval.copy())
+    rights.append(empty.copy())
+    rights.append(wide.copy())
+    for right in rights:
+        for how in [String("semi"), String("anti")]:
+            var expected = whole.join(right, "k", how)
+            assert_true(aligned.join(right, "k", how).equals(expected))
+            assert_true(unaligned.join(right, "k", how).equals(expected))
+    assert_left_rows(aligned.join(holes, "k", "semi"), [1, 3])
+    assert_left_rows(aligned.join(holes, "k", "anti"), [0, 2, 4, 5])
+
+
 def test_temporal_physical_int64_uses_the_same_dense_range() raises:
     var left = DataFrame(
         [
@@ -213,6 +260,29 @@ def test_temporal_physical_int64_uses_the_same_dense_range() raises:
         ]
     )
     assert_rows(left.join(right, "d"), [0], [1])
+
+
+def test_large_parallel_strided_probe_preserves_all_left_rows() raises:
+    var rows = 2_000_003
+    assert_true(worker_count(rows) > 1)
+    var keys = List[Int64](capacity=rows)
+    var valid = List[Bool](capacity=rows)
+    for i in range(rows):
+        keys.append(Int64((i % 6 - 2) * 60))
+        valid.append(i % 29 != 0)
+    var whole = Series("k", Column[Int64](keys^, valid^))
+    var left = Series._from_chunks(
+        [whole.slice(0, 770_001), whole.slice(770_001, rows - 770_001)]
+    )
+    var right = Series("k", Column[Int64]([-120, -60, 0, 60]))
+    var result = _dense_right_int64_rows(left, right, True)
+    assert_true(result[0])
+    assert_equal(len(result[1]), rows)
+    assert_equal(len(result[2]), rows)
+    for i in range(rows):
+        assert_equal(result[1][i], i)
+        var expected = i % 6 if i % 29 != 0 and i % 6 < 4 else -1
+        assert_equal(result[2][i], expected)
 
 
 def main() raises:

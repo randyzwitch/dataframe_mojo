@@ -206,7 +206,7 @@ def float_compare_rows(
     return rows^
 
 
-def can_filter_float_chunks(columns: List[Series]) -> Bool:
+def can_filter_aligned_chunks(columns: List[Series]) -> Bool:
     """Whether all columns share physical row boundaries for local filtering."""
     if len(columns) == 0 or not columns[0].is_chunked():
         return False
@@ -292,6 +292,121 @@ def filter_float_chunks(
     var jobs = List[_FloatChunkFilterJob]()
     for i in range(columns[0].n_chunks()):
         jobs.append(_FloatChunkFilterJob(shared, predicate, i, op, literal))
+    var pool = Pool(min(configured_workers(), len(jobs)))
+    pool.run(jobs)
+    pool.release()
+    var output = List[Series](capacity=len(columns))
+    for c in range(len(columns)):
+        var pieces = List[Series]()
+        for i in range(len(jobs)):
+            ref part = jobs[i].selected[c]
+            if len(part) > 0:
+                pieces.append(part.copy())
+        if len(pieces) == 0:
+            output.append(columns[c].slice(0, 0))
+        else:
+            output.append(Series._from_chunks(pieces^))
+    return output^
+
+
+struct _RangeMembershipChunkFilterJob(Job):
+    """Select one aligned chunk using Int64 membership and gather locally."""
+
+    var columns: ArcPointer[List[Series]]
+    var predicate: Int
+    var chunk: Int
+    var present: ArcPointer[List[UInt8]]
+    var low: Int64
+    var high: Int64
+    var consecutive: Bool
+    var found: Bool
+    var want_match: Bool
+    var selected: List[Series]
+
+    def __init__(
+        out self,
+        columns: ArcPointer[List[Series]],
+        predicate: Int,
+        chunk: Int,
+        present: ArcPointer[List[UInt8]],
+        low: Int64,
+        high: Int64,
+        consecutive: Bool,
+        found: Bool,
+        want_match: Bool,
+    ):
+        self.columns = columns.copy()
+        self.predicate = predicate
+        self.chunk = chunk
+        self.present = present.copy()
+        self.low = low
+        self.high = high
+        self.consecutive = consecutive
+        self.found = found
+        self.want_match = want_match
+        self.selected = List[Series]()
+
+    def run(mut self) raises:
+        ref columns = self.columns[]
+        ref key = (
+            columns[self.predicate]
+            ._chunked.value()[]
+            .arrays[self.chunk][Column[Int64]]
+        )
+        var rows = List[Int]()
+        var all_valid = len(key._bits[]) == 0
+        for i in range(len(key)):
+            var matched = False
+            if self.found and (all_valid or key._valid(i)):
+                var value = key._get(i)
+                if value >= self.low and value <= self.high:
+                    matched = self.consecutive or (
+                        self.present[][Int(value - self.low)] != 0
+                    )
+            if matched == self.want_match:
+                rows.append(i)
+        var selected = List[Series](capacity=len(columns))
+        for column in columns:
+            var part = Series(
+                column.name(),
+                column._chunked.value()[].arrays[self.chunk].copy(),
+                column.dtype(),
+            )
+            if len(rows) > 0:
+                selected.append(part.take(rows.copy()))
+            else:
+                selected.append(part.slice(0, 0))
+        self.selected = selected^
+
+
+def filter_range_int64_chunks(
+    columns: List[Series],
+    predicate: Int,
+    var present: List[UInt8],
+    low: Int64,
+    high: Int64,
+    consecutive: Bool,
+    found: Bool,
+    want_match: Bool,
+) raises -> List[Series]:
+    """Fuse bounded membership selection with aligned chunk gathers."""
+    var shared_columns = ArcPointer(columns.copy())
+    var shared_present = ArcPointer(present^)
+    var jobs = List[_RangeMembershipChunkFilterJob]()
+    for i in range(columns[0].n_chunks()):
+        jobs.append(
+            _RangeMembershipChunkFilterJob(
+                shared_columns,
+                predicate,
+                i,
+                shared_present,
+                low,
+                high,
+                consecutive,
+                found,
+                want_match,
+            )
+        )
     var pool = Pool(min(configured_workers(), len(jobs)))
     pool.run(jobs)
     pool.release()
