@@ -509,5 +509,31 @@ def test_parallel_float_sum_across_many_nullable_chunks() raises:
     )
 
 
+def test_shared_null_extension_bits_keep_source_nulls() raises:
+    var columns = List[Series]()
+    columns.append(Series("i", Column[Int64]([10, 20, 30])))
+    columns.append(Series("f", Column[Float64]([1.0, 2.0, 3.0])))
+    columns.append(Series("b", Column[Bool]([True, False, True])))
+    columns.append(
+        Series("nullable", Column[Int64]([4, 5, 6], [True, False, True]))
+    )
+    columns.append(Series("s", Column[String](["a", "b", "c"])))
+    var rows = List[Int]([0, -1, 1, 1, 2, -1, 0, 2])
+    var gathered = take_parallel(columns^, rows^, 4, or_null=True)
+    assert_equal(len(gathered[0]), 8)
+    assert_equal(gathered[0].get(0).int64(), Int64(10))
+    assert_true(gathered[0].get(1).is_null())
+    assert_equal(gathered[0].get(3).int64(), Int64(20))
+    assert_equal(gathered[1].get(4).float64(), 3.0)
+    assert_true(gathered[1].get(5).is_null())
+    assert_equal(gathered[2].get(2).bool(), False)
+    assert_true(gathered[2].get(5).is_null())
+    assert_true(gathered[3].get(1).is_null())
+    assert_true(gathered[3].get(2).is_null())
+    assert_equal(gathered[3].get(4).int64(), Int64(6))
+    assert_equal(gathered[4].get(3).string(), "b")
+    assert_true(gathered[4].get(5).is_null())
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

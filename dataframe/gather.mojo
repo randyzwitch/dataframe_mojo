@@ -642,6 +642,7 @@ struct _GatherJob(Job):
     # A join's unmatched rows carry index -1, meaning "no row on this side".
     var or_null: Bool
     var skip_validity: Bool
+    var share_validity: Bool
 
     def __init__(
         out self,
@@ -653,6 +654,7 @@ struct _GatherJob(Job):
         bits: Int,
         or_null: Bool = False,
         skip_validity: Bool = False,
+        share_validity: Bool = False,
     ):
         self.source = source.copy()
         self.indices = indices
@@ -663,6 +665,7 @@ struct _GatherJob(Job):
         self.piece = source.copy()
         self.or_null = or_null
         self.skip_validity = skip_validity
+        self.share_validity = share_validity
 
     def run(mut self) raises:
         ref rows = self.indices[]
@@ -691,7 +694,7 @@ struct _GatherJob(Job):
                     var mask = UInt8(1) << UInt8(k % 8)
                     if column._get(row):
                         out.unsafe_offset(k // 8)[] |= mask
-                    if self.or_null:
+                    if self.or_null and not self.share_validity:
                         out_bits.unsafe_offset(k // 8)[] |= mask
                 return
             for k in range(self.start, self.end):
@@ -719,7 +722,7 @@ struct _GatherJob(Job):
                         if self.or_null and row < 0:
                             continue
                         out.unsafe_offset(k)[] = input.unsafe_offset(row)[]
-                        if self.or_null:
+                        if self.or_null and not self.share_validity:
                             out_bits.unsafe_offset(k // 8)[] |= UInt8(
                                 1
                             ) << UInt8(k % 8)
@@ -783,8 +786,29 @@ def take_parallel(
             contiguous[positions.pop(0)] = rechunk.pop(0).into_result()
         return take_parallel(contiguous^, indices^, workers, or_null)
     var m = len(indices)
+    # Keep each gather job large enough to amortize pool scheduling and
+    # string-view chunk assembly across columns.
+    var active_workers = min(workers, max(1, (m + 65_535) // 65_536))
+    var nonnullable_fixed = 0
+    if or_null and active_workers < workers:
+        for column in columns:
+            if (
+                not column._data.isa[StringColumn]()
+                and column.null_count() == 0
+            ):
+                nonnullable_fixed += 1
+    # A shared bitmap amortizes the index scan when several fixed-width
+    # columns would otherwise write the same null-extension bits.
+    var share_validity = nonnullable_fixed >= 3
     var shared = ArcPointer(indices^)
-    var bounds = partitions(m, workers, 8)
+    var common_bits = List[UInt8]()
+    if share_validity:
+        common_bits = List[UInt8](length=(m + 7) // 8, fill=0)
+        for i in range(m):
+            if shared[][i] >= 0:
+                common_bits[i // 8] |= UInt8(1) << UInt8(i % 8)
+    var shared_bits = ArcPointer(common_bits^)
+    var bounds = partitions(m, active_workers, 8)
     # Preallocate each fixed-width output; strings are assembled from pieces.
     var outputs = List[Series](capacity=len(columns))
     var bits = List[List[UInt8]](capacity=len(columns))
@@ -794,15 +818,19 @@ def take_parallel(
         # once per column instead of reading and writing validity per row.
         var source_all_valid = column.null_count() == 0
         skip_validity.append(source_all_valid)
+        var needs_own_bits = not source_all_valid or (
+            or_null and not share_validity
+        )
         bits.append(
-            List[UInt8]() if source_all_valid
-            and not or_null else List[UInt8](length=(m + 7) // 8, fill=0)
+            List[UInt8](
+                length=(m + 7) // 8, fill=0
+            ) if needs_own_bits else List[UInt8]()
         )
         outputs.append(_allocate(column, m))
-    var jobs = List[_GatherJob](capacity=len(columns) * workers)
+    var jobs = List[_GatherJob](capacity=len(columns) * active_workers)
     for c in range(len(columns)):
         var values = _payload_address(outputs[c])
-        for w in range(workers):
+        for w in range(active_workers):
             jobs.append(
                 _GatherJob(
                     columns[c],
@@ -813,6 +841,7 @@ def take_parallel(
                     Int(bits[c].unsafe_ptr()),
                     or_null,
                     skip_validity[c],
+                    share_validity and skip_validity[c],
                 )
             )
     run_jobs(jobs)
@@ -821,13 +850,16 @@ def take_parallel(
         if columns[c]._data.isa[StringColumn]():
             # Keep each worker's gathered view as a physical chunk. Appending
             # views here repeatedly copies the growing descriptor array.
-            var pieces = List[Series](capacity=workers)
-            for w in range(workers):
-                pieces.append(jobs[c * workers + w].piece.copy())
+            var pieces = List[Series](capacity=active_workers)
+            for w in range(active_workers):
+                pieces.append(jobs[c * active_workers + w].piece.copy())
             result.append(Series._from_chunks(pieces^))
             continue
         var output = outputs[c].copy()
-        _set_bits(output, bits[c].copy())
+        if share_validity and skip_validity[c]:
+            _set_shared_bits(output, shared_bits)
+        else:
+            _set_bits(output, bits[c].copy())
         result.append(output^)
     _ = bits^
     _ = outputs^
@@ -859,4 +891,15 @@ def _set_bits(mut series: Series, var bits: List[UInt8]):
         comptime D = NUMERIC_DTYPES[d]
         if series._data.isa[Column[Scalar[D]]]():
             series._data[Column[Scalar[D]]]._bits = ArcPointer(bits^)
+            return
+
+
+def _set_shared_bits(mut series: Series, bits: ArcPointer[List[UInt8]]):
+    if series._data.isa[BoolColumn]():
+        series._data[BoolColumn]._bits = bits.copy()
+        return
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        if series._data.isa[Column[Scalar[D]]]():
+            series._data[Column[Scalar[D]]]._bits = bits.copy()
             return
