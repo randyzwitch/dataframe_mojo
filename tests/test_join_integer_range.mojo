@@ -197,6 +197,49 @@ def test_ordered_equal_runs_join_without_an_index() raises:
     assert_rows(extreme.join(one_key, "k"), [0, 0], [0, 1])
 
 
+def test_aligned_chunk_membership_matches_general_row_selection() raises:
+    var key = Series(
+        "k",
+        Column[Int64](
+            [1, 2, 3, 4, 5, 6],
+            [True, True, True, True, True, False],
+        ),
+    )
+    var row = Series("left_row", Column[Int64]([0, 1, 2, 3, 4, 5]))
+    var label = Series("label", Column[String](["a", "b", "c", "d", "e", "f"]))
+    var whole = DataFrame([key.copy(), row.copy(), label.copy()])
+    var aligned = DataFrame(
+        [
+            Series._from_chunks([key.slice(0, 3), key.slice(3, 3)]),
+            Series._from_chunks([row.slice(0, 3), row.slice(3, 3)]),
+            Series._from_chunks([label.slice(0, 3), label.slice(3, 3)]),
+        ]
+    )
+    var unaligned = DataFrame(
+        [
+            Series._from_chunks([key.slice(0, 3), key.slice(3, 3)]),
+            Series._from_chunks([row.slice(0, 2), row.slice(2, 4)]),
+            Series._from_chunks([label.slice(0, 3), label.slice(3, 3)]),
+        ]
+    )
+    var holes = side([2, 4], [True, True], "right_row")
+    var interval = side([2, 3, 4], [True, True, True], "right_row")
+    var empty = side([0], [False], "right_row")
+    var wide = side([Int64.MIN, Int64.MAX], [True, True], "right_row")
+    var rights = List[DataFrame]()
+    rights.append(holes.copy())
+    rights.append(interval.copy())
+    rights.append(empty.copy())
+    rights.append(wide.copy())
+    for right in rights:
+        for how in [String("semi"), String("anti")]:
+            var expected = whole.join(right, "k", how)
+            assert_true(aligned.join(right, "k", how).equals(expected))
+            assert_true(unaligned.join(right, "k", how).equals(expected))
+    assert_left_rows(aligned.join(holes, "k", "semi"), [1, 3])
+    assert_left_rows(aligned.join(holes, "k", "anti"), [0, 2, 4, 5])
+
+
 def test_temporal_physical_int64_uses_the_same_dense_range() raises:
     var left = DataFrame(
         [
