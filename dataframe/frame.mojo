@@ -667,9 +667,21 @@ struct DataFrame(Copyable, Sized, Writable):
                             left_identity = False
                             break
                 if not left_identity:
-                    columns = take_parallel(
-                        columns^, left_rows.copy(), workers, or_null=False
-                    )
+                    var ordered_chunks = how == "inner"
+                    for column in columns:
+                        if not column.is_chunked() or column.n_chunks() < 16:
+                            ordered_chunks = False
+                    if ordered_chunks:
+                        columns = take_sorted_chunked(
+                            columns^,
+                            left_rows.copy(),
+                            workers,
+                            allow_repeats=True,
+                        )
+                    else:
+                        columns = take_parallel(
+                            columns^, left_rows.copy(), workers, or_null=False
+                        )
                 var right_sources = List[Series]()
                 for c in right_output:
                     right_sources.append(right._columns[c].copy())
@@ -1600,10 +1612,110 @@ def _group_index(ids: List[Int], count: Int) -> List[Int]:
     return starts^
 
 
+struct _RepeatedProgressionProbeJob(Job):
+    """Probe a sorted right progression with equal-size key runs."""
+
+    var left: Column[Int64]
+    var base: Int64
+    var stride: UInt64
+    var repeat: Int
+    var right_count: Int
+    var start: Int
+    var end: Int
+    var include_unmatched: Bool
+    var left_rows: List[Int]
+    var right_rows: List[Int]
+
+    def __init__(
+        out self,
+        left: Column[Int64],
+        base: Int64,
+        stride: UInt64,
+        repeat: Int,
+        right_count: Int,
+        start: Int,
+        end: Int,
+        include_unmatched: Bool,
+    ):
+        self.left = left.copy()
+        self.base = base
+        self.stride = stride
+        self.repeat = repeat
+        self.right_count = right_count
+        self.start = start
+        self.end = end
+        self.include_unmatched = include_unmatched
+        self.left_rows = List[Int](capacity=end - start)
+        self.right_rows = List[Int](capacity=end - start)
+
+    def run(mut self) raises:
+        var all_valid = len(self.left._bits[]) == 0
+        var max_slot = UInt64((self.right_count - 1) // self.repeat)
+        for i in range(self.start, self.end):
+            var first = -1
+            if all_valid or self.left._valid(i):
+                var value = self.left._get(i)
+                if value >= self.base:
+                    var distance = _int64_distance(self.base, value)
+                    if self.stride == 1:
+                        if distance <= max_slot:
+                            first = Int(distance) * self.repeat
+                    elif distance % self.stride == 0:
+                        var slot = distance // self.stride
+                        if slot <= max_slot:
+                            first = Int(slot) * self.repeat
+            if first >= 0:
+                var count = min(self.repeat, self.right_count - first)
+                for j in range(first, first + count):
+                    self.left_rows.append(i)
+                    self.right_rows.append(j)
+            elif self.include_unmatched:
+                self.left_rows.append(i)
+                self.right_rows.append(-1)
+
+
+def _repeated_progression_rows(
+    left: Series,
+    base: Int64,
+    stride: UInt64,
+    repeat: Int,
+    right_count: Int,
+    include_unmatched: Bool,
+) raises -> Tuple[List[Int], List[Int]]:
+    var left_values = left.int64()
+    var workers = worker_count(len(left_values))
+    var bounds = partitions(len(left_values), workers, 1)
+    var jobs = List[_RepeatedProgressionProbeJob](capacity=workers)
+    for worker in range(workers):
+        jobs.append(
+            _RepeatedProgressionProbeJob(
+                left_values,
+                base,
+                stride,
+                repeat,
+                right_count,
+                bounds[worker],
+                bounds[worker + 1],
+                include_unmatched,
+            )
+        )
+    run_jobs(jobs)
+    var total = 0
+    for worker in range(workers):
+        total += len(jobs[worker].left_rows)
+    var left_rows = List[Int](capacity=total)
+    var right_rows = List[Int](capacity=total)
+    for worker in range(workers):
+        for i in range(len(jobs[worker].left_rows)):
+            left_rows.append(jobs[worker].left_rows[i])
+            right_rows.append(jobs[worker].right_rows[i])
+    return (left_rows^, right_rows^)
+
+
 def _dense_right_int64_rows(
     left: Series, right: Series, include_unmatched: Bool = False
-) -> Tuple[Bool, List[Int], List[Int]]:
-    """Direct matches when right keys form an ascending Int64 progression."""
+) raises -> Tuple[Bool, List[Int], List[Int]]:
+    """Direct matches for ascending Int64 progressions with fixed-size runs."""
     if right.dtype() != DataType.INT64 or left.dtype() != DataType.INT64:
         return (False, List[Int](), List[Int]())
     if len(right) == 0:
@@ -1611,6 +1723,8 @@ def _dense_right_int64_rows(
     var base = Int64(0)
     var previous = Int64(0)
     var stride = UInt64(1)
+    var repeat = 0
+    var run_length = 0
     var row = 0
     for part in right.chunks():
         ref column = part._data[Column[Int64]]
@@ -1620,16 +1734,31 @@ def _dense_right_int64_rows(
             var value = column._get(i)
             if row == 0:
                 base = value
+                run_length = 1
+            elif value == previous:
+                run_length += 1
+                if repeat > 0 and run_length > repeat:
+                    return (False, List[Int](), List[Int]())
             else:
-                if value <= previous:
+                if value < previous:
                     return (False, List[Int](), List[Int]())
-                var distance = _int64_distance(previous, value)
-                if row == 1:
-                    stride = distance
-                elif distance != stride:
+                if repeat == 0:
+                    repeat = run_length
+                    stride = _int64_distance(previous, value)
+                elif run_length != repeat or (
+                    _int64_distance(previous, value) != stride
+                ):
                     return (False, List[Int](), List[Int]())
+                run_length = 1
             previous = value
             row += 1
+    if repeat == 0:
+        repeat = run_length
+    if repeat > 1:
+        var pairs = _repeated_progression_rows(
+            left, base, stride, repeat, len(right), include_unmatched
+        )
+        return (True, pairs[0].copy(), pairs[1].copy())
     if stride == 1:
         var right_limit = UInt64(len(right))
         var left_rows = List[Int](capacity=len(left))
