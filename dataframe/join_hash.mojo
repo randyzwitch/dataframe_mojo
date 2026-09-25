@@ -1,10 +1,10 @@
-"""Right-side hash index for high-cardinality inner and left joins.
+"""Right-side hash index for high-cardinality joins.
 
-The index stores row positions, rather than dense key codes. A slot holds a
-chain of right rows in input order. Each entry keeps a row number, next link,
-and either its hash or exact Int64 key together for locality. Hash equality
-narrows generic candidates; column equality resolves collisions exactly. Workers probe disjoint left row
-ranges, so concatenating their results preserves the join's left-major order.
+Each open-addressed slot holds its first matching right row. Extra rows for
+the same key use a compact duplicate chain; distinct keys with the same hash
+continue to the next slot. Exact column equality resolves hash collisions.
+Building in reverse row order and probing disjoint left ranges preserves the
+join's documented left-major, right-input match order.
 """
 from std.memory import ArcPointer, bitcast
 
@@ -49,19 +49,25 @@ def _row_equal(left: List[Series], right: List[Series], i: Int, j: Int) -> Bool:
 
 
 @fieldwise_init
-struct _HashEntry(Copyable):
-    var row: Int
-    var hash: UInt64
-    var next_position: Int
+struct _HashSlot(Copyable):
+    var row: Int32
+    var next_position: Int32
+    var key: UInt64
+
+
+@fieldwise_init
+struct _DuplicateEntry(Copyable):
+    var row: Int32
+    var next_position: Int32
 
 
 @fieldwise_init
 struct _HashBucket(Copyable):
-    var heads: List[Int]
-    var entries: List[_HashEntry]
+    var slots: List[_HashSlot]
+    var duplicates: List[_DuplicateEntry]
 
     def mask(self) -> Int:
-        return len(self.heads) - 1
+        return len(self.slots) - 1
 
 
 struct _HashBuildJob(Job):
@@ -69,7 +75,7 @@ struct _HashBuildJob(Job):
 
     var hashes: ArcPointer[List[UInt64]]
     var order: ArcPointer[List[Int]]
-    var right_key: Series
+    var right_keys: List[Series]
     var typed_int: Bool
     var first: Int
     var last: Int
@@ -79,49 +85,57 @@ struct _HashBuildJob(Job):
         out self,
         hashes: ArcPointer[List[UInt64]],
         order: ArcPointer[List[Int]],
-        right_key: Series,
+        right_keys: List[Series],
         typed_int: Bool,
         first: Int,
         last: Int,
     ):
         self.hashes = hashes.copy()
         self.order = order.copy()
-        self.right_key = right_key.copy()
+        self.right_keys = right_keys.copy()
         self.typed_int = typed_int
         self.first = first
         self.last = last
-        self.result = _HashBucket(List[Int](), List[_HashEntry]())
+        self.result = _HashBucket(List[_HashSlot](), List[_DuplicateEntry]())
 
     def run(mut self) raises:
         var size = 2
         while size < 2 * (self.last - self.first):
             size *= 2
-        var heads = List[Int](length=size, fill=-1)
-        var entries = List[_HashEntry](
-            length=self.last - self.first,
-            fill=_HashEntry(-1, 0, -1),
-        )
-        if self.typed_int:
-            ref key = self.right_key._data[Column[Int64]]
-            for position in range(self.last - 1, self.first - 1, -1):
-                var row = self.order[][position]
-                if not key._valid(row):
+        var slots = List[_HashSlot](length=size, fill=_HashSlot(-1, -1, 0))
+        var duplicates = List[_DuplicateEntry]()
+        for position in range(self.last - 1, self.first - 1, -1):
+            var row = self.order[][position]
+            var hash = self.hashes[][row]
+            var key = hash
+            if self.typed_int:
+                ref values = self.right_keys[0]._data[Column[Int64]]
+                if not values._valid(row):
                     continue
-                var hash = self.hashes[][row]
-                var slot = Int(hash & UInt64(size - 1))
-                var local = position - self.first
-                var stored_key = bitcast[DType.uint64](key._get(row))
-                entries[local] = _HashEntry(row, stored_key, heads[slot])
-                heads[slot] = local
-        else:
-            for position in range(self.last - 1, self.first - 1, -1):
-                var row = self.order[][position]
-                var hash = self.hashes[][row]
-                var slot = Int(hash & UInt64(size - 1))
-                var local = position - self.first
-                entries[local] = _HashEntry(row, hash, heads[slot])
-                heads[slot] = local
-        self.result = _HashBucket(heads^, entries^)
+                key = bitcast[DType.uint64](values._get(row))
+            var slot = Int(hash & UInt64(size - 1))
+            while slots[slot].row >= 0:
+                var same = slots[slot].key == key
+                if same and not self.typed_int:
+                    same = _row_equal(
+                        self.right_keys,
+                        self.right_keys,
+                        row,
+                        Int(slots[slot].row),
+                    )
+                if same:
+                    duplicates.append(
+                        _DuplicateEntry(
+                            slots[slot].row, slots[slot].next_position
+                        )
+                    )
+                    slots[slot].row = Int32(row)
+                    slots[slot].next_position = Int32(len(duplicates) - 1)
+                    break
+                slot = (slot + 1) & (size - 1)
+            if slots[slot].row < 0:
+                slots[slot] = _HashSlot(Int32(row), -1, key)
+        self.result = _HashBucket(slots^, duplicates^)
 
     def into_result(deinit self) -> _HashBucket:
         return self.result^
@@ -169,8 +183,7 @@ struct _HashProbeJob(Job):
             ref left = self.left_keys[0]._data[Column[Int64]]
             var left_all_valid = len(left._bits[]) == 0
             for i in range(self.start, self.end):
-                var valid = left_all_valid or left._valid(i)
-                if not valid:
+                if not (left_all_valid or left._valid(i)):
                     if self.include_unmatched:
                         self.left_rows.append(i)
                         self.right_rows.append(-1)
@@ -178,17 +191,23 @@ struct _HashProbeJob(Job):
                 var hash = self.left_hashes[][i]
                 var bucket = Int(hash >> 56) >> self.fold
                 ref index = self.buckets[][bucket]
-                var position = index.heads[Int(hash & UInt64(index.mask()))]
+                var position = Int(hash & UInt64(index.mask()))
                 var matched = False
-                var value = left._get(i)
-                while position >= 0:
-                    ref entry = index.entries[position]
-                    var j = entry.row
-                    if value == bitcast[DType.int64](entry.hash):
+                var key = bitcast[DType.uint64](left._get(i))
+                while index.slots[position].row >= 0:
+                    ref slot = index.slots[position]
+                    if key == slot.key:
                         self.left_rows.append(i)
-                        self.right_rows.append(j)
+                        self.right_rows.append(Int(slot.row))
+                        var next = Int(slot.next_position)
+                        while next >= 0:
+                            ref entry = index.duplicates[next]
+                            self.left_rows.append(i)
+                            self.right_rows.append(Int(entry.row))
+                            next = Int(entry.next_position)
                         matched = True
-                    position = entry.next_position
+                        break
+                    position = (position + 1) & index.mask()
                 if not matched and self.include_unmatched:
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
@@ -203,16 +222,23 @@ struct _HashProbeJob(Job):
                 var hash = self.left_hashes[][i]
                 var bucket = Int(hash >> 56) >> self.fold
                 ref index = self.buckets[][bucket]
-                var position = index.heads[Int(hash & UInt64(index.mask()))]
+                var position = Int(hash & UInt64(index.mask()))
                 var matched = False
-                while position >= 0:
-                    ref entry = index.entries[position]
-                    var j = entry.row
-                    if hash == entry.hash and left._equal_at(right, i, j):
+                while index.slots[position].row >= 0:
+                    ref slot = index.slots[position]
+                    var j = Int(slot.row)
+                    if hash == slot.key and left._equal_at(right, i, j):
                         self.left_rows.append(i)
                         self.right_rows.append(j)
+                        var next = Int(slot.next_position)
+                        while next >= 0:
+                            ref entry = index.duplicates[next]
+                            self.left_rows.append(i)
+                            self.right_rows.append(Int(entry.row))
+                            next = Int(entry.next_position)
                         matched = True
-                    position = entry.next_position
+                        break
+                    position = (position + 1) & index.mask()
                 if not matched and self.include_unmatched:
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
@@ -221,18 +247,25 @@ struct _HashProbeJob(Job):
             var hash = self.left_hashes[][i]
             var bucket = Int(hash >> 56) >> self.fold
             ref index = self.buckets[][bucket]
-            var position = index.heads[Int(hash & UInt64(index.mask()))]
+            var position = Int(hash & UInt64(index.mask()))
             var matched = False
-            while position >= 0:
-                ref entry = index.entries[position]
-                var j = entry.row
-                if hash == entry.hash and _row_equal(
+            while index.slots[position].row >= 0:
+                ref slot = index.slots[position]
+                var j = Int(slot.row)
+                if hash == slot.key and _row_equal(
                     self.left_keys, self.right_keys, i, j
                 ):
                     self.left_rows.append(i)
                     self.right_rows.append(j)
+                    var next = Int(slot.next_position)
+                    while next >= 0:
+                        ref entry = index.duplicates[next]
+                        self.left_rows.append(i)
+                        self.right_rows.append(Int(entry.row))
+                        next = Int(entry.next_position)
                     matched = True
-                position = entry.next_position
+                    break
+                position = (position + 1) & index.mask()
             if not matched and self.include_unmatched:
                 self.left_rows.append(i)
                 self.right_rows.append(-1)
@@ -244,6 +277,8 @@ def direct_hash_join_rows(
     include_unmatched: Bool,
 ) raises -> Tuple[List[Int], List[Int]]:
     """Exact left-major matches through a read-only right-row hash index."""
+    if len(right_keys[0]) > Int(Int32.MAX):
+        raise Error("Direct hash join exceeds 32-bit row index capacity")
     var left = List[Series](capacity=len(left_keys))
     var right = List[Series](capacity=len(right_keys))
     for key in left_keys:
@@ -264,7 +299,7 @@ def direct_hash_join_rows(
             _HashBuildJob(
                 shared_right_hashes,
                 shared_order,
-                right[0],
+                right,
                 typed_int,
                 right_parts.bounds[bucket],
                 right_parts.bounds[bucket + 1],

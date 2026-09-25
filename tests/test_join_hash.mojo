@@ -128,6 +128,14 @@ def test_string_keys_are_exact_and_nulls_do_not_match() raises:
     assert_equal(rows[1], [1, 0, -1, 2, -1])
 
 
+def test_open_address_string_duplicates_preserve_right_order() raises:
+    var left = Series("k", Column[String](["ab", "different", "ab", "absent"]))
+    var right = Series("k", Column[String](["ab", "different", "ab", "ab"]))
+    var rows = direct_hash_join_rows([left.copy()], [right.copy()], True)
+    assert_equal(rows[0], [0, 0, 0, 1, 2, 2, 2, 3])
+    assert_equal(rows[1], [0, 2, 3, 1, 0, 2, 3, -1])
+
+
 def test_composite_float_nan_and_signed_zero() raises:
     var nan = Float64(0) / Float64(0)
     var left_float = Series("f", Column[Float64]([nan, -0.0, 0.0, 1.0]))

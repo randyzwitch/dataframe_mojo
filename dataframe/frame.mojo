@@ -721,7 +721,11 @@ struct DataFrame(Copyable, Sized, Writable):
                     direct = True
                     left_rows = range_rows[1].copy()
                     right_rows = range_rows[2].copy()
-            if not direct and not low_cardinality(right_sources):
+            if (
+                not direct
+                and right.height() <= Int(Int32.MAX)
+                and not low_cardinality(right_sources)
+            ):
                 var pairs = direct_hash_join_rows(
                     left_sources, right_sources, how == "left"
                 )
@@ -785,7 +789,11 @@ struct DataFrame(Copyable, Sized, Writable):
                     direct_right = True
                     right_rows = range_rows[1].copy()
                     left_rows = range_rows[2].copy()
-            if not direct_right and not low_cardinality(left_build_keys):
+            if (
+                not direct_right
+                and self.height() <= Int(Int32.MAX)
+                and not low_cardinality(left_build_keys)
+            ):
                 var pairs = direct_hash_join_rows(
                     right_probe_keys, left_build_keys, True
                 )
