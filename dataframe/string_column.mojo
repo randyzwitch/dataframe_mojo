@@ -126,9 +126,13 @@ struct StringColumn(Copyable, Sized):
         )
 
     def _equal_at(self, other: Self, i: Int, j: Int) -> Bool:
-        """Compare two valid row values without building borrowed slices."""
+        """Compare two row values, treating nulls as unequal."""
         if not self._valid(i) or not other._valid(j):
             return False
+        return self._equal_at_valid(other, i, j)
+
+    def _equal_at_valid(self, other: Self, i: Int, j: Int) -> Bool:
+        """Compare rows known to be valid without repeat bitmap checks."""
         if self._is_view_storage() or other._is_view_storage():
             return self._get(i) == other._get(j)
         var left_start = Int(self._offsets[][self._offset + i])
