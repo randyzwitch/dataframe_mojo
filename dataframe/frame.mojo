@@ -726,6 +726,7 @@ struct DataFrame(Copyable, Sized, Writable):
             var left_rows = List[Int]()
             var right_rows = List[Int]()
             var direct = False
+            var direct_identity = False
             if len(left_keys) == 1:
                 var range_rows = _bounded_int64_join_rows(
                     left_sources[0], right_sources[0], how == "left"
@@ -740,16 +741,22 @@ struct DataFrame(Copyable, Sized, Writable):
                 and not low_cardinality(right_sources)
             ):
                 var pairs = direct_hash_join_rows(
-                    left_sources, right_sources, how == "left"
+                    left_sources,
+                    right_sources,
+                    how == "left",
+                    omit_identity=True,
                 )
                 direct = True
+                direct_identity = pairs[2]
                 left_rows = pairs[0].copy()
                 right_rows = pairs[1].copy()
             if direct:
-                var workers = worker_count(len(left_rows))
+                var workers = worker_count(len(right_rows))
                 var columns = self._columns.copy()
-                var left_identity = len(left_rows) == self.height()
-                if left_identity:
+                var left_identity = (
+                    direct_identity or len(left_rows) == self.height()
+                )
+                if left_identity and not direct_identity:
                     for i in range(len(left_rows)):
                         if left_rows[i] != i:
                             left_identity = False
@@ -773,6 +780,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 var right_output_sources = List[Series]()
                 for c in right_output:
                     right_output_sources.append(right._columns[c].copy())
+                var output_height = len(right_rows)
                 var gathered = take_parallel(
                     right_output_sources,
                     right_rows^,
@@ -781,7 +789,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
-                return Self(columns^, height=len(left_rows))
+                return Self(columns^, height=output_height)
         # A right join is a left-major probe from the right input. Build on
         # the original left rows for high-cardinality keys, then swap the
         # resulting row lists back to the public output column order.
