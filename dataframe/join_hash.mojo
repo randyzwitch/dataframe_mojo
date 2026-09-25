@@ -100,7 +100,9 @@ struct _HashBuildJob(Job):
 
     def run(mut self) raises:
         var size = 2
-        while size < 2 * (self.last - self.first):
+        # Keep at least one-third of slots empty while avoiding a second
+        # power-of-two jump for buckets with many duplicate rows.
+        while size * 2 < 3 * (self.last - self.first):
             size *= 2
         var slots = List[_HashSlot](length=size, fill=_HashSlot(-1, -1, 0))
         var duplicates = List[_DuplicateEntry]()
