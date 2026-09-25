@@ -51,6 +51,25 @@ merged across every split point and association order in
 results equal within tolerance. These are the properties parallel execution
 relies on.
 
+## Benchmarks and the fast paths they hit
+
+`pixi run -e oracle bench-polars` (see `scripts/bench_polars.py`) is the
+yardstick. Its generated data qualifies for several fast paths, and a case
+that always qualifies only measures that path, so each such case has a
+partner that misses it on the same data:
+
+| case | fast path it exercises | partner that misses it |
+|---|---|---|
+| `grouped_low`, `grouped_skew` | direct lookup for Int64 keys spanning fewer than 4,096 values | `grouped_outlier`: `key_low` with a few keys at 10^12 |
+| `grouped_high`, `grouped_str` | general hash grouping | — |
+| `sort_multi` | bucket sort on a first key with at most 64 evenly spread values | `sort_high`: first key with rows/10 distinct values |
+| `join_inner` | ordered right keys (see below) | the join comparison's `shuffled` and `wide` layouts |
+
+The default sizes are 100k, 1M and 2.5M rows. The middle-of-the-range size is
+there because a row-count cutoff chosen by comparing 1M with 10M can sit
+anywhere between them; if a workload's time per row jumps between two sizes,
+sweep the sizes in between before drawing conclusions.
+
 ## Broad join comparison
 
 `pixi run -e oracle bench-joins-polars --sizes 1000000,10000000 --threads 32`
@@ -60,6 +79,22 @@ left/right/full joins, semi/anti joins, duplicate matches, and a lazy join
 followed by a narrow projection. Both engines use the same generated CSV input;
 frame construction is outside join timing, and row counts and numeric totals
 must agree.
+
+Every case runs on three key layouts, reported in the `keys` column:
+
+- `base`: the generated files. Every Int64 right key derives from a sorted
+  `range(n)`, which the ordered-key path (`_dense_right_int64_rows`) and the
+  direct-address paths (`_bounded_int64_join_rows` and the membership checks)
+  recognise, so these are fast-path numbers. Real data with this shape is a
+  lookup table keyed by sequential IDs stored in order.
+- `shuffled`: the same right rows in random order. The join and its result
+  are identical, but no ordered-key path applies.
+- `wide`: every key mapped one-to-one onto a 2^40 range, so no
+  direct-address path applies either.
+
+Treat `shuffled` and `wide` as the general join performance and `base` as
+the ordered-key case. A change that improves `base` alone has tuned a fast
+path, not the join. `--variants base` runs only the ordered layout.
 
 `pixi run -e oracle bench-joins-duckdb --sizes 1000000,10000000 --reps 5 --threads 32`
 adds DuckDB to the same matrix. DuckDB times `CREATE TEMP TABLE AS SELECT` for

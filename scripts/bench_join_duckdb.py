@@ -17,8 +17,17 @@ import sys
 import time
 from pathlib import Path
 
-from bench_join_polars import CASES, build_runner, check, run_mojo, run_polars
-from bench_polars import ROOT, generate, physical_cores
+from bench_join_polars import (
+    CASES,
+    VARIANTS,
+    build_runner,
+    check,
+    input_files,
+    parse_variants,
+    run_mojo,
+    run_polars,
+)
+from bench_polars import ROOT, generate, generate_join_variants, physical_cores
 
 
 LEFT_COLUMNS = ["key_low", "key_high", "key_skew", "key_str", "jk", "x", "y", "n"]
@@ -26,9 +35,13 @@ BASIC_COLUMNS = LEFT_COLUMNS + ["r"]
 RIGHT_COLUMNS = [name for name in LEFT_COLUMNS if name != "jk"] + ["jk", "r"]
 
 
-def run_duckdb(data_dir: Path, rows: int, reps: int, threads: int) -> dict:
+def run_duckdb(
+    data_dir: Path, rows: int, reps: int, threads: int, variant: str = "base"
+) -> dict:
     import duckdb
 
+    wide = variant == "wide"
+    left_name, right_name = input_files(rows, variant)
     con = duckdb.connect()
     con.execute(f"SET threads = {threads}")
     left_types = (
@@ -36,14 +49,29 @@ def run_duckdb(data_dir: Path, rows: int, reps: int, threads: int) -> dict:
         "'key_skew': 'BIGINT', 'key_str': 'VARCHAR', "
         "'jk': 'BIGINT', 'x': 'DOUBLE', 'y': 'DOUBLE', 'n': 'BIGINT'}"
     )
-    right_types = "{'jk': 'BIGINT', 'r': 'DOUBLE'}"
-    con.execute(
-        f"CREATE TABLE l AS SELECT * FROM read_csv(?, types={left_types})",
-        [str(data_dir / f"left_{rows}.csv")],
+    right_types = (
+        "{'jk': 'BIGINT', 'jk_shift': 'BIGINT', 'jk_dup': 'BIGINT', 'r': 'DOUBLE'}"
+        if wide else "{'jk': 'BIGINT', 'r': 'DOUBLE'}"
     )
     con.execute(
-        f"CREATE TABLE r AS SELECT * FROM read_csv(?, types={right_types})",
-        [str(data_dir / f"right_{rows}.csv")],
+        f"CREATE TABLE l AS SELECT * FROM read_csv(?, types={left_types})",
+        [str(data_dir / left_name)],
+    )
+    con.execute(
+        f"CREATE TABLE r_source AS SELECT * FROM read_csv(?, types={right_types})",
+        [str(data_dir / right_name)],
+    )
+    con.execute("CREATE TABLE r AS SELECT jk, r FROM r_source")
+    # The wide files carry the unmatched and duplicate keys precomputed from
+    # the raw key; see generate_join_variants.
+    shift = rows // 4
+    shifted_query = (
+        "SELECT jk_shift AS jk, r FROM r_source" if wide
+        else f"SELECT jk + {shift} AS jk, r FROM r"
+    )
+    duplicates_query = (
+        "SELECT jk_dup AS jk, r FROM r_source" if wide
+        else "SELECT jk // 2 AS jk, r FROM r"
     )
     results = {}
 
@@ -113,8 +141,7 @@ def run_duckdb(data_dir: Path, rows: int, reps: int, threads: int) -> dict:
     )
     drop("lm", "rm")
 
-    shift = rows // 4
-    prepare("shifted", f"SELECT jk + {shift} AS jk, r FROM r")
+    prepare("shifted", shifted_query)
     time_case(
         "left_unmatched",
         "SELECT l.*, shifted.r FROM l LEFT JOIN shifted USING (jk)",
@@ -148,10 +175,9 @@ def run_duckdb(data_dir: Path, rows: int, reps: int, threads: int) -> dict:
         "SELECT l.* FROM l ANTI JOIN shifted USING (jk)",
         LEFT_COLUMNS,
     )
-    drop("shifted")
-
     prepare("sl", "SELECT * REPLACE (jk * 17 AS jk) FROM l")
-    prepare("sr", f"SELECT (jk + {shift}) * 17 AS jk, r FROM r")
+    prepare("sr", "SELECT jk * 17 AS jk, r FROM shifted")
+    drop("shifted")
     time_case(
         "left_sparse",
         "SELECT sl.*, sr.r FROM sl LEFT JOIN sr USING (jk)",
@@ -168,7 +194,7 @@ def run_duckdb(data_dir: Path, rows: int, reps: int, threads: int) -> dict:
     )
     drop("sl", "sr")
 
-    prepare("duplicates", "SELECT jk // 2 AS jk, r FROM r")
+    prepare("duplicates", duplicates_query)
     time_case(
         "inner_duplicate",
         "SELECT l.*, duplicates.r FROM l JOIN duplicates USING (jk)",
@@ -187,6 +213,8 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sizes", default="1000000,10000000")
+    parser.add_argument("--variants", default=",".join(VARIANTS),
+                        help="comma-separated key layouts: base, shuffled, wide")
     parser.add_argument("--reps", type=int, default=5)
     parser.add_argument("--threads", type=int, default=physical_cores())
     parser.add_argument("--data-dir", type=Path, default=ROOT / "build" / "bench_polars")
@@ -197,6 +225,7 @@ def main() -> int:
     sizes = [int(value) for value in args.sizes.split(",")]
     if any(rows < 1_000_000 for rows in sizes):
         parser.error("join comparison requires at least 1,000,000 rows")
+    variants = parse_variants(args.variants)
 
     os.environ["POLARS_MAX_THREADS"] = str(args.threads)
     runner = args.runner.resolve() if args.runner else build_runner()
@@ -209,25 +238,30 @@ def main() -> int:
         flush=True,
     )
     print(
-        "| join case | input rows | Mojo ms | Polars ms | DuckDB ms | "
+        "| join case | keys | input rows | Mojo ms | Polars ms | DuckDB ms | "
         "Mojo / DuckDB |",
         flush=True,
     )
-    print("|---|---:|---:|---:|---:|---:|", flush=True)
+    print("|---|---|---:|---:|---:|---:|---:|", flush=True)
     for rows in sizes:
         generate(args.data_dir, rows)
-        mojo = run_mojo(runner, args.data_dir, rows, args.reps, args.threads)
-        polars = run_polars(args.data_dir, rows, args.reps)
-        duckdb_results = run_duckdb(args.data_dir, rows, args.reps, args.threads)
-        check(rows, mojo, polars)
-        check(rows, mojo, duckdb_results, "DuckDB")
-        for case in CASES:
-            m, p, d = mojo[case][0], polars[case][0], duckdb_results[case][0]
-            print(
-                f"| {case} | {rows:,} | {m:.2f} | {p:.2f} | {d:.2f} | "
-                f"{m/d:.2f}x |",
-                flush=True,
+        if variants != ["base"]:
+            generate_join_variants(args.data_dir, rows)
+        for variant in variants:
+            mojo = run_mojo(runner, args.data_dir, rows, args.reps, args.threads, variant)
+            polars = run_polars(args.data_dir, rows, args.reps, variant)
+            duckdb_results = run_duckdb(
+                args.data_dir, rows, args.reps, args.threads, variant
             )
+            check(rows, mojo, polars)
+            check(rows, mojo, duckdb_results, "DuckDB")
+            for case in CASES:
+                m, p, d = mojo[case][0], polars[case][0], duckdb_results[case][0]
+                print(
+                    f"| {case} | {variant} | {rows:,} | {m:.2f} | {p:.2f} | {d:.2f} | "
+                    f"{m/d:.2f}x |",
+                    flush=True,
+                )
     return 0
 
 

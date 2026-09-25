@@ -25,6 +25,7 @@ from dataframe import (
     col,
     lit,
     read_csv,
+    when,
 )
 from dataframe.parallel import worker_count
 
@@ -148,8 +149,10 @@ def timed_join(left: DataFrame, right: DataFrame, repetitions: Int) raises:
     report("join_inner", best, warm.height(), total(warm, "r"))
 
 
-def timed_sort(frame: DataFrame, repetitions: Int) raises:
-    var by: List[String] = ["key_low", "x"]
+def timed_sort(
+    frame: DataFrame, workload: String, first: String, repetitions: Int
+) raises:
+    var by: List[String] = [first, "x"]
     var warm = frame.sort(by)
     var best = Int.MAX
     for _ in range(repetitions):
@@ -157,12 +160,12 @@ def timed_sort(frame: DataFrame, repetitions: Int) raises:
         var result = frame.sort(by)
         best = min(best, monotonic() - start)
         if result.height() != warm.height():
-            raise Error("sort height changed between runs")
+            raise Error(workload + " height changed between runs")
     # The value is order-sensitive on purpose: both engines must agree on
     # the row order, not only the row set.
     var order_check = warm.head(1000).select(col("x").sum()).item()
     var value = 0.0 if order_check.is_null() else order_check.float64()
-    report("sort_multi", best, warm.height(), value)
+    report(workload, best, warm.height(), value)
 
 
 def main() raises:
@@ -201,5 +204,17 @@ def main() raises:
     timed_grouped(left, "grouped_high", "key_high", repetitions)
     timed_grouped(left, "grouped_skew", "key_skew", repetitions)
     timed_grouped(left, "grouped_str", "key_str", repetitions)
+    # A few far-off keys take the 16-value column off the small-integer-range
+    # path, so this measures the general hash path on the same data.
+    var outliers = left.with_columns(
+        when(col("n") == lit(Int64(-500)))
+        .then(lit(Int64(1_000_000_000_000)))
+        .otherwise(col("key_low"))
+        .alias("key_outlier")
+    )
+    timed_grouped(outliers, "grouped_outlier", "key_outlier", repetitions)
     timed_join(left, right, repetitions)
-    timed_sort(left, repetitions)
+    timed_sort(left, "sort_multi", "key_low", repetitions)
+    # key_high has rows/10 distinct values, which misses the low-cardinality
+    # bucket sort that key_low always qualifies for.
+    timed_sort(left, "sort_high", "key_high", repetitions)
