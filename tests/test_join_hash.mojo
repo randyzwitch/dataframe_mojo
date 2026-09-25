@@ -209,6 +209,62 @@ def test_open_address_string_duplicates_preserve_right_order() raises:
     assert_equal(rows[1], [0, 2, 3, 1, 0, 2, 3, -1])
 
 
+def test_two_int64_keys_keep_duplicates_and_nulls() raises:
+    var left_first = Series(
+        "a", Column[Int64]([1, 1, 2, 3, 0], [True, True, True, False, True])
+    )
+    var left_second = Series(
+        "b", Column[Int64]([10, 11, 10, 10, 0], [True, True, True, True, False])
+    )
+    var right_first = Series(
+        "a",
+        Column[Int64](
+            [1, 1, 1, 2, 3, 0], [True, True, True, True, True, False]
+        ),
+    )
+    var right_second = Series(
+        "b",
+        Column[Int64](
+            [10, 10, 11, 10, 10, 0], [True, True, True, True, False, True]
+        ),
+    )
+    var inner = direct_hash_join_rows(
+        [left_first.copy(), left_second.copy()],
+        [right_first.copy(), right_second.copy()],
+        False,
+    )
+    assert_equal(inner[0], [0, 0, 1, 2])
+    assert_equal(inner[1], [0, 1, 2, 3])
+    var outer = direct_hash_join_rows(
+        [left_first.copy(), left_second.copy()],
+        [right_first.copy(), right_second.copy()],
+        True,
+    )
+    assert_equal(outer[0], [0, 0, 1, 2, 3, 4])
+    assert_equal(outer[1], [0, 1, 2, 3, -1, -1])
+
+
+def test_two_nonnullable_int64_keys_keep_duplicates() raises:
+    var left_first = Series("a", Column[Int64]([1, 1, 2, 3]))
+    var left_second = Series("b", Column[Int64]([10, 11, 10, 10]))
+    var right_first = Series("a", Column[Int64]([1, 1, 1, 2]))
+    var right_second = Series("b", Column[Int64]([10, 10, 11, 10]))
+    var inner = direct_hash_join_rows(
+        [left_first.copy(), left_second.copy()],
+        [right_first.copy(), right_second.copy()],
+        False,
+    )
+    assert_equal(inner[0], [0, 0, 1, 2])
+    assert_equal(inner[1], [0, 1, 2, 3])
+    var outer = direct_hash_join_rows(
+        [left_first.copy(), left_second.copy()],
+        [right_first.copy(), right_second.copy()],
+        True,
+    )
+    assert_equal(outer[0], [0, 0, 1, 2, 3])
+    assert_equal(outer[1], [0, 1, 2, 3, -1])
+
+
 def test_composite_float_nan_and_signed_zero() raises:
     var nan = Float64(0) / Float64(0)
     var left_float = Series("f", Column[Float64]([nan, -0.0, 0.0, 1.0]))
