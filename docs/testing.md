@@ -51,6 +51,16 @@ merged across every split point and association order in
 results equal within tolerance. These are the properties parallel execution
 relies on.
 
+## Parquet tests in CI
+
+`tests/test_parquet.mojo` needs `libdfparquet` and skips itself, with a
+notice, when the library is missing, so `pixi run test` passes on a machine
+without a C++ toolchain. CI on Linux builds the library first
+(`pixi run -e native build-dfparquet`, cached by the contents of
+`native/dfparquet/`) and then fails the run if the module reports `skipped`,
+so the Parquet reader, its type coercions and row-group pruning are tested
+on every push. macOS CI still skips them (#279).
+
 ## Benchmarks and the fast paths they hit
 
 `pixi run -e oracle bench-polars` (see `scripts/bench_polars.py`) is the
