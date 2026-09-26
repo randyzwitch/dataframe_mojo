@@ -22,6 +22,9 @@ if [ ! -d "$SRC" ]; then
   tar xzf "$WORK/arrow.tar.gz" -C "$WORK"
 fi
 
+# Thrift uses Boost.Locale headers, but the minimal Parquet reader does not
+# need its optional ICU backend. Auto-detection can find SDK ICU libraries
+# without usable headers on macOS, and adds an unbundled dependency.
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -30,6 +33,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DARROW_WITH_SNAPPY=ON -DARROW_WITH_ZSTD=ON -DARROW_WITH_LZ4=ON -DARROW_WITH_ZLIB=ON \
   -DARROW_WITH_BROTLI=OFF -DARROW_WITH_BZ2=OFF \
   -DARROW_DEPENDENCY_SOURCE=BUNDLED -DARROW_DEPENDENCY_USE_SHARED=OFF \
+  -DBOOST_LOCALE_ENABLE_ICU=OFF \
   -DARROW_MIMALLOC=ON -DARROW_JEMALLOC=OFF \
   -DARROW_FILESYSTEM=OFF -DARROW_S3=OFF -DARROW_GCS=OFF -DARROW_AZURE=OFF -DARROW_HDFS=OFF \
   -DARROW_JSON=OFF -DARROW_CSV=OFF -DARROW_IPC=OFF -DARROW_DATASET=OFF -DARROW_ACERO=OFF \
