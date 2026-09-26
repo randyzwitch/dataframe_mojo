@@ -98,6 +98,8 @@ comptime LEN = 90
 comptime ANY = 91
 comptime ALL = 92
 comptime NULL_COUNT = 93
+# Gather each group's values into a list (a reduction whose result is a list).
+comptime IMPLODE = 94
 
 # Conditional: left=predicate, right=then, extra=otherwise (-1 means null).
 comptime WHEN = 100
@@ -150,6 +152,9 @@ comptime LIST_MIN = 152
 comptime LIST_MAX = 153
 comptime LIST_MEAN = 154
 comptime STRUCT_FIELD = 155
+# Pack several expressions into one struct column; the children beyond the
+# first are listed in text2 (SEP-separated node indices) and named in text.
+comptime STRUCT_PACK = 156
 
 
 def is_binary(op: Int) -> Bool:
@@ -683,6 +688,11 @@ struct Expr(Copyable):
     def list(self) -> ListNamespace:
         """Operations on list columns."""
         return ListNamespace(self.copy())
+
+    def implode(self) -> Self:
+        """Gather values into one list: per group inside agg, otherwise one
+        row holding every value, in input order (nulls included)."""
+        return self._unary(IMPLODE)
 
     def field(self, name: String) -> Self:
         """One field of a struct column, null where the struct is null."""
@@ -1340,3 +1350,46 @@ struct DtNamespace(Copyable):
     def strftime(self, format: String) -> Expr:
         """Format as text; see dataframe/temporal.mojo for directives."""
         return self._op(DT_STRFTIME, format)
+
+
+def as_struct(fields: List[Expr], name: String = "") raises -> Expr:
+    """Pack expressions into one struct column; each field takes its
+    expression's output name. The result is named after the first field
+    unless `name` is given. Scalars broadcast to the row count."""
+    if len(fields) == 0:
+        raise Error("as_struct needs at least one field")
+    var nodes = List[Node]()
+    var roots = String()
+    var names = String()
+    var first = -1
+    for i in range(len(fields)):
+        var offset = len(nodes)
+        _append_shifted(nodes, fields[i]._nodes, offset)
+        var root = len(nodes) - 1
+        if i == 0:
+            first = root
+        else:
+            roots += SEP
+            names += SEP
+        roots += String(root)
+        names += fields[i]._name
+    nodes.append(_node(STRUCT_PACK, first, text=names, text2=roots))
+    return Expr(nodes^, name if name != "" else fields[0]._name)
+
+
+def struct_pack_children(node: Node) -> List[Int]:
+    """The node indices of a STRUCT_PACK node's fields, in order."""
+    var children = List[Int]()
+    for part in node.text2.split(SEP):
+        try:
+            children.append(Int(String(part)))
+        except:
+            pass
+    return children^
+
+
+def struct_pack_names(node: Node) -> List[String]:
+    var names = List[String]()
+    for part in node.text.split(SEP):
+        names.append(String(part))
+    return names^

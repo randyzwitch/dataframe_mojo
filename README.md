@@ -179,13 +179,16 @@ var flat = packed.unnest("point")
 The `.list()` namespace has `len`, `get(i)` (negative from the end, null when
 out of range), `first`, `last`, `contains(value)`, `join(separator)`, `sum`,
 `min`, `max` and `mean`; `field(name)` reads one struct field, null where the
-struct is null. `explode` and `unnest` also exist on `LazyFrame`. Nested
-columns take part in `select`, `filter`, `take`, `slice`, `concat`, `head`,
-`equals`, display, and Arrow export and import; they cannot yet be sort,
-group, join or unique keys, be cast, be reduced (`sum`, `count`, ...), appear
-in `when`/`then`, or be written to CSV, and each of those raises a clear
-error. `implode` (aggregating a group into a list) and an expression-level
-`struct(...)` constructor are not implemented yet.
+struct is null. `col(x).implode()` gathers a group's values into one list
+inside `agg` (or a whole column into one row), and `as_struct([...])` packs
+expressions into a struct column. Struct columns can be `group_by`, `unique`
+and inner/left/semi/anti join keys; they compare field by field, with a null
+struct distinct from a struct of nulls. `explode` and `unnest` also exist on
+`LazyFrame`. Nested columns take part in `select`, `filter`, `take`, `slice`,
+`concat`, `head`, `equals`, display, and Arrow export and import; they cannot
+yet be sort keys, list columns cannot be keys at all, and neither can be
+cast, reduced (other than `implode`), used in `when`/`then`, or written to
+CSV. Each of those raises a clear error.
 
 The reader is Arrow C++'s, built with only its Parquet parts and bundled
 codecs into `libdfparquet`, a 15 MB shared library with no dependencies
