@@ -1534,8 +1534,24 @@ struct _KeyBucketSortJob(Job):
         self.rows = rows^
 
 
+# Threadripper 3970X, 32 workers, Mojo 1.2; full sweep in
+# docs/sort-cutoffs.md. At 100k rows, 64/65/128/256 values all win;
+# at 65k, 512 is marginal and 1024 loses. Bound the histogram to 2 KiB
+# and amortize each bucket's allocation/job over at least 128 rows (8,192 rows / 64 values still win on M1).
+comptime _BUCKET_MAX_VALUES = 256
+comptime _BUCKET_MIN_ROWS = 128
+# Four wide rank words win at 150-200k, are marginal at 250k, and lose
+# at 500k with 16 buckets. Bound the remaining-rank input to 5 MiB for
+# more than two remaining words; narrower values can win beyond this,
+# but detecting their effective width would add another full scan.
+comptime _BUCKET_WIDE_RANK_BYTES = 5 * 1024 * 1024
+# Maximum remaining-rank work in one bucket, in average worker shares.
+# A 25% hot bucket with 4 words loses at 32 workers but wins at 8 on M1.
+comptime _BUCKET_MAX_WORKER_SHARES = 16
+
+
 def _low_card_first_sort(
-    ranks: List[List[Int]], radix: Bool = False
+    ranks: List[List[Int]], radix: Bool = False, workers: Int = 0
 ) raises -> List[Int]:
     """Sort independent first-key buckets without global merge rounds."""
     var n = len(ranks[0])
@@ -1546,7 +1562,7 @@ def _low_card_first_sort(
         low = min(low, value)
         high = max(high, value)
     var span = UInt64(high) - UInt64(low)
-    if span > 63:
+    if span >= UInt64(_BUCKET_MAX_VALUES):
         return List[Int]()
     var counts = List[Int](length=Int(span) + 1, fill=0)
     for value in first:
@@ -1556,7 +1572,25 @@ def _low_card_first_sort(
     for count in counts:
         occupied += Int(count > 0)
         largest = max(largest, count)
-    if occupied < 4 or largest > n // 4:
+    # One bucket is serial. Four-wide-word sorts with a 25% hot bucket
+    # lose already at 100k (6.3 vs 5.5 ms); the two-word case wins there.
+    # Scale the allowance with rank work AND available parallelism. The
+    # M1's 8-worker merge alternative is slower than buckets at this skew.
+    var parallelism = configured_workers() if workers <= 0 else workers
+    var balance = max(
+        4,
+        (
+            configured_workers() * (len(ranks) - 1)
+            + _BUCKET_MAX_WORKER_SHARES
+            - 1
+        )
+        // _BUCKET_MAX_WORKER_SHARES,
+    )
+    if (
+        occupied < 4
+        or occupied > n // _BUCKET_MIN_ROWS
+        or largest > n // balance
+    ):
         return List[Int]()
     var buckets = List[List[Int]]()
     for count in counts:
@@ -1569,7 +1603,7 @@ def _low_card_first_sort(
         var rows = buckets.pop(0)
         if len(rows) > 0:
             jobs.append(_KeyBucketSortJob(shared, rows^, radix))
-    var pool = Pool(min(configured_workers(), len(jobs)))
+    var pool = Pool(min(parallelism, len(jobs)))
     pool.run(jobs)
     pool.release()
     var order = List[Int](capacity=n)
@@ -1594,13 +1628,17 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
     if len(ranks) == 0:
         raise Error("Sorting requires at least one key")
     var n = len(ranks[0])
+    var workers = configured_workers()
     if (
         n >= 8192
         and len(ranks) > 1
-        and configured_workers() > 1
-        and (n <= 200_000 or len(ranks) <= 3)
+        and workers > 1
+        and (
+            len(ranks) <= 3
+            or n <= _BUCKET_WIDE_RANK_BYTES // 8 // (len(ranks) - 1)
+        )
     ):
-        var bucket_order = _low_card_first_sort(ranks, True)
+        var bucket_order = _low_card_first_sort(ranks, True, workers)
         if len(bucket_order) == n:
             return bucket_order^
     # One run per thread, not one per MIN_ROWS_PER_WORKER rows: that minimum
@@ -1609,7 +1647,6 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
     # Sorting a run is n log n, so shorter runs still repay their scheduling,
     # and the merge rounds below are themselves split across threads and so
     # do not lengthen as runs are added.
-    var workers = configured_workers()
     var target = max(1, min(workers, n // _MIN_ROWS_PER_RUN))
     if target <= 1 or n < 2:
         return _sort_range(ranks, 0, n)

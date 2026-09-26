@@ -127,3 +127,6 @@ Polars produce their native dataframe results.
 
 For CPU profiling, build `benchmarks/bench_join_matrix.mojo` and pass a case
 name as its fourth argument to run only that case.
+
+Sort bucket calibration and reproducible sweeps are recorded in
+[sort-cutoffs.md](sort-cutoffs.md), including fast-path misses and Mac validation.
