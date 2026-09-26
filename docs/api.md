@@ -25,6 +25,12 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
 - `def __init__(out self, value: String)`
 - `def __init__(out self, dtype: DataType, valid: Bool, integer: Int64, floating: Float64, boolean: Bool, var string: String)`
 - `def __eq__(self, other: Self) -> Bool`
+- `def nested(dtype: DataType, var series: Series) -> Self`
+  A list value (its elements as a series) or a struct value (a one-row series of the struct column).
+- `def list(self) -> Series`
+  A list value's elements.
+- `def struct_field(self, name: String) -> Self`
+  One field of a struct value.
 - `def null(dtype: DataType) -> Self`
 - `def null(dtype: String) -> Self`
 - `def temporal(dtype: DataType, value: Int64) -> Self`
@@ -268,6 +274,13 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def filter(self, mask: BoolColumn) -> Self`
   Keep true rows, dropping false and null mask entries, in input order.
 - `def filter(self, predicate: Expr, *, batch_size: Int = Int(1024)) -> Self`
+- `def explode(self, column: String) -> Self`
+- `def explode(self, columns: List[String]) -> Self`
+  One output row per list element; other columns repeat. An empty or null list gives one row holding null. Several columns explode together and must have the same element count in every row.
+- `def unnest(self, column: String) -> Self`
+  Replace a struct column with its fields as top-level columns, in its position. Field names must not clash with other columns.
+- `def pack_struct(self, name: String, columns: List[String]) -> Self`
+  Add a struct column built from existing columns (kept as they are); unnest(name) gives them back.
 - `def with_column(self, var column: Series) -> Self`
   Replace by name or append; the input dataframe is unchanged.
 - `def sort(self, by: String, descending: Bool = False, nulls_last: Bool = True) -> Self`
@@ -332,10 +345,31 @@ A logical column type.
 Numeric: INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
 FLOAT32, FLOAT64. Also BOOL, STRING, DATE (days since 1970-01-01), TIME
 (nanoseconds since midnight), and datetime(unit) / duration(unit) with
-unit "ns", "us", or "ms". Temporal types are stored as Int64.
+unit "ns", "us", or "ms". Temporal types are stored as Int64. Nested:
+list(inner) holds a variable number of `inner` values per row, and
+struct(names, dtypes) holds one value of each named field per row.
 
+- `def __init__(out self, code: Int, unit: Int)`
+- `def __init__(out self, code: Int, var spec: String)`
 - `def __eq__(self, other: Self) -> Bool`
 - `def __ne__(self, other: Self) -> Bool`
+- `def list(inner) -> Self`
+  A list column whose elements have dtype `inner`.
+- `def struct(names: List[String], dtypes: List[Self]) -> Self`
+  A struct column with one field per name, in order.
+- `def is_list(self) -> Bool`
+- `def is_struct(self) -> Bool`
+- `def is_nested(self) -> Bool`
+- `def inner(self) -> Self`
+  The element type of a list.
+- `def field_count(self) -> Int`
+  A struct's number of fields (0 for other types).
+- `def field_names(self) -> List[String]`
+  A struct's field names, in order (empty for other types).
+- `def field_dtypes(self) -> List[Self]`
+  A struct's field types, in order (empty for other types).
+- `def field_index(self, name: String) -> Int`
+- `def field_dtype(self, index: Int) -> Self`
 - `def is_untyped(self) -> Bool`
   Whether this is an untyped literal awaiting a dtype (binder only).
 - `def default(self) -> Self`
@@ -591,6 +625,10 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def over(self, partition_by: String) -> Self`
 - `def over(self, partition_by: List[String]) -> Self`
   Evaluate within partitions of the key columns, keeping row order.
+- `def list(self) -> ListNamespace`
+  Operations on list columns.
+- `def field(self, name: String) -> Self`
+  One field of a struct column, null where the struct is null.
 - `def str(self) -> StrNamespace`
   String operations: col("name").str().to_uppercase().
 - `def dt(self) -> DtNamespace`
@@ -725,6 +763,11 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def limit(self, n: Int = Int(5)) -> Self`
 - `def unique(self, subset: List[String] = List(), *, keep: String = "any", maintain_order: Bool = False) -> Self`
 - `def drop(self, names: List[String]) -> Self`
+- `def explode(self, columns: List[String]) -> Self`
+  One row per list element; see DataFrame.explode.
+- `def explode(self, column: String) -> Self`
+- `def unnest(self, column: String) -> Self`
+  Replace a struct column with its fields; see DataFrame.unnest.
 - `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right") -> Self`
   Join with another lazy plan; see DataFrame.join.
 - `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right") -> Self`
@@ -743,6 +786,59 @@ A pending lazy grouping; finish it with agg.
 
 - `def agg(self, exprs: List[Expr]) -> LazyFrame`
 - `def agg(self, expr: Expr) -> LazyFrame`
+
+## `ListColumn`
+
+A window onto shared list offsets, validity, and one child series.
+
+- `def __init__(out self, var offsets: List[Int64], var child: Series, var bits: List[UInt8] = List())`
+  Adopt offsets (one more than the rows), a child, and an optional prepacked validity bitmap. Offsets must not decrease and must stay within the child.
+- `def from_lists(rows: List[Series], inner: DataType, valid: List[Bool] = List()) -> Self`
+  Build from one series per row (an empty series for an empty list; `valid[i] == False` makes row i null).
+- `def __len__(self) -> Int`
+- `def dtype(self) -> DataType`
+- `def child(self) -> Series`
+  The whole child series (shared, O(1)).
+- `def is_null(self, i: Int) -> Bool`
+- `def null_count(self) -> Int`
+- `def element_count(self, i: Int) -> Int`
+  Elements in row i (0 for null rows).
+- `def row(self, i: Int) -> Series`
+  Row i's elements as a series (empty for an empty or null row).
+- `def slice(self, offset: Int, length: Int) -> Self`
+- `def take(self, indices: List[Int]) -> Self`
+  Rows by index; gathers the child rows each list refers to.
+- `def take_or_null(self, indices: List[Int]) -> Self`
+  Like take, but a negative index yields a null row.
+- `def equals(self, other: Self) -> Bool`
+- `def lengths(self) -> List[Int64]`
+  Elements per row; null rows count 0 (pair with the validity).
+- `def validity(self) -> List[Bool]`
+- `def unsafe_validity(self) -> Int`
+  Address of the validity bitmap, 0 when every row is valid.
+
+## `ListNamespace`
+
+Expressions on list columns. A null list gives a null result.
+
+- `def len(self) -> Expr`
+  Elements per list, as Int64.
+- `def get(self, index: Int) -> Expr`
+  Element at index (negative counts from the end); null when out of range.
+- `def first(self) -> Expr`
+- `def last(self) -> Expr`
+- `def contains(self, value: String) -> Expr`
+  Whether a string list holds the value.
+- `def contains(self, value: Int64) -> Expr`
+  Whether an integer list holds the value.
+- `def contains(self, value: Float64) -> Expr`
+  Whether a float list holds the value.
+- `def join(self, separator: String) -> Expr`
+  Join a string list's elements, skipping null elements.
+- `def sum(self) -> Expr`
+- `def min(self) -> Expr`
+- `def max(self) -> Expr`
+- `def mean(self) -> Expr`
 
 ## `lit`
 
@@ -891,7 +987,9 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def __init__(out self, var name: String, var column: StringColumn)`
 - `def __init__(out self, var name: String, column: Column[String])`
   Convert list-backed strings to the contiguous UTF-8 layout.
-- `def __init__(out self, var name: String, var storage: Variant[Column[Int64], Column[Float64], BoolColumn, StringColumn, Column[Int8], Column[Int16], Column[Int32], Column[UInt8], Column[UInt16], Column[UInt32], Column[UInt64], Column[Float32]], dtype: DataType)`
+- `def __init__(out self, var name: String, var column: ListColumn)`
+- `def __init__(out self, var name: String, var column: StructColumn)`
+- `def __init__(out self, var name: String, var storage: Variant[Column[Int64], Column[Float64], BoolColumn, StringColumn, Column[Int8], Column[Int16], Column[Int32], Column[UInt8], Column[UInt16], Column[UInt32], Column[UInt64], Column[Float32], ListColumn, StructColumn], dtype: DataType)`
 - `def __getitem__(self, index: Int) -> AnyValue`
   One cell; raises when out of bounds. Negative indices count from the end.
 - `def __neg__(self) -> Self`
@@ -996,6 +1094,10 @@ A named column of one supported dtype, plus expression-backed methods.
   Return an owned typed copy, raising on a dtype mismatch.
 - `def string(self) -> StringColumn`
   Return the (shared, immutable) column, raising on a dtype mismatch.
+- `def list_column(self) -> ListColumn`
+  The (shared, immutable) list column, raising on a dtype mismatch.
+- `def struct_column(self) -> StructColumn`
+  The (shared, immutable) struct column, raising on a mismatch.
 - `def take(self, indices: List[Int]) -> Self`
 - `def take_or_null(self, indices: List[Int]) -> Self`
 - `def argsort(self, descending: Bool = False, nulls_last: Bool = True) -> List[Int]`
@@ -1094,6 +1196,30 @@ String expressions. Character operations work on Unicode code points; there is n
 - `def to_datetime(self, format: String = "", unit: String = "us") -> Expr`
 - `def zfill(self, width: Int) -> Expr`
   Left-pad with zeros, after a leading + or - sign.
+- `def split(self, by: String, inclusive: Bool = False) -> Expr`
+  Split on a literal separator into a list of strings. With inclusive, each part but the last keeps the separator.
+
+## `StructColumn`
+
+A window onto named child series of equal length and a validity.
+
+- `def __init__(out self, var fields: List[Series], var bits: List[UInt8] = List())`
+  Adopt named children (their names are the field names) and an optional prepacked validity bitmap for the struct rows.
+- `def __len__(self) -> Int`
+- `def dtype(self) -> DataType`
+- `def field_count(self) -> Int`
+- `def field_names(self) -> List[String]`
+- `def field(self, index: Int) -> Series`
+  Field `index` over this window (shared, O(1)).
+- `def field(self, name: String) -> Series`
+- `def is_null(self, i: Int) -> Bool`
+- `def null_count(self) -> Int`
+- `def slice(self, offset: Int, length: Int) -> Self`
+- `def take(self, indices: List[Int]) -> Self`
+- `def take_or_null(self, indices: List[Int]) -> Self`
+- `def equals(self, other: Self) -> Bool`
+- `def validity(self) -> List[Bool]`
+- `def unsafe_validity(self) -> Int`
 
 ## `Then`
 

@@ -259,6 +259,7 @@ def to_csv_string(
     line_terminator: String = "\n",
 ) raises -> String:
     """Render the whole frame as CSV text; use write_csv for large frames."""
+    _reject_nested(frame)
     var writer = _CsvWriter(separator, quote_style, null_value, line_terminator)
     var out = String()
     if has_header:
@@ -285,6 +286,7 @@ def write_csv(
     written as "" so they stay distinct. Output is flushed in chunks of about
     buffer_size bytes, so memory does not grow with the frame.
     """
+    _reject_nested(frame)
     if buffer_size <= 0:
         raise Error("CSV buffer_size must be positive")
     var writer = _CsvWriter(separator, quote_style, null_value, line_terminator)
@@ -299,3 +301,14 @@ def write_csv(
                 chunk = String()
         if chunk.byte_length() > 0:
             file.write(chunk)
+
+
+def _reject_nested(frame: DataFrame) raises:
+    for field in frame.schema():
+        if field.dtype.is_nested():
+            raise Error(
+                "CSV cannot hold list or struct columns: "
+                + field.name
+                + " is "
+                + field.dtype.name()
+            )

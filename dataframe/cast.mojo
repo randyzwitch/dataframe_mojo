@@ -130,6 +130,14 @@ def cast_series(
     """Convert every valid, observed row; others become null."""
     if input.is_chunked():
         return cast_series(input.rechunk(), target, strict, offset, mask)
+    if input.dtype().is_nested() or target.is_nested():
+        raise Error(
+            "cannot cast "
+            + input.dtype().name()
+            + " to "
+            + target.name()
+            + ": list and struct casts are not supported yet"
+        )
     var source = _dtype(input)
     if source == target:
         return input.copy()

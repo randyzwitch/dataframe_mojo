@@ -1,5 +1,6 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
+from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
@@ -744,6 +745,10 @@ def validity(series: Series) -> List[Bool]:
     if series._data.isa[BoolColumn]():
         for i in range(n):
             valid.append(series._data[BoolColumn]._valid(i))
+    elif series._data.isa[ListColumn]():
+        return series._data[ListColumn].validity()
+    elif series._data.isa[StructColumn]():
+        return series._data[StructColumn].validity()
     else:
         for i in range(n):
             valid.append(series._data[StringColumn]._valid(i))

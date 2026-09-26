@@ -87,6 +87,11 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
         if not column._valid(row):
             return "null"
         return "true" if column._get(row) else "false"
+    if series.dtype().is_nested():
+        try:
+            return _truncate(String(series.get(row)), max(max_string_length, 8))
+        except:
+            return "?"
     ref column = series._data[StringColumn]
     if not column._valid(row):
         return "null"

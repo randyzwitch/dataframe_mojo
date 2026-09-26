@@ -295,6 +295,11 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     With nulls_equal=True a null is an ordinary key value, equal only to
     other nulls in the same column. Otherwise any null key yields id -1.
     """
+    for key in keys:
+        if key.dtype().is_nested():
+            raise Error(
+                "list and struct columns cannot be keys yet: " + key.name()
+            )
     if len(keys) == 0:
         raise Error("Row keys require at least one column")
     if len(keys) == 1 and keys[0]._data.isa[StringColumn]():

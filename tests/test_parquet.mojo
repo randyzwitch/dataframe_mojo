@@ -308,6 +308,24 @@ def test_scan_parquet_matches_eager_and_prunes() raises:
     assert_equal(schema[0], "v: float64")
 
 
+def test_nested_parquet_columns() raises:
+    var lists = read_parquet(FIXTURES + "list_int.parquet").column("c")
+    assert_equal(lists.dtype(), DataType.list(DataType.INT64))
+    assert_equal(String(lists.get(0)), "[1, 2]")
+    assert_true(lists.get(1).is_null())
+    assert_equal(len(lists.get(2).list()), 0)
+    var structs = read_parquet(FIXTURES + "struct.parquet").column("c")
+    assert_equal(structs.dtype().name(), "struct[a: int64, b: string]")
+    assert_equal(structs.get(0).struct_field("b").string(), "s")
+    assert_true(structs.get(1).is_null())
+    # Naming a nested column must read every leaf behind it.
+    var projected = read_parquet(FIXTURES + "struct.parquet", columns=["c"])
+    assert_equal(
+        projected.column("c").dtype().name(), "struct[a: int64, b: string]"
+    )
+    assert_equal(projected.column("c").get(0).struct_field("a").int64(), 1)
+
+
 def main() raises:
     try:
         print("libdfparquet: arrow", parquet_backend_version())

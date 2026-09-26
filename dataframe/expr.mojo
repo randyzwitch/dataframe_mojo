@@ -139,6 +139,17 @@ comptime DT_OFFSET_BY = 142
 comptime DT_TOTAL = 143
 comptime DT_STRFTIME = 144
 comptime DT_STRPTIME = 145
+# List and struct operations (see list_kernels.mojo).
+comptime STR_SPLIT = 146
+comptime LIST_LEN = 147
+comptime LIST_GET = 148
+comptime LIST_CONTAINS = 149
+comptime LIST_JOIN = 150
+comptime LIST_SUM = 151
+comptime LIST_MIN = 152
+comptime LIST_MAX = 153
+comptime LIST_MEAN = 154
+comptime STRUCT_FIELD = 155
 
 
 def is_binary(op: Int) -> Bool:
@@ -167,6 +178,11 @@ def is_dt_op(op: Int) -> Bool:
 
 def is_window(op: Int) -> Bool:
     return op >= CUM_SUM and op <= BACKWARD_FILL
+
+
+def is_nested_op(op: Int) -> Bool:
+    """Whether op is str.split, a .list operation, or struct field access."""
+    return op >= STR_SPLIT and op <= STRUCT_FIELD
 
 
 def is_conditional(op: Int) -> Bool:
@@ -664,6 +680,16 @@ struct Expr(Copyable):
         nodes.append(_node(OVER, len(nodes) - 1, text2=_joined(partition_by)))
         return Self(nodes^, self._name)
 
+    def list(self) -> ListNamespace:
+        """Operations on list columns."""
+        return ListNamespace(self.copy())
+
+    def field(self, name: String) -> Self:
+        """One field of a struct column, null where the struct is null."""
+        var nodes = self._nodes.copy()
+        nodes.append(_node(STRUCT_FIELD, len(nodes) - 1, text=name))
+        return Self(nodes^, name)
+
     def str(self) -> StrNamespace:
         """String operations: col("name").str().to_uppercase()."""
         return StrNamespace(self.copy())
@@ -1103,6 +1129,82 @@ struct StrNamespace(Copyable):
     def zfill(self, width: Int) -> Expr:
         """Left-pad with zeros, after a leading + or - sign."""
         return self._op(STR_PAD, "0", 2, width)
+
+    def split(self, by: String, inclusive: Bool = False) -> Expr:
+        """Split on a literal separator into a list of strings. With
+        inclusive, each part but the last keeps the separator."""
+        return self._op(STR_SPLIT, by, Int64(1) if inclusive else Int64(0))
+
+
+@fieldwise_init
+struct ListNamespace(Copyable):
+    """Expressions on list columns. A null list gives a null result."""
+
+    var _expr: Expr
+
+    def _op(
+        self,
+        op: Int,
+        text: String = "",
+        integer: Int64 = 0,
+        floating: Float64 = 0,
+        min_count: Int = 0,
+    ) -> Expr:
+        var nodes = self._expr._nodes.copy()
+        nodes.append(
+            _node(
+                op,
+                len(nodes) - 1,
+                text=text,
+                integer=integer,
+                floating=floating,
+                min_count=min_count,
+            )
+        )
+        return Expr(nodes^, self._expr._name)
+
+    def len(self) -> Expr:
+        """Elements per list, as Int64."""
+        return self._op(LIST_LEN)
+
+    def get(self, index: Int) -> Expr:
+        """Element at index (negative counts from the end); null when out
+        of range."""
+        return self._op(LIST_GET, integer=Int64(index))
+
+    def first(self) -> Expr:
+        return self.get(0)
+
+    def last(self) -> Expr:
+        return self.get(-1)
+
+    def contains(self, value: String) -> Expr:
+        """Whether a string list holds the value."""
+        return self._op(LIST_CONTAINS, text=value, min_count=0)
+
+    def contains(self, value: Int64) -> Expr:
+        """Whether an integer list holds the value."""
+        return self._op(LIST_CONTAINS, integer=value, min_count=1)
+
+    def contains(self, value: Float64) -> Expr:
+        """Whether a float list holds the value."""
+        return self._op(LIST_CONTAINS, floating=value, min_count=2)
+
+    def join(self, separator: String) -> Expr:
+        """Join a string list's elements, skipping null elements."""
+        return self._op(LIST_JOIN, text=separator)
+
+    def sum(self) -> Expr:
+        return self._op(LIST_SUM)
+
+    def min(self) -> Expr:
+        return self._op(LIST_MIN)
+
+    def max(self) -> Expr:
+        return self._op(LIST_MAX)
+
+    def mean(self) -> Expr:
+        return self._op(LIST_MEAN)
 
 
 def concat_str(exprs: List[Expr], separator: String = "") raises -> Expr:

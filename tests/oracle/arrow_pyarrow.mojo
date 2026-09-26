@@ -17,6 +17,7 @@ from dataframe import (
     DataType,
     Series,
     StringColumn,
+    export_arrow_series,
     import_arrow,
     import_arrow_series,
 )
@@ -219,10 +220,14 @@ def check_pyarrow_produced_types() raises:
 
 def check_unsupported_types_are_rejected() raises:
     var pa = Python.import_module("pyarrow")
+    # Lists and structs import since nested columns exist; maps do not yet.
     var cases = Python.list(
         pa.array(Python.list(1, 2), type=pa.timestamp("us", tz="UTC")),
         pa.array(Python.list("a", "b")).dictionary_encode(),
-        pa.array(Python.list(Python.list(1), Python.list(2))),
+        pa.array(
+            Python.list(Python.list(Python.tuple("k", 1))),
+            type=pa.map_(pa.string(), pa.int64()),
+        ),
     )
     for array in cases:
         var c = CStructs()
@@ -238,9 +243,54 @@ def check_unsupported_types_are_rejected() raises:
         c.free()
 
 
+def check_pyarrow_nested_types() raises:
+    """A pyarrow list (int32 offsets) and a struct array import and round-trip."""
+    var pa = Python.import_module("pyarrow")
+    var lists = pa.array(
+        Python.list(Python.list(1, 2), Python.none(), Python.list()),
+        type=pa.list_(pa.int64()),
+    )
+    var c = CStructs()
+    lists._export_to_c(c.array, c.schema)
+    var xs = import_arrow_series(c.array, c.schema)
+    c.free()
+    assert_true(xs.dtype() == DataType.list(DataType.INT64))
+    assert_equal(len(xs), 3)
+    assert_equal(xs.get(0).list().get(1).int64(), 2)
+    assert_true(xs.get(1).is_null())
+    assert_equal(len(xs.get(2).list()), 0)
+    var structs = pa.array(
+        Python.list(
+            Python.dict(a=1, b="x"), Python.none(), Python.dict(a=3, b="z")
+        ),
+        type=pa.struct(
+            Python.list(pa.field("a", pa.int64()), pa.field("b", pa.string()))
+        ),
+    )
+    var d = CStructs()
+    structs._export_to_c(d.array, d.schema)
+    var s = import_arrow_series(d.array, d.schema)
+    d.free()
+    assert_equal(s.dtype().name(), "struct[a: int64, b: string]")
+    assert_true(s.get(1).is_null())
+    assert_equal(s.get(2).struct_field("b").string(), "z")
+    # Our export is large_list (Int64 offsets); the values must match.
+    var back = CStructs()
+    export_arrow_series(
+        xs, _at[ArrowArray](back.array)[], _at[ArrowSchema](back.schema)[]
+    )
+    var again = pa.Array._import_from_c(back.array, back.schema)
+    assert_true(
+        Bool(again.equals(lists.cast(pa.large_list(pa.int64())))),
+        String(again),
+    )
+    back.free()
+
+
 def main() raises:
     check_export_is_valid_arrow()
     check_round_trips_with_offsets()
     check_pyarrow_produced_types()
+    check_pyarrow_nested_types()
     check_unsupported_types_are_rejected()
     print("arrow C data interface: pyarrow interop ok")

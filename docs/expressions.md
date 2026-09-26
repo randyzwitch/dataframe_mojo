@@ -386,3 +386,34 @@ columns and keeps node outputs until the batch ends.
 SIMD loads/stores are assembled by lane rather than a zero-copy buffer view.
 There is no shared-expression elimination, parallel scheduler, or measured end-to-end speedup claim yet. Those are execution
 improvements to pursue with benchmarks, not reasons to change expression semantics.
+
+
+## List and struct expressions
+
+`col(x).str().split(by, inclusive=False)` turns a string column into
+`list[string]`: an empty string gives one empty part, a separator at either
+end gives an empty part there, and a null string gives a null list. With
+`inclusive=True` each part but the last keeps the separator.
+
+The `.list()` namespace works on any list column. `len()` counts elements
+(Int64); `get(i)` returns element `i`, counting from the end when negative and
+null when out of range; `first()` and `last()` are `get(0)` and `get(-1)`;
+`contains(value)` tests a string, integer or float against the list's element
+type; `join(separator)` joins a string list, skipping null elements; `sum`,
+`min`, `max` and `mean` reduce numeric lists (`sum` widens 8- and 16-bit
+integers to Int64, `mean` is Float64, and an empty or all-null list gives
+null except for `sum`, which gives 0). A null list gives a null result.
+
+`col(s).field(name)` reads one field of a struct column; rows where the
+struct itself is null are null. `DataFrame.pack_struct(name, columns)` builds
+a struct column from existing columns and `unnest(name)` puts its fields back
+as top-level columns, in the struct's position.
+
+`DataFrame.explode(columns)` and `LazyFrame.explode(columns)` produce one row
+per list element and repeat the other columns; an empty or null list gives
+one row holding null, and several columns explode together only when every
+row has the same element count in each.
+
+Nested columns cannot yet be sort, group, join or unique keys, be cast,
+reduced, used in `when`/`then`, or written to CSV; each raises an error that
+says so.

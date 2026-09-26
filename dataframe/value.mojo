@@ -1,9 +1,14 @@
 """A runtime-tagged scalar for row access and single-cell results."""
+from std.collections import Optional
+from std.memory import ArcPointer
+
 from .dtype import DataType, NUMERIC_DTYPES
+from .nested_column import _Box
+from .series import Series
 from .temporal import format as format_temporal
 
 
-struct AnyValue(Copyable, Equatable, Writable):
+struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
     """One nullable cell of a supported dtype.
 
     Only the payload field matching `dtype` is meaningful. Equality is
@@ -16,6 +21,8 @@ struct AnyValue(Copyable, Equatable, Writable):
     var _float: Float64
     var _bool: Bool
     var _string: String
+    # A list value's elements, or a one-row series holding a struct value.
+    var _nested: Optional[ArcPointer[_Box[Series]]]
 
     def __init__[D: DType](out self, value: Scalar[D]):
         """A numeric value. Integers are held in an Int64 slot (UInt64 by
@@ -55,6 +62,31 @@ struct AnyValue(Copyable, Equatable, Writable):
         self._float = floating
         self._bool = boolean
         self._string = string^
+        self._nested = None
+
+    @staticmethod
+    def nested(dtype: DataType, var series: Series) -> Self:
+        """A list value (its elements as a series) or a struct value (a
+        one-row series of the struct column)."""
+        var result = Self(dtype, True, 0, 0, False, "")
+        result._nested = ArcPointer(_Box[Series](series^))
+        return result^
+
+    def list(self) raises -> Series:
+        """A list value's elements."""
+        if not self._dtype.is_list():
+            raise Error("Expected a list value, found " + self._dtype.name())
+        if not self._valid:
+            raise Error("Cannot read a null value")
+        return self._nested.value()[].get().copy()
+
+    def struct_field(self, name: String) raises -> Self:
+        """One field of a struct value."""
+        if not self._dtype.is_struct():
+            raise Error("Expected a struct value, found " + self._dtype.name())
+        if not self._valid:
+            raise Error("Cannot read a null value")
+        return self._nested.value()[].get().struct_column().field(name).get(0)
 
     @staticmethod
     def null(dtype: DataType) -> Self:
@@ -158,11 +190,42 @@ struct AnyValue(Copyable, Equatable, Writable):
             return both_nan or self._float == other._float
         if self._dtype == DataType.BOOL:
             return self._bool == other._bool
+        if self._dtype.is_nested():
+            if not self._nested or not other._nested:
+                return False
+            return (
+                self._nested.value()[]
+                .get()
+                .equals(other._nested.value()[].get())
+            )
         return self._string == other._string
 
     def write_to(self, mut writer: Some[Writer]):
         if not self._valid:
             writer.write("null")
+        elif self._dtype.is_list():
+            writer.write("[")
+            try:
+                var items = self.list()
+                for i in range(len(items)):
+                    if i > 0:
+                        writer.write(", ")
+                    writer.write(items.get(i))
+            except:
+                pass
+            writer.write("]")
+        elif self._dtype.is_struct():
+            writer.write("{")
+            try:
+                var row = self._nested.value()[].get().struct_column()
+                var names = row.field_names()
+                for i in range(len(names)):
+                    if i > 0:
+                        writer.write(", ")
+                    writer.write(names[i], ": ", row.field(i).get(0))
+            except:
+                pass
+            writer.write("}")
         elif self._dtype == DataType.UINT64:
             writer.write(self._int.cast[DType.uint64]())
         elif self._dtype.is_integer():

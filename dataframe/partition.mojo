@@ -90,6 +90,10 @@ def _hash_column(
 ) raises:
     """Hash rows [start, end) of one key column into `out`, combining with
     what earlier key columns wrote unless this is the first."""
+    if series.dtype().is_nested():
+        raise Error(
+            "list and struct columns cannot be keys yet: " + series.name()
+        )
     var p = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=out_address)
 
     @__parameter
@@ -345,6 +349,11 @@ struct Partitioner(Movable):
     var rows: Int
 
     def __init__(out self, keys: List[Series], workers: Int) raises:
+        for key in keys:
+            if key.dtype().is_nested():
+                raise Error(
+                    "list and struct columns cannot be keys yet: " + key.name()
+                )
         var contiguous = List[Series](capacity=len(keys))
         for key in keys:
             contiguous.append(key.rechunk() if key.is_chunked() else key.copy())

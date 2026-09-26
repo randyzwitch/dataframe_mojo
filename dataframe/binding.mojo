@@ -95,6 +95,17 @@ from .expr import (
     STR_SLICE,
     STR_PAD,
     is_string_op,
+    is_nested_op,
+    STR_SPLIT,
+    STRUCT_FIELD,
+    LIST_LEN,
+    LIST_GET,
+    LIST_CONTAINS,
+    LIST_JOIN,
+    LIST_SUM,
+    LIST_MIN,
+    LIST_MAX,
+    LIST_MEAN,
     is_conditional,
     is_logical,
     is_binary,
@@ -277,6 +288,14 @@ def temporal_result(
 
 
 def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
+    if left.is_nested() or right.is_nested():
+        raise Error(
+            op_name(op)
+            + " does not support list or struct operands, found "
+            + left.name()
+            + " and "
+            + right.name()
+        )
     if op == KEEP_NULLS:
         return right
     if (left.is_temporal() or right.is_temporal()) and (
@@ -359,6 +378,12 @@ def _unary_dtype(op: Int, input: DataType) raises -> DataType:
 
 def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     var op = node.op
+    if input.is_nested():
+        raise Error(
+            op_name(op)
+            + " does not support list or struct expressions yet, found "
+            + input.name()
+        )
     if op == SUM:
         if input.is_duration():
             return input
@@ -681,6 +706,11 @@ def bind(
             # An untyped branch adopts the other branch's type.
             var then_type = types[node.right]
             var else_type = types[node.extra] if node.extra >= 0 else then_type
+            if then_type.is_nested() or else_type.is_nested():
+                raise Error(
+                    "when/then/otherwise does not support list or struct"
+                    " branches yet"
+                )
             if then_type.is_untyped() and not else_type.is_untyped():
                 _adopt(nodes, types, node.right, _target(else_type))
             elif else_type.is_untyped() and not then_type.is_untyped():
@@ -723,6 +753,12 @@ def bind(
             if shapes[node.left] != ROWS:
                 raise Error("Window operations require a row-valued input")
             var input = types[node.left]
+            if input.is_nested():
+                raise Error(
+                    op_name(node.op)
+                    + " does not support list or struct expressions, found "
+                    + input.name()
+                )
             dtype = input
             if node.op == CUM_SUM or node.op == ROLLING_SUM:
                 if not _numeric(input) and not input.is_duration():
@@ -819,6 +855,81 @@ def bind(
                 dtype = DataType.BOOL
             else:
                 dtype = DataType.STRING
+            shape = shapes[node.left]
+            has_aggregate = aggregated[node.left]
+        elif is_nested_op(node.op):
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid list expression input")
+            var input = types[node.left]
+            if node.op == STR_SPLIT:
+                if input != DataType.STRING:
+                    raise Error(
+                        "str.split requires a string expression, found "
+                        + input.name()
+                    )
+                dtype = DataType.list(DataType.STRING)
+            elif node.op == STRUCT_FIELD:
+                if not input.is_struct():
+                    raise Error(
+                        "field() requires a struct expression, found "
+                        + input.name()
+                    )
+                dtype = input.field_dtype(input.field_index(node.text))
+            else:
+                if not input.is_list():
+                    raise Error(
+                        op_name(node.op)
+                        + " requires a list expression, found "
+                        + input.name()
+                    )
+                var inner = input.inner()
+                if node.op == LIST_LEN:
+                    dtype = DataType.INT64
+                elif node.op == LIST_GET:
+                    dtype = inner
+                elif node.op == LIST_CONTAINS:
+                    var wanted = (
+                        DataType.STRING if node.min_count == 0 else inner
+                    )
+                    if node.min_count == 0 and inner != DataType.STRING:
+                        raise Error(
+                            "list.contains with a string needs a string"
+                            " list, found " + input.name()
+                        )
+                    if node.min_count == 1 and not inner.is_integer():
+                        raise Error(
+                            "list.contains with an integer needs an integer"
+                            " list, found " + input.name()
+                        )
+                    if node.min_count == 2 and not inner.is_float():
+                        raise Error(
+                            "list.contains with a float needs a float list,"
+                            " found " + input.name()
+                        )
+                    _ = wanted
+                    dtype = DataType.BOOL
+                elif node.op == LIST_JOIN:
+                    if inner != DataType.STRING:
+                        raise Error(
+                            "list.join needs a string list, found "
+                            + input.name()
+                        )
+                    dtype = DataType.STRING
+                elif node.op == LIST_MEAN:
+                    if not inner.is_numeric():
+                        raise Error(
+                            "list.mean needs a numeric list, found "
+                            + input.name()
+                        )
+                    dtype = DataType.FLOAT64
+                else:
+                    if not inner.is_numeric():
+                        raise Error(
+                            op_name(node.op)
+                            + " needs a numeric list, found "
+                            + input.name()
+                        )
+                    dtype = inner.sum_type() if node.op == LIST_SUM else inner
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif is_unary(node.op):
