@@ -83,5 +83,15 @@ bench-polars = "python3 scripts/bench_polars.py"
 [feature.oracle.pypi-dependencies]
 duckdb = ">=1.5.5, <2"
 
+# Builds libdfparquet, the Parquet reader library read_parquet loads at run
+# time (see native/dfparquet). Needs a C++20 compiler on the host.
+[feature.native.dependencies]
+cmake = ">=3.25"
+ninja = ">=1.11"
+
+[feature.native.tasks]
+build-dfparquet = "bash native/dfparquet/build.sh build/dfparquet"
+
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }
+native = { features = ["native"], solve-group = "default" }

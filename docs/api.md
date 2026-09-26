@@ -816,6 +816,30 @@ A typed null literal of any dtype name (see DataType.parse).
 def null(dtype: String) -> Expr
 ```
 
+## `parquet_backend_version`
+
+The reader library's Arrow version, for diagnostics.
+
+```mojo
+def parquet_backend_version() -> String
+```
+
+## `parquet_library_candidates`
+
+Where `read_parquet` looks for its reader library, in order.
+
+```mojo
+def parquet_library_candidates() -> List[String]
+```
+
+## `parquet_row_group_statistics`
+
+One row per row group of `path`, without decoding any data.
+
+```mojo
+def parquet_row_group_statistics(path: String) -> DataFrame
+```
+
 ## `read_csv`
 
 Read CSV through the Polars-derived scanner and typed builders.
@@ -828,6 +852,14 @@ def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separa
 def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
 ```
 
+## `read_parquet`
+
+Read a local Parquet file into a DataFrame.
+
+```mojo
+def read_parquet(path: String, *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True) -> DataFrame
+```
+
 ## `scan_csv`
 
 Lazily read a CSV file with an inferred schema. Nothing is read until collect; projection and head() are pushed into the reader.
@@ -838,6 +870,14 @@ def scan_csv(path: String) -> LazyFrame
 
 ```mojo
 def scan_csv(path: String, schema: CsvSchema) -> LazyFrame
+```
+
+## `scan_parquet`
+
+Lazily read a Parquet file. Nothing is read until collect; projection is pushed into the reader, and a filter directly above the scan decodes only the row groups whose footer statistics can hold a match.
+
+```mojo
+def scan_parquet(path: String) -> LazyFrame
 ```
 
 ## `Series`

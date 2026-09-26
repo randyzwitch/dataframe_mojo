@@ -57,7 +57,8 @@ No universal dataframe trait or foreign-backend abstraction is imposed.
    zero-copy import that retains foreign buffers remain.
 6. **Broader operations and input:** additional expressions/reductions, multiple
    and numeric grouping/join keys, casts, multi-column sorting, and CSV input.
-   Parquet remains a separate integration project.
+   Parquet reading goes through Arrow C++ behind a C shim (`native/dfparquet`)
+   until a Mojo-native reader exists; `dataframe/parquet.mojo` is the seam.
 
 GPU execution, distributed execution, arbitrary Python-object columns, pandas
 index compatibility, and cross-engine adapters remain outside the initial scope.

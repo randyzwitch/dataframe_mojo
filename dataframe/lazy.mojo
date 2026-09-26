@@ -10,8 +10,11 @@ the plan before execution:
   that owns every column they read;
   row-local filters directly above unrestricted CSV scans run per decode range;
 - projection pushdown: scans read only the columns the rest of the plan uses
-  (CSV scans decode only those fields);
-- slice pushdown: a head/slice directly over a CSV scan becomes `n_rows`.
+  (CSV and Parquet scans decode only those fields);
+- slice pushdown: a head/slice directly over a CSV scan becomes `n_rows`;
+- row-group pruning: a row-local filter directly above a Parquet scan reads
+  the footer statistics first and decodes only the row groups that can
+  hold a match (see `parquet._pruned_row_groups`).
 
 Filters never move past a slice, unique, group_by, or right/full join,
 because that would change which rows those operators see.
@@ -21,6 +24,11 @@ from .csv import CsvSchema, read_csv
 from .csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import COL, OVER, SELECTOR, Expr, col, is_reduction, is_window
 from .frame import DataFrame, GroupBy
+from .parquet import (
+    _pruned_row_groups,
+    parquet_row_group_statistics,
+    read_parquet,
+)
 from .series import Series
 
 comptime SCAN_FRAME = 0
@@ -34,6 +42,7 @@ comptime SORT = 7
 comptime SLICE = 8
 comptime UNIQUE = 9
 comptime DROP = 10
+comptime SCAN_PARQUET = 11
 
 
 @fieldwise_init
@@ -235,7 +244,7 @@ struct LazyFrame(Copyable):
                 copied.left += shift
             if copied.right >= 0:
                 copied.right += shift
-            if copied.kind == SCAN_FRAME or copied.kind == SCAN_CSV:
+            if _is_scan(copied.kind):
                 copied.offset += frame_shift
             result._nodes.append(copied^)
         var join = _plan_node(
@@ -300,6 +309,12 @@ struct LazyFrame(Copyable):
                     columns=node.names,
                 )
             return read_csv(node.text, n_rows=rows, columns=node.names)
+        if node.kind == SCAN_PARQUET:
+            if empty:
+                return read_parquet(
+                    node.text, columns=node.names, row_groups=List[Int]()
+                )
+            return read_parquet(node.text, columns=node.names)
         # Keep a sort's row permutation until after a plain projection, so
         # columns used only as sort keys are never gathered into output.
         if node.kind == SELECT and not empty:
@@ -329,6 +344,15 @@ struct LazyFrame(Copyable):
         # materialization order, so retain the eager path for those cases.
         if node.kind == FILTER and not empty and _row_local(node.exprs):
             ref source = self._nodes[node.left]
+            # Decode only the row groups whose footer bounds admit a match;
+            # the filter still runs on what was read.
+            if source.kind == SCAN_PARQUET:
+                var groups = _pruned_row_groups(
+                    parquet_row_group_statistics(source.text), node.exprs[0]
+                )
+                return read_parquet(
+                    source.text, columns=source.names, row_groups=groups
+                ).filter(node.exprs[0])
             if source.kind == SCAN_CSV and source.length < 0:
                 if self._schemas[source.offset]:
                     return read_csv_explicit(
@@ -548,7 +572,7 @@ struct LazyFrame(Copyable):
         for reverse in range(len(self._nodes)):
             var i = len(self._nodes) - 1 - reverse
             ref node = self._nodes[i]
-            if node.kind == SCAN_FRAME or node.kind == SCAN_CSV:
+            if _is_scan(node.kind):
                 if not all_needed[i] and needed[i]:
                     var columns = self._columns_of(i)
                     var keep = List[String]()
@@ -607,6 +631,8 @@ struct LazyFrame(Copyable):
             label = "SCAN frame"
         elif node.kind == SCAN_CSV:
             label = "SCAN CSV " + node.text
+        elif node.kind == SCAN_PARQUET:
+            label = "SCAN PARQUET " + node.text
         elif node.kind == FILTER:
             label = "FILTER"
         elif node.kind == SELECT:
@@ -630,7 +656,7 @@ struct LazyFrame(Copyable):
             label = "UNIQUE " + _joined(node.names)
         else:
             label = "DROP " + _joined(node.names)
-        if node.kind == SCAN_FRAME or node.kind == SCAN_CSV:
+        if _is_scan(node.kind):
             if len(node.names) > 0:
                 label += " [project " + _joined(node.names) + "]"
             if node.kind == SCAN_CSV and node.length >= 0:
@@ -640,6 +666,10 @@ struct LazyFrame(Copyable):
             self._describe(node.left, depth + 1, out)
         if node.right >= 0:
             self._describe(node.right, depth + 1, out)
+
+
+def _is_scan(kind: Int) -> Bool:
+    return kind == SCAN_FRAME or kind == SCAN_CSV or kind == SCAN_PARQUET
 
 
 def _joined(names: List[String]) -> String:
@@ -710,4 +740,15 @@ def scan_csv(path: String, schema: CsvSchema) raises -> LazyFrame:
         [_plan_node(SCAN_CSV, text=path, offset=0)],
         [DataFrame([])],
         [Optional[CsvSchema](schema.copy())],
+    )
+
+
+def scan_parquet(path: String) raises -> LazyFrame:
+    """Lazily read a Parquet file. Nothing is read until collect; projection
+    is pushed into the reader, and a filter directly above the scan decodes
+    only the row groups whose footer statistics can hold a match."""
+    return LazyFrame(
+        [_plan_node(SCAN_PARQUET, text=path, offset=0)],
+        [DataFrame([])],
+        [Optional[CsvSchema]()],
     )
