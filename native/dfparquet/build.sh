@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build libdfparquet.so: a minimal static Arrow C++ (Parquet reader, bundled
-# codecs, mimalloc) behind three C symbols, depending only on libc and libm.
+# Build libdfparquet.so / .dylib: a minimal static Arrow C++ (Parquet reader,
+# bundled codecs, mimalloc) behind four C symbols and the system runtimes.
 #
 #   ARROW_VERSION=24.0.0 bash native/dfparquet/build.sh [OUT_DIR]
 #
@@ -22,6 +22,9 @@ if [ ! -d "$SRC" ]; then
   tar xzf "$WORK/arrow.tar.gz" -C "$WORK"
 fi
 
+# Thrift uses Boost.Locale headers, but the minimal Parquet reader does not
+# need its optional ICU backend. Auto-detection can find SDK ICU libraries
+# without usable headers on macOS, and adds an unbundled dependency.
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -30,6 +33,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DARROW_WITH_SNAPPY=ON -DARROW_WITH_ZSTD=ON -DARROW_WITH_LZ4=ON -DARROW_WITH_ZLIB=ON \
   -DARROW_WITH_BROTLI=OFF -DARROW_WITH_BZ2=OFF \
   -DARROW_DEPENDENCY_SOURCE=BUNDLED -DARROW_DEPENDENCY_USE_SHARED=OFF \
+  -DBOOST_LOCALE_ENABLE_ICU=OFF \
   -DARROW_MIMALLOC=ON -DARROW_JEMALLOC=OFF \
   -DARROW_FILESYSTEM=OFF -DARROW_S3=OFF -DARROW_GCS=OFF -DARROW_AZURE=OFF -DARROW_HDFS=OFF \
   -DARROW_JSON=OFF -DARROW_CSV=OFF -DARROW_IPC=OFF -DARROW_DATASET=OFF -DARROW_ACERO=OFF \
@@ -38,17 +42,32 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DARROW_BUILD_TESTS=OFF -DARROW_BUILD_BENCHMARKS=OFF -DARROW_BUILD_INTEGRATION=OFF \
   -DARROW_BUILD_UTILITIES=OFF -DPARQUET_REQUIRE_ENCRYPTION=OFF -DPARQUET_BUILD_EXECUTABLES=OFF \
   -DARROW_USE_CCACHE=OFF
-cmake --build "$BUILD" -j "${JOBS:-$(nproc)}"
+cmake --build "$BUILD" -j "${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
 
+# Apple ld resolves archive references without GNU ld's --start/end-group.
+# Keep the library mode, export controls and strip options platform-specific.
 case "$(uname -s)" in
-  Darwin) LIB=$OUT/libdfparquet.dylib; LINK_FLAGS=(-Wl,-exported_symbols_list,"$HERE/dfparquet.sym");;
-  *)      LIB=$OUT/libdfparquet.so
-          LINK_FLAGS=(-Wl,--version-script="$HERE/dfparquet.map" -Wl,--exclude-libs,ALL -static-libstdc++ -static-libgcc);;
+  Darwin)
+    LIB=$OUT/libdfparquet.dylib
+    LINK_FLAGS=(-dynamiclib -Wl,-install_name,@rpath/libdfparquet.dylib
+                -Wl,-exported_symbols_list,"$HERE/dfparquet.sym")
+    ARCHIVES=(-lparquet -larrow -larrow_bundled_dependencies)
+    SYSTEM_LIBS=(-lpthread)
+    STRIP_FLAGS=(-x)
+    ;;
+  Linux)
+    LIB=$OUT/libdfparquet.so
+    LINK_FLAGS=(-shared -Wl,--version-script="$HERE/dfparquet.map"
+                -Wl,--exclude-libs,ALL -static-libstdc++ -static-libgcc)
+    ARCHIVES=(-Wl,--start-group -lparquet -larrow
+              -larrow_bundled_dependencies -Wl,--end-group)
+    SYSTEM_LIBS=(-lpthread -ldl)
+    STRIP_FLAGS=(--strip-unneeded)
+    ;;
+  *) echo "Unsupported platform: $(uname -s)" >&2; exit 1;;
 esac
-${CXX:-c++} -O2 -std=c++20 -fPIC -shared \
+${CXX:-c++} -O2 -std=c++20 -fPIC "${LINK_FLAGS[@]}" \
   -I"$SRC/src" -I"$BUILD/src" "$HERE/dfparquet.cc" -o "$LIB" \
-  -L"$BUILD/release" \
-  -Wl,--start-group -lparquet -larrow -larrow_bundled_dependencies -Wl,--end-group \
-  -lpthread -ldl "${LINK_FLAGS[@]}"
-strip --strip-unneeded "$LIB" 2>/dev/null || true
+  -L"$BUILD/release" "${ARCHIVES[@]}" "${SYSTEM_LIBS[@]}"
+strip "${STRIP_FLAGS[@]}" "$LIB"
 ls -la "$LIB"
