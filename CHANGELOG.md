@@ -25,6 +25,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
   Float64 comparison filters run on aligned chunks from 50,000 rows (was
   2,000,000). At 1M rows this makes expression chains about 3x and filters
   about 1.7x faster.
+- List and struct column types: `DataType.list(inner)` and
+  `DataType.struct(names, dtypes)`, backed by `ListColumn` and `StructColumn`
+  in the Arrow `large_list` and `struct` layouts, with take, slice, concat,
+  equality, display, and Arrow import and export (so `read_parquet` now
+  returns nested columns). `str.split`, `DataFrame.explode` and
+  `LazyFrame.explode`, the `.list()` expression namespace (`len`, `get`,
+  `first`, `last`, `contains`, `join`, `sum`, `min`, `max`, `mean`),
+  `pack_struct`, `unnest` (eager and lazy) and `field(name)`. Operations
+  that do not support nested columns yet raise a clear error.
 
 ### Breaking
 

@@ -601,6 +601,12 @@ def take_sorted_chunked(
     Generic ``take_parallel`` still handles arbitrary join indices. Jobs run
     by column, so the selected chunks remain in source order in the result.
     """
+    for column in columns:
+        if column.dtype().is_nested():
+            var gathered = List[Series](capacity=len(columns))
+            for c in columns:
+                gathered.append(c.take(indices))
+            return gathered^
     if len(indices) >= 2_000_000 and len(columns) > 1:
         var parts = min(4, configured_workers() // len(columns))
         if parts > 1:
@@ -769,6 +775,16 @@ def take_parallel(
     With `or_null`, a negative index yields a null instead of a row, which
     is how a join names the side that has no matching row.
     """
+    # List and struct columns gather through their own take; the payload
+    # scatter below only knows fixed-width and string buffers.
+    for column in columns:
+        if column.dtype().is_nested():
+            var gathered = List[Series](capacity=len(columns))
+            for c in columns:
+                gathered.append(
+                    c.take_or_null(indices) if or_null else c.take(indices)
+                )
+            return gathered^
     var contiguous = List[Series](capacity=len(columns))
     var rechunk = List[_RechunkJob]()
     var positions = List[Int]()

@@ -67,8 +67,10 @@ from .expr import (
     is_window,
     is_reduction,
     is_string_op,
+    is_nested_op,
 )
 from .str_kernels import string_op, concat_strings
+from .list_kernels import nested_op
 from .cast import cast_series
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows
@@ -264,6 +266,8 @@ def _eval[
         )
     if is_string_op(node.op):
         return string_op(node, left)
+    if is_nested_op(node.op):
+        return nested_op(node, left, bound.dtypes[node.left])
     if node.right < 0:
         return _unary_op[width](node.op, left, node.integer, mask)
     var right = _eval[width](

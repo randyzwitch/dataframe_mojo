@@ -158,6 +158,35 @@ uses are decoded, and a filter with constant bounds reads the footer's
 row-group statistics first and skips row groups that cannot match.
 `parquet_row_group_statistics(path)` returns those bounds as a frame.
 
+## List and struct columns
+
+`DataType.list(inner)` holds a variable number of values per row and
+`DataType.struct(names, dtypes)` holds one value of each named field per row,
+in the Arrow `large_list` and `struct` layouts. They come out of
+`read_parquet` and Arrow import, from `str.split`, and from `pack_struct`.
+
+```mojo
+from dataframe import DataFrame, col
+
+var tags = frame.with_columns(col("tags").str().split(",").alias("tag"))
+var one_per_tag = tags.explode("tag")           # other columns repeat
+var counts = tags.select_exprs([col("tag").list().len().alias("n")])
+var packed = frame.pack_struct("point", ["x", "y"])
+var xs = packed.select_exprs([col("point").field("x")])
+var flat = packed.unnest("point")
+```
+
+The `.list()` namespace has `len`, `get(i)` (negative from the end, null when
+out of range), `first`, `last`, `contains(value)`, `join(separator)`, `sum`,
+`min`, `max` and `mean`; `field(name)` reads one struct field, null where the
+struct is null. `explode` and `unnest` also exist on `LazyFrame`. Nested
+columns take part in `select`, `filter`, `take`, `slice`, `concat`, `head`,
+`equals`, display, and Arrow export and import; they cannot yet be sort,
+group, join or unique keys, be cast, be reduced (`sum`, `count`, ...), appear
+in `when`/`then`, or be written to CSV, and each of those raises a clear
+error. `implode` (aggregating a group into a list) and an expression-level
+`struct(...)` constructor are not implemented yet.
+
 The reader is Arrow C++'s, built with only its Parquet parts and bundled
 codecs into `libdfparquet`, a 15 MB shared library with no dependencies
 beyond libc. It is loaded at run time, so nothing else in the package needs

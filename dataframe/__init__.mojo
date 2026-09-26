@@ -2,6 +2,7 @@
 from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
+from .nested_column import ListColumn, StructColumn
 from .series import Series
 from .frame import DataFrame, Field, GroupBy, concat
 from .groups import GroupIndices
@@ -14,6 +15,7 @@ from .expr import (
     Expr,
     StrNamespace,
     DtNamespace,
+    ListNamespace,
     all,
     by_dtype,
     exclude,

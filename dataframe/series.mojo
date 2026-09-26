@@ -3,6 +3,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from std.utils import Variant
 from .bool_column import BoolColumn
 from .column import Column
+from .nested_column import ListColumn, StructColumn
 from .string_column import StringColumn
 from .string_view import StringViewStorage
 from .value import AnyValue
@@ -50,16 +51,18 @@ comptime Storage = Variant[
     Column[UInt32],
     Column[UInt64],
     Column[Float32],
+    ListColumn,
+    StructColumn,
 ]
 
 
 @fieldwise_init
-struct _SeriesChunks(Copyable):
+struct _SeriesChunks(Copyable, Deinitable, Movable):
     var arrays: List[Storage]
     var ends: List[Int]
 
 
-struct Series(Copyable, Sized, Writable):
+struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     """A named column of one supported dtype, plus expression-backed methods."""
 
     var _name: String
@@ -96,6 +99,18 @@ struct Series(Copyable, Sized, Writable):
     def __init__(out self, var name: String, column: Column[String]):
         """Convert list-backed strings to the contiguous UTF-8 layout."""
         self = Self(name^, StringColumn(column))
+
+    def __init__(out self, var name: String, var column: ListColumn):
+        self._name = name^
+        self._dtype = column.dtype()
+        self._data = Storage(column^)
+        self._chunked = None
+
+    def __init__(out self, var name: String, var column: StructColumn):
+        self._name = name^
+        self._dtype = column.dtype()
+        self._data = Storage(column^)
+        self._chunked = None
 
     @staticmethod
     def _wrap[
@@ -231,6 +246,10 @@ struct Series(Copyable, Sized, Writable):
                 return DataType.of(D)
         if self._data.isa[BoolColumn]():
             return DataType.BOOL
+        if self._data.isa[ListColumn]():
+            return self._data[ListColumn].dtype()
+        if self._data.isa[StructColumn]():
+            return self._data[StructColumn].dtype()
         return DataType.STRING
 
     def with_dtype(self, dtype: DataType) raises -> Self:
@@ -287,6 +306,10 @@ struct Series(Copyable, Sized, Writable):
                 return len(self._data[Column[E]])
         if self._data.isa[BoolColumn]():
             return len(self._data[BoolColumn])
+        if self._data.isa[ListColumn]():
+            return len(self._data[ListColumn])
+        if self._data.isa[StructColumn]():
+            return len(self._data[StructColumn])
         return len(self._data[StringColumn])
 
     def null_count(self) -> Int:
@@ -301,6 +324,10 @@ struct Series(Copyable, Sized, Writable):
                 return self._data[Column[E]].null_count()
         if self._data.isa[BoolColumn]():
             return self._data[BoolColumn].null_count()
+        if self._data.isa[ListColumn]():
+            return self._data[ListColumn].null_count()
+        if self._data.isa[StructColumn]():
+            return self._data[StructColumn].null_count()
         return self._data[StringColumn].null_count()
 
     def get(self, index: Int) raises -> AnyValue:
@@ -324,6 +351,18 @@ struct Series(Copyable, Sized, Writable):
             if self._data[BoolColumn].is_null(index):
                 return AnyValue.null(DataType.BOOL)
             return AnyValue(self._data[BoolColumn]._get(index))
+        if self._data.isa[ListColumn]():
+            ref lists = self._data[ListColumn]
+            if lists.is_null(index):
+                return AnyValue.null(self._dtype)
+            return AnyValue.nested(self._dtype, lists.row(index))
+        if self._data.isa[StructColumn]():
+            ref structs = self._data[StructColumn]
+            if structs.is_null(index):
+                return AnyValue.null(self._dtype)
+            return AnyValue.nested(
+                self._dtype, Self(self._name, structs.slice(index, 1))
+            )
         if self._data[StringColumn].is_null(index):
             return AnyValue.null(DataType.STRING)
         return AnyValue(String(self._data[StringColumn]._get(index)))
@@ -391,6 +430,10 @@ struct Series(Copyable, Sized, Writable):
                 if a._valid(i) and a._get(i) != b._get(i):
                     return False
             return True
+        if self._data.isa[ListColumn]():
+            return self._data[ListColumn].equals(other._data[ListColumn])
+        if self._data.isa[StructColumn]():
+            return self._data[StructColumn].equals(other._data[StructColumn])
         ref a = self._data[StringColumn]
         ref b = other._data[StringColumn]
         for i in range(len(a)):
@@ -722,6 +765,22 @@ struct Series(Copyable, Sized, Writable):
             raise Error("Expected string column")
         return self._data[StringColumn].copy()
 
+    def list_column(self) raises -> ListColumn:
+        """The (shared, immutable) list column, raising on a dtype mismatch."""
+        if self.is_chunked():
+            return self.rechunk().list_column()
+        if not self._data.isa[ListColumn]():
+            raise Error("Expected list column, found " + self._dtype.name())
+        return self._data[ListColumn].copy()
+
+    def struct_column(self) raises -> StructColumn:
+        """The (shared, immutable) struct column, raising on a mismatch."""
+        if self.is_chunked():
+            return self.rechunk().struct_column()
+        if not self._data.isa[StructColumn]():
+            raise Error("Expected struct column, found " + self._dtype.name())
+        return self._data[StructColumn].copy()
+
     def take(self, indices: List[Int]) raises -> Self:
         if self.is_chunked():
             return self.rechunk().take(indices)
@@ -738,6 +797,10 @@ struct Series(Copyable, Sized, Writable):
                 )
         if self._data.isa[BoolColumn]():
             return Self(self._name, self._data[BoolColumn].take(indices))
+        if self._data.isa[ListColumn]():
+            return Self(self._name, self._data[ListColumn].take(indices))
+        if self._data.isa[StructColumn]():
+            return Self(self._name, self._data[StructColumn].take(indices))
         return Self(self._name, self._data[StringColumn].take(indices))
 
     def take_or_null(self, indices: List[Int]) raises -> Self:
@@ -762,6 +825,14 @@ struct Series(Copyable, Sized, Writable):
                 self._name,
                 self._data[BoolColumn].take_or_null(indices, False),
             )
+        if self._data.isa[ListColumn]():
+            return Self(
+                self._name, self._data[ListColumn].take_or_null(indices)
+            )
+        if self._data.isa[StructColumn]():
+            return Self(
+                self._name, self._data[StructColumn].take_or_null(indices)
+            )
         return Self(
             self._name,
             self._data[StringColumn].take_or_null(indices, String("")),
@@ -770,6 +841,8 @@ struct Series(Copyable, Sized, Writable):
     def _less(
         self, a: Int, b: Int, descending: Bool, nulls_last: Bool
     ) raises -> Bool:
+        if self._dtype.is_nested():
+            raise Error("cannot sort by a " + self._dtype.name() + " column")
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if self._data.isa[Column[Scalar[D]]]():
@@ -819,6 +892,8 @@ struct Series(Copyable, Sized, Writable):
         """
         if self.is_chunked():
             return self.rechunk()._sort_ranks(descending, nulls_last)
+        if self._dtype.is_nested():
+            raise Error("cannot sort by a " + self._dtype.name() + " column")
         var n = len(self)
         var ranks = List[Int](length=n, fill=0)
         var valid = List[Bool](length=n, fill=False)
@@ -957,6 +1032,14 @@ struct Series(Copyable, Sized, Writable):
             return Self(
                 self._name, self._data[BoolColumn].slice(offset, length)
             )
+        if self._data.isa[ListColumn]():
+            return Self(
+                self._name, self._data[ListColumn].slice(offset, length)
+            )
+        if self._data.isa[StructColumn]():
+            return Self(
+                self._name, self._data[StructColumn].slice(offset, length)
+            )
         return Self(self._name, self._data[StringColumn].slice(offset, length))
 
     def _broadcast(self, length: Int) raises -> Self:
@@ -975,6 +1058,10 @@ struct Series(Copyable, Sized, Writable):
                 )
         if self._data.isa[BoolColumn]():
             return Self(self._name, self._data[BoolColumn]._broadcast(length))
+        if self._data.isa[ListColumn]():
+            return Self(self._name, self._data[ListColumn]._broadcast(length))
+        if self._data.isa[StructColumn]():
+            return Self(self._name, self._data[StructColumn]._broadcast(length))
         return Self(self._name, self._data[StringColumn]._broadcast(length))
 
     @staticmethod
@@ -996,6 +1083,10 @@ struct Series(Copyable, Sized, Writable):
                 return Self(name^, Column[Scalar[D]]._nulls(length, 0))
         if dtype == DataType.BOOL:
             return Self(name^, BoolColumn._nulls(length, False))
+        if dtype.is_list():
+            return Self(name^, ListColumn._nulls(length, dtype.inner()))
+        if dtype.is_struct():
+            return Self(name^, StructColumn._nulls(length, dtype))
         return Self(name^, StringColumn._nulls(length))
 
     def append(self, other: Self) raises -> Self:
@@ -1059,6 +1150,16 @@ struct Series(Copyable, Sized, Writable):
             self._data[BoolColumn]._append_column(other._data[BoolColumn])
         if self._data.isa[StringColumn]():
             self._data[StringColumn]._append_column(other._data[StringColumn])
+        if self._data.isa[ListColumn]():
+            self._data = Storage(
+                self._data[ListColumn]._append_column(other._data[ListColumn])
+            )
+        if self._data.isa[StructColumn]():
+            self._data = Storage(
+                self._data[StructColumn]._append_column(
+                    other._data[StructColumn]
+                )
+            )
 
 
 def _equal_columns[

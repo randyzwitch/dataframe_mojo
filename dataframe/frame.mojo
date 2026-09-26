@@ -42,6 +42,7 @@ from .gather import (
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
 from .join_hash import direct_hash_join_rows, direct_hash_semi_anti_rows
+from .nested_column import ListColumn, StructColumn
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
@@ -363,6 +364,114 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error("Filter mask must match dataframe height")
         return self._filter_rows(true_rows(mask))
 
+    def explode(self, column: String) raises -> Self:
+        return self.explode([column])
+
+    def explode(self, columns: List[String]) raises -> Self:
+        """One output row per list element; other columns repeat. An empty
+        or null list gives one row holding null. Several columns explode
+        together and must have the same element count in every row."""
+        if len(columns) == 0:
+            raise Error("explode needs at least one column")
+        var positions = List[Int](capacity=len(columns))
+        var lists = List[ListColumn](capacity=len(columns))
+        for name in columns:
+            var index = self._index(name)
+            for p in positions:
+                if p == index:
+                    raise Error("explode: column listed twice: " + name)
+            if not self._columns[index].dtype().is_list():
+                raise Error(
+                    "explode needs list columns; "
+                    + name
+                    + " is "
+                    + self._columns[index].dtype().name()
+                )
+            positions.append(index)
+            lists.append(self._columns[index].list_column())
+        var repeat = List[Int]()
+        var child_rows = List[List[Int]](capacity=len(lists))
+        for _ in range(len(lists)):
+            child_rows.append(List[Int]())
+        for i in range(self._height):
+            var count = lists[0].element_count(i)
+            for k in range(1, len(lists)):
+                if lists[k].element_count(i) != count:
+                    raise Error(
+                        "explode: columns have different element counts at"
+                        " row " + String(i)
+                    )
+            if count == 0:
+                repeat.append(i)
+                for k in range(len(lists)):
+                    child_rows[k].append(-1)
+                continue
+            for e in range(count):
+                repeat.append(i)
+                for k in range(len(lists)):
+                    child_rows[k].append(lists[k]._start(i) + e)
+        var out = List[Series](capacity=self.width())
+        for c in range(self.width()):
+            var exploded = -1
+            for k in range(len(positions)):
+                if positions[k] == c:
+                    exploded = k
+            if exploded < 0:
+                out.append(self._columns[c].take(repeat))
+            else:
+                out.append(
+                    lists[exploded]
+                    .child()
+                    .take_or_null(child_rows[exploded])
+                    .renamed(self._columns[c].name())
+                )
+        return Self(out^, height=len(repeat))
+
+    def unnest(self, column: String) raises -> Self:
+        """Replace a struct column with its fields as top-level columns, in
+        its position. Field names must not clash with other columns."""
+        var index = self._index(column)
+        if not self._columns[index].dtype().is_struct():
+            raise Error(
+                "unnest needs a struct column; "
+                + column
+                + " is "
+                + self._columns[index].dtype().name()
+            )
+        var structs = self._columns[index].struct_column()
+        var out = List[Series](capacity=self.width() + structs.field_count())
+        for c in range(self.width()):
+            if c != index:
+                out.append(self._columns[c].copy())
+                continue
+            for f in range(structs.field_count()):
+                var field = structs.field(f)
+                if structs.null_count() > 0:
+                    var rows = List[Int](capacity=len(structs))
+                    for i in range(len(structs)):
+                        rows.append(i if structs._valid(i) else -1)
+                    field = field.take_or_null(rows)
+                for other in range(self.width()):
+                    if (
+                        other != index
+                        and self._columns[other].name() == field.name()
+                    ):
+                        raise Error(
+                            "unnest: field "
+                            + field.name()
+                            + " clashes with an existing column"
+                        )
+                out.append(field^)
+        return Self(out^, height=self._height)
+
+    def pack_struct(self, name: String, columns: List[String]) raises -> Self:
+        """Add a struct column built from existing columns (kept as they
+        are); unnest(name) gives them back."""
+        var fields = List[Series](capacity=len(columns))
+        for c in columns:
+            fields.append(self.column(c))
+        return self.with_column(Series(name, StructColumn(fields^)))
+
     def _filter_rows(self, var rows: List[Int]) raises -> Self:
         var max_chunks = 1
         for column in self._columns:
@@ -437,6 +546,14 @@ struct DataFrame(Copyable, Sized, Writable):
         nulls_last: List[Bool],
     ) raises -> List[Int]:
         """Row order of a stable sort; equal keys keep input order."""
+        for name in by:
+            if self.column(name).dtype().is_nested():
+                raise Error(
+                    "cannot sort by a "
+                    + self.column(name).dtype().name()
+                    + " column: "
+                    + name
+                )
         return sort_indices(self._sort_ranks(by, descending, nulls_last))
 
     def top_k(self, k: Int, by: List[String]) raises -> Self:

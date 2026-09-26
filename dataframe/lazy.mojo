@@ -43,6 +43,8 @@ comptime SLICE = 8
 comptime UNIQUE = 9
 comptime DROP = 10
 comptime SCAN_PARQUET = 11
+comptime EXPLODE = 12
+comptime UNNEST = 13
 
 
 @fieldwise_init
@@ -222,6 +224,17 @@ struct LazyFrame(Copyable):
     def drop(self, names: List[String]) -> Self:
         return self._push(_plan_node(DROP, names=names))
 
+    def explode(self, columns: List[String]) -> Self:
+        """One row per list element; see DataFrame.explode."""
+        return self._push(_plan_node(EXPLODE, names=columns))
+
+    def explode(self, column: String) -> Self:
+        return self.explode([column])
+
+    def unnest(self, column: String) -> Self:
+        """Replace a struct column with its fields; see DataFrame.unnest."""
+        return self._push(_plan_node(UNNEST, text=column))
+
     def join(
         self,
         other: Self,
@@ -396,6 +409,10 @@ struct LazyFrame(Copyable):
             return input.unique(
                 node.names, keep=node.text, maintain_order=node.maintain_order
             )
+        if node.kind == EXPLODE:
+            return input.explode(node.names)
+        if node.kind == UNNEST:
+            return input.unnest(node.text)
         return input.drop(node.names)
 
     # --- optimization --------------------------------------------------
@@ -594,7 +611,11 @@ struct LazyFrame(Copyable):
                 or node.kind == WITH_COLUMNS
                 or node.kind == DROP
                 or node.kind == JOIN
+                or node.kind == EXPLODE
+                or node.kind == UNNEST
             )
+            if node.kind == UNNEST:
+                reads.append(node.text)
             if node.kind == UNIQUE and len(node.names) == 0:
                 reads_all = True
             if not reads_all:
@@ -654,6 +675,10 @@ struct LazyFrame(Copyable):
             label = "SLICE " + String(node.offset) + " " + String(node.length)
         elif node.kind == UNIQUE:
             label = "UNIQUE " + _joined(node.names)
+        elif node.kind == EXPLODE:
+            label = "EXPLODE " + _joined(node.names)
+        elif node.kind == UNNEST:
+            label = "UNNEST " + node.text
         else:
             label = "DROP " + _joined(node.names)
         if _is_scan(node.kind):

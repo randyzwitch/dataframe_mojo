@@ -26,6 +26,7 @@
 #include <arrow/type.h>
 #include <arrow/util/config.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/arrow/schema.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
 #include <parquet/properties.h>
@@ -111,18 +112,28 @@ arrow::Status Open(const char* path, bool use_threads,
   return builder.Build(reader);
 }
 
-// Flat schemas only: Arrow field index == Parquet leaf index.
-arrow::Result<std::vector<int>> ColumnIndices(parquet::arrow::FileReader& reader,
-                                              const char** columns, int n) {
+void CollectLeaves(const parquet::arrow::SchemaField& field, std::vector<int>* out) {
+  if (field.is_leaf()) {
+    out->push_back(field.column_index);
+    return;
+  }
+  for (const auto& child : field.children) CollectLeaves(child, out);
+}
+
+// The Parquet leaf columns behind each named Arrow field. A nested field
+// (list, struct) spans several leaves; ReadRowGroups wants all of them.
+arrow::Result<std::vector<int>> LeafIndices(parquet::arrow::FileReader& reader,
+                                            const char** columns, int n) {
   std::shared_ptr<arrow::Schema> schema;
   ARROW_RETURN_NOT_OK(reader.GetSchema(&schema));
-  std::vector<int> indices;
+  const auto& manifest = reader.manifest();
+  std::vector<int> leaves;
   for (int i = 0; i < n; ++i) {
     int index = schema->GetFieldIndex(columns[i]);
     if (index < 0) return arrow::Status::KeyError("no column named ", columns[i]);
-    indices.push_back(index);
+    CollectLeaves(manifest.schema_fields[index], &leaves);
   }
-  return indices;
+  return leaves;
 }
 
 bool IsBinaryLike(const arrow::DataType& type) {
@@ -150,16 +161,11 @@ int dfq_read_parquet(const char* path, int use_threads, const char** columns,
   arrow::Status status = Open(path, use_threads != 0, &reader);
   if (!status.ok()) return fail(status, error_out);
 
-  std::vector<int> indices;
+  std::vector<int> leaves;
   if (n_columns > 0) {
-    auto result = ColumnIndices(*reader, columns, n_columns);
+    auto result = LeafIndices(*reader, columns, n_columns);
     if (!result.ok()) return fail(result.status(), error_out);
-    indices = *result;
-  } else {
-    std::shared_ptr<arrow::Schema> schema;
-    status = reader->GetSchema(&schema);
-    if (!status.ok()) return fail(status, error_out);
-    for (int i = 0; i < schema->num_fields(); ++i) indices.push_back(i);
+    leaves = *result;
   }
 
   std::vector<int> groups;
@@ -176,7 +182,8 @@ int dfq_read_parquet(const char* path, int use_threads, const char** columns,
     }
   }
 
-  auto table = reader->ReadRowGroups(groups, indices);
+  auto table = n_columns > 0 ? reader->ReadRowGroups(groups, leaves)
+                             : reader->ReadRowGroups(groups);
   if (!table.ok()) return fail(table.status(), error_out);
   auto batch = (*table)->CombineChunksToBatch();
   if (!batch.ok()) return fail(batch.status(), error_out);

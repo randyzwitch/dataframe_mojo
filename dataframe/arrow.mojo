@@ -34,6 +34,7 @@ from .bool_column import BoolColumn
 from .column import Column, _copy_bits, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
+from .nested_column import ListColumn, StructColumn
 from .series import Series
 from .string_column import StringColumn
 
@@ -264,6 +265,10 @@ def _format(dtype: DataType) raises -> String:
         return "tdD"
     if dtype == DataType.TIME:
         return "ttn"
+    if dtype.is_list():
+        return "+L"
+    if dtype.is_struct():
+        return "+s"
     var unit = String(dtype.unit()[byte=0])
     if dtype.is_datetime():
         return "ts" + unit + ":"
@@ -277,12 +282,28 @@ def _fill_schema(mut schema: ArrowSchema, series: Series) raises:
     # Native Utf8View output needs Arrow C's final variadic buffer-size array;
     # export uses StringColumn.to_large_utf8() until that complete ABI lands.
     var state = _SchemaState(_format(series.dtype()), series.name())
+    var dtype = series.dtype()
+    if dtype.is_list():
+        var child = _leak(ArrowSchema())
+        _fill_schema(
+            _at[ArrowSchema](child)[],
+            series.list_column().child().renamed("item"),
+        )
+        state.children.append(child)
+    elif dtype.is_struct():
+        var column = series.struct_column()
+        for i in range(column.field_count()):
+            var child = _leak(ArrowSchema())
+            _fill_schema(_at[ArrowSchema](child)[], column.field(i))
+            state.children.append(child)
     schema.format = Int(state.format.unsafe_ptr())
     schema.name = Int(state.name.unsafe_ptr())
     schema.metadata = 0
     schema.flags = ARROW_FLAG_NULLABLE
-    schema.n_children = 0
-    schema.children = 0
+    schema.n_children = Int64(len(state.children))
+    schema.children = (
+        Int(state.children.unsafe_ptr()) if len(state.children) > 0 else 0
+    )
     schema.dictionary = 0
     schema.private_data = _leak(state^)
     schema.release = _schema_release_address()
@@ -330,6 +351,36 @@ def _fill_array(
             Int(column.unsafe_validity()) if len(column._bits[]) != 0 else 0
         )
         state.buffers.append(Int(column._data[].unsafe_ptr()))
+    elif kept._data.isa[ListColumn]():
+        # large_list: shared Int64 offsets (absolute into the child) plus
+        # the whole child exported as one child array; the window is the
+        # parent offset.
+        ref column = kept._data[ListColumn]
+        array.offset = Int64(column._offset)
+        state.buffers.append(column.unsafe_validity())
+        state.buffers.append(Int(column._offsets[].unsafe_ptr()))
+        var child = _leak(ArrowArray())
+        _fill_array(_at[ArrowArray](child)[], column.child(), releases)
+        state.children.append(child)
+        array.n_children = 1
+        array.children = Int(state.children.unsafe_ptr())
+    elif kept._data.isa[StructColumn]():
+        # Fields are exported over the same window, so the struct itself
+        # carries a rebased validity and no offset.
+        ref column = kept._data[StructColumn]
+        array.offset = 0
+        state.owned.append(
+            _copy_validity(column._bits[], column._offset, length)
+        )
+        state.buffers.append(
+            Int(state.owned[0].unsafe_ptr()) if len(state.owned[0]) else 0
+        )
+        for i in range(column.field_count()):
+            var child = _leak(ArrowArray())
+            _fill_array(_at[ArrowArray](child)[], column.field(i), releases)
+            state.children.append(child)
+        array.n_children = Int64(len(state.children))
+        array.children = Int(state.children.unsafe_ptr())
     elif dtype == DataType.DATE:
         # Arrow date32 holds Int32 days; narrow (range-checked) at export.
         ref column = kept._data[Column[Int64]]
@@ -625,6 +676,43 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
             name,
             _int64_column(_import_fixed[Int64](array, length, offset), bits^),
         ).with_dtype(dtype)
+    if format == "+L" or format == "+l":
+        if array.n_children != 1 or schema.n_children != 1:
+            raise Error("Arrow list array must have one child: " + name)
+        var large = format == "+L"
+        var offsets_address = _buffer(array, 1)
+
+        def list_offset(i: Int) {imm large, imm offsets_address} -> Int:
+            if large:
+                return Int(_read[Int64](offsets_address, i))
+            return Int(_read[Int32](offsets_address, i))
+
+        var child_array = _at[ArrowArray](_at[Int](array.children)[])
+        var child_schema = _at[ArrowSchema](_at[Int](schema.children)[])
+        var child = _import_child(child_array[], child_schema[])
+        var first = list_offset(offset)
+        var last = list_offset(offset + length)
+        var offsets = List[Int64](capacity=length + 1)
+        for i in range(length + 1):
+            offsets.append(Int64(list_offset(offset + i) - first))
+        return Series(
+            name,
+            ListColumn(offsets^, child.slice(first, last - first), bits^),
+        )
+    if format == "+s":
+        if array.n_children != schema.n_children:
+            raise Error("Arrow struct children counts differ: " + name)
+        var fields = List[Series]()
+        for k in range(Int(array.n_children)):
+            var child_array = _at[ArrowArray](
+                _at[Int](array.children + 8 * k)[]
+            )
+            var child_schema = _at[ArrowSchema](
+                _at[Int](schema.children + 8 * k)[]
+            )
+            var child = _import_child(child_array[], child_schema[])
+            fields.append(child.slice(offset, length))
+        return Series(name, StructColumn(fields^, bits^))
     raise Error("Unsupported Arrow format '" + format + "' for column " + name)
 
 

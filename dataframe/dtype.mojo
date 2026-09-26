@@ -4,8 +4,14 @@
 constants (`DataType.INT64`) and compare with `==`. `String(dtype)` gives the
 canonical name used in schemas, casts, and error messages, and
 `DataType.parse(name)` is its inverse. Parameterized types (such as datetime
-units) keep their parameter in `_unit`.
+units) keep their parameter in `_unit`; nested types (`DataType.list(inner)`
+and `DataType.struct(names, dtypes)`) keep their child types as an encoded
+spec behind a shared pointer and decode them on demand. A DataType cannot
+hold a `List[DataType]`, even indirectly: Mojo rejects that cycle in an
+imported module.
 """
+from std.collections import Optional
+from std.memory import ArcPointer
 from std.sys import size_of
 
 comptime _INT64 = 0
@@ -24,6 +30,8 @@ comptime _UINT16 = 12
 comptime _UINT32 = 13
 comptime _UINT64 = 14
 comptime _FLOAT32 = 15
+comptime _LIST = 16
+comptime _STRUCT = 17
 # Binder-only types of untyped numeric literals (`col("x") > 0`) before they
 # adopt the dtype of the operand they meet. Never stored in a column.
 comptime _UNTYPED_INT = 100
@@ -51,18 +59,139 @@ comptime US = 2
 comptime MS = 3
 
 
-@fieldwise_init
-struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
+struct _NestedSpec(Copyable, Movable):
+    """The encoded child types of a nested DataType (see _encode)."""
+
+    var text: String
+
+    def __init__(out self, var text: String):
+        self.text = text^
+
+
+struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     """A logical column type.
 
     Numeric: INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
     FLOAT32, FLOAT64. Also BOOL, STRING, DATE (days since 1970-01-01), TIME
     (nanoseconds since midnight), and datetime(unit) / duration(unit) with
-    unit "ns", "us", or "ms". Temporal types are stored as Int64.
+    unit "ns", "us", or "ms". Temporal types are stored as Int64. Nested:
+    list(inner) holds a variable number of `inner` values per row, and
+    struct(names, dtypes) holds one value of each named field per row.
     """
 
     var _code: Int
     var _unit: Int
+    var _nested: Optional[ArcPointer[_NestedSpec]]
+
+    def __init__(out self, code: Int, unit: Int):
+        self._code = code
+        self._unit = unit
+        self._nested = None
+
+    def __init__(out self, code: Int, var spec: String):
+        self._code = code
+        self._unit = 0
+        self._nested = ArcPointer(_NestedSpec(spec^))
+
+    @staticmethod
+    def list(inner: DataType) -> DataType:
+        """A list column whose elements have dtype `inner`."""
+        return DataType(_LIST, "L" + inner._encode())
+
+    @staticmethod
+    def struct(names: List[String], dtypes: List[DataType]) raises -> DataType:
+        """A struct column with one field per name, in order."""
+        if len(names) != len(dtypes):
+            raise Error("struct needs one dtype per field name")
+        if len(names) == 0:
+            raise Error("struct needs at least one field")
+        for i in range(len(names)):
+            for j in range(i):
+                if names[i] == names[j]:
+                    raise Error(
+                        "struct field names must be unique: " + names[i]
+                    )
+        var spec = String("S") + String(len(names)) + ":"
+        for i in range(len(names)):
+            spec += String(names[i].byte_length()) + ":" + names[i]
+            spec += dtypes[i]._encode()
+        return DataType(_STRUCT, spec^)
+
+    def _encode(self) -> String:
+        """A self-delimiting spec: P<len>:<name> for a flat type,
+        L<inner> for a list, S<n>:(<len>:<name><dtype>)* for a struct."""
+        if self._nested:
+            return self._nested.value()[].text
+        var name = self.name()
+        return "P" + String(name.byte_length()) + ":" + name
+
+    def is_list(self) -> Bool:
+        return self._code == _LIST
+
+    def is_struct(self) -> Bool:
+        return self._code == _STRUCT
+
+    def is_nested(self) -> Bool:
+        return self._code == _LIST or self._code == _STRUCT
+
+    def inner(self) raises -> DataType:
+        """The element type of a list."""
+        if not self.is_list():
+            raise Error("inner() needs a list dtype, found " + self.name())
+        var cursor = 1
+        return _decode(self._nested.value()[].text, cursor)
+
+    def field_count(self) -> Int:
+        """A struct's number of fields (0 for other types)."""
+        if not self.is_struct():
+            return 0
+        try:
+            return len(self.field_names())
+        except:
+            return 0
+
+    def field_names(self) raises -> List[String]:
+        """A struct's field names, in order (empty for other types)."""
+        var names = List[String]()
+        if not self.is_struct():
+            return names^
+        ref spec = self._nested.value()[].text
+        var cursor = 1
+        var count = _read_count(spec, cursor)
+        for _ in range(count):
+            names.append(_read_text(spec, cursor))
+            _ = _decode(spec, cursor)
+        return names^
+
+    def field_dtypes(self) raises -> List[DataType]:
+        """A struct's field types, in order (empty for other types)."""
+        var dtypes = List[DataType]()
+        if not self.is_struct():
+            return dtypes^
+        ref spec = self._nested.value()[].text
+        var cursor = 1
+        var count = _read_count(spec, cursor)
+        for _ in range(count):
+            _ = _read_text(spec, cursor)
+            dtypes.append(_decode(spec, cursor))
+        return dtypes^
+
+    def field_index(self, name: String) raises -> Int:
+        if not self.is_struct():
+            raise Error(
+                "field_index needs a struct dtype, found " + self.name()
+            )
+        var names = self.field_names()
+        for i in range(len(names)):
+            if names[i] == name:
+                return i
+        raise Error("struct has no field named " + name)
+
+    def field_dtype(self, index: Int) raises -> DataType:
+        var dtypes = self.field_dtypes()
+        if index < 0 or index >= len(dtypes):
+            raise Error("struct field index out of range")
+        return dtypes[index]
 
     comptime INT64 = DataType(_INT64, 0)
     comptime FLOAT64 = DataType(_FLOAT64, 0)
@@ -164,6 +293,10 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
                 return DataType.datetime(unit)
             if name == "duration[" + unit + "]":
                 return DataType.duration(unit)
+        if name.startswith("list[") and name.endswith("]"):
+            return DataType.list(
+                DataType.parse(String(name[byte = 5 : name.byte_length() - 1]))
+            )
         raise Error("Unknown dtype: " + name)
 
     @staticmethod
@@ -175,7 +308,13 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
             return False
 
     def __eq__(self, other: Self) -> Bool:
-        return self._code == other._code and self._unit == other._unit
+        if self._code != other._code or self._unit != other._unit:
+            return False
+        if not self._nested and not other._nested:
+            return True
+        if not self._nested or not other._nested:
+            return False
+        return self._nested.value()[].text == other._nested.value()[].text
 
     def __ne__(self, other: Self) -> Bool:
         return not self == other
@@ -200,6 +339,23 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
             return "integer literal"
         if self._code == _UNTYPED_FLOAT:
             return "float literal"
+        if self._code == _LIST:
+            try:
+                return "list[" + self.inner().name() + "]"
+            except:
+                return "list[?]"
+        if self._code == _STRUCT:
+            var out = String("struct[")
+            try:
+                var names = self.field_names()
+                var dtypes = self.field_dtypes()
+                for i in range(len(names)):
+                    if i > 0:
+                        out += ", "
+                    out += names[i] + ": " + dtypes[i].name()
+            except:
+                out += "?"
+            return out + "]"
         if self._code >= _INT8:
             return String(self.storage().value())
         return "string"
@@ -214,6 +370,13 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Writable):
             return "bool"
         if self._code == _STRING:
             return "str"
+        if self._code == _LIST:
+            try:
+                return "list[" + self.inner().short_name() + "]"
+            except:
+                return "list[?]"
+        if self._code == _STRUCT:
+            return "struct[" + String(self.field_count()) + "]"
         if self._code >= _INT8:
             var name = self.name()
             if name.startswith("uint"):
@@ -318,3 +481,50 @@ def _unit_code(unit: String) raises -> Int:
     if unit == "ms":
         return MS
     raise Error("time unit must be 'ns', 'us', or 'ms', found '" + unit + "'")
+
+
+def _read_count(spec: String, mut cursor: Int) raises -> Int:
+    """Read digits up to ':' at cursor; leave cursor after the colon."""
+    var value = 0
+    var digits = 0
+    while cursor < spec.byte_length():
+        var byte = spec.as_bytes()[cursor]
+        cursor += 1
+        if byte == 58:  # ':'
+            if digits == 0:
+                raise Error("Malformed nested dtype spec")
+            return value
+        if byte < 48 or byte > 57:
+            raise Error("Malformed nested dtype spec")
+        value = value * 10 + Int(byte - 48)
+        digits += 1
+    raise Error("Malformed nested dtype spec")
+
+
+def _read_text(spec: String, mut cursor: Int) raises -> String:
+    var length = _read_count(spec, cursor)
+    if cursor + length > spec.byte_length():
+        raise Error("Malformed nested dtype spec")
+    var text = String(spec[byte = cursor : cursor + length])
+    cursor += length
+    return text^
+
+
+def _decode(spec: String, mut cursor: Int) raises -> DataType:
+    """Decode one dtype at cursor (see DataType._encode)."""
+    if cursor >= spec.byte_length():
+        raise Error("Malformed nested dtype spec")
+    var kind = spec.as_bytes()[cursor]
+    cursor += 1
+    if kind == 80:  # 'P'
+        return DataType.parse(_read_text(spec, cursor))
+    if kind == 76:  # 'L'
+        return DataType(_LIST, "L" + _decode(spec, cursor)._encode())
+    if kind == 83:  # 'S'
+        var start = cursor - 1
+        var count = _read_count(spec, cursor)
+        for _ in range(count):
+            _ = _read_text(spec, cursor)
+            _ = _decode(spec, cursor)
+        return DataType(_STRUCT, String(spec[byte=start:cursor]))
+    raise Error("Malformed nested dtype spec")
