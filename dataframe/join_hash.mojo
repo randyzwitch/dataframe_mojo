@@ -154,6 +154,9 @@ struct _HashProbeJob(Job):
     var include_unmatched: Bool
     var omit_identity: Bool
     var identity: Bool
+    # -1 emits (left, right) pairs; 1 or 0 emits each left row once when
+    # it has a match (semi) or none (anti). Null left keys never match.
+    var membership: Int
     var left_rows: List[Int]
     var right_rows: List[Int]
 
@@ -168,6 +171,7 @@ struct _HashProbeJob(Job):
         end: Int,
         include_unmatched: Bool,
         omit_identity: Bool,
+        membership: Int = -1,
     ):
         self.left_keys = left_keys.copy()
         self.right_keys = right_keys.copy()
@@ -179,16 +183,61 @@ struct _HashProbeJob(Job):
         self.include_unmatched = include_unmatched
         self.omit_identity = (
             omit_identity
+            and membership < 0
             and len(left_keys) == 1
             and left_keys[0]._data.isa[StringColumn]()
         )
         self.identity = False
+        self.membership = membership
         self.left_rows = List[Int](
             capacity=0 if self.omit_identity else end - start
         )
-        self.right_rows = List[Int](capacity=end - start)
+        self.right_rows = List[Int](
+            capacity=0 if membership >= 0 else end - start
+        )
+
+    def _matches(self, i: Int) -> Bool:
+        """Whether probe row i has at least one exact match in the index.
+        A null key never matches: `_key_equal` requires both sides valid,
+        and the Int64 path checks validity itself."""
+        var hash = self.left_hashes[][i]
+        var bucket = Int(hash >> 56) >> self.fold
+        ref index = self.buckets[][bucket]
+        var position = Int(hash & UInt64(index.mask()))
+        if (
+            len(self.left_keys) == 1
+            and self.left_keys[0]._data.isa[Column[Int64]]()
+        ):
+            ref left = self.left_keys[0]._data[Column[Int64]]
+            if not left._valid(i):
+                return False
+            var key = bitcast[DType.uint64](left._get(i))
+            while index.slots[position].row >= 0:
+                if key == index.slots[position].key:
+                    return True
+                position = (position + 1) & index.mask()
+            return False
+        while index.slots[position].row >= 0:
+            ref slot = index.slots[position]
+            if hash == slot.key and _row_equal(
+                self.left_keys, self.right_keys, i, Int(slot.row)
+            ):
+                return True
+            position = (position + 1) & index.mask()
+        return False
+
+    def run_membership(mut self) raises:
+        """Semi (membership == 1) or anti (0): each left row at most once,
+        in row order; duplicate right keys do not repeat it."""
+        var keep = self.membership == 1
+        for i in range(self.start, self.end):
+            if self._matches(i) == keep:
+                self.left_rows.append(i)
 
     def run(mut self) raises:
+        if self.membership >= 0:
+            self.run_membership()
+            return
         if (
             len(self.left_keys) == 1
             and self.left_keys[0]._data.isa[Column[Int64]]()
@@ -382,17 +431,21 @@ struct _HashProbeJob(Job):
                 self.right_rows.append(-1)
 
 
-def direct_hash_join_rows(
-    left_keys: List[Series],
-    right_keys: List[Series],
-    include_unmatched: Bool,
-    omit_identity: Bool = False,
-) raises -> Tuple[List[Int], List[Int], Bool]:
-    """Exact left-major matches through a read-only right-row hash index.
+@fieldwise_init
+struct _HashIndex(Movable):
+    """A built right-row index plus the probe-side hashes it was keyed with."""
 
-    The third result means every probe row appears exactly once in order;
-    when requested, the first list is then omitted as an implicit identity.
-    """
+    var left: List[Series]
+    var right: List[Series]
+    var left_hashes: ArcPointer[List[UInt64]]
+    var indexes: ArcPointer[List[_HashBucket]]
+    var fold: Int
+    var workers: Int
+
+
+def _build_hash_index(
+    left_keys: List[Series], right_keys: List[Series]
+) raises -> _HashIndex:
     if len(right_keys[0]) > Int(Int32.MAX):
         raise Error("Direct hash join exceeds 32-bit row index capacity")
     var left = List[Series](capacity=len(left_keys))
@@ -425,22 +478,77 @@ def direct_hash_join_rows(
     var indexes = List[_HashBucket](capacity=len(builders))
     while len(builders) > 0:
         indexes.append(builders.pop(0).into_result())
-    var shared_indexes = ArcPointer(indexes^)
     var fold = 8
     var count = 1
     while count < right_parts.buckets():
         count *= 2
         fold -= 1
-    var bounds = partitions(len(left[0]), workers, 1)
+    return _HashIndex(
+        left^, right^, shared_left_hashes, ArcPointer(indexes^), fold, workers
+    )
+
+
+def direct_hash_semi_anti_rows(
+    left_keys: List[Series], right_keys: List[Series], keep_matches: Bool
+) raises -> List[Int]:
+    """Left rows with (semi) or without (anti) an exact match, in row order.
+
+    Same index as `direct_hash_join_rows`, probed for membership only: a
+    left row appears once however many right rows share its key, and a
+    null left key never matches, so semi drops it and anti keeps it.
+    """
+    var index = _build_hash_index(left_keys, right_keys)
+    var bounds = partitions(len(index.left[0]), index.workers, 1)
+    var jobs = List[_HashProbeJob](capacity=index.workers)
+    for worker in range(index.workers):
+        jobs.append(
+            _HashProbeJob(
+                index.left,
+                index.right,
+                index.left_hashes,
+                index.indexes,
+                index.fold,
+                bounds[worker],
+                bounds[worker + 1],
+                False,
+                False,
+                membership=1 if keep_matches else 0,
+            )
+        )
+    run_jobs(jobs)
+    var total = 0
+    for worker in range(len(jobs)):
+        total += len(jobs[worker].left_rows)
+    var rows = List[Int](capacity=total)
+    for worker in range(len(jobs)):
+        for row in jobs[worker].left_rows:
+            rows.append(row)
+    return rows^
+
+
+def direct_hash_join_rows(
+    left_keys: List[Series],
+    right_keys: List[Series],
+    include_unmatched: Bool,
+    omit_identity: Bool = False,
+) raises -> Tuple[List[Int], List[Int], Bool]:
+    """Exact left-major matches through a read-only right-row hash index.
+
+    The third result means every probe row appears exactly once in order;
+    when requested, the first list is then omitted as an implicit identity.
+    """
+    var index = _build_hash_index(left_keys, right_keys)
+    var workers = index.workers
+    var bounds = partitions(len(index.left[0]), workers, 1)
     var jobs = List[_HashProbeJob](capacity=workers)
     for worker in range(workers):
         jobs.append(
             _HashProbeJob(
-                left,
-                right,
-                shared_left_hashes,
-                shared_indexes,
-                fold,
+                index.left,
+                index.right,
+                index.left_hashes,
+                index.indexes,
+                index.fold,
                 bounds[worker],
                 bounds[worker + 1],
                 include_unmatched,

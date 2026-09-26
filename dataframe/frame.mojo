@@ -41,7 +41,7 @@ from .gather import (
 )
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
-from .join_hash import direct_hash_join_rows
+from .join_hash import direct_hash_join_rows, direct_hash_semi_anti_rows
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
@@ -712,6 +712,25 @@ struct DataFrame(Copyable, Sized, Writable):
                 )
                 if membership[0]:
                     return self._filter_rows(membership[1].copy())
+        # Semi and anti joins on keys the bounded path declined: probe a
+        # right-row hash index for membership only. The dictionary path
+        # below would encode both inputs and group every right row first.
+        if (
+            (how == "semi" or how == "anti")
+            and worker_count(self.height()) > 1
+            and right.height() <= Int(Int32.MAX)
+        ):
+            var left_sources = List[Series](capacity=len(left_keys))
+            var right_sources = List[Series](capacity=len(right_keys))
+            for k in range(len(left_keys)):
+                left_sources.append(self._columns[left_keys[k]].copy())
+                right_sources.append(right._columns[right_keys[k]].copy())
+            if not low_cardinality(right_sources):
+                return self._filter_rows(
+                    direct_hash_semi_anti_rows(
+                        left_sources, right_sources, how == "semi"
+                    )
+                )
         # Dense ids over both inputs materialize and re-encode every key.
         # For high-cardinality right keys, a row index probes the original
         # columns directly and preserves exact equality across collisions.
@@ -1168,8 +1187,9 @@ struct DataFrame(Copyable, Sized, Writable):
                 and self._columns[bound.sources[node.left]].dtype()
                 == DataType.FLOAT64
             ):
-                if self._height >= 2_000_000 and can_filter_aligned_chunks(
-                    self._columns
+                if (
+                    self._height >= ALIGNED_FILTER_ROWS
+                    and can_filter_aligned_chunks(self._columns)
                 ):
                     var filtered = filter_float_chunks(
                         self._columns,
@@ -1887,6 +1907,14 @@ def _group_rows(ids: List[Int], starts: List[Int]) -> List[Int]:
             cursor[id] += 1
     return rows^
 
+
+# Rows from which a Float64 comparison filter runs directly on aligned
+# chunks instead of materializing a mask. Swept on 2026-09-25 with the
+# overall benchmark's filter (32 threads, best of 7, two rounds): the mask
+# path won at 5k and 20k rows (0.18 vs 0.25 ms, 0.70 vs 0.73 ms) and the
+# aligned path won from 100k up (2.1 vs 3.8 ms; 4.7 vs 7.9 ms at 1M). The
+# old 2,000,000 was chosen without a sweep and cost 1M-row filters 1.7x.
+comptime ALIGNED_FILTER_ROWS = 50_000
 
 comptime _RANGE_JOIN_MAX_IDS = 8_000_000
 

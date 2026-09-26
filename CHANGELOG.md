@@ -5,6 +5,27 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ## Unreleased
 
+### Added
+
+- `read_parquet(path, columns=, row_groups=)` and the lazy `scan_parquet(path)`,
+  which pushes projection into the reader and decodes only the row groups
+  whose footer statistics can hold a match for a filter with constant
+  bounds. `parquet_row_group_statistics(path)` returns those bounds as a
+  frame. The reader is Arrow C++ built with only its Parquet parts behind a
+  15 MB shared library that is loaded on first use; see the README.
+
+### Changed
+
+- Semi and anti joins whose keys do not fit a direct-address range probe
+  the right-row hash index for membership instead of encoding both inputs
+  as dictionary ids. On 10M rows with wide Int64 keys, semi and anti went
+  from about 1.6 s to 0.2 s.
+- Two row-count cutoffs were re-measured by sweeping sizes: fused
+  expressions keep source chunks from 200,000 rows (was 2,000,000), and
+  Float64 comparison filters run on aligned chunks from 50,000 rows (was
+  2,000,000). At 1M rows this makes expression chains about 3x and filters
+  about 1.7x faster.
+
 ### Breaking
 
 - Public read_csv now uses the single source-derived Polars CSV pipeline; the
