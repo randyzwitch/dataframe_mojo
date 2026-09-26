@@ -55,11 +55,16 @@ relies on.
 
 `tests/test_parquet.mojo` needs `libdfparquet` and skips itself, with a
 notice, when the library is missing, so `pixi run test` passes on a machine
-without a C++ toolchain. CI on Linux builds the library first
-(`pixi run -e native build-dfparquet`, cached by the contents of
-`native/dfparquet/`) and then fails the run if the module reports `skipped`,
-so the Parquet reader, its type coercions and row-group pruning are tested
-on every push. macOS CI still skips them (#279).
+without a C++ toolchain. CI on Linux and Apple Silicon builds the library
+first (`pixi run -e native build-dfparquet`, cached by OS, architecture and
+the contents of `native/dfparquet/`). Then
+`pixi run bash scripts/check_parquet_library.sh` checks that the stripped
+library exports exactly the four C entry points and runs the compiled
+Parquet tests twice: once loading from `build/dfparquet`, and once from an
+isolated `$CONDA_PREFIX/lib` with no build-directory fallback. An explicit
+`DATAFRAME_PARQUET_LIBRARY` override is removed for both runs. Either run
+failing or reporting `skipped` fails CI, so type coercions, row-group pruning,
+and both library search paths are exercised on every push.
 
 ## Benchmarks and the fast paths they hit
 
