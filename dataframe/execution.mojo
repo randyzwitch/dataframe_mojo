@@ -86,6 +86,16 @@ from std.memory import ArcPointer
 from std.math import isnan
 
 
+# Rows below which a fused expression copies chunked Float64 sources into
+# one contiguous buffer first. Swept on 2026-09-25 with the overall benchmark
+# (32 threads, best of 7, two rounds, arithmetic_chain / nullable_compare):
+# the copy won at 100k rows (0.68 vs 0.89 ms, 0.42 vs 0.56 ms) and chunk
+# windows won from 250k up (1.24 vs 1.39 ms, 0.69 vs 1.09 ms), widening to
+# 3-4x at 1M. The old 2,000,000 was chosen without a sweep and cost 1M-row
+# expressions 3x.
+comptime FUSED_CONTIGUOUS_ROWS = 200_000
+
+
 def _numeric_literal(node: Node) raises -> Series:
     """A one-row column for an Int/Float literal of its tagged type."""
     if node.text == "":
@@ -962,9 +972,9 @@ def evaluate[
         if bound.fusible[i] and bound.expr._nodes[i].left >= 0:
             has_fused = True
             break
-    # Small frames repay one contiguous copy through lower per-batch overhead.
-    # At millions of rows, keep source chunks and use bounded windows in fused().
-    if has_fused and height < 2_000_000:
+    # Small frames repay one contiguous copy through lower per-batch overhead;
+    # larger ones keep source chunks and use bounded windows in fused().
+    if has_fused and height < FUSED_CONTIGUOUS_ROWS:
         for i in range(count):
             if bound.expr._nodes[i].op == COL:
                 var source = bound.sources[i]
