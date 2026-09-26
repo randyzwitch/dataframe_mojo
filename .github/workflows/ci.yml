@@ -37,8 +37,34 @@ jobs:
           pixi run docs
           git diff --exit-code docs/api.md
 
+      # tests/test_parquet.mojo skips itself when the reader library is
+      # absent, so build it first (Linux only until #279) and make sure the
+      # module really ran. The library is cached by the shim's sources; the
+      # Arrow version lives in build.sh, so a bump changes the key.
+      - name: Restore libdfparquet
+        if: runner.os == 'Linux'
+        id: dfparquet
+        uses: actions/cache@v4
+        with:
+          path: build/dfparquet/libdfparquet.so
+          key: dfparquet-${{ runner.os }}-${{ hashFiles('native/dfparquet/**') }}
+
+      - name: Build libdfparquet
+        if: runner.os == 'Linux' && steps.dfparquet.outputs.cache-hit != 'true'
+        run: pixi run -e native build-dfparquet
+
       - name: Run tests
         run: pixi run test
+
+      - name: Parquet tests must run, not skip
+        if: runner.os == 'Linux'
+        run: |
+          out=$(pixi run mojo run -I . tests/test_parquet.mojo 2>&1)
+          echo "$out" | tail -20
+          if echo "$out" | grep -q "skipped:"; then
+            echo "::error::tests/test_parquet.mojo skipped: libdfparquet was not found"
+            exit 1
+          fi
 
       - name: Build examples
         run: pixi run build
