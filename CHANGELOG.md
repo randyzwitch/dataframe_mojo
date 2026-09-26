@@ -16,6 +16,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Join and sorted-chunk-gather dispatch uses measured working-set and job
+  costs instead of the remaining fixed 2,000,000-row switches. Bounded join
+  tables share an overflow-safe byte budget, with measured density and
+  membership-cache limits; ordered CSR IDs and chunked progression probes
+  avoid parallel paths that lose on those inputs. See [the measurements](docs/join-cutoffs.md).
+
 - Semi and anti joins whose keys do not fit a direct-address range probe
   the right-row hash index for membership instead of encoding both inputs
   as dictionary ids. On 10M rows with wide Int64 keys, semi and anti went
