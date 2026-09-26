@@ -7,7 +7,7 @@ once, and reports the best of REPETITIONS timed runs. Before times are
 compared, each workload's row count and an order-insensitive column total
 must agree between the engines, so the table cannot compare different work.
 
-    pixi run -e oracle bench-polars                 # 100k and 1M rows
+    pixi run -e oracle bench-polars                 # 100k, 1M and 2.5M rows
     pixi run -e oracle bench-polars --sizes 10000000
     pixi run -e oracle bench-polars --smoke         # tiny, for CI
     pixi run -e oracle bench-polars --csv-only --threads 32
@@ -39,9 +39,40 @@ WORKLOADS = [
     "grouped_high",
     "grouped_skew",
     "grouped_str",
+    "grouped_outlier",
     "join_inner",
     "sort_multi",
+    "sort_high",
 ]
+
+# Maps a join key onto a 2^40 range. The multiplier is odd, so the mapping is
+# one-to-one and every join keeps its match count; the range is far too wide
+# for any direct-address path. The product fits Int64 while the largest raw
+# key (0.75 * rows) stays below 1.3e7, which caps the join variants at 16M rows.
+WIDE_MULTIPLIER = 0x9E3779B97F
+WIDE_MODULUS = 1 << 40
+WIDE_MAX_ROWS = 16_000_000
+
+
+def left_schema() -> dict:
+    import polars as pl
+
+    return {
+        "key_low": pl.Int64, "key_high": pl.Int64, "key_skew": pl.Int64,
+        "key_str": pl.String, "jk": pl.Int64, "x": pl.Float64, "y": pl.Float64, "n": pl.Int64,
+    }
+
+
+def right_schema() -> dict:
+    import polars as pl
+
+    return {"jk": pl.Int64, "r": pl.Float64}
+
+
+def right_wide_schema() -> dict:
+    import polars as pl
+
+    return {"jk": pl.Int64, "jk_shift": pl.Int64, "jk_dup": pl.Int64, "r": pl.Float64}
 
 
 def physical_cores() -> int:
@@ -114,6 +145,42 @@ def generate(data_dir: Path, rows: int) -> None:
         {"jk": list(range(half)), "r": [rng.randrange(1000) / 10 for _ in range(half)]},
         schema={"jk": pl.Int64, "r": pl.Float64},
     ).write_csv(right)
+
+
+def generate_join_variants(data_dir: Path, rows: int) -> None:
+    """Write the right inputs whose keys miss the ordered and bounded-range
+    join paths, derived from the base files so every join keeps its result.
+
+    right_ROWS_shuffled.csv: the base right rows in random order.
+    left_ROWS_wide.csv, right_ROWS_wide.csv: every key mapped onto a 2^40
+    range. The unmatched (`jk_shift`) and duplicate (`jk_dup`) keys are mapped
+    from the raw key too, because deriving them from the mapped key would
+    change which rows match.
+    """
+    shuffled = data_dir / f"right_{rows}_shuffled.csv"
+    left_wide = data_dir / f"left_{rows}_wide.csv"
+    right_wide = data_dir / f"right_{rows}_wide.csv"
+    if shuffled.exists() and left_wide.exists() and right_wide.exists():
+        return
+    if rows > WIDE_MAX_ROWS:
+        raise ValueError(f"join variants support at most {WIDE_MAX_ROWS:,} rows")
+    import polars as pl
+
+    generate(data_dir, rows)
+    left = pl.read_csv(data_dir / f"left_{rows}.csv", schema=left_schema())
+    right = pl.read_csv(data_dir / f"right_{rows}.csv", schema=right_schema())
+    right.sample(fraction=1.0, shuffle=True, seed=SEED + rows).write_csv(shuffled)
+
+    def wide(expr):
+        return (expr * WIDE_MULTIPLIER) % WIDE_MODULUS
+
+    left.with_columns(wide(pl.col("jk")).alias("jk")).write_csv(left_wide)
+    right.select(
+        wide(pl.col("jk")).alias("jk"),
+        wide(pl.col("jk") + rows // 4).alias("jk_shift"),
+        wide(pl.col("jk") // 2).alias("jk_dup"),
+        pl.col("r"),
+    ).write_csv(right_wide)
 
 
 def build_runner() -> Path:
@@ -195,20 +262,34 @@ def run_polars(data_dir: Path, rows: int, reps: int, csv_only: bool = False) -> 
     ms, out = best_of(lambda: left.select(pl.col("x").sum()), reps)
     results["global_sum"] = (ms, 1, float(out.item()))
 
-    for workload, key in [("grouped_low", "key_low"), ("grouped_high", "key_high"),
-                          ("grouped_skew", "key_skew"), ("grouped_str", "key_str")]:
+    # A few far-off keys take the 16-value column off the small-integer-range
+    # path, so grouped_outlier measures the general hash path on the same data.
+    outliers = left.with_columns(
+        pl.when(pl.col("n") == -500)
+        .then(pl.lit(1_000_000_000_000))
+        .otherwise(pl.col("key_low"))
+        .alias("key_outlier")
+    )
+    for workload, frame, key in [
+        ("grouped_low", left, "key_low"), ("grouped_high", left, "key_high"),
+        ("grouped_skew", left, "key_skew"), ("grouped_str", left, "key_str"),
+        ("grouped_outlier", outliers, "key_outlier"),
+    ]:
         aggs = [pl.col("x").sum().alias("s"), pl.col("n").count().alias("c")]
-        ms, out = best_of(lambda: left.group_by(key).agg(aggs), reps)
+        ms, out = best_of(lambda: frame.group_by(key).agg(aggs), reps)
         results[workload] = (ms, out.height, total(out, "s") + total(out, "c"))
+    del outliers
 
     ms, out = best_of(lambda: left.join(right, on="jk", how="inner"), reps)
     results["join_inner"] = (ms, out.height, total(out, "r"))
 
     # dataframe_mojo's sort is always stable; Polars' default is not, which
     # is the faster of its two modes, so this favors Polars. nulls_last
-    # matches dataframe_mojo's default.
-    ms, out = best_of(lambda: left.sort(["key_low", "x"], nulls_last=True), reps)
-    results["sort_multi"] = (ms, out.height, total(out.head(1000), "x"))
+    # matches dataframe_mojo's default. sort_high's first key has rows/10
+    # distinct values, which misses the low-cardinality bucket sort.
+    for workload, first in [("sort_multi", "key_low"), ("sort_high", "key_high")]:
+        ms, out = best_of(lambda: left.sort([first, "x"], nulls_last=True), reps)
+        results[workload] = (ms, out.height, total(out.head(1000), "x"))
     return results
 
 
@@ -225,7 +306,9 @@ def check_agreement(rows: int, mojo: dict, polars: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--sizes", default="100000,1000000", help="comma-separated row counts")
+    # 2.5M sits between the round sizes, where a row-count cutoff chosen at
+    # 1M or 10M would otherwise go unnoticed.
+    parser.add_argument("--sizes", default="100000,1000000,2500000", help="comma-separated row counts")
     parser.add_argument("--reps", type=int, default=5)
     parser.add_argument("--threads", type=int, default=physical_cores())
     parser.add_argument("--data-dir", default=str(ROOT / "build" / "bench_polars"))
