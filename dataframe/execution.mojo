@@ -68,9 +68,14 @@ from .expr import (
     is_reduction,
     is_string_op,
     is_nested_op,
+    IMPLODE,
+    STRUCT_PACK,
+    struct_pack_children,
+    struct_pack_names,
 )
 from .str_kernels import string_op, concat_strings
 from .list_kernels import nested_op
+from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows
@@ -244,6 +249,10 @@ def _eval[
         return _conditional[width](
             bound, columns, aggregates, index, offset, length, grouped, mask
         )
+    if node.op == STRUCT_PACK:
+        return _pack_struct[width](
+            bound, columns, aggregates, index, offset, length, grouped, mask
+        )
     if bound.fusible[index] and node.left >= 0:
         return fused[width](bound, columns, index, offset, length)
     var left = _eval[width](
@@ -287,6 +296,94 @@ def _eval[
             node.op, left, right, left_type, right_type, bound.dtypes[index]
         )
     return _binary_op[width](node.op, left, right, mask)
+
+
+def _pack_struct[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    aggregates: List[Series],
+    index: Int,
+    offset: Int,
+    length: Int,
+    grouped: Bool,
+    mask: List[Bool],
+) raises -> Series:
+    """Evaluate every field of a STRUCT_PACK node and pack them; scalar
+    fields broadcast to the batch."""
+    ref node = bound.expr._nodes[index]
+    var shape = bound.shapes[index]
+    var size = (
+        length if shape == ROWS or (grouped and shape == AGGREGATE) else 1
+    )
+    var names = struct_pack_names(node)
+    var children = struct_pack_children(node)
+    var fields = List[Series](capacity=len(children))
+    for k in range(len(children)):
+        var value = _eval[width](
+            bound,
+            columns,
+            aggregates,
+            children[k],
+            offset,
+            length,
+            grouped,
+            mask,
+        )
+        if len(value) != size:
+            if len(value) != 1:
+                raise Error("struct field length mismatch")
+            value = value._broadcast(size)
+        # Kernel outputs carry physical tags; restore the bound logical type.
+        if value.dtype() != bound.dtypes[children[k]]:
+            value = value.with_dtype(bound.dtypes[children[k]])
+        fields.append(value.renamed(names[k]))
+    return Series("", StructColumn(fields^))
+
+
+def _implode[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    node: Node,
+    height: Int,
+    batch_size: Int,
+    grouped: Bool,
+    groups: List[Int],
+    group_count: Int,
+) raises -> Series:
+    """One list per group (or one list of every row): the input rows in
+    input order, nulls included."""
+    var input = _full[width](
+        bound, columns, states, node.left, height, batch_size, False
+    )
+    if input.dtype() != bound.dtypes[node.left]:
+        input = input.with_dtype(bound.dtypes[node.left])
+    if not grouped:
+        var offsets = List[Int64](capacity=2)
+        offsets.append(0)
+        offsets.append(Int64(height))
+        return Series("", ListColumn(offsets^, input.renamed("item")))
+    var counts = List[Int](length=group_count, fill=0)
+    for g in groups:
+        counts[g] += 1
+    var offsets = List[Int64](capacity=group_count + 1)
+    var starts = List[Int](capacity=group_count)
+    var total = 0
+    offsets.append(0)
+    for g in range(group_count):
+        starts.append(total)
+        total += counts[g]
+        offsets.append(Int64(total))
+    var order = List[Int](length=height, fill=0)
+    for row in range(height):
+        var g = groups[row]
+        order[starts[g]] = row
+        starts[g] += 1
+    return Series("", ListColumn(offsets^, input.take(order).renamed("item")))
 
 
 def _conditional[
@@ -1010,6 +1107,9 @@ def evaluate[
                 reachable[child.right] = True
             if child.extra >= 0:
                 reachable[child.extra] = True
+            if child.op == STRUCT_PACK:
+                for field in struct_pack_children(child):
+                    reachable[field] = True
     var states = List[Series]()
     for i in range(count):
         states.append(_empty(bound.dtypes[i]))
@@ -1017,7 +1117,22 @@ def evaluate[
         if inside_over[node_index]:
             continue
         var node = bound.expr._nodes[node_index].copy()
-        if is_reduction(node.op):
+        if node.op == IMPLODE:
+            var state = _implode[width](
+                bound,
+                prepared_columns,
+                states,
+                node,
+                height,
+                batch_size,
+                grouped,
+                groups,
+                group_count,
+            )
+            if row_mode:
+                state = state.take(groups)
+            states[node_index] = state^
+        elif is_reduction(node.op):
             var reducer = _reduce[width](
                 bound,
                 prepared_columns,

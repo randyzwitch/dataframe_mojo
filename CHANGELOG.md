@@ -34,6 +34,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
   `first`, `last`, `contains`, `join`, `sum`, `min`, `max`, `mean`),
   `pack_struct`, `unnest` (eager and lazy) and `field(name)`. Operations
   that do not support nested columns yet raise a clear error.
+- `col(x).implode()` (a group's values as a list inside `agg`, or a whole
+  column as one row), `as_struct([...])` to pack expressions into a struct
+  column, and struct columns as `group_by`, `unique` and inner/left/semi/anti
+  join keys, compared field by field with a null struct distinct from a
+  struct of nulls.
 
 ### Breaking
 

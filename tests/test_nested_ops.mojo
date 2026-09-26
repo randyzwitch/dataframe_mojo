@@ -10,6 +10,7 @@ from dataframe import (
     DataType,
     Series,
     StringColumn,
+    as_struct,
     col,
     export_arrow_series,
     import_arrow_series,
@@ -326,6 +327,175 @@ def test_unsupported_operations_raise_clearly() raises:
     assert_true("cast" in messages[2])
     assert_true("CSV" in messages[3])
     assert_true("list or struct" in messages[4])
+
+
+def sales() raises -> DataFrame:
+    var region_valid: List[Bool] = [True, True, True, True, False, True]
+    return DataFrame(
+        [
+            Series(
+                "region",
+                StringColumn(["n", "s", "n", "s", "n", "n"], region_valid),
+            ),
+            Series("year", Column[Int64]([1, 1, 2, 1, 1, 2])),
+            Series("v", Column[Int64]([10, 20, 30, 40, 50, 60])),
+        ]
+    )
+
+
+def test_implode_groups_and_whole_column() raises:
+    var frame = sales()
+    var grouped = frame.group_by("region", maintain_order=True).agg(
+        [col("v").implode().alias("vs"), col("v").sum().alias("total")]
+    )
+    assert_equal(grouped.column("vs").dtype(), DataType.list(DataType.INT64))
+    assert_equal(grouped.height(), 3)
+    assert_equal(String(grouped.column("vs").get(0)), "[10, 30, 60]")
+    assert_equal(String(grouped.column("vs").get(1)), "[20, 40]")
+    assert_equal(String(grouped.column("vs").get(2)), "[50]")
+    assert_equal(grouped.column("total").get(0).int64(), 100)
+    # implode then explode gives the rows back (up to order).
+    var back = grouped.select(["region", "vs"]).explode("vs").sort(["vs"])
+    var expected = frame.select(["region", "v"]).sort(["v"])
+    assert_true(back.column("vs").equals(expected.column("v")))
+    var whole = frame.select_exprs([col("v").implode().alias("all")])
+    assert_equal(whole.height(), 1)
+    assert_equal(String(whole.column("all").get(0)), "[10, 20, 30, 40, 50, 60]")
+    var lazy = (
+        frame.lazy()
+        .group_by("year", maintain_order=True)
+        .agg([col("v").implode().alias("vs")])
+        .collect()
+    )
+    assert_equal(String(lazy.column("vs").get(0)), "[10, 20, 40, 50]")
+    assert_equal(String(lazy.column("vs").get(1)), "[30, 60]")
+    var texts = frame.group_by("year", maintain_order=True).agg(
+        [col("region").implode().alias("rs")]
+    )
+    assert_equal(String(texts.column("rs").get(0)), "[n, s, s, null]")
+
+
+def test_as_struct_builds_fields_and_unnests_back() raises:
+    var frame = sales()
+    var packed = frame.select_exprs(
+        [
+            as_struct(
+                [
+                    col("year"),
+                    (col("v") * lit(Int64(2))).alias("double"),
+                    lit(Int64(7)).alias("seven"),
+                    col("region"),
+                ]
+            )
+        ]
+    )
+    assert_equal(packed.columns()[0], "year")
+    var s = packed.column("year")
+    assert_equal(
+        s.dtype().name(),
+        "struct[year: int64, double: int64, seven: int64, region: string]",
+    )
+    assert_equal(s.get(1).struct_field("double").int64(), 40)
+    assert_equal(s.get(5).struct_field("seven").int64(), 7)
+    assert_true(s.get(4).struct_field("region").is_null())
+    var named = frame.select_exprs(
+        [as_struct([col("region"), col("year")], "key"), col("v")]
+    )
+    assert_equal(named.columns()[0], "key")
+    var back = named.unnest("key")
+    assert_true(back.equals(frame.select(["region", "year", "v"])))
+    var aliased = frame.select_exprs(
+        [as_struct([col("year"), col("v")]).alias("pair")]
+    )
+    assert_equal(aliased.columns()[0], "pair")
+    var raised = False
+    try:
+        _ = frame.select_exprs([as_struct([col("v"), col("v")])])
+    except e:
+        raised = True
+        assert_true("unique" in String(e))
+    assert_true(raised)
+
+
+def test_struct_keys_group_unique_and_join() raises:
+    var frame = sales()
+    var packed = frame.pack_struct("key", ["region", "year"])
+    var by_struct = packed.group_by("key", maintain_order=True).agg(
+        [col("v").sum().alias("total")]
+    )
+    var by_fields = frame.group_by(["region", "year"], maintain_order=True).agg(
+        [col("v").sum().alias("total")]
+    )
+    assert_equal(
+        by_struct.column("key").dtype().name(),
+        "struct[region: string, year: int64]",
+    )
+    assert_true(by_struct.unnest("key").equals(by_fields))
+    # A null struct is its own group, apart from a struct of null fields.
+    var bits = _bits([True, True, False, True])
+    var nullable = DataFrame(
+        [
+            Series(
+                "k",
+                StructColumn(
+                    [
+                        Series(
+                            "a",
+                            Column[Int64](
+                                [1, 1, 1, 1], [True, True, False, False]
+                            ),
+                        )
+                    ],
+                    bits^,
+                ),
+            ),
+            Series("v", Column[Int64]([1, 2, 3, 4])),
+        ]
+    )
+    var groups = nullable.group_by("k", maintain_order=True).agg(
+        [col("v").sum().alias("t")]
+    )
+    assert_equal(groups.height(), 3)
+    assert_equal(groups.column("t").get(0).int64(), 3)
+    assert_true(groups.column("k").get(1).is_null())
+    assert_equal(groups.column("t").get(1).int64(), 3)
+    assert_equal(groups.column("t").get(2).int64(), 4)
+    assert_equal(packed.unique(["key"], maintain_order=True).height(), 4)
+    assert_equal(packed.n_unique(["key"]), 4)
+    var lookup = (
+        DataFrame(
+            [
+                Series("region", StringColumn(["n", "s"])),
+                Series("year", Column[Int64]([1, 1])),
+                Series("label", StringColumn(["north-1", "south-1"])),
+            ]
+        )
+        .pack_struct("key", ["region", "year"])
+        .select(["key", "label"])
+    )
+    var inner = packed.join(lookup, ["key"], "inner")
+    var by_field_join = frame.join(
+        lookup.unnest("key"), ["region", "year"], "inner"
+    )
+    assert_equal(inner.height(), by_field_join.height())
+    assert_equal(inner.height(), 3)
+    assert_true(inner.column("label").equals(by_field_join.column("label")))
+    assert_equal(
+        inner.column("key").dtype().name(),
+        "struct[region: string, year: int64]",
+    )
+    var left = packed.join(lookup, ["key"], "left")
+    assert_equal(left.height(), 6)
+    assert_true(left.column("label").get(2).is_null())
+    assert_equal(packed.join(lookup, ["key"], "semi").height(), 3)
+    assert_equal(packed.join(lookup, ["key"], "anti").height(), 3)
+    var raised = False
+    try:
+        _ = packed.join(lookup, ["key"], "full")
+    except e:
+        raised = True
+        assert_true("struct join keys" in String(e))
+    assert_true(raised)
 
 
 def main() raises:

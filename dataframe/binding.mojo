@@ -96,6 +96,10 @@ from .expr import (
     STR_PAD,
     is_string_op,
     is_nested_op,
+    IMPLODE,
+    STRUCT_PACK,
+    struct_pack_children,
+    struct_pack_names,
     STR_SPLIT,
     STRUCT_FIELD,
     LIST_LEN,
@@ -378,6 +382,8 @@ def _unary_dtype(op: Int, input: DataType) raises -> DataType:
 
 def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     var op = node.op
+    if op == IMPLODE:
+        return DataType.list(input)
     if input.is_nested():
         raise Error(
             op_name(op)
@@ -857,6 +863,26 @@ def bind(
                 dtype = DataType.STRING
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
+        elif node.op == STRUCT_PACK:
+            var children = struct_pack_children(node)
+            var names = struct_pack_names(node)
+            if len(children) == 0 or len(children) != len(names):
+                raise Error("Invalid struct expression")
+            var field_types = List[DataType]()
+            var any_rows = False
+            for child in children:
+                if child < 0 or child >= i:
+                    raise Error("Invalid struct expression input")
+                _default(nodes, types, child)
+                field_types.append(types[child])
+                if shapes[child] == ROWS:
+                    any_rows = True
+                elif shapes[child] == AGGREGATE:
+                    shape = AGGREGATE
+                has_aggregate = has_aggregate or aggregated[child]
+            if any_rows:
+                shape = ROWS
+            dtype = DataType.struct(names, field_types)
         elif is_nested_op(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid list expression input")

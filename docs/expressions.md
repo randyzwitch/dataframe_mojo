@@ -409,11 +409,25 @@ struct itself is null are null. `DataFrame.pack_struct(name, columns)` builds
 a struct column from existing columns and `unnest(name)` puts its fields back
 as top-level columns, in the struct's position.
 
+`as_struct([exprs], name="")` packs expressions into one struct column; each
+field takes its expression's output name, scalars broadcast, and the result
+is named after the first field unless `name` is given. `col(x).implode()` is
+a reduction whose result is a list: inside `agg` it gathers each group's
+values in input order (nulls included), and on its own it gathers the whole
+column into one row. `group_by(...).agg(col(x).implode())` followed by
+`explode(x)` gives the rows back.
+
+Struct columns work as `group_by`, `unique`/`n_unique`/`is_duplicated` and
+inner/left/semi/anti join keys. They are compared field by field together
+with the struct's own validity, so a null struct forms a group of its own,
+distinct from a struct whose fields are all null. Right and full joins on
+struct keys, struct keys with nested fields, and list keys raise.
+
 `DataFrame.explode(columns)` and `LazyFrame.explode(columns)` produce one row
 per list element and repeat the other columns; an empty or null list gives
 one row holding null, and several columns explode together only when every
 row has the same element count in each.
 
-Nested columns cannot yet be sort, group, join or unique keys, be cast,
-reduced, used in `when`/`then`, or written to CSV; each raises an error that
-says so.
+Nested columns cannot yet be sort keys, be cast, be reduced (other than
+`implode`), be used in `when`/`then`, or be written to CSV; each raises an
+error that says so.

@@ -3,7 +3,7 @@ from .dtype import DataType
 from std.collections import Dict
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
-from .column import Column, _append_validity
+from .column import Column, _append_validity, _pack_bits
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
 from .expr import (
@@ -51,6 +51,86 @@ from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
 from .lazy import LazyFrame
 from .display import render_frame, render_glimpse
+
+# A struct key groups, joins and deduplicates by its fields plus its own
+# validity, so a null struct is one group and a struct of nulls another.
+# The expanded columns carry the struct's name, this separator, and the
+# field name (or _KEY_VALID); _key_columns packs them back.
+comptime _KEY_SEP = "\x1f"
+comptime _KEY_VALID = "\x1evalid"
+
+
+def _expand_struct_keys(columns: List[Series]) raises -> List[Series]:
+    """Replace each struct key column by its fields and validity."""
+    var out = List[Series](capacity=len(columns))
+    for column in columns:
+        if not column.dtype().is_struct():
+            out.append(column.copy())
+            continue
+        var structs = column.struct_column()
+        for i in range(structs.field_count()):
+            var field = structs.field(i)
+            if field.dtype().is_nested():
+                raise Error(
+                    "struct keys with nested fields are not supported yet: "
+                    + column.name()
+                    + "."
+                    + field.name()
+                )
+            out.append(field.renamed(column.name() + _KEY_SEP + field.name()))
+        out.append(
+            Series(
+                column.name() + _KEY_SEP + _KEY_VALID,
+                BoolColumn(structs.validity()),
+            )
+        )
+    return out^
+
+
+def _key_prefix(name: String) -> String:
+    """The struct name an expanded key column belongs to, or "" if plain."""
+    var at = name.find(_KEY_SEP)
+    if at < 0:
+        return ""
+    return String(name[byte=0:at])
+
+
+def _pack_struct_keys(frame: DataFrame) raises -> DataFrame:
+    """Pack runs of expanded key columns (see _expand_struct_keys) back into
+    their struct, in place; other columns are unchanged."""
+    var columns = List[Series](capacity=frame.width())
+    var k = 0
+    while k < frame.width():
+        var prefix = _key_prefix(frame._columns[k].name())
+        if prefix == "":
+            columns.append(frame._columns[k].copy())
+            k += 1
+            continue
+        var fields = List[Series]()
+        var bits = List[UInt8]()
+        while (
+            k < frame.width()
+            and _key_prefix(frame._columns[k].name()) == prefix
+        ):
+            ref column = frame._columns[k]
+            var suffix = String(
+                column.name()[byte = prefix.byte_length() + 1 :]
+            )
+            if suffix == _KEY_VALID:
+                # The helper's values (not its bitmap) are the struct's
+                # validity.
+                var flags = column.bool()
+                var values = List[Bool](capacity=len(flags))
+                for i in range(len(flags)):
+                    values.append(flags._get(i))
+                bits = _pack_bits(values)
+            else:
+                fields.append(column.renamed(suffix))
+            k += 1
+        columns.append(Series(prefix, StructColumn(fields^, bits^)))
+    return DataFrame(columns^, height=frame.height())
+
+
 from .reductions import FloatSumState
 
 
@@ -748,6 +828,56 @@ struct DataFrame(Copyable, Sized, Writable):
                     + " is "
                     + rtype.name()
                 )
+        var has_struct_key = False
+        for k in left_keys:
+            if self._columns[k].dtype().is_struct():
+                has_struct_key = True
+        if has_struct_key:
+            # Join on the struct's fields and validity as ordinary key
+            # columns, then drop those helpers. The right struct column is
+            # dropped up front so it does not come through as an extra
+            # output column.
+            if (
+                how != "inner"
+                and how != "left"
+                and how != "semi"
+                and how != "anti"
+            ):
+                raise Error(
+                    "struct join keys support inner, left, semi and anti"
+                    " joins; found " + how
+                )
+            var left_side = self.copy()
+            var right_side = right.copy()
+            var new_left_on = List[String]()
+            var new_right_on = List[String]()
+            var helpers = List[String]()
+            for i in range(len(left_on)):
+                if not self._columns[left_keys[i]].dtype().is_struct():
+                    new_left_on.append(left_on[i])
+                    new_right_on.append(right_on[i])
+                    continue
+                var left_parts = _expand_struct_keys(
+                    [self._columns[left_keys[i]].copy()]
+                )
+                var right_parts = _expand_struct_keys(
+                    [right._columns[right_keys[i]].renamed(left_on[i])]
+                )
+                right_side = right_side.drop([right_on[i]])
+                for p in range(len(left_parts)):
+                    left_side = left_side.with_column(left_parts[p].copy())
+                    right_side = right_side.with_column(right_parts[p].copy())
+                    new_left_on.append(left_parts[p].name())
+                    new_right_on.append(left_parts[p].name())
+                    helpers.append(left_parts[p].name())
+            return left_side.join(
+                right_side,
+                left_on=new_left_on,
+                right_on=new_right_on,
+                how=how,
+                suffix=suffix,
+                coalesce=coalesce,
+            ).drop(helpers)
         var keep_right_keys = how == "full" and not coalesce
         var right_output = List[Int]()
         var right_names = List[String]()
@@ -1542,7 +1672,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 raise Error("Column listed twice in subset: " + name)
             seen[name] = True
             keys.append(self._columns[self._index(name)].copy())
-        return keys^
+        return _expand_struct_keys(keys)
 
     def _key_counts(
         self, subset: List[String]
@@ -1720,7 +1850,9 @@ struct DataFrame(Copyable, Sized, Writable):
                 raise Error("Duplicate group_by key: " + key)
             seen[key] = True
             columns.append(self._columns[self._index(key)].copy())
-        return GroupBy(self.copy(), columns^, maintain_order)
+        return GroupBy(
+            self.copy(), _expand_struct_keys(columns), maintain_order
+        )
 
     def group_indices(self, key: String) raises -> GroupIndices:
         return self.group_indices([key])
@@ -1743,7 +1875,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 raise Error("Duplicate group_indices key: " + key)
             seen[key] = True
             columns.append(self._columns[self._index(key)].copy())
-        var encoded = encode_rows(columns, True)
+        var encoded = encode_rows(_expand_struct_keys(columns), True)
         return GroupIndices(encoded.ids.copy(), encoded.representatives.copy())
 
     def group_by(
@@ -1768,7 +1900,9 @@ struct DataFrame(Copyable, Sized, Writable):
             if expression.shape() != ROWS:
                 result = result._broadcast(self._height)
             columns.append(result^)
-        return GroupBy(self.copy(), columns^, maintain_order)
+        return GroupBy(
+            self.copy(), _expand_struct_keys(columns), maintain_order
+        )
 
 
 def _as_int64(values: List[Int]) -> List[Int64]:
@@ -3923,7 +4057,8 @@ struct GroupBy(Copyable):
     def _key_names(self) -> Dict[String, Bool]:
         var names = Dict[String, Bool]()
         for key in self._keys:
-            names[key.name()] = True
+            var prefix = _key_prefix(key.name())
+            names[prefix if prefix != "" else key.name()] = True
         return names^
 
     def _key_columns(self, groups: RowKeys) raises -> List[Series]:
@@ -3955,15 +4090,18 @@ struct GroupBy(Copyable):
                     + expression.expr._name
                 )
         var workers = worker_count(self._frame.height())
+        var result: DataFrame
         if workers > 1 and self._can_fuse_float(bound, workers):
-            return self._agg_fused_float(
+            result = self._agg_fused_float(
                 expressions, bound, batch_size, workers
             )
-        if workers > 1:
-            return self._agg_partitioned(
+        elif workers > 1:
+            result = self._agg_partitioned(
                 expressions, bound, batch_size, workers
             )
-        return self._agg_whole(bound, batch_size)
+        else:
+            result = self._agg_whole(bound, batch_size)
+        return _pack_struct_keys(result)
 
     def _can_fuse_float(self, bound: List[BoundExpr], workers: Int) -> Bool:
         """Use range-local fusion when private group states stay bounded."""
@@ -4434,7 +4572,7 @@ struct GroupBy(Copyable):
             self._keys, groups.representatives.copy(), 1
         )
         columns.append(Series(name, Column[Int64](counts^)))
-        return DataFrame(columns^, height=groups.count())
+        return _pack_struct_keys(DataFrame(columns^, height=groups.count()))
 
 
 def _is_untyped(value: Expr) -> Bool:

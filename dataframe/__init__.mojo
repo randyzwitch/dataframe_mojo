@@ -17,6 +17,7 @@ from .expr import (
     DtNamespace,
     ListNamespace,
     all,
+    as_struct,
     by_dtype,
     exclude,
     first,

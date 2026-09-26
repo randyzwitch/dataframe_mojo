@@ -69,6 +69,14 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
 - `def __init__(out self)`
   A released (empty) struct, ready to be filled by a producer.
 
+## `as_struct`
+
+Pack expressions into one struct column; each field takes its expression's output name. The result is named after the first field unless `name` is given. Scalars broadcast to the row count.
+
+```mojo
+def as_struct(fields: List[Expr], name: String = "") -> Expr
+```
+
 ## `BoolColumn`
 
 A window onto shared, bit-packed values and validity.
@@ -627,6 +635,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   Evaluate within partitions of the key columns, keeping row order.
 - `def list(self) -> ListNamespace`
   Operations on list columns.
+- `def implode(self) -> Self`
+  Gather values into one list: per group inside agg, otherwise one row holding every value, in input order (nulls included).
 - `def field(self, name: String) -> Self`
   One field of a struct column, null where the struct is null.
 - `def str(self) -> StrNamespace`
