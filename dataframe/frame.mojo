@@ -1101,14 +1101,13 @@ struct DataFrame(Copyable, Sized, Writable):
             if how != "right":
                 right_starts = _group_index(right_ids, count)
                 var csr_workers = worker_count(len(right_ids))
-                # The stable range scatter adds an order list and one cursor per
-                # key. Keep the compact serial CSR below the 2M-row crossover.
+                # Use the output/cursor working set and key cardinality to
+                # decide whether the extra stable scatter passes pay off.
                 right_flat = _parallel_group_rows(
                     right_ids, right_starts, csr_workers
                 ) if (
                     (how == "inner" or how == "full")
-                    and csr_workers > 1
-                    and len(right_ids) >= 2_000_000
+                    and _parallel_csr_fits(right_ids, count, csr_workers)
                 ) else _group_rows(
                     right_ids, right_starts
                 )
@@ -1127,7 +1126,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 var left_flat = _parallel_group_rows(
                     left_ids, left_starts, left_workers
                 ) if (
-                    left_workers > 1 and len(left_ids) >= 2_000_000
+                    _parallel_csr_fits(left_ids, count, left_workers)
                 ) else _group_rows(
                     left_ids, left_starts
                 )
@@ -2065,10 +2064,13 @@ def _dense_right_int64_rows(
             row += 1
     if repeat == 0:
         repeat = run_length
-    # Parallel mapping pays for its rechunk and row-list merge on large
-    # strided inputs; smaller progressions stay on the direct serial path.
+    # Rechunking and row-list merging pay off once the probe working set is large.
+    var progression_workers = worker_count(len(left))
     if repeat > 1 or (
-        stride > 1 and len(left) >= 2_000_000 and worker_count(len(left)) > 1
+        stride > 1
+        and progression_workers > 1
+        and not left.is_chunked()
+        and len(left) >= _PROGRESSION_PARALLEL_KEY_BYTES // 8
     ):
         var pairs = _repeated_progression_rows(
             left, base, stride, repeat, len(right), include_unmatched
@@ -2167,7 +2169,103 @@ def _group_rows(ids: List[Int], starts: List[Int]) -> List[Int]:
 # old 2,000,000 was chosen without a sweep and cost 1M-row filters 1.7x.
 comptime ALIGNED_FILTER_ROWS = 50_000
 
-comptime _RANGE_JOIN_MAX_IDS = 8_000_000
+# Measured on a Threadripper 3970X (32 cores, 16 MiB L3 per cache domain),
+# Mojo 1.2, at 32 workers with an 8-worker cross-check; see
+# docs/join-cutoffs.md for the alternating sweeps and their limitations.
+# CSR: 750k distinct rows lose (15 vs 18 ms), 1M win (33 vs 21-26 ms).
+# At 1.5M rows / 93,750 groups serial wins; at 1.75M / 109,375 parallel wins.
+# Use the conservative 16 MiB working-set boundary: earlier dispatch helps
+# uniform random IDs but regressed the 1M-row dictionary-encoded full join.
+comptime _CSR_PARALLEL_WORKING_BYTES = 16 * 1024 * 1024
+# At 6M rows, 64/512 groups win serial (63/35 vs 83/67 ms), 4,098
+# groups are level (64 vs 62 ms), and 5,859 groups win parallel (127 vs 71).
+# Keep the cursor below 32 KiB on the serial path.
+comptime _CSR_MIN_PARALLEL_GROUPS = 4096
+# Rechunk + row-list merge lose at 1.5-2M probes and win at 3-6M on 32
+# workers. The 8-worker run also loses at 2M and wins at 4M: this follows
+# probe-buffer size, not rows per worker. Use the conservative 24 MiB edge.
+# Chunked probes stay serial: rechunking loses at 2M, 4M, 6M, 8M and 10M.
+comptime _PROGRESSION_PARALLEL_KEY_BYTES = 24 * 1024 * 1024
+
+# Allocation policy shared by all direct-address paths: the domain table
+# costs at most four times the Int64 input-key bytes and at most 128 MiB.
+# Row-chain heads cost 8 B/slot; CSR starts plus cursors cost 16 B/slot;
+# membership flags cost 1 B/slot. Row-proportional buffers are separate.
+# The absolute budget admits the winning 80 MB dense row-chain table at
+# 10M keys but rejects the 160 MB table that is only level with hashing.
+comptime _RANGE_TABLE_MAX_BYTES = 128 * 1024 * 1024
+comptime _RANGE_TABLE_BYTES_PER_KEY = 4 * 8
+# A 25%-dense head table wins at 100k keys (3.2 MB), but loses at 500k
+# (16 MB). Beyond this cache allowance require at least 50% row density.
+comptime _RANGE_SMALL_TABLE_BYTES = 8 * 1024 * 1024
+# Membership's serial random stores hit a separate cache cliff: at 2M keys
+# 10/12 MB take 32/38 ms vs hash's 39 ms; 14/16 MB take 46/55 ms.
+comptime _RANGE_MEMBERSHIP_MAX_BYTES = 12_000_000
+# GCD scan and serial strided scatter win at 250k keys, are mixed at 500k,
+# and lose at 1M for probe/build ratios 0.25, 0.5, 1 and 2. No side-size test.
+comptime _RANGE_STRIDED_MAX_KEY_BYTES = 4 * 1024 * 1024
+# Building a large random head table in slot partitions starts paying off
+# at 750k keys / 12 MB heads and 1M / 8 MB, not 500k / 8 MB. Account for
+# keys, next-row links and heads; tiny head tables still stay serial.
+comptime _RANGE_PARALLEL_WORKING_BYTES = 20 * 1024 * 1024
+comptime _RANGE_PARALLEL_MIN_HEAD_BYTES = 8_000_000
+
+
+def _parallel_csr_fits(ids: List[Int], groups: Int, workers: Int) -> Bool:
+    """Choose stable scatter from footprint, cardinality and sampled locality.
+
+    The sample only selects between equivalent algorithms; it is not an
+    ordering proof. Missing a rare inversion merely keeps the serial path.
+    """
+    var rows = len(ids)
+    if (
+        workers <= 1
+        or groups < _CSR_MIN_PARALLEL_GROUPS
+        or rows < max(0, _CSR_PARALLEL_WORKING_BYTES // 8 - groups)
+    ):
+        return False
+    # Ordered IDs write almost sequentially: 1M/2M/4M distinct rows take
+    # 6/13/25 ms serial vs 19/40/69 ms parallel. At most 64 adjacent pairs
+    # sample locality; random IDs usually reject ordering at the first pair.
+    var step = max(1, (rows - 1) // 64)
+    for sample in range(64):
+        var row = 1 + sample * step
+        if row >= rows:
+            break
+        if ids[row] >= 0 and ids[row - 1] > ids[row]:
+            return True
+    return False
+
+
+def _range_join_table_capacity(
+    rows: Int,
+    slot_bytes: Int,
+    max_bytes: Int = _RANGE_TABLE_MAX_BYTES,
+    bytes_per_key: Int = _RANGE_TABLE_BYTES_PER_KEY,
+) -> Int:
+    """Domain slots fitting both an absolute and input-relative byte budget.
+
+    Bound before multiplying, so even theoretical Int.MAX row counts do
+    not overflow. Callers account for the actual per-domain-slot storage.
+    """
+    if rows <= 0 or slot_bytes <= 0 or max_bytes <= 0:
+        return 0
+    var slots = max_bytes // slot_bytes
+    var per_row = bytes_per_key // slot_bytes
+    if per_row <= 0:
+        return 0
+    return slots if rows > slots // per_row else rows * per_row
+
+
+def _parallel_range_build_workers(rows: Int, slots: Int) -> Int:
+    """Split a random index build only when its working set warrants it."""
+    var entries = _RANGE_PARALLEL_WORKING_BYTES // 8
+    if (
+        slots < _RANGE_PARALLEL_MIN_HEAD_BYTES // 8
+        or slots < entries - 2 * min(rows, entries // 2)
+    ):
+        return 1
+    return min(16, worker_count(rows))
 
 
 def _range_join_span_fits(low: Int64, high: Int64, cap: Int) -> Bool:
@@ -2400,9 +2498,16 @@ def _bounded_int64_join_rows(
         or len(right) == 0
     ):
         return (False, List[Int](), List[Int]())
-    var cap = 64_000_000
-    if len(right) < cap // 4:
-        cap = len(right) * 4
+    var cap = _range_join_table_capacity(len(right), 8)
+    # Beyond the cache-sized allowance, a sparse head table only ties or
+    # loses to hashing. Both limits are computed without row-count overflow.
+    cap = min(
+        cap,
+        max(
+            _RANGE_SMALL_TABLE_BYTES // 8,
+            _range_join_table_capacity(len(right), 8, bytes_per_key=16),
+        ),
+    )
     # A sample can prove a domain is too wide without rechunking or
     # scanning the full right key. The exact scan below still decides hits.
     var sample_wide = False
@@ -2433,12 +2538,11 @@ def _bounded_int64_join_rows(
                             max(sample_anchor, value),
                         ),
                     )
-                # A larger build side is better handled by the parallel
-                # hash index. Reject its wide raw domain before rechunking or
-                # scanning the whole column.
+                # Large strided builds lose to hashing regardless of the
+                # probe/build ratio. Reject before the full GCD scan.
                 if not _range_join_span_fits(sample_low, sample_high, cap):
                     sample_wide = True
-                    if len(left) < len(right) and len(right) >= 2_000_000:
+                    if len(right) > _RANGE_STRIDED_MAX_KEY_BYTES // 8:
                         return (False, List[Int](), List[Int]())
                 if not _strided_range_fits(
                     sample_low, sample_high, max(sample_gcd, UInt64(1)), cap
@@ -2473,10 +2577,9 @@ def _bounded_int64_join_rows(
     var stride = UInt64(1)
     var dense = _range_join_span_fits(low, high, cap)
     if not dense:
-        # A small strided domain can use direct addressing even when the
-        # probe side is shorter. For larger builds the parallel hash index
-        # avoids the serial strided scatter.
-        if len(left) < len(right) and len(right) >= 2_000_000:
+        # The sample may have missed the wide domain. Apply the same build
+        # footprint limit before paying for its serial GCD scan and scatter.
+        if len(right) > _RANGE_STRIDED_MAX_KEY_BYTES // 8:
             return (False, List[Int](), List[Int]())
         if not sample_wide:
             # The sample missed an extreme key; calculate the stride now.
@@ -2498,10 +2601,9 @@ def _bounded_int64_join_rows(
     )
     var next_rows = List[Int](length=len(right_values), fill=-1)
     var unique_keys = True
-    var build_workers = (
-        min(16, worker_count(len(right_values))) if dense
-        and (len(right_values) >= 2_000_000 and len(heads) >= 2_000_000) else 1
-    )
+    var build_workers = _parallel_range_build_workers(
+        len(right_values), len(heads)
+    ) if dense else 1
     if build_workers > 1:
         var slot_bounds = partitions(len(heads), build_workers, 1)
         var build_jobs = List[_RangeIndexBuildJob](capacity=build_workers)
@@ -2608,9 +2710,9 @@ def _range_int64_membership_domain(
             low = min(low, value)
             high = max(high, value)
         previous = value
-    var cap = 64_000_000
-    if len(right_values) < cap // 4:
-        cap = len(right_values) * 4
+    var cap = _range_join_table_capacity(
+        len(right_values), 1, _RANGE_MEMBERSHIP_MAX_BYTES
+    )
     if found and not consecutive and not _range_join_span_fits(low, high, cap):
         return _RangeMembershipDomain(
             False, found, low, high, consecutive, List[UInt8]()
@@ -2727,9 +2829,8 @@ def _bounded_int64_join_ids(
     if left.height() > Int.MAX - right.height():
         return (False, List[Int](), List[Int](), 0)
     var total = left.height() + right.height()
-    var cap = _RANGE_JOIN_MAX_IDS
-    if total < cap // 4:
-        cap = total * 4
+    # Starts and its cursor copy each have count + 1 entries.
+    var cap = _range_join_table_capacity(total, 16, _RANGE_TABLE_MAX_BYTES - 16)
     var found = False
     var low = Int64(0)
     var high = Int64(0)

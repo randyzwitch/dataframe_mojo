@@ -590,6 +590,10 @@ def _take_sorted_chunked_partitioned(
     return result^
 
 
+# Selected rows needed per dispatched column/partition job (measured below).
+comptime _SORTED_GATHER_ROWS_PER_JOB = 16_384
+
+
 def take_sorted_chunked(
     columns: List[Series],
     var indices: List[Int],
@@ -607,9 +611,17 @@ def take_sorted_chunked(
             for c in columns:
                 gathered.append(c.take(indices))
             return gathered^
-    if len(indices) >= 2_000_000 and len(columns) > 1:
+    if workers > 1 and len(columns) > 1:
         var parts = min(4, configured_workers() // len(columns))
-        if parts > 1:
+        # Dispatch cost grows with the column/partition job count. Swept
+        # on a 3970X at 32 workers: 2 columns win from 100-125k selected
+        # rows; 8 columns are flat around 500-750k and win from 1M.
+        # See docs/join-cutoffs.md; do not fit this to a benchmark row size.
+        if (
+            parts > 1
+            and len(indices) // (parts * len(columns))
+            >= _SORTED_GATHER_ROWS_PER_JOB
+        ):
             var chunked = True
             for column in columns:
                 if not column.is_chunked() or column.n_chunks() < 16:

@@ -85,6 +85,11 @@ there because a row-count cutoff chosen by comparing 1M with 10M can sit
 anywhere between them; if a workload's time per row jumps between two sizes,
 sweep the sizes in between before drawing conclusions.
 
+The join/gather cutoffs and bounded-table budgets have a reproducible
+[measurement report](join-cutoffs.md), including density, cardinality,
+ordered-input and chunked-input counterexamples. Run its sweeps before
+changing those guards; record the machine and the losing side of a crossover.
+
 ## Broad join comparison
 
 `pixi run -e oracle bench-joins-polars --sizes 1000000,10000000 --threads 32`
