@@ -95,6 +95,10 @@ def test_row_groups_and_zstd() raises:
     var frame = read_parquet(FIXTURES + "row_groups.parquet")
     assert_equal(frame.height(), 1000)
     assert_equal(frame.width(), 3)
+    for name in frame.columns():
+        assert_equal(frame.column(name).n_chunks(), 3)
+    assert_equal(len(frame.column("k").chunks()[0]), 400)
+    assert_equal(len(frame.column("k").chunks()[2]), 200)
     # k is null at every seventh row (143 of them), so the sum skips those.
     var expected = 0
     for row in range(1000):

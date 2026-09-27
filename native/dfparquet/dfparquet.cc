@@ -1,7 +1,8 @@
 // dfparquet: a minimal C ABI over Arrow C++'s Parquet reader.
 //
-// Two entry points read a file: dfq_read_parquet decodes a column and
-// row-group selection into one record batch, and dfq_row_group_statistics
+// dfq_read_parquet_stream decodes one selected row group per stream batch.
+// The legacy dfq_read_parquet still exports one combined batch for existing
+// ABI consumers, and dfq_row_group_statistics
 // exports the footer's per-row-group statistics as a record batch, so a
 // caller can decide which row groups a filter needs before decoding any.
 // Both export through the Arrow C Data Interface. Only the dfq_* symbols
@@ -136,6 +137,46 @@ arrow::Result<std::vector<int>> LeafIndices(parquet::arrow::FileReader& reader,
   return leaves;
 }
 
+// Own the file reader for the stream lifetime. Decode only the next selected
+// row group; never create a table or prebuffer spanning the whole selection.
+class RowGroupReader final : public arrow::RecordBatchReader {
+ public:
+  RowGroupReader(std::unique_ptr<parquet::arrow::FileReader> reader,
+                 std::vector<int> groups, std::vector<int> leaves,
+                 bool projected, std::shared_ptr<arrow::Schema> schema)
+      : reader_(std::move(reader)), groups_(std::move(groups)),
+        leaves_(std::move(leaves)), projected_(projected),
+        schema_(std::move(schema)) {}
+
+  std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
+
+  arrow::Status ReadNext(std::shared_ptr<arrow::RecordBatch>* out) override {
+    *out = nullptr;
+    // An empty batch preserves the schema for an empty selection/file.
+    if (groups_.empty() && next_ == 0) {
+      ++next_;
+      ARROW_ASSIGN_OR_RAISE(*out, arrow::RecordBatch::MakeEmpty(schema_));
+      return arrow::Status::OK();
+    }
+    if (next_ >= groups_.size()) return arrow::Status::OK();
+    std::vector<int> group{groups_[next_]};
+    ARROW_ASSIGN_OR_RAISE(auto table, projected_
+        ? reader_->ReadRowGroups(group, leaves_) : reader_->ReadRowGroups(group));
+    ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());
+    ARROW_ASSIGN_OR_RAISE(*out, CoerceBatch(batch));
+    ++next_;
+    return arrow::Status::OK();
+  }
+
+ private:
+  std::unique_ptr<parquet::arrow::FileReader> reader_;
+  std::vector<int> groups_;
+  std::vector<int> leaves_;
+  bool projected_;
+  std::shared_ptr<arrow::Schema> schema_;
+  size_t next_ = 0;
+};
+
 bool IsBinaryLike(const arrow::DataType& type) {
   return arrow::is_base_binary_like(type.id()) || arrow::is_binary_view_like(type.id()) ||
          type.id() == arrow::Type::FIXED_SIZE_BINARY;
@@ -192,6 +233,55 @@ int dfq_read_parquet(const char* path, int use_threads, const char** columns,
   status = arrow::ExportRecordBatch(**coerced, out_array, out_schema);
   if (!status.ok()) return fail(status, error_out);
   return 0;
+}
+
+// Export an Arrow C stream, one batch per selected row group. The caller
+// releases every array/schema and the stream, including on early termination.
+int dfq_read_parquet_stream(const char* path, int use_threads,
+                            const char** columns, int n_columns,
+                            const int* row_groups, int n_row_groups,
+                            struct ArrowArrayStream* out, char** error_out) {
+  *error_out = nullptr;
+  out->release = nullptr;
+  std::unique_ptr<parquet::arrow::FileReader> reader;
+  auto status = Open(path, use_threads != 0, &reader);
+  if (!status.ok()) return fail(status, error_out);
+  std::shared_ptr<arrow::Schema> source;
+  status = reader->GetSchema(&source);
+  if (!status.ok()) return fail(status, error_out);
+  std::vector<int> leaves;
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  if (n_columns > 0) {
+    auto indices = LeafIndices(*reader, columns, n_columns);
+    if (!indices.ok()) return fail(indices.status(), error_out);
+    leaves = *indices;
+    for (int i = 0; i < n_columns; ++i) {
+      auto field = source->GetFieldByName(columns[i]);
+      fields.push_back(arrow::field(field->name(), CoercedType(field->type()),
+                                    field->nullable()));
+    }
+  } else {
+    for (const auto& field : source->fields()) {
+      fields.push_back(arrow::field(field->name(), CoercedType(field->type()),
+                                    field->nullable()));
+    }
+  }
+  std::vector<int> groups;
+  if (n_row_groups < 0) {
+    for (int g = 0; g < reader->num_row_groups(); ++g) groups.push_back(g);
+  } else {
+    for (int i = 0; i < n_row_groups; ++i) {
+      if (row_groups[i] < 0 || row_groups[i] >= reader->num_row_groups()) {
+        return fail(arrow::Status::IndexError("row group ", row_groups[i],
+                                             " is out of range"), error_out);
+      }
+      groups.push_back(row_groups[i]);
+    }
+  }
+  auto stream = std::make_shared<RowGroupReader>(std::move(reader),
+      std::move(groups), std::move(leaves), n_columns > 0, arrow::schema(fields));
+  status = arrow::ExportRecordBatchReader(std::move(stream), out);
+  return status.ok() ? 0 : fail(status, error_out);
 }
 
 // One row per row group: `row_group` (int32), `rows` (int64), then for each

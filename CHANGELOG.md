@@ -21,6 +21,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
   tables share an overflow-safe byte budget, with measured density and
   membership-cache limits; ordered CSR IDs and chunked progression probes
   avoid parallel paths that lose on those inputs. See [the measurements](docs/join-cutoffs.md).
+- Parquet reads decode one selected row group at a time through an Arrow C
+  stream and preserve imported chunks, avoiding whole-file batch assembly.
 
 - Semi and anti joins whose keys do not fit a direct-address range probe
   the right-row hash index for membership instead of encoding both inputs
