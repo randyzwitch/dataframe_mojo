@@ -3,7 +3,7 @@
 Identify LF terminators outside quote parity. Callers retain CR trimming and
 CSV field validation. Chunk sizing uses a thread and width allocation budget.
 """
-from std.bit import count_leading_zeros, pop_count
+from std.bit import count_leading_zeros, count_trailing_zeros, pop_count
 from .csv_bits import _mask64, _prefix_xor_inclusive
 
 
@@ -83,6 +83,52 @@ struct CountLines:
                 last = total
             total += 1
         return CsvCount(rows, last)
+
+    def take_rows(
+        self, bytes: Span[UInt8, ImmutAnyOrigin], limit: Int
+    ) -> CsvCount:
+        """Find at most limit record endings, carrying quote parity in SIMD."""
+        var offset = 0
+        var rows = 0
+        var outside_previous = True
+        var last = -1
+        while offset + 64 <= len(bytes):
+            var block = bytes.unsafe_ptr().unsafe_load[width=64](offset)
+            var valid = _mask64(block.eq(SIMD[DType.uint8, 64](self.eol)))
+            if self.quoting:
+                var quotes = _mask64(
+                    block.eq(SIMD[DType.uint8, 64](self.quote))
+                )
+                var outside = _prefix_xor_inclusive(quotes)
+                if outside_previous:
+                    outside = ~outside
+                outside_previous = (outside & (UInt64(1) << 63)) != 0
+                valid &= outside
+            var count = Int(pop_count(valid))
+            if rows + count >= limit:
+                for _ in range(limit - rows - 1):
+                    valid &= valid - 1
+                return CsvCount(
+                    limit, offset + Int(count_trailing_zeros(valid))
+                )
+            if count:
+                last = offset + 63 - Int(count_leading_zeros(valid))
+            rows += count
+            offset += 64
+        var inside = not outside_previous
+        while offset < len(bytes):
+            var byte = bytes[offset]
+            if self.quoting and byte == self.quote:
+                inside = not inside
+            elif byte == self.eol and not inside:
+                rows += 1
+                last = offset
+                if rows == limit:
+                    return CsvCount(rows, last)
+            offset += 1
+        if last + 1 < len(bytes):
+            rows += 1
+        return CsvCount(rows, len(bytes) - 1)
 
     def find_next(
         self, bytes: Span[UInt8, ImmutAnyOrigin], chunk_size: Int

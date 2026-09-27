@@ -5,6 +5,7 @@ header removal, CountLines range discovery, immediate decode publication, and
 array-reference reassembly.
 """
 from std.atomic import Atomic
+from std.ffi import external_call
 from std.collections import Dict, Optional
 from .csv_infer import infer_csv_schema
 from std.memory import ArcPointer, Pointer
@@ -522,3 +523,105 @@ def read_csv_inferred(
             result = result.filter(predicate.value())
         _ = input^
         return result^
+
+
+struct _CsvBatches(Movable):
+    """A mapped CSV cursor; only a bounded wave of decode jobs is retained."""
+
+    var mapping: _Mapping
+    var context: ArcPointer[_ReadContext]
+    var offset: Int
+    var record: Int
+    var remaining: Int
+    var batch_size: Int
+    var emitted: Bool
+
+    def __init__(
+        out self,
+        var mapping: _Mapping,
+        schema: Optional[CsvSchema],
+        columns: List[String],
+        limit: Int,
+        batch_size: Int,
+    ) raises:
+        self.mapping = mapping^
+        if self.mapping.address == 0:
+            raise Error("Streaming CSV requires a nonempty regular mapped file")
+        var options = _options(
+            ",", '"', "", 0, -1, List[String](), False, False, "utf8", 65536
+        )
+        var selected: CsvSchema
+        if schema:
+            selected = schema.value().copy()
+            _validate_explicit_header(
+                self.mapping.span(), selected, options, True
+            )
+            var prelude = _prelude(self.mapping.span(), options, True)
+            self.offset = prelude[0]
+            self.record = prelude[1]
+        else:
+            var inferred = infer_csv_schema(
+                self.mapping.span(), options, has_header=True
+            )
+            selected = inferred.schema.copy()
+            self.offset = inferred.data_offset
+            self.record = inferred.record_start
+        self.context = ArcPointer(
+            _ReadContext(
+                selected,
+                options,
+                _projection(selected, columns),
+                Optional[Expr](),
+            )
+        )
+        self.remaining = limit
+        self.batch_size = batch_size
+        self.emitted = False
+
+    def next(mut self) raises -> Optional[_DecodeJob]:
+        if self.emitted and (
+            self.offset >= self.mapping.length or self.remaining == 0
+        ):
+            return None
+        self.emitted = True
+        var size = self.batch_size if self.remaining < 0 else min(
+            self.batch_size, self.remaining
+        )
+        var count = 0
+        var end = self.offset
+        if size > 0:
+            var found = CountLines().take_rows(
+                self.mapping.span()[self.offset :], size
+            )
+            count = found.rows
+            end = self.offset + found.last_newline + 1
+        var job = _DecodeJob(
+            self.context,
+            self.mapping.address + self.offset,
+            end - self.offset,
+            count,
+            self.record,
+        )
+        self.offset = end
+        self.record += count
+        if self.remaining >= 0:
+            self.remaining -= count
+        return job^
+
+    def discard(mut self):
+        # Every worker has copied its range. Unmap consumed whole pages,
+        # rather than advising DONTNEED (Darwin may retain those pages in RSS).
+        # Keep only the contiguous remaining mapping for the next wave and
+        # for _Mapping's destructor, including on an early stop or error.
+        var page = Int(external_call["getpagesize", Int32]())
+        var end = self.offset // page * page
+        if end > 0:
+            var status = external_call["munmap", Int32](
+                self.mapping.address, end
+            )
+            if status == 0:
+                self.mapping.address += end
+                self.mapping.length -= end
+                self.offset -= end
+                if self.mapping.length == 0:
+                    self.mapping.address = 0

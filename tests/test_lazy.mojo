@@ -102,7 +102,7 @@ def test_predicate_pushdown_rules() raises:
         df.lazy()
         .with_columns((col("v") * lit(Int64(2))).alias("v2"))
         .filter(col("k").eq(lit(String("a"))))
-        .explain()
+        .explain(streaming=False)
     )
     assert_equal(pushed, "WITH_COLUMNS v2\n  FILTER\n    SCAN frame\n")
     # A filter on a produced column must stay above its producer.
@@ -110,12 +110,12 @@ def test_predicate_pushdown_rules() raises:
         df.lazy()
         .with_columns((col("v") * lit(Int64(2))).alias("v2"))
         .filter(col("v2") > lit(Int64(4)))
-        .explain()
+        .explain(streaming=False)
     )
     assert_equal(kept, "FILTER\n  WITH_COLUMNS v2\n    SCAN frame\n")
     # Never past a slice: that would change which rows survive.
     var sliced = df.lazy().head(3).filter(col("v") > lit(Int64(1)))
-    assert_true(sliced.explain().startswith("FILTER\n  SLICE"))
+    assert_true(sliced.explain(streaming=False).startswith("FILTER\n  SLICE"))
     assert_true(
         sliced.collect().equals(df.head(3).filter(col("v") > lit(Int64(1))))
     )
@@ -126,7 +126,7 @@ def test_predicate_pushdown_rules() raises:
         .filter(col("label").eq(lit(String("A"))))
     )
     assert_equal(
-        inner.explain(),
+        inner.explain(streaming=False),
         "JOIN inner on k\n  SCAN frame\n  FILTER\n    SCAN frame\n",
     )
     var left = (
@@ -134,14 +134,16 @@ def test_predicate_pushdown_rules() raises:
         .join(other().lazy(), "k", "left")
         .filter(col("label").eq(lit(String("A"))))
     )
-    assert_true(left.explain().startswith("FILTER\n  JOIN left"))
+    assert_true(left.explain(streaming=False).startswith("FILTER\n  JOIN left"))
     var sorted = df.lazy().sort(["w"]).filter(col("v") > lit(Int64(2)))
-    assert_true(sorted.explain().startswith("SORT w\n  FILTER"))
+    assert_true(sorted.explain(streaming=False).startswith("SORT w\n  FILTER"))
     assert_true(
         sorted.collect().equals(df.sort(["w"]).filter(col("v") > lit(Int64(2))))
     )
     var whole_column = df.lazy().sort(["w"]).filter(col("w") > col("w").mean())
-    assert_true(whole_column.explain().startswith("FILTER\n  SORT"))
+    assert_true(
+        whole_column.explain(streaming=False).startswith("FILTER\n  SORT")
+    )
     assert_true(
         whole_column.collect().equals(
             df.sort(["w"]).filter(col("w") > col("w").mean())
@@ -165,7 +167,7 @@ def test_projection_and_slice_pushdown_into_csv() raises:
     write_csv(frame(), PATH)
     var q = scan_csv(PATH).select(["k", "v"]).head(2)
     assert_equal(
-        q.explain(),
+        q.explain(streaming=False),
         "SELECT k, v\n  SLICE 0 2\n    SCAN CSV "
         + PATH
         + " [project k, v] [n_rows 2]\n",
@@ -173,7 +175,7 @@ def test_projection_and_slice_pushdown_into_csv() raises:
     assert_true(q.collect().equals(frame().select(["k", "v"]).head(2)))
     # A slice is not pushed below an aggregate projection.
     var agg = scan_csv(PATH).select(col("v").sum()).head(1)
-    assert_true(agg.explain().startswith("SLICE"))
+    assert_true(agg.explain(streaming=False).startswith("SLICE"))
     assert_equal(agg.collect().item().int64(), Int64(18))
     var schema = CsvSchema(
         [
@@ -188,7 +190,7 @@ def test_projection_and_slice_pushdown_into_csv() raises:
         .filter(col("w") > lit(Float64(2)))
         .select(["note"])
     )
-    assert_true(typed.explain().endswith("[project w, note]\n"))
+    assert_true(typed.explain(streaming=False).endswith("[project w, note]\n"))
     assert_equal(typed.collect().height(), 4)
     assert_true(
         typed.collect().equals(

@@ -139,5 +139,9 @@ on Threadripper and Apple M1, plus isolated worker-policy experiments.
 The [Parquet streaming report](parquet-streaming.md) records paired read-time
 and peak-RSS measurements, raw samples, and reproduction commands.
 
+The [lazy streaming report](lazy-streaming.md) compares the materializing
+executor with ordered batch pipelines at 1M and 10M rows, including peak RSS
+on a CSV larger than 1 GB.
+
 Sort bucket calibration and reproducible sweeps are recorded in
 [sort-cutoffs.md](sort-cutoffs.md), including fast-path misses and Mac validation.

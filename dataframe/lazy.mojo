@@ -20,9 +20,41 @@ Filters never move past a slice, unique, group_by, or right/full join,
 because that would change which rows those operators see.
 """
 from std.collections import Dict, Optional
+from std.memory import ArcPointer
+from .csv_reader import _CsvBatches, _DecodeJob
+from .csv_types import _map_file
+from .parquet import _ParquetBatches
+from .parallel import Job, Pool, configured_workers
+from .streaming import _StreamReduction
+from .expr import (
+    SUM,
+    COUNT,
+    MIN,
+    MAX,
+    MEAN,
+    FIRST,
+    LAST,
+    STD,
+    VAR,
+    LEN,
+    ANY,
+    ALL,
+    NULL_COUNT,
+    N_UNIQUE,
+)
+from .frame import concat
 from .csv import CsvSchema, read_csv
 from .csv_reader import read_csv_explicit, read_csv_inferred
-from .expr import COL, OVER, SELECTOR, Expr, col, is_reduction, is_window
+from .expr import (
+    COL,
+    OVER,
+    SELECTOR,
+    Expr,
+    col,
+    is_reduction,
+    is_window,
+    subtree,
+)
 from .frame import DataFrame, GroupBy
 from .parquet import (
     _pruned_row_groups,
@@ -119,6 +151,126 @@ def _output_names(exprs: List[Expr]) -> List[String]:
     for e in exprs:
         names.append(e._name)
     return names^
+
+
+def _stream_rows(node: PlanNode) -> Bool:
+    if node.kind == FILTER or node.kind == WITH_COLUMNS:
+        return _row_local(node.exprs)
+    if node.kind == SELECT:
+        if not _row_local(node.exprs):
+            return False
+        # An all-scalar select produces one row for the whole input.
+        for expression in node.exprs:
+            for item in expression._nodes:
+                if item.op == COL or item.op == SELECTOR:
+                    return True
+        return False
+    return node.kind == DROP or node.kind == EXPLODE or node.kind == UNNEST
+
+
+def _stream_reductions(expressions: List[Expr]) -> Bool:
+    if len(expressions) == 0:
+        return False
+    for expression in expressions:
+        ref nodes = expression._nodes
+        var reachable = List[Bool](length=len(nodes), fill=False)
+        reachable[len(nodes) - 1] = True
+        var saw_reduction = False
+        for reverse in range(len(nodes)):
+            var i = len(nodes) - 1 - reverse
+            ref node = nodes[i]
+            if is_window(node.op) or node.op == OVER or node.op == SELECTOR:
+                return False
+            if not reachable[i]:
+                continue
+            if is_reduction(node.op):
+                if node.op not in [
+                    SUM,
+                    COUNT,
+                    MIN,
+                    MAX,
+                    MEAN,
+                    FIRST,
+                    LAST,
+                    STD,
+                    VAR,
+                    LEN,
+                    ANY,
+                    ALL,
+                    NULL_COUNT,
+                    N_UNIQUE,
+                ]:
+                    return False
+                # Reduction inputs must be row-local; reduction-of-reduction
+                # and windows retain the materializing evaluator.
+                if not _row_local([subtree(expression, node.left)]):
+                    return False
+                saw_reduction = True
+                continue
+            if node.op == COL:
+                return False
+            for child in [node.left, node.right, node.extra]:
+                if child >= 0:
+                    reachable[child] = True
+        if not saw_reduction:
+            return False
+    return True
+
+
+struct _StreamJob(Job):
+    var decode: List[_DecodeJob]
+    var frame: DataFrame
+    var operations: List[PlanNode]
+    var joins: ArcPointer[List[DataFrame]]
+    var expressions: List[Expr]
+    var keys: List[String]
+    var reduced: List[_StreamReduction]
+
+    def __init__(
+        out self,
+        var frame: DataFrame,
+        operations: List[PlanNode],
+        joins: ArcPointer[List[DataFrame]],
+        expressions: List[Expr],
+        keys: List[String],
+    ):
+        self.decode = List[_DecodeJob]()
+        self.frame = frame^
+        self.operations = operations.copy()
+        self.joins = joins.copy()
+        self.expressions = expressions.copy()
+        self.keys = keys.copy()
+        self.reduced = List[_StreamReduction]()
+
+    def run(mut self) raises:
+        if len(self.decode):
+            self.decode[0].run()
+            self.frame = self.decode.pop().into_frame()
+        for node in self.operations:
+            if node.kind == JOIN:
+                self.frame = self.frame.join(
+                    self.joins[][node.offset],
+                    node.names,
+                    node.text,
+                    node.names2[0],
+                )
+            elif node.kind == FILTER:
+                self.frame = self.frame.filter(node.exprs[0])
+            elif node.kind == SELECT:
+                self.frame = self.frame.select_exprs(node.exprs)
+            elif node.kind == WITH_COLUMNS:
+                self.frame = self.frame.with_columns(node.exprs)
+            elif node.kind == DROP:
+                self.frame = self.frame.drop(node.names)
+            elif node.kind == EXPLODE:
+                self.frame = self.frame.explode(node.names)
+            elif node.kind == UNNEST:
+                self.frame = self.frame.unnest(node.text)
+        if len(self.expressions):
+            self.reduced.append(
+                _StreamReduction(self.frame, self.expressions, self.keys)
+            )
+            self.frame = self.frame.clear()
 
 
 struct LazyFrame(Copyable):
@@ -276,10 +428,23 @@ struct LazyFrame(Copyable):
     ) -> Self:
         return self.join(other, [on], how, suffix)
 
-    def collect(self, *, optimize: Bool = True) raises -> DataFrame:
-        """Optimize (unless disabled) and execute the plan."""
+    def collect(
+        self,
+        *,
+        optimize: Bool = True,
+        streaming: Bool = True,
+        batch_size: Int = 65536,
+    ) raises -> DataFrame:
+        """Optimize (unless disabled) and execute the plan.
+
+        Streaming batches default to 65,536 rows. Set streaming=False to use
+        the materializing executor. Stateful/global operations retain their
+        documented boundaries; collecting still retains the final output.
+        """
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
         var plan = self._optimized() if optimize else self.copy()
-        return plan._execute(len(plan._nodes) - 1, False)
+        return plan._execute(len(plan._nodes) - 1, False, streaming, batch_size)
 
     def fetch(self, n: Int = 5) raises -> DataFrame:
         """Collect only the first n rows of the result."""
@@ -296,16 +461,186 @@ struct LazyFrame(Copyable):
             out.append(field.name + ": " + field.dtype.name())
         return out^
 
-    def explain(self, *, optimize: Bool = True) raises -> String:
-        """The (optimized) plan, one operator per line, root first."""
+    def explain(
+        self, *, optimize: Bool = True, streaming: Bool = True
+    ) raises -> String:
+        """The (optimized) plan, one operator per line, root first.
+
+        Streaming annotations show batch-capable operators, aggregate state
+        and materialization boundaries. streaming=False omits annotations.
+        """
         var plan = self._optimized() if optimize else self.copy()
         var out = String()
-        plan._describe(len(plan._nodes) - 1, 0, out)
+        plan._describe(len(plan._nodes) - 1, 0, out, streaming)
         return out^
 
     # --- execution -----------------------------------------------------
 
-    def _execute(self, index: Int, empty: Bool) raises -> DataFrame:
+    def _stream_execute(
+        self, index: Int, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        var cursor = index
+        var expressions = List[Expr]()
+        var keys = List[String]()
+        var skip = 0
+        var limit = -1
+        ref terminal = self._nodes[index]
+        if terminal.kind == AGG or terminal.kind == SELECT:
+            if _stream_reductions(terminal.exprs):
+                expressions = terminal.exprs.copy()
+                if terminal.kind == AGG:
+                    keys = terminal.names.copy()
+                    if len(keys) == 0:
+                        return None
+                cursor = terminal.left
+        if terminal.kind == SLICE:
+            if terminal.offset < 0:
+                return None
+            skip = terminal.offset
+            limit = terminal.length
+            cursor = terminal.left
+        var operations = List[PlanNode]()
+        var joins = List[DataFrame]()
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if _stream_rows(node):
+                operations.append(node.copy())
+            elif node.kind == JOIN and node.text in [
+                "inner",
+                "left",
+                "semi",
+                "anti",
+                "cross",
+            ]:
+                var operation = node.copy()
+                operation.offset = len(joins)
+                joins.append(self._execute(node.right, False, True, batch_size))
+                operations.append(operation^)
+            else:
+                break
+            cursor = node.left
+        if (
+            cursor < 0
+            or cursor == index
+            and not _is_scan(self._nodes[cursor].kind)
+        ):
+            return None
+        operations.reverse()
+        var shared_joins = ArcPointer(joins^)
+        ref source = self._nodes[cursor]
+        var csv = List[_CsvBatches]()
+        var parquet = List[_ParquetBatches]()
+        var input = DataFrame(List[Series](), height=0)
+        if source.kind == SCAN_CSV:
+            var mapping = _map_file(source.text)
+            if mapping.address == 0:
+                return None
+            csv.append(
+                _CsvBatches(
+                    mapping^,
+                    self._schemas[source.offset],
+                    source.names,
+                    source.length,
+                    batch_size,
+                )
+            )
+        elif source.kind == SCAN_PARQUET:
+            var groups = Optional[List[Int]]()
+            if len(operations) and operations[0].kind == FILTER:
+                groups = _pruned_row_groups(
+                    parquet_row_group_statistics(source.text),
+                    operations[0].exprs[0],
+                )
+            parquet.append(
+                _ParquetBatches(source.text, source.names, groups, batch_size)
+            )
+        elif source.kind == SCAN_FRAME:
+            input = self._frames[source.offset].copy()
+            if len(source.names):
+                input = input.select(source.names)
+        else:
+            input = self._execute(cursor, False, True, batch_size)
+        var workers = configured_workers()
+        var pool = Pool(1)
+        var pool_ready = False
+        var offset = 0
+        var emitted = False
+        var ended = False
+        var outputs = List[DataFrame]()
+        var reductions = List[_StreamReduction]()
+        while not ended:
+            var jobs = List[_StreamJob]()
+            for _ in range(workers):
+                var frame = DataFrame(List[Series](), height=0)
+                var decode = List[_DecodeJob]()
+                if len(csv):
+                    var next = csv[0].next()
+                    if not next:
+                        ended = True
+                        break
+                    decode.append(next.take())
+                elif len(parquet):
+                    var next = parquet[0].next()
+                    if not next:
+                        ended = True
+                        break
+                    frame = next.take()
+                else:
+                    if emitted and offset >= input.height():
+                        ended = True
+                        break
+                    frame = input.slice(offset, batch_size)
+                    offset += frame.height()
+                    emitted = True
+                var job = _StreamJob(
+                    frame^, operations, shared_joins, expressions, keys
+                )
+                job.decode = decode^
+                jobs.append(job^)
+            if len(jobs) == 0:
+                break
+            if not pool_ready:
+                pool = Pool(len(jobs))
+                pool_ready = True
+            pool.run(jobs, claim=True)
+            # Pool returns jobs in submission order, independently of worker
+            # completion order. Merge states and assemble rows in that order.
+            for i in range(len(jobs)):
+                if len(expressions):
+                    if len(reductions) == 0:
+                        reductions.append(jobs[i].reduced.pop())
+                    else:
+                        reductions[0].merge(jobs[i].reduced[0])
+                else:
+                    var part = jobs[i].frame.copy()
+                    var dropped = min(skip, part.height())
+                    skip -= dropped
+                    part = part.slice(dropped, limit)
+                    if limit >= 0:
+                        limit -= part.height()
+                    outputs.append(part^)
+            if len(csv):
+                csv[0].discard()
+            if limit == 0:
+                ended = True
+        pool.release()
+        if len(reductions):
+            return reductions[0].finish()
+        if len(outputs):
+            return concat(outputs)
+        return None
+
+    def _execute(
+        self,
+        index: Int,
+        empty: Bool,
+        streaming: Bool = False,
+        batch_size: Int = 65536,
+    ) raises -> DataFrame:
+        if streaming and not empty:
+            var streamed = self._stream_execute(index, batch_size)
+            if streamed:
+                return streamed.take()
         ref node = self._nodes[index]
         if node.kind == SCAN_FRAME:
             var frame = self._frames[node.offset].copy()
@@ -313,6 +648,22 @@ struct LazyFrame(Copyable):
                 frame = frame.select(node.names)
             return frame.clear() if empty else frame^
         if node.kind == SCAN_CSV:
+            if empty:
+                # Metadata probes must not use eager n_rows=0: that API
+                # intentionally decodes a source chunk before truncation.
+                var mapping = _map_file(node.text)
+                if mapping.address != 0:
+                    var batches = _CsvBatches(
+                        mapping^,
+                        self._schemas[node.offset],
+                        node.names,
+                        0,
+                        batch_size,
+                    )
+                    var next = batches.next()
+                    var job = next.take()
+                    job.run()
+                    return job^.into_frame()
             var rows = 0 if empty else node.length
             if self._schemas[node.offset]:
                 return read_csv(
@@ -339,7 +690,9 @@ struct LazyFrame(Copyable):
                     if len(expression._nodes) == 1:
                         plain = plain and expression._nodes[0].op == COL
                 if plain:
-                    var source = self._execute(sorted.left, False)
+                    var source = self._execute(
+                        sorted.left, False, streaming, batch_size
+                    )
                     var n = len(sorted.names)
                     var descending = List[Bool]()
                     var nulls_last = List[Bool]()
@@ -379,7 +732,7 @@ struct LazyFrame(Copyable):
                     columns=source.names,
                     predicate=Optional(node.exprs[0].copy()),
                 )
-        var input = self._execute(node.left, empty)
+        var input = self._execute(node.left, empty, streaming, batch_size)
         if node.kind == FILTER:
             return input.filter(node.exprs[0])
         if node.kind == SELECT:
@@ -391,7 +744,7 @@ struct LazyFrame(Copyable):
                 node.names, maintain_order=node.maintain_order
             ).agg(node.exprs)
         if node.kind == JOIN:
-            var right = self._execute(node.right, empty)
+            var right = self._execute(node.right, empty, streaming, batch_size)
             return input.join(right, node.names, node.text, node.names2[0])
         if node.kind == SORT:
             var n = len(node.names)
@@ -644,7 +997,9 @@ struct LazyFrame(Copyable):
                 else:
                     needed[child] = reads.copy()
 
-    def _describe(self, index: Int, depth: Int, mut out: String):
+    def _describe(
+        self, index: Int, depth: Int, mut out: String, streaming: Bool = True
+    ):
         ref node = self._nodes[index]
         var pad = String("  ") * depth
         var label: String
@@ -686,11 +1041,30 @@ struct LazyFrame(Copyable):
                 label += " [project " + _joined(node.names) + "]"
             if node.kind == SCAN_CSV and node.length >= 0:
                 label += " [n_rows " + String(node.length) + "]"
+        if streaming:
+            if _is_scan(node.kind) or _stream_rows(node):
+                label += " [stream]"
+            elif (
+                node.kind == AGG or node.kind == SELECT
+            ) and _stream_reductions(node.exprs):
+                label += " [stream aggregate state]"
+            elif node.kind == JOIN and node.text in [
+                "inner",
+                "left",
+                "semi",
+                "anti",
+                "cross",
+            ]:
+                label += " [stream probe; materialize build]"
+            elif node.kind == SLICE and node.offset >= 0:
+                label += " [ordered slice]"
+            else:
+                label += " [materialize]"
         out += pad + label + "\n"
         if node.left >= 0:
-            self._describe(node.left, depth + 1, out)
+            self._describe(node.left, depth + 1, out, streaming)
         if node.right >= 0:
-            self._describe(node.right, depth + 1, out)
+            self._describe(node.right, depth + 1, out, streaming)
 
 
 def _is_scan(kind: Int) -> Bool:
