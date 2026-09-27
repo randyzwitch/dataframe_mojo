@@ -6,6 +6,7 @@ join / unique, reductions, windows, casts, CSV, Arrow, comparisons,
 arithmetic, when/then, fill_null) for a single dtype; the test calls it for
 each entry of NUMERIC_DTYPES, so a new dtype cannot skip a site.
 """
+from std.sys import size_of
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from dataframe import (
     ArrowArray,
@@ -410,6 +411,48 @@ def test_float32_simd_widths_agree() raises:
         assert_true(run[16](frame, e, size).equals(reference))
     var compare = col("x") >= lit(Float32(0))
     assert_true(run[16](frame, compare, 5).equals(run[1](frame, compare, 1)))
+
+
+def test_numeric_dtype_names_and_storage_round_trip() raises:
+    var short: List[String] = [
+        "i64",
+        "f64",
+        "i8",
+        "i16",
+        "i32",
+        "u8",
+        "u16",
+        "u32",
+        "u64",
+        "f32",
+    ]
+    comptime for i in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[i]
+        var dtype = DataType.of(D)
+        assert_true(DataType.parse(dtype.name()) == dtype)
+        assert_true(DataType.of(dtype.storage().value()) == dtype)
+        assert_equal(dtype.name(), String(D))
+        assert_equal(dtype.short_name(), short[i])
+        assert_equal(dtype.bit_width(), size_of[Scalar[D]]() * 8)
+        assert_true(dtype.is_numeric())
+        assert_equal(dtype.is_float(), D.is_floating_point())
+        assert_equal(dtype.is_unsigned(), D.is_unsigned())
+        comptime for j in range(len(NUMERIC_DTYPES)):
+            comptime E = NUMERIC_DTYPES[j]
+            assert_equal(dtype == DataType.of(E), i == j)
+    assert_true(DataType.DATE.storage().value() == DType.int64)
+    assert_true(DataType.datetime("ms").storage().value() == DType.int64)
+    assert_false(DataType.BOOL.storage())
+    assert_false(DataType.STRING.storage())
+    assert_equal(DataType.BOOL.bit_width(), 1)
+    assert_equal(DataType.STRING.bit_width(), 0)
+    assert_equal(DataType.DATE.bit_width(), 64)
+    assert_false(DataType.DATE == DataType.INT64)
+    assert_false(DataType.DATE.is_numeric())
+    assert_true(DataType.INT16.sum_type() == DataType.INT64)
+    assert_true(DataType.UINT8.sum_type() == DataType.INT64)
+    assert_true(DataType.INT32.sum_type() == DataType.INT32)
+    assert_true(DataType.FLOAT32.sum_type() == DataType.FLOAT32)
 
 
 def main() raises:

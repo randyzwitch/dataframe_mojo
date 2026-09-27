@@ -14,23 +14,18 @@ from std.collections import Optional
 from std.memory import ArcPointer
 from std.sys import size_of
 
-comptime _INT64 = 0
-comptime _FLOAT64 = 1
+# Every numeric type shares one code; its DType tells them apart.
+comptime _NUMERIC = 0
 comptime _BOOL = 2
 comptime _STRING = 3
 comptime _DATE = 4
 comptime _DATETIME = 5
 comptime _DURATION = 6
 comptime _TIME = 7
-comptime _INT8 = 8
-comptime _INT16 = 9
-comptime _INT32 = 10
-comptime _UINT8 = 11
-comptime _UINT16 = 12
-comptime _UINT32 = 13
-comptime _UINT64 = 14
-comptime _FLOAT32 = 15
 comptime _LIST = 16
+# Marks a type without numeric storage (bool, string, nested). Bool columns
+# are bit-packed, so DType.bool never names a numeric storage type.
+comptime _NO_STORAGE = DType.bool
 comptime _STRUCT = 17
 # Binder-only types of untyped numeric literals (`col("x") > 0`) before they
 # adopt the dtype of the operand they meet. Never stored in a column.
@@ -81,16 +76,30 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
 
     var _code: Int
     var _unit: Int
+    # The fixed-width storage type: the numeric DType itself, int64 for
+    # temporal types, _NO_STORAGE for bool, string and nested types.
+    var _storage: DType
     var _nested: Optional[ArcPointer[_NestedSpec]]
 
     def __init__(out self, code: Int, unit: Int):
         self._code = code
         self._unit = unit
+        self._storage = DType.int64 if (
+            code >= _DATE and code <= _TIME
+        ) else _NO_STORAGE
+        self._nested = None
+
+    def __init__(out self, storage: DType):
+        """A numeric type stored as Scalar[storage]."""
+        self._code = _NUMERIC
+        self._unit = 0
+        self._storage = storage
         self._nested = None
 
     def __init__(out self, code: Int, var spec: String):
         self._code = code
         self._unit = 0
+        self._storage = _NO_STORAGE
         self._nested = ArcPointer(_NestedSpec(spec^))
 
     @staticmethod
@@ -193,20 +202,20 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             raise Error("struct field index out of range")
         return dtypes[index]
 
-    comptime INT64 = DataType(_INT64, 0)
-    comptime FLOAT64 = DataType(_FLOAT64, 0)
+    comptime INT64 = DataType(DType.int64)
+    comptime FLOAT64 = DataType(DType.float64)
     comptime BOOL = DataType(_BOOL, 0)
     comptime STRING = DataType(_STRING, 0)
     comptime DATE = DataType(_DATE, 0)
     comptime TIME = DataType(_TIME, 0)
-    comptime INT8 = DataType(_INT8, 0)
-    comptime INT16 = DataType(_INT16, 0)
-    comptime INT32 = DataType(_INT32, 0)
-    comptime UINT8 = DataType(_UINT8, 0)
-    comptime UINT16 = DataType(_UINT16, 0)
-    comptime UINT32 = DataType(_UINT32, 0)
-    comptime UINT64 = DataType(_UINT64, 0)
-    comptime FLOAT32 = DataType(_FLOAT32, 0)
+    comptime INT8 = DataType(DType.int8)
+    comptime INT16 = DataType(DType.int16)
+    comptime INT32 = DataType(DType.int32)
+    comptime UINT8 = DataType(DType.uint8)
+    comptime UINT16 = DataType(DType.uint16)
+    comptime UINT32 = DataType(DType.uint32)
+    comptime UINT64 = DataType(DType.uint64)
+    comptime FLOAT32 = DataType(DType.float32)
     comptime UNTYPED_INT = DataType(_UNTYPED_INT, 0)
     comptime UNTYPED_FLOAT = DataType(_UNTYPED_FLOAT, 0)
 
@@ -225,35 +234,14 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     @staticmethod
     def of(dtype: DType) -> DataType:
         """The DataType stored as Scalar[dtype] (numeric types only)."""
-        if dtype == DType.int64:
-            return DataType.INT64
-        if dtype == DType.float64:
-            return DataType.FLOAT64
-        if dtype == DType.int8:
-            return DataType.INT8
-        if dtype == DType.int16:
-            return DataType.INT16
-        if dtype == DType.int32:
-            return DataType.INT32
-        if dtype == DType.uint8:
-            return DataType.UINT8
-        if dtype == DType.uint16:
-            return DataType.UINT16
-        if dtype == DType.uint32:
-            return DataType.UINT32
-        if dtype == DType.uint64:
-            return DataType.UINT64
-        return DataType.FLOAT32
+        return DataType(dtype)
 
     def storage(self) -> Optional[DType]:
         """The numeric storage DType (int64 for temporal types); None for
-        bool and string."""
-        var physical = self.physical()
-        comptime for i in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[i]
-            if physical == DataType.of(D):
-                return D
-        return None
+        bool, string and nested types."""
+        if self._storage == _NO_STORAGE:
+            return None
+        return self._storage
 
     @staticmethod
     def datetime(unit: String = "us") raises -> DataType:
@@ -308,7 +296,11 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return False
 
     def __eq__(self, other: Self) -> Bool:
-        if self._code != other._code or self._unit != other._unit:
+        if (
+            self._code != other._code
+            or self._unit != other._unit
+            or self._storage != other._storage
+        ):
             return False
         if not self._nested and not other._nested:
             return True
@@ -321,10 +313,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
 
     def name(self) -> String:
         """The canonical name, as accepted by parse."""
-        if self._code == _INT64:
-            return "int64"
-        if self._code == _FLOAT64:
-            return "float64"
+        if self._code == _NUMERIC:
+            return String(self._storage)
         if self._code == _BOOL:
             return "bool"
         if self._code == _DATE:
@@ -356,16 +346,15 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             except:
                 out += "?"
             return out + "]"
-        if self._code >= _INT8:
-            return String(self.storage().value())
         return "string"
 
     def short_name(self) -> String:
         """The compact name used in table headers (i64, f64, bool, str)."""
-        if self._code == _INT64:
-            return "i64"
-        if self._code == _FLOAT64:
-            return "f64"
+        if self._code == _NUMERIC:
+            var letter = "f" if self.is_float() else (
+                "u" if self.is_unsigned() else "i"
+            )
+            return letter + String(self.bit_width())
         if self._code == _BOOL:
             return "bool"
         if self._code == _STRING:
@@ -377,13 +366,6 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
                 return "list[?]"
         if self._code == _STRUCT:
             return "struct[" + String(self.field_count()) + "]"
-        if self._code >= _INT8:
-            var name = self.name()
-            if name.startswith("uint"):
-                return "u" + String(name[byte=4:])
-            if name.startswith("int"):
-                return "i" + String(name[byte=3:])
-            return "f" + String(name[byte=5:])
         return self.name()
 
     def unit(self) -> String:
@@ -432,15 +414,13 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         return self.is_integer() or self.is_float()
 
     def is_integer(self) -> Bool:
-        return self._code == _INT64 or (
-            self._code >= _INT8 and self._code <= _UINT64
-        )
+        return self._code == _NUMERIC and self._storage.is_integral()
 
     def is_float(self) -> Bool:
-        return self._code == _FLOAT64 or self._code == _FLOAT32
+        return self._code == _NUMERIC and self._storage.is_floating_point()
 
     def is_unsigned(self) -> Bool:
-        return self._code >= _UINT8 and self._code <= _UINT64
+        return self._code == _NUMERIC and self._storage.is_unsigned()
 
     def is_signed(self) -> Bool:
         """Whether values can be negative (numeric types only)."""
@@ -450,22 +430,18 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         """Bits per value for fixed-width types; 0 for variable-width."""
         if self._code == _BOOL:
             return 1
-        var physical = self.physical()
+        # A runtime DType cannot report its width in Mojo 1.2; match it
+        # against the comptime list, whose members can.
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
-            if physical == DataType.of(D):
+            if self._storage == D:
                 return size_of[Scalar[D]]() * 8
         return 0
 
     def sum_type(self) -> DataType:
         """The result type of sum and cumulative sums (as in Polars): 8-
         and 16-bit integers widen to INT64; other types keep their type."""
-        if (
-            self._code == _INT8
-            or self._code == _INT16
-            or self._code == _UINT8
-            or self._code == _UINT16
-        ):
+        if self.is_integer() and self.bit_width() <= 16:
             return DataType.INT64
         return self
 
