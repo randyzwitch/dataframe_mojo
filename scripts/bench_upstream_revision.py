@@ -50,6 +50,8 @@ def main():
                 "dataframe/frame.mojo",
                 "dataframe/join_hash.mojo",
                 "dataframe/lazy.mojo",
+                "dataframe/string_column.mojo",
+                "dataframe/string_view.mojo",
                 "benchmarks/bench_upstream_joins.mojo",
                 "pixi.lock",
             ]

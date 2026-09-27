@@ -160,7 +160,9 @@ struct StringViewStorage(Copyable, Sized):
                     length=length,
                 )
             )
-        var buffer = self._buffers[][Int(view.buffer_index)]
+        # The storage already owns this immutable block. Borrowing avoids
+        # an atomic Arc retain/release on every long-string read.
+        ref buffer = self._buffers[][Int(view.buffer_index)]
         return StringSlice[ImmutAnyOrigin](
             unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
                 unsafe_ptr=buffer[]
