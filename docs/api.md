@@ -722,7 +722,7 @@ group g, which is where to read that group's key values from.
 
 ## `import_arrow`
 
-Copy an exported Arrow struct array (a record batch) into a frame, then release it. The input structs are consumed even when import fails.
+Copy an exported Arrow record batch, then release both exports.
 
 ```mojo
 def import_arrow(mut array: ArrowArray, mut schema: ArrowSchema) -> DataFrame
@@ -1276,4 +1276,12 @@ Stream a frame to a UTF-8 CSV file that read_csv reads back exactly.
 
 ```mojo
 def write_csv(frame: DataFrame, path: String, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n", buffer_size: Int = Int(65536))
+```
+
+## `write_parquet`
+
+Write a local Parquet file, replacing it if it exists.
+
+```mojo
+def write_parquet(frame: DataFrame, path: String, *, compression: String = "zstd", row_group_size: Int = Int(1000000))
 ```

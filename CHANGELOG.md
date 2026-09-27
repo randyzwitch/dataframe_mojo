@@ -7,6 +7,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- `write_parquet` writes supported logical and nested column types with zstd,
+  snappy or uncompressed output and configurable row-group sizes.
 - `read_csv` accepts ordered `(name, dtype)` pairs as a concise explicit schema.
 
 - `read_parquet(path, columns=, row_groups=)` and the lazy `scan_parquet(path)`,
@@ -18,6 +20,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Large Arrow record batches import columns in parallel on Linux; Parquet
+  reuses the pool across row groups. Measured Mac imports remain serial.
 - Worker pools park when they exceed physical/performance cores. Gather
   partitions and bounded-index builders respect core budgets, with 4/8/16
   worker calibration on Threadripper and Apple M1.

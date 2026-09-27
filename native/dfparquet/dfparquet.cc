@@ -27,6 +27,7 @@
 #include <arrow/type.h>
 #include <arrow/util/config.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/arrow/writer.h>
 #include <parquet/arrow/schema.h>
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
@@ -282,6 +283,36 @@ int dfq_read_parquet_stream(const char* path, int use_threads,
       std::move(groups), std::move(leaves), n_columns > 0, arrow::schema(fields));
   status = arrow::ExportRecordBatchReader(std::move(stream), out);
   return status.ok() ? 0 : fail(status, error_out);
+}
+
+// Import owns the exports on success; the caller releases any structs left
+// unconsumed on failure. store_schema preserves duration and Arrow type widths.
+int dfq_write_parquet(const char* path, struct ArrowArray* array,
+                      struct ArrowSchema* schema, const char* compression,
+                      int64_t row_group_size, char** error_out) {
+  *error_out = nullptr;
+  parquet::Compression::type codec;
+  std::string name(compression);
+  if (name == "uncompressed") codec = parquet::Compression::UNCOMPRESSED;
+  else if (name == "snappy") codec = parquet::Compression::SNAPPY;
+  else if (name == "zstd") codec = parquet::Compression::ZSTD;
+  else return fail(arrow::Status::Invalid("unsupported compression: ", name), error_out);
+  if (row_group_size <= 0) {
+    return fail(arrow::Status::Invalid("row_group_size must be positive"), error_out);
+  }
+  auto imported = arrow::ImportRecordBatch(array, schema);
+  if (!imported.ok()) return fail(imported.status(), error_out);
+  auto table = arrow::Table::FromRecordBatches({*imported});
+  if (!table.ok()) return fail(table.status(), error_out);
+  auto output = arrow::io::FileOutputStream::Open(path);
+  if (!output.ok()) return fail(output.status(), error_out);
+  auto properties = parquet::WriterProperties::Builder().compression(codec)->build();
+  auto arrow_properties = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+  auto status = parquet::arrow::WriteTable(**table, arrow::default_memory_pool(),
+      *output, row_group_size, properties, arrow_properties);
+  auto closed = (*output)->Close();
+  if (!status.ok()) return fail(status, error_out);
+  return closed.ok() ? 0 : fail(closed, error_out);
 }
 
 // One row per row group: `row_group` (int32), `rows` (int64), then for each

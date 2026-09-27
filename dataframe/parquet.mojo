@@ -50,12 +50,16 @@ from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
 
+from .parallel import Pool
 from .arrow import (
     ArrowArray,
     ArrowSchema,
     _c_string,
     _read_c_string,
     import_arrow,
+    _import_arrow_with_pool,
+    _arrow_import_workers,
+    export_arrow,
     _release_imported,
 )
 from .expr import (
@@ -133,6 +137,73 @@ comptime _StatisticsFn = def(Int, Int, Int, Int) thin abi("C") -> Int32
 comptime _FreeFn = def(Int) thin abi("C") -> None
 # const char *dfq_arrow_version(void)
 comptime _VersionFn = def() thin abi("C") -> Int
+
+
+def write_parquet(
+    frame: DataFrame,
+    path: String,
+    *,
+    compression: String = "zstd",
+    row_group_size: Int = 1_000_000,
+) raises:
+    """Write a local Parquet file, replacing it if it exists.
+
+    Compression is zstd (default), snappy or uncompressed. Row groups contain
+    at most row_group_size rows. Arrow schema metadata preserves logical
+    types, including duration units and nested fields. Requires libdfparquet.
+    """
+    if (
+        compression != "zstd"
+        and compression != "snappy"
+        and compression != "uncompressed"
+    ):
+        raise Error("write_parquet: unsupported compression: " + compression)
+    if row_group_size <= 0:
+        raise Error("write_parquet: row_group_size must be positive")
+    var library = _load_library()
+    # Resolve only for writes, so existing reader-only libraries keep working.
+    var writer = _Library._symbol(library.handle, "dfq_write_parquet")
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow(frame, array, schema)
+    try:
+        var error = 0
+        var status = _call_writer(
+            writer, path, compression, row_group_size, array, schema, error
+        )
+        if status != 0:
+            _raise_backend_error(library, error, "write_parquet")
+        _release_imported(array, schema)
+    except e:
+        _release_imported(array, schema)
+        raise e^
+
+
+comptime _WriteFn = def(Int, Int, Int, Int, Int64, Int) thin abi("C") -> Int32
+
+
+def _call_writer(
+    writer: Int,
+    path: String,
+    compression: String,
+    row_group_size: Int,
+    mut array: ArrowArray,
+    mut schema: ArrowSchema,
+    mut error: Int,
+) -> Int32:
+    var c_path = _c_string(path)
+    var c_compression = _c_string(compression)
+    var status = Pointer(to=writer).unsafe_bitcast[_WriteFn]()[](
+        Int(c_path.unsafe_ptr()),
+        Int(Pointer(to=array)),
+        Int(Pointer(to=schema)),
+        Int(c_compression.unsafe_ptr()),
+        Int64(row_group_size),
+        Int(Pointer(to=error)),
+    )
+    _ = c_path^
+    _ = c_compression^
+    return status
 
 
 def read_parquet(
@@ -343,6 +414,7 @@ def _is_literal(node: Node) -> Bool:
 struct _Library(Copyable, Movable):
     """The opened reader library: its entry points."""
 
+    var handle: Int
     var read: Int
     var statistics: Int
     var free: Int
@@ -360,6 +432,7 @@ struct _Library(Copyable, Movable):
                 + ": "
                 + _read_c_string(external_call["dlerror", Int]())
             )
+        self.handle = handle
         self.read = Self._symbol(handle, "dfq_read_parquet_stream")
         self.statistics = Self._symbol(handle, "dfq_row_group_statistics")
         self.free = Self._symbol(handle, "dfq_free")
@@ -459,6 +532,8 @@ def _stream_schema(
 def _collect_stream(mut stream: _ArrowArrayStream) raises -> DataFrame:
     """Import arrays and release the stream on EOF and every error path."""
     var frames = List[DataFrame]()
+    var pool = Pool(1)
+    var initialized = False
     try:
         while True:
             var array = ArrowArray()
@@ -474,7 +549,14 @@ def _collect_stream(mut stream: _ArrowArrayStream) raises -> DataFrame:
                 status = _stream_schema(stream, schema)
                 if status != 0:
                     _stream_error(stream)
-                frames.append(import_arrow(array, schema))
+                if not initialized:
+                    pool = Pool(
+                        _arrow_import_workers(
+                            Int(array.length), Int(array.n_children)
+                        )
+                    )
+                    initialized = True
+                frames.append(_import_arrow_with_pool(array, schema, pool))
             except e:
                 _release_imported(array, schema)
                 raise e^

@@ -132,14 +132,15 @@ Float64 accepts the standard parser's values, including `nan`, and only explicit
 `write_csv(frame, path)` writes the inverse format: reading it back with
 `CsvSchema.of(frame)` reproduces the frame exactly.
 
-## Parquet ingestion
+## Parquet reading and writing
 
 `read_parquet(path)` reads a local Parquet file; `columns=[...]` selects
 fields in the order given and `row_groups=[...]` selects row groups.
 Integer and float widths, strings, booleans, dates and timestamps carry
 over with their nulls. Dictionary columns arrive as plain strings, float16
 as float32, and a timestamp with a time zone as the same UTC instants
-without the zone. Nested columns, decimals and binary are not supported yet.
+without the zone. Lists and structs map recursively; decimals and binary are
+not supported yet.
 
 ```mojo
 from dataframe import read_parquet, scan_parquet, col, lit
@@ -157,6 +158,13 @@ var recent = (
 uses are decoded, and a filter with constant bounds reads the footer's
 row-group statistics first and skips row groups that cannot match.
 `parquet_row_group_statistics(path)` returns those bounds as a frame.
+
+`write_parquet(frame, "sales.parquet", compression="zstd", row_group_size=1_000_000)`
+writes a local file, replacing an existing file at that path. Compression can
+be `zstd` (the default), `snappy` or `uncompressed`. All supported column types,
+including nested fields and temporal units, round-trip through Arrow schema
+metadata. Rebuild `libdfparquet` to add the writer entry point. See the
+[Parquet guide](docs/parquet.md) for behavior and validation.
 
 ## List and struct columns
 
@@ -297,7 +305,7 @@ the Arrow C Data Interface (see [Arrow interchange](docs/arrow.md)); most
 dtypes export zero-copy. There are no performance claims yet.
 The underscore-prefixed fields are internal and must not be mutated by callers.
 
-There is no thread scheduler, Parquet writer, GPU execution, index
+There is no GPU execution, index
 alignment, implicit dtype coercion, or dataframe backend
 adapter. Build input columns in memory for this first version.
 
