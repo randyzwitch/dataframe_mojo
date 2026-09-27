@@ -16,6 +16,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Worker pools park when they exceed physical/performance cores. Gather
+  partitions and bounded-index builders respect core budgets, with 4/8/16
+  worker calibration on Threadripper and Apple M1.
+
 - Join and sorted-chunk-gather dispatch uses measured working-set and job
   costs instead of the remaining fixed 2,000,000-row switches. Bounded join
   tables share an overflow-safe byte budget, with measured density and

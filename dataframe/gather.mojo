@@ -21,6 +21,7 @@ from .column import Column, _bit, _validity_bit
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import GT, LT, GE, LE, EQ, NE
 from .parallel import (
+    _performance_core_count,
     Job,
     Pool,
     configured_workers,
@@ -590,6 +591,14 @@ def _take_sorted_chunked_partitioned(
     return result^
 
 
+# Checked on Threadripper 3970X and M1 at 4/8/16 workers. Four chunks
+# sometimes win on M1 but lose on Threadripper; keep the conservative
+# 16-chunk guard. See docs/worker-calibration.md for widths and selectivity.
+comptime SORTED_GATHER_MIN_CHUNKS = 16
+# Cap jobs by both configured workers and physical/performance cores.
+# M1 8-worker / 2-column / 1M-row gather: two parts 2.07 ms, four 2.46 ms.
+comptime _SORTED_GATHER_MAX_PARTS = 4
+
 # Selected rows needed per dispatched column/partition job (measured below).
 comptime _SORTED_GATHER_ROWS_PER_JOB = 16_384
 
@@ -612,7 +621,11 @@ def take_sorted_chunked(
                 gathered.append(c.take(indices))
             return gathered^
     if workers > 1 and len(columns) > 1:
-        var parts = min(4, configured_workers() // len(columns))
+        var parts = min(
+            _SORTED_GATHER_MAX_PARTS,
+            min(configured_workers(), _performance_core_count())
+            // len(columns),
+        )
         # Dispatch cost grows with the column/partition job count. Swept
         # on a 3970X at 32 workers: 2 columns win from 100-125k selected
         # rows; 8 columns are flat around 500-750k and win from 1M.
@@ -624,7 +637,10 @@ def take_sorted_chunked(
         ):
             var chunked = True
             for column in columns:
-                if not column.is_chunked() or column.n_chunks() < 16:
+                if (
+                    not column.is_chunked()
+                    or column.n_chunks() < SORTED_GATHER_MIN_CHUNKS
+                ):
                     chunked = False
                     break
             if chunked:

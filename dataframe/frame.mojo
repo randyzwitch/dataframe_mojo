@@ -1,6 +1,7 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
 from .dtype import DataType
 from std.collections import Dict
+from std.sys import num_physical_cores
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
 from .column import Column, _append_validity, _pack_bits
@@ -31,6 +32,7 @@ from .expr import (
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate
 from .gather import (
+    SORTED_GATHER_MIN_CHUNKS,
     take_parallel,
     take_sorted_chunked,
     true_rows,
@@ -917,7 +919,10 @@ struct DataFrame(Copyable, Sized, Writable):
                 if not left_identity:
                     var ordered_chunks = how == "inner"
                     for column in columns:
-                        if not column.is_chunked() or column.n_chunks() < 16:
+                        if (
+                            not column.is_chunked()
+                            or column.n_chunks() < SORTED_GATHER_MIN_CHUNKS
+                        ):
                             ordered_chunks = False
                     if ordered_chunks:
                         columns = take_sorted_chunked(
@@ -1030,7 +1035,10 @@ struct DataFrame(Copyable, Sized, Writable):
                 if not left_identity:
                     var ordered_chunks = how == "inner"
                     for column in columns:
-                        if not column.is_chunked() or column.n_chunks() < 16:
+                        if (
+                            not column.is_chunked()
+                            or column.n_chunks() < SORTED_GATHER_MIN_CHUNKS
+                        ):
                             ordered_chunks = False
                     if ordered_chunks:
                         columns = take_sorted_chunked(
@@ -2265,7 +2273,10 @@ def _parallel_range_build_workers(rows: Int, slots: Int) -> Int:
         or slots < entries - 2 * min(rows, entries // 2)
     ):
         return 1
-    return min(16, worker_count(rows))
+    # 4/8/16-worker calibration on 3970X and M1: retain the 16-worker
+    # ceiling, but never oversubscribe physical cores for this memory-bound
+    # build. M1 1M keys: 8 builders 12.5 ms vs cap 16 (15 effective) 15.1 ms.
+    return min(16, min(max(1, num_physical_cores()), worker_count(rows)))
 
 
 def _range_join_span_fits(low: Int64, high: Int64, cap: Int) -> Bool:
