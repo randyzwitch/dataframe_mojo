@@ -535,7 +535,6 @@ struct _CsvBatches(Movable):
     var remaining: Int
     var batch_size: Int
     var emitted: Bool
-    var discarded: Int
 
     def __init__(
         out self,
@@ -578,7 +577,6 @@ struct _CsvBatches(Movable):
         self.remaining = limit
         self.batch_size = batch_size
         self.emitted = False
-        self.discarded = 0
 
     def next(mut self) raises -> Optional[_DecodeJob]:
         if self.emitted and (
@@ -611,14 +609,19 @@ struct _CsvBatches(Movable):
         return job^
 
     def discard(mut self):
-        # Drop already consumed mapped pages from RSS after every worker has
-        # copied its range. The file and mapping remain valid for later pages.
+        # Every worker has copied its range. Unmap consumed whole pages,
+        # rather than advising DONTNEED (Darwin may retain those pages in RSS).
+        # Keep only the contiguous remaining mapping for the next wave and
+        # for _Mapping's destructor, including on an early stop or error.
         var page = Int(external_call["getpagesize", Int32]())
         var end = self.offset // page * page
-        if end > self.discarded:
-            _ = external_call["madvise", Int32](
-                self.mapping.address + self.discarded,
-                end - self.discarded,
-                Int32(4),
+        if end > 0:
+            var status = external_call["munmap", Int32](
+                self.mapping.address, end
             )
-            self.discarded = end
+            if status == 0:
+                self.mapping.address += end
+                self.mapping.length -= end
+                self.offset -= end
+                if self.mapping.length == 0:
+                    self.mapping.address = 0

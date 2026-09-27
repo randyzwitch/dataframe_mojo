@@ -639,6 +639,22 @@ struct LazyFrame(Copyable):
                 frame = frame.select(node.names)
             return frame.clear() if empty else frame^
         if node.kind == SCAN_CSV:
+            if empty:
+                # Metadata probes must not use eager n_rows=0: that API
+                # intentionally decodes a source chunk before truncation.
+                var mapping = _map_file(node.text)
+                if mapping.address != 0:
+                    var batches = _CsvBatches(
+                        mapping^,
+                        self._schemas[node.offset],
+                        node.names,
+                        0,
+                        batch_size,
+                    )
+                    var next = batches.next()
+                    var job = next.take()
+                    job.run()
+                    return job^.into_frame()
             var rows = 0 if empty else node.length
             if self._schemas[node.offset]:
                 return read_csv(

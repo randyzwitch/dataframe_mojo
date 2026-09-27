@@ -238,5 +238,37 @@ def test_randomized_state_and_join_differential() raises:
             )
 
 
+def test_schema_probe_does_not_decode_data() raises:
+    with open(PATH, "w") as file:
+        file.write("v\ninvalid\n")
+    var schema = CsvSchema([CsvField.int64("v")])
+    var query = scan_csv(PATH, schema).select(col("v").sum())
+    assert_equal(query.collect_schema(), [String("v: int64")])
+    with assert_raises():
+        _ = query.collect(batch_size=1)
+
+
+def test_owned_strings_survive_consumed_page_unmapping() raises:
+    var texts = List[String]()
+    var values = List[Int64]()
+    for i in range(1200):
+        texts.append(
+            "é,"
+            + String(i)
+            + (String("x") * 5000 if i % 17 == 0 else "line\nvalue")
+        )
+        values.append(Int64(i))
+    var source = DataFrame(
+        [
+            Series("k", Column[String](texts^)),
+            Series("v", Column[Int64](values^)),
+        ]
+    )
+    write_csv(source, PATH)
+    var actual = scan_csv(PATH).select(["k", "v"]).collect(batch_size=17)
+    assert_true(actual.equals(source))
+    assert_equal(scan_csv(PATH).head(19).collect(batch_size=7).height(), 19)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -781,13 +781,13 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right") -> Self`
   Join with another lazy plan; see DataFrame.join.
 - `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right") -> Self`
-- `def collect(self, *, optimize: Bool = True) -> DataFrame`
+- `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`
   Optimize (unless disabled) and execute the plan.
 - `def fetch(self, n: Int = Int(5)) -> DataFrame`
   Collect only the first n rows of the result.
 - `def collect_schema(self) -> List[String]`
   Output names and dtypes as "name: dtype", computed without reading rows: every scan yields zero rows, then the plan runs as usual, so binding validates each expression exactly as collect would.
-- `def explain(self, *, optimize: Bool = True) -> String`
+- `def explain(self, *, optimize: Bool = True, streaming: Bool = True) -> String`
   The (optimized) plan, one operator per line, root first.
 
 ## `LazyGroupBy`

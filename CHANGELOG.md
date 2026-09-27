@@ -16,6 +16,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Lazy collect executes supported pipelines in bounded ordered batches,
+  merges aggregate state, streams supported join probes, and annotates
+  materialization boundaries in explain. `streaming=False` keeps the
+  materializing executor available for comparison.
+
 - Large Arrow record batches import columns in parallel on Linux; Parquet
   reuses the pool across row groups. Measured Mac imports remain serial.
 

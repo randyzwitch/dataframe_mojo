@@ -366,5 +366,34 @@ def test_consumed_reaches_eof_for_plain_and_quoted_fields() raises:
         _ = owned^
 
 
+def test_take_rows_matches_scalar_at_simd_boundaries() raises:
+    for padding in range(193):
+        var text = (
+            '"' + String("x") * padding + '\n""quoted""",1\nsecond,2\nlast,3'
+        )
+        var owned = span(text)
+        var bytes = Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=owned.unsafe_ptr()
+            .unsafe_mut_cast[False]()
+            .unsafe_origin_cast[ImmutAnyOrigin](),
+            length=len(owned),
+        )
+        var endings = List[Int]()
+        var inside = False
+        for i in range(len(bytes)):
+            if bytes[i] == 34:
+                inside = not inside
+            elif bytes[i] == 10 and not inside:
+                endings.append(i)
+        if len(endings) == 0 or endings[len(endings) - 1] + 1 < len(bytes):
+            endings.append(len(bytes) - 1)
+        for limit in range(1, 6):
+            var got = CountLines().take_rows(bytes, limit)
+            var count = min(limit, len(endings))
+            assert_equal(got.rows, count)
+            assert_equal(got.last_newline, endings[count - 1])
+        _ = owned^
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
