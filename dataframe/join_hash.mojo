@@ -90,6 +90,35 @@ struct _HashBucket(Copyable):
         return len(self.slots) - 1
 
 
+@always_inline
+def _int64_probe_slot(index: _HashBucket, hash: UInt64, key: UInt64) -> Int:
+    var at = Int(hash & UInt64(index.mask()))
+    while index.slots[at].row >= 0:
+        if key == index.slots[at].key:
+            return at
+        at = (at + 1) & index.mask()
+    return -1
+
+
+@always_inline
+def _string_probe_slot(
+    index: _HashBucket,
+    hash: UInt64,
+    probe: StringColumn,
+    build: StringColumn,
+    row: Int,
+) -> Int:
+    # The caller proves probe validity; null build rows never enter the index.
+    # Equal hashes still require exact bytes, including embedded NULs.
+    var at = Int(hash & UInt64(index.mask()))
+    while index.slots[at].row >= 0:
+        ref slot = index.slots[at]
+        if hash == slot.key and probe._get(row) == build._get(Int(slot.row)):
+            return at
+        at = (at + 1) & index.mask()
+    return -1
+
+
 def _append_duplicate_rows(
     index: _HashBucket,
     first: Int,
@@ -316,6 +345,49 @@ struct _HashProbeJob(Job):
         """Semi (membership == 1) or anti (0): each left row at most once,
         in row order; duplicate right keys do not repeat it."""
         var keep = self.membership == 1
+        if (
+            len(self.left_keys) == 1
+            and self.left_keys[0]._data.isa[Column[Int64]]()
+        ):
+            ref probe = self.left_keys[0]._data[Column[Int64]]
+            var all_valid = len(probe._bits[]) == 0
+            for i in range(self.start, self.end):
+                var matched = False
+                if all_valid or probe._valid(i):
+                    var hash = self.left_hashes[][i]
+                    var bucket = Int(hash >> 56) >> self.fold
+                    matched = (
+                        _int64_probe_slot(
+                            self.buckets[][bucket],
+                            hash,
+                            bitcast[DType.uint64](probe._get(i)),
+                        )
+                        >= 0
+                    )
+                if matched == keep:
+                    self.left_rows.append(i)
+            return
+        if (
+            len(self.left_keys) == 1
+            and self.left_keys[0]._data.isa[StringColumn]()
+        ):
+            ref probe = self.left_keys[0]._data[StringColumn]
+            ref build = self.right_keys[0]._data[StringColumn]
+            var all_valid = len(probe._bits[]) == 0
+            for i in range(self.start, self.end):
+                var matched = False
+                if all_valid or probe._valid(i):
+                    var hash = self.left_hashes[][i]
+                    var bucket = Int(hash >> 56) >> self.fold
+                    matched = (
+                        _string_probe_slot(
+                            self.buckets[][bucket], hash, probe, build, i
+                        )
+                        >= 0
+                    )
+                if matched == keep:
+                    self.left_rows.append(i)
+            return
         for i in range(self.start, self.end):
             if self._matches(i) == keep:
                 self.left_rows.append(i)
@@ -893,6 +965,23 @@ struct _HashCountProbeJob(Job):
         self.total = 0
 
     def run(mut self) raises:
+        if len(self.probe) == 1 and self.probe[0]._data.isa[StringColumn]():
+            ref probe = self.probe[0]._data[StringColumn]
+            ref build = self.build[0]._data[StringColumn]
+            var all_valid = len(probe._bits[]) == 0
+            for row in range(self.first, self.last):
+                if not (all_valid or probe._valid(row)):
+                    continue
+                var hash = self.hashes[][row]
+                var bucket = Int(hash >> 56) >> self.fold
+                var at = _string_probe_slot(
+                    self.indexes[][bucket], hash, probe, build, row
+                )
+                if at >= 0:
+                    self.total = _checked_join_count_add(
+                        self.total, Int64(self.counts[][bucket][at])
+                    )
+            return
         var typed_int = (
             len(self.probe) == 1 and self.probe[0]._data.isa[Column[Int64]]()
         )
