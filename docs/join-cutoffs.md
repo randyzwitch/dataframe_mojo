@@ -125,15 +125,18 @@ also wins (23.3 vs 25.1 ms). Both old two-million-row conditions disappear.
 Eight-worker checks retain the larger-case gains. This is a cache/working-set
 criterion; very small head tables stay serial even with many duplicate rows.
 
-### Strided bounded indexes
+### Strided bounded indexes (removed)
 
-Permit the GCD scan and serial strided scatter only through 4 MiB of build
-keys. Apply the same rule in the sample rejection and exact-scan paths.
-At 250k build keys, direct addressing wins for probe/build ratios 0.25,
-0.5, 1 and 2; at 500k the results are mixed; at 1M hashing wins at every
-ratio. With 2M keys on each side, direct takes about 120 ms vs hash's 46 ms.
-The former condition required a larger build than probe **and** 2M rows,
-missing the same loss when the inputs were equal-sized.
+The GCD scan and strided scatter were removed in #307. Shuffled keys that
+are all multiples of a common stride do not occur in real tables; the only
+workload that used this mode was the join matrix's `jk * 17` case. The mode
+won only through 250k build keys and lost from 1M. Such keys now use the
+dense index when their span is compact and the hash index otherwise. The
+measurements below are kept for the record.
+
+At 250k build keys, direct addressing won for probe/build ratios 0.25,
+0.5, 1 and 2; at 500k the results were mixed; at 1M hashing won at every
+ratio. With 2M keys on each side, direct took about 120 ms vs hash's 46 ms.
 
 ### Stable CSR scatter
 
