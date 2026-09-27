@@ -53,4 +53,5 @@ from .parquet import (
     parquet_library_candidates,
     parquet_row_group_statistics,
     read_parquet,
+    write_parquet,
 )
