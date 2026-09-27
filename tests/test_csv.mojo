@@ -222,5 +222,61 @@ def test_bom_is_only_recognized_at_start() raises:
     assert_equal(frame.column("s").string().value(0), "\ufeffvalue")
 
 
+def test_tuple_schema_matches_explicit_and_inference() raises:
+    _write("id;ts;value\n1;2024-01-02T03:04:05;2.5\n2;;NA\n")
+    var dtype = DataType.datetime("ms")
+    var pairs = List[Tuple[String, DataType]](
+        [
+            ("id", DataType.INT64),
+            ("ts", dtype),
+            ("value", DataType.FLOAT64),
+        ]
+    )
+    var short = read_csv(
+        CSV_PATH, schema=pairs, separator=";", null_values=["NA"]
+    )
+    var explicit = read_csv(
+        CSV_PATH,
+        CsvSchema(
+            [
+                CsvField("id", DataType.INT64),
+                CsvField("ts", dtype),
+                CsvField("value", DataType.FLOAT64),
+            ]
+        ),
+        separator=";",
+        null_values=["NA"],
+    )
+    for c in range(short.width()):
+        assert_true(short._columns[c].equals(explicit._columns[c]))
+    assert_true(short.column("ts").dtype() == dtype)
+    assert_equal(short.column("value").null_count(), 1)
+    _write("x\n1\n2\n")
+    var inferred = read_csv(CSV_PATH)
+    var typed = read_csv(CSV_PATH, schema=[("x", DataType.INT64)])
+    assert_true(inferred.column("x").equals(typed.column("x")))
+    _write("1\n2\n")
+    var headerless = read_csv(
+        CSV_PATH, [("renamed", DataType.INT64)], has_header=False, n_rows=1
+    )
+    assert_equal(headerless.height(), 1)
+    assert_equal(headerless.column("renamed").get(0).int64(), 1)
+
+
+def test_tuple_schema_reuses_validation() raises:
+    _write("x,y\n1,2\n")
+    with assert_raises(contains="Duplicate CSV field name"):
+        _ = read_csv(CSV_PATH, [("x", DataType.INT64), ("x", DataType.INT64)])
+    with assert_raises(contains="at least one field"):
+        _ = read_csv(CSV_PATH, List[Tuple[String, DataType]]())
+    _write("x\nnot-an-integer\n")
+    with assert_raises():
+        _ = read_csv(CSV_PATH, [("x", DataType.INT64)])
+    var ignored = read_csv(
+        CSV_PATH, [("x", DataType.INT64)], ignore_errors=True
+    )
+    assert_equal(ignored.column("x").null_count(), 1)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

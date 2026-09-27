@@ -7,6 +7,7 @@ last test here runs many pools back to back and the suite's own clean exit is
 the check -- a leaked worker would take the process down with it.
 """
 from std.ffi import external_call
+from std.sys import num_physical_cores
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 
 from dataframe.parallel import Job, Pool, configured_workers, _ProducedJobs
@@ -237,6 +238,31 @@ def test_producer_capacity_failure_drains_on_unwind() raises:
     jobs.append(Square(7))
     pool.run(jobs)
     assert_equal(jobs[0].output, 49)
+    pool.release()
+
+
+def test_oversubscribed_parked_pool_reuses_rounds_and_propagates_errors() raises:
+    var pool = Pool(num_physical_cores() + 1)
+    for round in range(8):
+        var jobs = List[Square]()
+        for i in range(19):
+            jobs.append(Square(i + round))
+        pool.run(jobs)
+        for i in range(len(jobs)):
+            assert_equal(jobs[i].output, (i + round) * (i + round))
+    var failed = False
+    try:
+        var jobs = List[Failing]()
+        for i in range(9):
+            jobs.append(Failing(i))
+        pool.run(jobs)
+    except:
+        failed = True
+    assert_true(failed)
+    var final = List[Square]()
+    final.append(Square(7))
+    pool.run(final)
+    assert_equal(final[0].output, 49)
     pool.release()
 
 
