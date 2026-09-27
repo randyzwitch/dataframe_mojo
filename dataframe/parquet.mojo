@@ -50,12 +50,15 @@ from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
 
+from .parallel import Pool
 from .arrow import (
     ArrowArray,
     ArrowSchema,
     _c_string,
     _read_c_string,
     import_arrow,
+    _import_arrow_with_pool,
+    _arrow_import_workers,
     _release_imported,
 )
 from .expr import (
@@ -459,6 +462,8 @@ def _stream_schema(
 def _collect_stream(mut stream: _ArrowArrayStream) raises -> DataFrame:
     """Import arrays and release the stream on EOF and every error path."""
     var frames = List[DataFrame]()
+    var pool = Pool(1)
+    var initialized = False
     try:
         while True:
             var array = ArrowArray()
@@ -474,7 +479,14 @@ def _collect_stream(mut stream: _ArrowArrayStream) raises -> DataFrame:
                 status = _stream_schema(stream, schema)
                 if status != 0:
                     _stream_error(stream)
-                frames.append(import_arrow(array, schema))
+                if not initialized:
+                    pool = Pool(
+                        _arrow_import_workers(
+                            Int(array.length), Int(array.n_children)
+                        )
+                    )
+                    initialized = True
+                frames.append(_import_arrow_with_pool(array, schema, pool))
             except e:
                 _release_imported(array, schema)
                 raise e^

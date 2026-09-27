@@ -214,5 +214,51 @@ def test_unsupported_formats_raise_and_release() raises:
     _ = fake^
 
 
+def test_parallel_batch_order_offsets_and_error_release() raises:
+    var n = 500_005
+    var values = List[Int64]()
+    var texts = List[String]()
+    var valid = List[Bool]()
+    for i in range(n):
+        values.append(Int64(i - 17))
+        texts.append(String(i))
+        valid.append(i % 7 != 0)
+    var source = DataFrame(
+        [
+            Series("a", Column[Int64](values.copy(), valid)),
+            Series("b", StringColumn(texts, valid)),
+            Series("c", Column[Int64](values.copy())),
+            Series("d", Column[Int64](values^, valid)).with_dtype(
+                DataType.datetime("us")
+            ),
+        ]
+    )
+    for fail in range(2):
+        var array = ArrowArray()
+        var schema = ArrowSchema()
+        var releases = 0
+        _export_frame(source, array, schema, Int(Pointer(to=releases)))
+        # Parent slicing must still apply to every column after parallel copy.
+        array.offset = 3
+        array.length -= 5
+        var fake = List[UInt8]([UInt8(ord("z")), 0])
+        if fail:
+            _at[ArrowSchema](_at[Int](schema.children + 8)[])[].format = Int(
+                fake.unsafe_ptr()
+            )
+        var failed = False
+        try:
+            var result = import_arrow(array, schema)
+            assert_frames_equal(result, source.slice(3, n - 5))
+        except e:
+            failed = True
+            assert_true("Unsupported Arrow format 'z'" in String(e))
+        assert_equal(failed, fail != 0)
+        assert_equal(releases, 1 + source.width())
+        assert_equal(array.release, 0)
+        assert_equal(schema.release, 0)
+        _ = fake^
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

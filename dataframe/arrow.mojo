@@ -34,6 +34,8 @@ from .bool_column import BoolColumn
 from .column import Column, _copy_bits, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
+from .parallel import Job, Pool, worker_count
+from std.sys import CompilationTarget
 from .nested_column import ListColumn, StructColumn
 from .series import Series
 from .string_column import StringColumn
@@ -764,12 +766,65 @@ def import_arrow_series(
     )
 
 
+comptime _ARROW_IMPORT_MIN_CELLS = 2_000_000
+
+
+def _arrow_import_workers(rows: Int, columns: Int) -> Int:
+    # M1 4/8/16-worker sweeps found no copy win; eight workers regressed
+    # standalone 10M x 8 imports from 22 to 29 ms. Keep macOS serial until
+    # another Mac demonstrates a useful crossover. See docs/arrow-import.md.
+    comptime if CompilationTarget.is_macos():
+        return 1
+    return min(columns, worker_count(rows))
+
+
+struct _ImportColumnJob(Job):
+    # Borrowed pointers; the parent exports outlive every worker, even on error.
+    var array: Int
+    var schema: Int
+    var offset: Int
+    var length: Int
+    var result: List[Series]
+
+    def __init__(out self, array: Int, schema: Int, offset: Int, length: Int):
+        self.array = array
+        self.schema = schema
+        self.offset = offset
+        self.length = length
+        self.result = List[Series]()
+
+    def run(mut self) raises:
+        var series = _import_child(
+            _at[ArrowArray](self.array)[], _at[ArrowSchema](self.schema)[]
+        )
+        self.result.append(series.slice(self.offset, self.length))
+
+
 def import_arrow(
     mut array: ArrowArray, mut schema: ArrowSchema
 ) raises -> DataFrame:
-    """Copy an exported Arrow struct array (a record batch) into a frame,
-    then release it. The input structs are consumed even when import fails.
+    """Copy an exported Arrow record batch, then release both exports.
+
+    Large batches copy independent columns on the worker pool. The input
+    structs are consumed even when import fails; workers never release them.
     """
+    # One-off pool startup loses for cache-resident narrow batches: 3970X,
+    # 250k x 2 Int64 values 0.09 -> 0.42 ms; 1M x 2 and 250k x 8 win.
+    # Require two million cells before starting a standalone import pool.
+    # Stream readers amortize startup across batches with their own pool.
+    var columns = Int(array.n_children)
+    var rows = Int(array.length)
+    var enough = (
+        columns > 0
+        and rows >= (_ARROW_IMPORT_MIN_CELLS + columns - 1) // columns
+    )
+    var pool = Pool(_arrow_import_workers(rows, columns) if enough else 1)
+    return _import_arrow_with_pool(array, schema, pool)
+
+
+def _import_arrow_with_pool(
+    mut array: ArrowArray, mut schema: ArrowSchema, mut pool: Pool
+) raises -> DataFrame:
     try:
         if array.release == 0 or schema.release == 0:
             raise Error("Arrow array or schema was already released")
@@ -782,15 +837,24 @@ def import_arrow(
             raise Error("Arrow array and schema child counts differ")
         if _buffer(array, 0) != 0 and array.null_count != 0:
             raise Error("Arrow struct arrays with null rows are not supported")
-        var columns = List[Series]()
+        var jobs = List[_ImportColumnJob]()
         for k in range(Int(array.n_children)):
-            var child = _at[ArrowArray](_at[Int](array.children + 8 * k)[])
-            var child_schema = _at[ArrowSchema](
-                _at[Int](schema.children + 8 * k)[]
+            jobs.append(
+                _ImportColumnJob(
+                    _at[Int](array.children + 8 * k)[],
+                    _at[Int](schema.children + 8 * k)[],
+                    Int(array.offset),
+                    Int(array.length),
+                )
             )
-            var series = _import_child(child[], child_schema[])
-            # A parent offset shifts every child.
-            columns.append(series.slice(Int(array.offset), Int(array.length)))
+        if worker_count(Int(array.length)) > 1 and len(jobs) > 1:
+            pool.run(jobs, claim=True)
+        else:
+            for i in range(len(jobs)):
+                jobs[i].run()
+        var columns = List[Series](capacity=len(jobs))
+        for i in range(len(jobs)):
+            columns.append(jobs[i].result.pop())
         var result = DataFrame(columns^, height=Int(array.length))
         _release_imported(array, schema)
         return result^

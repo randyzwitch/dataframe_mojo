@@ -16,6 +16,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Large Arrow record batches import columns in parallel on Linux; Parquet
+  reuses the pool across row groups. Measured Mac imports remain serial.
+
 - Join and sorted-chunk-gather dispatch uses measured working-set and job
   costs instead of the remaining fixed 2,000,000-row switches. Bounded join
   tables share an overflow-safe byte budget, with measured density and

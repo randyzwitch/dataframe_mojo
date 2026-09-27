@@ -82,3 +82,7 @@ oracle-arrow` (dev only) checks interop with pyarrow, in both directions:
 - pyarrow reads our buffers in place (buffer addresses match);
 - pyarrow-produced arrays, including sliced ones, import correctly;
 - unsupported types are rejected and still released.
+
+Large record batches can copy columns in parallel on Linux. Release remains
+owned by the caller after all jobs finish; Parquet reuses the pool between
+row groups. See [measurements and platform policy](arrow-import.md).
