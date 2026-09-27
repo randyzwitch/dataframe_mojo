@@ -4,6 +4,8 @@ from std.memory import bitcast
 from std.sys import size_of
 from std.sys.info import is_little_endian
 
+from .csv_numeric import _pow10_f64
+
 # Private APIs from the Mojo 1.2 nightly pinned in pixi.lock. These are the
 # same conversion routines Float64(String) uses; keep reference-bit tests
 # when upgrading Mojo. Passing a borrowed span avoids constructing a String.
@@ -264,60 +266,6 @@ def _is_special_float(text: StringSlice) -> Bool:
     return False
 
 
-# Powers of ten that a Float64 holds exactly, so mantissa / 10**k is
-# correctly rounded whenever the mantissa is exact too (the classic fast
-# path: both operands exact means a single correctly-rounded division).
-def _pow10(k: Int) -> Float64:
-    """10**k for k in [0, 22]; every value here is an exact Float64."""
-    if k == 0:
-        return 1e0
-    if k == 1:
-        return 1e1
-    if k == 2:
-        return 1e2
-    if k == 3:
-        return 1e3
-    if k == 4:
-        return 1e4
-    if k == 5:
-        return 1e5
-    if k == 6:
-        return 1e6
-    if k == 7:
-        return 1e7
-    if k == 8:
-        return 1e8
-    if k == 9:
-        return 1e9
-    if k == 10:
-        return 1e10
-    if k == 11:
-        return 1e11
-    if k == 12:
-        return 1e12
-    if k == 13:
-        return 1e13
-    if k == 14:
-        return 1e14
-    if k == 15:
-        return 1e15
-    if k == 16:
-        return 1e16
-    if k == 17:
-        return 1e17
-    if k == 18:
-        return 1e18
-    if k == 19:
-        return 1e19
-    if k == 20:
-        return 1e20
-    if k == 21:
-        return 1e21
-    if k == 22:
-        return 1e22
-    return 1.0
-
-
 # 2**53: above this a Float64 cannot hold every integer.  A fully consumed
 # plain decimal still passes directly to the standard converter, which is
 # responsible for its exact rounding.
@@ -392,9 +340,9 @@ def _scan_float64[parse_exponent: Bool](text: StringSlice) raises -> Float64:
                     ):
                         value = Float64(mantissa)
                         if exponent < 0:
-                            value /= _pow10(-exponent)
+                            value /= _pow10_f64(-exponent)
                         else:
-                            value *= _pow10(exponent)
+                            value *= _pow10_f64(exponent)
                     else:
                         value = lemire_algorithm(mantissa, Int64(exponent))
                     if isinf(value):
@@ -418,7 +366,7 @@ def _scan_float64[parse_exponent: Bool](text: StringSlice) raises -> Float64:
         return -value if negative else value
     var value = Float64(mantissa)
     if fraction > 0:
-        value = value / _pow10(fraction)
+        value = value / _pow10_f64(fraction)
     # The sign applies to the magnitude, so "-0.0" stays negative and no
     # other value's rounding changes.
     return -value if negative else value
