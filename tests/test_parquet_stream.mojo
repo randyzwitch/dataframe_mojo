@@ -17,6 +17,7 @@ from dataframe.parquet import (
     _StreamError,
     _StreamRelease,
     _collect_stream,
+    _ParquetBatches,
 )
 
 
@@ -75,7 +76,9 @@ def release_stream(address: Int) abi("C"):
     stream.release = 0
 
 
-def exercise(mut state: State) raises:
+def exercise(
+    mut state: State, cursor: Bool = False, early: Bool = False
+) raises:
     var frame = DataFrame([Series("k", Column[Int64]([1, 2]))])
     _export_frame(
         frame, state.array, state.schema, Int(Pointer(to=state.array_releases))
@@ -92,8 +95,19 @@ def exercise(mut state: State) raises:
     stream.private_data = Int(Pointer(to=state))
     var failed = False
     try:
-        var result = _collect_stream(stream)
-        assert_true(result.equals(frame))
+        if cursor:
+            var batches = _ParquetBatches(stream^, 1)
+            var first = batches.next()
+            assert_true(first.value().equals(frame.head(1)))
+            if not early:
+                var second = batches.next()
+                assert_true(second.value().equals(frame.slice(1, 1)))
+                assert_true(not batches.next())
+            _ = batches^
+        else:
+            var result = _collect_stream(stream)
+            assert_true(result.equals(frame))
+            assert_equal(stream.release, 0)
     except e:
         failed = True
         if state.mode == 1 or state.mode == 2:
@@ -101,13 +115,20 @@ def exercise(mut state: State) raises:
     assert_equal(failed, state.mode != 0)
     assert_equal(state.stream_releases, 1)
     assert_equal(state.array_releases, 2)
-    assert_equal(stream.release, 0)
 
 
 def test_stream_releases_once_on_eof_next_schema_and_import_errors() raises:
     for mode in range(4):
         var state = State(mode)
         exercise(state)
+
+
+def test_batch_cursor_releases_on_eof_error_and_early_stop() raises:
+    for mode in range(4):
+        var state = State(mode)
+        exercise(state, cursor=True)
+    var state = State(0)
+    exercise(state, cursor=True, early=True)
 
 
 def main() raises:

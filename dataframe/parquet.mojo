@@ -414,6 +414,24 @@ def _read_with_dfparquet(
     Foreign memory is released after each import. The eager result still
     owns the entire output, but Arrow decoding buffers are row-group bounded.
     """
+    var stream = _open_parquet_stream(
+        path, columns, row_groups, group_count, use_threads
+    )
+    return _collect_stream(stream)
+
+
+def _open_parquet_stream(
+    path: String,
+    columns: List[String],
+    row_groups: List[Int32],
+    group_count: Int,
+    use_threads: Bool,
+) raises -> _ArrowArrayStream:
+    """Consume one row group at a time and retain imported buffers as chunks.
+
+    Foreign memory is released after each import. The eager result still
+    owns the entire output, but Arrow decoding buffers are row-group bounded.
+    """
     var library = _load_library()
     var c_path = _c_string(path)
     var c_columns = List[List[UInt8]](capacity=len(columns))
@@ -438,7 +456,7 @@ def _read_with_dfparquet(
     if status != 0:
         _release_stream(stream)
         _raise_backend_error(library, error, "read_parquet")
-    return _collect_stream(stream)
+    return stream^
 
 
 # Borrow output structs across foreign calls: raw integer addresses alone do
@@ -561,3 +579,66 @@ def _call_statistics(
         Int(Pointer(to=schema)),
         Int(Pointer(to=error)),
     )
+
+
+struct _ParquetBatches(Movable):
+    """Own a native stream, including cleanup on early stop and exceptions."""
+
+    var stream: _ArrowArrayStream
+    var pending: Optional[DataFrame]
+    var offset: Int
+    var size: Int
+
+    def __init__(
+        out self,
+        path: String,
+        columns: List[String],
+        groups: Optional[List[Int]],
+        size: Int,
+    ) raises:
+        var selected = List[Int32]()
+        if groups:
+            for group in groups.value():
+                selected.append(Int32(group))
+        self.stream = _open_parquet_stream(
+            path, columns, selected, len(selected) if groups else -1, True
+        )
+        self.pending = None
+        self.offset = 0
+        self.size = size
+
+    def __init__(out self, var stream: _ArrowArrayStream, size: Int):
+        self.stream = stream^
+        self.pending = None
+        self.offset = 0
+        self.size = size
+
+    def __deinit__(deinit self):
+        _release_stream(self.stream)
+
+    def next(mut self) raises -> Optional[DataFrame]:
+        if self.pending and self.offset < self.pending.value().height():
+            var batch = self.pending.value().slice(self.offset, self.size)
+            self.offset += batch.height()
+            return batch^
+        self.pending = None
+        if self.stream.release == 0:
+            return None
+        var array = ArrowArray()
+        var schema = ArrowSchema()
+        try:
+            if _stream_next(self.stream, array) != 0:
+                _stream_error(self.stream)
+            if array.release == 0:
+                _release_stream(self.stream)
+                return None
+            if _stream_schema(self.stream, schema) != 0:
+                _stream_error(self.stream)
+            self.pending = import_arrow(array, schema)
+            var batch = self.pending.value().slice(0, self.size)
+            self.offset = batch.height()
+            return batch^
+        except e:
+            _release_imported(array, schema)
+            _release_stream(self.stream)
+            raise e^
