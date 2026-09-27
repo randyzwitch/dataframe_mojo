@@ -722,7 +722,7 @@ group g, which is where to read that group's key values from.
 
 ## `import_arrow`
 
-Copy an exported Arrow struct array (a record batch) into a frame, then release it. The input structs are consumed even when import fails.
+Copy an exported Arrow record batch, then release both exports.
 
 ```mojo
 def import_arrow(mut array: ArrowArray, mut schema: ArrowSchema) -> DataFrame
