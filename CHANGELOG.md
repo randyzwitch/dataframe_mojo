@@ -19,12 +19,16 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - Worker pools park when they exceed physical/performance cores. Gather
   partitions and bounded-index builders respect core budgets, with 4/8/16
   worker calibration on Threadripper and Apple M1.
+- Progression joins accept matching Date, Datetime, Duration and Time keys,
+  including temporal units, and retain measured equal-run panel support.
 
 - Join and sorted-chunk-gather dispatch uses measured working-set and job
   costs instead of the remaining fixed 2,000,000-row switches. Bounded join
   tables share an overflow-safe byte budget, with measured density and
   membership-cache limits; ordered CSR IDs and chunked progression probes
   avoid parallel paths that lose on those inputs. See [the measurements](docs/join-cutoffs.md).
+- Sort bucket dispatch uses measured domain, rank-buffer and worker-balance
+  limits, with calibration on Threadripper and Apple M1.
 
 - Semi and anti joins whose keys do not fit a direct-address range probe
   the right-row hash index for membership instead of encoding both inputs

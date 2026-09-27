@@ -130,3 +130,6 @@ name as its fourth argument to run only that case.
 
 [worker-calibration.md](worker-calibration.md) records 4/8/16-worker sweeps
 on Threadripper and Apple M1, plus isolated worker-policy experiments.
+
+Sort bucket calibration and reproducible sweeps are recorded in
+[sort-cutoffs.md](sort-cutoffs.md), including fast-path misses and Mac validation.
