@@ -11,7 +11,7 @@ from std.memory import ArcPointer, bitcast
 from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column
-from .dtype import NUMERIC_DTYPES
+from .dtype import DataType, NUMERIC_DTYPES
 from .parallel import Job, Pool, partitions, run_jobs, worker_count
 from .partition import Partitioner
 from .series import Series
@@ -616,22 +616,18 @@ struct PreparedHashIndex(Copyable):
     var progression: Bool
     var base: Int64
     var stride: UInt64
-    var repeat: Int
 
     @always_inline
     def progression_row(self, value: Int64, right_count: Int) -> Int:
+        """The build row holding value, or -1 (see int64_progression)."""
         if value < self.base:
             return -1
         var distance = UInt64(value) - UInt64(self.base)
-        if self.stride == 1 and self.repeat == 1:
-            return Int(distance) if distance < UInt64(right_count) else -1
-        if distance % self.stride != 0:
-            return -1
-        var group = distance // self.stride
-        var groups = (right_count - 1) // self.repeat + 1
-        if group >= UInt64(groups):
-            return -1
-        return Int(group) * self.repeat
+        if self.stride != 1:
+            if distance % self.stride != 0:
+                return -1
+            distance //= self.stride
+        return Int(distance) if distance < UInt64(right_count) else -1
 
     def probe(self, left_keys: List[Series]) raises -> _HashIndex:
         var left = List[Series](capacity=len(left_keys))
@@ -649,48 +645,54 @@ struct PreparedHashIndex(Copyable):
         )
 
 
-def _prepared_progression(
-    right: List[Series],
-) -> Tuple[Bool, Int64, UInt64, Int]:
-    if (
-        len(right) != 1
-        or not right[0]._data.isa[Column[Int64]]()
-        or len(right[0]) == 0
-    ):
-        return (False, 0, 1, 1)
-    ref column = right[0]._data[Column[Int64]]
-    var base = column._get(0)
-    var previous = base
-    var stride = UInt64(1)
-    var repeat = 0
-    var run = 0
-    for i in range(len(column)):
-        if not column._valid(i):
-            return (False, 0, 1, 1)
-        var value = column._get(i)
-        if i == 0 or value == previous:
-            run += 1
-            if repeat > 0 and run > repeat:
-                return (False, 0, 1, 1)
-        else:
-            if value < previous:
-                return (False, 0, 1, 1)
-            var step = UInt64(value) - UInt64(previous)
-            if repeat == 0:
-                repeat = run
-                stride = step
-            elif run != repeat or step != stride:
-                return (False, 0, 1, 1)
-            run = 1
-        previous = value
-    return (True, base, stride, run if repeat == 0 else repeat)
+def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
+    """Base and step when the keys ascend from base by one positive step.
+
+    The key must have physical Int64 storage. Every row must be valid and
+    each key must exceed the previous one by the same amount, so row r holds
+    base + r * step. Sorted sequential IDs and calendar grids have this
+    shape. The scan stops at the first null or irregular step.
+    """
+    if len(key) == 0:
+        return (False, Int64(0), UInt64(1))
+    var base = Int64(0)
+    var previous = Int64(0)
+    var stride = UInt64(0)
+    var row = 0
+    for part in key.chunks():
+        ref column = part._data[Column[Int64]]
+        for i in range(len(column)):
+            if not column._valid(i):
+                return (False, Int64(0), UInt64(1))
+            var value = column._get(i)
+            if row == 0:
+                base = value
+            else:
+                if value <= previous:
+                    return (False, Int64(0), UInt64(1))
+                # Unsigned subtraction is the exact distance of value > previous.
+                var step = UInt64(value) - UInt64(previous)
+                if stride == 0:
+                    stride = step
+                elif step != stride:
+                    return (False, Int64(0), UInt64(1))
+            previous = value
+            row += 1
+    return (True, base, max(stride, UInt64(1)))
 
 
 def prepare_progression_index(
     right_keys: List[Series],
 ) raises -> Optional[PreparedHashIndex]:
     """Validate a compact progression without building a fallback hash table."""
-    if len(right_keys) != 1 or len(right_keys[0]) > Int(Int32.MAX):
+    if (
+        len(right_keys) != 1
+        or len(right_keys[0]) > Int(Int32.MAX)
+        or right_keys[0].dtype().physical() != DataType.INT64
+    ):
+        return None
+    var progression = int64_progression(right_keys[0])
+    if not progression[0]:
         return None
     var right = List[Series]()
     right.append(
@@ -699,9 +701,6 @@ def prepare_progression_index(
         .is_chunked() else right_keys[0]
         .copy()
     )
-    var progression = _prepared_progression(right)
-    if not progression[0]:
-        return None
     return PreparedHashIndex(
         right^,
         ArcPointer(List[_HashBucket]()),
@@ -709,7 +708,6 @@ def prepare_progression_index(
         True,
         progression[1],
         progression[2],
-        progression[3],
     )
 
 
@@ -721,9 +719,13 @@ def prepare_hash_index(
     var right = List[Series](capacity=len(right_keys))
     for key in right_keys:
         right.append(key.rechunk() if key.is_chunked() else key.copy())
-    var progression = (False, Int64(0), UInt64(1), 1)
-    if allow_progression:
-        progression = _prepared_progression(right)
+    var progression = (False, Int64(0), UInt64(1))
+    if (
+        allow_progression
+        and len(right) == 1
+        and right[0].dtype().physical() == DataType.INT64
+    ):
+        progression = int64_progression(right[0])
     if progression[0]:
         return PreparedHashIndex(
             right^,
@@ -732,7 +734,6 @@ def prepare_hash_index(
             True,
             progression[1],
             progression[2],
-            progression[3],
         )
     var right_hashes = Partitioner(right, worker_count(len(right[0])))
     var right_parts = right_hashes.scatter(worker_count(len(right[0])))
@@ -764,7 +765,7 @@ def prepare_hash_index(
     while count < right_parts.buckets():
         count *= 2
         fold -= 1
-    return PreparedHashIndex(right^, ArcPointer(indexes^), fold, False, 0, 1, 1)
+    return PreparedHashIndex(right^, ArcPointer(indexes^), fold, False, 0, 1)
 
 
 def direct_hash_semi_anti_rows(
@@ -863,14 +864,9 @@ def prepared_hash_join_rows(
             var first = -1
             if values._valid(i):
                 first = prepared.progression_row(values._get(i), right_count)
-            if first >= 0:
-                var last = first + min(prepared.repeat, right_count - first)
-                for j in range(first, last):
-                    left_rows.append(i)
-                    right_rows.append(j)
-            elif include_unmatched:
+            if first >= 0 or include_unmatched:
                 left_rows.append(i)
-                right_rows.append(-1)
+                right_rows.append(first)
         return (left_rows^, right_rows^, False)
     var index = prepared.probe(left_keys)
     var workers = index.workers
@@ -1044,10 +1040,7 @@ struct _ProgressionCountJob(Job):
                     self.probe._get(row), build_count
                 )
                 if first >= 0:
-                    self.total = _checked_join_count_add(
-                        self.total,
-                        Int64(min(self.prepared.repeat, build_count - first)),
-                    )
+                    self.total = _checked_join_count_add(self.total, 1)
 
 
 def _count_progression(

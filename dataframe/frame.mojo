@@ -46,6 +46,7 @@ from .partition import Partitioner, encode_partitioned, low_cardinality
 from .join_hash import (
     direct_hash_join_rows,
     direct_hash_semi_anti_rows,
+    int64_progression,
     PreparedHashIndex,
     prefer_left_build,
     prepared_hash_join_rows,
@@ -2157,13 +2158,12 @@ def _group_index(ids: List[Int], count: Int) -> List[Int]:
     return starts^
 
 
-struct _RepeatedProgressionProbeJob(Job):
-    """Probe a sorted right progression with equal-size key runs."""
+struct _ProgressionProbeJob(Job):
+    """Probe one left-row range against an ascending constant-step build."""
 
     var left: Column[Int64]
     var base: Int64
     var stride: UInt64
-    var repeat: Int
     var right_count: Int
     var start: Int
     var end: Int
@@ -2176,7 +2176,6 @@ struct _RepeatedProgressionProbeJob(Job):
         left: Column[Int64],
         base: Int64,
         stride: UInt64,
-        repeat: Int,
         right_count: Int,
         start: Int,
         end: Int,
@@ -2185,7 +2184,6 @@ struct _RepeatedProgressionProbeJob(Job):
         self.left = left.copy()
         self.base = base
         self.stride = stride
-        self.repeat = repeat
         self.right_count = right_count
         self.start = start
         self.end = end
@@ -2195,49 +2193,39 @@ struct _RepeatedProgressionProbeJob(Job):
 
     def run(mut self) raises:
         var all_valid = len(self.left._bits[]) == 0
-        var max_slot = UInt64((self.right_count - 1) // self.repeat)
+        var right_limit = UInt64(self.right_count)
         for i in range(self.start, self.end):
-            var first = -1
+            var row = -1
             if all_valid or self.left._valid(i):
                 var value = self.left._get(i)
                 if value >= self.base:
                     var distance = _int64_distance(self.base, value)
-                    if self.stride == 1:
-                        if distance <= max_slot:
-                            first = Int(distance) * self.repeat
-                    elif distance % self.stride == 0:
+                    if distance % self.stride == 0:
                         var slot = distance // self.stride
-                        if slot <= max_slot:
-                            first = Int(slot) * self.repeat
-            if first >= 0:
-                var count = min(self.repeat, self.right_count - first)
-                for j in range(first, first + count):
-                    self.left_rows.append(i)
-                    self.right_rows.append(j)
-            elif self.include_unmatched:
+                        if slot < right_limit:
+                            row = Int(slot)
+            if row >= 0 or self.include_unmatched:
                 self.left_rows.append(i)
-                self.right_rows.append(-1)
+                self.right_rows.append(row)
 
 
-def _repeated_progression_rows(
+def _parallel_progression_rows(
     left: Series,
     base: Int64,
     stride: UInt64,
-    repeat: Int,
     right_count: Int,
     include_unmatched: Bool,
 ) raises -> Tuple[List[Int], List[Int]]:
     var left_values = left.int64()
     var workers = worker_count(len(left_values))
     var bounds = partitions(len(left_values), workers, 1)
-    var jobs = List[_RepeatedProgressionProbeJob](capacity=workers)
+    var jobs = List[_ProgressionProbeJob](capacity=workers)
     for worker in range(workers):
         jobs.append(
-            _RepeatedProgressionProbeJob(
+            _ProgressionProbeJob(
                 left_values,
                 base,
                 stride,
-                repeat,
                 right_count,
                 bounds[worker],
                 bounds[worker + 1],
@@ -2260,71 +2248,39 @@ def _repeated_progression_rows(
 def _dense_right_int64_rows(
     left: Series, right: Series, include_unmatched: Bool = False
 ) raises -> Tuple[Bool, List[Int], List[Int]]:
-    """Direct matches for ascending physical Int64 progressions.
+    """Direct matches when the build keys are an ascending progression.
 
-    Logical types must agree, including temporal units. Fixed-size runs
-    serve complete timestamp-by-sensor panels: every time step has one
-    reading per sensor, stored in timestamp order. Detection scans the build
-    keys and stops at the first null, descending key or irregular run/step.
+    Logical types must agree, including temporal units. Sorted sequential
+    IDs and calendar grids (one row per constant step) qualify; see
+    int64_progression. Any repeated, null, descending or irregular build
+    key declines, and the caller falls back to an index.
     """
     if (
         left.dtype() != right.dtype()
         or right.dtype().physical() != DataType.INT64
     ):
         return (False, List[Int](), List[Int]())
-    if len(right) == 0:
+    var progression = int64_progression(right)
+    if not progression[0]:
         return (False, List[Int](), List[Int]())
-    var base = Int64(0)
-    var previous = Int64(0)
-    var stride = UInt64(1)
-    var repeat = 0
-    var run_length = 0
-    var row = 0
-    for part in right.chunks():
-        ref column = part._data[Column[Int64]]
-        for i in range(len(column)):
-            if not column._valid(i):
-                return (False, List[Int](), List[Int]())
-            var value = column._get(i)
-            if row == 0:
-                base = value
-                run_length = 1
-            elif value == previous:
-                run_length += 1
-                if repeat > 0 and run_length > repeat:
-                    return (False, List[Int](), List[Int]())
-            else:
-                if value < previous:
-                    return (False, List[Int](), List[Int]())
-                if repeat == 0:
-                    repeat = run_length
-                    stride = _int64_distance(previous, value)
-                elif run_length != repeat or (
-                    _int64_distance(previous, value) != stride
-                ):
-                    return (False, List[Int](), List[Int]())
-                run_length = 1
-            previous = value
-            row += 1
-    if repeat == 0:
-        repeat = run_length
+    var base = progression[1]
+    var stride = progression[2]
     # Rechunking and row-list merging pay off once the probe working set is large.
-    var progression_workers = worker_count(len(left))
-    if repeat > 1 or (
+    if (
         stride > 1
-        and progression_workers > 1
+        and worker_count(len(left)) > 1
         and not left.is_chunked()
         and len(left) >= _PROGRESSION_PARALLEL_KEY_BYTES // 8
     ):
-        var pairs = _repeated_progression_rows(
-            left, base, stride, repeat, len(right), include_unmatched
+        var pairs = _parallel_progression_rows(
+            left, base, stride, len(right), include_unmatched
         )
         return (True, pairs[0].copy(), pairs[1].copy())
+    var row = 0
     if stride == 1:
         var right_limit = UInt64(len(right))
         var left_rows = List[Int](capacity=len(left))
         var right_rows = List[Int](capacity=len(left))
-        row = 0
         for part in left.chunks():
             ref column = part._data[Column[Int64]]
             var values = column.unsafe_values()
@@ -2357,7 +2313,6 @@ def _dense_right_int64_rows(
     var right_limit = UInt64(len(right))
     var left_rows = List[Int](capacity=len(left))
     var right_rows = List[Int](capacity=len(left))
-    row = 0
     for part in left.chunks():
         ref column = part._data[Column[Int64]]
         var values = column.unsafe_values()

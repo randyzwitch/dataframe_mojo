@@ -1,5 +1,12 @@
 # Progression joins (#269)
 
+> **Update (#308).** Equal-run support described below was removed. Its
+> only consumer was the join matrix's `jk // 2` case; the sensor-panel model
+> was written afterwards, and one missing reading rejects it. Repeated build
+> keys now use the join index. Unit-step IDs and constant-step calendar grids
+> keep the progression path, detected by one shared function,
+> `int64_progression`. The measurements below are kept for the record.
+
 The arithmetic join accepts matching logical types whose physical storage is
 Int64: Int64, Date, Datetime, Duration and Time. Datetime/Duration units must
 match; this is not a unit conversion. Null probes do not match, and any null
