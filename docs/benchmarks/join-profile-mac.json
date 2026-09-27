@@ -1,0 +1,308 @@
+{
+  "samples": 73471,
+  "total_weight_ns": 73471000000,
+  "self": [
+    {
+      "symbol": "check_bounds",
+      "weight_ns": 11372000000,
+      "percent": 15.478
+    },
+    {
+      "symbol": "find_slot_matching",
+      "weight_ns": 7157000000,
+      "percent": 9.741
+    },
+    {
+      "symbol": "match_empty",
+      "weight_ns": 7080000000,
+      "percent": 9.636
+    },
+    {
+      "symbol": "_id_range_bucket",
+      "weight_ns": 6364000000,
+      "percent": 8.662
+    },
+    {
+      "symbol": "std::collections::dict::Dict::_grow_slow(::Dict[$0, $1, $2]),K=[typevalue<#kgen.instref<std::simd::SIMD,dtype=si64,length=1>>, scalar<si64>],V=[typevalue<#kgen.instref<std::simd::SIMD,dtype=index,length=1>>, scalar<index>],H=[typevalue<#kgen.instref<std::hashlib::_ahash::AHasher,key=0>>, struct<(scalar<ui64>, scalar<ui64>, simd<2, ui64>) memoryOnly>]",
+      "weight_ns": 6145000000,
+      "percent": 8.364
+    },
+    {
+      "symbol": "_ensure_capacity",
+      "weight_ns": 5186000000,
+      "percent": 7.059
+    },
+    {
+      "symbol": "__init__",
+      "weight_ns": 3782000000,
+      "percent": 5.148
+    },
+    {
+      "symbol": "std::collections::_swisstable::SwissTable::resize(::SwissTable[$0, $1, $2],::SIMD[DType.int, 1]),K=[typevalue<#kgen.instref<std::simd::SIMD,dtype=si64,length=1>>, scalar<si64>],V=[typevalue<#kgen.instref<std::simd::SIMD,dtype=index,length=1>>, scalar<index>],H=[typevalue<#kgen.instref<std::hashlib::_ahash::AHasher,key=0>>, struct<(scalar<ui64>, scalar<ui64>, simd<2, ui64>) memoryOnly>]",
+      "weight_ns": 3501000000,
+      "percent": 4.765
+    },
+    {
+      "symbol": "unsafe_write",
+      "weight_ns": 3152000000,
+      "percent": 4.29
+    },
+    {
+      "symbol": "std::collections::dict::Dict::_maybe_compact_order(::Dict[$0, $1, $2])_REMOVED_ARG",
+      "weight_ns": 3091000000,
+      "percent": 4.207
+    },
+    {
+      "symbol": "run",
+      "weight_ns": 1977000000,
+      "percent": 2.691
+    },
+    {
+      "symbol": "dataframe::hashing::encode_rows(::List[dataframe::series::Series],::Bool)",
+      "weight_ns": 1876000000,
+      "percent": 2.553
+    },
+    {
+      "symbol": "__next__",
+      "weight_ns": 1873000000,
+      "percent": 2.549
+    },
+    {
+      "symbol": "match_h2",
+      "weight_ns": 1492000000,
+      "percent": 2.031
+    },
+    {
+      "symbol": "_folded_multiply",
+      "weight_ns": 1177000000,
+      "percent": 1.602
+    },
+    {
+      "symbol": "copy",
+      "weight_ns": 1046000000,
+      "percent": 1.424
+    },
+    {
+      "symbol": "_platform_memmove",
+      "weight_ns": 948000000,
+      "percent": 1.29
+    },
+    {
+      "symbol": "_codes_by_value",
+      "weight_ns": 833000000,
+      "percent": 1.134
+    },
+    {
+      "symbol": "encode_partitioned",
+      "weight_ns": 641000000,
+      "percent": 0.872
+    },
+    {
+      "symbol": "__bzero",
+      "weight_ns": 594000000,
+      "percent": 0.808
+    },
+    {
+      "symbol": "set_ctrl",
+      "weight_ns": 460000000,
+      "percent": 0.626
+    },
+    {
+      "symbol": "len",
+      "weight_ns": 368000000,
+      "percent": 0.501
+    },
+    {
+      "symbol": "debug_assert",
+      "weight_ns": 302000000,
+      "percent": 0.411
+    },
+    {
+      "symbol": "append",
+      "weight_ns": 286000000,
+      "percent": 0.389
+    },
+    {
+      "symbol": "_platform_memset",
+      "weight_ns": 286000000,
+      "percent": 0.389
+    },
+    {
+      "symbol": "find_empty_slot",
+      "weight_ns": 279000000,
+      "percent": 0.38
+    },
+    {
+      "symbol": "_place_new_entry",
+      "weight_ns": 265000000,
+      "percent": 0.361
+    },
+    {
+      "symbol": "_insert",
+      "weight_ns": 202000000,
+      "percent": 0.275
+    },
+    {
+      "symbol": "write",
+      "weight_ns": 174000000,
+      "percent": 0.237
+    },
+    {
+      "symbol": "dataframe::partition::_hash_column(dataframe::series::Series,::SIMD[DType.int, 1],::SIMD[DType.int, 1],::SIMD[DType.int, 1],::Bool,::SIMD[DType.int, 1])",
+      "weight_ns": 132000000,
+      "percent": 0.18
+    }
+  ],
+  "inclusive": [
+    {
+      "symbol": "thread_start",
+      "weight_ns": 57088000000,
+      "percent": 77.701
+    },
+    {
+      "symbol": "run",
+      "weight_ns": 55361000000,
+      "percent": 75.351
+    },
+    {
+      "symbol": "__wrap_and_execute_raising_main",
+      "weight_ns": 16377000000,
+      "percent": 22.29
+    },
+    {
+      "symbol": "dataframe::lazy::LazyFrame::_stream_execute(dataframe::lazy::LazyFrame,::SIMD[DType.int, 1],::SIMD[DType.int, 1])",
+      "weight_ns": 16322000000,
+      "percent": 22.216
+    },
+    {
+      "symbol": "dataframe::lazy::LazyFrame::collect(dataframe::lazy::LazyFrame,optimize:::Bool,streaming:::Bool,batch_size:::SIMD[DType.int, 1])",
+      "weight_ns": 16322000000,
+      "percent": 22.216
+    },
+    {
+      "symbol": "dataframe::lazy::LazyFrame::_execute(dataframe::lazy::LazyFrame,::SIMD[DType.int, 1],::Bool,::Bool,::SIMD[DType.int, 1])",
+      "weight_ns": 16320000000,
+      "percent": 22.213
+    },
+    {
+      "symbol": "dataframe::parallel::_Slot::run(dataframe::parallel::_Slot[$0]),J=[typevalue<#kgen.instref<dataframe::lazy::_StreamJob>>, struct<(struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>, scalar<index>) memoryOnly>, struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>, pointer<none>, struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>) memoryOnly>]",
+      "weight_ns": 16271000000,
+      "percent": 22.146
+    },
+    {
+      "symbol": "join",
+      "weight_ns": 16265000000,
+      "percent": 22.138
+    },
+    {
+      "symbol": "dataframe::frame::DataFrame::join(dataframe::frame::DataFrame,dataframe::frame::DataFrame,left_on:::List[::String],right_on:::List[::String],how:::String,suffix:::String,coalesce:::Bool)",
+      "weight_ns": 11696000000,
+      "percent": 15.919
+    },
+    {
+      "symbol": "check_bounds",
+      "weight_ns": 11372000000,
+      "percent": 15.478
+    },
+    {
+      "symbol": "find_slot_matching",
+      "weight_ns": 7157000000,
+      "percent": 9.741
+    },
+    {
+      "symbol": "match_empty",
+      "weight_ns": 7080000000,
+      "percent": 9.636
+    },
+    {
+      "symbol": "_ensure_capacity",
+      "weight_ns": 6969000000,
+      "percent": 9.485
+    },
+    {
+      "symbol": "_id_range_bucket",
+      "weight_ns": 6364000000,
+      "percent": 8.662
+    },
+    {
+      "symbol": "std::collections::dict::Dict::_grow_slow(::Dict[$0, $1, $2]),K=[typevalue<#kgen.instref<std::simd::SIMD,dtype=si64,length=1>>, scalar<si64>],V=[typevalue<#kgen.instref<std::simd::SIMD,dtype=index,length=1>>, scalar<index>],H=[typevalue<#kgen.instref<std::hashlib::_ahash::AHasher,key=0>>, struct<(scalar<ui64>, scalar<ui64>, simd<2, ui64>) memoryOnly>]",
+      "weight_ns": 6145000000,
+      "percent": 8.364
+    },
+    {
+      "symbol": "unsafe_write",
+      "weight_ns": 3899000000,
+      "percent": 5.307
+    },
+    {
+      "symbol": "__init__",
+      "weight_ns": 3788000000,
+      "percent": 5.156
+    },
+    {
+      "symbol": "std::collections::_swisstable::SwissTable::resize(::SwissTable[$0, $1, $2],::SIMD[DType.int, 1]),K=[typevalue<#kgen.instref<std::simd::SIMD,dtype=si64,length=1>>, scalar<si64>],V=[typevalue<#kgen.instref<std::simd::SIMD,dtype=index,length=1>>, scalar<index>],H=[typevalue<#kgen.instref<std::hashlib::_ahash::AHasher,key=0>>, struct<(scalar<ui64>, scalar<ui64>, simd<2, ui64>) memoryOnly>]",
+      "weight_ns": 3501000000,
+      "percent": 4.765
+    },
+    {
+      "symbol": "std::collections::dict::Dict::_maybe_compact_order(::Dict[$0, $1, $2])_REMOVED_ARG",
+      "weight_ns": 3091000000,
+      "percent": 4.207
+    },
+    {
+      "symbol": "copy",
+      "weight_ns": 1994000000,
+      "percent": 2.714
+    },
+    {
+      "symbol": "dataframe::hashing::encode_rows(::List[dataframe::series::Series],::Bool)",
+      "weight_ns": 1878000000,
+      "percent": 2.556
+    },
+    {
+      "symbol": "__next__",
+      "weight_ns": 1873000000,
+      "percent": 2.549
+    },
+    {
+      "symbol": "encode_partitioned",
+      "weight_ns": 1676000000,
+      "percent": 2.281
+    },
+    {
+      "symbol": "match_h2",
+      "weight_ns": 1492000000,
+      "percent": 2.031
+    },
+    {
+      "symbol": "_folded_multiply",
+      "weight_ns": 1177000000,
+      "percent": 1.602
+    },
+    {
+      "symbol": "_platform_memmove",
+      "weight_ns": 948000000,
+      "percent": 1.29
+    },
+    {
+      "symbol": "dataframe::parallel::run_jobs[dataframe::parallel::Job & ::AnyType & ::Deinitable & ::Movable](::List[$0]),J=[typevalue<#kgen.instref<dataframe::gather::_GatherJob>>, struct<(struct<(struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(struct<(variant<struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, pointer<none>, scalar<index>, scalar<index>, struct<(struct<(struct<(variant<struct<()>, struct<(pointer<none>, pointer<none>, pointer<none>, scalar<index>, scalar<index>, scalar<index>) memoryOnly>>) memoryOnly>) memoryOnly>) memoryOnly>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>, pointer<none>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>>) memoryOnly>) memoryOnly>, struct<(scalar<index>, scalar<index>, struct<(struct<(struct<(variant<struct<()>, pointer<none>>)>)>)>) memoryOnly>, struct<(struct<(struct<(variant<struct<()>, pointer<none>>)>)>)>) memoryOnly>, pointer<none>, scalar<index>, scalar<index>, scalar<index>, scalar<index>, struct<(struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(struct<(variant<struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, pointer<none>, scalar<index>, scalar<index>, struct<(struct<(struct<(variant<struct<()>, struct<(pointer<none>, pointer<none>, pointer<none>, scalar<index>, scalar<index>, scalar<index>) memoryOnly>>) memoryOnly>) memoryOnly>) memoryOnly>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>, pointer<none>) memoryOnly>, struct<(pointer<none>, pointer<none>, scalar<index>, scalar<index>) memoryOnly>>) memoryOnly>) memoryOnly>, struct<(scalar<index>, scalar<index>, struct<(struct<(struct<(variant<struct<()>, pointer<none>>)>)>)>) memoryOnly>, struct<(struct<(struct<(variant<struct<()>, pointer<none>>)>)>)>) memoryOnly>, scalar<bool>, scalar<bool>, scalar<bool>) memoryOnly>]_closure_0",
+      "weight_ns": 919000000,
+      "percent": 1.251
+    },
+    {
+      "symbol": "dataframe::parallel::run_jobs[dataframe::parallel::Job & ::AnyType & ::Deinitable & ::Movable](::List[$0]),J=[typevalue<#kgen.instref<dataframe::partition::_HashJob>>, struct<(struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>, scalar<index>, scalar<index>, scalar<index>, struct<(pointer<none>, scalar<index>, scalar<index>) memoryOnly>) memoryOnly>]_closure_0",
+      "weight_ns": 877000000,
+      "percent": 1.194
+    },
+    {
+      "symbol": "_codes_by_value",
+      "weight_ns": 833000000,
+      "percent": 1.134
+    },
+    {
+      "symbol": "dataframe::gather::take_parallel(::List[dataframe::series::Series],::List[::SIMD[DType.int, 1]]$,::SIMD[DType.int, 1],::Bool)",
+      "weight_ns": 702000000,
+      "percent": 0.955
+    }
+  ]
+}

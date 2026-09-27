@@ -1,0 +1,142 @@
+{
+  "engine_commit": "c8c649898fcbe3b934fdfac56f9e1d6a80cb9f5f",
+  "threads": 4,
+  "rows": 1000000,
+  "variant": "wide",
+  "event": "cycles:u",
+  "frequency_hz": 199,
+  "call_graph": "dwarf,8192",
+  "host_caveat": "Unrelated Bazel build completed; no compiler activity detected before or after recording. Affinity unpinned; ordinary desktop background processes remain possible. Whole-process profile includes CSV loading and warmup.",
+  "recorded_utc": "2026-09-27T17:54:34.426589+00:00",
+  "runner_sha256": "a7ce32d8547f339c756909956850d98ca512c0001bbf3ed832b9f35b45105df3",
+  "profiles": {
+    "lazy-wide": {
+      "repetitions": 20,
+      "sample_header": [
+        "# Total Lost Samples: 0",
+        "# Samples: 37K of event 'cycles:u'",
+        "# Event count (approx.): 96027214614"
+      ],
+      "hotspots": [
+        {
+          "self_percent": 17.36,
+          "symbol": "std::collections::_swisstable::SwissTable::resize"
+        },
+        {
+          "self_percent": 15.41,
+          "symbol": "dataframe::hashing::column_codes"
+        },
+        {
+          "self_percent": 14.11,
+          "symbol": "dataframe::frame::_joint_key_ids"
+        },
+        {
+          "self_percent": 9.02,
+          "symbol": "std::collections::dict::Dict::_grow_slow"
+        },
+        {
+          "self_percent": 7.07,
+          "symbol": "dataframe::frame::_group_rows"
+        },
+        {
+          "self_percent": 6.42,
+          "symbol": "dataframe::hashing::encode_rows"
+        },
+        {
+          "self_percent": 5.23,
+          "symbol": "__memset_avx2_unaligned_erms"
+        },
+        {
+          "self_percent": 2.99,
+          "symbol": "dataframe::column::Column::_append_column"
+        },
+        {
+          "self_percent": 2.83,
+          "symbol": "dataframe::frame::_group_index"
+        },
+        {
+          "self_percent": 2.64,
+          "symbol": "__memmove_avx_unaligned_erms"
+        },
+        {
+          "self_percent": 2.49,
+          "symbol": "dataframe::frame::DataFrame::join"
+        },
+        {
+          "self_percent": 2.31,
+          "symbol": "dataframe::gather::_GatherJob.run"
+        }
+      ]
+    },
+    "semi-wide": {
+      "repetitions": 40,
+      "sample_header": [
+        "# Total Lost Samples: 0",
+        "# Samples: 7K of event 'cycles:u'",
+        "# Event count (approx.): 9019092428"
+      ],
+      "hotspots": [
+        {
+          "self_percent": 41.05,
+          "symbol": "dataframe::join_hash::_HashProbeJob.run"
+        },
+        {
+          "self_percent": 7.46,
+          "symbol": "dataframe::series::Series::take"
+        },
+        {
+          "self_percent": 6.94,
+          "symbol": "dataframe::join_hash::_HashBuildJob.run"
+        },
+        {
+          "self_percent": 5.22,
+          "symbol": "dataframe::csv_decode::decode_chunk"
+        },
+        {
+          "self_percent": 4.37,
+          "symbol": "dataframe::partition::_hash_column"
+        },
+        {
+          "self_percent": 4.08,
+          "symbol": "dataframe::join_hash::_build_hash_index"
+        },
+        {
+          "self_percent": 4.06,
+          "symbol": "dataframe::gather::_SortedChunkTakeJob::run"
+        },
+        {
+          "self_percent": 3.83,
+          "symbol": "dataframe::frame::_range_int64_membership_domain"
+        },
+        {
+          "self_percent": 3.14,
+          "symbol": "dataframe::column::Column::_append_column"
+        },
+        {
+          "self_percent": 2.69,
+          "symbol": "dataframe::csv_buffers::CsvBuffer::add_many"
+        },
+        {
+          "self_percent": 2.24,
+          "symbol": "__memset_avx2_unaligned_erms"
+        },
+        {
+          "self_percent": 1.62,
+          "symbol": "dataframe::csv_numeric::_scan_csv_number[LITImmOrigin,::Origin[False, $0]]"
+        },
+        {
+          "self_percent": 1.48,
+          "symbol": "dataframe::join_hash::direct_hash_semi_anti_rows"
+        },
+        {
+          "self_percent": 1.41,
+          "symbol": "dataframe::partition::_HashJob.run"
+        },
+        {
+          "self_percent": 1.1,
+          "symbol": "dataframe::csv_numeric::parse_csv_float64[LITImmOrigin,::Origin[False, $0]]"
+        }
+      ]
+    }
+  }
+}

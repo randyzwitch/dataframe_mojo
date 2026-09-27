@@ -1,0 +1,54 @@
+{
+  "commit": "c8c649898fcbe3b934fdfac56f9e1d6a80cb9f5f",
+  "dirty": "?? .pixi\n?? benchmarks/bench_upstream_joins.mojo\n?? scripts/bench_upstream_joins.py\n",
+  "source_sha256": {
+    "scripts/bench_upstream_joins.py": "3eee85811c438468ca0ba16cff5ddf7fd7520261be3b4b65d0fad9b25701784e",
+    "benchmarks/bench_upstream_joins.mojo": "2fe2e364e81495d3767bbdf2c3f23ee3616b5cff1ef9ed849128875ebadd6c52",
+    "pixi.lock": "a73ec597f8965ecbed143adc462ce9e2ae5f68662a33733f9f0fa500357986fe"
+  },
+  "runner_sha256": "66567d5913fded4b70378040e3bf8710bec9f74708d17cd0f7f52c59b1c85f73",
+  "compiler": "Mojo 1.2.0.dev2026092105 (e9569894)",
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "processor": "arm",
+  "cpu": "hw.model: Macmini9,1\nhw.physicalcpu: 8\nhw.logicalcpu: 8\nhw.memsize: 17179869184\n",
+  "polars": "1.44.2",
+  "duckdb": "1.5.5",
+  "upstream": "d8a1bd4f4fbccdf3d22d8f1fe27a94c11c805d0a",
+  "sources": {
+    "highcardinality": "hashjoin_highcardinality.benchmark",
+    "duplicate_strings": "hashjoin_dups_rhs.benchmark"
+  },
+  "command": [
+    "scripts/bench_upstream_joins.py",
+    "--sizes",
+    "1000000,10000000",
+    "--threads",
+    "4",
+    "--output",
+    "build/upstream-joins/mac-4-final.csv"
+  ],
+  "timestamp": "2026-09-27T17:30:41Z",
+  "inputs": {
+    "highcardinality-1000000-base-left.csv": "cd0669fd2417cdf0496d8d3269e55cacd6ba7b827168bd53e61d778bcd115ebc",
+    "highcardinality-1000000-base-right.csv": "945af4bd58986766dee4d65cb2a7d02aa311f294800e78deb88fb56df036a172",
+    "highcardinality-1000000-shuffled-left.csv": "cd0669fd2417cdf0496d8d3269e55cacd6ba7b827168bd53e61d778bcd115ebc",
+    "highcardinality-1000000-shuffled-right.csv": "dd05d51e69270d4f50b45883f9faf64ebbf4683d8a67035b0c87c8fabd564a8d",
+    "highcardinality-1000000-wide-left.csv": "9b3012f66316cba0eb67bba631e5dfc1d368452e4e3ada14d15e41bfb5f6c5a9",
+    "highcardinality-1000000-wide-right.csv": "a16e86a5e50dfead21461cbbd003ef34ac9f3d0f4ecc670539d5b3a9cf9d5738",
+    "duplicate_strings-1000000-base-left.csv": "c7acc529f775223117745b1ef81b9b9d4db18d1ae5f151b73dbe4daccc0a6029",
+    "duplicate_strings-1000000-base-right.csv": "6d2fff9a5974dfa630d7e29beeeab7e2e1b9856b1e3b254ba11922545c9b4cc9",
+    "duplicate_strings-1000000-shuffled-left.csv": "c7acc529f775223117745b1ef81b9b9d4db18d1ae5f151b73dbe4daccc0a6029",
+    "duplicate_strings-1000000-shuffled-right.csv": "1bfa5b3d8f97a5755579640b3e3ab2ecc2793bd5c0f1915a39eb6f6063f08ab8",
+    "highcardinality-10000000-base-left.csv": "cd0669fd2417cdf0496d8d3269e55cacd6ba7b827168bd53e61d778bcd115ebc",
+    "highcardinality-10000000-base-right.csv": "aefe247a97eb634938736d010d8fa115de4097e376c6a815a98232dc27e01d9a",
+    "highcardinality-10000000-shuffled-left.csv": "cd0669fd2417cdf0496d8d3269e55cacd6ba7b827168bd53e61d778bcd115ebc",
+    "highcardinality-10000000-shuffled-right.csv": "6164cf5105bd183860237e663c2bd96d6d1aa147f3da28af2a57b6239584ea1c",
+    "highcardinality-10000000-wide-left.csv": "9b3012f66316cba0eb67bba631e5dfc1d368452e4e3ada14d15e41bfb5f6c5a9",
+    "highcardinality-10000000-wide-right.csv": "67d4393a5cb41dc355c32cae54d766972745358293e836252ed86bdd765d4314",
+    "duplicate_strings-10000000-base-left.csv": "c7acc529f775223117745b1ef81b9b9d4db18d1ae5f151b73dbe4daccc0a6029",
+    "duplicate_strings-10000000-base-right.csv": "244f984a2174610d2667b500f8058ea50af352796f967a01a0bf571d0cfb0751",
+    "duplicate_strings-10000000-shuffled-left.csv": "c7acc529f775223117745b1ef81b9b9d4db18d1ae5f151b73dbe4daccc0a6029",
+    "duplicate_strings-10000000-shuffled-right.csv": "a88b440048e16dc1e4ea51012fd41e584a4dc92a4a6181aed39cb3df81e83f02"
+  },
+  "status": "complete"
+}
