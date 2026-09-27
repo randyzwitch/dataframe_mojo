@@ -5,7 +5,7 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Expr, Series, StringColumn, col
 from dataframe.parallel import MIN_ROWS_PER_WORKER, worker_count
-from dataframe.partition import _hash_column, low_cardinality
+from dataframe.partition import _hash_bytes, _hash_column, low_cardinality
 from dataframe.string_view import StringViewBuilder
 
 comptime ROWS = 200_000
@@ -42,6 +42,15 @@ def test_string_hash_agrees_across_storage_and_slices() raises:
         False,
         True,
     ]
+    # Cross inline-view and every eight-byte tail boundary with exact bytes.
+    for size in range(9, 81):
+        var text = String()
+        for i in range(size):
+            text += "a" if i % 3 else "\x00"
+        texts.append(text^)
+        valid.append(True)
+    texts.append("多字节é共同前缀-tail")
+    valid.append(True)
     var contiguous = Series("s", StringColumn(texts.copy(), valid.copy()))
     var builder = StringViewBuilder(len(texts))
     for i in range(len(texts)):
@@ -60,6 +69,70 @@ def test_string_hash_agrees_across_storage_and_slices() raises:
         _hash_column(view_slice, 0, count, Int(right.unsafe_ptr()), True)
         for i in range(count):
             assert_equal(left[i], right[i])
+
+
+def test_word_hash_unaligned_spans_and_tail_boundaries() raises:
+    # DuckDB block-mixer vectors, before this project's column finalizer.
+    var lengths: List[Int] = [
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        23,
+        24,
+        25,
+        31,
+        32,
+        33,
+        63,
+        64,
+        65,
+    ]
+    var expected: List[UInt64] = [
+        0x4EB2B2F4045FEE6E,
+        0xDF7813878559DD45,
+        0x9479384728E1A0C8,
+        0x1498AF9B3C02397F,
+        0xC3F38FCDBA43DAFA,
+        0x7BA1BFD411625971,
+        0xF6E78FD4EE1DCF34,
+        0x847F657550CADE0B,
+        0x132CDE3DDE0E5C27,
+        0x16B92FDF0BCA1DF5,
+        0xF5029816BBE3C848,
+        0x2D998608B12EE554,
+        0x2124460EC4E77A2A,
+        0x67242CD4FC968359,
+        0x0A998BE8D76643B5,
+        0x36FF0DAD0DB27AC6,
+        0xED2F5D98A9AE675D,
+        0x9AE22B5143CF9FA9,
+    ]
+    for offset in range(8):
+        for at in range(len(lengths)):
+            var size = lengths[at]
+            var bytes = List[UInt8](length=offset + size, fill=0xFF)
+            for i in range(size):
+                bytes[offset + i] = UInt8((i * 37 + 11) % 256)
+            var window = Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=bytes.unsafe_ptr()
+                .unsafe_offset(offset)
+                .unsafe_mut_cast[False]()
+                .unsafe_origin_cast[ImmutAnyOrigin](),
+                length=size,
+            )
+            assert_equal(_hash_bytes(window), expected[at])
+            # Neither prefix bytes nor allocation alignment are key bytes.
+            for i in range(offset):
+                bytes[i] = 0
+            assert_equal(_hash_bytes(window), expected[at])
+            bytes[offset + size - 1] ^= 1
+            assert_true(_hash_bytes(window) != expected[at])
 
 
 def c_string(text: String) -> List[UInt8]:

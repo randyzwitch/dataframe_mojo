@@ -1,0 +1,682 @@
+{
+  "status": "complete",
+  "utc": "2026-09-27T22:56:29Z",
+  "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.39",
+  "machine": "x86_64",
+  "candidate_sources": {
+    "dataframe/frame.mojo": "bcf217dbdca8017811d06fee1e16563f57a56e2681ef88739c864d30c06ae677",
+    "dataframe/join_hash.mojo": "fb29a204d39c7c41a01f28a076db2503d81a6b31792edaf20491353f7885ef91",
+    "dataframe/lazy.mojo": "e86440eabe574cbda019644300f8b4984d0d2e19bf98e95d0c649fcdb34c7a52",
+    "benchmarks/bench_join_matrix.mojo": "82f482863234b9389277524148504d773d8e8874d1d8ce39659f5c6bcffef508",
+    "pixi.lock": "a73ec597f8965ecbed143adc462ce9e2ae5f68662a33733f9f0fa500357986fe"
+  },
+  "threads": 4,
+  "rows": 1000000,
+  "runners": {
+    "baseline": {
+      "path": "/tmp/dataframe-fused-probes/build/matrix_baseline",
+      "sha256": "346f567dc20a0a938399b4a4c920a0a5bb76cee4d598b48b7b377d8ce31a298d"
+    },
+    "candidate": {
+      "path": "/tmp/dataframe-word-hashing/build/matrix_candidate",
+      "sha256": "f7f76fa0c3e499fd41205d88b44d8e0e94afc193b582684476450de30e016ccc"
+    }
+  },
+  "inputs": {
+    "left_1000000.csv": "8bf1b4e58ddf819abd38a8a3a7b81749a86452f8a63bc098337ab4eab6ea802e",
+    "left_1000000_wide.csv": "ad9805ab7cd85b79d80b1d7f8a6129d6bdb40b677d568a7e5ff7f40f09e85191",
+    "right_1000000.csv": "bc41bce0cbf0408dcdb8cdf03b8c288ef9e82a560b93803e73da5a74e90b1a8d",
+    "right_1000000_shuffled.csv": "efd750698df1e76c4b666ca43c5d5b271722e12e00f6c8eefde7d171f4ce73a4",
+    "right_1000000_wide.csv": "dee33544ad5830656224d92686c9f879439e67047f853be4ecf872ff818b33d1"
+  },
+  "samples": [
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "base",
+      "ns": 88000502,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "base",
+      "ns": 100299722,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "shuffled",
+      "ns": 101282514,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "shuffled",
+      "ns": 89413286,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "wide",
+      "ns": 114585276,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "wide",
+      "ns": 104000085,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "base",
+      "ns": 103934215,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "base",
+      "ns": 104531784,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "shuffled",
+      "ns": 109960834,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "shuffled",
+      "ns": 101210998,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "wide",
+      "ns": 107347682,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "wide",
+      "ns": 111188060,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "base",
+      "ns": 23989192,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "base",
+      "ns": 26279949,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "shuffled",
+      "ns": 29610996,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "shuffled",
+      "ns": 29526668,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "wide",
+      "ns": 62977473,
+      "height": 500261,
+      "checksum": 17919.75000000004
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "wide",
+      "ns": 66637495,
+      "height": 500261,
+      "checksum": 17919.75000000004
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "base",
+      "ns": 26208090,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "base",
+      "ns": 25625831,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "shuffled",
+      "ns": 22196015,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "shuffled",
+      "ns": 28312100,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 0,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "wide",
+      "ns": 60107737,
+      "height": 499739,
+      "checksum": -20071.129999999983
+    },
+    {
+      "round": 0,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "wide",
+      "ns": 65006185,
+      "height": 499739,
+      "checksum": -20071.129999999983
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "base",
+      "ns": 91088858,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "base",
+      "ns": 89925500,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "shuffled",
+      "ns": 88337959,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "shuffled",
+      "ns": 84828006,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "wide",
+      "ns": 115091842,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "wide",
+      "ns": 132813481,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "base",
+      "ns": 103552787,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "base",
+      "ns": 104716475,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "shuffled",
+      "ns": 101325899,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "shuffled",
+      "ns": 98354745,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "wide",
+      "ns": 109519977,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "wide",
+      "ns": 98870926,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "base",
+      "ns": 25896477,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "base",
+      "ns": 27736293,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "shuffled",
+      "ns": 21846943,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "shuffled",
+      "ns": 29157807,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "wide",
+      "ns": 62712961,
+      "height": 500261,
+      "checksum": 17919.75000000004
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "wide",
+      "ns": 67553181,
+      "height": 500261,
+      "checksum": 17919.75000000004
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "base",
+      "ns": 28613506,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "base",
+      "ns": 25474335,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "shuffled",
+      "ns": 25173820,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "shuffled",
+      "ns": 29944342,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 1,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "wide",
+      "ns": 77000455,
+      "height": 499739,
+      "checksum": -20071.129999999983
+    },
+    {
+      "round": 1,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "wide",
+      "ns": 65620007,
+      "height": 499739,
+      "checksum": -20071.129999999983
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "base",
+      "ns": 103202237,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "base",
+      "ns": 93312692,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "shuffled",
+      "ns": 104871497,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "shuffled",
+      "ns": 93974670,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "inner_string",
+      "layout": "wide",
+      "ns": 140410635,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "inner_string",
+      "layout": "wide",
+      "ns": 116140957,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "base",
+      "ns": 103102770,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "base",
+      "ns": 114999999,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "shuffled",
+      "ns": 113815011,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "shuffled",
+      "ns": 101201056,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "inner_multi",
+      "layout": "wide",
+      "ns": 111008734,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "inner_multi",
+      "layout": "wide",
+      "ns": 109223757,
+      "height": 1000000,
+      "checksum": 49982574.70000006
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "base",
+      "ns": 25144173,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "base",
+      "ns": 26766122,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "shuffled",
+      "ns": 22353974,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "shuffled",
+      "ns": 29653668,
+      "height": 500261,
+      "checksum": 17919.750000000004
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "semi_unmatched",
+      "layout": "wide",
+      "ns": 65800606,
+      "height": 500261,
+      "checksum": 17919.75000000004
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "semi_unmatched",
+      "layout": "wide",
+      "ns": 65084170,
+      "height": 500261,
+      "checksum": 17919.75000000004
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "base",
+      "ns": 18446367,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "base",
+      "ns": 21997491,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "shuffled",
+      "ns": 27566987,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "shuffled",
+      "ns": 25540756,
+      "height": 499739,
+      "checksum": -20071.129999999994
+    },
+    {
+      "round": 2,
+      "revision": "baseline",
+      "case": "anti_unmatched",
+      "layout": "wide",
+      "ns": 58299736,
+      "height": 499739,
+      "checksum": -20071.129999999983
+    },
+    {
+      "round": 2,
+      "revision": "candidate",
+      "case": "anti_unmatched",
+      "layout": "wide",
+      "ns": 60827959,
+      "height": 499739,
+      "checksum": -20071.129999999983
+    }
+  ]
+}

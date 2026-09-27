@@ -26,6 +26,7 @@ from dataframe import (
     DataType,
     Expr,
     col,
+    concat_str,
     lit,
     read_csv,
 )
@@ -199,6 +200,26 @@ def main() raises:
             repetitions,
             "r",
         )
+
+    # Fixed prefixes exercise shared-prefix keys beyond the short-key hash.
+    # Both cases materialize the entire join, including all payload columns.
+    for name in ["inner_string_16", "inner_string_64"]:
+        if only == "" or only == name:
+            var prefix = "namespace:"
+            if name == "inner_string_64":
+                prefix = "tenant/region/catalog/namespace/resource/identifier/value/:"
+            var key = concat_str(
+                [lit(prefix), col("jk").cast(DataType.STRING)]
+            ).alias("key")
+            timed(
+                left.with_columns(key),
+                right.with_columns(key),
+                name,
+                ["key"],
+                "inner",
+                repetitions,
+                "r",
+            )
 
     if only == "" or only == "inner_multi":
         var compound: List[Expr] = [

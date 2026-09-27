@@ -65,6 +65,7 @@ def main():
             for name in [
                 "dataframe/frame.mojo",
                 "dataframe/join_hash.mojo",
+                "dataframe/partition.mojo",
                 "dataframe/lazy.mojo",
                 "benchmarks/bench_join_matrix.mojo",
                 "pixi.lock",
