@@ -32,8 +32,12 @@ from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import Pointer
 from std.os import getenv
-from std.sys import num_physical_cores, size_of
+from std.sys import CompilationTarget, num_physical_cores, size_of
 
+# Threadripper 3970X and M1, 4/8/16-worker sweeps: 16k helps 100k-row
+# expressions on M1 but makes cheap counts 5-7x slower and oversubscribed
+# grouping 4x slower. Keep the shared 64k floor; per-operation tuning is
+# separate. See docs/worker-calibration.md.
 comptime MIN_ROWS_PER_WORKER = 65536
 
 # pthread_mutex_t and pthread_cond_t are opaque and platform-sized (up to 64
@@ -52,6 +56,43 @@ comptime _SYNC_BYTES = 128
 # A pool is scoped to one operation, so this only ever burns a core during
 # that operation's own serial gaps, and never while the process is idle.
 comptime _SPIN_LIMIT = 2_000_000
+
+
+def _read_performance_core_count(
+    name: List[UInt8], mut count: Int32, mut size: Int
+) -> Int32:
+    comptime if CompilationTarget.is_macos():
+        return external_call["sysctlbyname", Int32](
+            name.unsafe_ptr(), Pointer(to=count), Pointer(to=size), 0, 0
+        )
+    else:
+        return -1
+
+
+def _performance_core_count() -> Int:
+    """Physical cores, using the performance cluster on heterogeneous Macs."""
+    var cores = num_physical_cores()
+    comptime if CompilationTarget.is_macos():
+        # On heterogeneous Apple Silicon, count performance cores rather
+        # than all cores. Fall back to the physical count on older systems.
+        var name = List[UInt8]()
+        name.extend(String("hw.perflevel0.physicalcpu").as_bytes())
+        name.append(0)
+        var count = Int32(0)
+        var size = size_of[Int32]()
+        if _read_performance_core_count(name, count, size) == 0 and count > 0:
+            cores = min(cores, Int(count))
+    return max(1, cores)
+
+
+def _pool_spin_limit(participants: Int) -> Int:
+    """Park when spinning would compete with workers that need CPU time."""
+    var cores = _performance_core_count()
+    # M1 (4P+4E), Mojo 1.2: at 8 workers, 1M-row merge sort improves
+    # 49 -> 43 ms with no spin; at 16, 100k rows improve 27 -> 3 ms.
+    # Four workers still benefit from spinning (3.7 -> 3.1 ms).
+    # Threadripper and M1 sweeps: docs/worker-calibration.md (#273).
+    return 0 if participants > cores else _SPIN_LIMIT
 
 
 trait Job(Deinitable, Movable):
@@ -139,6 +180,7 @@ struct _Shared(Movable):
     # Set once, at release, to let parked workers return instead of waiting.
     var stopping: Atomic[Int64]
     var threads: Int
+    var spin_limit: Int
 
     def __init__(out self):
         self.mutex = Array[UInt8, _SYNC_BYTES](fill=0)
@@ -153,6 +195,7 @@ struct _Shared(Movable):
         self.closed = Atomic[Int64](0)
         self.stopping = Atomic[Int64](0)
         self.threads = 0
+        self.spin_limit = _SPIN_LIMIT
 
     def _mutex(self) -> Int:
         return Int(self.mutex.unsafe_ptr())
@@ -247,7 +290,7 @@ def _worker(argument: Int) abi("C") -> Int:
         # is what makes a round cost more than the longest task in it.
         var spins = 0
         while (
-            spins < _SPIN_LIMIT
+            spins < shared.spin_limit
             and shared.generation.load() == seen
             and shared.stopping.load() == 0
         ):
@@ -420,6 +463,7 @@ struct Pool(Movable):
         )
         pointer.unsafe_write(_Shared())
         ref shared = pointer[]
+        shared.spin_limit = _pool_spin_limit(workers)
         _ = external_call["pthread_mutex_init", Int32](shared._mutex(), 0)
         _ = external_call["pthread_cond_init", Int32](shared._cond(), 0)
         var entry: _Entry = _worker

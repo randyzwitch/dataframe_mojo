@@ -18,6 +18,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Worker pools park when they exceed physical/performance cores. Gather
+  partitions and bounded-index builders respect core budgets, with 4/8/16
+  worker calibration on Threadripper and Apple M1.
 - Progression joins accept matching Date, Datetime, Duration and Time keys,
   including temporal units, and retain measured equal-run panel support.
 
