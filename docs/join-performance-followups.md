@@ -42,6 +42,10 @@ base/stride/repeat representation, validated once rather than rescanned per
 batch. Exact identity matches share left columns. Nested keys retain the
 existing eager fallback; cross joins retain their existing execution path.
 The eager public API and direct-hash algorithm selection are unchanged.
+Heavily duplicated hash buckets retain contiguous duplicate-row groups and
+a table sized to distinct keys. This preserves the locality of the previous
+dictionary/CSR streaming path while allowing preparation to be reused.
+Unique and lightly duplicated buckets retain their linked representation.
 
 Seven affected Linux test modules passed (61 tests). After the final
 profile-guided probe changes, the hash and streaming modules passed again
@@ -52,7 +56,10 @@ runs. Existing tests cover collision equality, strings, NaNs, signed zero,
 large probes, and output ordering. A further regression verifies that null
 string, numeric, or Boolean key components never occupy hash slots or
 duplicate chains; the hash/streaming modules pass with this correction on
-both hosts (26 tests).
+both hosts (26 tests). Heavy duplicate groups have an additional numeric,
+string, and compound-key regression checking exact row order, nulls, repeated
+probes, identity fallback, and semi/anti membership; the three modules pass
+on Linux and M1 (27 tests).
 
 The following times are medians of five samples from separate processes;
 each process warms once before one timed query. Revision order alternates
@@ -67,12 +74,12 @@ compiler guard does not exclude every possible background task.
 
 | Host | Layout | Baseline ms | Prepared ms | Speedup |
 |---|---|---:|---:|---:|
-| Linux Threadripper 3970X | ordered | 28.382 | 25.369 | 1.12x |
-| Linux Threadripper 3970X | shuffled | 100.084 | 47.311 | 2.12x |
-| Linux Threadripper 3970X | wide | 212.061 | 47.341 | 4.48x |
-| Mac M1 | ordered | 13.690 | 8.804 | 1.55x |
-| Mac M1 | shuffled | 94.808 | 19.487 | 4.87x |
-| Mac M1 | wide | 170.932 | 19.519 | 8.76x |
+| Linux Threadripper 3970X | ordered | 25.751 | 22.390 | 1.15x |
+| Linux Threadripper 3970X | shuffled | 104.173 | 62.463 | 1.67x |
+| Linux Threadripper 3970X | wide | 215.107 | 61.091 | 3.52x |
+| Mac M1 | ordered | 13.632 | 8.840 | 1.54x |
+| Mac M1 | shuffled | 94.793 | 22.002 | 4.31x |
+| Mac M1 | wide | 169.319 | 22.230 | 7.62x |
 
 [Linux samples](benchmarks/prepared-joins-linux.json),
 [Mac samples](benchmarks/prepared-joins-mac.json), and
@@ -80,7 +87,7 @@ compiler guard does not exclude every possible background task.
 supporting evidence. Baseline engine code is the merged PR #297 baseline.
 Candidate source digests identify this implementation before its commit.
 
-A separate 199 Hz user-cycle/DWARF recording of 40 wide-key repetitions
+Before the duplicate-group correction, a separate 199 Hz user-cycle/DWARF recording of 40 wide-key repetitions
 attributes 55.95% self samples to hash probing and 4.11% to hash building.
 The repeated dictionary encoding/growth routines that dominated the earlier
 profile are absent from the leading entries. This is a whole-process profile
@@ -98,6 +105,42 @@ python3 scripts/bench_join_revision.py \
   --data /path/to/bench_polars --output build/prepared-comparison.json
 ```
 
-Opportunities 2–5 remain to be implemented and measured. Broader upstream
-query measurements will follow those changes; the table above does not
-claim the high-cardinality or duplicate-string count gaps are closed.
+Opportunities 2–5 remain separate changes; these measurements do not claim
+the high-cardinality or duplicate-string count gaps are closed.
+
+## Full-query regression check
+
+After adding compact duplicate groups, paired full-query runs compare the
+merged PR #297 engine with the final prepared implementation. Each host has
+300 timed samples: three alternating process rounds, one warmup and five
+checked repetitions, at 1M and 10M right rows with four workers. Every timed
+result passes the upstream runner’s complete-answer check. The table gives
+medians of per-round medians for the 10M cases; raw files also include 1M.
+Compiler, affinity, loading, and RSS caveats are the same as the upstream
+baseline. Input and candidate-source hashes match across hosts.
+
+| Host | Query | Layout | Baseline ms | Prepared ms | Speedup |
+|---|---|---|---:|---:|---:|
+| Linux | highcardinality | base | 41.555 | 37.757 | 1.10x |
+| Linux | highcardinality | shuffled | 736.270 | 186.874 | 3.94x |
+| Linux | highcardinality | wide | 740.627 | 185.339 | 4.00x |
+| Linux | duplicate_strings | base | 1749.861 | 1133.218 | 1.54x |
+| Linux | duplicate_strings | shuffled | 1830.178 | 1123.313 | 1.63x |
+| M1 | highcardinality | base | 33.573 | 21.269 | 1.58x |
+| M1 | highcardinality | shuffled | 403.373 | 133.077 | 3.03x |
+| M1 | highcardinality | wide | 404.680 | 133.608 | 3.03x |
+| M1 | duplicate_strings | base | 866.592 | 677.592 | 1.28x |
+| M1 | duplicate_strings | shuffled | 986.790 | 737.417 | 1.34x |
+
+The first prepared representation regressed shuffled duplicate strings by
+following long, scattered duplicate chains. A separate profile attributed
+56.93% self samples to probing, 12.17% to generic row equality and 10.32% to
+string access. Compact groups remove that regression while preserving row
+order. These profile percentages include loading and warmup; they are not
+query-only counters or speedup estimates.
+
+[Linux full-query samples](benchmarks/prepared-upstream-linux.json) and
+[M1 full-query samples](benchmarks/prepared-upstream-mac.json) preserve all
+measurements, binary/source hashes, input hashes and whole-process peak RSS.
+Reproduce using `scripts/bench_upstream_revision.py --baseline <runner>`
+`--candidate <runner> --data <PR297 CSV directory> --output <result.json>`.

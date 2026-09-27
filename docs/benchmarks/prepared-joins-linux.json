@@ -1,11 +1,11 @@
 {
   "status": "complete",
-  "utc": "2026-09-27T18:59:09Z",
+  "utc": "2026-09-27T19:41:16Z",
   "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.39",
   "machine": "x86_64",
   "candidate_sources": {
     "dataframe/frame.mojo": "1c7d0f746a999afff3f3c4d3fe706bff9e9da752b992fdbcab7a9305cf44d506",
-    "dataframe/join_hash.mojo": "f28dd729e569d4865758a9c4bcb7db909d408dfa3fda8a8e760415af45a14a1d",
+    "dataframe/join_hash.mojo": "046cbff5262a4f6a8d06f115a6b6c765737928272ea949e09dcdd4cd51f9d8d3",
     "dataframe/lazy.mojo": "13c21db8b3973f251a14e870bc7a4af52cbedb798ec5ec25a5b5268bb50df29c",
     "benchmarks/bench_join_matrix.mojo": "82f482863234b9389277524148504d773d8e8874d1d8ce39659f5c6bcffef508",
     "pixi.lock": "a73ec597f8965ecbed143adc462ce9e2ae5f68662a33733f9f0fa500357986fe"
@@ -19,7 +19,7 @@
     },
     "candidate": {
       "path": "/tmp/dataframe-prepared-review/build/bench_join_matrix_prepared",
-      "sha256": "9f2683a2454345c671f9df9629d3f218e88124127b0920124943277f5105f6b5"
+      "sha256": "94d4c21d00a154f18d387b636be341dd0f958ecb459b4f5acad36dba19263eb4"
     }
   },
   "inputs": {
@@ -35,7 +35,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 24692825,
+      "ns": 25368412,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -44,7 +44,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 25370221,
+      "ns": 22283697,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -53,7 +53,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 107848136,
+      "ns": 100612634,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -62,7 +62,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 52874419,
+      "ns": 65251995,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -71,7 +71,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 204688203,
+      "ns": 213377671,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -80,7 +80,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 47341110,
+      "ns": 59729163,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -89,7 +89,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 22547757,
+      "ns": 22861695,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -98,7 +98,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 28574737,
+      "ns": 32492811,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -107,7 +107,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 47131074,
+      "ns": 62463215,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -116,7 +116,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 94720509,
+      "ns": 104173429,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -125,7 +125,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 47056315,
+      "ns": 63577861,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -134,7 +134,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 207359518,
+      "ns": 215106505,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -143,7 +143,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 25414350,
+      "ns": 24926291,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -152,7 +152,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 25369251,
+      "ns": 22014493,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -161,7 +161,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 100613900,
+      "ns": 109838890,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -170,7 +170,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 47311040,
+      "ns": 60539215,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -179,7 +179,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 212060713,
+      "ns": 216808640,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -188,7 +188,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 49731402,
+      "ns": 61091064,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -197,7 +197,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 21975869,
+      "ns": 23060950,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -206,7 +206,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 28588456,
+      "ns": 31228547,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -215,7 +215,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 46562466,
+      "ns": 64766036,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -224,7 +224,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 100083990,
+      "ns": 119216820,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -233,7 +233,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 46093075,
+      "ns": 67926819,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -242,7 +242,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 216457203,
+      "ns": 214112688,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -251,7 +251,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 28382310,
+      "ns": 25751044,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -260,7 +260,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 31592115,
+      "ns": 22389995,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -269,7 +269,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 97303196,
+      "ns": 102202572,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -278,7 +278,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 59118753,
+      "ns": 60734622,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -287,7 +287,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 213946613,
+      "ns": 215286003,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -296,7 +296,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 48200862,
+      "ns": 59129196,
       "height": 1000000,
       "checksum": 49982574.699999996
     }
