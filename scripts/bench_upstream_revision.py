@@ -52,6 +52,7 @@ def main():
                 "dataframe/lazy.mojo",
                 "dataframe/string_column.mojo",
                 "dataframe/string_view.mojo",
+                "dataframe/partition.mojo",
                 "benchmarks/bench_upstream_joins.mojo",
                 "pixi.lock",
             ]

@@ -68,15 +68,35 @@ def _short_hash(word: UInt64, length: Int) -> UInt64:
 
 
 def _hash_bytes(bytes: Span[UInt8, ImmutAnyOrigin]) -> UInt64:
-    """Hash short strings by one packed word, longer strings by FNV-1a."""
+    """Hash short strings by one packed word, longer strings in eight-byte blocks.
+
+    Block mixing follows DuckDB 1.5.5 HashBytes (see THIRD_PARTY_NOTICES).
+    Keep our existing short-key encoding and final column-level `_mix`.
+    Every wide load lies entirely inside the supplied byte span.
+    """
     if len(bytes) <= 8:
         var word = UInt64(0)
         for k in range(len(bytes)):
             word |= UInt64(bytes[k]) << UInt64(k * 8)
         return _short_hash(word, len(bytes))
-    var h = UInt64(0xCBF29CE484222325)
-    for k in range(len(bytes)):
-        h = (h ^ UInt64(bytes[k])) * 0x100000001B3
+    var h = UInt64(0xE17A1465) ^ (UInt64(len(bytes)) * 0xC6A4A7935BD1E995)
+    var remainder = len(bytes) & 7
+    var end = len(bytes) - remainder
+    for k in range(0, end, 8):
+        var word = bitcast[DType.uint64, 1](
+            bytes.unsafe_ptr().unsafe_offset(k).unsafe_load[width=8]()
+        )
+        h = (h ^ word) * 0xD6E8FEB86659FD93
+    if remainder:
+        # Read the final eight bytes, then discard the bytes already mixed.
+        # len(bytes) > 8 here, so this never reads before or after the span.
+        var tail = bitcast[DType.uint64, 1](
+            bytes.unsafe_ptr()
+            .unsafe_offset(len(bytes) - 8)
+            .unsafe_load[width=8]()
+        )
+        tail >>= UInt64((8 - remainder) * 8)
+        h = (h ^ tail) * 0xD6E8FEB86659FD93
     return h
 
 
