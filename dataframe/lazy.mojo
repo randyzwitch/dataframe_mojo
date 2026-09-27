@@ -61,9 +61,11 @@ from .parquet import (
     parquet_row_group_statistics,
     read_parquet,
 )
+from .column import Column
 from .series import Series
 from .join_hash import (
     PreparedHashIndex,
+    count_inner_join,
     prepare_hash_index,
     prepare_progression_index,
     prefer_left_build,
@@ -494,6 +496,54 @@ struct LazyFrame(Copyable):
 
     # --- execution -----------------------------------------------------
 
+    def _try_join_count(
+        self, index: Int, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """Fuse simple counts over an in-memory inner join; keep other plans."""
+        ref terminal = self._nodes[index]
+        if terminal.kind != SELECT or len(terminal.exprs) == 0:
+            return None
+        ref join = self._nodes[terminal.left]
+        if join.kind != JOIN or join.text != "inner" or len(join.names) == 0:
+            return None
+        if (
+            self._nodes[join.left].kind != SCAN_FRAME
+            or self._nodes[join.right].kind != SCAN_FRAME
+        ):
+            return None
+        for expression in terminal.exprs:
+            ref nodes = expression._nodes
+            if (
+                len(nodes) != 2
+                or nodes[0].op != COL
+                or nodes[1].left != 0
+                or nodes[1].op not in [LEN, COUNT]
+            ):
+                return None
+            # Inner join keys are non-null in every matching row. Counts
+            # of nullable payloads need their own validity-aware reducer.
+            if nodes[1].op == COUNT and nodes[0].text not in join.names:
+                return None
+        # Run the ordinary metadata path first, preserving key, suffix,
+        # dtype, expression and duplicate output-name validation.
+        _ = self._execute(index, True, False, batch_size)
+        var left = self._execute(join.left, False, False, batch_size)
+        var right = self._execute(join.right, False, False, batch_size)
+        if min(left.height(), right.height()) > Int(Int32.MAX):
+            return None
+        var left_keys = List[Series]()
+        var right_keys = List[Series]()
+        for name in join.names:
+            if left[name].dtype().is_nested():
+                return None
+            left_keys.append(left[name].copy())
+            right_keys.append(right[name].copy())
+        var count = count_inner_join(left_keys, right_keys)
+        var columns = List[Series]()
+        for expression in terminal.exprs:
+            columns.append(Series(expression._name, Column[Int64]([count])))
+        return DataFrame(columns^)
+
     def _known_height(self, index: Int) -> Int:
         """Exact cheap cardinalities only; -1 means execution is required."""
         ref node = self._nodes[index]
@@ -720,6 +770,10 @@ struct LazyFrame(Copyable):
         streaming: Bool = False,
         batch_size: Int = 65536,
     ) raises -> DataFrame:
+        if not empty:
+            var counted = self._try_join_count(index, batch_size)
+            if counted:
+                return counted.take()
         if streaming and not empty:
             var streamed = self._stream_execute(index, batch_size)
             if streamed:
