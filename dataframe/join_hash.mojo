@@ -614,6 +614,33 @@ def _prepared_progression(
     return (True, base, stride, run if repeat == 0 else repeat)
 
 
+def prepare_progression_index(
+    right_keys: List[Series],
+) raises -> Optional[PreparedHashIndex]:
+    """Validate a compact progression without building a fallback hash table."""
+    if len(right_keys) != 1 or len(right_keys[0]) > Int(Int32.MAX):
+        return None
+    var right = List[Series]()
+    right.append(
+        right_keys[0]
+        .rechunk() if right_keys[0]
+        .is_chunked() else right_keys[0]
+        .copy()
+    )
+    var progression = _prepared_progression(right)
+    if not progression[0]:
+        return None
+    return PreparedHashIndex(
+        right^,
+        ArcPointer(List[_HashBucket]()),
+        8,
+        True,
+        progression[1],
+        progression[2],
+        progression[3],
+    )
+
+
 def prepare_hash_index(
     right_keys: List[Series], allow_progression: Bool = True
 ) raises -> PreparedHashIndex:
@@ -810,3 +837,17 @@ def prepared_hash_join_rows(
         for row in jobs[worker].right_rows:
             right_rows.append(row)
     return (left_rows^, right_rows^, identity)
+
+
+def prefer_left_build(left_rows: Int, right_rows: Int) -> Bool:
+    """Measured conservative crossover; see docs/join-performance-followups.md.
+
+    Small probe tables lose on M1 despite a large ratio. Require both a
+    512K-row probe table and a 32:1 imbalance before restoring logical order.
+    """
+    return (
+        right_rows >= 524288
+        and left_rows > 0
+        and left_rows <= Int(Int32.MAX)
+        and left_rows <= right_rows // 32
+    )

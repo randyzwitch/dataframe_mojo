@@ -1,0 +1,21 @@
+{
+  "status": "complete",
+  "utc": "2026-09-27T19:13:10Z",
+  "platform": "macOS-26.5.2-arm64-arm-64bit",
+  "machine": "arm64",
+  "threads": 4,
+  "compiler": "Mojo 1.2.0.dev2026092105 (e9569894)",
+  "runner_sha256": "6f74488d4363e537f3631cd3bddfe635dbf60b1bad0378a2aef8c1be6af18d81",
+  "command": [
+    "/private/tmp/dataframe-prepared-joins/build/bench_join_build_ratio"
+  ],
+  "samples": 360,
+  "source_sha256": {
+    "benchmarks/bench_join_build_ratio.mojo": "ac566510fbbac61d520955a88a67fc20e96758d211e1afa85506083494b267cc",
+    "dataframe/frame.mojo": "a88eedf42080fb6be09cb4ee10f582152f25cb948a8ddde3bf8b76edaddbf388",
+    "dataframe/join_hash.mojo": "077019905ad89af69dba8c37e9a82580f756f344feb45fa86ea3803f052f7197",
+    "dataframe/lazy.mojo": "dfcc11dc2a9d243374e929363d72a2cd47b48e78f472ca6d9f6a5c38259057c6",
+    "pixi.lock": "a73ec597f8965ecbed143adc462ce9e2ae5f68662a33733f9f0fa500357986fe"
+  },
+  "scope": "Paired row matching and order restoration; construction, warmup and complete ordered-pair checks outside timing. Unique/fourfold duplicate right keys; two left sizes; right input capped at 8,388,608 rows."
+}
