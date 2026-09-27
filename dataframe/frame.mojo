@@ -2025,8 +2025,17 @@ def _repeated_progression_rows(
 def _dense_right_int64_rows(
     left: Series, right: Series, include_unmatched: Bool = False
 ) raises -> Tuple[Bool, List[Int], List[Int]]:
-    """Direct matches for ascending Int64 progressions with fixed-size runs."""
-    if right.dtype() != DataType.INT64 or left.dtype() != DataType.INT64:
+    """Direct matches for ascending physical Int64 progressions.
+
+    Logical types must agree, including temporal units. Fixed-size runs
+    serve complete timestamp-by-sensor panels: every time step has one
+    reading per sensor, stored in timestamp order. Detection scans the build
+    keys and stops at the first null, descending key or irregular run/step.
+    """
+    if (
+        left.dtype() != right.dtype()
+        or right.dtype().physical() != DataType.INT64
+    ):
         return (False, List[Int](), List[Int]())
     if len(right) == 0:
         return (False, List[Int](), List[Int]())

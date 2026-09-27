@@ -324,5 +324,79 @@ def test_membership_cache_limit_falls_back_without_changing_rows() raises:
     assert_left_rows(left.join(right, "k", "anti"), [1, 3])
 
 
+def test_temporal_progressions_keep_logical_types_nulls_and_order() raises:
+    for dtype in [
+        DataType.DATE,
+        DataType.datetime("ms"),
+        DataType.datetime("us"),
+        DataType.datetime("ns"),
+        DataType.duration("us"),
+        DataType.TIME,
+    ]:
+        var steps: List[Int64] = [1, 60]
+        for step in steps:
+            var l = Series(
+                "k",
+                Column[Int64](
+                    [step, -step, 0, 3 * step, 0],
+                    [True, True, True, True, False],
+                ),
+            ).with_dtype(dtype)
+            var r = Series(
+                "k", Column[Int64]([-step, 0, step, 2 * step])
+            ).with_dtype(dtype)
+            # The grid may span physical chunks without changing detection.
+            r = Series._from_chunks([r.slice(0, 2), r.slice(2, 2)])
+            var pairs = _dense_right_int64_rows(l, r, True)
+            assert_true(pairs[0])
+            assert_equal(pairs[1], List[Int]([0, 1, 2, 3, 4]))
+            assert_equal(pairs[2], List[Int]([2, 0, 1, -1, -1]))
+            var left = DataFrame(
+                [l.copy(), Series("left_row", Column[Int64]([0, 1, 2, 3, 4]))]
+            )
+            var right = DataFrame(
+                [r.copy(), Series("right_row", Column[Int64]([0, 1, 2, 3]))]
+            )
+            var joined = left.join(right, "k", "left")
+            assert_rows(joined, [0, 1, 2, 3, 4], [2, 0, 1, -1, -1])
+            assert_true(joined.column("k").dtype() == dtype)
+            assert_rows(left.join(right, "k"), [0, 1, 2], [2, 0, 1])
+            var plain = Series("k", Column[Int64]([-step, 0, step, 2 * step]))
+            assert_true(not _dense_right_int64_rows(l, plain)[0])
+    var millis = Series("k", Column[Int64]([0, 60])).with_dtype(
+        DataType.datetime("ms")
+    )
+    var micros = Series("k", Column[Int64]([0, 60])).with_dtype(
+        DataType.datetime("us")
+    )
+    assert_true(not _dense_right_int64_rows(millis, micros)[0])
+
+
+def test_timestamp_sensor_panel_runs_and_irregular_fallback() raises:
+    var dtype = DataType.datetime("us")
+    var left = Series("k", Column[Int64]([120, 0, 60])).with_dtype(dtype)
+    var panel = Series("k", Column[Int64]([0, 0, 60, 60, 120, 120])).with_dtype(
+        dtype
+    )
+    var pairs = _dense_right_int64_rows(left, panel)
+    assert_true(pairs[0])
+    assert_equal(pairs[1], List[Int]([0, 0, 1, 1, 2, 2]))
+    assert_equal(pairs[2], List[Int]([4, 5, 0, 1, 2, 3]))
+    var irregular_keys: List[List[Int64]] = [
+        [0, 0, 60, 120, 120],
+        [0, 60, 121],
+        [60, 0, 120],
+    ]
+    for keys in irregular_keys:
+        var irregular = Series("k", Column[Int64](keys.copy())).with_dtype(
+            dtype
+        )
+        assert_true(not _dense_right_int64_rows(left, irregular)[0])
+    var nullable = Series(
+        "k", Column[Int64]([0, 60], [True, False])
+    ).with_dtype(dtype)
+    assert_true(not _dense_right_int64_rows(left, nullable)[0])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
