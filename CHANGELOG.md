@@ -16,6 +16,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Progression joins accept matching Date, Datetime, Duration and Time keys,
+  including temporal units, and retain measured equal-run panel support.
+
 - Join and sorted-chunk-gather dispatch uses measured working-set and job
   costs instead of the remaining fixed 2,000,000-row switches. Bounded join
   tables share an overflow-safe byte budget, with measured density and
@@ -23,6 +26,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
   avoid parallel paths that lose on those inputs. See [the measurements](docs/join-cutoffs.md).
 - Parquet reads decode one selected row group at a time through an Arrow C
   stream and preserve imported chunks, avoiding whole-file batch assembly.
+- Sort bucket dispatch uses measured domain, rank-buffer and worker-balance
+  limits, with calibration on Threadripper and Apple M1.
 
 - Semi and anti joins whose keys do not fit a direct-address range probe
   the right-row hash index for membership instead of encoding both inputs

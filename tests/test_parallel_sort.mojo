@@ -4,7 +4,13 @@ from std.testing import TestSuite, assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Series
 from dataframe.parallel import MIN_ROWS_PER_WORKER, worker_count
-from dataframe.series import _merge_runs, _merge_slice, _sort_range
+from dataframe.series import (
+    _merge_runs,
+    _merge_slice,
+    _sort_range,
+    sort_indices,
+    _low_card_first_sort,
+)
 
 comptime ROWS = 200_000
 
@@ -202,6 +208,30 @@ def test_merge_slices_reproduce_the_whole_merge() raises:
                         + String(i)
                     ),
                 )
+
+
+def test_bucket_boundaries_and_skew_preserve_exact_stable_order() raises:
+    set_threads(8)
+    var n = 65_536
+    for distinct in [64, 65, 256, 257]:
+        for words in [2, 3, 4]:
+            for skew in [False, True]:
+                var ranks = List[List[Int]]()
+                for word in range(words):
+                    var values = List[Int](capacity=n)
+                    for row in range(n):
+                        var value = (row * 31 // (word + 1)) % 7 - 3
+                        if word == 0:
+                            value = row % distinct - 128
+                            if skew and row % 4 == 0:
+                                value = -128
+                        values.append(value)
+                    ranks.append(values^)
+                var expected = _sort_range(ranks, 0, n)
+                assert_equal(sort_indices(ranks), expected)
+                if not skew and distinct <= 256:
+                    assert_equal(_low_card_first_sort(ranks, True), expected)
+    set_threads(32)
 
 
 def main() raises:

@@ -135,3 +135,6 @@ name as its fourth argument to run only that case.
 
 The [Parquet streaming report](parquet-streaming.md) records paired read-time
 and peak-RSS measurements, raw samples, and reproduction commands.
+
+Sort bucket calibration and reproducible sweeps are recorded in
+[sort-cutoffs.md](sort-cutoffs.md), including fast-path misses and Mac validation.
