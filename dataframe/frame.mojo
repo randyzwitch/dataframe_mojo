@@ -41,7 +41,7 @@ from .gather import (
     filter_float_chunks,
     filter_range_int64_chunks,
 )
-from .parallel import Job, partitions, run_jobs, worker_count
+from .parallel import Job, Pool, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
 from .join_hash import (
     direct_hash_join_rows,
@@ -814,6 +814,7 @@ struct DataFrame(Copyable, Sized, Writable):
         suffix: String = "_right",
         coalesce: Bool = True,
         prepared: Optional[PreparedHashIndex] = None,
+        range_filtered: Bool = False,
     ) raises -> Self:
         if how == "cross":
             raise Error(
@@ -926,6 +927,27 @@ struct DataFrame(Copyable, Sized, Writable):
                 names[name] = True
                 right_output.append(i)
                 right_names.append(name)
+        if (
+            not range_filtered
+            and not prepared
+            and (how == "inner" or how == "left")
+            and prefer_left_build(self.height(), right.height())
+        ):
+            for k in range(len(left_keys)):
+                var selected = _join_range_rows(
+                    self._columns[left_keys[k]], right._columns[right_keys[k]]
+                )
+                if selected:
+                    var filtered = right._filter_rows(selected.take())
+                    return self._join_impl(
+                        filtered,
+                        left_on=left_on,
+                        right_on=right_on,
+                        how=how,
+                        suffix=suffix,
+                        coalesce=coalesce,
+                        range_filtered=True,
+                    )
         if prepared:
             var sources = List[Series](capacity=len(left_keys))
             for k in left_keys:
@@ -1986,6 +2008,118 @@ def _as_int64(values: List[Int]) -> List[Int64]:
     for v in values:
         out.append(Int64(v))
     return out^
+
+
+struct _JoinRangeProbeJob(Job):
+    """Collect a stable right-row subsequence within proven left-key bounds."""
+
+    var key: Column[Int64]
+    var low: Int64
+    var high: Int64
+    var offset: Int
+    var first: Int
+    var last: Int
+    var rows: List[Int]
+
+    def __init__(
+        out self,
+        key: Column[Int64],
+        low: Int64,
+        high: Int64,
+        offset: Int,
+        first: Int,
+        last: Int,
+    ):
+        self.key = key.copy()
+        self.low = low
+        self.high = high
+        self.offset = offset
+        self.first = first
+        self.last = last
+        self.rows = List[Int]()
+
+    def run(mut self) raises:
+        var all_valid = len(self.key._bits[]) == 0
+        for i in range(self.first, self.last):
+            if all_valid or self.key._valid(i):
+                var value = self.key._get(i)
+                if value >= self.low and value <= self.high:
+                    self.rows.append(self.offset + i)
+
+
+def _join_range_rows(
+    left: Series,
+    right: Series,
+) raises -> Optional[List[Int]]:
+    """Conservative physical Int64 bounds; None means no worthwhile filter.
+
+    Bounds are exact. Sampling only chooses whether to attempt filtering;
+    every retained row is checked and the ordinary join resolves equality.
+    No subtraction is used, so signed extremes and temporal storage are safe.
+    """
+    if (
+        not left._data.isa[Column[Int64]]()
+        or not right._data.isa[Column[Int64]]()
+    ):
+        return None
+    var low = Int64.MAX
+    var high = Int64.MIN
+    var found = False
+    for part in left.chunks():
+        ref key = part._data[Column[Int64]]
+        for i in range(len(key)):
+            if key._valid(i):
+                var value = key._get(i)
+                low = min(low, value)
+                high = max(high, value)
+                found = True
+    if not found or len(right) == 0:
+        return List[Int]()
+    var samples = min(256, len(right))
+    var possible = 0
+    for i in range(samples):
+        var row = i * (len(right) // samples)
+        var part = right.copy()
+        if right.is_chunked():
+            var located = right._chunk_at(row)
+            part = located[0].copy()
+            row = located[1]
+        ref key = part._data[Column[Int64]]
+        if key._valid(row):
+            var value = key._get(row)
+            possible += Int(value >= low and value <= high)
+    if possible > samples // 4:
+        return None
+    var jobs = List[_JoinRangeProbeJob]()
+    var offset = 0
+    for part in right.chunks():
+        var workers = worker_count(len(part))
+        var bounds = partitions(len(part), workers, 1)
+        for worker in range(workers):
+            jobs.append(
+                _JoinRangeProbeJob(
+                    part._data[Column[Int64]],
+                    low,
+                    high,
+                    offset,
+                    bounds[worker],
+                    bounds[worker + 1],
+                )
+            )
+        offset += len(part)
+    var pool = Pool(min(worker_count(len(right)), len(jobs)))
+    pool.run(jobs)
+    pool.release()
+    var count = 0
+    for i in range(len(jobs)):
+        count += len(jobs[i].rows)
+    if count > len(right) // 4:
+        return None
+    var rows = List[Int](capacity=count)
+    for i in range(len(jobs)):
+        for row in jobs[i].rows:
+            rows.append(row)
+    return rows^
 
 
 def _smaller_build_join_rows(
