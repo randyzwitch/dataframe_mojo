@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build libdfparquet.so / .dylib: a minimal static Arrow C++ (Parquet reader,
-# bundled codecs, mimalloc) behind four C symbols and the system runtimes.
+# bundled codecs, mimalloc) behind a small C ABI and the system runtimes.
 #
 #   ARROW_VERSION=24.0.0 bash native/dfparquet/build.sh [OUT_DIR]
 #
@@ -25,6 +25,8 @@ fi
 # Thrift uses Boost.Locale headers, but the minimal Parquet reader does not
 # need its optional ICU backend. Auto-detection can find SDK ICU libraries
 # without usable headers on macOS, and adds an unbundled dependency.
+# Thrift also probes Java even with WITH_JAVA=OFF. Skip that unused probe:
+# an installed but unusable JVM can otherwise hang CMake at java -version.
 cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -33,7 +35,7 @@ cmake -S "$SRC" -B "$BUILD" -G Ninja \
   -DARROW_WITH_SNAPPY=ON -DARROW_WITH_ZSTD=ON -DARROW_WITH_LZ4=ON -DARROW_WITH_ZLIB=ON \
   -DARROW_WITH_BROTLI=OFF -DARROW_WITH_BZ2=OFF \
   -DARROW_DEPENDENCY_SOURCE=BUNDLED -DARROW_DEPENDENCY_USE_SHARED=OFF \
-  -DBOOST_LOCALE_ENABLE_ICU=OFF \
+  -DBOOST_LOCALE_ENABLE_ICU=OFF -DCMAKE_DISABLE_FIND_PACKAGE_Java=ON \
   -DARROW_MIMALLOC=ON -DARROW_JEMALLOC=OFF \
   -DARROW_FILESYSTEM=OFF -DARROW_S3=OFF -DARROW_GCS=OFF -DARROW_AZURE=OFF -DARROW_HDFS=OFF \
   -DARROW_JSON=OFF -DARROW_CSV=OFF -DARROW_IPC=OFF -DARROW_DATASET=OFF -DARROW_ACERO=OFF \

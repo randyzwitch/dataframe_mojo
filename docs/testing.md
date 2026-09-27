@@ -59,12 +59,17 @@ without a C++ toolchain. CI on Linux and Apple Silicon builds the library
 first (`pixi run -e native build-dfparquet`, cached by OS, architecture and
 the contents of `native/dfparquet/`). Then
 `pixi run bash scripts/check_parquet_library.sh` checks that the stripped
-library exports exactly the four C entry points and runs the compiled
+library exports exactly the declared C entry points and runs the compiled
 Parquet tests twice: once loading from `build/dfparquet`, and once from an
 isolated `$CONDA_PREFIX/lib` with no build-directory fallback. An explicit
 `DATAFRAME_PARQUET_LIBRARY` override is removed for both runs. Either run
 failing or reporting `skipped` fails CI, so type coercions, row-group pruning,
-and both library search paths are exercised on every push.
+chunk preservation, and both library search paths are exercised on every push.
+`tests/test_parquet_stream.mojo` uses a fake producer to count releases on
+EOF, schema/import errors and failure after a consumed batch. It requires no
+native library. `scripts/check_parquet_stream.py` uses PyArrow and the real
+shim to check projection, reordered/duplicate groups, empty selections,
+early close and a corrupted later row group.
 
 ## Benchmarks and the fast paths they hit
 
@@ -127,6 +132,9 @@ Polars produce their native dataframe results.
 
 For CPU profiling, build `benchmarks/bench_join_matrix.mojo` and pass a case
 name as its fourth argument to run only that case.
+
+The [Parquet streaming report](parquet-streaming.md) records paired read-time
+and peak-RSS measurements, raw samples, and reproduction commands.
 
 Sort bucket calibration and reproducible sweeps are recorded in
 [sort-cutoffs.md](sort-cutoffs.md), including fast-path misses and Mac validation.

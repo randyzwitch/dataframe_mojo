@@ -26,6 +26,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
   tables share an overflow-safe byte budget, with measured density and
   membership-cache limits; ordered CSR IDs and chunked progression probes
   avoid parallel paths that lose on those inputs. See [the measurements](docs/join-cutoffs.md).
+- Parquet reads decode one selected row group at a time through an Arrow C
+  stream and preserve imported chunks, avoiding whole-file batch assembly.
 - Sort bucket dispatch uses measured domain, rank-buffer and worker-balance
   limits, with calibration on Threadripper and Apple M1.
 
