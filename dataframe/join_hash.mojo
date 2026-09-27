@@ -82,9 +82,35 @@ struct _DuplicateEntry(Copyable):
 struct _HashBucket(Copyable):
     var slots: List[_HashSlot]
     var duplicates: List[_DuplicateEntry]
+    # Heavy duplication uses [count, row, row, ...] groups instead of
+    # pointer chains. Slot.next_position addresses the group's count.
+    var groups: List[Int32]
 
     def mask(self) -> Int:
         return len(self.slots) - 1
+
+
+def _append_duplicate_rows(
+    index: _HashBucket,
+    first: Int,
+    left_row: Int,
+    mut left_rows: List[Int],
+    mut right_rows: List[Int],
+):
+    if first < 0:
+        return
+    if len(index.groups):
+        var count = Int(index.groups[first])
+        for at in range(first + 1, first + 1 + count):
+            left_rows.append(left_row)
+            right_rows.append(Int(index.groups[at]))
+    else:
+        var next = first
+        while next >= 0:
+            ref entry = index.duplicates[next]
+            left_rows.append(left_row)
+            right_rows.append(Int(entry.row))
+            next = Int(entry.next_position)
 
 
 struct _HashBuildJob(Job):
@@ -116,7 +142,9 @@ struct _HashBuildJob(Job):
         self.skip_nulls = skip_nulls and not typed_int
         self.first = first
         self.last = last
-        self.result = _HashBucket(List[_HashSlot](), List[_DuplicateEntry]())
+        self.result = _HashBucket(
+            List[_HashSlot](), List[_DuplicateEntry](), List[Int32]()
+        )
 
     def run(mut self) raises:
         var size = 2
@@ -126,6 +154,7 @@ struct _HashBuildJob(Job):
             size *= 2
         var slots = List[_HashSlot](length=size, fill=_HashSlot(-1, -1, 0))
         var duplicates = List[_DuplicateEntry]()
+        var unique = 0
         for position in range(self.last - 1, self.first - 1, -1):
             var row = self.order[][position]
             if self.skip_nulls and not _row_valid(self.right_keys, row):
@@ -159,7 +188,42 @@ struct _HashBuildJob(Job):
                 slot = (slot + 1) & (size - 1)
             if slots[slot].row < 0:
                 slots[slot] = _HashSlot(Int32(row), -1, key)
-        self.result = _HashBucket(slots^, duplicates^)
+                unique += 1
+        var groups = List[Int32]()
+        if len(duplicates) > 4 * unique:
+            # Retain compact groups, as the previous dictionary/CSR stream
+            # path did. Long random duplicate chains waste cache bandwidth;
+            # a table sized to rows also wastes space when keys repeat.
+            var compact_size = 2
+            while compact_size * 2 < 3 * unique:
+                compact_size *= 2
+            var compact = List[_HashSlot](
+                length=compact_size, fill=_HashSlot(-1, -1, 0)
+            )
+            groups = List[Int32](capacity=unique + len(duplicates))
+            for old in slots:
+                if old.row < 0:
+                    continue
+                var first = -1
+                var next = Int(old.next_position)
+                if next >= 0:
+                    first = len(groups)
+                    groups.append(0)
+                    var count = 0
+                    while next >= 0:
+                        ref entry = duplicates[next]
+                        groups.append(entry.row)
+                        count += 1
+                        next = Int(entry.next_position)
+                    groups[first] = Int32(count)
+                var hash = self.hashes[][Int(old.row)]
+                var at = Int(hash & UInt64(compact_size - 1))
+                while compact[at].row >= 0:
+                    at = (at + 1) & (compact_size - 1)
+                compact[at] = _HashSlot(old.row, Int32(first), old.key)
+            slots = compact^
+            duplicates = List[_DuplicateEntry]()
+        self.result = _HashBucket(slots^, duplicates^, groups^)
 
     def into_result(deinit self) -> _HashBucket:
         return self.result^
@@ -283,12 +347,13 @@ struct _HashProbeJob(Job):
                     if key == slot.key:
                         self.left_rows.append(i)
                         self.right_rows.append(Int(slot.row))
-                        var next = Int(slot.next_position)
-                        while next >= 0:
-                            ref entry = index.duplicates[next]
-                            self.left_rows.append(i)
-                            self.right_rows.append(Int(entry.row))
-                            next = Int(entry.next_position)
+                        _append_duplicate_rows(
+                            index,
+                            Int(slot.next_position),
+                            i,
+                            self.left_rows,
+                            self.right_rows,
+                        )
                         matched = True
                         break
                     position = (position + 1) & index.mask()
@@ -366,12 +431,13 @@ struct _HashProbeJob(Job):
                     ):
                         self.left_rows.append(i)
                         self.right_rows.append(j)
-                        var next = Int(slot.next_position)
-                        while next >= 0:
-                            ref entry = index.duplicates[next]
-                            self.left_rows.append(i)
-                            self.right_rows.append(Int(entry.row))
-                            next = Int(entry.next_position)
+                        _append_duplicate_rows(
+                            index,
+                            Int(slot.next_position),
+                            i,
+                            self.left_rows,
+                            self.right_rows,
+                        )
                         matched = True
                         break
                     position = (position + 1) & index.mask()
@@ -412,12 +478,13 @@ struct _HashProbeJob(Job):
                         ):
                             self.left_rows.append(i)
                             self.right_rows.append(j)
-                            var next = Int(slot.next_position)
-                            while next >= 0:
-                                ref entry = index.duplicates[next]
-                                self.left_rows.append(i)
-                                self.right_rows.append(Int(entry.row))
-                                next = Int(entry.next_position)
+                            _append_duplicate_rows(
+                                index,
+                                Int(slot.next_position),
+                                i,
+                                self.left_rows,
+                                self.right_rows,
+                            )
                             matched = True
                             break
                         position = (position + 1) & index.mask()
@@ -439,12 +506,13 @@ struct _HashProbeJob(Job):
                 ):
                     self.left_rows.append(i)
                     self.right_rows.append(j)
-                    var next = Int(slot.next_position)
-                    while next >= 0:
-                        ref entry = index.duplicates[next]
-                        self.left_rows.append(i)
-                        self.right_rows.append(Int(entry.row))
-                        next = Int(entry.next_position)
+                    _append_duplicate_rows(
+                        index,
+                        Int(slot.next_position),
+                        i,
+                        self.left_rows,
+                        self.right_rows,
+                    )
                     matched = True
                     break
                 position = (position + 1) & index.mask()
