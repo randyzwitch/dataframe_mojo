@@ -23,9 +23,12 @@ performance approaching DuckDB on equivalent workloads and hardware.
 
 ## Published optimizations
 
-No PR from this effort has been opened yet.
+1. [PR #305](https://github.com/randyzwitch/dataframe_mojo/pull/305): shared
+   eight-byte block hashing for long strings. Open, awaiting CI and review.
+   Linux full-result joins improve 1.05–1.18x on the measured longer-key layouts;
+   this is not a whole-engine parity claim.
 
-## Current candidate
+## First optimization
 
 Shared long-string hashing using DuckDB's eight-byte block mixer, with paired
 Linux and Apple M1 measurements and materialized-join checks. See
