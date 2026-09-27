@@ -446,5 +446,57 @@ def test_prepared_progressions_runs_extremes_and_invalid_shapes() raises:
     assert_true(not prepare_hash_index([descending.copy()]).progression)
 
 
+def test_prepared_null_build_rows_are_never_indexed() raises:
+    var text = List[String]()
+    var valid = List[Bool]()
+    var ids = List[Int64]()
+    for i in range(4096):
+        text.append("same")
+        valid.append(i == 31 or i == 127)
+        ids.append(1)
+    var right = Series("s", Column[String](text^, valid))
+    for kind in [0, 1, 2]:
+        var compound = kind != 0
+        var sources = List[Series]()
+        sources.append(right.copy())
+        if compound:
+            var numeric_valid = valid.copy()
+            numeric_valid[127] = False
+            if kind == 1:
+                sources.append(
+                    Series("n", Column[Int64](ids.copy(), numeric_valid^))
+                )
+            else:
+                sources.append(
+                    Series(
+                        "n",
+                        Column[Bool](
+                            List[Bool](length=4096, fill=True), numeric_valid^
+                        ),
+                    )
+                )
+        var index = prepare_hash_index(sources)
+        var stored = 0
+        for bucket in index.indexes[]:
+            for slot in bucket.slots:
+                if slot.row >= 0:
+                    stored += 1
+            stored += len(bucket.duplicates)
+        assert_equal(stored, 1 if compound else 2)
+        var probe = List[Series]()
+        probe.append(Series("s", Column[String](["same", "none"])))
+        if kind == 1:
+            probe.append(Series("n", Column[Int64]([1, 1])))
+        elif kind == 2:
+            probe.append(Series("n", Column[Bool]([True, True])))
+        var rows = prepared_hash_join_rows(probe, index, True)
+        if compound:
+            assert_equal(rows[0], [0, 1])
+            assert_equal(rows[1], [31, -1])
+        else:
+            assert_equal(rows[0], [0, 0, 1])
+            assert_equal(rows[1], [31, 127, -1])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

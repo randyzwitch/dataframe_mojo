@@ -1,11 +1,11 @@
 {
   "status": "complete",
-  "utc": "2026-09-27T18:26:41Z",
+  "utc": "2026-09-27T19:01:16Z",
   "platform": "macOS-26.5.2-arm64-arm-64bit",
   "machine": "arm64",
   "candidate_sources": {
     "dataframe/frame.mojo": "1c7d0f746a999afff3f3c4d3fe706bff9e9da752b992fdbcab7a9305cf44d506",
-    "dataframe/join_hash.mojo": "40419c17050daaccc00e2979ff84bead4296a5d835dbcb5455e39b12fbc98a82",
+    "dataframe/join_hash.mojo": "f28dd729e569d4865758a9c4bcb7db909d408dfa3fda8a8e760415af45a14a1d",
     "dataframe/lazy.mojo": "13c21db8b3973f251a14e870bc7a4af52cbedb798ec5ec25a5b5268bb50df29c",
     "benchmarks/bench_join_matrix.mojo": "82f482863234b9389277524148504d773d8e8874d1d8ce39659f5c6bcffef508",
     "pixi.lock": "a73ec597f8965ecbed143adc462ce9e2ae5f68662a33733f9f0fa500357986fe"
@@ -18,8 +18,8 @@
       "sha256": "1d8decf066b33322fc8d08803602ea53edf4e72e938436156b613c9b7cc5cbd8"
     },
     "candidate": {
-      "path": "/private/tmp/dataframe-prepared-joins/build/bench_join_matrix_prepared",
-      "sha256": "3d5f161764813dbe7679ec308c7913955c770e5a2f456071765a53884324301e"
+      "path": "/private/tmp/dataframe-prepared-review/build/bench_join_matrix_prepared",
+      "sha256": "264f113a0afb0c58cbea5fcfb9941c449aab148e2bf86a0525627e5f2ced7c7b"
     }
   },
   "inputs": {
@@ -35,7 +35,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 13793000,
+      "ns": 13654000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -44,7 +44,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 9603000,
+      "ns": 8960000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -53,7 +53,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 94759000,
+      "ns": 94947000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -62,7 +62,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 19180000,
+      "ns": 19762000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -71,7 +71,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 169776000,
+      "ns": 171766000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -80,7 +80,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 19362000,
+      "ns": 19353000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -89,7 +89,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 9030000,
+      "ns": 8804000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -98,7 +98,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 13601000,
+      "ns": 13690000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -107,7 +107,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 19972000,
+      "ns": 19060000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -116,7 +116,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 95210000,
+      "ns": 94721000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -125,7 +125,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 19245000,
+      "ns": 19519000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -134,7 +134,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 169280000,
+      "ns": 170164000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -143,7 +143,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 13838000,
+      "ns": 13821000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -152,7 +152,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 9099000,
+      "ns": 8837000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -161,7 +161,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 96024000,
+      "ns": 94808000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -170,7 +170,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 19334000,
+      "ns": 19487000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -179,7 +179,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 171471000,
+      "ns": 169712000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -188,7 +188,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 19268000,
+      "ns": 19510000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -197,7 +197,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 8925000,
+      "ns": 8765000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -206,7 +206,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 13648000,
+      "ns": 13594000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -215,7 +215,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 19240000,
+      "ns": 19785000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -224,7 +224,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 95238000,
+      "ns": 94665000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -233,7 +233,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 19420000,
+      "ns": 19795000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -242,7 +242,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 169111000,
+      "ns": 170932000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -251,7 +251,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 13509000,
+      "ns": 13775000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -260,7 +260,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "base",
-      "ns": 9117000,
+      "ns": 8796000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -269,7 +269,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 95018000,
+      "ns": 95112000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -278,7 +278,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "shuffled",
-      "ns": 19402000,
+      "ns": 19357000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -287,7 +287,7 @@
       "revision": "baseline",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 170014000,
+      "ns": 173867000,
       "height": 1000000,
       "checksum": 49982574.699999996
     },
@@ -296,7 +296,7 @@
       "revision": "candidate",
       "case": "lazy_narrow",
       "layout": "wide",
-      "ns": 19336000,
+      "ns": 19647000,
       "height": 1000000,
       "checksum": 49982574.699999996
     }

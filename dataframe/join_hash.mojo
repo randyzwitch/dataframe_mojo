@@ -41,6 +41,23 @@ def _key_equal(left: Series, right: Series, i: Int, j: Int) -> Bool:
     return a._valid(i) and b._valid(j) and a._get(i) == b._get(j)
 
 
+def _row_valid(keys: List[Series], row: Int) -> Bool:
+    """Null in any join component makes the build row unmatchable."""
+    for key in keys:
+        var valid = True
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if key._data.isa[Column[Scalar[D]]]():
+                valid = key._data[Column[Scalar[D]]]._valid(row)
+        if key._data.isa[BoolColumn]():
+            valid = key._data[BoolColumn]._valid(row)
+        elif key._data.isa[StringColumn]():
+            valid = key._data[StringColumn]._valid(row)
+        if not valid:
+            return False
+    return True
+
+
 def _row_equal(left: List[Series], right: List[Series], i: Int, j: Int) -> Bool:
     for k in range(len(left)):
         if not _key_equal(left[k], right[k], i, j):
@@ -77,6 +94,7 @@ struct _HashBuildJob(Job):
     var order: ArcPointer[List[Int]]
     var right_keys: List[Series]
     var typed_int: Bool
+    var skip_nulls: Bool
     var first: Int
     var last: Int
     var result: _HashBucket
@@ -89,11 +107,13 @@ struct _HashBuildJob(Job):
         typed_int: Bool,
         first: Int,
         last: Int,
+        skip_nulls: Bool,
     ):
         self.hashes = hashes.copy()
         self.order = order.copy()
         self.right_keys = right_keys.copy()
         self.typed_int = typed_int
+        self.skip_nulls = skip_nulls and not typed_int
         self.first = first
         self.last = last
         self.result = _HashBucket(List[_HashSlot](), List[_DuplicateEntry]())
@@ -108,6 +128,8 @@ struct _HashBuildJob(Job):
         var duplicates = List[_DuplicateEntry]()
         for position in range(self.last - 1, self.first - 1, -1):
             var row = self.order[][position]
+            if self.skip_nulls and not _row_valid(self.right_keys, row):
+                continue
             var hash = self.hashes[][row]
             var key = hash
             if self.typed_int:
@@ -550,6 +572,9 @@ def prepare_hash_index(
     var shared_right_hashes = ArcPointer(right_hashes.hashes.copy())
     var shared_order = ArcPointer(right_parts.order.copy())
     var typed_int = len(right) == 1 and right[0]._data.isa[Column[Int64]]()
+    var skip_nulls = False
+    for key in right:
+        skip_nulls = skip_nulls or key.null_count() > 0
     var builders = List[_HashBuildJob](capacity=right_parts.buckets())
     for bucket in range(right_parts.buckets()):
         builders.append(
@@ -560,6 +585,7 @@ def prepare_hash_index(
                 typed_int,
                 right_parts.bounds[bucket],
                 right_parts.bounds[bucket + 1],
+                skip_nulls,
             )
         )
     run_jobs(builders)
