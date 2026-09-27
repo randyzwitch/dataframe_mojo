@@ -2,3 +2,4 @@ _dfq_read_parquet
 _dfq_row_group_statistics
 _dfq_free
 _dfq_arrow_version
+_dfq_read_parquet_stream

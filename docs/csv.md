@@ -8,6 +8,20 @@ reader and no Python, Arrow, Polars, Rayon or jemalloc runtime dependency.
 
 ## Schema and records
 
+For a concise explicit schema, pass ordered `(name, dtype)` pairs:
+
+```mojo
+read_csv("sales.csv", schema=[("region", DataType.STRING), ("amount", DataType.FLOAT64)])
+```
+
+This is equivalent to `CsvSchema([CsvField("region", DataType.STRING),
+CsvField("amount", DataType.FLOAT64)])`. Each field defaults to
+`nullable=True` and the standard ISO temporal format. Parameterized types,
+such as `DataType.datetime("ms")`, work wherever the explicit schema supports
+them. Use `CsvField` when a field needs a custom temporal format or metadata.
+All reader options and positional name/type validation are shared with the
+explicit schema API. An empty or duplicate-name shorthand schema raises.
+
 `CsvSchema` is ordered, non-empty and has unique names. Construct fields with
 `CsvField.int64`, `.float64`, `.bool`, `.string`, `.date`, `.datetime`, `.time`,
 or `CsvField(name, dtype)` for any supported numeric width. Explicit schema

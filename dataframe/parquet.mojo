@@ -2,7 +2,7 @@
 
 `read_parquet` is the public entry point. It is served today by
 `_read_with_dfparquet`, which loads `libdfparquet` (Arrow C++'s Parquet
-reader built with nothing else, behind four C symbols; see
+reader built with nothing else, behind a small C ABI; see
 `native/dfparquet/`) and brings the result in through the Arrow C Data
 Interface importer this package already has. The backend's whole contract
 is "a path, column names and row groups in, a DataFrame out" plus a
@@ -13,8 +13,13 @@ Column types the importer cannot hold are coerced by the reader: dictionary
 columns are decoded to their value type, float16 widens to float32, string
 views become strings, and a timestamp with a time zone loses the zone. Its
 values are UTC instants, so the result is the same moment as a naive UTC
-datetime; the zone name is not kept. Decimal, binary and nested columns
-still raise.
+datetime; the zone name is not kept. Lists and structs map recursively;
+decimal and binary columns still raise.
+
+The backend exports an Arrow C stream with one batch per selected row group.
+Each batch is imported and released before decoding the next, and the result
+retains those buffers as Series chunks. Eager reading still stores the whole
+output; temporary Arrow buffers are bounded by a row group instead of a file.
 
 Row-group pruning: `parquet_row_group_statistics` returns one row per row
 group with each column's minimum, maximum and null count from the footer,
@@ -51,6 +56,7 @@ from .arrow import (
     _c_string,
     _read_c_string,
     import_arrow,
+    _release_imported,
 )
 from .expr import (
     AND,
@@ -68,20 +74,58 @@ from .expr import (
     Node,
     col,
 )
-from .frame import DataFrame
+from .frame import DataFrame, concat
 
 comptime PARQUET_LIBRARY_ENV = "DATAFRAME_PARQUET_LIBRARY"
 
 # dlopen mode: resolve every symbol now, so a broken library fails at open.
 comptime _RTLD_NOW = Int32(2)
 
-# int dfq_read_parquet(const char *path, int use_threads,
-#     const char **columns, int n_columns, const int *row_groups,
-#     int n_row_groups, struct ArrowArray *out_array,
-#     struct ArrowSchema *out_schema, char **error_out)
-comptime _ReadFn = def(
-    Int, Int32, Int, Int32, Int, Int32, Int, Int, Int
-) thin abi("C") -> Int32
+# int dfq_read_parquet_stream(path, threads, columns, n_columns,
+#     row_groups, n_row_groups, out_stream, error_out)
+comptime _ReadFn = def(Int, Int32, Int, Int32, Int, Int32, Int, Int) thin abi(
+    "C"
+) -> Int32
+comptime _StreamGet = def(Int, Int) thin abi("C") -> Int32
+comptime _StreamError = def(Int) thin abi("C") -> Int
+comptime _StreamRelease = def(Int) thin abi("C") -> None
+
+
+struct _ArrowArrayStream(Movable):
+    """Arrow C Stream ABI; callbacks and producer state remain stream-owned."""
+
+    var get_schema: Int
+    var get_next: Int
+    var get_last_error: Int
+    var release: Int
+    var private_data: Int
+
+    def __init__(out self):
+        self.get_schema = 0
+        self.get_next = 0
+        self.get_last_error = 0
+        self.release = 0
+        self.private_data = 0
+
+
+def _release_stream(mut stream: _ArrowArrayStream):
+    if stream.release != 0:
+        var callback = stream.release
+        Pointer(to=callback).unsafe_bitcast[_StreamRelease]()[](
+            Int(Pointer(to=stream))
+        )
+
+
+def _stream_error(mut stream: _ArrowArrayStream) raises:
+    var callback = stream.get_last_error
+    var message = _read_c_string(
+        Pointer(to=callback).unsafe_bitcast[_StreamError]()[](
+            Int(Pointer(to=stream))
+        )
+    )
+    raise Error("read_parquet stream: " + message)
+
+
 # int dfq_row_group_statistics(const char *path, struct ArrowArray *out,
 #     struct ArrowSchema *out_schema, char **error_out)
 comptime _StatisticsFn = def(Int, Int, Int, Int) thin abi("C") -> Int32
@@ -101,14 +145,19 @@ def read_parquet(
     """Read a local Parquet file into a DataFrame.
 
     `columns` selects fields by name, in the order given; the default reads
-    every column. `row_groups` selects row groups by index, in file order;
+    every column. `row_groups` selects row groups by index, in the requested order;
     the default reads them all, and an empty list reads none and returns the
     schema with no rows. Column types map as the Arrow importer maps them:
     integer and float widths are kept, `date32` becomes Date, timestamps
     keep their unit (a time zone is dropped; values stay UTC instants), and
     strings, booleans and nulls carry over. Dictionary columns arrive as
-    plain strings and float16 as float32. Nested columns, decimals and
-    binary are not supported yet.
+    plain strings and float16 as float32. Lists and structs map recursively;
+    decimals and binary are not supported yet.
+
+    Selected row groups are decoded one at a time and kept as column chunks.
+    The eager result holds all selected rows, while temporary decode buffers
+    are bounded by one row group. Rebuild libdfparquet if an older library
+    reports that the stream entry point is missing.
 
     Raises when the file cannot be read, a requested column or row group is
     missing, or the reader library is not installed (see the module notes
@@ -311,7 +360,7 @@ struct _Library(Copyable, Movable):
                 + ": "
                 + _read_c_string(external_call["dlerror", Int]())
             )
-        self.read = Self._symbol(handle, "dfq_read_parquet")
+        self.read = Self._symbol(handle, "dfq_read_parquet_stream")
         self.statistics = Self._symbol(handle, "dfq_row_group_statistics")
         self.free = Self._symbol(handle, "dfq_free")
         self.version = Self._symbol(handle, "dfq_arrow_version")
@@ -357,12 +406,10 @@ def _read_with_dfparquet(
     group_count: Int,
     use_threads: Bool,
 ) raises -> DataFrame:
-    """The FFI backend: one call into libdfparquet, then the Arrow import.
+    """Consume one row group at a time and retain imported buffers as chunks.
 
-    `dfq_read_parquet` reads the selection into one Arrow record batch and
-    exports it through the C Data Interface. `import_arrow` copies the
-    buffers into our own and calls the exported release, so no foreign
-    memory outlives this function.
+    Foreign memory is released after each import. The eager result still
+    owns the entire output, but Arrow decoding buffers are row-group bounded.
     """
     var library = _load_library()
     var c_path = _c_string(path)
@@ -372,8 +419,7 @@ def _read_with_dfparquet(
     var column_pointers = List[Int](capacity=len(c_columns))
     for i in range(len(c_columns)):
         column_pointers.append(Int(c_columns[i].unsafe_ptr()))
-    var array = ArrowArray()
-    var schema = ArrowSchema()
+    var stream = _ArrowArrayStream()
     var error = 0
     var status = _call_reader(
         library,
@@ -383,13 +429,62 @@ def _read_with_dfparquet(
         row_groups,
         group_count,
         use_threads,
-        array,
-        schema,
+        stream,
         error,
     )
     if status != 0:
+        _release_stream(stream)
         _raise_backend_error(library, error, "read_parquet")
-    return import_arrow(array, schema)
+    return _collect_stream(stream)
+
+
+# Borrow output structs across foreign calls: raw integer addresses alone do
+# not communicate their mutation/lifetime to Mojo's optimizer.
+def _stream_next(mut stream: _ArrowArrayStream, mut array: ArrowArray) -> Int32:
+    var callback = stream.get_next
+    return Pointer(to=callback).unsafe_bitcast[_StreamGet]()[](
+        Int(Pointer(to=stream)), Int(Pointer(to=array))
+    )
+
+
+def _stream_schema(
+    mut stream: _ArrowArrayStream, mut schema: ArrowSchema
+) -> Int32:
+    var callback = stream.get_schema
+    return Pointer(to=callback).unsafe_bitcast[_StreamGet]()[](
+        Int(Pointer(to=stream)), Int(Pointer(to=schema))
+    )
+
+
+def _collect_stream(mut stream: _ArrowArrayStream) raises -> DataFrame:
+    """Import arrays and release the stream on EOF and every error path."""
+    var frames = List[DataFrame]()
+    try:
+        while True:
+            var array = ArrowArray()
+            var schema = ArrowSchema()
+            try:
+                var status = _stream_next(stream, array)
+                if status != 0:
+                    _stream_error(stream)
+                if array.release == 0:
+                    break
+                # Each schema export has its own release. import_arrow consumes
+                # both exports, including when a column type is unsupported.
+                status = _stream_schema(stream, schema)
+                if status != 0:
+                    _stream_error(stream)
+                frames.append(import_arrow(array, schema))
+            except e:
+                _release_imported(array, schema)
+                raise e^
+        # The backend emits a schema-bearing empty batch for empty inputs.
+        var result = concat(frames)
+        _release_stream(stream)
+        return result^
+    except e:
+        _release_stream(stream)
+        raise e^
 
 
 def _statistics_with_dfparquet(path: String) raises -> DataFrame:
@@ -418,8 +513,7 @@ def _call_reader(
     row_groups: List[Int32],
     group_count: Int,
     use_threads: Bool,
-    mut array: ArrowArray,
-    mut schema: ArrowSchema,
+    mut stream: _ArrowArrayStream,
     mut error: Int,
 ) raises -> Int32:
     if len(c_columns) != len(column_pointers):
@@ -437,8 +531,7 @@ def _call_reader(
         Int32(len(column_pointers)),
         groups_address,
         Int32(group_count),
-        Int(Pointer(to=array)),
-        Int(Pointer(to=schema)),
+        Int(Pointer(to=stream)),
         Int(Pointer(to=error)),
     )
 

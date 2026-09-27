@@ -7,6 +7,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- `read_csv` accepts ordered `(name, dtype)` pairs as a concise explicit schema.
+
 - `read_parquet(path, columns=, row_groups=)` and the lazy `scan_parquet(path)`,
   which pushes projection into the reader and decodes only the row groups
   whose footer statistics can hold a match for a filter with constant
@@ -27,6 +29,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
   tables share an overflow-safe byte budget, with measured density and
   membership-cache limits; ordered CSR IDs and chunked progression probes
   avoid parallel paths that lose on those inputs. See [the measurements](docs/join-cutoffs.md).
+- Parquet reads decode one selected row group at a time through an Arrow C
+  stream and preserve imported chunks, avoiding whole-file batch assembly.
 - Sort bucket dispatch uses measured domain, rank-buffer and worker-balance
   limits, with calibration on Threadripper and Apple M1.
 

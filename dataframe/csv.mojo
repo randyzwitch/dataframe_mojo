@@ -1,6 +1,6 @@
 """CSV reading and writing for native Mojo dataframes.
 
-Both public read_csv overloads use the same Polars-derived pipeline.
+All public read_csv overloads use the same Polars-derived pipeline.
 """
 from std.collections import Dict
 from .csv_types import (
@@ -49,6 +49,50 @@ def read_csv(
     return read_csv_explicit(
         path,
         schema,
+        has_header=has_header,
+        separator=separator,
+        quote_char=quote_char,
+        comment_prefix=comment_prefix,
+        skip_rows=skip_rows,
+        n_rows=n_rows,
+        columns=columns,
+        null_values=null_values,
+        ignore_errors=ignore_errors,
+        truncate_ragged_lines=truncate_ragged_lines,
+        encoding=encoding,
+        buffer_size=buffer_size,
+    )
+
+
+def read_csv(
+    path: String,
+    schema: List[Tuple[String, DataType]],
+    *,
+    has_header: Bool = True,
+    separator: String = ",",
+    quote_char: String = '"',
+    comment_prefix: String = "",
+    skip_rows: Int = 0,
+    n_rows: Int = -1,
+    columns: List[String] = List[String](),
+    null_values: List[String] = List[String](),
+    ignore_errors: Bool = False,
+    truncate_ragged_lines: Bool = False,
+    encoding: String = "utf8",
+    buffer_size: Int = 65536,
+) raises -> DataFrame:
+    """Read CSV with ordered (name, dtype) pairs as a concise schema.
+
+    Fields default to nullable=True and ISO temporal parsing, exactly as
+    CsvField(name, dtype). Use CsvSchema for per-field configuration.
+    """
+    var fields = List[CsvField](capacity=len(schema))
+    for field in schema:
+        fields.append(CsvField(field[0], field[1]))
+    var explicit = CsvSchema(fields^)
+    return read_csv(
+        path,
+        explicit,
         has_header=has_header,
         separator=separator,
         quote_char=quote_char,
