@@ -86,20 +86,22 @@ process profile as join-only. Counter access was verified on the reference
 Linux host. Full Xcode was installed on the Mac during this work; Instruments recording
 was subsequently verified.
 
-## Initial CPU profiles
+## Linux CPU profiles after build completion
 
 [Compact profile evidence](benchmarks/join-profile-linux.json) records sampled
 self CPU percentages on the merged engine, four workers and 1M wide-key rows.
 The optimized runner used `-O3 -g1`; `perf` sampled user cycles at 199 Hz with
-DWARF call stacks. The Linux host had a concurrent unrelated Bazel/Clang build.
-These are diagnostic profiles, **not accepted throughput measurements**, and
-percentages can change with an uncontended host. Loading and warmup remain in
-the profile; 20 lazy/40 semi repetitions increase the query contribution.
+DWARF call stacks. These recordings were repeated after the unrelated
+Bazel/Clang build completed, with no compiler activity detected before or
+after recording. Affinity was not pinned; normal desktop background work
+remains possible. Loading and warmup remain in the profile; 20 lazy/40 semi
+repetitions increase the query contribution. These summaries supersede the
+earlier contended-host diagnostic recordings.
 Raw `.data` captures remain in `build/profiles` rather than the repository.
 
-For `lazy_narrow`, `_group_rows` (19.38%), `_joint_key_ids` (19.34%) and
-`column_codes` (16.69%) dominate. Swiss-table resize and dictionary growth
-contribute another 10.78%. Call stacks show `_StreamJob.run -> DataFrame.join`.
+For `lazy_narrow`, `_group_rows` (7.07%), `_joint_key_ids` (14.11%) and
+`column_codes` (15.41%) are major costs. Swiss-table resize (17.36%) and
+dictionary growth (9.02%) together contribute another 26.38%. Call stacks show `_StreamJob.run -> DataFrame.join`.
 Source inspection confirms that every batch calls the complete join operation
 with the retained right frame, rather than a retained prepared join index.
 A 65,536-row probe batch also has only one worker according to the shared
@@ -107,8 +109,8 @@ rows/worker floor, so it misses the eager high-cardinality parallel hash route.
 The profiling hypothesis is **repeated preparation plus an unsuitable fallback
 for batch-sized probes**, not a Mojo compiler limitation.
 
-The separate `semi_unmatched` profile attributes 70.11% to `_HashProbeJob` and
-11.76% to `_HashBuildJob`. Visible gather/take entries contribute about 6%.
+The separate `semi_unmatched` profile attributes 41.05% to `_HashProbeJob` and
+6.94% to `_HashBuildJob`. Visible gather/take entries contribute about 11.5%.
 This does not support assuming output gathering is the dominant remaining
 cost on this measured case. Inspect probe memory access, dispatch, bounds
 checks and table layout before choosing an implementation change.
@@ -166,8 +168,66 @@ The high-cardinality Mojo times barely change, while duplicate-string count
 gets slower with eight workers. The M1 has four performance and four
 efficiency cores: eight configured workers is not eight equivalent cores.
 This supports prioritizing less work and better planning over higher worker
-counts. No Linux speed comparison is published while the host is compiling.
+counts. The Linux follow-up below was run after the unrelated build finished.
 
+
+## Linux Threadripper baseline
+
+AMD Threadripper 3970X (32 physical / 64 logical CPUs), with the same Mojo,
+Polars and DuckDB versions as the Mac. The owner confirmed the unrelated
+Bazel build had finished; no compiler activity was detected during these runs.
+The Linux frequency governor was `schedutil`; CPU affinity was not pinned. Each worker count uses three rotated rounds and
+five measured repetitions after one warmup. The tables show medians of round
+medians in milliseconds, for 10M right rows. Raw files also include 1M rows.
+
+Source/lockfile hashes and every input-file hash match the Mac baseline.
+The benchmark commit is `5f4bc46`; production engine code remains `c8c6498`.
+
+### 4 workers
+
+[Raw samples](benchmarks/upstream-joins-linux-4.csv) / [provenance](benchmarks/upstream-joins-linux-4.json).
+
+| Query | Layout | Mojo ms | Polars ms | DuckDB ms | Mojo / Polars | Mojo / DuckDB |
+|---|---|---:|---:|---:|---:|---:|
+| duplicate_strings | base | 1592.95 | 1271.93 | 88.96 | 1.25 | 17.91 |
+| duplicate_strings | shuffled | 1716.18 | 1851.36 | 110.52 | 0.93 | 15.53 |
+| highcardinality | base | 40.34 | 10.79 | 1.55 | 3.74 | 26.08 |
+| highcardinality | shuffled | 723.45 | 10.60 | 6.53 | 68.24 | 110.74 |
+| highcardinality | wide | 719.86 | 10.41 | 15.29 | 69.15 | 47.08 |
+
+### 8 workers
+
+[Raw samples](benchmarks/upstream-joins-linux-8.csv) / [provenance](benchmarks/upstream-joins-linux-8.json).
+
+| Query | Layout | Mojo ms | Polars ms | DuckDB ms | Mojo / Polars | Mojo / DuckDB |
+|---|---|---:|---:|---:|---:|---:|
+| duplicate_strings | base | 1546.02 | 1349.40 | 51.81 | 1.15 | 29.84 |
+| duplicate_strings | shuffled | 1623.89 | 1813.33 | 65.26 | 0.90 | 24.89 |
+| highcardinality | base | 42.00 | 6.25 | 1.68 | 6.72 | 25.05 |
+| highcardinality | shuffled | 727.87 | 6.48 | 4.52 | 112.40 | 161.03 |
+| highcardinality | wide | 736.47 | 6.45 | 9.64 | 114.26 | 76.38 |
+
+### 32 workers
+
+[Raw samples](benchmarks/upstream-joins-linux-32.csv) / [provenance](benchmarks/upstream-joins-linux-32.json).
+
+| Query | Layout | Mojo ms | Polars ms | DuckDB ms | Mojo / Polars | Mojo / DuckDB |
+|---|---|---:|---:|---:|---:|---:|
+| duplicate_strings | base | 1484.76 | 1479.09 | 35.92 | 1.00 | 41.34 |
+| duplicate_strings | shuffled | 1631.13 | 2296.80 | 39.04 | 0.71 | 41.78 |
+| highcardinality | base | 45.15 | 7.16 | 2.08 | 6.31 | 21.71 |
+| highcardinality | shuffled | 981.15 | 7.05 | 4.66 | 139.26 | 210.63 |
+| highcardinality | wide | 967.25 | 7.19 | 7.56 | 134.56 | 127.92 |
+
+
+The additional cores do not close the Mojo high-cardinality gap: shuffled
+10M-row time rises from 723 ms at four workers to 981 ms at 32. For the
+ordered duplicate-string count, Mojo improves only from 1,593 to 1,485 ms,
+while DuckDB improves from 89 to 36 ms. At 32 workers Mojo is approximately
+level with Polars on that count case, yet remains about 41 times slower than
+DuckDB. This supports reducing preparation and intermediate materialization
+before further worker-count tuning. Some round-to-round differences are
+visible in the raw samples; small deltas are not treated as precise crossovers.
 
 ## Uncontended Mac profile and query-plan evidence
 
