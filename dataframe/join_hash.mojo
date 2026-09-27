@@ -443,22 +443,110 @@ struct _HashIndex(Movable):
     var workers: Int
 
 
-def _build_hash_index(
-    left_keys: List[Series], right_keys: List[Series]
-) raises -> _HashIndex:
+@fieldwise_init
+struct PreparedHashIndex(Copyable):
+    """Immutable build-side state, shared across independent probe batches."""
+
+    var right: List[Series]
+    var indexes: ArcPointer[List[_HashBucket]]
+    var fold: Int
+
+    var progression: Bool
+    var base: Int64
+    var stride: UInt64
+    var repeat: Int
+
+    @always_inline
+    def progression_row(self, value: Int64, right_count: Int) -> Int:
+        if value < self.base:
+            return -1
+        var distance = UInt64(value) - UInt64(self.base)
+        if self.stride == 1 and self.repeat == 1:
+            return Int(distance) if distance < UInt64(right_count) else -1
+        if distance % self.stride != 0:
+            return -1
+        var group = distance // self.stride
+        var groups = (right_count - 1) // self.repeat + 1
+        if group >= UInt64(groups):
+            return -1
+        return Int(group) * self.repeat
+
+    def probe(self, left_keys: List[Series]) raises -> _HashIndex:
+        var left = List[Series](capacity=len(left_keys))
+        for key in left_keys:
+            left.append(key.rechunk() if key.is_chunked() else key.copy())
+        var workers = worker_count(len(left[0]))
+        var hashes = Partitioner(left, workers)
+        return _HashIndex(
+            left^,
+            self.right.copy(),
+            ArcPointer(hashes.hashes.copy()),
+            self.indexes.copy(),
+            self.fold,
+            workers,
+        )
+
+
+def _prepared_progression(
+    right: List[Series],
+) -> Tuple[Bool, Int64, UInt64, Int]:
+    if (
+        len(right) != 1
+        or not right[0]._data.isa[Column[Int64]]()
+        or len(right[0]) == 0
+    ):
+        return (False, 0, 1, 1)
+    ref column = right[0]._data[Column[Int64]]
+    var base = column._get(0)
+    var previous = base
+    var stride = UInt64(1)
+    var repeat = 0
+    var run = 0
+    for i in range(len(column)):
+        if not column._valid(i):
+            return (False, 0, 1, 1)
+        var value = column._get(i)
+        if i == 0 or value == previous:
+            run += 1
+            if repeat > 0 and run > repeat:
+                return (False, 0, 1, 1)
+        else:
+            if value < previous:
+                return (False, 0, 1, 1)
+            var step = UInt64(value) - UInt64(previous)
+            if repeat == 0:
+                repeat = run
+                stride = step
+            elif run != repeat or step != stride:
+                return (False, 0, 1, 1)
+            run = 1
+        previous = value
+    return (True, base, stride, run if repeat == 0 else repeat)
+
+
+def prepare_hash_index(
+    right_keys: List[Series], allow_progression: Bool = True
+) raises -> PreparedHashIndex:
     if len(right_keys[0]) > Int(Int32.MAX):
         raise Error("Direct hash join exceeds 32-bit row index capacity")
-    var left = List[Series](capacity=len(left_keys))
     var right = List[Series](capacity=len(right_keys))
-    for key in left_keys:
-        left.append(key.rechunk() if key.is_chunked() else key.copy())
     for key in right_keys:
         right.append(key.rechunk() if key.is_chunked() else key.copy())
-    var workers = worker_count(len(left[0]))
-    var left_hashes = Partitioner(left, workers)
+    var progression = (False, Int64(0), UInt64(1), 1)
+    if allow_progression:
+        progression = _prepared_progression(right)
+    if progression[0]:
+        return PreparedHashIndex(
+            right^,
+            ArcPointer(List[_HashBucket]()),
+            8,
+            True,
+            progression[1],
+            progression[2],
+            progression[3],
+        )
     var right_hashes = Partitioner(right, worker_count(len(right[0])))
     var right_parts = right_hashes.scatter(worker_count(len(right[0])))
-    var shared_left_hashes = ArcPointer(left_hashes.hashes.copy())
     var shared_right_hashes = ArcPointer(right_hashes.hashes.copy())
     var shared_order = ArcPointer(right_parts.order.copy())
     var typed_int = len(right) == 1 and right[0]._data.isa[Column[Int64]]()
@@ -483,9 +571,7 @@ def _build_hash_index(
     while count < right_parts.buckets():
         count *= 2
         fold -= 1
-    return _HashIndex(
-        left^, right^, shared_left_hashes, ArcPointer(indexes^), fold, workers
-    )
+    return PreparedHashIndex(right^, ArcPointer(indexes^), fold, False, 0, 1, 1)
 
 
 def direct_hash_semi_anti_rows(
@@ -497,7 +583,30 @@ def direct_hash_semi_anti_rows(
     left row appears once however many right rows share its key, and a
     null left key never matches, so semi drops it and anti keeps it.
     """
-    var index = _build_hash_index(left_keys, right_keys)
+    return prepared_hash_semi_anti_rows(
+        left_keys,
+        prepare_hash_index(right_keys, allow_progression=False),
+        keep_matches,
+    )
+
+
+def prepared_hash_semi_anti_rows(
+    left_keys: List[Series], prepared: PreparedHashIndex, keep_matches: Bool
+) raises -> List[Int]:
+    if prepared.progression:
+        var key = left_keys[0].rechunk()
+        ref values = key._data[Column[Int64]]
+        var rows = List[Int](capacity=len(values))
+        var right_count = len(prepared.right[0])
+        for i in range(len(values)):
+            var matched = (
+                values._valid(i)
+                and prepared.progression_row(values._get(i), right_count) >= 0
+            )
+            if matched == keep_matches:
+                rows.append(i)
+        return rows^
+    var index = prepared.probe(left_keys)
     var bounds = partitions(len(index.left[0]), index.workers, 1)
     var jobs = List[_HashProbeJob](capacity=index.workers)
     for worker in range(index.workers):
@@ -537,7 +646,40 @@ def direct_hash_join_rows(
     The third result means every probe row appears exactly once in order;
     when requested, the first list is then omitted as an implicit identity.
     """
-    var index = _build_hash_index(left_keys, right_keys)
+    return prepared_hash_join_rows(
+        left_keys,
+        prepare_hash_index(right_keys, allow_progression=False),
+        include_unmatched,
+        omit_identity,
+    )
+
+
+def prepared_hash_join_rows(
+    left_keys: List[Series],
+    prepared: PreparedHashIndex,
+    include_unmatched: Bool,
+    omit_identity: Bool = False,
+) raises -> Tuple[List[Int], List[Int], Bool]:
+    if prepared.progression:
+        var key = left_keys[0].rechunk()
+        ref values = key._data[Column[Int64]]
+        var left_rows = List[Int](capacity=len(values))
+        var right_rows = List[Int](capacity=len(values))
+        var right_count = len(prepared.right[0])
+        for i in range(len(values)):
+            var first = -1
+            if values._valid(i):
+                first = prepared.progression_row(values._get(i), right_count)
+            if first >= 0:
+                var last = first + min(prepared.repeat, right_count - first)
+                for j in range(first, last):
+                    left_rows.append(i)
+                    right_rows.append(j)
+            elif include_unmatched:
+                left_rows.append(i)
+                right_rows.append(-1)
+        return (left_rows^, right_rows^, False)
+    var index = prepared.probe(left_keys)
     var workers = index.workers
     var bounds = partitions(len(index.left[0]), workers, 1)
     var jobs = List[_HashProbeJob](capacity=workers)

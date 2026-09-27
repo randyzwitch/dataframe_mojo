@@ -1,6 +1,6 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
 from .dtype import DataType
-from std.collections import Dict
+from std.collections import Dict, Optional
 from std.sys import num_physical_cores
 from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
@@ -43,7 +43,13 @@ from .gather import (
 )
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, encode_partitioned, low_cardinality
-from .join_hash import direct_hash_join_rows, direct_hash_semi_anti_rows
+from .join_hash import (
+    direct_hash_join_rows,
+    direct_hash_semi_anti_rows,
+    PreparedHashIndex,
+    prepared_hash_join_rows,
+    prepared_hash_semi_anti_rows,
+)
 from .nested_column import ListColumn, StructColumn
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
@@ -788,6 +794,26 @@ struct DataFrame(Copyable, Sized, Writable):
         take whichever side is present; with how="full" and coalesce=False,
         right keys are kept as separate columns instead.
         """
+        return self._join_impl(
+            right,
+            left_on=left_on,
+            right_on=right_on,
+            how=how,
+            suffix=suffix,
+            coalesce=coalesce,
+        )
+
+    def _join_impl(
+        self,
+        right: Self,
+        *,
+        left_on: List[String],
+        right_on: List[String],
+        how: String = "inner",
+        suffix: String = "_right",
+        coalesce: Bool = True,
+        prepared: Optional[PreparedHashIndex] = None,
+    ) raises -> Self:
         if how == "cross":
             raise Error(
                 "A cross join takes no keys; use join(right, how='cross')"
@@ -899,6 +925,40 @@ struct DataFrame(Copyable, Sized, Writable):
                 names[name] = True
                 right_output.append(i)
                 right_names.append(name)
+        if prepared:
+            var sources = List[Series](capacity=len(left_keys))
+            for k in left_keys:
+                sources.append(self._columns[k].copy())
+            if how == "semi" or how == "anti":
+                return self._filter_rows(
+                    prepared_hash_semi_anti_rows(
+                        sources, prepared.value(), how == "semi"
+                    )
+                )
+            var pairs = prepared_hash_join_rows(
+                sources, prepared.value(), how == "left", omit_identity=True
+            )
+            var workers = worker_count(len(pairs[1]))
+            var columns = self._columns.copy()
+            var identity = pairs[2] or len(pairs[0]) == self.height()
+            if identity and not pairs[2]:
+                for i in range(len(pairs[0])):
+                    if pairs[0][i] != i:
+                        identity = False
+                        break
+            if not identity:
+                columns = take_parallel(
+                    columns^, pairs[0].copy(), workers, or_null=False
+                )
+            var right_sources = List[Series]()
+            for c in right_output:
+                right_sources.append(right._columns[c].copy())
+            var gathered = take_parallel(
+                right_sources, pairs[1].copy(), workers, or_null=how == "left"
+            )
+            for k in range(len(right_output)):
+                columns.append(gathered[k].renamed(right_names[k]))
+            return Self(columns^, height=len(pairs[1]))
         if (how == "inner" or how == "left") and len(left_keys) == 1:
             var dense = _dense_right_int64_rows(
                 self._columns[left_keys[0]],

@@ -62,6 +62,7 @@ from .parquet import (
     read_parquet,
 )
 from .series import Series
+from .join_hash import PreparedHashIndex, prepare_hash_index
 
 comptime SCAN_FRAME = 0
 comptime SCAN_CSV = 1
@@ -222,6 +223,7 @@ struct _StreamJob(Job):
     var frame: DataFrame
     var operations: List[PlanNode]
     var joins: ArcPointer[List[DataFrame]]
+    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
     var expressions: List[Expr]
     var keys: List[String]
     var reduced: List[_StreamReduction]
@@ -231,6 +233,7 @@ struct _StreamJob(Job):
         var frame: DataFrame,
         operations: List[PlanNode],
         joins: ArcPointer[List[DataFrame]],
+        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
         expressions: List[Expr],
         keys: List[String],
     ):
@@ -238,6 +241,7 @@ struct _StreamJob(Job):
         self.frame = frame^
         self.operations = operations.copy()
         self.joins = joins.copy()
+        self.indexes = indexes.copy()
         self.expressions = expressions.copy()
         self.keys = keys.copy()
         self.reduced = List[_StreamReduction]()
@@ -247,7 +251,16 @@ struct _StreamJob(Job):
             self.decode[0].run()
             self.frame = self.decode.pop().into_frame()
         for node in self.operations:
-            if node.kind == JOIN:
+            if node.kind == JOIN and self.indexes[][node.offset]:
+                self.frame = self.frame._join_impl(
+                    self.joins[][node.offset],
+                    left_on=node.names,
+                    right_on=node.names,
+                    how=node.text,
+                    suffix=node.names2[0],
+                    prepared=self.indexes[][node.offset],
+                )
+            elif node.kind == JOIN:
                 self.frame = self.frame.join(
                     self.joins[][node.offset],
                     node.names,
@@ -501,6 +514,7 @@ struct LazyFrame(Copyable):
             cursor = terminal.left
         var operations = List[PlanNode]()
         var joins = List[DataFrame]()
+        var indexes = List[Optional[PreparedHashIndex]]()
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if _stream_rows(node):
@@ -515,6 +529,18 @@ struct LazyFrame(Copyable):
                 var operation = node.copy()
                 operation.offset = len(joins)
                 joins.append(self._execute(node.right, False, True, batch_size))
+                var prepared = Optional[PreparedHashIndex]()
+                if node.text != "cross" and len(node.names):
+                    ref build = joins[len(joins) - 1]
+                    var sources = List[Series]()
+                    var supported = build.height() <= Int(Int32.MAX)
+                    for name in node.names:
+                        var key = build[name]
+                        supported = supported and not key.dtype().is_nested()
+                        sources.append(key.copy())
+                    if supported:
+                        prepared = prepare_hash_index(sources)
+                indexes.append(prepared^)
                 operations.append(operation^)
             else:
                 break
@@ -527,6 +553,7 @@ struct LazyFrame(Copyable):
             return None
         operations.reverse()
         var shared_joins = ArcPointer(joins^)
+        var shared_indexes = ArcPointer(indexes^)
         ref source = self._nodes[cursor]
         var csv = List[_CsvBatches]()
         var parquet = List[_ParquetBatches]()
@@ -593,7 +620,12 @@ struct LazyFrame(Copyable):
                     offset += frame.height()
                     emitted = True
                 var job = _StreamJob(
-                    frame^, operations, shared_joins, expressions, keys
+                    frame^,
+                    operations,
+                    shared_joins,
+                    shared_indexes,
+                    expressions,
+                    keys,
                 )
                 job.decode = decode^
                 jobs.append(job^)

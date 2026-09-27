@@ -1,7 +1,12 @@
 """Exact row-hash join matches across nulls, duplicates, and key dtypes."""
 from std.testing import TestSuite, assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
-from dataframe.join_hash import direct_hash_join_rows
+from dataframe.join_hash import (
+    direct_hash_join_rows,
+    prepare_hash_index,
+    prepared_hash_join_rows,
+    prepared_hash_semi_anti_rows,
+)
 from dataframe.frame import _bounded_int64_join_rows
 from dataframe.partition import Partitioner
 from dataframe.parallel import worker_count
@@ -391,6 +396,54 @@ def test_high_cardinality_right_join_preserves_right_order() raises:
         assert_equal(result.item(at, "k").int64(), Int64(i * 17))
         assert_equal(result.item(at, "r").int64(), Int64(i))
         assert_equal(result.item(at, "v").is_null(), True)
+
+
+def test_prepared_index_reuses_build_across_independent_probes() raises:
+    var right = Series(
+        "k", Column[Int64]([17, 17, 31, 0], [True, True, True, False])
+    )
+    var index = prepare_hash_index([right.copy()])
+    var shared = index.copy()
+    var first = Series("k", Column[Int64]([17, 99]))
+    var second = Series("k", Column[Int64]([31, 0, 17], [True, False, True]))
+    for _ in range(3):
+        var rows = prepared_hash_join_rows([first.copy()], index, True)
+        assert_equal(rows[0], [0, 0, 1])
+        assert_equal(rows[1], [0, 1, -1])
+        var next = prepared_hash_join_rows([second.copy()], shared, False)
+        assert_equal(next[0], [0, 2, 2])
+        assert_equal(next[1], [2, 0, 1])
+        assert_equal(
+            prepared_hash_semi_anti_rows([second.copy()], index, True), [0, 2]
+        )
+        assert_equal(
+            prepared_hash_semi_anti_rows([second.copy()], index, False), [1]
+        )
+
+
+def test_prepared_progressions_runs_extremes_and_invalid_shapes() raises:
+    var low = Int64.MIN
+    var right = Series(
+        "k", Column[Int64]([low, low, low + 2, low + 2, low + 4])
+    )
+    var index = prepare_hash_index([right.copy()])
+    assert_true(index.progression)
+    var left = Series("k", Column[Int64]([low, low + 1, low + 4, Int64.MAX]))
+    var rows = prepared_hash_join_rows([left.copy()], index, True)
+    assert_equal(rows[0], [0, 0, 1, 2, 3])
+    assert_equal(rows[1], [0, 1, -1, 4, -1])
+    var extremes = Series("k", Column[Int64]([Int64.MIN, Int64.MAX]))
+    var wide = prepare_hash_index([extremes.copy()])
+    assert_true(wide.progression)
+    assert_equal(
+        prepared_hash_semi_anti_rows([left.copy()], wide, True), [0, 3]
+    )
+    var irregular = Series("k", Column[Int64]([1, 1, 3, 5, 5]))
+    assert_true(not prepare_hash_index([irregular.copy()]).progression)
+    var nulls = Series("k", Column[Int64]([1, 2], [True, False]))
+    assert_true(not prepare_hash_index([nulls.copy()]).progression)
+    var descending = Series("k", Column[Int64]([3, 2, 1]))
+    assert_true(not prepare_hash_index([descending.copy()]).progression)
 
 
 def main() raises:
