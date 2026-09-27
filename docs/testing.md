@@ -133,6 +133,9 @@ Polars produce their native dataframe results.
 For CPU profiling, build `benchmarks/bench_join_matrix.mojo` and pass a case
 name as its fourth argument to run only that case.
 
+[worker-calibration.md](worker-calibration.md) records 4/8/16-worker sweeps
+on Threadripper and Apple M1, plus isolated worker-policy experiments.
+
 The [Parquet streaming report](parquet-streaming.md) records paired read-time
 and peak-RSS measurements, raw samples, and reproduction commands.
 
