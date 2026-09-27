@@ -145,3 +145,7 @@ on a CSV larger than 1 GB.
 
 Sort bucket calibration and reproducible sweeps are recorded in
 [sort-cutoffs.md](sort-cutoffs.md), including fast-path misses and Mac validation.
+
+The [upstream join baseline](upstream-join-baseline.md) adapts pinned DuckDB
+queries for all three engines, retains raw paired samples and provenance, and
+records CPU-profile evidence for the next general join improvements.
