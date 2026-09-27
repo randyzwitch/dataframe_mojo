@@ -588,6 +588,8 @@ struct _ParquetBatches(Movable):
     var pending: Optional[DataFrame]
     var offset: Int
     var size: Int
+    var pool: Pool
+    var pool_ready: Bool
 
     def __init__(
         out self,
@@ -606,12 +608,16 @@ struct _ParquetBatches(Movable):
         self.pending = None
         self.offset = 0
         self.size = size
+        self.pool = Pool(1)
+        self.pool_ready = False
 
     def __init__(out self, var stream: _ArrowArrayStream, size: Int):
         self.stream = stream^
         self.pending = None
         self.offset = 0
         self.size = size
+        self.pool = Pool(1)
+        self.pool_ready = False
 
     def __deinit__(deinit self):
         _release_stream(self.stream)
@@ -634,7 +640,14 @@ struct _ParquetBatches(Movable):
                 return None
             if _stream_schema(self.stream, schema) != 0:
                 _stream_error(self.stream)
-            self.pending = import_arrow(array, schema)
+            if not self.pool_ready:
+                self.pool = Pool(
+                    _arrow_import_workers(
+                        Int(array.length), Int(array.n_children)
+                    )
+                )
+                self.pool_ready = True
+            self.pending = _import_arrow_with_pool(array, schema, self.pool)
             var batch = self.pending.value().slice(0, self.size)
             self.offset = batch.height()
             return batch^

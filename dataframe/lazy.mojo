@@ -435,7 +435,12 @@ struct LazyFrame(Copyable):
         streaming: Bool = True,
         batch_size: Int = 65536,
     ) raises -> DataFrame:
-        """Optimize (unless disabled) and execute the plan."""
+        """Optimize (unless disabled) and execute the plan.
+
+        Streaming batches default to 65,536 rows. Set streaming=False to use
+        the materializing executor. Stateful/global operations retain their
+        documented boundaries; collecting still retains the final output.
+        """
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         var plan = self._optimized() if optimize else self.copy()
@@ -459,7 +464,11 @@ struct LazyFrame(Copyable):
     def explain(
         self, *, optimize: Bool = True, streaming: Bool = True
     ) raises -> String:
-        """The (optimized) plan, one operator per line, root first."""
+        """The (optimized) plan, one operator per line, root first.
+
+        Streaming annotations show batch-capable operators, aggregate state
+        and materialization boundaries. streaming=False omits annotations.
+        """
         var plan = self._optimized() if optimize else self.copy()
         var out = String()
         plan._describe(len(plan._nodes) - 1, 0, out, streaming)
