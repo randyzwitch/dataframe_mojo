@@ -1273,3 +1273,11 @@ Stream a frame to a UTF-8 CSV file that read_csv reads back exactly.
 ```mojo
 def write_csv(frame: DataFrame, path: String, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n", buffer_size: Int = Int(65536))
 ```
+
+## `write_parquet`
+
+Write a local Parquet file, replacing it if it exists.
+
+```mojo
+def write_parquet(frame: DataFrame, path: String, *, compression: String = "zstd", row_group_size: Int = Int(1000000))
+```
