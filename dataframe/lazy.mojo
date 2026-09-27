@@ -62,7 +62,12 @@ from .parquet import (
     read_parquet,
 )
 from .series import Series
-from .join_hash import PreparedHashIndex, prepare_hash_index
+from .join_hash import (
+    PreparedHashIndex,
+    prepare_hash_index,
+    prepare_progression_index,
+    prefer_left_build,
+)
 
 comptime SCAN_FRAME = 0
 comptime SCAN_CSV = 1
@@ -489,6 +494,27 @@ struct LazyFrame(Copyable):
 
     # --- execution -----------------------------------------------------
 
+    def _known_height(self, index: Int) -> Int:
+        """Exact cheap cardinalities only; -1 means execution is required."""
+        ref node = self._nodes[index]
+        if node.kind == SCAN_FRAME:
+            return self._frames[node.offset].height()
+        if (
+            node.kind == DROP
+            or node.kind == UNNEST
+            or (
+                (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and _stream_rows(node)
+            )
+        ):
+            return self._known_height(node.left)
+        if node.kind == SLICE and node.offset >= 0:
+            var height = self._known_height(node.left)
+            if height >= 0:
+                height = max(0, height - node.offset)
+                return min(height, node.length) if node.length >= 0 else height
+        return -1
+
     def _stream_execute(
         self, index: Int, batch_size: Int
     ) raises -> Optional[DataFrame]:
@@ -526,11 +552,36 @@ struct LazyFrame(Copyable):
                 "anti",
                 "cross",
             ]:
+                var prepared = Optional[PreparedHashIndex]()
+                if (
+                    self._known_height(node.left) <= batch_size
+                    and (node.text == "inner" or node.text == "left")
+                    and prefer_left_build(
+                        self._known_height(node.left),
+                        self._known_height(node.right),
+                    )
+                ):
+                    # This left input already fits one stream batch, so
+                    # physical reversal does not increase the materialized
+                    # join output over the existing batch bound. Keep larger
+                    # left inputs on the bounded streaming executor.
+                    # A directly available progression already has a cheaper
+                    # compact lookup. Validate once and retain its prepared
+                    # state instead of falling back to eager progression scans.
+                    ref build_node = self._nodes[node.right]
+                    if build_node.kind == SCAN_FRAME and len(node.names) == 1:
+                        var sources: List[Series] = [
+                            self._frames[build_node.offset][
+                                node.names[0]
+                            ].copy()
+                        ]
+                        prepared = prepare_progression_index(sources)
+                    if not prepared:
+                        break
                 var operation = node.copy()
                 operation.offset = len(joins)
                 joins.append(self._execute(node.right, False, True, batch_size))
-                var prepared = Optional[PreparedHashIndex]()
-                if node.text != "cross" and len(node.names):
+                if not prepared and node.text != "cross" and len(node.names):
                     ref build = joins[len(joins) - 1]
                     var sources = List[Series]()
                     var supported = build.height() <= Int(Int32.MAX)
@@ -1087,7 +1138,17 @@ struct LazyFrame(Copyable):
                 "anti",
                 "cross",
             ]:
-                label += " [stream probe; materialize build]"
+                if (
+                    self._known_height(node.left) <= 65536
+                    and (node.text == "inner" or node.text == "left")
+                    and prefer_left_build(
+                        self._known_height(node.left),
+                        self._known_height(node.right),
+                    )
+                ):
+                    label += " [small left input; materialize unless compact progression]"
+                else:
+                    label += " [stream probe; materialize build]"
             elif node.kind == SLICE and node.offset >= 0:
                 label += " [ordered slice]"
             else:

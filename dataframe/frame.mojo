@@ -47,6 +47,7 @@ from .join_hash import (
     direct_hash_join_rows,
     direct_hash_semi_anti_rows,
     PreparedHashIndex,
+    prefer_left_build,
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
@@ -1046,9 +1047,10 @@ struct DataFrame(Copyable, Sized, Writable):
         # Dense ids over both inputs materialize and re-encode every key.
         # For high-cardinality right keys, a row index probes the original
         # columns directly and preserves exact equality across collisions.
-        if (how == "inner" or how == "left") and worker_count(
-            self.height()
-        ) > 1:
+        var build_left = prefer_left_build(self.height(), right.height())
+        if (how == "inner" or how == "left") and (
+            build_left or worker_count(self.height()) > 1
+        ):
             var left_sources = List[Series](capacity=len(left_keys))
             var right_sources = List[Series](capacity=len(right_keys))
             for k in range(len(left_keys)):
@@ -1058,7 +1060,14 @@ struct DataFrame(Copyable, Sized, Writable):
             var right_rows = List[Int]()
             var direct = False
             var direct_identity = False
-            if len(left_keys) == 1:
+            if build_left:
+                var pairs = _smaller_build_join_rows(
+                    left_sources, right_sources, how == "left"
+                )
+                left_rows = pairs[0].copy()
+                right_rows = pairs[1].copy()
+                direct = True
+            if not direct and len(left_keys) == 1:
                 var range_rows = _bounded_int64_join_rows(
                     left_sources[0], right_sources[0], how == "left"
                 )
@@ -1977,6 +1986,30 @@ def _as_int64(values: List[Int]) -> List[Int64]:
     for v in values:
         out.append(Int64(v))
     return out^
+
+
+def _smaller_build_join_rows(
+    left: List[Series], right: List[Series], include_unmatched: Bool
+) raises -> Tuple[List[Int], List[Int]]:
+    """Build on logical left, then stably restore left-major/right-input order.
+
+    The physical probe emits right-major pairs. Stable counting scatter by
+    logical left row preserves the original right-row ordering within every
+    left group, including duplicate keys on either side.
+    """
+    var pairs = direct_hash_join_rows(right, left, False)
+    var starts = _group_index(pairs[1], len(left[0]))
+    var order = _group_rows(pairs[1], starts)
+    var left_rows = List[Int](capacity=len(order))
+    var right_rows = List[Int](capacity=len(order))
+    for i in range(len(left[0])):
+        if starts[i] == starts[i + 1] and include_unmatched:
+            left_rows.append(i)
+            right_rows.append(-1)
+        for at in range(starts[i], starts[i + 1]):
+            left_rows.append(i)
+            right_rows.append(pairs[0][order[at]])
+    return (left_rows^, right_rows^)
 
 
 def _group_index(ids: List[Int], count: Int) -> List[Int]:
