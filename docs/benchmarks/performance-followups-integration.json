@@ -1,0 +1,39 @@
+{
+  "integration_merge": "e2db0631431a497d5d0ac7decc60ffb177944fcb",
+  "parents": [
+    "138348446282666cec8702a6b971d20e0900b9fe",
+    "916620cdfb49f05dc7ff834c13d41e7f1c2bee8b"
+  ],
+  "source_sha256": {
+    "dataframe/frame.mojo": "bcf217dbdca8017811d06fee1e16563f57a56e2681ef88739c864d30c06ae677",
+    "dataframe/join_hash.mojo": "fb29a204d39c7c41a01f28a076db2503d81a6b31792edaf20491353f7885ef91",
+    "dataframe/lazy.mojo": "e86440eabe574cbda019644300f8b4984d0d2e19bf98e95d0c649fcdb34c7a52",
+    "dataframe/string_column.mojo": "0401dd16005a0c93e9e5897d0f02b8ab8504363207736d239613e12bfe36791c",
+    "dataframe/string_view.mojo": "daf2d147db175255d7ad7bd8ac09727302c3c08a418339f01a93318dc70bf696",
+    "pixi.lock": "a73ec597f8965ecbed143adc462ce9e2ae5f68662a33733f9f0fa500357986fe"
+  },
+  "hosts": {
+    "linux": {
+      "modules": 9,
+      "tests": 56,
+      "failed": 0
+    },
+    "mac": {
+      "modules": 9,
+      "tests": 56,
+      "failed": 0
+    }
+  },
+  "modules": [
+    "test_join_ranges",
+    "test_join_count",
+    "test_typed_join_probes",
+    "test_join_hash",
+    "test_join_semi_anti",
+    "test_lazy_streaming",
+    "test_join",
+    "test_join_build_side",
+    "test_prepared_join_groups"
+  ],
+  "scope": "Combined feature engine, clean local ort merge. Identical source/lockfile hashes on Linux and M1. Focused semantic integration validation, not a new combined performance comparison."
+}

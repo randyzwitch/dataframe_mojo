@@ -144,3 +144,12 @@ query-only counters or speedup estimates.
 measurements, binary/source hashes, input hashes and whole-process peak RSS.
 Reproduce using `scripts/bench_upstream_revision.py --baseline <runner>`
 `--candidate <runner> --data <PR297 CSV directory> --output <result.json>`.
+
+## Completed implementation records
+
+The five opportunities are now implemented in separate PRs. Probe efficiency
+has separate ownership and typed-dispatch changes. The
+[integration record](performance-followups-integration.md) maps each change
+to its review/dependency and records combined Linux/M1 semantic validation.
+Each PR retains its own paired measurements rather than attributing the
+whole sequence's gains to one change.

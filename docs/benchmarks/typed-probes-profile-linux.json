@@ -1,0 +1,37 @@
+{
+  "workload": "duplicate_strings",
+  "layout": "shuffled",
+  "right_rows": 10000000,
+  "threads": 4,
+  "repetitions": 20,
+  "frequency_hz": 199,
+  "event": "cycles:u",
+  "call_graph": "dwarf,8192",
+  "scope": "Whole process including loading and warmup; separate recordings after timing without compiler activity. Normalized self-sample percentages are not query-only counters or speedup estimates.",
+  "profiles": {
+    "generic": {
+      "samples_display": "9K",
+      "runner_sha256": "5c10de4f296c3571f7c8eaa9467d92a48596d8d7762fa602cf02a50effd126a5",
+      "self_percent": {
+        "dataframe::join_hash::_row_equal": 47.65,
+        "dataframe::partition::_hash_bytes": 13.31,
+        "dataframe::string_column::StringColumn::_get": 12.37,
+        "dataframe::partition::_hash_column": 10.83,
+        "HashCountProbeJob (in _Slot.run)": 8.65,
+        "dataframe::series::Series::rechunk": 3.02
+      }
+    },
+    "typed": {
+      "samples_display": "8K",
+      "runner_sha256": "6c6a5a26b05981c57406b180f74329048d810aa2a3fa6614ace2a40b73580f3b",
+      "self_percent": {
+        "HashCountProbeJob (in _Slot.run)": 43.69,
+        "dataframe::partition::_hash_bytes": 17.19,
+        "dataframe::string_column::StringColumn::_get": 17.13,
+        "dataframe::partition::_hash_column": 12.79,
+        "dataframe::series::Series::rechunk": 3.82,
+        "HashJob (in _Slot.run)": 1.18
+      }
+    }
+  }
+}
