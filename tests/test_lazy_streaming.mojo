@@ -270,5 +270,49 @@ def test_owned_strings_survive_consumed_page_unmapping() raises:
     assert_equal(scan_csv(PATH).head(19).collect(batch_size=7).height(), 19)
 
 
+def test_prepared_compound_joins_and_chained_batches() raises:
+    var left = DataFrame(
+        [
+            Series("k", Column[String](["a", "b", "a", "c", "a", "b"])),
+            Series(
+                "n",
+                Column[Int64](
+                    [1, 2, 1, 3, 0, 2], [True, True, True, True, False, True]
+                ),
+            ),
+            Series("v", Column[Int64]([0, 1, 2, 3, 4, 5])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[String](["a", "b", "a", "a"])),
+            Series("n", Column[Int64]([1, 2, 1, 0], [True, True, True, False])),
+            Series("w", Column[Int64]([10, 20, 30, 40])),
+        ]
+    )
+    for how in ["inner", "left", "semi", "anti"]:
+        var plan = left.lazy().join(right.lazy(), ["k", "n"], how=how)
+        var expected = left.join(right, ["k", "n"], how=how)
+        for size in [1, 2, 4, 20]:
+            assert_true(plan.collect(batch_size=size).equals(expected))
+            assert_true(
+                plan.head(2).collect(batch_size=size).equals(expected.head(2))
+            )
+            var twice = plan.join(right.lazy(), ["k", "n"], how="semi")
+            assert_true(
+                twice.collect(batch_size=size).equals(
+                    expected.join(right, ["k", "n"], how="semi")
+                )
+            )
+    var empty = right.head(0)
+    for how in ["inner", "left", "semi", "anti"]:
+        assert_true(
+            left.lazy()
+            .join(empty.lazy(), ["k", "n"], how=how)
+            .collect(batch_size=2)
+            .equals(left.join(empty, ["k", "n"], how=how))
+        )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

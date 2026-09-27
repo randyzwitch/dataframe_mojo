@@ -41,6 +41,23 @@ def _key_equal(left: Series, right: Series, i: Int, j: Int) -> Bool:
     return a._valid(i) and b._valid(j) and a._get(i) == b._get(j)
 
 
+def _row_valid(keys: List[Series], row: Int) -> Bool:
+    """Null in any join component makes the build row unmatchable."""
+    for key in keys:
+        var valid = True
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if key._data.isa[Column[Scalar[D]]]():
+                valid = key._data[Column[Scalar[D]]]._valid(row)
+        if key._data.isa[BoolColumn]():
+            valid = key._data[BoolColumn]._valid(row)
+        elif key._data.isa[StringColumn]():
+            valid = key._data[StringColumn]._valid(row)
+        if not valid:
+            return False
+    return True
+
+
 def _row_equal(left: List[Series], right: List[Series], i: Int, j: Int) -> Bool:
     for k in range(len(left)):
         if not _key_equal(left[k], right[k], i, j):
@@ -65,9 +82,35 @@ struct _DuplicateEntry(Copyable):
 struct _HashBucket(Copyable):
     var slots: List[_HashSlot]
     var duplicates: List[_DuplicateEntry]
+    # Heavy duplication uses [count, row, row, ...] groups instead of
+    # pointer chains. Slot.next_position addresses the group's count.
+    var groups: List[Int32]
 
     def mask(self) -> Int:
         return len(self.slots) - 1
+
+
+def _append_duplicate_rows(
+    index: _HashBucket,
+    first: Int,
+    left_row: Int,
+    mut left_rows: List[Int],
+    mut right_rows: List[Int],
+):
+    if first < 0:
+        return
+    if len(index.groups):
+        var count = Int(index.groups[first])
+        for at in range(first + 1, first + 1 + count):
+            left_rows.append(left_row)
+            right_rows.append(Int(index.groups[at]))
+    else:
+        var next = first
+        while next >= 0:
+            ref entry = index.duplicates[next]
+            left_rows.append(left_row)
+            right_rows.append(Int(entry.row))
+            next = Int(entry.next_position)
 
 
 struct _HashBuildJob(Job):
@@ -77,6 +120,7 @@ struct _HashBuildJob(Job):
     var order: ArcPointer[List[Int]]
     var right_keys: List[Series]
     var typed_int: Bool
+    var skip_nulls: Bool
     var first: Int
     var last: Int
     var result: _HashBucket
@@ -89,14 +133,18 @@ struct _HashBuildJob(Job):
         typed_int: Bool,
         first: Int,
         last: Int,
+        skip_nulls: Bool,
     ):
         self.hashes = hashes.copy()
         self.order = order.copy()
         self.right_keys = right_keys.copy()
         self.typed_int = typed_int
+        self.skip_nulls = skip_nulls and not typed_int
         self.first = first
         self.last = last
-        self.result = _HashBucket(List[_HashSlot](), List[_DuplicateEntry]())
+        self.result = _HashBucket(
+            List[_HashSlot](), List[_DuplicateEntry](), List[Int32]()
+        )
 
     def run(mut self) raises:
         var size = 2
@@ -106,8 +154,11 @@ struct _HashBuildJob(Job):
             size *= 2
         var slots = List[_HashSlot](length=size, fill=_HashSlot(-1, -1, 0))
         var duplicates = List[_DuplicateEntry]()
+        var unique = 0
         for position in range(self.last - 1, self.first - 1, -1):
             var row = self.order[][position]
+            if self.skip_nulls and not _row_valid(self.right_keys, row):
+                continue
             var hash = self.hashes[][row]
             var key = hash
             if self.typed_int:
@@ -137,7 +188,42 @@ struct _HashBuildJob(Job):
                 slot = (slot + 1) & (size - 1)
             if slots[slot].row < 0:
                 slots[slot] = _HashSlot(Int32(row), -1, key)
-        self.result = _HashBucket(slots^, duplicates^)
+                unique += 1
+        var groups = List[Int32]()
+        if len(duplicates) > 4 * unique:
+            # Retain compact groups, as the previous dictionary/CSR stream
+            # path did. Long random duplicate chains waste cache bandwidth;
+            # a table sized to rows also wastes space when keys repeat.
+            var compact_size = 2
+            while compact_size * 2 < 3 * unique:
+                compact_size *= 2
+            var compact = List[_HashSlot](
+                length=compact_size, fill=_HashSlot(-1, -1, 0)
+            )
+            groups = List[Int32](capacity=unique + len(duplicates))
+            for old in slots:
+                if old.row < 0:
+                    continue
+                var first = -1
+                var next = Int(old.next_position)
+                if next >= 0:
+                    first = len(groups)
+                    groups.append(0)
+                    var count = 0
+                    while next >= 0:
+                        ref entry = duplicates[next]
+                        groups.append(entry.row)
+                        count += 1
+                        next = Int(entry.next_position)
+                    groups[first] = Int32(count)
+                var hash = self.hashes[][Int(old.row)]
+                var at = Int(hash & UInt64(compact_size - 1))
+                while compact[at].row >= 0:
+                    at = (at + 1) & (compact_size - 1)
+                compact[at] = _HashSlot(old.row, Int32(first), old.key)
+            slots = compact^
+            duplicates = List[_DuplicateEntry]()
+        self.result = _HashBucket(slots^, duplicates^, groups^)
 
     def into_result(deinit self) -> _HashBucket:
         return self.result^
@@ -261,12 +347,13 @@ struct _HashProbeJob(Job):
                     if key == slot.key:
                         self.left_rows.append(i)
                         self.right_rows.append(Int(slot.row))
-                        var next = Int(slot.next_position)
-                        while next >= 0:
-                            ref entry = index.duplicates[next]
-                            self.left_rows.append(i)
-                            self.right_rows.append(Int(entry.row))
-                            next = Int(entry.next_position)
+                        _append_duplicate_rows(
+                            index,
+                            Int(slot.next_position),
+                            i,
+                            self.left_rows,
+                            self.right_rows,
+                        )
                         matched = True
                         break
                     position = (position + 1) & index.mask()
@@ -344,12 +431,13 @@ struct _HashProbeJob(Job):
                     ):
                         self.left_rows.append(i)
                         self.right_rows.append(j)
-                        var next = Int(slot.next_position)
-                        while next >= 0:
-                            ref entry = index.duplicates[next]
-                            self.left_rows.append(i)
-                            self.right_rows.append(Int(entry.row))
-                            next = Int(entry.next_position)
+                        _append_duplicate_rows(
+                            index,
+                            Int(slot.next_position),
+                            i,
+                            self.left_rows,
+                            self.right_rows,
+                        )
                         matched = True
                         break
                     position = (position + 1) & index.mask()
@@ -390,12 +478,13 @@ struct _HashProbeJob(Job):
                         ):
                             self.left_rows.append(i)
                             self.right_rows.append(j)
-                            var next = Int(slot.next_position)
-                            while next >= 0:
-                                ref entry = index.duplicates[next]
-                                self.left_rows.append(i)
-                                self.right_rows.append(Int(entry.row))
-                                next = Int(entry.next_position)
+                            _append_duplicate_rows(
+                                index,
+                                Int(slot.next_position),
+                                i,
+                                self.left_rows,
+                                self.right_rows,
+                            )
                             matched = True
                             break
                         position = (position + 1) & index.mask()
@@ -417,12 +506,13 @@ struct _HashProbeJob(Job):
                 ):
                     self.left_rows.append(i)
                     self.right_rows.append(j)
-                    var next = Int(slot.next_position)
-                    while next >= 0:
-                        ref entry = index.duplicates[next]
-                        self.left_rows.append(i)
-                        self.right_rows.append(Int(entry.row))
-                        next = Int(entry.next_position)
+                    _append_duplicate_rows(
+                        index,
+                        Int(slot.next_position),
+                        i,
+                        self.left_rows,
+                        self.right_rows,
+                    )
                     matched = True
                     break
                 position = (position + 1) & index.mask()
@@ -443,25 +533,116 @@ struct _HashIndex(Movable):
     var workers: Int
 
 
-def _build_hash_index(
-    left_keys: List[Series], right_keys: List[Series]
-) raises -> _HashIndex:
+@fieldwise_init
+struct PreparedHashIndex(Copyable):
+    """Immutable build-side state, shared across independent probe batches."""
+
+    var right: List[Series]
+    var indexes: ArcPointer[List[_HashBucket]]
+    var fold: Int
+
+    var progression: Bool
+    var base: Int64
+    var stride: UInt64
+    var repeat: Int
+
+    @always_inline
+    def progression_row(self, value: Int64, right_count: Int) -> Int:
+        if value < self.base:
+            return -1
+        var distance = UInt64(value) - UInt64(self.base)
+        if self.stride == 1 and self.repeat == 1:
+            return Int(distance) if distance < UInt64(right_count) else -1
+        if distance % self.stride != 0:
+            return -1
+        var group = distance // self.stride
+        var groups = (right_count - 1) // self.repeat + 1
+        if group >= UInt64(groups):
+            return -1
+        return Int(group) * self.repeat
+
+    def probe(self, left_keys: List[Series]) raises -> _HashIndex:
+        var left = List[Series](capacity=len(left_keys))
+        for key in left_keys:
+            left.append(key.rechunk() if key.is_chunked() else key.copy())
+        var workers = worker_count(len(left[0]))
+        var hashes = Partitioner(left, workers)
+        return _HashIndex(
+            left^,
+            self.right.copy(),
+            ArcPointer(hashes.hashes.copy()),
+            self.indexes.copy(),
+            self.fold,
+            workers,
+        )
+
+
+def _prepared_progression(
+    right: List[Series],
+) -> Tuple[Bool, Int64, UInt64, Int]:
+    if (
+        len(right) != 1
+        or not right[0]._data.isa[Column[Int64]]()
+        or len(right[0]) == 0
+    ):
+        return (False, 0, 1, 1)
+    ref column = right[0]._data[Column[Int64]]
+    var base = column._get(0)
+    var previous = base
+    var stride = UInt64(1)
+    var repeat = 0
+    var run = 0
+    for i in range(len(column)):
+        if not column._valid(i):
+            return (False, 0, 1, 1)
+        var value = column._get(i)
+        if i == 0 or value == previous:
+            run += 1
+            if repeat > 0 and run > repeat:
+                return (False, 0, 1, 1)
+        else:
+            if value < previous:
+                return (False, 0, 1, 1)
+            var step = UInt64(value) - UInt64(previous)
+            if repeat == 0:
+                repeat = run
+                stride = step
+            elif run != repeat or step != stride:
+                return (False, 0, 1, 1)
+            run = 1
+        previous = value
+    return (True, base, stride, run if repeat == 0 else repeat)
+
+
+def prepare_hash_index(
+    right_keys: List[Series], allow_progression: Bool = True
+) raises -> PreparedHashIndex:
     if len(right_keys[0]) > Int(Int32.MAX):
         raise Error("Direct hash join exceeds 32-bit row index capacity")
-    var left = List[Series](capacity=len(left_keys))
     var right = List[Series](capacity=len(right_keys))
-    for key in left_keys:
-        left.append(key.rechunk() if key.is_chunked() else key.copy())
     for key in right_keys:
         right.append(key.rechunk() if key.is_chunked() else key.copy())
-    var workers = worker_count(len(left[0]))
-    var left_hashes = Partitioner(left, workers)
+    var progression = (False, Int64(0), UInt64(1), 1)
+    if allow_progression:
+        progression = _prepared_progression(right)
+    if progression[0]:
+        return PreparedHashIndex(
+            right^,
+            ArcPointer(List[_HashBucket]()),
+            8,
+            True,
+            progression[1],
+            progression[2],
+            progression[3],
+        )
     var right_hashes = Partitioner(right, worker_count(len(right[0])))
     var right_parts = right_hashes.scatter(worker_count(len(right[0])))
-    var shared_left_hashes = ArcPointer(left_hashes.hashes.copy())
     var shared_right_hashes = ArcPointer(right_hashes.hashes.copy())
     var shared_order = ArcPointer(right_parts.order.copy())
     var typed_int = len(right) == 1 and right[0]._data.isa[Column[Int64]]()
+    var skip_nulls = False
+    for key in right:
+        skip_nulls = skip_nulls or key.null_count() > 0
     var builders = List[_HashBuildJob](capacity=right_parts.buckets())
     for bucket in range(right_parts.buckets()):
         builders.append(
@@ -472,6 +653,7 @@ def _build_hash_index(
                 typed_int,
                 right_parts.bounds[bucket],
                 right_parts.bounds[bucket + 1],
+                skip_nulls,
             )
         )
     run_jobs(builders)
@@ -483,9 +665,7 @@ def _build_hash_index(
     while count < right_parts.buckets():
         count *= 2
         fold -= 1
-    return _HashIndex(
-        left^, right^, shared_left_hashes, ArcPointer(indexes^), fold, workers
-    )
+    return PreparedHashIndex(right^, ArcPointer(indexes^), fold, False, 0, 1, 1)
 
 
 def direct_hash_semi_anti_rows(
@@ -497,7 +677,30 @@ def direct_hash_semi_anti_rows(
     left row appears once however many right rows share its key, and a
     null left key never matches, so semi drops it and anti keeps it.
     """
-    var index = _build_hash_index(left_keys, right_keys)
+    return prepared_hash_semi_anti_rows(
+        left_keys,
+        prepare_hash_index(right_keys, allow_progression=False),
+        keep_matches,
+    )
+
+
+def prepared_hash_semi_anti_rows(
+    left_keys: List[Series], prepared: PreparedHashIndex, keep_matches: Bool
+) raises -> List[Int]:
+    if prepared.progression:
+        var key = left_keys[0].rechunk()
+        ref values = key._data[Column[Int64]]
+        var rows = List[Int](capacity=len(values))
+        var right_count = len(prepared.right[0])
+        for i in range(len(values)):
+            var matched = (
+                values._valid(i)
+                and prepared.progression_row(values._get(i), right_count) >= 0
+            )
+            if matched == keep_matches:
+                rows.append(i)
+        return rows^
+    var index = prepared.probe(left_keys)
     var bounds = partitions(len(index.left[0]), index.workers, 1)
     var jobs = List[_HashProbeJob](capacity=index.workers)
     for worker in range(index.workers):
@@ -537,7 +740,40 @@ def direct_hash_join_rows(
     The third result means every probe row appears exactly once in order;
     when requested, the first list is then omitted as an implicit identity.
     """
-    var index = _build_hash_index(left_keys, right_keys)
+    return prepared_hash_join_rows(
+        left_keys,
+        prepare_hash_index(right_keys, allow_progression=False),
+        include_unmatched,
+        omit_identity,
+    )
+
+
+def prepared_hash_join_rows(
+    left_keys: List[Series],
+    prepared: PreparedHashIndex,
+    include_unmatched: Bool,
+    omit_identity: Bool = False,
+) raises -> Tuple[List[Int], List[Int], Bool]:
+    if prepared.progression:
+        var key = left_keys[0].rechunk()
+        ref values = key._data[Column[Int64]]
+        var left_rows = List[Int](capacity=len(values))
+        var right_rows = List[Int](capacity=len(values))
+        var right_count = len(prepared.right[0])
+        for i in range(len(values)):
+            var first = -1
+            if values._valid(i):
+                first = prepared.progression_row(values._get(i), right_count)
+            if first >= 0:
+                var last = first + min(prepared.repeat, right_count - first)
+                for j in range(first, last):
+                    left_rows.append(i)
+                    right_rows.append(j)
+            elif include_unmatched:
+                left_rows.append(i)
+                right_rows.append(-1)
+        return (left_rows^, right_rows^, False)
+    var index = prepared.probe(left_keys)
     var workers = index.workers
     var bounds = partitions(len(index.left[0]), workers, 1)
     var jobs = List[_HashProbeJob](capacity=workers)

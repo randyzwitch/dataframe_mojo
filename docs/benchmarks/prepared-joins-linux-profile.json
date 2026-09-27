@@ -1,0 +1,27 @@
+{
+  "workload": "lazy_narrow",
+  "layout": "wide",
+  "rows": 1000000,
+  "threads": 4,
+  "repetitions": 40,
+  "frequency_hz": 199,
+  "event": "cycles:u",
+  "call_graph": "dwarf,8192",
+  "samples": 5981,
+  "runner_sha256": "9f2683a2454345c671f9df9629d3f218e88124127b0920124943277f5105f6b5",
+  "scope": "whole process including load and warmup; recorded separately after timing with no compiler activity",
+  "self_percent": {
+    "HashProbeJob (in _Slot.run)": 55.95,
+    "dataframe::column::Column::_append_column": 10.13,
+    "dataframe::parallel::_worker": 4.75,
+    "HashBuildJob (in _Slot.run)": 4.11,
+    "GatherJob (in _Slot.run)": 2.66,
+    "__memset_avx2_unaligned_erms": 2.38,
+    "dataframe::join_hash::prepared_hash_join_rows": 2.24,
+    "dataframe::csv_decode::decode_chunk": 2.0,
+    "dataframe::column::_append_bits": 1.94,
+    "dataframe::partition::_hash_column": 1.68,
+    "dataframe::frame::DataFrame::_join_impl": 1.57,
+    "dataframe::csv_buffers::CsvBuffer::add_many": 1.44
+  }
+}
