@@ -467,7 +467,9 @@ def _dt_dtype(node: Node, input: DataType) raises -> DataType:
             raise Error(
                 "strptime requires a string expression, found " + input.name()
             )
-        var target = DataType.parse(node.text2)
+        if len(node.dtypes) == 0 or not node.dtypes[0]:
+            raise Error("Unknown dtype: " + node.text2)
+        var target = node.dtypes[0].value()
         if not (target.is_date() or target.is_datetime() or target.is_time()):
             raise Error("strptime target must be date, datetime, or time")
         return target
@@ -583,6 +585,7 @@ def _adopt(
             nodes[root].op = LIT_FLOAT
             nodes[root].floating = Float64(nodes[root].integer)
         nodes[root].text = target.name()
+        nodes[root].dtypes = [Optional(target)]
         return
     var left = nodes[root].left
     var right = nodes[root].right
@@ -665,16 +668,16 @@ def bind(
             if node.text == UNTYPED:
                 dtype = DataType.UNTYPED_INT
             else:
-                dtype = DataType.INT64 if node.text == "" else DataType.parse(
-                    node.text
-                )
+                dtype = node.dtypes[0].value() if len(
+                    node.dtypes
+                ) else DataType.INT64
         elif node.op == LIT_FLOAT:
             if node.text == UNTYPED:
                 dtype = DataType.UNTYPED_FLOAT
             else:
-                dtype = DataType.FLOAT64 if node.text == "" else DataType.parse(
-                    node.text
-                )
+                dtype = node.dtypes[0].value() if len(
+                    node.dtypes
+                ) else DataType.FLOAT64
         elif node.op == LIT_BOOL:
             dtype = DataType.BOOL
         elif node.op == LIT_STRING:
@@ -685,9 +688,9 @@ def bind(
                 " with_columns, agg, or filter"
             )
         elif node.op == LIT_NULL:
-            if not DataType.is_known(node.text):
+            if len(node.dtypes) == 0 or not node.dtypes[0]:
                 raise Error("Unknown null literal dtype: " + node.text)
-            dtype = DataType.parse(node.text)
+            dtype = node.dtypes[0].value()
         elif is_reduction(node.op):
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid aggregate input")
@@ -831,9 +834,9 @@ def bind(
         elif node.op == CAST:
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid cast input")
-            if not DataType.is_known(node.text):
+            if len(node.dtypes) == 0 or not node.dtypes[0]:
                 raise Error("Unknown cast dtype: " + node.text)
-            dtype = DataType.parse(node.text)
+            dtype = node.dtypes[0].value()
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif is_string_op(node.op):

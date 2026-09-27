@@ -105,11 +105,11 @@ comptime FUSED_CONTIGUOUS_ROWS = 200_000
 
 def _numeric_literal(node: Node) raises -> Series:
     """A one-row column for an Int/Float literal of its tagged type."""
-    if node.text == "":
+    if len(node.dtypes) == 0:
         if node.op == LIT_INT:
             return Series("", Column[Int64]([node.integer]))
         return Series("", Column[Float64]([node.floating]))
-    var dtype = DataType.parse(node.text)
+    var dtype = node.dtypes[0].value()
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if dtype == DataType.of(D):
@@ -238,7 +238,7 @@ def _eval[
     if node.op == LIT_STRING:
         return Series("", StringColumn([node.text]))
     if node.op == LIT_NULL:
-        return Series.full_null("", DataType.parse(node.text), 1)
+        return Series.full_null("", node.dtypes[0].value(), 1)
     if is_window(node.op) or node.op == OVER:
         return aggregates[index].slice(offset, length)
     if is_reduction(node.op):
@@ -268,7 +268,7 @@ def _eval[
         # A scalar input is observed if any row is; its offset is not a row.
         return cast_series(
             left,
-            DataType.parse(node.text),
+            node.dtypes[0].value(),
             node.integer == 1,
             offset if len(left) == length else 0,
             observed.copy() if len(observed) == len(left) else List[Bool](),
