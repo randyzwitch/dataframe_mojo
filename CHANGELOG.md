@@ -7,6 +7,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- `read_csv` accepts ordered `(name, dtype)` pairs as a concise explicit schema.
+
 - `read_parquet(path, columns=, row_groups=)` and the lazy `scan_parquet(path)`,
   which pushes projection into the reader and decodes only the row groups
   whose footer statistics can hold a match for a filter with constant

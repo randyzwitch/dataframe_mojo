@@ -955,6 +955,10 @@ def read_csv(path: String, schema: CsvSchema, *, has_header: Bool = True, separa
 ```
 
 ```mojo
+def read_csv(path: String, schema: List[Tuple[String, DataType]], *, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+```mojo
 def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
 ```
 

@@ -1,16 +1,11 @@
 """Read typed CSV data and execute a native expression pipeline."""
-from dataframe import CsvField, CsvSchema, col, read_csv
+from dataframe import DataType, col, read_csv
 
 
 def main() raises:
     var sales = read_csv(
         "examples/sales.csv",
-        CsvSchema(
-            [
-                CsvField.string("region", False),
-                CsvField.float64("amount"),
-            ]
-        ),
+        schema=[("region", DataType.STRING), ("amount", DataType.FLOAT64)],
     )
     var result = (
         sales.filter(col("amount") > 0)
