@@ -20,6 +20,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Lazy projection pushdown reaches through joins: each join input reads only
+  its keys and the columns the plan above uses, for frame, CSV and Parquet
+  scans and through filters. The inner-join count shortcut, which answered
+  `join(...).select(len())` without running the join, is removed (#304).
 - Lazy collect executes supported pipelines in bounded ordered batches,
   merges aggregate state, streams supported join probes, and annotates
   materialization boundaries in explain. `streaming=False` keeps the

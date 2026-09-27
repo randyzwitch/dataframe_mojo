@@ -10,7 +10,8 @@ the plan before execution:
   that owns every column they read;
   row-local filters directly above unrestricted CSV scans run per decode range;
 - projection pushdown: scans read only the columns the rest of the plan uses
-  (CSV and Parquet scans decode only those fields);
+  (CSV and Parquet scans decode only those fields); a join passes each input
+  only its keys and the columns read above it from that side;
 - slice pushdown: a head/slice directly over a CSV scan becomes `n_rows`;
 - row-group pruning: a row-local filter directly above a Parquet scan reads
   the footer statistics first and decodes only the row groups that can
@@ -61,11 +62,9 @@ from .parquet import (
     parquet_row_group_statistics,
     read_parquet,
 )
-from .column import Column
 from .series import Series
 from .join_hash import (
     PreparedHashIndex,
-    count_inner_join,
     prepare_hash_index,
     prepare_progression_index,
     prefer_left_build,
@@ -496,54 +495,6 @@ struct LazyFrame(Copyable):
 
     # --- execution -----------------------------------------------------
 
-    def _try_join_count(
-        self, index: Int, batch_size: Int
-    ) raises -> Optional[DataFrame]:
-        """Fuse simple counts over an in-memory inner join; keep other plans."""
-        ref terminal = self._nodes[index]
-        if terminal.kind != SELECT or len(terminal.exprs) == 0:
-            return None
-        ref join = self._nodes[terminal.left]
-        if join.kind != JOIN or join.text != "inner" or len(join.names) == 0:
-            return None
-        if (
-            self._nodes[join.left].kind != SCAN_FRAME
-            or self._nodes[join.right].kind != SCAN_FRAME
-        ):
-            return None
-        for expression in terminal.exprs:
-            ref nodes = expression._nodes
-            if (
-                len(nodes) != 2
-                or nodes[0].op != COL
-                or nodes[1].left != 0
-                or nodes[1].op not in [LEN, COUNT]
-            ):
-                return None
-            # Inner join keys are non-null in every matching row. Counts
-            # of nullable payloads need their own validity-aware reducer.
-            if nodes[1].op == COUNT and nodes[0].text not in join.names:
-                return None
-        # Run the ordinary metadata path first, preserving key, suffix,
-        # dtype, expression and duplicate output-name validation.
-        _ = self._execute(index, True, False, batch_size)
-        var left = self._execute(join.left, False, False, batch_size)
-        var right = self._execute(join.right, False, False, batch_size)
-        if min(left.height(), right.height()) > Int(Int32.MAX):
-            return None
-        var left_keys = List[Series]()
-        var right_keys = List[Series]()
-        for name in join.names:
-            if left[name].dtype().is_nested():
-                return None
-            left_keys.append(left[name].copy())
-            right_keys.append(right[name].copy())
-        var count = count_inner_join(left_keys, right_keys)
-        var columns = List[Series]()
-        for expression in terminal.exprs:
-            columns.append(Series(expression._name, Column[Int64]([count])))
-        return DataFrame(columns^)
-
     def _known_height(self, index: Int) -> Int:
         """Exact cheap cardinalities only; -1 means execution is required."""
         ref node = self._nodes[index]
@@ -770,10 +721,6 @@ struct LazyFrame(Copyable):
         streaming: Bool = False,
         batch_size: Int = 65536,
     ) raises -> DataFrame:
-        if not empty:
-            var counted = self._try_join_count(index, batch_size)
-            if counted:
-                return counted.take()
         if streaming and not empty:
             var streamed = self._stream_execute(index, batch_size)
             if streamed:
@@ -1070,15 +1017,36 @@ struct LazyFrame(Copyable):
                 self._nodes[node.left].length = node.length
 
     def _push_projections(mut self) raises:
-        """Scans read only columns that some operator above them uses."""
+        """Scans read only columns that some operator above them uses.
+
+        A join passes each input only its keys and the columns the plan
+        above reads from that side, so unused payload columns are never
+        read or gathered. A join input that is not a scan gets a plain
+        column selection above it.
+        """
         var needed = List[Optional[List[String]]](
             length=len(self._nodes), fill=Optional[List[String]]()
         )
         var all_needed = List[Bool](length=len(self._nodes), fill=False)
         all_needed[len(self._nodes) - 1] = True
+        # (join index, right side?, columns) for join inputs to narrow.
+        var narrow_joins = List[Int]()
+        var narrow_sides = List[Bool]()
+        var narrow_columns = List[List[String]]()
         for reverse in range(len(self._nodes)):
             var i = len(self._nodes) - 1 - reverse
             ref node = self._nodes[i]
+            if node.kind == JOIN and not all_needed[i] and needed[i]:
+                var sides = self._join_input_columns(i, needed[i].value())
+                if sides:
+                    for side in range(2):
+                        var child = node.right if side == 1 else node.left
+                        ref keep = sides.value()[side]
+                        needed[child] = keep.copy()
+                        narrow_joins.append(i)
+                        narrow_sides.append(side == 1)
+                        narrow_columns.append(keep.copy())
+                    continue
             if _is_scan(node.kind):
                 if not all_needed[i] and needed[i]:
                     var columns = self._columns_of(i)
@@ -1133,6 +1101,97 @@ struct LazyFrame(Copyable):
                     needed[child] = merged^
                 else:
                     needed[child] = reads.copy()
+        self._narrow_join_inputs(narrow_joins, narrow_sides, narrow_columns)
+
+    def _join_input_columns(
+        self, index: Int, wanted: List[String]
+    ) raises -> Optional[List[List[String]]]:
+        """Columns each join input must supply for the wanted output names.
+
+        Keys are always kept. A right column whose output name carries the
+        suffix keeps its colliding left column too, so no output is renamed.
+        Returns None when the unpruned join would reject its output names,
+        so execution still raises that error.
+        """
+        ref node = self._nodes[index]
+        var left_cols = self._columns_of(node.left)
+        var right_cols = self._columns_of(node.right)
+        var suffix = node.names2[0]
+        var membership = node.text == "semi" or node.text == "anti"
+        var outputs = Dict[String, Bool]()
+        for c in left_cols:
+            outputs[c] = True
+        var left_names = outputs.copy()
+        var want = Dict[String, Bool]()
+        for w in wanted:
+            want[w] = True
+        var keep_left = Dict[String, Bool]()
+        var keep_right = Dict[String, Bool]()
+        for k in node.names:
+            keep_left[k] = True
+            keep_right[k] = True
+        for c in left_cols:
+            if c in want:
+                keep_left[c] = True
+        if not membership:
+            for c in right_cols:
+                if c in keep_right:
+                    continue
+                var name = c + suffix if c in left_names else c
+                if name in outputs:
+                    return None
+                outputs[name] = True
+                if name in want:
+                    keep_right[c] = True
+                    if c in left_names:
+                        keep_left[c] = True
+        var left_keep = List[String]()
+        for c in left_cols:
+            if c in keep_left:
+                left_keep.append(c)
+        var right_keep = List[String]()
+        for c in right_cols:
+            if c in keep_right:
+                right_keep.append(c)
+        var sides = List[List[String]]()
+        sides.append(left_keep^)
+        sides.append(right_keep^)
+        return sides^
+
+    def _narrow_join_inputs(
+        mut self,
+        joins: List[Int],
+        right_sides: List[Bool],
+        columns: List[List[String]],
+    ) raises:
+        """Select only the kept columns above join inputs that are not scans.
+
+        Scans already read only those columns. Other inputs (a filter, a
+        computed column) would otherwise hand the join every column they
+        produce. The selection is only added when it drops a column.
+        """
+        var added = False
+        for k in range(len(joins)):
+            var join = joins[k]
+            var child = self._nodes[join].left
+            if right_sides[k]:
+                child = self._nodes[join].right
+            if _is_scan(self._nodes[child].kind):
+                continue
+            var produced = self._columns_of(child)
+            if len(columns[k]) >= len(produced):
+                continue
+            var exprs = List[Expr]()
+            for name in columns[k]:
+                exprs.append(col(name))
+            self._nodes.append(_plan_node(SELECT, child, exprs=exprs))
+            if right_sides[k]:
+                self._nodes[join].right = len(self._nodes) - 1
+            else:
+                self._nodes[join].left = len(self._nodes) - 1
+            added = True
+        if added:
+            self._reorder()
 
     def _describe(
         self, index: Int, depth: Int, mut out: String, streaming: Bool = True

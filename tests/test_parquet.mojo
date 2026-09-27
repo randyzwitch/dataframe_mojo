@@ -330,6 +330,18 @@ def test_nested_parquet_columns() raises:
     assert_equal(projected.column("c").get(0).struct_field("a").int64(), 1)
 
 
+def test_scan_parquet_under_a_join_reads_only_used_columns() raises:
+    var path = FIXTURES + "row_groups.parquet"
+    var query = (
+        scan_parquet(path).join(scan_parquet(path), "k").select(col("k").len())
+    )
+    assert_equal(query.explain().count("[project k]"), 2)
+    var eager = read_parquet(path)
+    assert_equal(
+        query.collect().item().int64(), Int64(eager.join(eager, "k").height())
+    )
+
+
 def main() raises:
     try:
         print("libdfparquet: arrow", parquet_backend_version())

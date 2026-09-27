@@ -1,4 +1,13 @@
-# Inner-join count fusion
+# Inner-join count fusion (removed)
+
+> **Removed in #304.** This shortcut fired only for an in-memory inner join
+> followed directly by `len()` or `count()` of a key, which is the upstream
+> `duplicate_strings` benchmark query. It answered by summing key
+> multiplicities, so the join was never executed and the numbers below
+> measure skipped work. General projection pushdown replaces it: a lazy join
+> now receives only its keys and the columns the plan above reads, on every
+> scan kind, so this query joins key columns alone. The record below is kept
+> for history.
 
 A SELECT of simple column LEN expressions or COUNT of inner-join keys can
 sum match multiplicities without constructing joined row pairs or payload
