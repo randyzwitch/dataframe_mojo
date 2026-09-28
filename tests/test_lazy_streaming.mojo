@@ -238,6 +238,58 @@ def test_randomized_state_and_join_differential() raises:
             )
 
 
+def test_deferred_merges_keep_order_and_state() raises:
+    """Batch states are merged in groups (#326): many pending batches at
+    once, the 64-batch cap on low-cardinality input, and groups that keep
+    appearing late, all against the non-streaming executor."""
+    for shape in range(3):
+        var state = UInt64(shape + 11)
+        var ints = List[Int64]()
+        var words = List[String]()
+        var values = List[Int64]()
+        var valid = List[Bool]()
+        var rows = 300
+        for i in range(rows):
+            state = state * 6364136223846793005 + 1
+            var r = Int64((state >> 33) % 1_000_000)
+            # 0: nearly every row a new group; 1: 5 groups; 2: groups that
+            # keep arriving as the input goes on.
+            var key = Int64(i) if shape == 0 else (
+                r % 5 if shape == 1 else r % (Int64(i) // 10 + 1)
+            )
+            ints.append(key)
+            words.append("w" + String(key % 7))
+            values.append(r % 1000 - 500)
+            valid.append(i % 11 != 0)
+        var source = DataFrame(
+            [
+                Series("k", Column[Int64](ints^, valid)),
+                Series("s", Column[String](words^)),
+                Series("v", Column[Int64](values^, valid)),
+            ]
+        )
+        for composite in [False, True]:
+            var keys: List[String] = ["s", "k"] if composite else ["k"]
+            var query = (
+                source.lazy()
+                .group_by(keys, maintain_order=True)
+                .agg(
+                    [
+                        col("v").sum().alias("sum"),
+                        col("v").first().alias("first"),
+                        col("v").last().alias("last"),
+                        col("v").min().alias("min"),
+                        col("v").arg_min().alias("arg_min"),
+                        col("v").n_unique().alias("distinct"),
+                        col("v").len().alias("rows"),
+                    ]
+                )
+            )
+            var expected = query.collect(streaming=False)
+            for size in [4]:
+                assert_true(query.collect(batch_size=size).equals(expected))
+
+
 def test_schema_probe_does_not_decode_data() raises:
     with open(PATH, "w") as file:
         file.write("v\ninvalid\n")

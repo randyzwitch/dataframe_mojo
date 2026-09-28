@@ -1193,21 +1193,56 @@ struct Reducer(Movable):
             self.strings[g] = other.strings[source]
 
     def grow(mut self, count: Int):
-        """Add empty group states without finalizing partial integer sums."""
+        """Add empty states for groups [group_count, count), in place.
+
+        Existing states are neither copied nor rebuilt: a reducer for just
+        the new groups supplies their empty states, and each per-group list
+        is extended with a copy of its counterpart, which holds only the new
+        groups. Lists this operation does not use
+        are empty in both, so they stay empty. Rebuilding the reducer and
+        merging the old state into it (as this used to) re-inserted every
+        n_unique set whenever a streaming batch brought a new group (#326).
+        """
         if count <= self.group_count:
             return
-        var expanded = Self(
+        var added = Self(
             self.op,
             self.input,
-            count,
+            count - self.group_count,
             self.min_count,
             self.integer,
             self.floating,
             self.text,
             self.logical,
         )
-        expanded.merge(self)
-        self = expanded^
+        self.counts.extend(added.counts.copy())
+        self.int_sums.extend(added.int_sums.copy())
+        self.float_sums.extend(added.float_sums.copy())
+        self.logic.extend(added.logic.copy())
+        self.moments.extend(added.moments.copy())
+        self.samples.extend(added.samples.copy())
+        self.seen.extend(added.seen.copy())
+        self.nan_seen.extend(added.nan_seen.copy())
+        self.picked_valid.extend(added.picked_valid.copy())
+        self.ints.extend(added.ints.copy())
+        self.floats.extend(added.floats.copy())
+        self.bools.extend(added.bools.copy())
+        self.strings.extend(added.strings.copy())
+        self.int_sets.extend(added.int_sets.copy())
+        self.float_sets.extend(added.float_sets.copy())
+        self.string_sets.extend(added.string_sets.copy())
+        self.positions.extend(added.positions.copy())
+        self.nan_positions.extend(added.nan_positions.copy())
+        self.moments4.extend(added.moments4.copy())
+        self.comoments.extend(added.comoments.copy())
+        self.pair_x.extend(added.pair_x.copy())
+        self.pair_y.extend(added.pair_y.copy())
+        self.mode_ints.extend(added.mode_ints.copy())
+        self.mode_floats.extend(added.mode_floats.copy())
+        self.mode_float_values.extend(added.mode_float_values.copy())
+        self.mode_strings.extend(added.mode_strings.copy())
+        self.mode_nulls.extend(added.mode_nulls.copy())
+        self.group_count = count
 
     def finish(self) raises -> Series:
         var op = self.op
