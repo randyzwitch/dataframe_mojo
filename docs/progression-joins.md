@@ -6,6 +6,41 @@
 > keys now use the join index. Unit-step IDs and constant-step calendar grids
 > keep the progression path, detected by one shared function,
 > `int64_progression`. The measurements below are kept for the record.
+>
+> **After removal.** Measured 2026-09-27 on the Threadripper 3970X at 32 workers with Mojo 1.2.0.dev2026092105 (e9569894), using `-O3 -g1` builds of each revision. `scripts/bench_join_revision.py` alternates the two binaries every round (five rounds; three for the control cases). Each process warms once and times one query, and the driver checks that both revisions return the same height and checksum. Values are medians in milliseconds; speedup above 1 means the change is faster. Baseline is the #307 branch, and the change includes
+> the inlined detector.
+
+| Rows | Case | Layout | before ms | after ms | Speedup |
+|---:|---|---|---:|---:|---:|
+| 100,000 | inner_dense | base | 1.33 | 1.24 | 1.07x |
+| 100,000 | inner_dense | shuffled | 4.49 | 4.33 | 1.04x |
+| 100,000 | inner_duplicate | base | 11.23 | 13.53 | 0.83x |
+| 100,000 | inner_duplicate | shuffled | 13.79 | 13.68 | 1.01x |
+| 1,000,000 | inner_dense | base | 20.90 | 20.12 | 1.04x |
+| 1,000,000 | inner_dense | shuffled | 32.09 | 32.17 | 1.00x |
+| 1,000,000 | inner_duplicate | base | 47.14 | 53.15 | 0.89x |
+| 1,000,000 | inner_duplicate | shuffled | 55.62 | 54.93 | 1.01x |
+| 10,000,000 | inner_dense | base | 180.13 | 178.51 | 1.01x |
+| 10,000,000 | inner_dense | shuffled | 279.07 | 279.48 | 1.00x |
+| 10,000,000 | inner_duplicate | base | 323.75 | 363.32 | 0.89x |
+| 10,000,000 | inner_duplicate | shuffled | 402.87 | 404.16 | 1.00x |
+
+Sorted unique keys (`inner_dense`) are unchanged. Sorted duplicate keys
+(`jk // 2`) now use the index and are 11 to 17% slower. Shuffled inputs never
+used the path and are unchanged. In `bench_progression`, best of five per
+process and median of three rounds:
+
+| Rows | Shape | before ms | after ms | Speedup |
+|---:|---|---:|---:|---:|
+| 100,000 | calendar | 1.41 | 1.28 | 1.10x |
+| 100,000 | lookup | 1.00 | 0.88 | 1.14x |
+| 100,000 | panel | 7.96 | 16.33 | 0.49x |
+| 1,000,000 | calendar | 21.43 | 20.29 | 1.06x |
+| 1,000,000 | lookup | 17.45 | 16.17 | 1.08x |
+| 1,000,000 | panel | 58.82 | 71.81 | 0.82x |
+
+ID lookup and calendar grids keep direct lookup. The complete sensor panel
+loses its special case: 2x slower at 100k rows and 1.2x at 1M.
 
 The arithmetic join accepts matching logical types whose physical storage is
 Int64: Int64, Date, Datetime, Duration and Time. Datetime/Duration units must
