@@ -372,5 +372,17 @@ def test_colliding_names_still_raise() raises:
         _ = left.lazy().join(right.lazy(), "k").select(["k"]).collect()
 
 
+def test_unknown_join_type_raises_from_a_lazy_plan() raises:
+    var frames = payload_frames()
+    with assert_raises(contains="Join how must be"):
+        _ = (
+            frames[0]
+            .lazy()
+            .join(frames[1].lazy(), "k", how="sideways")
+            .select(["x"])
+            .collect()
+        )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
