@@ -645,6 +645,7 @@ struct PreparedHashIndex(Copyable):
         )
 
 
+@always_inline
 def int64_progression(key: Series) -> Tuple[Bool, Int64, UInt64]:
     """Base and step when the keys ascend from base by one positive step.
 
