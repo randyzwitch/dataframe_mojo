@@ -1,5 +1,10 @@
 # Typed scalar hash probes
 
+> **Update (#304).** The typed string count probe described below was removed
+> with inner-join count fusion. The typed Int64 and string membership probes
+> for semi and anti joins remain.
+
+
 Semi/anti joins now choose Int64 or string probe loops once per job rather
 than repeating generic key dispatch for each row. Inner-join count probes
 similarly specialize one-string keys. Column references and all-valid flags

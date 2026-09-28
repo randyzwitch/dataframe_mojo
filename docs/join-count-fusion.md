@@ -1,4 +1,47 @@
-# Inner-join count fusion
+# Inner-join count fusion (removed)
+
+> **Removed in #304.** This shortcut fired only for an in-memory inner join
+> followed directly by `len()` or `count()` of a key, which is the upstream
+> `duplicate_strings` benchmark query. It answered by summing key
+> multiplicities, so the join was never executed and the numbers below
+> measure skipped work. General projection pushdown replaces it: a lazy join
+> now receives only its keys and the columns the plan above reads, on every
+> scan kind, so this query joins key columns alone. The record below is kept
+> for history.
+
+## After removal
+
+Measured 2026-09-27 on the Threadripper 3970X at 32 workers with Mojo 1.2.0.dev2026092105 (e9569894), using `-O3 -g1` builds of each revision. `scripts/bench_join_revision.py` alternates the two binaries every round (five rounds; three for the control cases). Each process warms once and times one query, and the driver checks that both revisions return the same height and checksum. Values are medians in milliseconds; speedup above 1 means the change is faster. Baseline is the #308 branch. The upstream queries use
+`scripts/bench_upstream_revision.py` with three rounds of five repetitions per
+process. Loading is untimed.
+
+| Rows | Query | Layout | before ms | after ms | Speedup |
+|---:|---|---|---:|---:|---:|
+| 1,000,000 | duplicate_strings | base | 55.5 | 98.8 | 0.56x |
+| 1,000,000 | duplicate_strings | shuffled | 60.9 | 107.3 | 0.57x |
+| 10,000,000 | duplicate_strings | base | 173.1 | 753.0 | 0.23x |
+| 10,000,000 | duplicate_strings | shuffled | 177.2 | 755.3 | 0.23x |
+| 1,000,000 | highcardinality | base | 6.0 | 5.9 | 1.02x |
+| 1,000,000 | highcardinality | shuffled | 3.5 | 3.5 | 1.02x |
+| 10,000,000 | highcardinality | base | 44.7 | 44.2 | 1.01x |
+| 10,000,000 | highcardinality | shuffled | 10.7 | 10.6 | 1.01x |
+
+`duplicate_strings` now executes its join, producing 4 matches per right row,
+so it is 1.8x slower at 1M right rows and 4.3x slower at 10M. The earlier
+numbers measured skipped work. `highcardinality` is unchanged. The
+materializing narrow join reads only its keys and two payload columns:
+
+| Rows | Case | Layout | before ms | after ms | Speedup |
+|---:|---|---|---:|---:|---:|
+| 1,000,000 | lazy_narrow | base | 12.40 | 11.44 | 1.08x |
+| 1,000,000 | lazy_narrow | shuffled | 25.37 | 24.45 | 1.04x |
+| 1,000,000 | lazy_narrow | wide | 25.79 | 24.75 | 1.04x |
+| 10,000,000 | lazy_narrow | base | 388.48 | 380.18 | 1.02x |
+| 10,000,000 | lazy_narrow | shuffled | 438.11 | 451.11 | 0.97x |
+| 10,000,000 | lazy_narrow | wide | 434.75 | 457.08 | 0.95x |
+
+Those are within noise, because `lazy_narrow`'s inputs have few unused
+columns. Wider inputs gain more.
 
 A SELECT of simple column LEN expressions or COUNT of inner-join keys can
 sum match multiplicities without constructing joined row pairs or payload

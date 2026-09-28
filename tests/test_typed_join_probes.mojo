@@ -2,7 +2,14 @@
 from std.testing import TestSuite, assert_equal
 from dataframe import Column, Series, StringColumn
 from dataframe.string_view import StringViewBuilder
-from dataframe.join_hash import direct_hash_semi_anti_rows, count_inner_join
+from dataframe.join_hash import (
+    direct_hash_join_rows,
+    direct_hash_semi_anti_rows,
+)
+
+
+def count_matches(left: List[Series], right: List[Series]) raises -> Int:
+    return len(direct_hash_join_rows(left, right, False)[1])
 
 
 def strings(
@@ -60,8 +67,8 @@ def test_typed_strings_preserve_views_slices_bytes_and_nulls() raises:
             assert_equal(
                 direct_hash_semi_anti_rows(left, right, False), [1, 3, 5, 7]
             )
-            assert_equal(count_inner_join(left, right), 5)
-            assert_equal(count_inner_join(right, left), 5)
+            assert_equal(count_matches(left, right), 5)
+            assert_equal(count_matches(right, left), 5)
 
 
 def test_typed_int64_membership_preserves_signed_bits_and_nulls() raises:
@@ -84,7 +91,7 @@ def test_typed_int64_membership_preserves_signed_bits_and_nulls() raises:
     ]
     assert_equal(direct_hash_semi_anti_rows(left, right, True), [0, 1])
     assert_equal(direct_hash_semi_anti_rows(left, right, False), [2, 3, 4])
-    assert_equal(count_inner_join(left, right), 3)
+    assert_equal(count_matches(left, right), 3)
 
 
 def test_compound_keys_retain_generic_equality() raises:
@@ -101,7 +108,7 @@ def test_compound_keys_retain_generic_equality() raises:
     ]
     assert_equal(direct_hash_semi_anti_rows(left, right, True), [0, 1])
     assert_equal(direct_hash_semi_anti_rows(left, right, False), [2, 3])
-    assert_equal(count_inner_join(left, right), 2)
+    assert_equal(count_matches(left, right), 2)
 
 
 def main() raises:
