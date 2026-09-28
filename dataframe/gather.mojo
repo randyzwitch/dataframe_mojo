@@ -31,6 +31,7 @@ from .parallel import (
 )
 from .series import Series
 from .string_column import StringColumn
+from .trace import trace_path
 
 
 struct _MaskJob(Job):
@@ -186,6 +187,7 @@ def float_compare_rows(
     source: Series, op: Int, literal: Float64
 ) raises -> List[Int]:
     """Select valid Float64 rows without materializing a Boolean column."""
+    trace_path("filter.float_rows")
     var n = len(source)
     var workers = worker_count(n)
     var bounds = partitions(n, workers, 1)
@@ -289,6 +291,7 @@ def filter_float_chunks(
     columns: List[Series], predicate: Int, op: Int, literal: Float64
 ) raises -> List[Series]:
     """Filter aligned source chunks independently, keeping their row order."""
+    trace_path("filter.aligned_float")
     var shared = ArcPointer(columns.copy())
     var jobs = List[_FloatChunkFilterJob]()
     for i in range(columns[0].n_chunks()):

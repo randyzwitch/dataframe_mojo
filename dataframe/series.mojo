@@ -19,6 +19,7 @@ from std.memory import ArcPointer
 from .cast import cast_series
 from .expr import Expr, col, lit
 from .frame import DataFrame
+from .trace import trace_path
 
 # Storage holds Column[Scalar[D]] for each D in NUMERIC_DTYPES, BoolColumn
 # (bit-packed values),
@@ -1640,6 +1641,7 @@ def sort_indices(ranks: List[List[Int]]) raises -> List[Int]:
     ):
         var bucket_order = _low_card_first_sort(ranks, True, workers)
         if len(bucket_order) == n:
+            trace_path("sort.bucket")
             return bucket_order^
     # One run per thread, not one per MIN_ROWS_PER_WORKER rows: that minimum
     # is sized for a linear scan, and it both caps a 1M-row sort at 15 runs
