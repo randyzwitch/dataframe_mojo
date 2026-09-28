@@ -20,9 +20,14 @@ comptime COUNT = 11
 # A typed null literal; the dtype name is kept in `text`.
 comptime LIT_NULL = 12
 # A column selector leaf, expanded into one expression per matched column
-# before binding. text: kind, prefix, suffix joined by SEP; text2: SEP-joined
-# names or dtypes; integer: nth index.
+# before binding. min_count: kind (SELECT_*); text: prefix and suffix joined
+# by SEP; text2: SEP-joined names or dtypes; integer: nth index.
 comptime SELECTOR = 13
+comptime SELECT_ALL = 0
+comptime SELECT_COLS = 1
+comptime SELECT_EXCLUDE = 2
+comptime SELECT_DTYPE = 3
+comptime SELECT_NTH = 4
 comptime SEP = "\x1f"
 
 # Binary operations occupy 20..49.
@@ -295,13 +300,7 @@ struct Expr(Copyable):
             if result._nodes[i].op == SELECTOR:
                 var parts = result._nodes[i].text.split(SEP)
                 result._nodes[i].text = (
-                    String(parts[0])
-                    + SEP
-                    + prefix
-                    + String(parts[1])
-                    + SEP
-                    + String(parts[2])
-                    + suffix
+                    prefix + String(parts[0]) + SEP + String(parts[1]) + suffix
                 )
                 return result^
         result._name = prefix + result._name + suffix
@@ -834,7 +833,7 @@ def col(name: String) -> Expr:
 
 
 def _selector(
-    kind: String,
+    kind: Int,
     items: String = "",
     index: Int = 0,
     dtypes: List[Optional[DataType]] = List[Optional[DataType]](),
@@ -844,7 +843,8 @@ def _selector(
         [
             _node(
                 SELECTOR,
-                text=kind + SEP + SEP,
+                text=SEP,
+                min_count=kind,
                 text2=items,
                 integer=Int64(index),
                 dtypes=dtypes,
@@ -865,17 +865,17 @@ def _joined(items: List[String]) -> String:
 
 def col(names: List[String]) -> Expr:
     """Select several columns; operations apply to each one."""
-    return _selector("cols", _joined(names))
+    return _selector(SELECT_COLS, _joined(names))
 
 
 def all() -> Expr:
     """Every column, in schema order."""
-    return _selector("all")
+    return _selector(SELECT_ALL)
 
 
 def exclude(names: List[String]) -> Expr:
     """Every column except the listed ones, in schema order."""
-    return _selector("exclude", _joined(names))
+    return _selector(SELECT_EXCLUDE, _joined(names))
 
 
 def by_dtype(dtypes: List[String]) -> Expr:
@@ -883,12 +883,12 @@ def by_dtype(dtypes: List[String]) -> Expr:
     var parsed = List[Optional[DataType]](capacity=len(dtypes))
     for name in dtypes:
         parsed.append(_parse_dtype(name))
-    return _selector("dtype", _joined(dtypes), dtypes=parsed)
+    return _selector(SELECT_DTYPE, _joined(dtypes), dtypes=parsed)
 
 
 def nth(index: Int) -> Expr:
     """The column at a position; negative positions count from the end."""
-    return _selector("nth", "", index)
+    return _selector(SELECT_NTH, "", index)
 
 
 def first() -> Expr:
