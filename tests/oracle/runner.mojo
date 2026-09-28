@@ -183,6 +183,31 @@ def run(
             return frame.with_columns(e.over("k"))
         var grouped = frame.group_by("k", maintain_order=True).agg(e)
         return grouped.explode("out") if name == "mode" else grouped^
+    if op == "describe":
+        var frame = left.with_columns(
+            (col("x") * (col("x") / col("x"))).alias("xn")
+        ).select(split(spec[1]))
+        var qs = List[Float64]()
+        if spec[2] != "none":
+            for part in split(spec[2]):
+                qs.append(Float64(part))
+        return frame.describe(percentiles=qs)
+    if op == "value_counts":
+        var context = spec[1]
+        var column = spec[2]
+        var e = (
+            col(column)
+            .value_counts(sort=spec[3] == "1", normalize=spec[4] == "1")
+            .alias("out")
+        )
+        if context == "global":
+            return left.select_exprs([e^]).unnest("out")
+        return (
+            left.group_by("k", maintain_order=True)
+            .agg([e^])
+            .explode("out")
+            .unnest("out")
+        )
     if op == "cast":
         return left.with_columns(
             col(spec[1]).cast(spec[2], strict=False).alias("out")

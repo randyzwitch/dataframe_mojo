@@ -54,6 +54,7 @@ from .expr import (
     KURTOSIS,
     CORR,
     COV,
+    VALUE_COUNTS,
     is_pair_reduction,
     MIN,
     MAX,
@@ -245,6 +246,8 @@ def op_name(op: Int) -> String:
         return "corr"
     if op == COV:
         return "cov"
+    if op == VALUE_COUNTS:
+        return "value_counts"
     if op == QUANTILE:
         return "quantile"
     if op == LEN:
@@ -453,6 +456,19 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
         return DataType.UINT32
     if op == MODE:
         return DataType.list(input)
+    if op == VALUE_COUNTS:
+        var parts = node.text.split(SEP)
+        var names: List[String] = [String(parts[0]), String(parts[1])]
+        if names[0] == names[1]:
+            raise Error(
+                "value_counts count name must differ from the value name: "
+                + names[0]
+            )
+        var types: List[DataType] = [
+            input,
+            DataType.FLOAT64 if (node.integer & 2) != 0 else DataType.UINT32,
+        ]
+        return DataType.list(DataType.struct(names, types))
     if op == SKEW or op == KURTOSIS:
         if not _numeric(input):
             raise Error(
@@ -905,10 +921,12 @@ def bind(
                     found = found or column.name() == String(part)
                 if not found:
                     raise Error("Unknown partition column: " + String(part))
-            if _reaches(nodes, node.left, MODE):
+            if _reaches(nodes, node.left, MODE) or _reaches(
+                nodes, node.left, VALUE_COUNTS
+            ):
                 raise Error(
-                    "mode() returns a list per group and cannot be used in"
-                    " over(); use group_by().agg() instead"
+                    "mode() and value_counts() return a list per group and"
+                    " cannot be used in over(); use group_by().agg() instead"
                 )
             dtype = types[node.left]
             shape = ROWS

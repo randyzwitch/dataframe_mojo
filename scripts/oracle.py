@@ -13,6 +13,7 @@ Failures print the seed, the operation, and minimized inputs (rows are
 removed while the mismatch persists) so they can be reproduced.
 """
 import argparse
+import math
 import os
 import random
 import subprocess
@@ -57,7 +58,7 @@ def gen_right(rng: random.Random, rows: int) -> pl.DataFrame:
     )
 
 
-KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat"]
+KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts"]
 
 
 def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
@@ -94,6 +95,15 @@ def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
         return ["cum_sum", rng.choice(["g", "x", "n"])]
     if kind == "stat":
         return gen_stat(rng)
+    if kind == "describe":
+        # Numeric and Bool columns; "xn" adds NaNs (see STAT_FNS).
+        names = rng.sample(["g", "x", "y", "n", "b", "xn"], rng.randint(1, 4))
+        qs = rng.sample(["0.1", "0.25", "0.5", "0.75", "0.9", "0.333", "0", "1"], rng.randint(0, 3))
+        return ["describe", ",".join(names), ",".join(qs) or "none"]
+    if kind == "value_counts":
+        context = rng.choice(["global", "group"])
+        column = rng.choice(["g", "n", "b", "x", "y"] + (["k"] if context == "global" else []))
+        return ["value_counts", context, column, rng.choice("01"), rng.choice("01")]
     return ["cast", rng.choice(["x", "g", "b"]), rng.choice(["int64", "float64", "string"])]
 
 
@@ -196,7 +206,32 @@ def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.Dat
         if context == "over":
             return frame.with_columns(e.over("k"))
         grouped = frame.group_by("k", maintain_order=True).agg(e)
-        return grouped.explode("out") if fn == "mode" else grouped
+        return grouped.explode("out", empty_as_null=True) if fn == "mode" else grouped
+    if op == "describe":
+        frame = left.with_columns((pl.col("x") * (pl.col("x") / pl.col("x"))).alias("xn")).select(spec[1].split(","))
+        qs = None if spec[2] == "none" else [float(q) for q in spec[2].split(",")]
+        got = frame.describe(percentiles=qs)
+        # Polars gives max null (but min NaN) for a column whose valid values
+        # are all NaN; the contract is NaN for both.
+        mins = got.row(4, named=True)
+        return got.with_columns(
+            pl.when((pl.col("statistic") == "max") & pl.lit(mins[c] is not None and math.isnan(mins[c])))
+            .then(float("nan")).otherwise(pl.col(c)).alias(c)
+            for c in frame.columns
+        )
+    if op == "value_counts":
+        context, column, by_count, share = spec[1], spec[2], spec[3] == "1", spec[4] == "1"
+        field = "proportion" if share else "count"
+        e = pl.col(column).value_counts(sort=by_count, normalize=share).alias("out")
+        # Polars' order is unspecified without sort and among count ties:
+        # the contract is ascending by value, null last, after count.
+        keys = ([field] if by_count else []) + [column]
+        desc = ([True] if by_count else []) + [False]
+        if context == "global":
+            return left.select(e).unnest("out").sort(keys, descending=desc, nulls_last=True)
+        grouped = left.group_by("k", maintain_order=True).agg(e).with_row_index("gi")
+        flat = grouped.explode("out", empty_as_null=True).unnest("out")
+        return flat.sort(["gi"] + keys, descending=[False] + desc, nulls_last=True).drop("gi")
     return left.with_columns(pl.col(spec[1]).cast({"int64": pl.Int64, "float64": pl.Float64, "string": pl.String}[spec[2]], strict=False).alias("out"))
 
 
@@ -231,7 +266,7 @@ def run_case(runner: Path, left: pl.DataFrame, right: pl.DataFrame, spec: list[s
         try:
             # Moment statistics are computed by different algorithms (online
             # updates here, two-pass in Polars): compare them more loosely.
-            statistic = spec[0] == "stat" and spec[2] not in ("arg_min", "arg_max", "mode")
+            statistic = spec[0] == "describe" or (spec[0] == "stat" and spec[2] not in ("arg_min", "arg_max", "mode"))
             assert_frame_equal(
                 normalize(got), normalize(ref), check_dtypes=False,
                 rel_tol=1e-6 if statistic else 1e-9, abs_tol=1e-9 if statistic else 1e-12,
