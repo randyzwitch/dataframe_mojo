@@ -281,6 +281,10 @@ columns outside grouping.
 | `var(ddof=1)`, `std(ddof=1)` | numeric | Float64 | null when fewer than `ddof + 1` values | yes (Welford/Chan) |
 | `median()`, `quantile(q, interpolation)` | numeric | Float64 | null | no: keeps every valid value |
 | `any()`, `all()` | Bool | Bool | false / true | yes |
+| `arg_min()`, `arg_max()` | any | UInt32 | null | needs partition order |
+| `mode()` | any | list of the input type | empty | yes (value counts) |
+| `skew(bias=True)`, `kurtosis(fisher=True, bias=True)` | numeric | Float64 | null | yes (moments to the fourth) |
+| `corr(a, b, method="pearson")`, `cov(a, b, ddof=1)` | two numeric | Float64 | NaN / null | Pearson and `cov` yes; Spearman keeps pairs |
 
 `min` and `max` order strings byte-lexicographically and `false < true`. Float
 NaN sorts above every number, as in `sort`: `max` is NaN if any valid value is
@@ -296,6 +300,31 @@ averages them, and `nearest` rounds the position half up. Int64 values above
 2^53 lose precision in `var`, `std`, `median`, and `quantile`. Every reduction
 works globally and inside `group_by(...).agg(...)`, and arithmetic on
 reduction outputs (for example `col("x").max() - col("x").min()`) is allowed.
+
+`arg_min` and `arg_max` return the index of the first minimum or maximum,
+counting every row including nulls; inside `group_by(...).agg(...)` and
+`over(...)` the index is within the group. Nulls are skipped, and NaN counts
+only when every valid value is NaN (then the first NaN's index), as in
+Polars. Polars' global `arg_max` on strings returns the last of tied indices;
+this library returns the first in every context.
+
+`mode` returns every most frequent value, ascending, with NaN above numbers
+and null last; null counts as a value and `-0.0` equals `0.0`. In `select` it
+yields one row per mode and cannot be combined with row-valued expressions;
+in `group_by(...).agg(...)` it yields a list per group; it is not available
+in `over(...)`.
+
+`skew` and `kurtosis` follow scipy and Polars: `bias=False` applies the
+sample-size correction and gives null below three (skew) or four (kurtosis)
+values; constant input gives NaN; `fisher=True` reports excess kurtosis.
+
+`corr(a, b)` and `cov(a, b)` are functions of two columns, named after `a`.
+Rows where either side is null are dropped pairwise. `corr` is Pearson's r,
+or Pearson on average ranks with `method="spearman"`, and is NaN below two
+pairs or for a constant side. `cov` is null with no pairs and 0.0 when the
+pairs do not exceed `ddof`, as Polars returns. A NaN in any pair makes both
+NaN. Polars' grouped `corr`/`cov` do not always drop null pairs; the
+differential oracle compares complete pairs.
 
 Integer sums use signed 128-bit totals plus valid counts. Every possible Int64
 column with length representable by Int fits this accumulator. Partial states

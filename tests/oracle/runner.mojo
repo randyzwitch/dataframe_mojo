@@ -11,6 +11,7 @@ SPEC is one operation (see scripts/oracle.py for the generator):
   unique COLS                  keep="first", maintain_order=True
   cum_sum COL                  output column "out"
   cast COL DTYPE               non-strict
+  stat CONTEXT FN COL          CONTEXT in global, group, over (see oracle.py)
 
 Setting DATAFRAME_ORACLE_INJECT=1 drops the last result row, so the harness
 can prove it detects a wrong answer.
@@ -25,6 +26,8 @@ from dataframe import (
     DataType,
     Expr,
     col,
+    corr,
+    cov,
     lit,
     read_csv,
     write_csv,
@@ -136,6 +139,50 @@ def run(
         return left.unique(split(spec[1]), keep="first", maintain_order=True)
     if op == "cum_sum":
         return left.with_columns(col(spec[1]).cum_sum().alias("out"))
+    if op == "stat":
+        var context = spec[1]
+        var name = spec[2]
+        var column = spec[3]
+        var frame = left.copy()
+        var e: Expr
+        if name.startswith("corr") or name.startswith("cov"):
+            var names = split(column)
+            var a = col(names[0])
+            var b = col(names[1])
+            frame = left.filter(a.is_not_null() & b.is_not_null())
+            if name == "corr":
+                e = corr(a, b)
+            elif name == "corr_spearman":
+                e = corr(a, b, method="spearman")
+            else:
+                e = cov(a, b, ddof=0 if name == "cov_ddof0" else 1)
+        else:
+            var c = col(column)
+            if column == "xn":
+                c = col("x") * (col("x") / col("x"))
+            if name == "arg_min":
+                e = c.arg_min()
+            elif name == "arg_max":
+                e = c.arg_max()
+            elif name == "mode":
+                e = c.mode()
+            elif name == "skew":
+                e = c.skew()
+            elif name == "skew_unbiased":
+                e = c.skew(bias=False)
+            elif name == "kurtosis":
+                e = c.kurtosis()
+            elif name == "kurtosis_unbiased":
+                e = c.kurtosis(bias=False)
+            else:
+                e = c.kurtosis(fisher=False)
+        e = e.alias("out")
+        if context == "global":
+            return frame.select(e)
+        if context == "over":
+            return frame.with_columns(e.over("k"))
+        var grouped = frame.group_by("k", maintain_order=True).agg(e)
+        return grouped.explode("out") if name == "mode" else grouped^
     if op == "cast":
         return left.with_columns(
             col(spec[1]).cast(spec[2], strict=False).alias("out")

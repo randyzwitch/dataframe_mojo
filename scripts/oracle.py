@@ -57,8 +57,11 @@ def gen_right(rng: random.Random, rows: int) -> pl.DataFrame:
     )
 
 
-def gen_op(rng: random.Random) -> list[str]:
-    kind = rng.choice(["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast"])
+KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat"]
+
+
+def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
+    kind = rng.choice(kinds)
     if kind == "filter":
         column = rng.choice(["g", "x", "n", "k", "b"])
         op = rng.choice(["gt", "lt", "ge", "le", "eq", "ne"])
@@ -89,7 +92,59 @@ def gen_op(rng: random.Random) -> list[str]:
         return ["unique", ",".join(rng.sample(["k", "g", "b"], rng.randint(1, 2)))]
     if kind == "cum_sum":
         return ["cum_sum", rng.choice(["g", "x", "n"])]
+    if kind == "stat":
+        return gen_stat(rng)
     return ["cast", rng.choice(["x", "g", "b"]), rng.choice(["int64", "float64", "string"])]
+
+
+# Statistics from #226. "xn" is x * (x / x): x, but NaN where x is zero, so
+# NaN handling is covered without changing the shared inputs.
+STAT_FNS = {
+    "arg_min": ["g", "x", "n", "k", "b", "xn"],
+    "arg_max": ["g", "x", "n", "k", "b", "xn"],
+    "mode": ["g", "n", "k", "b", "y"],
+    "skew": ["g", "x", "n", "y", "xn"],
+    "skew_unbiased": ["x", "n", "y"],
+    "kurtosis": ["g", "x", "n", "y", "xn"],
+    "kurtosis_unbiased": ["x", "n", "y"],
+    "kurtosis_pearson": ["x", "n", "y"],
+    "corr": ["x,y", "g,n", "n,y"],
+    "corr_spearman": ["x,y", "g,n", "n,y"],
+    "cov": ["x,y", "g,n", "n,y"],
+    "cov_ddof0": ["x,y", "g,n"],
+}
+
+
+def gen_stat(rng: random.Random) -> list[str]:
+    fn = rng.choice(sorted(STAT_FNS))
+    context = rng.choice(["global", "group"] + ([] if fn == "mode" else ["over"]))
+    return ["stat", context, fn, rng.choice(STAT_FNS[fn])]
+
+
+def stat_expr(fn: str, column: str) -> pl.Expr:
+    if fn.startswith("corr") or fn.startswith("cov"):
+        a, b = column.split(",")
+        if fn == "corr":
+            return pl.corr(a, b)
+        if fn == "corr_spearman":
+            return pl.corr(a, b, method="spearman")
+        return pl.cov(a, b, ddof=0 if fn == "cov_ddof0" else 1)
+    c = pl.col("x") * (pl.col("x") / pl.col("x")) if column == "xn" else pl.col(column)
+    return {
+        "arg_min": c.arg_min(), "arg_max": c.arg_max(), "mode": c.mode().sort(nulls_last=True),
+        "skew": c.skew(), "skew_unbiased": c.skew(bias=False), "kurtosis": c.kurtosis(),
+        "kurtosis_unbiased": c.kurtosis(bias=False), "kurtosis_pearson": c.kurtosis(fisher=False),
+    }[fn]
+
+
+def stat_input(left: pl.DataFrame, fn: str, column: str) -> pl.DataFrame:
+    """corr/cov drop rows where either side is null (the documented
+    semantics); Polars' grouped path disagrees with its global path at one
+    or zero pairs, so both engines get the complete pairs."""
+    if "," in column:
+        a, b = column.split(",")
+        return left.filter(pl.col(a).is_not_null() & pl.col(b).is_not_null())
+    return left
 
 
 def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.DataFrame:
@@ -123,6 +178,25 @@ def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.Dat
         return left.unique(subset=spec[1].split(","), keep="first", maintain_order=True)
     if op == "cum_sum":
         return left.with_columns(pl.col(spec[1]).cum_sum().alias("out"))
+    if op == "stat":
+        context, fn, column = spec[1], spec[2], spec[3]
+        frame = stat_input(left, fn, column)
+        e = stat_expr(fn, column).alias("out")
+        if context == "global" and fn == "arg_max" and column == "k":
+            # Polars' global string arg_max returns the last tied index,
+            # unlike its grouped/over paths and every other dtype, which
+            # return the first; the contract is the first.
+            best = frame.select(pl.col("k").max()).item()
+            if best is None:
+                return pl.DataFrame({"out": [None]}, schema={"out": pl.UInt32})
+            first = frame.with_row_index("i").filter(pl.col("k") == best)["i"][0]
+            return pl.DataFrame({"out": [first]}, schema={"out": pl.UInt32})
+        if context == "global":
+            return frame.select(e)
+        if context == "over":
+            return frame.with_columns(e.over("k"))
+        grouped = frame.group_by("k", maintain_order=True).agg(e)
+        return grouped.explode("out") if fn == "mode" else grouped
     return left.with_columns(pl.col(spec[1]).cast({"int64": pl.Int64, "float64": pl.Float64, "string": pl.String}[spec[2]], strict=False).alias("out"))
 
 
@@ -155,7 +229,13 @@ def run_case(runner: Path, left: pl.DataFrame, right: pl.DataFrame, spec: list[s
                 got = got.with_columns(pl.col("out").cast(source, strict=False))
                 ref = ref.with_columns(pl.col("out").cast(source, strict=False))
         try:
-            assert_frame_equal(normalize(got), normalize(ref), check_dtypes=False, rel_tol=1e-9, abs_tol=1e-12)
+            # Moment statistics are computed by different algorithms (online
+            # updates here, two-pass in Polars): compare them more loosely.
+            statistic = spec[0] == "stat" and spec[2] not in ("arg_min", "arg_max", "mode")
+            assert_frame_equal(
+                normalize(got), normalize(ref), check_dtypes=False,
+                rel_tol=1e-6 if statistic else 1e-9, abs_tol=1e-9 if statistic else 1e-12,
+            )
         except AssertionError as error:
             return str(error).splitlines()[0]
     return None
@@ -192,6 +272,7 @@ def main() -> int:
     parser.add_argument("--cases", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--mutation-check", action="store_true")
+    parser.add_argument("--kinds", default=",".join(KINDS), help="comma-separated operation kinds to generate")
     args = parser.parse_args()
     runner = build_runner()
     env = dict(os.environ)
@@ -203,7 +284,7 @@ def main() -> int:
         seed = args.seed + case
         rng = random.Random(seed)
         left, right = gen_left(rng, rng.randint(0, 12)), gen_right(rng, rng.randint(0, 6))
-        spec = gen_op(rng)
+        spec = gen_op(rng, args.kinds.split(","))
         problem = run_case(runner, left, right, spec, env)
         if args.mutation_check:
             expect_nonempty = expected(left, right, spec).height > 0

@@ -47,6 +47,14 @@ from .expr import (
     ANY,
     ALL,
     NULL_COUNT,
+    ARG_MIN,
+    ARG_MAX,
+    MODE,
+    SKEW,
+    KURTOSIS,
+    CORR,
+    COV,
+    is_pair_reduction,
     MIN,
     MAX,
     MEAN,
@@ -223,6 +231,20 @@ def op_name(op: Int) -> String:
         return "var"
     if op == MEDIAN:
         return "median"
+    if op == ARG_MIN:
+        return "arg_min"
+    if op == ARG_MAX:
+        return "arg_max"
+    if op == MODE:
+        return "mode"
+    if op == SKEW:
+        return "skew"
+    if op == KURTOSIS:
+        return "kurtosis"
+    if op == CORR:
+        return "corr"
+    if op == COV:
+        return "cov"
     if op == QUANTILE:
         return "quantile"
     if op == LEN:
@@ -380,6 +402,23 @@ def _unary_dtype(op: Int, input: DataType) raises -> DataType:
     return input
 
 
+def _reaches(nodes: List[Node], root: Int, op: Int) -> Bool:
+    """Whether the subtree under `root` contains a node with `op`."""
+    var pending = List[Int]()
+    pending.append(root)
+    while len(pending) > 0:
+        var index = pending.pop()
+        if index < 0:
+            continue
+        ref node = nodes[index]
+        if node.op == op:
+            return True
+        pending.append(node.left)
+        pending.append(node.right)
+        pending.append(node.extra)
+    return False
+
+
 def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     var op = node.op
     if op == IMPLODE:
@@ -410,6 +449,18 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
         return DataType.BOOL
     if op == MIN or op == MAX or op == FIRST or op == LAST:
         return input
+    if op == ARG_MIN or op == ARG_MAX:
+        return DataType.UINT32
+    if op == MODE:
+        return DataType.list(input)
+    if op == SKEW or op == KURTOSIS:
+        if not _numeric(input):
+            raise Error(
+                op_name(op)
+                + " requires a numeric expression, found "
+                + input.name()
+            )
+        return DataType.FLOAT64
     if op == MEAN or op == STD or op == VAR or op == MEDIAN or op == QUANTILE:
         if not _numeric(input):
             raise Error(
@@ -700,7 +751,32 @@ def bind(
                 )
             if node.min_count < 0:
                 raise Error("min_count must be nonnegative")
-            dtype = _reduction_dtype(node, types[node.left])
+            if is_pair_reduction(node.op):
+                if node.right < 0 or node.right >= i:
+                    raise Error("Invalid aggregate input")
+                if shapes[node.right] != ROWS or aggregated[node.right]:
+                    raise Error(
+                        "Aggregate input must be row-valued without nested"
+                        " aggregates"
+                    )
+                for side in [node.left, node.right]:
+                    if types[side].is_untyped():
+                        _default(nodes, types, side)
+                    if not _numeric(types[side]):
+                        raise Error(
+                            op_name(node.op)
+                            + " requires numeric expressions, found "
+                            + types[side].name()
+                        )
+                if node.op == CORR and (
+                    node.text != "pearson" and node.text != "spearman"
+                ):
+                    raise Error("corr method must be pearson or spearman")
+                if node.op == COV and node.integer < 0:
+                    raise Error("ddof must be nonnegative")
+                dtype = DataType.FLOAT64
+            else:
+                dtype = _reduction_dtype(node, types[node.left])
             shape = AGGREGATE
             has_aggregate = True
         elif is_conditional(node.op):
@@ -829,6 +905,11 @@ def bind(
                     found = found or column.name() == String(part)
                 if not found:
                     raise Error("Unknown partition column: " + String(part))
+            if _reaches(nodes, node.left, MODE):
+                raise Error(
+                    "mode() returns a list per group and cannot be used in"
+                    " over(); use group_by().agg() instead"
+                )
             dtype = types[node.left]
             shape = ROWS
         elif node.op == CAST:

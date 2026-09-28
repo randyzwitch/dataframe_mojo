@@ -9,6 +9,13 @@ from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
 from .expr import (
     Expr,
+    ARG_MIN,
+    ARG_MAX,
+    MODE,
+    SKEW,
+    KURTOSIS,
+    CORR,
+    COV,
     is_reduction,
     is_window,
     subtree,
@@ -1487,6 +1494,18 @@ struct DataFrame(Copyable, Sized, Writable):
         var columns = List[Series]()
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        # A top-level mode() yields one row per mode, as in Polars; scalar
+        # siblings repeat, and row-valued siblings cannot align with it.
+        var modes = List[String]()
+        for expression in bound:
+            ref nodes = expression.expr._nodes
+            if nodes[len(nodes) - 1].op == MODE:
+                if has_rows:
+                    raise Error(
+                        "mode() cannot be selected with row-valued"
+                        " expressions; its length differs"
+                    )
+                modes.append(expression.expr._name)
         for expression in bound:
             var result = evaluate(
                 expression, self._columns, self._height, batch_size=batch_size
@@ -1494,7 +1513,14 @@ struct DataFrame(Copyable, Sized, Writable):
             if expression.shape() != ROWS and has_rows:
                 result = result._broadcast(height)
             columns.append(result^)
-        return Self(columns^, height=height)
+        var frame = Self(columns^, height=height)
+        if len(modes) > 0:
+            # An empty input has no modes: zero rows, not one null row.
+            var empty = frame.select(col(modes[0]).list().len()).item()
+            if empty.int64() == 0:
+                return frame.explode(modes).clear()
+            return frame.explode(modes)
+        return frame^
 
     def with_columns(
         self, expression: Expr, *, batch_size: Int = 8192
@@ -4362,11 +4388,21 @@ def _stream_reductions(expressions: List[Expr]) -> Bool:
                     ALL,
                     NULL_COUNT,
                     N_UNIQUE,
+                    ARG_MIN,
+                    ARG_MAX,
+                    SKEW,
+                    KURTOSIS,
+                    CORR,
+                    COV,
                 ]:
                     return False
                 # Reduction inputs must be row-local; reduction-of-reduction
                 # and windows retain the materializing evaluator.
                 if not _row_local([subtree(expression, node.left)]):
+                    return False
+                if node.right >= 0 and not _row_local(
+                    [subtree(expression, node.right)]
+                ):
                     return False
                 saw_reduction = True
                 continue

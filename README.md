@@ -221,7 +221,8 @@ operations (`cum_sum`, `shift`, `diff`, `rank`, `rolling_*`, `forward_fill`,
 `is_between`, `cast`, `when(...).then(...).otherwise(...)`, a `.str()`
 namespace with `concat_str`, and the reductions `sum(min_count=0)`, `count`,
 `null_count`, `len`, `min`, `max`, `mean`, `first`, `last`, `n_unique`, `var`,
-`std`, `median`, `quantile`, `any`, and `all`. Equality is `.eq()` rather than
+`std`, `median`, `quantile`, `any`, `all`, `arg_min`, `arg_max`, `mode`,
+`skew` and `kurtosis`, plus the two-column `corr` and `cov`. Equality is `.eq()` rather than
 Python-style `==`. See the operator table in [expressions](docs/expressions.md).
 
 `select(expr)` selects one expression; `select_exprs([expr, ...])` selects several.

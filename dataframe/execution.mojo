@@ -66,6 +66,7 @@ from .expr import (
     subtree,
     is_window,
     is_reduction,
+    is_pair_reduction,
     is_string_op,
     is_nested_op,
     IMPLODE,
@@ -89,6 +90,7 @@ from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
 from .aggregate import Reducer
 from .parallel import Job, partitions, run_jobs, worker_count
+from std.collections import Optional
 from std.memory import ArcPointer
 from std.math import isnan
 
@@ -457,7 +459,34 @@ def _new_reducer(bound: BoundExpr, node: Node, group_count: Int) -> Reducer:
         node.integer,
         node.floating,
         node.text,
+        Optional(bound.dtypes[node.left]),
     )
+
+
+def _feed[
+    width: Int
+](
+    mut reducer: Reducer,
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    node: Node,
+    offset: Int,
+    length: Int,
+    grouped: Bool,
+    groups: List[Int],
+) raises:
+    """Evaluate one batch of the reduction's input(s) and fold it in."""
+    var chunk = _batch[width](
+        bound, columns, states, node.left, offset, length, False
+    )
+    if is_pair_reduction(node.op):
+        var other = _batch[width](
+            bound, columns, states, node.right, offset, length, False
+        )
+        reducer.update_pair(chunk, other, offset, grouped, groups)
+    else:
+        reducer.update(chunk, offset, grouped, groups)
 
 
 struct _ReduceJob[width: Int](Job):
@@ -524,16 +553,17 @@ struct _ReduceJob[width: Int](Job):
         ):
             return
         for offset in range(self.start, self.end, self.batch_size):
-            var chunk = _batch[Self.width](
+            _feed[Self.width](
+                self.reducer,
                 self.bound,
                 self.columns,
                 self.states,
-                self.node.left,
+                self.node,
                 offset,
                 min(self.batch_size, self.end - offset),
-                False,
+                self.grouped,
+                self.groups[],
             )
-            self.reducer.update(chunk, offset, self.grouped, self.groups[])
 
 
 struct _RowsJob[width: Int](Job):
@@ -911,16 +941,17 @@ def _reduce[
         ):
             return reducer^
         for offset in range(0, height, batch_size):
-            var chunk = _batch[width](
+            _feed[width](
+                reducer,
                 bound,
                 columns,
                 states,
-                node.left,
+                node,
                 offset,
                 min(batch_size, height - offset),
-                False,
+                grouped,
+                groups,
             )
-            reducer.update(chunk, offset, grouped, groups)
         return reducer^
     var shared_groups = ArcPointer(groups.copy())
     var bounds = partitions(height, workers, batch_size)

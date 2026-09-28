@@ -27,6 +27,8 @@ from .expr import (
     When,
     coalesce,
     col,
+    corr,
+    cov,
     concat_str,
     lit,
     null,

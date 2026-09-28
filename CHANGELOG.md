@@ -7,6 +7,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Reductions `arg_min`, `arg_max`, `mode`, `skew(bias)` and
+  `kurtosis(fisher, bias)`, and the two-column `corr(a, b, method)` (Pearson
+  or Spearman) and `cov(a, b, ddof)`, globally, in `group_by(...).agg(...)`
+  and in `over(...)` (except `mode`), with Polars' null and NaN rules (#226).
 - `write_parquet` writes supported logical and nested column types with zstd,
   snappy or uncompressed output and configurable row-group sizes.
 - `read_csv` accepts ordered `(name, dtype)` pairs as a concise explicit schema.
