@@ -1,7 +1,17 @@
 """Selector expansion: one bound expression per matched column."""
 from std.collections import Optional
 from .dtype import DataType
-from .expr import COL, SELECTOR, SEP, Expr, _node
+from .expr import (
+    COL,
+    SELECT_ALL,
+    SELECT_COLS,
+    SELECT_DTYPE,
+    SELECT_EXCLUDE,
+    SELECTOR,
+    SEP,
+    Expr,
+    _node,
+)
 from .series import Series
 
 
@@ -15,20 +25,19 @@ def _split(text: String) -> List[String]:
 
 
 def _matches(
-    node_text: String,
+    kind: Int,
     items: String,
     index: Int64,
     parsed: List[Optional[DataType]],
     columns: List[Series],
 ) raises -> List[String]:
-    var kind = String(node_text.split(SEP)[0])
     var names = List[String]()
     for column in columns:
         names.append(column.name())
     var result = List[String]()
-    if kind == "all":
+    if kind == SELECT_ALL:
         return names^
-    if kind == "cols" or kind == "exclude":
+    if kind == SELECT_COLS or kind == SELECT_EXCLUDE:
         var listed = _split(items)
         for name in listed:
             var found = False
@@ -36,7 +45,7 @@ def _matches(
                 found = found or existing == name
             if not found:
                 raise Error("Unknown selector column: " + name)
-        if kind == "cols":
+        if kind == SELECT_COLS:
             return listed^
         for name in names:
             var excluded = False
@@ -45,7 +54,7 @@ def _matches(
             if not excluded:
                 result.append(name)
         return result^
-    if kind == "dtype":
+    if kind == SELECT_DTYPE:
         var dtypes = List[DataType]()
         var listed = _split(items)
         for i in range(len(listed)):
@@ -85,10 +94,10 @@ def expand(expression: Expr, columns: List[Series]) raises -> List[Expr]:
         return result^
     ref node = expression._nodes[selector]
     var parts = node.text.split(SEP)
-    var prefix = String(parts[1])
-    var suffix = String(parts[2])
+    var prefix = String(parts[0])
+    var suffix = String(parts[1])
     for name in _matches(
-        node.text, node.text2, node.integer, node.dtypes, columns
+        node.min_count, node.text2, node.integer, node.dtypes, columns
     ):
         var nodes = expression._nodes.copy()
         nodes[selector] = _node(COL, text=name)
