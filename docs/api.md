@@ -358,6 +358,8 @@ list(inner) holds a variable number of `inner` values per row, and
 struct(names, dtypes) holds one value of each named field per row.
 
 - `def __init__(out self, code: Int, unit: Int)`
+- `def __init__(out self, storage: DType)`
+  A numeric type stored as Scalar[storage].
 - `def __init__(out self, code: Int, var spec: String)`
 - `def __eq__(self, other: Self) -> Bool`
 - `def __ne__(self, other: Self) -> Bool`
@@ -385,7 +387,7 @@ struct(names, dtypes) holds one value of each named field per row.
 - `def of(dtype: DType) -> Self`
   The DataType stored as Scalar[dtype] (numeric types only).
 - `def storage(self) -> Optional[DType]`
-  The numeric storage DType (int64 for temporal types); None for bool and string.
+  The numeric storage DType (int64 for temporal types); None for bool, string and nested types.
 - `def datetime(unit: String = "us") -> Self`
   A time-zone-naive instant counted in unit since the epoch.
 - `def duration(unit: String = "us") -> Self`
