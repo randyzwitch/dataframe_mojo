@@ -20,6 +20,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Retired the in-repo benchmarks the external suites supersede or whose
+  target code is gone: `bench_vs_polars` (`bench-polars`), the upstream join
+  ports, `bench_progression`, `bench_aggregate_fusion` and `bench_agg_shapes`.
+  docs/benchmarks.md lists what remains and why.
 - Lazy projection pushdown reaches through joins: each join input reads only
   its keys and the columns the plan above uses, for frame, CSV and Parquet
   scans and through filters. The inner-join count shortcut, which answered

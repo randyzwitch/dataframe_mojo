@@ -39,7 +39,7 @@ sys.path.insert(0, str(SUITES_DIR))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import datagen  # noqa: E402
-from bench_upstream_joins import compiler_processes  # noqa: E402
+from bench_host import compiler_processes  # noqa: E402
 
 ENGINES = ("mojo", "polars", "duckdb")
 

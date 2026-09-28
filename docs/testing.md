@@ -71,24 +71,18 @@ native library. `scripts/check_parquet_stream.py` uses PyArrow and the real
 shim to check projection, reordered/duplicate groups, empty selections,
 early close and a corrupted later row group.
 
-## Benchmarks and the fast paths they hit
+## Benchmarks
 
-`pixi run -e oracle bench-polars` (see `scripts/bench_polars.py`) is the
-yardstick. Its generated data qualifies for several fast paths, and a case
-that always qualifies only measures that path, so each such case has a
-partner that misses it on the same data:
+Headline performance comes from the external suites run by
+`scripts/bench_suites.py`; [benchmarks.md](benchmarks.md) states the rules
+and describes the suites, their data variants and the answer checks. The
+in-repo `benchmarks/bench_*.mojo` programs below measure one mechanism at a
+time and are development tools, not evidence of general performance.
 
-| case | fast path it exercises | partner that misses it |
-|---|---|---|
-| `grouped_low`, `grouped_skew` | direct lookup for Int64 keys spanning fewer than 4,096 values | `grouped_outlier`: `key_low` with a few keys at 10^12 |
-| `grouped_high`, `grouped_str` | general hash grouping | — |
-| `sort_multi` | bucket sort on a first key with at most 64 evenly spread values | `sort_high`: first key with rows/10 distinct values |
-| `join_inner` | ordered right keys (see below) | the join comparison's `shuffled` and `wide` layouts |
-
-The default sizes are 100k, 1M and 2.5M rows. The middle-of-the-range size is
-there because a row-count cutoff chosen by comparing 1M with 10M can sit
-anywhere between them; if a workload's time per row jumps between two sizes,
-sweep the sizes in between before drawing conclusions.
+When a mechanism benchmark's data qualifies for a fast path, it needs a
+partner case that misses the path on the same data, and any row-count cutoff
+needs sizes between the benchmark points: a cutoff chosen by comparing 1M
+with 10M rows can sit anywhere between them.
 
 The join/gather cutoffs and bounded-table budgets have a reproducible
 [measurement report](join-cutoffs.md), including density, cardinality,
@@ -146,6 +140,6 @@ on a CSV larger than 1 GB.
 Sort bucket calibration and reproducible sweeps are recorded in
 [sort-cutoffs.md](sort-cutoffs.md), including fast-path misses and Mac validation.
 
-The [upstream join baseline](upstream-join-baseline.md) adapts pinned DuckDB
-queries for all three engines, retains raw paired samples and provenance, and
-records CPU-profile evidence for the next general join improvements.
+The [upstream join baseline](upstream-join-baseline.md) records an earlier
+adaptation of two DuckDB join queries; its scripts are retired (see
+benchmarks.md) and the external suites supersede it.

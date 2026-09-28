@@ -1,5 +1,7 @@
 # Safe join-derived range filters
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `b9db9c6` to rerun them.
+
 This change follows build-side selection in #299. For small-left inner/left
 joins selected by its cardinality gate, exact bounds from valid physical
 Int64 left keys can reject right rows before hashing or payload gathering.

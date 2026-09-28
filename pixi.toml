@@ -79,7 +79,6 @@ python = ">=3.11"
 oracle = "python3 scripts/oracle.py"
 oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo"
 bench-suites = "python3 scripts/bench_suites.py"
-bench-polars = "python3 scripts/bench_polars.py"
 
 [feature.oracle.pypi-dependencies]
 duckdb = ">=1.5.5, <2"
