@@ -68,6 +68,18 @@ from .join_hash import (
     prepared_hash_join_rows,
     prepared_hash_semi_anti_rows,
 )
+from .join_type import (
+    JOIN_ANTI,
+    JOIN_CROSS,
+    JOIN_FULL,
+    JOIN_INNER,
+    JOIN_LEFT,
+    JOIN_RIGHT,
+    JOIN_SEMI,
+    join_code,
+    join_name,
+    join_type,
+)
 from .nested_column import ListColumn, StructColumn
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
@@ -816,7 +828,7 @@ struct DataFrame(Copyable, Sized, Writable):
             right,
             left_on=left_on,
             right_on=right_on,
-            how=how,
+            how=join_type(how),
             suffix=suffix,
             coalesce=coalesce,
         )
@@ -827,27 +839,15 @@ struct DataFrame(Copyable, Sized, Writable):
         *,
         left_on: List[String],
         right_on: List[String],
-        how: String = "inner",
+        how: Int = JOIN_INNER,
         suffix: String = "_right",
         coalesce: Bool = True,
         prepared: Optional[PreparedHashIndex] = None,
         range_filtered: Bool = False,
     ) raises -> Self:
-        if how == "cross":
+        if how == JOIN_CROSS:
             raise Error(
                 "A cross join takes no keys; use join(right, how='cross')"
-            )
-        if (
-            how != "inner"
-            and how != "left"
-            and how != "right"
-            and how != "full"
-            and how != "semi"
-            and how != "anti"
-        ):
-            raise Error(
-                "Join how must be inner, left, right, full, semi, anti, or"
-                " cross"
             )
         if len(left_on) == 0 or len(left_on) != len(right_on):
             raise Error(
@@ -885,14 +885,14 @@ struct DataFrame(Copyable, Sized, Writable):
             # dropped up front so it does not come through as an extra
             # output column.
             if (
-                how != "inner"
-                and how != "left"
-                and how != "semi"
-                and how != "anti"
+                how != JOIN_INNER
+                and how != JOIN_LEFT
+                and how != JOIN_SEMI
+                and how != JOIN_ANTI
             ):
                 raise Error(
                     "struct join keys support inner, left, semi and anti"
-                    " joins; found " + how
+                    " joins; found " + join_name(how)
                 )
             var left_side = self.copy()
             var right_side = right.copy()
@@ -917,7 +917,7 @@ struct DataFrame(Copyable, Sized, Writable):
                     new_left_on.append(left_parts[p].name())
                     new_right_on.append(left_parts[p].name())
                     helpers.append(left_parts[p].name())
-            return left_side.join(
+            return left_side._join_impl(
                 right_side,
                 left_on=new_left_on,
                 right_on=new_right_on,
@@ -925,10 +925,10 @@ struct DataFrame(Copyable, Sized, Writable):
                 suffix=suffix,
                 coalesce=coalesce,
             ).drop(helpers)
-        var keep_right_keys = how == "full" and not coalesce
+        var keep_right_keys = how == JOIN_FULL and not coalesce
         var right_output = List[Int]()
         var right_names = List[String]()
-        if how != "semi" and how != "anti":
+        if how != JOIN_SEMI and how != JOIN_ANTI:
             var names = Dict[String, Bool]()
             for column in self._columns:
                 names[column.name()] = True
@@ -947,7 +947,7 @@ struct DataFrame(Copyable, Sized, Writable):
         if (
             not range_filtered
             and not prepared
-            and (how == "inner" or how == "left")
+            and (how == JOIN_INNER or how == JOIN_LEFT)
             and prefer_left_build(self.height(), right.height())
         ):
             for k in range(len(left_keys)):
@@ -969,14 +969,14 @@ struct DataFrame(Copyable, Sized, Writable):
             var sources = List[Series](capacity=len(left_keys))
             for k in left_keys:
                 sources.append(self._columns[k].copy())
-            if how == "semi" or how == "anti":
+            if how == JOIN_SEMI or how == JOIN_ANTI:
                 return self._filter_rows(
                     prepared_hash_semi_anti_rows(
-                        sources, prepared.value(), how == "semi"
+                        sources, prepared.value(), how == JOIN_SEMI
                     )
                 )
             var pairs = prepared_hash_join_rows(
-                sources, prepared.value(), how == "left", omit_identity=True
+                sources, prepared.value(), how == JOIN_LEFT, omit_identity=True
             )
             var workers = worker_count(len(pairs[1]))
             var columns = self._columns.copy()
@@ -994,16 +994,19 @@ struct DataFrame(Copyable, Sized, Writable):
             for c in right_output:
                 right_sources.append(right._columns[c].copy())
             var gathered = take_parallel(
-                right_sources, pairs[1].copy(), workers, or_null=how == "left"
+                right_sources,
+                pairs[1].copy(),
+                workers,
+                or_null=how == JOIN_LEFT,
             )
             for k in range(len(right_output)):
                 columns.append(gathered[k].renamed(right_names[k]))
             return Self(columns^, height=len(pairs[1]))
-        if (how == "inner" or how == "left") and len(left_keys) == 1:
+        if (how == JOIN_INNER or how == JOIN_LEFT) and len(left_keys) == 1:
             var dense = _dense_right_int64_rows(
                 self._columns[left_keys[0]],
                 right._columns[right_keys[0]],
-                how == "left",
+                how == JOIN_LEFT,
             )
             if dense[0]:
                 var left_rows = dense[1].copy()
@@ -1017,7 +1020,7 @@ struct DataFrame(Copyable, Sized, Writable):
                             left_identity = False
                             break
                 if not left_identity:
-                    var ordered_chunks = how == "inner"
+                    var ordered_chunks = how == JOIN_INNER
                     for column in columns:
                         if (
                             not column.is_chunked()
@@ -1039,19 +1042,22 @@ struct DataFrame(Copyable, Sized, Writable):
                 for c in right_output:
                     right_sources.append(right._columns[c].copy())
                 var gathered = take_parallel(
-                    right_sources, right_rows^, workers, or_null=how == "left"
+                    right_sources,
+                    right_rows^,
+                    workers,
+                    or_null=how == JOIN_LEFT,
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
                 return Self(columns^, height=len(left_rows))
-        if (how == "semi" or how == "anti") and len(left_keys) == 1:
+        if (how == JOIN_SEMI or how == JOIN_ANTI) and len(left_keys) == 1:
             var aligned_chunks = can_filter_aligned_chunks(self._columns)
             if aligned_chunks:
                 var chunk_membership = _range_int64_membership_chunks(
                     self,
                     left_keys[0],
                     right._columns[right_keys[0]],
-                    how == "semi",
+                    how == JOIN_SEMI,
                 )
                 if chunk_membership[0]:
                     var selected = chunk_membership[1].copy()
@@ -1060,7 +1066,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 var membership = _range_int64_membership_rows(
                     self._columns[left_keys[0]],
                     right._columns[right_keys[0]],
-                    how == "semi",
+                    how == JOIN_SEMI,
                 )
                 if membership[0]:
                     return self._filter_rows(membership[1].copy())
@@ -1068,7 +1074,7 @@ struct DataFrame(Copyable, Sized, Writable):
         # right-row hash index for membership only. The dictionary path
         # below would encode both inputs and group every right row first.
         if (
-            (how == "semi" or how == "anti")
+            (how == JOIN_SEMI or how == JOIN_ANTI)
             and worker_count(self.height()) > 1
             and right.height() <= Int(Int32.MAX)
         ):
@@ -1080,14 +1086,14 @@ struct DataFrame(Copyable, Sized, Writable):
             if not low_cardinality(right_sources):
                 return self._filter_rows(
                     direct_hash_semi_anti_rows(
-                        left_sources, right_sources, how == "semi"
+                        left_sources, right_sources, how == JOIN_SEMI
                     )
                 )
         # Dense ids over both inputs materialize and re-encode every key.
         # For high-cardinality right keys, a row index probes the original
         # columns directly and preserves exact equality across collisions.
         var build_left = prefer_left_build(self.height(), right.height())
-        if (how == "inner" or how == "left") and (
+        if (how == JOIN_INNER or how == JOIN_LEFT) and (
             build_left or worker_count(self.height()) > 1
         ):
             var left_sources = List[Series](capacity=len(left_keys))
@@ -1101,14 +1107,14 @@ struct DataFrame(Copyable, Sized, Writable):
             var direct_identity = False
             if build_left:
                 var pairs = _smaller_build_join_rows(
-                    left_sources, right_sources, how == "left"
+                    left_sources, right_sources, how == JOIN_LEFT
                 )
                 left_rows = pairs[0].copy()
                 right_rows = pairs[1].copy()
                 direct = True
             if not direct and len(left_keys) == 1:
                 var range_rows = _bounded_int64_join_rows(
-                    left_sources[0], right_sources[0], how == "left"
+                    left_sources[0], right_sources[0], how == JOIN_LEFT
                 )
                 if range_rows[0]:
                     direct = True
@@ -1122,7 +1128,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 var pairs = direct_hash_join_rows(
                     left_sources,
                     right_sources,
-                    how == "left",
+                    how == JOIN_LEFT,
                     omit_identity=True,
                 )
                 direct = True
@@ -1141,7 +1147,7 @@ struct DataFrame(Copyable, Sized, Writable):
                             left_identity = False
                             break
                 if not left_identity:
-                    var ordered_chunks = how == "inner"
+                    var ordered_chunks = how == JOIN_INNER
                     for column in columns:
                         if (
                             not column.is_chunked()
@@ -1167,7 +1173,7 @@ struct DataFrame(Copyable, Sized, Writable):
                     right_output_sources,
                     right_rows^,
                     workers,
-                    or_null=how == "left",
+                    or_null=how == JOIN_LEFT,
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
@@ -1178,7 +1184,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var left_rows = List[Int]()
         var right_rows = List[Int]()
         var direct_right = False
-        if how == "right" and worker_count(right.height()) > 1:
+        if how == JOIN_RIGHT and worker_count(right.height()) > 1:
             var right_probe_keys = List[Series](capacity=len(right_keys))
             var left_build_keys = List[Series](capacity=len(left_keys))
             for k in range(len(left_keys)):
@@ -1214,7 +1220,7 @@ struct DataFrame(Copyable, Sized, Writable):
             # counting sort preserves the match order the contract documents.
             var right_starts = List[Int]()
             var right_flat = List[Int]()
-            if how != "right":
+            if how != JOIN_RIGHT:
                 right_starts = _group_index(right_ids, count)
                 var csr_workers = worker_count(len(right_ids))
                 # Use the output/cursor working set and key cardinality to
@@ -1222,21 +1228,21 @@ struct DataFrame(Copyable, Sized, Writable):
                 right_flat = _parallel_group_rows(
                     right_ids, right_starts, csr_workers
                 ) if (
-                    (how == "inner" or how == "full")
+                    (how == JOIN_INNER or how == JOIN_FULL)
                     and _parallel_csr_fits(right_ids, count, csr_workers)
                 ) else _group_rows(
                     right_ids, right_starts
                 )
-            if how == "semi" or how == "anti":
+            if how == JOIN_SEMI or how == JOIN_ANTI:
                 for i in range(len(left_ids)):
                     var id = left_ids[i]
                     var matched = (
                         id >= 0 and right_starts[id + 1] > right_starts[id]
                     )
-                    if matched == (how == "semi"):
+                    if matched == (how == JOIN_SEMI):
                         left_rows.append(i)
                 return self.take(left_rows)
-            if how == "right":
+            if how == JOIN_RIGHT:
                 var left_starts = _group_index(left_ids, count)
                 var left_workers = worker_count(len(left_ids))
                 var left_flat = _parallel_group_rows(
@@ -1265,7 +1271,7 @@ struct DataFrame(Copyable, Sized, Writable):
                         else:
                             left_rows.append(-1)
                             right_rows.append(j)
-            elif how == "full" and worker_count(len(left_ids)) > 1:
+            elif how == JOIN_FULL and worker_count(len(left_ids)) > 1:
                 var pairs = _parallel_full_join_rows(
                     left_ids,
                     right_ids,
@@ -1276,7 +1282,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 )
                 left_rows = pairs[0].copy()
                 right_rows = pairs[1].copy()
-            elif (how == "inner" or how == "left") and worker_count(
+            elif (how == JOIN_INNER or how == JOIN_LEFT) and worker_count(
                 len(left_ids)
             ) > 1:
                 var pairs = _parallel_join_rows(
@@ -1284,7 +1290,7 @@ struct DataFrame(Copyable, Sized, Writable):
                     right_starts,
                     right_flat,
                     worker_count(len(left_ids)),
-                    how == "left",
+                    how == JOIN_LEFT,
                 )
                 left_rows = pairs[0].copy()
                 right_rows = pairs[1].copy()
@@ -1300,15 +1306,15 @@ struct DataFrame(Copyable, Sized, Writable):
                             left_rows.append(i)
                             right_rows.append(j)
                             right_matched[j] = True
-                    elif how != "inner":
+                    elif how != JOIN_INNER:
                         left_rows.append(i)
                         right_rows.append(-1)
-                if how == "full":
+                if how == JOIN_FULL:
                     for j in range(len(right_ids)):
                         if not right_matched[j]:
                             left_rows.append(-1)
                             right_rows.append(j)
-        if how == "right":
+        if how == JOIN_RIGHT:
             # Every output row has a right row. Its key is the coalesced key
             # even when no left row matched, so never gather a left key or
             # choose between duplicate key columns after materialization.
@@ -1367,7 +1373,7 @@ struct DataFrame(Copyable, Sized, Writable):
         # at once; `or_null` is what lets it carry the -1 that means "no row
         # on this side".
         var gather_workers = worker_count(len(left_rows))
-        var sides_mixed = how == "right" or how == "full"
+        var sides_mixed = how == JOIN_RIGHT or how == JOIN_FULL
         var left_sources = List[Series](capacity=self.width())
         for c in range(self.width()):
             left_sources.append(self._columns[c].copy())
@@ -1403,7 +1409,7 @@ struct DataFrame(Copyable, Sized, Writable):
             right_sources,
             right_rows.copy(),
             gather_workers,
-            or_null=how == "left" or how == "full",
+            or_null=how == JOIN_LEFT or how == JOIN_FULL,
         )
 
         for j in range(len(coalesced)):
@@ -1427,7 +1433,7 @@ struct DataFrame(Copyable, Sized, Writable):
 
         Right names that collide with left names gain the suffix.
         """
-        if how != "cross":
+        if join_code(how) != JOIN_CROSS:
             raise Error("Join how='" + how + "' requires key columns")
         var total = self._height * right._height
         if right._height != 0 and total // right._height != self._height:

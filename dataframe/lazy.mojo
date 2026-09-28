@@ -63,6 +63,14 @@ from .parquet import (
     read_parquet,
 )
 from .series import Series
+from .join_type import (
+    JOIN_ANTI,
+    JOIN_CROSS,
+    JOIN_INNER,
+    JOIN_LEFT,
+    JOIN_SEMI,
+    join_code,
+)
 from .join_hash import (
     PreparedHashIndex,
     prepare_hash_index,
@@ -99,6 +107,9 @@ struct PlanNode(Copyable):
     var offset: Int
     var length: Int
     var maintain_order: Bool
+    # A JOIN's type code (see join_type); -1 for an unknown name, which the
+    # eager join reports from the original text when the plan executes.
+    var how: Int
 
 
 def _plan_node(
@@ -113,6 +124,7 @@ def _plan_node(
     offset: Int = 0,
     length: Int = -1,
     maintain_order: Bool = False,
+    how: Int = -1,
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -126,6 +138,7 @@ def _plan_node(
         offset,
         length,
         maintain_order,
+        how,
     )
 
 
@@ -204,7 +217,7 @@ struct _StreamJob(Job):
                     self.joins[][node.offset],
                     left_on=node.names,
                     right_on=node.names,
-                    how=node.text,
+                    how=node.how,
                     suffix=node.names2[0],
                     prepared=self.indexes[][node.offset],
                 )
@@ -374,7 +387,12 @@ struct LazyFrame(Copyable):
                 copied.offset += frame_shift
             result._nodes.append(copied^)
         var join = _plan_node(
-            JOIN, left_root, len(result._nodes) - 1, names=on, text=how
+            JOIN,
+            left_root,
+            len(result._nodes) - 1,
+            names=on,
+            text=how,
+            how=join_code(how),
         )
         join.names2 = [suffix]
         result._nodes.append(join^)
@@ -488,17 +506,17 @@ struct LazyFrame(Copyable):
             ref node = self._nodes[cursor]
             if _stream_rows(node):
                 operations.append(node.copy())
-            elif node.kind == JOIN and node.text in [
-                "inner",
-                "left",
-                "semi",
-                "anti",
-                "cross",
+            elif node.kind == JOIN and node.how in [
+                JOIN_INNER,
+                JOIN_LEFT,
+                JOIN_SEMI,
+                JOIN_ANTI,
+                JOIN_CROSS,
             ]:
                 var prepared = Optional[PreparedHashIndex]()
                 if (
                     self._known_height(node.left) <= batch_size
-                    and (node.text == "inner" or node.text == "left")
+                    and (node.how == JOIN_INNER or node.how == JOIN_LEFT)
                     and prefer_left_build(
                         self._known_height(node.left),
                         self._known_height(node.right),
@@ -524,7 +542,7 @@ struct LazyFrame(Copyable):
                 var operation = node.copy()
                 operation.offset = len(joins)
                 joins.append(self._execute(node.right, False, True, batch_size))
-                if not prepared and node.text != "cross" and len(node.names):
+                if not prepared and node.how != JOIN_CROSS and len(node.names):
                     ref build = joins[len(joins) - 1]
                     var sources = List[Series]()
                     var supported = build.height() <= Int(Int32.MAX)
@@ -857,17 +875,17 @@ struct LazyFrame(Copyable):
                     changed = True
                     break
                 elif below.kind == JOIN and (
-                    below.text == "inner"
-                    or below.text == "left"
-                    or below.text == "semi"
-                    or below.text == "anti"
+                    below.how == JOIN_INNER
+                    or below.how == JOIN_LEFT
+                    or below.how == JOIN_SEMI
+                    or below.how == JOIN_ANTI
                 ):
                     var left_cols = self._columns_of(below.left)
                     var right_cols = self._columns_of(below.right)
                     var side = -1
                     if _covers(left_cols, reads.value()):
                         side = 0
-                    elif below.text == "inner" and _covers_exclusive(
+                    elif below.how == JOIN_INNER and _covers_exclusive(
                         right_cols, left_cols, reads.value()
                     ):
                         side = 1
@@ -1059,7 +1077,7 @@ struct LazyFrame(Copyable):
         var left_cols = self._columns_of(node.left)
         var right_cols = self._columns_of(node.right)
         var suffix = node.names2[0]
-        var membership = node.text == "semi" or node.text == "anti"
+        var membership = node.how == JOIN_SEMI or node.how == JOIN_ANTI
         var outputs = Dict[String, Bool]()
         for c in left_cols:
             outputs[c] = True
@@ -1186,16 +1204,16 @@ struct LazyFrame(Copyable):
                 node.kind == AGG or node.kind == SELECT
             ) and _stream_reductions(node.exprs):
                 label += " [stream aggregate state]"
-            elif node.kind == JOIN and node.text in [
-                "inner",
-                "left",
-                "semi",
-                "anti",
-                "cross",
+            elif node.kind == JOIN and node.how in [
+                JOIN_INNER,
+                JOIN_LEFT,
+                JOIN_SEMI,
+                JOIN_ANTI,
+                JOIN_CROSS,
             ]:
                 if (
                     self._known_height(node.left) <= 65536
-                    and (node.text == "inner" or node.text == "left")
+                    and (node.how == JOIN_INNER or node.how == JOIN_LEFT)
                     and prefer_left_build(
                         self._known_height(node.left),
                         self._known_height(node.right),
