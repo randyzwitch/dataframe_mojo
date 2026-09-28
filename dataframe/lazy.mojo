@@ -56,7 +56,7 @@ from .expr import (
     is_window,
     subtree,
 )
-from .frame import DataFrame, GroupBy
+from .frame import DataFrame, GroupBy, _row_local, _stream_reductions
 from .parquet import (
     _pruned_row_groups,
     parquet_row_group_statistics,
@@ -144,15 +144,6 @@ def _references(expr: Expr) -> Optional[List[String]]:
     return names^
 
 
-def _row_local(exprs: List[Expr]) -> Bool:
-    """True when every output row depends only on the same input row."""
-    for e in exprs:
-        for node in e._nodes:
-            if is_reduction(node.op) or is_window(node.op) or node.op == OVER:
-                return False
-    return True
-
-
 def _output_names(exprs: List[Expr]) -> List[String]:
     var names = List[String]()
     for e in exprs:
@@ -173,55 +164,6 @@ def _stream_rows(node: PlanNode) -> Bool:
                     return True
         return False
     return node.kind == DROP or node.kind == EXPLODE or node.kind == UNNEST
-
-
-def _stream_reductions(expressions: List[Expr]) -> Bool:
-    if len(expressions) == 0:
-        return False
-    for expression in expressions:
-        ref nodes = expression._nodes
-        var reachable = List[Bool](length=len(nodes), fill=False)
-        reachable[len(nodes) - 1] = True
-        var saw_reduction = False
-        for reverse in range(len(nodes)):
-            var i = len(nodes) - 1 - reverse
-            ref node = nodes[i]
-            if is_window(node.op) or node.op == OVER or node.op == SELECTOR:
-                return False
-            if not reachable[i]:
-                continue
-            if is_reduction(node.op):
-                if node.op not in [
-                    SUM,
-                    COUNT,
-                    MIN,
-                    MAX,
-                    MEAN,
-                    FIRST,
-                    LAST,
-                    STD,
-                    VAR,
-                    LEN,
-                    ANY,
-                    ALL,
-                    NULL_COUNT,
-                    N_UNIQUE,
-                ]:
-                    return False
-                # Reduction inputs must be row-local; reduction-of-reduction
-                # and windows retain the materializing evaluator.
-                if not _row_local([subtree(expression, node.left)]):
-                    return False
-                saw_reduction = True
-                continue
-            if node.op == COL:
-                return False
-            for child in [node.left, node.right, node.extra]:
-                if child >= 0:
-                    reachable[child] = True
-        if not saw_reduction:
-            return False
-    return True
 
 
 struct _StreamJob(Job):

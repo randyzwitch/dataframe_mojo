@@ -24,6 +24,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
   its keys and the columns the plan above uses, for frame, CSV and Parquet
   scans and through filters. The inner-join count shortcut, which answered
   `join(...).select(len())` without running the join, is removed (#304).
+- Group-by reduces worker row ranges into mergeable state for any list of
+  supported reductions on low-cardinality keys of any type, replacing two
+  paths that accepted only Float64 sum/count/mean on one Int64 key. Other
+  aggregation lists run 3.3 to 6.5x faster there; the former two-aggregation
+  special case is slower. See [the measurements](docs/group-aggregation.md) (#306).
 - Lazy collect executes supported pipelines in bounded ordered batches,
   merges aggregate state, streams supported join probes, and annotates
   materialization boundaries in explain. `streaming=False` keeps the
