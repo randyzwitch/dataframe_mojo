@@ -183,6 +183,22 @@ Join String expressions row-wise; any null input makes the row null.
 def concat_str(exprs: List[Expr], separator: String = "") -> Expr
 ```
 
+## `corr`
+
+Correlation of the pairs (a, b), Float64, named after a. Rows where either side is null are dropped; method is "pearson" or "spearman" (Pearson on average ranks). NaN below two pairs.
+
+```mojo
+def corr(a: Expr, b: Expr, method: String = "pearson") -> Expr
+```
+
+## `cov`
+
+Covariance of the pairs (a, b), Float64, named after a. Rows where either side is null are dropped; null with no pairs.
+
+```mojo
+def cov(a: Expr, b: Expr, ddof: Int = Int(1)) -> Expr
+```
+
 ## `CsvField`
 
 One CSV output field. Names and dtypes are always explicit.
@@ -668,6 +684,16 @@ A flat, topologically ordered tree; composition never evaluates data.
   Number of rows including nulls, as Int64.
 - `def sum(self, min_count: Int = Int(0)) -> Self`
   Skip nulls; zero when empty unless fewer than min_count are valid.
+- `def arg_min(self) -> Self`
+  Index of the first minimum, as UInt32; nulls are skipped and NaN counts only when every value is NaN. Null for no values. Inside group_by().agg() or over(), the index is within the group.
+- `def arg_max(self) -> Self`
+  Index of the first maximum; see arg_min.
+- `def mode(self) -> Self`
+  Every most frequent value, ascending with null last (a null counts as a value). select() returns one row per mode; group_by() .agg() returns a list per group. Not available in over().
+- `def skew(self, bias: Bool = True) -> Self`
+  Sample skewness, Float64; bias=False applies the adjusted Fisher-Pearson correction (null below three values).
+- `def kurtosis(self, fisher: Bool = True, bias: Bool = True) -> Self`
+  Sample kurtosis, Float64: excess (normal is 0) when fisher, Pearson's otherwise; bias=False corrects for sample size (null below four values).
 - `def count(self) -> Self`
   Number of non-null values, as Int64.
 

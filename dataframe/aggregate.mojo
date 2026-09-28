@@ -31,8 +31,23 @@ from .expr import (
     MEDIAN,
     QUANTILE,
     LEN,
+    ARG_MIN,
+    ARG_MAX,
+    MODE,
+    SKEW,
+    KURTOSIS,
+    CORR,
+    COV,
 )
-from .reductions import IntSumState, FloatSumState, LogicState, VarState
+from .reductions import (
+    CoMomentState,
+    FloatSumState,
+    IntSumState,
+    LogicState,
+    MomentState,
+    VarState,
+)
+from .nested_column import ListColumn
 
 
 def _group(grouped: Bool, groups: List[Int], row: Int) -> Int:
@@ -264,6 +279,21 @@ def _distinct(
 comptime _UINT64_BIAS = UInt64(1) << 63
 
 
+def _float_values(chunk: Series) raises -> Tuple[List[Float64], List[Bool]]:
+    """Any numeric chunk as Float64 values and validity (UInt64 unbiased)."""
+    var values = List[Float64](capacity=len(chunk))
+    var valid = List[Bool](capacity=len(chunk))
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if chunk._data.isa[Column[Scalar[D]]]():
+            ref column = chunk._data[Column[Scalar[D]]]
+            for i in range(len(column)):
+                values.append(column._get(i).cast[DType.float64]())
+                valid.append(column._valid(i))
+            return (values^, valid^)
+    raise Error("expected a numeric column")
+
+
 def _state_type(dtype: DataType) -> DataType:
     if dtype.is_integer():
         return DataType.INT64
@@ -329,6 +359,44 @@ def _from_canonical(result: Series, dtype: DataType) raises -> Series:
                         values.append(column._get(i).cast[D]())
             return Series("", Column[Scalar[D]](values^, valid))
     return result.copy()
+
+
+def _bisect(sorted: List[Float64], value: Float64, right: Bool) -> Int:
+    """First index whose value is > (right) or >= (left) `value`."""
+    var lo = 0
+    var hi = len(sorted)
+    while lo < hi:
+        var mid = (lo + hi) // 2
+        if sorted[mid] < value or (right and sorted[mid] == value):
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _average_ranks(values: List[Float64]) -> List[Float64]:
+    """1-based ranks; ties share the average of the ranks they span."""
+    var ordered = values.copy()
+    sort(ordered)
+    var ranks = List[Float64](capacity=len(values))
+    for value in values:
+        var first = _bisect(ordered, value, False)
+        var last = _bisect(ordered, value, True)
+        ranks.append(Float64(first + last + 1) / 2)
+    return ranks^
+
+
+def _spearman(xs: List[Float64], ys: List[Float64]) -> Float64:
+    """Pearson's r on average ranks; NaN below two pairs or with a NaN."""
+    for i in range(len(xs)):
+        if isnan(xs[i]) or isnan(ys[i]):
+            return Float64(0) / Float64(0)
+    var rx = _average_ranks(xs)
+    var ry = _average_ranks(ys)
+    var state = CoMomentState()
+    for i in range(len(rx)):
+        state.add(rx[i], ry[i])
+    return state.correlation()
 
 
 def validity_of(series: Series) -> List[Bool]:
@@ -418,6 +486,23 @@ struct Reducer(Movable):
     var int_sets: List[Dict[Int64, Bool]]
     var float_sets: List[Dict[UInt64, Bool]]
     var string_sets: List[Dict[String, Bool]]
+    # arg_min/arg_max: index of the best value and of the first NaN, within
+    # each group; `counts` holds the rows seen per group.
+    var positions: List[Int64]
+    var nan_positions: List[Int64]
+    var moments4: List[MomentState]
+    var comoments: List[CoMomentState]
+    # Spearman keeps the pairs, since ranks need every value of a group.
+    var pair_x: List[List[Float64]]
+    var pair_y: List[List[Float64]]
+    # mode: occurrences per canonical value (bools as 0/1) and nulls.
+    var mode_ints: List[Dict[Int64, Int64]]
+    var mode_floats: List[Dict[UInt64, Int64]]
+    var mode_float_values: List[Dict[UInt64, Float64]]
+    var mode_strings: List[Dict[String, Int64]]
+    var mode_nulls: List[Int64]
+    # The logical input type, for results (mode) that carry input values.
+    var logical: DataType
 
     def __init__(
         out self,
@@ -428,9 +513,11 @@ struct Reducer(Movable):
         integer: Int64,
         floating: Float64 = 0,
         text: String = "",
+        logical: Optional[DataType] = None,
     ):
         self.op = op
         self.input = input_dtype
+        self.logical = logical.value() if logical else input_dtype
         self.dtype = _state_type(input_dtype)
         self.group_count = group_count
         self.min_count = min_count
@@ -441,7 +528,10 @@ struct Reducer(Movable):
         var is_int = self.dtype == DataType.INT64
         var is_float = self.dtype == DataType.FLOAT64
         var summing = op == SUM or op == MEAN
-        var picking = op == MIN or op == MAX or op == FIRST or op == LAST
+        var arg = op == ARG_MIN or op == ARG_MAX
+        var picking = op == MIN or op == MAX or op == FIRST or op == LAST or arg
+        var mode = op == MODE
+        var spearman = op == CORR and text == "spearman"
         var distinct = op == N_UNIQUE
         self.counts = List[Int64](length=n, fill=0)
         self.int_sums = List[IntSumState](
@@ -491,6 +581,36 @@ struct Reducer(Movable):
             length=n if distinct and input_dtype == DataType.STRING else 0,
             fill=Dict[String, Bool](),
         )
+        self.positions = List[Int64](length=n if arg else 0, fill=0)
+        self.nan_positions = List[Int64](length=n if arg else 0, fill=0)
+        self.moments4 = List[MomentState](
+            length=n if op == SKEW or op == KURTOSIS else 0, fill=MomentState()
+        )
+        self.comoments = List[CoMomentState](
+            length=n if (op == CORR and not spearman) or op == COV else 0,
+            fill=CoMomentState(),
+        )
+        self.pair_x = List[List[Float64]](
+            length=n if spearman else 0, fill=List[Float64]()
+        )
+        self.pair_y = List[List[Float64]](
+            length=n if spearman else 0, fill=List[Float64]()
+        )
+        var mode_ints = mode and (is_int or input_dtype == DataType.BOOL)
+        self.mode_ints = List[Dict[Int64, Int64]](
+            length=n if mode_ints else 0, fill=Dict[Int64, Int64]()
+        )
+        self.mode_floats = List[Dict[UInt64, Int64]](
+            length=n if mode and is_float else 0, fill=Dict[UInt64, Int64]()
+        )
+        self.mode_float_values = List[Dict[UInt64, Float64]](
+            length=n if mode and is_float else 0, fill=Dict[UInt64, Float64]()
+        )
+        self.mode_strings = List[Dict[String, Int64]](
+            length=n if mode and input_dtype == DataType.STRING else 0,
+            fill=Dict[String, Int64](),
+        )
+        self.mode_nulls = List[Int64](length=n if mode else 0, fill=0)
 
     def update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
@@ -503,6 +623,14 @@ struct Reducer(Movable):
             for part in chunk.chunks():
                 self.update(part, part_offset, grouped, groups)
                 part_offset += len(part)
+            return
+        if self.op == SKEW or self.op == KURTOSIS:
+            var floats = _float_values(chunk)
+            for i in range(len(floats[0])):
+                if floats[1][i]:
+                    self.moments4[_group(grouped, groups, offset + i)].add(
+                        floats[0][i]
+                    )
             return
         if self.input == self.dtype:
             self._update(chunk, offset, grouped, groups)
@@ -519,10 +647,56 @@ struct Reducer(Movable):
             return
         self._update(_canonical(chunk), offset, grouped, groups)
 
+    def update_pair(
+        mut self,
+        left: Series,
+        right: Series,
+        offset: Int,
+        grouped: Bool,
+        groups: List[Int],
+    ) raises:
+        """Feed (left, right) rows to corr/cov; a null on either side drops
+        the pair."""
+        var xs = _float_values(left.rechunk())
+        var ys = _float_values(right.rechunk())
+        if len(xs[0]) != len(ys[0]):
+            if len(ys[0]) == 1:
+                var value = ys[0][0]
+                var valid = ys[1][0]
+                ys = (
+                    List[Float64](length=len(xs[0]), fill=value),
+                    List[Bool](length=len(xs[0]), fill=valid),
+                )
+            elif len(xs[0]) == 1:
+                var value = xs[0][0]
+                var valid = xs[1][0]
+                xs = (
+                    List[Float64](length=len(ys[0]), fill=value),
+                    List[Bool](length=len(ys[0]), fill=valid),
+                )
+            else:
+                raise Error("corr and cov inputs differ in length")
+        var spearman = len(self.pair_x) > 0
+        for i in range(len(xs[0])):
+            if not (xs[1][i] and ys[1][i]):
+                continue
+            var g = _group(grouped, groups, offset + i)
+            if spearman:
+                self.pair_x[g].append(xs[0][i])
+                self.pair_y[g].append(ys[0][i])
+            else:
+                self.comoments[g].add(xs[0][i], ys[0][i])
+
     def _update(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
     ) raises:
         var op = self.op
+        if op == ARG_MIN or op == ARG_MAX:
+            self._update_arg(chunk, offset, grouped, groups)
+            return
+        if op == MODE:
+            self._update_mode(chunk, offset, grouped, groups)
+            return
         if op == COUNT or op == NULL_COUNT:
             var nulls = op == NULL_COUNT
             if chunk._data.isa[Column[Int64]]():
@@ -730,6 +904,155 @@ struct Reducer(Movable):
         else:
             raise Error("Unsupported reduction")
 
+    def _update_arg(
+        mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
+    ) raises:
+        """Track the first best value and its index within each group, and
+        the first NaN, which counts only when a group has nothing else."""
+        var is_max = self.op == ARG_MAX
+        if chunk._data.isa[Column[Int64]]():
+            ref column = chunk._data[Column[Int64]]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                var at = self.counts[g]
+                self.counts[g] += 1
+                if not column._valid(i):
+                    continue
+                var value = column._get(i)
+                if (
+                    not self.seen[g]
+                    or (is_max and value > self.ints[g])
+                    or (not is_max and value < self.ints[g])
+                ):
+                    self.ints[g] = value
+                    self.positions[g] = at
+                    self.seen[g] = True
+        elif chunk._data.isa[Column[Float64]]():
+            ref column = chunk._data[Column[Float64]]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                var at = self.counts[g]
+                self.counts[g] += 1
+                if not column._valid(i):
+                    continue
+                var value = column._get(i)
+                if isnan(value):
+                    if not self.nan_seen[g]:
+                        self.nan_seen[g] = True
+                        self.nan_positions[g] = at
+                elif (
+                    not self.seen[g]
+                    or (is_max and value > self.floats[g])
+                    or (not is_max and value < self.floats[g])
+                ):
+                    self.floats[g] = value
+                    self.positions[g] = at
+                    self.seen[g] = True
+        elif chunk._data.isa[BoolColumn]():
+            ref column = chunk._data[BoolColumn]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                var at = self.counts[g]
+                self.counts[g] += 1
+                if not column._valid(i):
+                    continue
+                var value = column._get(i)
+                if (
+                    not self.seen[g]
+                    or (is_max and value and not self.bools[g])
+                    or (not is_max and not value and self.bools[g])
+                ):
+                    self.bools[g] = value
+                    self.positions[g] = at
+                    self.seen[g] = True
+        else:
+            ref column = chunk._data[StringColumn]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                var at = self.counts[g]
+                self.counts[g] += 1
+                if not column._valid(i):
+                    continue
+                var value = column._get(i)
+                if (
+                    not self.seen[g]
+                    or (is_max and value > self.strings[g])
+                    or (not is_max and value < self.strings[g])
+                ):
+                    self.strings[g] = String(value)
+                    self.positions[g] = at
+                    self.seen[g] = True
+
+    def _update_mode(
+        mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
+    ) raises:
+        if chunk._data.isa[Column[Int64]]():
+            ref column = chunk._data[Column[Int64]]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                if not column._valid(i):
+                    self.mode_nulls[g] += 1
+                    continue
+                var key = column._get(i)
+                self.mode_ints[g][key] = self.mode_ints[g].get(key, 0) + 1
+        elif chunk._data.isa[Column[Float64]]():
+            ref column = chunk._data[Column[Float64]]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                if not column._valid(i):
+                    self.mode_nulls[g] += 1
+                    continue
+                var value = column._get(i)
+                var key = float_key(value)
+                var seen = self.mode_floats[g].get(key, 0)
+                if seen == 0:
+                    self.mode_float_values[g][key] = value
+                self.mode_floats[g][key] = seen + 1
+        elif chunk._data.isa[BoolColumn]():
+            ref column = chunk._data[BoolColumn]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                if not column._valid(i):
+                    self.mode_nulls[g] += 1
+                    continue
+                var key = Int64(column._get(i))
+                self.mode_ints[g][key] = self.mode_ints[g].get(key, 0) + 1
+        else:
+            ref column = chunk._data[StringColumn]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                if not column._valid(i):
+                    self.mode_nulls[g] += 1
+                    continue
+                var key = String(column._get(i))
+                self.mode_strings[g][key] = self.mode_strings[g].get(key, 0) + 1
+
+    def _better(self, other: Self, g: Int, source: Int, is_max: Bool) -> Bool:
+        """Whether other's value for `source` strictly beats ours for `g`."""
+        if self.dtype == DataType.INT64:
+            return (
+                other.ints[source]
+                > self.ints[g] if is_max else other.ints[source]
+                < self.ints[g]
+            )
+        if self.dtype == DataType.FLOAT64:
+            return (
+                other.floats[source]
+                > self.floats[g] if is_max else other.floats[source]
+                < self.floats[g]
+            )
+        if self.dtype == DataType.BOOL:
+            return (
+                other.bools[source]
+                > self.bools[g] if is_max else other.bools[source]
+                < self.bools[g]
+            )
+        return (
+            other.strings[source]
+            > self.strings[g] if is_max else other.strings[source]
+            < self.strings[g]
+        )
+
     def merge(mut self, other: Self, groups: List[Int] = List[Int]()):
         """Fold in the state of the next, disjoint row partition.
 
@@ -749,6 +1072,50 @@ struct Reducer(Movable):
                     self.float_sums[g].merge(other.float_sums[source])
             elif op == STD or op == VAR:
                 self.moments[g].merge(other.moments[source])
+            elif op == ARG_MIN or op == ARG_MAX:
+                # Other's indices count from the start of its partition,
+                # which follows every row this state has seen for g.
+                var shift = self.counts[g]
+                if other.nan_seen[source] and not self.nan_seen[g]:
+                    self.nan_seen[g] = True
+                    self.nan_positions[g] = shift + other.nan_positions[source]
+                if other.seen[source] and (
+                    not self.seen[g]
+                    or self._better(other, g, source, op == ARG_MAX)
+                ):
+                    self._take_value(other, g, source)
+                    self.positions[g] = shift + other.positions[source]
+                self.counts[g] += other.counts[source]
+            elif op == SKEW or op == KURTOSIS:
+                self.moments4[g].merge(other.moments4[source])
+            elif op == CORR or op == COV:
+                if len(self.pair_x) > 0:
+                    for value in other.pair_x[source]:
+                        self.pair_x[g].append(value)
+                    for value in other.pair_y[source]:
+                        self.pair_y[g].append(value)
+                else:
+                    self.comoments[g].merge(other.comoments[source])
+            elif op == MODE:
+                self.mode_nulls[g] += other.mode_nulls[source]
+                if len(self.mode_ints) > 0:
+                    for item in other.mode_ints[source].items():
+                        self.mode_ints[g][item.key] = (
+                            self.mode_ints[g].get(item.key, 0) + item.value
+                        )
+                elif len(self.mode_floats) > 0:
+                    for item in other.mode_floats[source].items():
+                        var seen = self.mode_floats[g].get(item.key, 0)
+                        if seen == 0:
+                            self.mode_float_values[g][
+                                item.key
+                            ] = other.mode_float_values[source].get(item.key, 0)
+                        self.mode_floats[g][item.key] = seen + item.value
+                else:
+                    for item in other.mode_strings[source].items():
+                        self.mode_strings[g][item.key] = (
+                            self.mode_strings[g].get(item.key, 0) + item.value
+                        )
             elif op == MEDIAN or op == QUANTILE:
                 for value in other.samples[source]:
                     self.samples[g].append(value)
@@ -835,20 +1202,128 @@ struct Reducer(Movable):
             self.integer,
             self.floating,
             self.text,
+            self.logical,
         )
         expanded.merge(self)
         self = expanded^
 
     def finish(self) raises -> Series:
+        var op = self.op
+        if op == MODE:
+            return self._finish_mode()
+        if (
+            op == ARG_MIN
+            or op == ARG_MAX
+            or op == SKEW
+            or op == KURTOSIS
+            or op == CORR
+            or op == COV
+        ):
+            return self._finish()
         if self.input == self.dtype:
             return self._finish()
-        var op = self.op
         if op == SUM and self.input.is_integer():
             return self._integer_sum()
         var result = self._finish()
         if op == SUM or op == MIN or op == MAX or op == FIRST or op == LAST:
             return _from_canonical(result, self.input)
         return result^
+
+    def _finish_mode(self) raises -> Series:
+        """Each group's most frequent values as a list: ascending, NaN above
+        numbers, null last. A group with no rows has an empty list."""
+        var n = self.group_count
+        var offsets = List[Int64](capacity=n + 1)
+        offsets.append(0)
+        var total = 0
+        var child: Series
+        if len(self.mode_ints) > 0:
+            var values = List[Int64]()
+            var valid = List[Bool]()
+            for g in range(n):
+                var best = self.mode_nulls[g]
+                for item in self.mode_ints[g].items():
+                    best = max(best, item.value)
+                if best > 0:
+                    var chosen = List[Int64]()
+                    for item in self.mode_ints[g].items():
+                        if item.value == best:
+                            chosen.append(item.key)
+                    sort(chosen)
+                    for value in chosen:
+                        values.append(value)
+                        valid.append(True)
+                    if self.mode_nulls[g] == best:
+                        values.append(0)
+                        valid.append(False)
+                    total = len(values)
+                offsets.append(Int64(total))
+            if self.input == DataType.BOOL:
+                var flags = List[Bool](capacity=len(values))
+                for value in values:
+                    flags.append(value != 0)
+                child = Series("", BoolColumn(flags^, valid^))
+            else:
+                child = _from_canonical(
+                    Series("", Column[Int64](values^, valid^)), self.input
+                )
+        elif len(self.mode_floats) > 0:
+            var values = List[Float64]()
+            var valid = List[Bool]()
+            for g in range(n):
+                var best = self.mode_nulls[g]
+                for item in self.mode_floats[g].items():
+                    best = max(best, item.value)
+                if best > 0:
+                    var numbers = List[Float64]()
+                    var nans = List[Float64]()
+                    for item in self.mode_floats[g].items():
+                        if item.value == best:
+                            var value = self.mode_float_values[g][item.key]
+                            if isnan(value):
+                                nans.append(value)
+                            else:
+                                numbers.append(value)
+                    sort(numbers)
+                    for value in numbers:
+                        values.append(value)
+                        valid.append(True)
+                    for value in nans:
+                        values.append(value)
+                        valid.append(True)
+                    if self.mode_nulls[g] == best:
+                        values.append(0)
+                        valid.append(False)
+                    total = len(values)
+                offsets.append(Int64(total))
+            child = _from_canonical(
+                Series("", Column[Float64](values^, valid^)), self.input
+            )
+        else:
+            var values = List[String]()
+            var valid = List[Bool]()
+            for g in range(n):
+                var best = self.mode_nulls[g]
+                for item in self.mode_strings[g].items():
+                    best = max(best, item.value)
+                if best > 0:
+                    var chosen = List[String]()
+                    for item in self.mode_strings[g].items():
+                        if item.value == best:
+                            chosen.append(item.key)
+                    sort(chosen)
+                    for value in chosen:
+                        values.append(value)
+                        valid.append(True)
+                    if self.mode_nulls[g] == best:
+                        values.append("")
+                        valid.append(False)
+                    total = len(values)
+                offsets.append(Int64(total))
+            child = Series("", StringColumn(values, valid))
+        if self.logical.is_temporal():
+            child = child.with_dtype(self.logical)
+        return Series("", ListColumn(offsets^, child.renamed("item")))
 
     def _integer_sum(self) raises -> Series:
         """Exact sums of narrow or unsigned integers in their sum type."""
@@ -881,6 +1356,39 @@ struct Reducer(Movable):
         var op = self.op
         var n = self.group_count
         var valid = List[Bool](length=n, fill=True)
+        if op == ARG_MIN or op == ARG_MAX:
+            var output = List[UInt32](length=n, fill=0)
+            for g in range(n):
+                valid[g] = self.seen[g] or self.nan_seen[g]
+                output[g] = UInt32(
+                    self.positions[g] if self.seen[g] else self.nan_positions[g]
+                )
+            return Series("", Column[UInt32](output^, valid))
+        if op == SKEW or op == KURTOSIS:
+            var output = List[Float64](length=n, fill=0)
+            var bias = (self.integer & 1) != 0
+            var fisher = (self.integer & 2) != 0
+            for g in range(n):
+                var value = self.moments4[g].skew(
+                    bias
+                ) if op == SKEW else self.moments4[g].kurtosis(fisher, bias)
+                valid[g] = Bool(value)
+                if value:
+                    output[g] = value.value()
+            return Series("", Column[Float64](output^, valid))
+        if op == CORR or op == COV:
+            var output = List[Float64](length=n, fill=0)
+            for g in range(n):
+                if len(self.pair_x) > 0:
+                    output[g] = _spearman(self.pair_x[g], self.pair_y[g])
+                elif op == CORR:
+                    output[g] = self.comoments[g].correlation()
+                else:
+                    var value = self.comoments[g].covariance(Int(self.integer))
+                    valid[g] = Bool(value)
+                    if value:
+                        output[g] = value.value()
+            return Series("", Column[Float64](output^, valid))
         if op == COUNT or op == NULL_COUNT or op == LEN:
             return Series("", Column[Int64](self.counts.copy()))
         if op == SUM and self.dtype == DataType.INT64:

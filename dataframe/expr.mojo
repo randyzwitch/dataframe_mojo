@@ -103,6 +103,15 @@ comptime LEN = 90
 comptime ANY = 91
 comptime ALL = 92
 comptime NULL_COUNT = 93
+# Index of the first minimum/maximum within its group, as UInt32.
+comptime ARG_MIN = 95
+comptime ARG_MAX = 96
+# Every most frequent value (nulls count as a value), sorted, as a list.
+comptime MODE = 97
+# integer: 1 for the biased estimator.
+comptime SKEW = 98
+# integer: bit 0 biased, bit 1 Fisher (excess) kurtosis.
+comptime KURTOSIS = 99
 # Gather each group's values into a list (a reduction whose result is a list).
 comptime IMPLODE = 94
 
@@ -161,6 +170,12 @@ comptime STRUCT_FIELD = 155
 # first are listed in text2 (SEP-separated node indices) and named in text.
 comptime STRUCT_PACK = 156
 
+# Two-input reductions of (left, right) pairs; rows where either side is
+# null are dropped pairwise. CORR: text "pearson" or "spearman". COV:
+# integer is ddof.
+comptime CORR = 160
+comptime COV = 161
+
 
 def is_binary(op: Int) -> Bool:
     return (op >= ADD and op <= EQ) or (op >= 20 and op < 50)
@@ -171,7 +186,17 @@ def is_unary(op: Int) -> Bool:
 
 
 def is_reduction(op: Int) -> Bool:
-    return op == SUM or op == COUNT or (op >= 80 and op < 100)
+    return (
+        op == SUM
+        or op == COUNT
+        or (op >= 80 and op < 100)
+        or is_pair_reduction(op)
+    )
+
+
+def is_pair_reduction(op: Int) -> Bool:
+    """Reductions over (left, right) pairs of rows."""
+    return op == CORR or op == COV
 
 
 def is_comparison(op: Int) -> Bool:
@@ -811,6 +836,33 @@ struct Expr(Copyable):
         nodes.append(_node(SUM, len(nodes) - 1, min_count=min_count))
         return Self(nodes^, self._name)
 
+    def arg_min(self) -> Self:
+        """Index of the first minimum, as UInt32; nulls are skipped and NaN
+        counts only when every value is NaN. Null for no values. Inside
+        group_by().agg() or over(), the index is within the group."""
+        return self._unary(ARG_MIN)
+
+    def arg_max(self) -> Self:
+        """Index of the first maximum; see arg_min."""
+        return self._unary(ARG_MAX)
+
+    def mode(self) -> Self:
+        """Every most frequent value, ascending with null last (a null
+        counts as a value). select() returns one row per mode; group_by()
+        .agg() returns a list per group. Not available in over()."""
+        return self._unary(MODE)
+
+    def skew(self, bias: Bool = True) -> Self:
+        """Sample skewness, Float64; bias=False applies the adjusted
+        Fisher-Pearson correction (null below three values)."""
+        return self._unary(SKEW, Int64(bias))
+
+    def kurtosis(self, fisher: Bool = True, bias: Bool = True) -> Self:
+        """Sample kurtosis, Float64: excess (normal is 0) when fisher,
+        Pearson's otherwise; bias=False corrects for sample size (null
+        below four values)."""
+        return self._unary(KURTOSIS, Int64(bias) + 2 * Int64(fisher))
+
     def count(self) -> Self:
         """Number of non-null values, as Int64."""
         return self._unary(COUNT)
@@ -990,6 +1042,23 @@ def null(dtype: String) -> Expr:
     return Expr(
         [_node(LIT_NULL, text=dtype, dtypes=[_parse_dtype(dtype)])], "literal"
     )
+
+
+def corr(a: Expr, b: Expr, method: String = "pearson") -> Expr:
+    """Correlation of the pairs (a, b), Float64, named after a. Rows where
+    either side is null are dropped; method is "pearson" or "spearman"
+    (Pearson on average ranks). NaN below two pairs."""
+    var result = a._binary(b, CORR)
+    result._nodes[len(result._nodes) - 1].text = method
+    return result^
+
+
+def cov(a: Expr, b: Expr, ddof: Int = 1) -> Expr:
+    """Covariance of the pairs (a, b), Float64, named after a. Rows where
+    either side is null are dropped; null with no pairs."""
+    var result = a._binary(b, COV)
+    result._nodes[len(result._nodes) - 1].integer = Int64(ddof)
+    return result^
 
 
 def coalesce(exprs: List[Expr]) raises -> Expr:
