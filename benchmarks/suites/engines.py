@@ -2,17 +2,13 @@
 
 Usage (oracle environment):
 
-    python engines.py ENGINE SUITE QUERY REPS name=path [name=path ...]
+    python engines.py ENGINE SUITE QUERIES REPS name=path [name=path ...]
 
-The worker loads every table into memory (untimed), runs the query once to
-warm up, then times REPS runs. Each timed run materializes the full result:
-Polars collects a DataFrame and DuckDB creates a temporary table, as the
-H2O.ai db-benchmark does. It prints, one per line:
-
-    time<TAB>NANOSECONDS          (one line per timed run)
-    summary<TAB>HEIGHT<TAB>V1,V2<TAB>NAME1,NAME2  (see `summary`)
-
-or `unsupported<TAB>REASON`. The Mojo runners print the same protocol, so
+QUERIES is comma-separated. The worker loads every table into memory once
+(untimed), then for each query runs it once to warm up and times REPS runs.
+Each timed run materializes the full result: Polars collects a DataFrame and
+DuckDB creates a temporary table, as the H2O.ai db-benchmark does. It prints
+the lines documented in suite_common.mojo, each tagged with its query, so
 the driver checks every engine's answer the same way.
 
 DuckDB runs the reference SQL for each suite: db-benchmark's queries,
@@ -991,21 +987,37 @@ POLARS = {
 }
 
 
+def _report(query, times, result):
+    for ns in times:
+        print(f"time\t{query}\t{ns}")
+    height, values = summary(result)
+    print(
+        f"summary\t{query}\t{height}\t"
+        + ",".join(repr(v) for v in values)
+        + "\t"
+        + ",".join(result.columns)
+    )
+
+
 def main():
-    engine, suite, query, reps = sys.argv[1:5]
+    engine, suite, queries, reps = sys.argv[1:5]
     reps = int(reps)
     tables = dict(arg.split("=", 1) for arg in sys.argv[5:])
-    times = []
     if engine == "polars":
         import polars as pl
 
         frames = {name: pl.read_parquet(path) for name, path in tables.items()}
         run = POLARS[suite]
-        result = run(frames, query)
-        for _ in range(reps):
-            start = time.perf_counter_ns()
+
+        def execute(query):
             result = run(frames, query)
-            times.append(time.perf_counter_ns() - start)
+            times = []
+            for _ in range(reps):
+                start = time.perf_counter_ns()
+                result = run(frames, query)
+                times.append(time.perf_counter_ns() - start)
+            return times, result
+
     elif engine == "duckdb":
         import duckdb
 
@@ -1019,24 +1031,28 @@ def main():
             con.execute(
                 f"CREATE TABLE {name} AS SELECT * FROM read_parquet('{path}')"
             )
-        sql = duckdb_sql(suite, query, con)
-        con.execute(f"CREATE OR REPLACE TEMP TABLE ans AS {sql}")
-        for _ in range(reps):
-            start = time.perf_counter_ns()
+
+        def execute(query):
+            sql = duckdb_sql(suite, query, con)
             con.execute(f"CREATE OR REPLACE TEMP TABLE ans AS {sql}")
-            times.append(time.perf_counter_ns() - start)
-        result = con.execute("SELECT * FROM ans").pl()
+            times = []
+            for _ in range(reps):
+                start = time.perf_counter_ns()
+                con.execute(f"CREATE OR REPLACE TEMP TABLE ans AS {sql}")
+                times.append(time.perf_counter_ns() - start)
+            return times, con.execute("SELECT * FROM ans").pl()
+
     else:
         raise SystemExit(f"unknown engine {engine}")
-    for ns in times:
-        print(f"time\t{ns}")
-    height, values = summary(result)
-    print(
-        f"summary\t{height}\t"
-        + ",".join(repr(v) for v in values)
-        + "\t"
-        + ",".join(result.columns)
-    )
+    for query in queries.split(","):
+        try:
+            times, result = execute(query)
+        except Exception as error:  # report and continue with the next query
+            message = " ".join(str(error).split())
+            print(f"failed\t{query}\t{message}")
+            continue
+        _report(query, times, result)
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

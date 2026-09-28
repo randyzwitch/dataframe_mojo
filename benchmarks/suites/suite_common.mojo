@@ -2,18 +2,23 @@
 
 Each suite runner is invoked as
 
-    RUNNER SUITE QUERY REPS name=path [name=path ...]
+    RUNNER SUITE QUERIES REPS name=path [name=path ...]
 
-It loads every named Parquet table into memory (untimed), runs the query
-once to warm up, then times REPS runs of the full query, each producing a
-materialized DataFrame. It prints the same lines as benchmarks/suites/
-engines.py: `time<TAB>ns` per run and
-`summary<TAB>height<TAB>v1,v2,...<TAB>name1,name2,...`,
-or `unsupported<TAB>reason` when this library cannot express the query.
-A query signals the latter by raising an error that starts with
-"unsupported:".
+where QUERIES is a comma-separated list. It loads every named Parquet table
+into memory once (untimed), then for each query runs it once to warm up and
+times REPS runs, each producing a materialized DataFrame. It prints the same
+lines as benchmarks/suites/engines.py, each tagged with its query:
+
+    time<TAB>QUERY<TAB>NANOSECONDS                  one per timed run
+    summary<TAB>QUERY<TAB>HEIGHT<TAB>V1,V2<TAB>N1,N2 see engines.py `summary`
+    unsupported<TAB>QUERY<TAB>REASON
+    failed<TAB>QUERY<TAB>MESSAGE
+
+A query reports unsupported by raising an error that starts with
+"unsupported:"; any other error fails that query alone.
 """
 from std.collections import Dict
+from std.io import FileDescriptor
 from std.sys import argv
 from std.time import monotonic
 
@@ -67,32 +72,44 @@ def summary_value(frame: DataFrame, name: String) raises -> Float64:
 def run[
     query: def(String, Dict[String, DataFrame]) raises thin -> DataFrame
 ]() raises:
-    """Load, warm up, time and summarize one query (see module docs)."""
+    """Load once, then warm up, time and summarize each query (module docs)."""
     var args = argv()
     if len(args) < 5:
-        raise Error("usage: RUNNER SUITE QUERY REPS name=path ...")
-    var name = String(args[2])
+        raise Error("usage: RUNNER SUITE QUERIES REPS name=path ...")
+    var names = String(args[2]).split(",")
     var reps = Int(String(args[3]))
     var tables = load_tables()
-    var result: DataFrame
-    try:
-        result = query(name, tables)
-    except e:
-        var message = String(e)
-        if message.startswith("unsupported:"):
-            print("unsupported\t" + String(message[byte=13:]))
-            return
-        raise e^
-    for _ in range(reps):
-        var start = monotonic()
-        result = query(name, tables)
-        print("time\t" + String(monotonic() - start))
-    var values = String()
-    var names = String()
-    for i in range(result.width()):
-        if i > 0:
-            values += ","
-            names += ","
-        values += String(summary_value(result, result.columns()[i]))
-        names += result.columns()[i]
-    print("summary\t" + String(result.height()) + "\t" + values + "\t" + names)
+    for part in names:
+        var name = String(part)
+        # Lets a trace (DATAFRAME_TRACE_PATHS) attribute paths to queries.
+        print("dataframe-query:", name, file=FileDescriptor(2))
+        try:
+            var result = query(name, tables)
+            for _ in range(reps):
+                var start = monotonic()
+                result = query(name, tables)
+                print("time\t" + name + "\t" + String(monotonic() - start))
+            var values = String()
+            var columns = String()
+            for i in range(result.width()):
+                if i > 0:
+                    values += ","
+                    columns += ","
+                values += String(summary_value(result, result.columns()[i]))
+                columns += result.columns()[i]
+            print(
+                "summary\t"
+                + name
+                + "\t"
+                + String(result.height())
+                + "\t"
+                + values
+                + "\t"
+                + columns
+            )
+        except e:
+            var message = String(e)
+            if message.startswith("unsupported:"):
+                print("unsupported\t" + name + "\t" + String(message[byte=13:]))
+            else:
+                print("failed\t" + name + "\t" + message.replace("\n", " "))

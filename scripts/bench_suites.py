@@ -1,20 +1,23 @@
 """Run the external benchmark suites against Polars and DuckDB.
 
 See docs/benchmarks.md for the rules these measurements serve. Run under the
-oracle environment, after building libdfparquet:
+oracle environment, after building libdfparquet (pixi run -e native
+build-dfparquet):
 
-    pixi run -e native build-dfparquet
-    pixi run -e oracle python3 scripts/bench_suites.py                 # dev suites
-    pixi run -e oracle python3 scripts/bench_suites.py --heldout       # + held-out
-    pixi run -e oracle python3 scripts/bench_suites.py --scale smoke --trace
+    # A code change, in minutes: development suites at 1M rows, this build
+    # against main, Polars/DuckDB from the reference cache.
+    pixi run -e oracle python3 scripts/bench_suites.py --baseline main
 
-Each (suite, variant, query, engine) runs in a fresh process that loads its
-tables untimed, warms up once and times --reps runs; the per-round figure is
-the fastest run and the report shows the median over --rounds rounds, with
-engine order rotated between rounds. Every answer is checked against DuckDB
-(see engines.py `summary`); a wrong answer is reported as such and excluded
-from ratios, never silently timed. Unsupported queries are counted, not
-dropped. Data lives outside the repository (benchmarks/suites/datagen.py).
+    # A report: 10M rows, three rounds, fast-path coverage, held-out suites.
+    pixi run -e oracle python3 scripts/bench_suites.py --tier full --heldout
+
+One worker process per (suite, variant, engine, round) loads the tables once
+(untimed), then warms up and times --reps runs of each query; the per-round
+figure is the fastest run, the report shows the median over rounds, and the
+order of the engines under test rotates. Every answer is checked against
+DuckDB (see engines.py `summary`); a wrong answer is reported as such and
+excluded from ratios. Unsupported queries are counted, not dropped. Data
+lives outside the repository (benchmarks/suites/datagen.py).
 """
 
 import argparse
@@ -70,9 +73,11 @@ SUITES = {
     },
 }
 
-# Data sizes. "smoke" checks answers in CI; "default" is for measurement.
+# Data sizes. "smoke" checks answers in CI; "dev" is the quick tier's size
+# for the edit-measure loop; "default" is for reports.
 SCALES = {
     "smoke": {"h2o_rows": 100_000, "pdsh_sf": 0.01, "clickbench_partitions": 1},
+    "dev": {"h2o_rows": 1_000_000, "pdsh_sf": 0.1, "clickbench_partitions": 1},
     "default": {
         "h2o_rows": 10_000_000,
         "pdsh_sf": 1,
@@ -82,6 +87,29 @@ SCALES = {
         "h2o_rows": 100_000_000,
         "pdsh_sf": 10,
         "clickbench_partitions": 100,
+    },
+}
+
+# Two tiers (docs/benchmarks.md). `quick` is for checking a code change in
+# minutes: development suites at 1M rows, every data variant, one round, and
+# Polars/DuckDB outcomes reused from the reference cache, since their code
+# does not change when this library does. `full` is for reports.
+TIERS = {
+    "quick": {
+        "suites": "h2o_groupby,h2o_join",
+        "scale": "dev",
+        "rounds": 3,
+        "reps": 3,
+        "reuse_references": True,
+        "trace": False,
+    },
+    "full": {
+        "suites": "h2o_groupby,h2o_join",
+        "scale": "default",
+        "rounds": 3,
+        "reps": 3,
+        "reuse_references": False,
+        "trace": True,
     },
 }
 
@@ -157,9 +185,32 @@ def tables(suite, variant, scale):
 # --- building and running workers ------------------------------------------
 
 
+def _build(tree, name, binary):
+    """Build suite runner `name` against the dataframe package in `tree`,
+    always from this checkout's suite sources."""
+    print(f"building {binary}", file=sys.stderr)
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.check_call(
+        [
+            "mojo",
+            "build",
+            "-O3",
+            "-I",
+            str(tree),
+            "-I",
+            str(SUITES_DIR),
+            str(SUITES_DIR / f"{name}.mojo"),
+            "-o",
+            str(binary),
+        ],
+        cwd=tree,
+    )
+
+
 def build_runners(names, force=False):
+    """Runners for this checkout, rebuilt when a library or suite source is
+    newer than the binary."""
     out = ROOT / "build" / "suites"
-    out.mkdir(parents=True, exist_ok=True)
     sources = list((ROOT / "dataframe").glob("*.mojo")) + list(
         SUITES_DIR.glob("*.mojo")
     )
@@ -168,30 +219,42 @@ def build_runners(names, force=False):
     for name in sorted(set(names)):
         binary = out / f"suite_{name}"
         if force or not binary.exists() or binary.stat().st_mtime < newest:
-            print(f"building {binary.relative_to(ROOT)}", file=sys.stderr)
-            subprocess.check_call(
-                [
-                    "mojo",
-                    "build",
-                    "-O3",
-                    "-I",
-                    str(ROOT),
-                    "-I",
-                    str(SUITES_DIR),
-                    str(SUITES_DIR / f"{name}.mojo"),
-                    "-o",
-                    str(binary),
-                ],
-                cwd=ROOT,
-            )
+            _build(ROOT, name, binary)
         binaries[name] = binary
     return binaries
 
 
-def command(engine, binaries, suite, query, reps, paths):
-    args = [suite, query, str(reps)] + [f"{k}={v}" for k, v in paths.items()]
-    if engine == "mojo":
-        return [str(binaries[SUITES[suite]["runner"]])] + args
+def build_baseline(ref, names):
+    """Runners built against the library at `ref`, cached by commit.
+
+    The revision is checked out once as a detached git worktree under
+    build/suites/baseline/<sha>; its binaries are rebuilt only when this
+    checkout's suite sources change. Returns (label, binaries).
+    """
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=ROOT, text=True
+    ).strip()
+    tree = ROOT / "build" / "suites" / "baseline" / sha
+    if not (tree / "dataframe").exists():
+        subprocess.check_call(
+            ["git", "worktree", "add", "--detach", str(tree), sha], cwd=ROOT
+        )
+    newest = max(path.stat().st_mtime for path in SUITES_DIR.glob("*.mojo"))
+    binaries = {}
+    for name in sorted(set(names)):
+        binary = tree / "build" / "suites" / f"suite_{name}"
+        if not binary.exists() or binary.stat().st_mtime < newest:
+            _build(tree, name, binary)
+        binaries[name] = binary
+    return f"base@{sha[:7]}", binaries
+
+
+def command(engine, runners, suite, queries, reps, paths):
+    args = [suite, ",".join(queries), str(reps)] + [
+        f"{k}={v}" for k, v in paths.items()
+    ]
+    if engine in runners:
+        return [str(runners[engine][SUITES[suite]["runner"]])] + args
     return [sys.executable, str(SUITES_DIR / "engines.py"), engine] + args
 
 
@@ -207,24 +270,45 @@ def environment(threads, trace=False):
     return env
 
 
-def parse(output):
-    times, summary, reason = [], None, None
+def parse(output, queries):
+    """Per-query outcomes from a worker's tagged output lines."""
+    found = {q: {"status": "failed", "reason": "no output"} for q in queries}
     for line in output.splitlines():
         fields = line.split("\t")
-        if fields[0] == "time":
-            times.append(int(fields[1]))
-        elif fields[0] == "summary":
-            values = [float(v) for v in fields[2].split(",")] if fields[2] else []
-            names = fields[3].split(",") if len(fields) > 3 and fields[3] else []
-            summary = {"height": int(fields[1]), "values": values, "names": names}
-        elif fields[0] == "unsupported":
-            reason = fields[1]
-    return times, summary, reason
+        if len(fields) < 3 or fields[1] not in found:
+            continue
+        kind, query = fields[0], fields[1]
+        entry = found[query]
+        if kind == "time":
+            entry.setdefault("times", []).append(int(fields[2]))
+        elif kind == "summary":
+            values = [float(v) for v in fields[3].split(",")] if fields[3] else []
+            names = fields[4].split(",") if len(fields) > 4 and fields[4] else []
+            entry.update(
+                status="ok",
+                reason="",
+                summary={"height": int(fields[2]), "values": values, "names": names},
+            )
+        elif kind in ("unsupported", "failed"):
+            entry.update(status=kind, reason=fields[2])
+    return found
+
+
+def trace_paths(stderr):
+    """Map each query to the specialized paths printed while it ran."""
+    paths, current = {}, None
+    for line in stderr.splitlines():
+        if line.startswith("dataframe-query: "):
+            current = line.split(": ", 1)[1].strip()
+            paths.setdefault(current, set())
+        elif line.startswith("dataframe-path: ") and current:
+            paths[current].add(line.split(": ", 1)[1].strip())
+    return {query: sorted(found) for query, found in paths.items()}
 
 
 def _wait_quiet(limit=3600):
     """Block until no compiler runs; other work on a shared host must not
-    overlap timing (docs/benchmarks.md, and the benchmark-hygiene notes)."""
+    overlap timing (docs/benchmarks.md)."""
     waited = 0
     while compiler_processes():
         if waited >= limit:
@@ -235,7 +319,13 @@ def _wait_quiet(limit=3600):
         waited += 10
 
 
-def run_worker(cmd, env, timeout, allow_busy):
+LOAD = []  # (load average, threads) sampled before each timed worker
+
+
+def run_worker(cmd, env, timeout, allow_busy, queries):
+    """Run one worker over `queries`; returns (per-query outcomes, stderr)."""
+    if hasattr(os, "getloadavg"):
+        LOAD.append(os.getloadavg()[0])
     for _ in range(3):
         if not allow_busy:
             _wait_quiet()
@@ -243,23 +333,27 @@ def run_worker(cmd, env, timeout, allow_busy):
             proc = subprocess.run(
                 cmd, env=env, capture_output=True, text=True, timeout=timeout
             )
-        except subprocess.TimeoutExpired:
-            return {"status": "timeout"}
+        except subprocess.TimeoutExpired as expired:
+            out = expired.stdout or ""
+            if isinstance(out, bytes):
+                out = out.decode(errors="replace")
+            found = parse(out, queries)
+            for entry in found.values():
+                if entry["status"] == "failed" and entry["reason"] == "no output":
+                    entry.update(status="timeout", reason="")
+            return found, ""
         if allow_busy or not compiler_processes():
             break
         print("compiler activity overlapped a run; repeating it", file=sys.stderr)
     else:
         raise RuntimeError("compiler activity kept overlapping timed runs")
+    found = parse(proc.stdout, queries)
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
-        return {"status": "failed", "reason": " | ".join(tail)}
-    times, summary, reason = parse(proc.stdout)
-    if reason is not None:
-        return {"status": "unsupported", "reason": reason}
-    paths = sorted(
-        set(re.findall(r"^dataframe-path: (\S+)$", proc.stderr, re.M))
-    )
-    return {"status": "ok", "times": times, "summary": summary, "paths": paths}
+        tail = " | ".join((proc.stderr or "").strip().splitlines()[-2:])
+        for entry in found.values():
+            if entry["status"] == "failed" and entry["reason"] == "no output":
+                entry["reason"] = f"worker exited {proc.returncode}: {tail}"
+    return found, proc.stderr
 
 
 # --- answer checks ----------------------------------------------------------
@@ -335,6 +429,8 @@ def provenance(args):
         "duckdb": duckdb.__version__,
         "platform": platform.platform(),
         "cpu": cpu,
+        "tier": args.tier,
+        "baseline": args.baseline or "",
         "threads": args.threads,
         "scale": args.scale,
         "rounds": args.rounds,
@@ -343,15 +439,77 @@ def provenance(args):
     }
 
 
+# --- reference cache -----------------------------------------------------------
+
+
+def _cache_file(suite, variant, engine):
+    return datagen.data_root() / "reference-cache" / suite / variant / f"{engine}.json"
+
+
+def _cache_key(engine, paths, args):
+    import duckdb
+    import polars
+
+    version = polars.__version__ if engine == "polars" else duckdb.__version__
+    files = sorted(
+        f"{Path(p).name}:{Path(p).stat().st_size}:{int(Path(p).stat().st_mtime)}"
+        for p in paths.values()
+    )
+    return f"{engine} {version} threads={args.threads} reps={args.reps} " + " ".join(files)
+
+
+def load_reference(suite, variant, engine, paths, args):
+    """Cached Polars/DuckDB outcomes for this data, engine version and thread
+    count, or None. Their code does not change when this library does."""
+    path = _cache_file(suite, variant, engine)
+    if not path.exists():
+        return None
+    cached = json.loads(path.read_text())
+    if cached.get("key") != _cache_key(engine, paths, args):
+        return None
+    return cached
+
+
+def save_reference(suite, variant, engine, paths, args, runs):
+    path = _cache_file(suite, variant, engine)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "key": _cache_key(engine, paths, args),
+                "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "host": platform.node(),
+                "runs": runs,
+            },
+            indent=1,
+        )
+    )
+
+
+# --- measurement -------------------------------------------------------------
+
+
 def measure(args):
     suites = [s for s in args.suites.split(",") if s]
     engines = [e for e in args.engines.split(",") if e]
-    binaries = {}
+    runners = {}
+    names = [SUITES[s]["runner"] for s in suites]
     if "mojo" in engines or args.trace:
-        binaries = build_runners(
-            [SUITES[s]["runner"] for s in suites], force=args.rebuild
-        )
-    result = {"provenance": provenance(args), "runs": [], "trace": {}}
+        runners["mojo"] = build_runners(names, force=args.rebuild)
+    if args.baseline:
+        label, binaries = build_baseline(args.baseline, names)
+        runners[label] = binaries
+        if label not in engines:
+            engines.insert(1, label)
+    measured = [e for e in engines if e in runners or not args.reuse_references]
+    references = [e for e in engines if e not in measured]
+    result = {
+        "provenance": provenance(args),
+        "engines": engines,
+        "baseline": next((e for e in engines if e.startswith("base@")), None),
+        "runs": [],
+        "trace": {},
+    }
     plan = []
     for suite in suites:
         variants = list(VARIANTS[suite])
@@ -361,55 +519,88 @@ def measure(args):
         if args.queries:
             queries = [q for q in queries if q in args.queries.split(",")]
         for variant in variants:
-            paths = tables(suite, variant, args.scale)
-            for query in queries:
-                plan.append((suite, variant, query, paths))
+            plan.append((suite, variant, queries, tables(suite, variant, args.scale)))
 
     def save():
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(json.dumps(result, indent=1, default=str))
 
-    for round_number in range(args.rounds):
-        for suite, variant, query, paths in plan:
-            order = engines[round_number % len(engines):] + engines[
-                : round_number % len(engines)
-            ]
-            for engine in order:
-                outcome = run_worker(
-                    command(engine, binaries, suite, query, args.reps, paths),
+    def record(outcomes, suite, variant, engine, round_number, cached=False):
+        runs = []
+        for query, outcome in outcomes.items():
+            outcome = dict(outcome)
+            outcome.update(
+                suite=suite,
+                variant=variant,
+                query=query,
+                engine=engine,
+                round=round_number,
+                cached=cached,
+            )
+            result["runs"].append(outcome)
+            runs.append(outcome)
+        return runs
+
+    # Reference engines: reuse cached outcomes, or measure and cache them.
+    for suite, variant, queries, paths in plan:
+        for engine in references:
+            cached = load_reference(suite, variant, engine, paths, args)
+            done = {r["query"] for r in cached["runs"]} if cached else set()
+            if cached and set(queries) <= done:
+                for run in cached["runs"]:
+                    if run["query"] in queries:
+                        run = dict(run, cached=True)
+                        result["runs"].append(run)
+                print(f"{suite}/{variant} {engine}: cached", file=sys.stderr)
+                continue
+            runs = []
+            for round_number in range(args.rounds):
+                outcomes, _ = run_worker(
+                    command(engine, runners, suite, queries, args.reps, paths),
                     environment(args.threads),
-                    args.timeout,
+                    args.timeout * len(queries),
                     args.allow_busy,
+                    queries,
                 )
-                outcome.update(
-                    suite=suite,
-                    variant=variant,
-                    query=query,
-                    engine=engine,
-                    round=round_number,
+                runs += record(outcomes, suite, variant, engine, round_number)
+            save_reference(suite, variant, engine, paths, args, runs)
+            print(f"{suite}/{variant} {engine}: measured and cached", file=sys.stderr)
+    save()
+
+    # Engines under test, alternating order so no build always runs first.
+    for round_number in range(args.rounds):
+        for step, (suite, variant, queries, paths) in enumerate(plan):
+            shift = (round_number + step) % max(1, len(measured))
+            for engine in measured[shift:] + measured[:shift]:
+                outcomes, _ = run_worker(
+                    command(engine, runners, suite, queries, args.reps, paths),
+                    environment(args.threads),
+                    args.timeout * len(queries),
+                    args.allow_busy,
+                    queries,
                 )
-                result["runs"].append(outcome)
+                record(outcomes, suite, variant, engine, round_number)
+                ok = sum(1 for o in outcomes.values() if o["status"] == "ok")
                 print(
-                    f"round {round_number} {suite}/{variant}/{query} {engine}: "
-                    f"{outcome['status']}"
-                    + (
-                        f" {min(outcome['times']) / 1e6:.1f} ms"
-                        if outcome.get("times")
-                        else ""
-                    ),
+                    f"round {round_number} {suite}/{variant} {engine}: "
+                    f"{ok}/{len(queries)} ok",
                     file=sys.stderr,
                 )
             save()
+    result["load"] = LOAD
+    save()
     if args.trace:
-        for suite, variant, query, paths in plan:
-            outcome = run_worker(
-                command("mojo", binaries, suite, query, 1, paths),
+        for suite, variant, queries, paths in plan:
+            _, stderr = run_worker(
+                command("mojo", runners, suite, queries, 0, paths),
                 environment(args.threads, trace=True),
-                args.timeout,
+                args.timeout * len(queries),
                 True,
+                queries,
             )
-            result["trace"][f"{suite}/{variant}/{query}"] = outcome.get("paths", [])
+            for query, paths_hit in trace_paths(stderr).items():
+                result["trace"][f"{suite}/{variant}/{query}"] = paths_hit
         save()
     return result
 
@@ -442,6 +633,7 @@ def evaluate(result):
         cells[(suite, variant, query, engine)] = {
             "status": "ok",
             "ms": _median_ms(runs),
+            "rounds": [min(r["times"]) / 1e6 for r in runs if r.get("times")],
             "summary": next(r["summary"] for r in runs if r["status"] == "ok"),
         }
     for (suite, variant, query, engine), cell in cells.items():
@@ -470,10 +662,12 @@ def geomean(values):
 def report(result):
     cells = evaluate(result)
     info = result["provenance"]
+    engines = result.get("engines", list(ENGINES))
     lines = [
         "# Benchmark suites",
         "",
-        f"Revision `{info['revision'][:10]}`{' (dirty)' if info['dirty'] else ''}, "
+        f"Tier `{info.get('tier', 'full')}`. Revision `{info['revision'][:10]}`"
+        f"{' (dirty)' if info['dirty'] else ''}, "
         f"{info['mojo']}, Polars {info['polars']}, DuckDB {info['duckdb']}. "
         f"{info['cpu']}, {info['threads']} threads, scale `{info['scale']}`, "
         f"{info['rounds']} rounds of {info['reps']} timed runs.",
@@ -484,6 +678,33 @@ def report(result):
         "correctly.",
         "",
     ]
+    if result.get("baseline"):
+        lines += [
+            f"`{result['baseline']}` is this library built at the baseline "
+            "revision; `vs " + result["baseline"] + "` above 1 means the change "
+            "is slower there.",
+            "",
+        ]
+    load = result.get("load") or []
+    threads = info["threads"]
+    if load and max(load) > threads + 4:
+        lines += [
+            f"**Busy host:** the one-minute load average reached "
+            f"{max(load):.0f} (median {statistics.median(load):.0f}) against "
+            f"{threads} benchmark threads. Other work competed for the CPU, so "
+            "treat small differences as noise and rerun on a quiet machine.",
+            "",
+        ]
+    if result.get("baseline"):
+        lines += _changes(result["baseline"], cells)
+    cached = sorted({r["engine"] for r in result["runs"] if r.get("cached")})
+    if cached:
+        lines += [
+            "Times for " + ", ".join(cached) + " come from the reference cache "
+            "(same data, engine version and thread count; possibly measured on "
+            "an earlier day, so compare their ratios with care).",
+            "",
+        ]
     suites = []
     for suite in SUITES:
         if any(key[0] == suite for key in cells):
@@ -507,18 +728,59 @@ def report(result):
             continue
         lines += [f"## {title}", "", note, ""]
         for suite in chosen:
-            lines += _suite_table(suite, cells)
+            lines += _suite_table(suite, cells, engines)
     if result.get("trace"):
         lines += _coverage(result["trace"])
     return "\n".join(lines) + "\n"
 
 
-def _suite_table(suite, cells):
+def _separated(mine, theirs):
+    """+1 when every round of `mine` is slower than every round of `theirs`,
+    -1 when every round is faster, 0 when the rounds overlap."""
+    if len(mine) < 2 or len(theirs) < 2:
+        return 0
+    if min(mine) > max(theirs):
+        return 1
+    if max(mine) < min(theirs):
+        return -1
+    return 0
+
+
+def _changes(baseline, cells):
+    """The cells where this build and the baseline differ beyond the spread
+    of their rounds; the first thing to read after a code change."""
+    slower, faster = [], []
+    for (suite, variant, query, engine), cell in sorted(cells.items()):
+        if engine != "mojo" or cell["status"] != "ok":
+            continue
+        base = cells.get((suite, variant, query, baseline))
+        if not base or base["status"] != "ok":
+            continue
+        side = _separated(cell["rounds"], base["rounds"])
+        ratio = cell["ms"] / base["ms"]
+        entry = f"{suite}/{variant}/{query} {ratio:.2f}x ({base['ms']:.1f} → {cell['ms']:.1f} ms)"
+        if side > 0 and ratio > 1.03:
+            slower.append(entry)
+        elif side < 0 and ratio < 0.97:
+            faster.append(entry)
+    lines = [f"## Changes vs {baseline}", ""]
+    lines.append(
+        "Only cells where every round of one build beat every round of the "
+        "other, by more than 3%, are listed."
+    )
+    lines.append("")
+    lines.append(f"- **Slower ({len(slower)}):** " + ("; ".join(slower) or "none"))
+    lines.append(f"- **Faster ({len(faster)}):** " + ("; ".join(faster) or "none"))
+    lines.append("")
+    return lines
+
+
+def _suite_table(suite, cells, all_engines):
     variants = [v for v in VARIANTS[suite] if any(
         k[0] == suite and k[1] == v for k in cells
     )]
     base = variants[0]
-    engines = [e for e in ENGINES if any(
+    engines = [e for e in all_engines if any(
         k[0] == suite and k[3] == e for k in cells
     )]
     others = [e for e in engines if e != "mojo"]
@@ -644,7 +906,18 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--suites", default="h2o_groupby,h2o_join")
+    parser.add_argument(
+        "--tier",
+        choices=list(TIERS),
+        default="quick",
+        help="quick: minutes, for a code change; full: for reports",
+    )
+    parser.add_argument(
+        "--baseline",
+        default="",
+        help="git revision to build and compare against, e.g. main",
+    )
+    parser.add_argument("--suites", default=None)
     parser.add_argument(
         "--heldout",
         action="store_true",
@@ -652,7 +925,7 @@ def main():
     )
     parser.add_argument("--engines", default="mojo,polars,duckdb")
     parser.add_argument("--queries", default="", help="comma-separated subset")
-    parser.add_argument("--scale", choices=list(SCALES), default="default")
+    parser.add_argument("--scale", choices=list(SCALES), default=None)
     parser.add_argument(
         "--variants",
         choices=["all", "base"],
@@ -660,10 +933,23 @@ def main():
         help="'base' skips the perturbed data variants (not for reporting)",
     )
     parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--reps", type=int, default=3)
-    parser.add_argument("--timeout", type=int, default=900)
-    parser.add_argument("--trace", action="store_true")
+    parser.add_argument("--rounds", type=int, default=None)
+    parser.add_argument("--reps", type=int, default=None)
+    parser.add_argument(
+        "--timeout", type=int, default=900, help="seconds per query per worker"
+    )
+    parser.add_argument(
+        "--reuse-references",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="reuse cached Polars/DuckDB outcomes (default: on for quick)",
+    )
+    parser.add_argument(
+        "--trace",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="record fast-path coverage (default: on for full)",
+    )
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--allow-busy", action="store_true")
     parser.add_argument(
@@ -680,12 +966,19 @@ def main():
         help="exit nonzero if any dataframe_mojo answer is wrong or fails",
     )
     args = parser.parse_args()
+    for name, value in TIERS[args.tier].items():
+        if getattr(args, name) is None:
+            setattr(args, name, value)
     if args.heldout:
         args.suites += ",pdsh,clickbench"
     if args.report_from:
         result = json.loads(args.report_from.read_text())
     else:
+        start = time.monotonic()
         result = measure(args)
+        print(
+            f"measured in {time.monotonic() - start:.0f} s", file=sys.stderr
+        )
     text = report(result)
     print(text)
     if args.output and not args.report_from:
@@ -694,7 +987,8 @@ def main():
         bad = [
             key
             for key, cell in evaluate(result).items()
-            if key[3] == "mojo" and cell["status"] in ("wrong answer", "failed", "timeout")
+            if (key[3] == "mojo" or key[3].startswith("base@"))
+            and cell["status"] in ("wrong answer", "failed", "timeout")
         ]
         if bad:
             print("dataframe_mojo failures:", bad, file=sys.stderr)

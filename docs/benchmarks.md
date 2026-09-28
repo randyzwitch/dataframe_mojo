@@ -39,6 +39,9 @@ and make benchmark-shaped paths visible.
    are checked against DuckDB; ratios use geometric means; wrong answers and
    unsupported queries are counted, never dropped.
 
+Rules 3 to 6 apply to both tiers. The quick tier makes them cheap enough to
+follow on every change; the full tier is what a report cites.
+
 ## Suites
 
 | Suite | Role | Source | Queries | Variants |
@@ -73,24 +76,51 @@ expressions, #219).
 
 ## Running
 
-Data is generated or downloaded once into a directory beside the main
-checkout, `<checkout>_benchdata` (override with `DATAFRAME_BENCH_DATA`), and
-shared by every git worktree.
+There are two tiers. Data is generated or downloaded once into a directory
+beside the main checkout, `<checkout>_benchdata` (override with
+`DATAFRAME_BENCH_DATA`), and shared by every git worktree.
 
 ```bash
-pixi run -e native build-dfparquet
-pixi run -e oracle python3 scripts/bench_suites.py                 # development suites
-pixi run -e oracle python3 scripts/bench_suites.py --heldout       # all four
-pixi run -e oracle python3 scripts/bench_suites.py --scale smoke --trace
-pixi run -e oracle python3 scripts/bench_suites.py --report-from build/suites/results.json
+pixi run -e native build-dfparquet                                   # once
+
+# After a code change: about two minutes once built.
+pixi run -e oracle python3 scripts/bench_suites.py --baseline main
+
+# For a report: hours; run it occasionally, not per change.
+pixi run -e oracle python3 scripts/bench_suites.py --tier full --heldout
 ```
 
-`--scale` is `smoke` (seconds; CI checks answers at this size), `default`
-(10M H2O rows, TPC-H scale factor 1, 10M ClickBench rows) or `large` (100M,
-10, 100M). The driver builds `build/suites/suite_*` runners with `-O3`,
-refuses to time while a compiler runs, gives every run a fresh process, and
-rotates engine order between rounds. It writes raw samples with provenance to
-`build/suites/results.json` and the report beside it.
+**Quick** (the default) runs the development suites at 1M rows with every
+data variant, three rounds of three timed runs, and times only this library.
+`--baseline REF` builds the suite runners against the library at `REF`
+(checked out once as a git worktree under `build/suites/baseline/`, cached by
+commit) and alternates the two builds. The report opens with **Changes vs
+baseline**: only the cells where every round of one build beat every round
+of the other by more than 3%. Polars and DuckDB outcomes come from a
+reference cache keyed by data file, engine version, thread count and
+repetitions, because their code does not change when this library does.
+Narrow a run with `--suites h2o_join` or `--queries q1,q2`.
+
+**Full** runs at 10M rows (TPC-H scale factor 1, 10M ClickBench rows with
+`--heldout`), three rounds, measures every engine afresh and records
+fast-path coverage.
+
+Both tiers give each (suite, variant, engine, round) its own process, which
+loads the tables once, untimed, then warms up and times each query. The
+driver waits while a compiler runs, records the load average before every
+worker and flags a busy host in the report. It writes raw samples with
+provenance to `build/suites/results.json` and the report beside it;
+`--report-from` re-renders a saved file.
+
+Two limits apply when reading a comparison. Timings on a shared machine move
+with its load: prefer a quiet host, and rerun before acting on a small
+change. And two builds can differ by up to about 10% on one query from code
+layout alone: an A/B of builds that differed only by the inert tracing hooks
+showed one query 10% faster in every round. Prefer the geometric means over
+single cells, and confirm a single-query change on the full tier.
+
+`--scale` overrides the tier's size: `smoke` (seconds; CI checks answers at
+this size), `dev` (1M rows), `default` (10M) or `large` (100M).
 
 ## Answer checks
 
