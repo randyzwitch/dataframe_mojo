@@ -209,6 +209,17 @@ struct Node(Copyable):
     var min_count: Int
     var extra: Int
     var text2: String
+    # Parsed dtypes for casts, typed and null literals, strptime targets and
+    # dtype selectors, in the order their names appear; None marks a name
+    # that did not parse, which binding or expansion reports.
+    var dtypes: List[Optional[DataType]]
+
+
+def _parse_dtype(name: String) -> Optional[DataType]:
+    try:
+        return DataType.parse(name)
+    except:
+        return None
 
 
 def _node(
@@ -221,9 +232,19 @@ def _node(
     min_count: Int = 0,
     extra: Int = -1,
     text2: String = "",
+    dtypes: List[Optional[DataType]] = List[Optional[DataType]](),
 ) -> Node:
     return Node(
-        op, left, right, text, integer, floating, min_count, extra, text2
+        op,
+        left,
+        right,
+        text,
+        integer,
+        floating,
+        min_count,
+        extra,
+        text2,
+        dtypes.copy(),
     )
 
 
@@ -563,7 +584,17 @@ struct Expr(Copyable):
 
     def cast(self, dtype: DataType, strict: Bool = True) -> Self:
         """Convert to dtype; see the String overload."""
-        return self.cast(dtype.name(), strict)
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                CAST,
+                len(nodes) - 1,
+                text=dtype.name(),
+                integer=Int64(strict),
+                dtypes=[Optional(dtype)],
+            )
+        )
+        return Self(nodes^, self._name)
 
     def cast(self, dtype: String, strict: Bool = True) -> Self:
         """Convert to any dtype by name (numeric, bool, string, temporal).
@@ -575,7 +606,13 @@ struct Expr(Copyable):
         """
         var nodes = self._nodes.copy()
         nodes.append(
-            _node(CAST, len(nodes) - 1, text=dtype, integer=Int64(strict))
+            _node(
+                CAST,
+                len(nodes) - 1,
+                text=dtype,
+                integer=Int64(strict),
+                dtypes=[_parse_dtype(dtype)],
+            )
         )
         return Self(nodes^, self._name)
 
@@ -796,7 +833,12 @@ def col(name: String) -> Expr:
     return Expr([_node(COL, text=name)], name)
 
 
-def _selector(kind: String, items: String = "", index: Int = 0) -> Expr:
+def _selector(
+    kind: String,
+    items: String = "",
+    index: Int = 0,
+    dtypes: List[Optional[DataType]] = List[Optional[DataType]](),
+) -> Expr:
     """Selector expressions start unnamed; expansion names each output."""
     return Expr(
         [
@@ -805,6 +847,7 @@ def _selector(kind: String, items: String = "", index: Int = 0) -> Expr:
                 text=kind + SEP + SEP,
                 text2=items,
                 integer=Int64(index),
+                dtypes=dtypes,
             )
         ],
         "",
@@ -837,7 +880,10 @@ def exclude(names: List[String]) -> Expr:
 
 def by_dtype(dtypes: List[String]) -> Expr:
     """Columns whose dtype is listed, in schema order."""
-    return _selector("dtype", _joined(dtypes))
+    var parsed = List[Optional[DataType]](capacity=len(dtypes))
+    for name in dtypes:
+        parsed.append(_parse_dtype(name))
+    return _selector("dtype", _joined(dtypes), dtypes=parsed)
 
 
 def nth(index: Int) -> Expr:
@@ -875,13 +921,21 @@ def _numeric_lit[D: DType](value: Scalar[D]) -> Expr:
                     LIT_FLOAT,
                     floating=value.cast[DType.float64](),
                     text=String(D),
+                    dtypes=[Optional(DataType.of(D))],
                 )
             ],
             "literal",
         )
     else:
         return Expr(
-            [_node(LIT_INT, integer=value.cast[DType.int64](), text=String(D))],
+            [
+                _node(
+                    LIT_INT,
+                    integer=value.cast[DType.int64](),
+                    text=String(D),
+                    dtypes=[Optional(DataType.of(D))],
+                )
+            ],
             "literal",
         )
 
@@ -933,7 +987,9 @@ def lit(value: String) -> Expr:
 
 def null(dtype: String) -> Expr:
     """A typed null literal of any dtype name (see DataType.parse)."""
-    return Expr([_node(LIT_NULL, text=dtype)], "literal")
+    return Expr(
+        [_node(LIT_NULL, text=dtype, dtypes=[_parse_dtype(dtype)])], "literal"
+    )
 
 
 def coalesce(exprs: List[Expr]) raises -> Expr:
@@ -1128,7 +1184,18 @@ struct StrNamespace(Copyable):
         """Parse text as "date", "datetime[unit]", or "time" using a
         strftime-style format (ISO 8601 when empty); unparseable text raises
         when strict, or is null otherwise."""
-        return self._op(DT_STRPTIME, format, Int64(strict), text2=dtype)
+        var nodes = self._expr._nodes.copy()
+        nodes.append(
+            _node(
+                DT_STRPTIME,
+                len(nodes) - 1,
+                text=format,
+                integer=Int64(strict),
+                text2=dtype,
+                dtypes=[_parse_dtype(dtype)],
+            )
+        )
+        return Expr(nodes^, self._expr._name)
 
     def to_date(self, format: String = "") -> Expr:
         return self.strptime("date", format)

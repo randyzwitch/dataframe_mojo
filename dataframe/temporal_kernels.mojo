@@ -191,7 +191,9 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
         return dt_op(node, input.rechunk(), dtype)
     var op = node.op
     if op == DT_STRPTIME:
-        return _strptime(node, input)
+        return _strptime(
+            input, node.dtypes[0].value(), node.text, node.integer == 1
+        )
     ref column = input._data[Column[Int64]]
     var n = len(column)
     var valid = List[Bool](length=n, fill=False)
@@ -251,10 +253,10 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
     return result^
 
 
-def _strptime(node: Node, input: Series) raises -> Series:
+def _strptime(
+    input: Series, target: DataType, format: String, strict: Bool
+) raises -> Series:
     ref column = input._data[StringColumn]
-    var target = DataType.parse(node.text2)
-    var strict = node.integer == 1
     var n = len(column)
     var values = List[Int64](length=n, fill=0)
     var valid = List[Bool](length=n, fill=False)
@@ -262,7 +264,7 @@ def _strptime(node: Node, input: Series) raises -> Series:
         if not column._valid(i):
             continue
         try:
-            values[i] = parse(String(column._get(i)), target, node.text)
+            values[i] = parse(String(column._get(i)), target, format)
             valid[i] = True
         except e:
             if strict:
@@ -289,8 +291,7 @@ def cast_temporal(
                 texts[i] = format(column._get(i), source)
         return Series(input.name(), StringColumn(texts, valid))
     if source == DataType.STRING:
-        var node = Node(0, -1, -1, "", Int64(strict), 0, 0, -1, target.name())
-        return _strptime(node, input).renamed(input.name())
+        return _strptime(input, target, "", strict).renamed(input.name())
     if (
         source.physical() != DataType.INT64
         or target.physical() != DataType.INT64

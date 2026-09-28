@@ -249,5 +249,29 @@ def test_series_cast_masks_and_validation() raises:
     )
 
 
+def test_cast_nodes_keep_the_parsed_dtype() raises:
+    var fields: List[String] = ["a", "b"]
+    var types: List[DataType] = [DataType.INT32, DataType.list(DataType.STRING)]
+    var nested = DataType.struct(fields, types)
+    var targets: List[DataType] = [
+        nested,
+        DataType.datetime("ms"),
+        DataType.UINT16,
+    ]
+    for target in targets:
+        var node = col("x").cast(target)._nodes[1].copy()
+        assert_equal(len(node.dtypes), 1)
+        assert_true(node.dtypes[0].value() == target)
+    var named = col("x").cast("duration[ns]")._nodes[1].copy()
+    assert_true(named.dtypes[0].value() == DataType.duration("ns"))
+    assert_false(col("x").cast("decimal")._nodes[1].dtypes[0])
+
+
+def test_unknown_strptime_target_raises_at_binding() raises:
+    var frame = DataFrame([Series("s", Column[String](["2024-01-02"]))])
+    with assert_raises(contains="Unknown dtype: decimal"):
+        _ = frame.select(col("s").str().strptime("decimal"))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

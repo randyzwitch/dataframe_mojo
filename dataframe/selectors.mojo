@@ -1,4 +1,5 @@
 """Selector expansion: one bound expression per matched column."""
+from std.collections import Optional
 from .dtype import DataType
 from .expr import COL, SELECTOR, SEP, Expr, _node
 from .series import Series
@@ -14,7 +15,11 @@ def _split(text: String) -> List[String]:
 
 
 def _matches(
-    node_text: String, items: String, index: Int64, columns: List[Series]
+    node_text: String,
+    items: String,
+    index: Int64,
+    parsed: List[Optional[DataType]],
+    columns: List[Series],
 ) raises -> List[String]:
     var kind = String(node_text.split(SEP)[0])
     var names = List[String]()
@@ -42,10 +47,11 @@ def _matches(
         return result^
     if kind == "dtype":
         var dtypes = List[DataType]()
-        for name in _split(items):
-            if not DataType.is_known(name):
-                raise Error("Unknown selector dtype: " + name)
-            dtypes.append(DataType.parse(name))
+        var listed = _split(items)
+        for i in range(len(listed)):
+            if not parsed[i]:
+                raise Error("Unknown selector dtype: " + listed[i])
+            dtypes.append(parsed[i].value())
         for column in columns:
             for dtype in dtypes:
                 if column.dtype() == dtype:
@@ -81,7 +87,9 @@ def expand(expression: Expr, columns: List[Series]) raises -> List[Expr]:
     var parts = node.text.split(SEP)
     var prefix = String(parts[1])
     var suffix = String(parts[2])
-    for name in _matches(node.text, node.text2, node.integer, columns):
+    for name in _matches(
+        node.text, node.text2, node.integer, node.dtypes, columns
+    ):
         var nodes = expression._nodes.copy()
         nodes[selector] = _node(COL, text=name)
         var output = expression._name
