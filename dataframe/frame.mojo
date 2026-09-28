@@ -9,6 +9,21 @@ from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
 from .expr import (
     Expr,
+    is_reduction,
+    is_window,
+    subtree,
+    OVER,
+    MIN,
+    MAX,
+    FIRST,
+    LAST,
+    STD,
+    VAR,
+    LEN,
+    ANY,
+    ALL,
+    NULL_COUNT,
+    N_UNIQUE,
     col,
     lit,
     COL,
@@ -30,7 +45,8 @@ from .expr import (
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
-from .execution import evaluate
+from .execution import evaluate, _ReduceJob
+from .aggregate import Reducer
 from .gather import (
     SORTED_GATHER_MIN_CHUNKS,
     take_parallel,
@@ -3921,268 +3937,49 @@ def _encode_parallel(keys: List[Series], workers: Int) raises -> RowKeys:
     return RowKeys(ids^, representatives^)
 
 
-struct _FusedFloatAggJob(Job):
-    """One input range, with all simple Float64 aggregates in one row pass."""
+struct _RangeAggJob(Job):
+    """Reduce rows [start, end) into mergeable per-group state."""
 
-    var key: Series
-    var values: List[Series]
+    var frame: DataFrame
+    var keys: List[Series]
+    var expressions: List[Expr]
+    var key_names: Dict[String, Bool]
     var start: Int
     var end: Int
-    var group_limit: Int
-    var over_limit: Bool
-    var keys: List[Int64]
-    var key_valid: List[Bool]
-    var firsts: List[Int]
-    var states: List[FloatSumState]
+    var budget: Int
+    # None when the range held more groups than the budget.
+    var state: Optional[_StreamReduction]
 
     def __init__(
         out self,
-        key: Series,
-        values: List[Series],
+        frame: DataFrame,
+        keys: List[Series],
+        expressions: List[Expr],
+        key_names: Dict[String, Bool],
         start: Int,
         end: Int,
-        group_limit: Int,
+        budget: Int,
     ):
-        self.key = key.copy()
-        self.values = values.copy()
+        self.frame = frame.copy()
+        self.keys = keys.copy()
+        self.expressions = expressions.copy()
+        self.key_names = key_names.copy()
         self.start = start
         self.end = end
-        self.group_limit = group_limit
-        self.over_limit = False
-        self.keys = List[Int64]()
-        self.key_valid = List[Bool]()
-        self.firsts = List[Int]()
-        self.states = List[FloatSumState]()
-
-    @always_inline
-    def _add_row(
-        mut self,
-        key: Column[Int64],
-        columns: List[Column[Float64]],
-        local: Int,
-        row: Int,
-        mut lookup: Dict[Int64, Int],
-        mut null_group: Int,
-    ) -> Bool:
-        var valid = key._valid(local)
-        var value = key._get(local)
-        var group = lookup.get(value, -1) if valid else null_group
-        if group < 0:
-            group = len(self.keys)
-            if group >= self.group_limit:
-                self.over_limit = True
-                return False
-            if valid:
-                lookup[value] = group
-                self.keys.append(value)
-            else:
-                null_group = group
-                self.keys.append(0)
-            self.key_valid.append(valid)
-            self.firsts.append(row)
-            for _ in range(len(columns)):
-                self.states.append(FloatSumState())
-        var base = group * len(columns)
-        for e in range(len(columns)):
-            if columns[e]._valid(local):
-                self.states[base + e].add(columns[e]._get(local))
-        return True
+        self.budget = budget
+        self.state = None
 
     def run(mut self) raises:
-        var lookup = Dict[Int64, Int]()
-        var null_group = -1
-        var key_source = self.key.copy()
-        var value_sources = self.values.copy()
-        if not key_source.is_chunked():
-            ref key = key_source._data[Column[Int64]]
-            var columns = List[Column[Float64]](capacity=len(self.values))
-            for value in value_sources:
-                columns.append(value._data[Column[Float64]].copy())
-            for row in range(self.start, self.end):
-                if not self._add_row(
-                    key, columns, row, row, lookup, null_group
-                ):
-                    return
-            return
-        ref key_chunks = key_source._chunked.value()[]
-        var chunk_start = 0
-        for c in range(len(key_chunks.ends)):
-            var chunk_end = key_chunks.ends[c]
-            var lo = max(self.start, chunk_start)
-            var hi = min(self.end, chunk_end)
-            if lo < hi:
-                ref key = key_chunks.arrays[c][Column[Int64]]
-                var columns = List[Column[Float64]](capacity=len(self.values))
-                for value in value_sources:
-                    columns.append(
-                        value._chunked.value()[]
-                        .arrays[c][Column[Float64]]
-                        .copy()
-                    )
-                for row in range(lo, hi):
-                    if not self._add_row(
-                        key,
-                        columns,
-                        row - chunk_start,
-                        row,
-                        lookup,
-                        null_group,
-                    ):
-                        return
-            chunk_start = chunk_end
-            if chunk_start >= self.end:
-                break
-
-
-struct _DirectSumCountBucketJob(Job):
-    """Reduce one hash bucket or input range without gathering columns."""
-
-    var key: Series
-    var values: Series
-    var counted: Series
-    var aligned: Bool
-    var order: ArcPointer[List[Int]]
-    var identity: Bool
-    var count_all_valid: Bool
-    var start: Int
-    var end: Int
-    var keys: List[Int64]
-    var key_valid: List[Bool]
-    var sums: List[FloatSumState]
-    var counts: List[Int64]
-    var firsts: List[Int]
-
-    def __init__(
-        out self,
-        key: Series,
-        values: Series,
-        counted: Series,
-        aligned: Bool,
-        order: ArcPointer[List[Int]],
-        start: Int,
-        end: Int,
-        identity: Bool = False,
-        count_all_valid: Bool = False,
-    ):
-        self.key = key.copy()
-        self.values = values.copy()
-        self.counted = counted.copy()
-        self.aligned = aligned
-        self.order = order.copy()
-        self.identity = identity
-        self.count_all_valid = count_all_valid
-        self.start = start
-        self.end = end
-        self.keys = List[Int64]()
-        self.key_valid = List[Bool]()
-        self.sums = List[FloatSumState]()
-        self.counts = List[Int64]()
-        self.firsts = List[Int]()
-
-    @always_inline
-    def _add_row(
-        mut self,
-        key: Column[Int64],
-        values: Column[Float64],
-        count_valid: Bool,
-        local: Int,
-        row: Int,
-        mut lookup: Dict[Int64, Int],
-        mut null_group: Int,
-    ):
-        var valid = key._valid(local)
-        var group = lookup.get(key._get(local), -1) if valid else null_group
-        if group < 0:
-            group = len(self.keys)
-            if valid:
-                var value = key._get(local).copy()
-                lookup[value] = group
-                self.keys.append(value)
-            else:
-                null_group = group
-                self.keys.append(0)
-            self.key_valid.append(valid)
-            self.sums.append(FloatSumState())
-            self.counts.append(0)
-            self.firsts.append(row)
-        if values._valid(local):
-            self.sums[group].add(values._get(local))
-        if count_valid:
-            self.counts[group] += 1
-
-    def run(mut self) raises:
-        var bucket_rows = self.end - self.start
-        var capacity = (
-            min(65_536, bucket_rows // 8) if bucket_rows >= 100_000 else 16
+        var length = self.end - self.start
+        var frame = self.frame.slice(self.start, length)
+        var keys = List[Series](capacity=len(self.keys))
+        for key in self.keys:
+            keys.append(key.slice(self.start, length))
+        var state = _StreamReduction(
+            frame, self.expressions, keys, self.key_names
         )
-        var lookup = Dict[Int64, Int](capacity=capacity)
-        var null_group = -1
-        var key_source = self.key.copy()
-        var value_source = self.values.copy()
-        var count_source = self.counted.copy()
-        ref order = self.order[]
-        if not self.aligned:
-            ref key = key_source._data[Column[Int64]]
-            ref values = value_source._data[Column[Float64]]
-            if self.count_all_valid:
-                for i in range(self.start, self.end):
-                    var row = i if self.identity else order[i]
-                    self._add_row(
-                        key, values, True, row, row, lookup, null_group
-                    )
-            else:
-                ref counted = count_source._data[Column[Int64]]
-                for i in range(self.start, self.end):
-                    var row = i if self.identity else order[i]
-                    self._add_row(
-                        key,
-                        values,
-                        counted._valid(row),
-                        row,
-                        row,
-                        lookup,
-                        null_group,
-                    )
-            return
-        ref key_chunks = key_source._chunked.value()[]
-        ref value_chunks = value_source._chunked.value()[]
-        ref count_chunks = count_source._chunked.value()[]
-        var i = self.start
-        var base = 0
-        for c in range(len(key_chunks.ends)):
-            var end = key_chunks.ends[c]
-            ref key = key_chunks.arrays[c][Column[Int64]]
-            ref values = value_chunks.arrays[c][Column[Float64]]
-            if self.count_all_valid:
-                while i < self.end and (i if self.identity else order[i]) < end:
-                    var row = i if self.identity else order[i]
-                    self._add_row(
-                        key,
-                        values,
-                        True,
-                        row - base,
-                        row,
-                        lookup,
-                        null_group,
-                    )
-                    i += 1
-            else:
-                ref counted = count_chunks.arrays[c][Column[Int64]]
-                while i < self.end and (i if self.identity else order[i]) < end:
-                    var row = i if self.identity else order[i]
-                    self._add_row(
-                        key,
-                        values,
-                        counted._valid(row - base),
-                        row - base,
-                        row,
-                        lookup,
-                        null_group,
-                    )
-                    i += 1
-            if i == self.end:
-                break
-            base = end
+        if state.keys.height() <= self.budget:
+            self.state = state^
 
 
 struct _BucketJob(Job):
@@ -4288,10 +4085,11 @@ struct GroupBy(Copyable):
                 )
         var workers = worker_count(self._frame.height())
         var result: DataFrame
-        if workers > 1 and self._can_fuse_float(bound, workers):
-            result = self._agg_fused_float(
-                expressions, bound, batch_size, workers
-            )
+        var ranged = Optional[DataFrame]()
+        if workers > 1 and _stream_reductions(expressions):
+            ranged = self._agg_ranges(expressions, key_names, workers)
+        if ranged:
+            result = ranged.take()
         elif workers > 1:
             result = self._agg_partitioned(
                 expressions, bound, batch_size, workers
@@ -4300,154 +4098,51 @@ struct GroupBy(Copyable):
             result = self._agg_whole(bound, batch_size)
         return _pack_struct_keys(result)
 
-    def _can_fuse_float(self, bound: List[BoundExpr], workers: Int) -> Bool:
-        """Use range-local fusion when private group states stay bounded."""
-        if len(bound) < 3 or len(self._keys) != 1:
-            return False
-        if self._keys[0].dtype() != DataType.INT64:
-            return False
-        var inputs = List[Series](capacity=len(bound) + 1)
-        inputs.append(self._keys[0].copy())
-        var chunked = self._keys[0].is_chunked()
-        for expression in bound:
-            ref nodes = expression.expr._nodes
-            if (
-                len(nodes) != 2
-                or nodes[0].op != COL
-                or nodes[1].left != 0
-                or (
-                    nodes[1].op != SUM
-                    and nodes[1].op != COUNT
-                    and nodes[1].op != MEAN
-                )
-                or (nodes[1].op == SUM and nodes[1].min_count != 0)
-            ):
-                return False
-            ref source = self._frame._columns[expression.sources[0]]
-            if source.dtype() != DataType.FLOAT64:
-                return False
-            if not chunked and source.is_chunked():
-                return False
-            inputs.append(source.copy())
-        if chunked and not can_filter_aligned_chunks(inputs):
-            return False
-        # Bound private states for each range. A strided sample catches
-        # high-cardinality keys without a full key encoding pass.
-        var sampled = Dict[Int64, Bool]()
-        var rows = self._frame.height()
-        var samples = min(rows, 4096)
-        var stride = max(1, rows // samples)
-        var chunk = 0
-        for i in range(samples):
-            var row = i * stride
-            if chunked:
-                ref parts = self._keys[0]._chunked.value()[]
-                while row >= parts.ends[chunk]:
-                    chunk += 1
-                var base = 0 if chunk == 0 else parts.ends[chunk - 1]
-                ref part = parts.arrays[chunk][Column[Int64]]
-                if part._valid(row - base):
-                    sampled[part._get(row - base)] = True
-            else:
-                ref key = self._keys[0]._data[Column[Int64]]
-                if key._valid(row):
-                    sampled[key._get(row)] = True
-            if len(sampled) > min(
-                2048, max(1, 1_000_000 // (workers * len(bound)))
-            ):
-                return False
-        return True
-
-    def _agg_fused_float(
+    def _agg_ranges(
         self,
         expressions: List[Expr],
-        bound: List[BoundExpr],
-        batch_size: Int,
+        key_names: Dict[String, Bool],
         workers: Int,
-    ) raises -> DataFrame:
-        """Accumulate any number of simple Float64 reductions per row."""
-        var sources = List[Series](capacity=len(bound))
-        for expression in bound:
-            sources.append(self._frame._columns[expression.sources[0]].copy())
-        var bounds = partitions(self._frame.height(), workers, 64)
-        var group_limit = max(1, 1_000_000 // (workers * len(bound)))
-        var jobs = List[_FusedFloatAggJob](capacity=workers)
+    ) raises -> Optional[DataFrame]:
+        """Reduce each worker's row range to per-group state, then merge.
+
+        Every row-local reduction the streaming executor supports keeps a
+        mergeable state (see _StreamReduction), so this serves any list of
+        them over any key types. Ranges are zero-copy slices; no column is
+        gathered. Private states must stay small for the serial merge, so
+        only low-cardinality keys qualify, and any range holding more groups
+        than the budget falls back to hash partitioning. Groups keep
+        first-occurrence order, as the whole-frame path does.
+        """
+        var height = self._frame.height()
+        var budget = max(1, 1_000_000 // (workers * len(expressions)))
+        # The same sampled estimate that picks whole-frame encoding over
+        # hash partitioning: every range of a high-cardinality key would
+        # hold most groups, and merging those states serially loses.
+        if not low_cardinality(self._keys):
+            return None
+        var bounds = partitions(height, workers, 64)
+        var jobs = List[_RangeAggJob](capacity=workers)
         for w in range(workers):
             jobs.append(
-                _FusedFloatAggJob(
-                    self._keys[0],
-                    sources,
+                _RangeAggJob(
+                    self._frame,
+                    self._keys,
+                    expressions,
+                    key_names,
                     bounds[w],
                     bounds[w + 1],
-                    group_limit,
+                    budget,
                 )
             )
         run_jobs(jobs)
-        for j in range(len(jobs)):
-            if jobs[j].over_limit:
-                return self._agg_partitioned(
-                    expressions, bound, batch_size, workers
-                )
-        var lookup = Dict[Int64, Int]()
-        var null_group = -1
-        var keys = List[Int64]()
-        var key_valid = List[Bool]()
-        var firsts = List[Int]()
-        var states = List[FloatSumState]()
-        var width = len(bound)
-        for j in range(len(jobs)):
-            ref job = jobs[j]
-            for local in range(len(job.keys)):
-                var valid = job.key_valid[local]
-                var value = job.keys[local]
-                var group = lookup.get(value, -1) if valid else null_group
-                if group < 0:
-                    group = len(keys)
-                    if valid:
-                        lookup[value] = group
-                    else:
-                        null_group = group
-                    keys.append(value)
-                    key_valid.append(valid)
-                    firsts.append(job.firsts[local])
-                    for _ in range(width):
-                        states.append(FloatSumState())
-                firsts[group] = min(firsts[group], job.firsts[local])
-                for e in range(width):
-                    states[group * width + e].merge(
-                        job.states[local * width + e]
-                    )
-        var output = List[Series](capacity=width + 1)
-        output.append(
-            Series(self._keys[0].name(), Column[Int64](keys^, key_valid^))
-        )
-        for e in range(width):
-            var op = bound[e].expr._nodes[1].op
-            if op == COUNT:
-                var counts = List[Int64](capacity=len(firsts))
-                for g in range(len(firsts)):
-                    counts.append(states[g * width + e].count)
-                output.append(
-                    Series(bound[e].expr._name, Column[Int64](counts^))
-                )
-            else:
-                var values = List[Float64](capacity=len(firsts))
-                var validity = List[Bool](capacity=len(firsts))
-                for g in range(len(firsts)):
-                    ref state = states[g * width + e]
-                    values.append(
-                        state.total / Float64(state.count) if op == MEAN
-                        and state.count > 0 else state.total
-                    )
-                    validity.append(op != MEAN or state.count > 0)
-                output.append(
-                    Series(
-                        bound[e].expr._name,
-                        Column[Float64](values^, validity^),
-                    )
-                )
-        var result = DataFrame(output^, height=len(firsts))
-        return result.take(sort_indices([firsts^]))
+        for w in range(len(jobs)):
+            if not jobs[w].state:
+                return None
+        var merged = jobs[0].state.take()
+        for w in range(1, len(jobs)):
+            merged.merge(jobs[w].state.value())
+        return merged.finish()
 
     def _referenced(self, bound: List[BoundExpr]) -> List[Series]:
         """The frame columns the aggregates read, in frame order; every
@@ -4489,44 +4184,6 @@ struct GroupBy(Copyable):
         # A sampled estimate decides whether scattering is worth its gather;
         # on a low-cardinality key the serial encode it replaces is cheap.
         var whole = low_cardinality(self._keys)
-        # This common reduction shape can read original rows by hash bucket
-        # instead of gathering the key and both value columns first.
-        if (
-            len(self._keys) == 1
-            and self._keys[0].dtype() == DataType.INT64
-            and len(bound) == 2
-        ):
-            var sum_expr = -1
-            var count_expr = -1
-            for e in range(2):
-                ref nodes = bound[e].expr._nodes
-                if len(nodes) != 2 or nodes[0].op != COL or nodes[1].left != 0:
-                    continue
-                if (
-                    nodes[1].op == SUM
-                    and nodes[1].min_count == 0
-                    and bound[e].dtypes[0] == DataType.FLOAT64
-                    and self._frame._columns[bound[e].sources[0]].dtype()
-                    == DataType.FLOAT64
-                ):
-                    sum_expr = e
-                elif (
-                    nodes[1].op == COUNT
-                    and bound[e].dtypes[1] == DataType.INT64
-                    and (
-                        self._frame._columns[bound[e].sources[0]].dtype()
-                        == DataType.INT64
-                        or self._frame._columns[
-                            bound[e].sources[0]
-                        ].null_count()
-                        == 0
-                    )
-                ):
-                    count_expr = e
-            if sum_expr >= 0 and count_expr >= 0:
-                return self._agg_direct_sum_count(
-                    bound, sum_expr, count_expr, workers, identity=whole
-                )
         if whole:
             return self._agg_whole(bound, batch_size)
         var partitioner = Partitioner(self._keys, workers)
@@ -4599,133 +4256,6 @@ struct GroupBy(Copyable):
             return result^
         return result.take(sort_indices([firsts^]))
 
-    def _agg_direct_sum_count(
-        self,
-        bound: List[BoundExpr],
-        sum_expr: Int,
-        count_expr: Int,
-        workers: Int,
-        identity: Bool = False,
-    ) raises -> DataFrame:
-        """Fuse sum and count over input ranges for small key domains.
-
-        High-cardinality keys still use disjoint hash buckets. Input-range
-        workers merge only one state per local group afterward.
-        """
-        var key = self._keys[0].copy()
-        var values = self._frame._columns[bound[sum_expr].sources[0]].copy()
-        var counted = self._frame._columns[bound[count_expr].sources[0]].copy()
-        var count_all_valid = counted.null_count() == 0
-        var aligned = can_filter_aligned_chunks(
-            [key.copy(), values.copy(), counted.copy()]
-        )
-        if not aligned:
-            key = key.rechunk()
-            values = values.rechunk()
-            counted = counted.rechunk()
-        var jobs = List[_DirectSumCountBucketJob]()
-        if identity:
-            var empty_order = ArcPointer(List[Int]())
-            var row_bounds = partitions(self._frame.height(), workers, 64)
-            for w in range(workers):
-                jobs.append(
-                    _DirectSumCountBucketJob(
-                        key,
-                        values,
-                        counted,
-                        aligned,
-                        empty_order,
-                        row_bounds[w],
-                        row_bounds[w + 1],
-                        identity=True,
-                        count_all_valid=count_all_valid,
-                    )
-                )
-        else:
-            var partitioner = Partitioner(self._keys, workers)
-            var parts = partitioner.scatter(workers)
-            var bucket_count = parts.buckets()
-            var bounds = parts.bounds.copy()
-            var order = ArcPointer(parts.order.copy())
-            for b in range(bucket_count):
-                var lo = bounds[b]
-                var hi = bounds[b + 1]
-                if hi > lo:
-                    jobs.append(
-                        _DirectSumCountBucketJob(
-                            key,
-                            values,
-                            counted,
-                            aligned,
-                            order,
-                            lo,
-                            hi,
-                            count_all_valid=count_all_valid,
-                        )
-                    )
-        run_jobs(jobs)
-        var key_values = List[Int64]()
-        var key_valid = List[Bool]()
-        var sum_values = List[Float64]()
-        var count_values = List[Int64]()
-        var firsts = List[Int]()
-        if identity:
-            var lookup = Dict[Int64, Int]()
-            var null_group = -1
-            for j in range(len(jobs)):
-                ref job = jobs[j]
-                for g in range(len(job.keys)):
-                    var valid = job.key_valid[g]
-                    var group = lookup.get(
-                        job.keys[g], -1
-                    ) if valid else null_group
-                    if group < 0:
-                        group = len(key_values)
-                        if valid:
-                            lookup[job.keys[g]] = group
-                        else:
-                            null_group = group
-                        key_values.append(job.keys[g])
-                        key_valid.append(valid)
-                        sum_values.append(0)
-                        count_values.append(0)
-                        firsts.append(job.firsts[g])
-                    sum_values[group] += job.sums[g].total
-                    count_values[group] += job.counts[g]
-                    firsts[group] = min(firsts[group], job.firsts[g])
-        else:
-            for j in range(len(jobs)):
-                ref job = jobs[j]
-                for g in range(len(job.keys)):
-                    key_values.append(job.keys[g])
-                    key_valid.append(job.key_valid[g])
-                    sum_values.append(job.sums[g].total)
-                    count_values.append(job.counts[g])
-                    firsts.append(job.firsts[g])
-        var output = List[Series](capacity=3)
-        output.append(
-            Series(self._keys[0].name(), Column[Int64](key_values^, key_valid^))
-        )
-        for e in range(2):
-            if e == sum_expr:
-                output.append(
-                    Series(
-                        bound[e].expr._name,
-                        Column[Float64](sum_values.copy()),
-                    )
-                )
-            else:
-                output.append(
-                    Series(
-                        bound[e].expr._name,
-                        Column[Int64](count_values.copy()),
-                    )
-                )
-        var result = DataFrame(output^, height=len(firsts))
-        if self._maintain_order or identity:
-            return result.take(sort_indices([firsts^]))
-        return result^
-
     def _agg_whole(
         self, bound: List[BoundExpr], batch_size: Int
     ) raises -> DataFrame:
@@ -4784,3 +4314,175 @@ def _is_untyped(value: Expr) -> Bool:
         if node.op == LIT_BOOL or node.op == LIT_STRING or node.op == LIT_NULL:
             return False
     return True
+
+
+def _row_local(exprs: List[Expr]) -> Bool:
+    """True when every output row depends only on the same input row."""
+    for e in exprs:
+        for node in e._nodes:
+            if is_reduction(node.op) or is_window(node.op) or node.op == OVER:
+                return False
+    return True
+
+
+def _stream_reductions(expressions: List[Expr]) -> Bool:
+    if len(expressions) == 0:
+        return False
+    for expression in expressions:
+        ref nodes = expression._nodes
+        var reachable = List[Bool](length=len(nodes), fill=False)
+        reachable[len(nodes) - 1] = True
+        var saw_reduction = False
+        for reverse in range(len(nodes)):
+            var i = len(nodes) - 1 - reverse
+            ref node = nodes[i]
+            if is_window(node.op) or node.op == OVER or node.op == SELECTOR:
+                return False
+            if not reachable[i]:
+                continue
+            if is_reduction(node.op):
+                if node.op not in [
+                    SUM,
+                    COUNT,
+                    MIN,
+                    MAX,
+                    MEAN,
+                    FIRST,
+                    LAST,
+                    STD,
+                    VAR,
+                    LEN,
+                    ANY,
+                    ALL,
+                    NULL_COUNT,
+                    N_UNIQUE,
+                ]:
+                    return False
+                # Reduction inputs must be row-local; reduction-of-reduction
+                # and windows retain the materializing evaluator.
+                if not _row_local([subtree(expression, node.left)]):
+                    return False
+                saw_reduction = True
+                continue
+            if node.op == COL:
+                return False
+            for child in [node.left, node.right, node.extra]:
+                if child >= 0:
+                    reachable[child] = True
+        if not saw_reduction:
+            return False
+    return True
+
+
+struct _StreamReduction(Movable):
+    var keys: DataFrame
+    var states: List[Reducer]
+    var names: List[String]
+    var dtypes: List[DataType]
+    var outputs: List[Expr]
+    var grouped: Bool
+
+    def __init__(
+        out self, frame: DataFrame, expressions: List[Expr], names: List[String]
+    ) raises:
+        var keys = List[Series]()
+        if len(names) > 0:
+            keys = _expand_struct_keys(frame._subset_keys(names))
+        var key_names = Dict[String, Bool]()
+        for name in names:
+            key_names[name] = True
+        self = Self(frame, expressions, keys, key_names)
+
+    def __init__(
+        out self,
+        frame: DataFrame,
+        expressions: List[Expr],
+        keys: List[Series],
+        key_names: Dict[String, Bool],
+    ) raises:
+        """Reduce every row of frame, grouped by keys (already expanded and
+        row-aligned with frame; none means one global group)."""
+        self.grouped = len(keys) > 0
+        var ids = List[Int]()
+        var count = 1
+        if self.grouped:
+            var groups = encode_rows(keys, nulls_equal=True)
+            count = groups.count()
+            ids = groups.ids.copy()
+            var columns = List[Series]()
+            for key in keys:
+                columns.append(key.take(groups.representatives.copy()))
+            self.keys = DataFrame(columns^, height=count)
+        else:
+            self.keys = DataFrame(List[Series](), height=1)
+        self.outputs = List[Expr]()
+        self.states = List[Reducer]()
+        self.names = List[String]()
+        self.dtypes = List[DataType]()
+        var shared = ArcPointer(ids^)
+        for expression in expressions:
+            var bound = bind(expression, frame._columns)
+            if bound.shape() != AGGREGATE:
+                raise Error(
+                    "Streaming aggregate requires scalar aggregate expressions"
+                )
+            if expression._name in key_names:
+                raise Error(
+                    "Aggregate output name collides with grouping key: "
+                    + expression._name
+                )
+            var rewritten = expression.copy()
+            for i in range(len(expression._nodes)):
+                if not is_reduction(expression._nodes[i].op):
+                    continue
+                var job = _ReduceJob[8](
+                    bound,
+                    frame._columns,
+                    List[Series](),
+                    expression._nodes[i],
+                    0,
+                    frame.height(),
+                    1024,
+                    self.grouped,
+                    shared,
+                    count,
+                )
+                job.run()
+                var name = "__stream_reduction_" + String(len(self.states))
+                self.states.append(job^.into_reducer())
+                self.names.append(name)
+                self.dtypes.append(bound.dtypes[i])
+                rewritten._nodes[i] = col(name)._nodes[0].copy()
+            self.outputs.append(subtree(rewritten, len(rewritten._nodes) - 1))
+
+    def merge(mut self, other: Self) raises:
+        var mapping = List[Int]()
+        var count = 1
+        if self.grouped:
+            var old = self.keys.height()
+            var combined = concat([self.keys.copy(), other.keys.copy()])
+            var groups = encode_rows(combined._columns, nulls_equal=True)
+            count = groups.count()
+            for i in range(other.keys.height()):
+                mapping.append(groups.ids[old + i])
+            self.keys = combined.take(groups.representatives^)
+        for i in range(len(self.states)):
+            self.states[i].grow(count)
+            self.states[i].merge(other.states[i], mapping)
+
+    def finish(self) raises -> DataFrame:
+        var reduced = List[Series]()
+        for i in range(len(self.states)):
+            reduced.append(
+                self.states[i]
+                .finish()
+                .with_dtype(self.dtypes[i])
+                .renamed(self.names[i])
+            )
+        var values = DataFrame(
+            reduced^, height=self.keys.height()
+        ).select_exprs(self.outputs)
+        var columns = self.keys._columns.copy()
+        for column in values._columns:
+            columns.append(column.copy())
+        return _pack_struct_keys(DataFrame(columns^, height=self.keys.height()))

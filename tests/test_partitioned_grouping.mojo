@@ -327,6 +327,76 @@ def test_all_null_keys_and_single_group() raises:
     )
 
 
+def test_worker_range_aggregation_matches_row_by_row_totals() raises:
+    """Any list of reductions on a low-cardinality key, with nulls in both
+    the key and the values, agrees with totals computed row by row."""
+    var n = 4 * MIN_ROWS_PER_WORKER + 17
+    var keys = List[Int64](capacity=n)
+    var key_valid = List[Bool](capacity=n)
+    var xs = List[Float64](capacity=n)
+    var x_valid = List[Bool](capacity=n)
+    var ns = List[Int64](capacity=n)
+    # Slot 7 is the null key.
+    var sums = List[Float64](length=8, fill=0)
+    var counts = List[Int64](length=8, fill=0)
+    var lows = List[Int64](length=8, fill=Int64.MAX)
+    var highs = List[Int64](length=8, fill=Int64.MIN)
+    for i in range(n):
+        var slot = 7 if i % 11 == 0 else i % 7
+        keys.append(Int64(slot))
+        key_valid.append(slot != 7)
+        var value = Float64(i % 101) - 50
+        xs.append(value)
+        x_valid.append(i % 13 != 0)
+        ns.append(Int64(i % 997) - 400)
+        if i % 13 != 0:
+            sums[slot] += value
+            counts[slot] += 1
+        lows[slot] = min(lows[slot], ns[i])
+        highs[slot] = max(highs[slot], ns[i])
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](keys^, key_valid^)),
+            Series("x", Column[Float64](xs^, x_valid^)),
+            Series("n", Column[Int64](ns^)),
+        ]
+    )
+    assert_true(worker_count(n) > 1)
+    var one: List[Expr] = [col("x").sum().alias("s")]
+    var three: List[Expr] = [
+        col("x").sum().alias("s"),
+        col("x").count().alias("c"),
+        col("x").mean().alias("m"),
+    ]
+    var extremes: List[Expr] = [
+        col("n").min().alias("lo"),
+        col("n").max().alias("hi"),
+    ]
+    var lists = List[List[Expr]]()
+    lists.append(one^)
+    lists.append(three^)
+    lists.append(extremes^)
+    for exprs in lists:
+        var result = frame.group_by("k").agg(exprs)
+        assert_equal(result.height(), 8)
+        # Groups keep first-occurrence order: the null key comes first.
+        assert_true(result.item(0, "k").is_null())
+        for row in range(result.height()):
+            var cell = result.item(row, "k")
+            var slot = 7 if cell.is_null() else Int(cell.int64())
+            if "s" in result.columns():
+                assert_equal(result.item(row, "s").float64(), sums[slot])
+            if "c" in result.columns():
+                assert_equal(result.item(row, "c").int64(), counts[slot])
+                assert_equal(
+                    result.item(row, "m").float64(),
+                    sums[slot] / Float64(counts[slot]),
+                )
+            if "lo" in result.columns():
+                assert_equal(result.item(row, "lo").int64(), lows[slot])
+                assert_equal(result.item(row, "hi").int64(), highs[slot])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 
