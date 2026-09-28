@@ -148,8 +148,14 @@ def compiler_processes():
         if len(fields) < 3:
             continue
         name = Path(fields[1]).name
+        # `mojo run`, `test` and `package` compile too, and every one of
+        # them competes with a timed run for the same cores.
         if name in {"clang", "clang++", "cc1", "cc1plus", "rustc"} or (
-            name == "mojo" and " build " in fields[2]
+            name == "mojo"
+            and any(
+                f" {verb} " in fields[2]
+                for verb in ("build", "run", "test", "package", "precompile")
+            )
         ):
             found.append((fields[0], name))
     return found

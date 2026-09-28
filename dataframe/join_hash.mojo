@@ -16,6 +16,7 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner
 from .series import Series
 from .string_column import StringColumn
+from .trace import trace_path
 
 
 def _key_equal(left: Series, right: Series, i: Int, j: Int) -> Bool:
@@ -789,6 +790,10 @@ def prepared_hash_semi_anti_rows(
     left_keys: List[Series], prepared: PreparedHashIndex, keep_matches: Bool
 ) raises -> List[Int]:
     if prepared.progression:
+        trace_path("join.progression_membership")
+    else:
+        trace_path("join.hash_membership")
+    if prepared.progression:
         var key = left_keys[0].rechunk()
         ref values = key._data[Column[Int64]]
         var rows = List[Int](capacity=len(values))
@@ -855,6 +860,10 @@ def prepared_hash_join_rows(
     include_unmatched: Bool,
     omit_identity: Bool = False,
 ) raises -> Tuple[List[Int], List[Int], Bool]:
+    if prepared.progression:
+        trace_path("join.progression_prepared")
+    else:
+        trace_path("join.hash_index")
     if prepared.progression:
         var key = left_keys[0].rechunk()
         ref values = key._data[Column[Int64]]

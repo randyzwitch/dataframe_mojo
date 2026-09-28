@@ -81,6 +81,7 @@ from .join_type import (
     join_type,
 )
 from .nested_column import ListColumn, StructColumn
+from .trace import trace_path
 from .row_encode import encodable, encode_sort_keys
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
@@ -1210,6 +1211,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 right_rows = pairs[0].copy()
                 left_rows = pairs[1].copy()
         if not direct_right:
+            trace_path("join.dictionary")
             var ids = _joint_key_ids(self, right, left_keys, right_keys)
             var left_ids = ids[0].copy()
             var right_ids = ids[1].copy()
@@ -2142,6 +2144,7 @@ def _join_range_rows(
     for i in range(len(jobs)):
         for row in jobs[i].rows:
             rows.append(row)
+    trace_path("join.range_filter")
     return rows^
 
 
@@ -2154,6 +2157,7 @@ def _smaller_build_join_rows(
     logical left row preserves the original right-row ordering within every
     left group, including duplicate keys on either side.
     """
+    trace_path("join.smaller_build")
     var pairs = direct_hash_join_rows(right, left, False)
     var starts = _group_index(pairs[1], len(left[0]))
     var order = _group_rows(pairs[1], starts)
@@ -2297,6 +2301,7 @@ def _dense_right_int64_rows(
         var pairs = _parallel_progression_rows(
             left, base, stride, len(right), include_unmatched
         )
+        trace_path("join.progression")
         return (True, pairs[0].copy(), pairs[1].copy())
     var row = 0
     if stride == 1:
@@ -2331,6 +2336,7 @@ def _dense_right_int64_rows(
                         left_rows.append(row)
                         right_rows.append(matched_row)
                     row += 1
+        trace_path("join.progression")
         return (True, left_rows^, right_rows^)
     var right_limit = UInt64(len(right))
     var left_rows = List[Int](capacity=len(left))
@@ -2367,6 +2373,7 @@ def _dense_right_int64_rows(
                     left_rows.append(row)
                     right_rows.append(matched_row)
                 row += 1
+    trace_path("join.progression")
     return (True, left_rows^, right_rows^)
 
 
@@ -2788,6 +2795,7 @@ def _bounded_int64_join_rows(
         for i in range(len(jobs[worker].left_rows)):
             left_rows.append(jobs[worker].left_rows[i])
             right_rows.append(jobs[worker].right_rows[i])
+    trace_path("join.bounded_index")
     return (True, left_rows^, right_rows^)
 
 
@@ -2853,6 +2861,7 @@ def _range_int64_membership_chunks(
     var domain = _range_int64_membership_domain(right)
     if not domain.supported:
         return (False, List[Series]())
+    trace_path("join.bounded_membership")
     return (
         True,
         filter_range_int64_chunks(
@@ -2887,6 +2896,7 @@ def _range_int64_membership_rows(
         if not want_match:
             for row in range(len(left_values)):
                 rows.append(row)
+        trace_path("join.bounded_membership")
         return (True, rows^)
     var low = domain.low
     var high = domain.high
@@ -2903,6 +2913,7 @@ def _range_int64_membership_rows(
                     matched = consecutive or (present[Int(value - low)] != 0)
             if matched == want_match:
                 rows.append(row)
+        trace_path("join.bounded_membership")
         return (True, rows^)
     var shared = ArcPointer(present^)
     var bounds = partitions(len(left_values), workers, 1)
@@ -2924,6 +2935,7 @@ def _range_int64_membership_rows(
     for worker in range(workers):
         for row in jobs[worker].rows:
             rows.append(row)
+    trace_path("join.bounded_membership")
     return (True, rows^)
 
 
@@ -2975,6 +2987,7 @@ def _bounded_int64_join_ids(
                 low = min(low, value)
                 high = max(high, value)
     if not found:
+        trace_path("join.dense_ids")
         return (
             True,
             List[Int](length=len(left_values), fill=-1),
@@ -2996,6 +3009,7 @@ def _bounded_int64_join_ids(
                 row
             ) else -1
         )
+    trace_path("join.dense_ids")
     return (True, left_ids^, right_ids^, count)
 
 
@@ -3459,6 +3473,7 @@ def _parallel_full_join_rows(
     workers: Int,
 ) raises -> Tuple[List[Int], List[Int]]:
     """Full pairs in left-major order, then unmatched right input order."""
+    trace_path("join.full_parallel")
     var present = List[Bool](length=count, fill=False)
     for key in left_ids:
         if key >= 0:
@@ -4148,6 +4163,7 @@ struct GroupBy(Copyable):
         var merged = jobs[0].state.take()
         for w in range(1, len(jobs)):
             merged.merge(jobs[w].state.value())
+        trace_path("group_by.ranges")
         return merged.finish()
 
     def _referenced(self, bound: List[BoundExpr]) -> List[Series]:
@@ -4192,6 +4208,7 @@ struct GroupBy(Copyable):
         var whole = low_cardinality(self._keys)
         if whole:
             return self._agg_whole(bound, batch_size)
+        trace_path("group_by.partitioned")
         var partitioner = Partitioner(self._keys, workers)
         var parts = partitioner.scatter(workers)
         var buckets = parts.buckets()
@@ -4266,6 +4283,7 @@ struct GroupBy(Copyable):
         self, bound: List[BoundExpr], batch_size: Int
     ) raises -> DataFrame:
         """Serial key encoding, then the parallel per-group reduce."""
+        trace_path("group_by.whole")
         var groups: RowKeys
         if len(self._keys) == 1 and self._keys[0]._data.isa[StringColumn]():
             groups = encode_string_rows_parallel(
