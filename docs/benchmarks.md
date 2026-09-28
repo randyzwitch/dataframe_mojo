@@ -132,3 +132,34 @@ compared: rows tied at a `LIMIT` boundary may legitimately differ between
 engines, and between runs of one engine, so ClickBench's top-N queries compare
 their `ORDER BY` column; q17, a `LIMIT` without `ORDER BY`, compares the row
 count. `CHECKS` in `scripts/bench_suites.py` lists them.
+
+## Mechanism benchmarks
+
+The programs in `benchmarks/` measure one mechanism at a time. Use them to
+develop and calibrate a change, then confirm it on the suites above.
+
+| Benchmark | What it measures |
+|---|---|
+| `bench_csv`, `bench_numeric_parse`, `bench_cast_parse` | CSV ingestion and text-to-number parsing; the suites load data untimed, so these are the only parsing coverage |
+| `bench_parquet_stream`, `bench_arrow_import` | Parquet reads and Arrow import, with their drivers in `scripts/` |
+| `bench_join_matrix` | Thirteen join shapes on `base`, `shuffled` and `wide` key layouts; `scripts/bench_join_revision.py` pairs two revisions, and `bench_join_polars.py` / `bench_join_duckdb.py` add the other engines. Inputs come from `scripts/bench_join_data.py`. Treat `shuffled` and `wide` as the general case |
+| `bench_join_cutoffs`, `bench_sort_cutoffs`, `bench_worker_sort`, `bench_join_build_ratio` | Sweeps behind named cutoff constants; see join-cutoffs.md, sort-cutoffs.md and worker-calibration.md |
+| `bench_join`, `bench_group_by`, `bench_sort`, `bench_late_sort`, `bench_concat` | Scaling of single operators over sizes, skew and key counts |
+| `bench_lazy_pipeline`, `bench_lazy_streaming` | Lazy CSV pipelines and the streaming executor |
+| `bench_suite` | Quick CPU workloads; `pixi run bench-smoke` runs it in CI |
+
+## Retired benchmarks
+
+These were removed because the external suites cover the same ground with
+upstream queries and checked answers, or because the code they measured is
+gone. Check out revision `b9db9c6` to rerun them, for example to reproduce a
+historical record in `docs/`.
+
+| Benchmark | Why it was retired |
+|---|---|
+| `bench_vs_polars.mojo`, `scripts/bench_polars.py` (`bench-polars`) | The old head-to-head; its grouped query was the shape the removed sum-plus-count group-by path matched (#306). The H2O suites replace it. Its data generator moved to `scripts/bench_join_data.py` |
+| `bench_upstream_joins.mojo`, `scripts/bench_upstream_joins.py`, `scripts/bench_upstream_revision.py` | Hand ports of two DuckDB join micro-benchmarks, one of them the target of the removed count fusion (#304). The H2O join suite and PDS-H replace them. Its compiler guard moved to `scripts/bench_host.py` |
+| `bench_progression.mojo`, `scripts/bench_progression.py` | Written with the equal-run progression path it measured (#308); only its rejection cases remained meaningful, and the join matrix's `shuffled` layout covers them |
+| `bench_aggregate_fusion.mojo` | Measured the fused Float64 group-by path removed in #319 |
+| `bench_agg_shapes.mojo`, `scripts/bench_agg_shapes_polars.py` | One-off comparison for #319; the H2O group-by suite and its variants cover it |
+

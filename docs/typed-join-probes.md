@@ -1,5 +1,7 @@
 # Typed scalar hash probes
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `b9db9c6` to rerun them.
+
 > **Update (#304).** The typed string count probe described below was removed
 > with inner-join count fusion. The typed Int64 and string membership probes
 > for semi and anti joins remain.

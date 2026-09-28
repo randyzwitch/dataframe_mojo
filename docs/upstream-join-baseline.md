@@ -1,5 +1,7 @@
 # Upstream join workload baseline
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `b9db9c6` to rerun them.
+
 This starts the post-merge profiling work at `c8c6498` (PR #296).
 The engine is unchanged. The first adapters exercise complete analytical
 queries, alongside the existing join-result-materialization matrix.

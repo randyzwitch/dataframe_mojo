@@ -1,5 +1,7 @@
 # Borrow immutable byte blocks in string-view reads
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `b9db9c6` to rerun them.
+
 Long Arrow Utf8View reads previously copied an Arc reference to the owning
 byte block into a local variable. That inserted an atomic retain/release on
 each scalar read, including hashing and join equality. Borrow the existing

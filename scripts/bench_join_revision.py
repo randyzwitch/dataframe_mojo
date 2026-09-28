@@ -14,7 +14,7 @@ import platform
 import subprocess
 import time
 
-from bench_upstream_joins import compiler_processes
+from bench_host import compiler_processes
 
 
 def digest(path):

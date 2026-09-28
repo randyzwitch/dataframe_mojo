@@ -1,5 +1,7 @@
 # Inner-join count fusion (removed)
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `b9db9c6` to rerun them.
+
 > **Removed in #304.** This shortcut fired only for an in-memory inner join
 > followed directly by `len()` or `count()` of a key, which is the upstream
 > `duplicate_strings` benchmark query. It answered by summing key

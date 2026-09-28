@@ -1,5 +1,7 @@
 # Cardinality-based join build selection
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `b9db9c6` to rerun them.
+
 This change follows prepared streaming joins in #298. Inner and left joins
 may build on the logical left input when the right side has at least 524,288
 rows and is at least 32 times larger. This uses actual cardinalities, not

@@ -1,5 +1,7 @@
 # Progression joins (#269)
 
+> **Retired benchmark.** The scripts this record uses to reproduce its measurements were retired in favor of the external suites ([benchmarks.md](benchmarks.md#retired-benchmarks)); check out revision `b9db9c6` to rerun them.
+
 > **Update (#308).** Equal-run support described below was removed. Its
 > only consumer was the join matrix's `jk // 2` case; the sensor-panel model
 > was written afterwards, and one missing reading rejects it. Repeated build

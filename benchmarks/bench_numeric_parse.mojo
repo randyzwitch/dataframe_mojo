@@ -2,7 +2,7 @@
 
 Build against each revision with `mojo build -I .` and compare binaries on
 an idle machine. This isolates conversion; CSV results are measured with
-bench_vs_polars.mojo. Inputs vary to prevent constant folding.
+the retired bench_vs_polars.mojo. Inputs vary to prevent constant folding.
 """
 from std.time import monotonic
 

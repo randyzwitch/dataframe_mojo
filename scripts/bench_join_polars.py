@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from bench_polars import (
+from bench_join_data import (
     ROOT,
     best_of,
     generate,

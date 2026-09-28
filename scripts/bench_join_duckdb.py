@@ -27,7 +27,7 @@ from bench_join_polars import (
     run_mojo,
     run_polars,
 )
-from bench_polars import ROOT, generate, generate_join_variants, physical_cores
+from bench_join_data import ROOT, generate, generate_join_variants, physical_cores
 
 
 LEFT_COLUMNS = ["key_low", "key_high", "key_skew", "key_str", "jk", "x", "y", "n"]
