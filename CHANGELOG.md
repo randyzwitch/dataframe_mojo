@@ -31,7 +31,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
   partitions and bounded-index builders respect core budgets, with 4/8/16
   worker calibration on Threadripper and Apple M1.
 - Progression joins accept matching Date, Datetime, Duration and Time keys,
-  including temporal units, and retain measured equal-run panel support.
+  including temporal units. Build keys with repeated values (equal runs) no
+  longer take the progression path; they use the join index (#308).
+- Bounded Int64 joins no longer compute a GCD stride for wide shuffled keys;
+  those keys use the hash index (#307).
 
 - Join and sorted-chunk-gather dispatch uses measured working-set and job
   costs instead of the remaining fixed 2,000,000-row switches. Bounded join

@@ -178,7 +178,7 @@ def test_ordered_strided_right_keys_map_rows_without_an_index() raises:
     assert_rows(extreme_left.join(extreme_right, "k"), [0, 2], [0, 1])
 
 
-def test_ordered_equal_runs_join_without_an_index() raises:
+def test_ordered_duplicate_keys_keep_row_order() raises:
     var left = side(
         [-120, -60, 0, 60, 120, 0],
         [True, True, True, True, True, False],
@@ -372,17 +372,17 @@ def test_temporal_progressions_keep_logical_types_nulls_and_order() raises:
     assert_true(not _dense_right_int64_rows(millis, micros)[0])
 
 
-def test_timestamp_sensor_panel_runs_and_irregular_fallback() raises:
+def test_timestamp_calendar_grid_and_irregular_fallback() raises:
     var dtype = DataType.datetime("us")
-    var left = Series("k", Column[Int64]([120, 0, 60])).with_dtype(dtype)
-    var panel = Series("k", Column[Int64]([0, 0, 60, 60, 120, 120])).with_dtype(
-        dtype
-    )
-    var pairs = _dense_right_int64_rows(left, panel)
+    var left = Series("k", Column[Int64]([120, 0, 60, 30])).with_dtype(dtype)
+    var grid = Series("k", Column[Int64]([0, 60, 120])).with_dtype(dtype)
+    var pairs = _dense_right_int64_rows(left, grid, True)
     assert_true(pairs[0])
-    assert_equal(pairs[1], List[Int]([0, 0, 1, 1, 2, 2]))
-    assert_equal(pairs[2], List[Int]([4, 5, 0, 1, 2, 3]))
+    assert_equal(pairs[1], List[Int]([0, 1, 2, 3]))
+    assert_equal(pairs[2], List[Int]([2, 0, 1, -1]))
+    # Repeated build keys (several readings per timestamp) use an index.
     var irregular_keys: List[List[Int64]] = [
+        [0, 0, 60, 60, 120, 120],
         [0, 0, 60, 120, 120],
         [0, 60, 121],
         [60, 0, 120],

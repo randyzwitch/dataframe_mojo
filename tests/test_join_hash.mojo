@@ -421,14 +421,21 @@ def test_prepared_index_reuses_build_across_independent_probes() raises:
         )
 
 
-def test_prepared_progressions_runs_extremes_and_invalid_shapes() raises:
+def test_prepared_progressions_extremes_and_invalid_shapes() raises:
     var low = Int64.MIN
+    var steps = Series("k", Column[Int64]([low, low + 2, low + 4]))
+    var stepped = prepare_hash_index([steps.copy()])
+    assert_true(stepped.progression)
+    var left = Series("k", Column[Int64]([low, low + 1, low + 4, Int64.MAX]))
+    var stepped_rows = prepared_hash_join_rows([left.copy()], stepped, True)
+    assert_equal(stepped_rows[0], [0, 1, 2, 3])
+    assert_equal(stepped_rows[1], [0, -1, 2, -1])
+    # Repeated keys are not a progression; the hash index keeps their order.
     var right = Series(
         "k", Column[Int64]([low, low, low + 2, low + 2, low + 4])
     )
     var index = prepare_hash_index([right.copy()])
-    assert_true(index.progression)
-    var left = Series("k", Column[Int64]([low, low + 1, low + 4, Int64.MAX]))
+    assert_true(not index.progression)
     var rows = prepared_hash_join_rows([left.copy()], index, True)
     assert_equal(rows[0], [0, 0, 1, 2, 3])
     assert_equal(rows[1], [0, 1, -1, 4, -1])
