@@ -125,15 +125,59 @@ also wins (23.3 vs 25.1 ms). Both old two-million-row conditions disappear.
 Eight-worker checks retain the larger-case gains. This is a cache/working-set
 criterion; very small head tables stay serial even with many duplicate rows.
 
-### Strided bounded indexes
+### Strided bounded indexes (removed)
 
-Permit the GCD scan and serial strided scatter only through 4 MiB of build
-keys. Apply the same rule in the sample rejection and exact-scan paths.
-At 250k build keys, direct addressing wins for probe/build ratios 0.25,
-0.5, 1 and 2; at 500k the results are mixed; at 1M hashing wins at every
-ratio. With 2M keys on each side, direct takes about 120 ms vs hash's 46 ms.
-The former condition required a larger build than probe **and** 2M rows,
-missing the same loss when the inputs were equal-sized.
+The GCD scan and strided scatter were removed in #307. Shuffled keys that
+are all multiples of a common stride do not occur in real tables; the only
+workload that used this mode was the join matrix's `jk * 17` case. The mode
+won only through 250k build keys and lost from 1M. Such keys now use the
+dense index when their span is compact and the hash index otherwise. The
+measurements below are kept for the record.
+
+At 250k build keys, direct addressing won for probe/build ratios 0.25,
+0.5, 1 and 2; at 500k the results were mixed; at 1M hashing won at every
+ratio. With 2M keys on each side, direct took about 120 ms vs hash's 46 ms.
+
+#### After removal
+
+Measured 2026-09-27 on the Threadripper 3970X at 32 workers with Mojo 1.2.0.dev2026092105 (e9569894), using `-O3 -g1` builds of each revision. `scripts/bench_join_revision.py` alternates the two binaries every round (five rounds; three for the control cases). Each process warms once and times one query, and the driver checks that both revisions return the same height and checksum. Values are medians in milliseconds; speedup above 1 means the change is faster. Baseline is main at `5ab269d`.
+
+The join matrix's sparse case (`jk * 17`) was the only workload using the mode:
+
+| Rows | Case | Layout | main ms | #307 ms | Speedup |
+|---:|---|---|---:|---:|---:|
+| 100,000 | inner_sparse | base | 2.54 | 2.61 | 0.97x |
+| 100,000 | inner_sparse | shuffled | 13.84 | 13.45 | 1.03x |
+| 250,000 | inner_sparse | base | 10.03 | 9.87 | 1.02x |
+| 250,000 | inner_sparse | shuffled | 11.26 | 17.58 | 0.64x |
+| 500,000 | inner_sparse | base | 18.88 | 19.31 | 0.98x |
+| 500,000 | inner_sparse | shuffled | 21.05 | 31.75 | 0.66x |
+| 1,000,000 | inner_sparse | base | 42.17 | 41.62 | 1.01x |
+| 1,000,000 | inner_sparse | shuffled | 41.18 | 49.05 | 0.84x |
+
+Sorted keys (`base`) keep the progression path and are unchanged. Shuffled
+keys lose up to 36% at 250k and 500k build rows, where the mode used to win,
+and 16% at 1M. Other join cases are unchanged:
+
+| Rows | Case | Layout | main ms | #307 ms | Speedup |
+|---:|---|---|---:|---:|---:|
+| 1,000,000 | anti_unmatched | base | 13.20 | 12.61 | 1.05x |
+| 1,000,000 | anti_unmatched | shuffled | 15.88 | 15.61 | 1.02x |
+| 1,000,000 | inner_dense | base | 20.66 | 20.26 | 1.02x |
+| 1,000,000 | inner_dense | shuffled | 31.57 | 31.44 | 1.00x |
+| 1,000,000 | left_unmatched | base | 21.54 | 21.43 | 1.01x |
+| 1,000,000 | left_unmatched | shuffled | 33.29 | 32.26 | 1.03x |
+| 1,000,000 | semi_unmatched | base | 13.04 | 12.58 | 1.04x |
+| 1,000,000 | semi_unmatched | shuffled | 15.87 | 15.66 | 1.01x |
+| 10,000,000 | anti_unmatched | base | 96.12 | 96.37 | 1.00x |
+| 10,000,000 | anti_unmatched | shuffled | 131.39 | 127.97 | 1.03x |
+| 10,000,000 | inner_dense | base | 173.93 | 176.66 | 0.98x |
+| 10,000,000 | inner_dense | shuffled | 269.23 | 268.06 | 1.00x |
+| 10,000,000 | left_unmatched | base | 223.71 | 222.25 | 1.01x |
+| 10,000,000 | left_unmatched | shuffled | 294.09 | 289.47 | 1.02x |
+| 10,000,000 | semi_unmatched | base | 96.41 | 95.61 | 1.01x |
+| 10,000,000 | semi_unmatched | shuffled | 132.02 | 132.43 | 1.00x |
+
 
 ### Stable CSR scatter
 

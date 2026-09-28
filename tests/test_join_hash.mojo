@@ -33,10 +33,10 @@ def test_bounded_int64_rows_keep_duplicates_nulls_and_extremes() raises:
     assert_equal(outer[1], [0, 0, 1, 2, 3, 4])
     assert_equal(outer[2], [0, 1, -1, 2, -1, -1])
     var wide = Series("k", Column[Int64]([Int64.MIN, Int64.MAX]))
+    # A span from Int64.MIN to Int64.MAX is too wide to address directly;
+    # the hash index handles it (see test_join_integer_range extremes).
     var extreme = _bounded_int64_join_rows(left, wide, False)
-    assert_equal(extreme[0], True)
-    assert_equal(extreme[1], [0, 3])
-    assert_equal(extreme[2], [0, 1])
+    assert_equal(extreme[0], False)
 
 
 def test_parallel_bounded_index_keeps_duplicate_row_order() raises:

@@ -127,7 +127,7 @@ def test_extreme_span_and_multi_key_join_correctness() raises:
     assert_equal(left_two.join(right_two, on=["k", "z"]).height(), 1)
 
 
-def test_strided_keys_reject_off_grid_probes_and_keep_duplicates() raises:
+def test_sparse_keys_reject_off_grid_probes_and_keep_duplicates() raises:
     var left = side(
         [-120, -119, -60, 0, 60, 0],
         [True, True, True, True, True, False],
