@@ -175,6 +175,10 @@ comptime STRUCT_PACK = 156
 # integer is ddof.
 comptime CORR = 160
 comptime COV = 161
+# Distinct values and their counts per group, as a list of structs.
+# text: value field SEP count field; integer: bit 0 sort by count, bit 1
+# normalize (proportions).
+comptime VALUE_COUNTS = 162
 
 
 def is_binary(op: Int) -> Bool:
@@ -191,6 +195,7 @@ def is_reduction(op: Int) -> Bool:
         or op == COUNT
         or (op >= 80 and op < 100)
         or is_pair_reduction(op)
+        or op == VALUE_COUNTS
     )
 
 
@@ -852,6 +857,29 @@ struct Expr(Copyable):
         .agg() returns a list per group. Not available in over()."""
         return self._unary(MODE)
 
+    def value_counts(
+        self, sort: Bool = False, name: String = "", normalize: Bool = False
+    ) -> Self:
+        """Each distinct value (null included) with its count, as a struct of
+        the value (named after this expression) and `name` ("count", or
+        "proportion" when normalize gives Float64 shares; counts are UInt32).
+        Ascending by value with null last, or by count descending (ties by
+        value) when sort. select() returns one row per value; group_by()
+        .agg() returns a list per group. Not available in over()."""
+        var count_name = name
+        if count_name.byte_length() == 0:
+            count_name = "proportion" if normalize else "count"
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                VALUE_COUNTS,
+                len(nodes) - 1,
+                text=self._name + SEP + count_name,
+                integer=Int64(sort) + 2 * Int64(normalize),
+            )
+        )
+        return Self(nodes^, self._name)
+
     def skew(self, bias: Bool = True) -> Self:
         """Sample skewness, Float64; bias=False applies the adjusted
         Fisher-Pearson correction (null below three values)."""
@@ -1035,6 +1063,13 @@ def lit(value: Bool) -> Expr:
 
 def lit(value: String) -> Expr:
     return Expr([_node(LIT_STRING, text=value)], "literal")
+
+
+def null(dtype: DataType) -> Expr:
+    """A typed null literal of a DataType; null(name) takes a dtype name."""
+    return Expr(
+        [_node(LIT_NULL, text=String(dtype), dtypes=[dtype])], "literal"
+    )
 
 
 def null(dtype: String) -> Expr:

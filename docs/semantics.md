@@ -49,7 +49,30 @@ names works. `with_row_index(name="index", offset=0)` prepends an Int64 column
 and raises if the name already exists.
 
 `shape()` is `(height, width)`. `null_count()` returns a one-row frame of Int64
-counts per column. `row(i)` returns a `List[AnyValue]` in schema order;
+counts per column.
+
+`describe(percentiles=[0.25, 0.5, 0.75], interpolation="nearest")` follows
+Polars' layout: a `statistic` column with rows `count`, `null_count`, `mean`,
+`std`, `min`, one row per percentile in ascending order (labelled `25%` and so
+on; an empty list gives none), and `max`, then one column per input column.
+Numeric and Bool columns give Float64; Bool `mean` is the share of true
+values and has no `std` or percentiles. `min` and `max` skip NaN unless every
+valid value is NaN, while `mean` and `std` propagate it. String columns give
+String counts, `min` and `max`. Temporal columns give String counts, `mean`
+(a datetime for a Date column), `min`, percentiles and `max`, formatted as a
+cast to String formats them. Polars formats temporal values through Python,
+so its Duration text (`1 day, 0:00:00`) and sub-microsecond digits differ.
+Nested columns give only the counts.
+
+`sample(n=None, fraction=None, with_replacement=False, shuffle=False,
+seed=None)` on DataFrame and Series draws `n` rows, or `floor(fraction *
+height)`, or one row when neither is given; passing both raises. Without
+replacement no row repeats and a sample larger than the frame raises. Rows
+keep their original order unless `shuffle=True`, which also randomizes the
+order; Polars' order without `shuffle` is unspecified. The generator is
+SplitMix64 with unbiased bounded draws, so a seed gives the same rows on every
+platform and release but not the rows Polars gives for that seed. Without a
+seed it is seeded from the clock. `row(i)` returns a `List[AnyValue]` in schema order;
 `AnyValue` carries a dtype tag and validity, and its typed accessors raise on a
 dtype mismatch or null. `item()` requires exactly one cell; `item(row, column)`
 reads one cell. `rows()` materializes every row and is meant for small frames.

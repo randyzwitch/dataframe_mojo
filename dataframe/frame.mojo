@@ -12,6 +12,7 @@ from .expr import (
     ARG_MIN,
     ARG_MAX,
     MODE,
+    VALUE_COUNTS,
     SKEW,
     KURTOSIS,
     CORR,
@@ -33,6 +34,7 @@ from .expr import (
     N_UNIQUE,
     col,
     lit,
+    null,
     COL,
     SELECTOR,
     LIT_INT,
@@ -54,6 +56,7 @@ from .expr import (
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate, _ReduceJob
 from .aggregate import Reducer
+from .sampling import sample_size, sample_indices
 from .gather import (
     SORTED_GATHER_MIN_CHUNKS,
     take_parallel,
@@ -460,6 +463,227 @@ struct DataFrame(Copyable, Sized, Writable):
         for name in names:
             columns.append(self.column(name))
         return Self(columns^, height=self._height)
+
+    def sample(
+        self,
+        n: Optional[Int] = None,
+        *,
+        fraction: Optional[Float64] = None,
+        with_replacement: Bool = False,
+        shuffle: Bool = False,
+        seed: Optional[Int] = None,
+    ) raises -> Self:
+        """A random sample of rows: n of them, or floor(fraction * height),
+        or one row when neither is given.
+
+        Without replacement no row repeats and asking for more rows than the
+        frame has raises. Rows keep their original order unless shuffle is
+        set (Polars' order without shuffle is unspecified). A seed makes the
+        sample reproducible across runs and platforms; without one the
+        generator is seeded from the clock. The generator is SplitMix64, so
+        seeded samples differ from Polars' for the same seed.
+        """
+        var count = sample_size(self._height, n, fraction, with_replacement)
+        return self.take(
+            sample_indices(self._height, count, with_replacement, shuffle, seed)
+        )
+
+    def describe(
+        self,
+        percentiles: List[Float64] = [0.25, 0.5, 0.75],
+        interpolation: String = "nearest",
+    ) raises -> Self:
+        """Summary statistics per column, laid out as Polars' describe().
+
+        Rows: count, null_count, mean, std, min, one row per percentile in
+        ascending order (labelled like "25%"), then max. Pass an empty list
+        for no percentile rows. Numeric and Bool columns give Float64 (Bool
+        mean is the share of true values; std and percentiles are null).
+        String columns give String: counts, min and max. Temporal columns
+        give String: counts, the mean (a datetime for Date columns), min,
+        percentiles and max, formatted as a cast to String formats them.
+        Nested columns give Float64 counts and nulls elsewhere. min and max
+        skip NaN; mean and std propagate it.
+        """
+        var qs = percentiles.copy()
+        for q in qs:
+            if not (q >= 0 and q <= 1):
+                raise Error("describe() percentiles must lie in [0, 1]")
+        sort(qs)
+        var labels: List[String] = ["count", "null_count", "mean", "std", "min"]
+        for q in qs:
+            labels.append(_percent_label(q))
+        labels.append("max")
+        var rows = len(labels)
+        var exprs = List[Expr]()
+        for i in range(self.width()):
+            ref column = self._columns[i]
+            var dtype = column.dtype()
+            var c = col(column.name())
+            var p = String(i) + "_"
+            exprs.append(c.count().alias(p + "count"))
+            exprs.append(c.null_count().alias(p + "null_count"))
+            if dtype.is_numeric() or dtype == DataType.BOOL:
+                var x = c.cast(DataType.FLOAT64)
+                # min and max skip NaN, as Polars' describe does; a column
+                # of only NaN gives NaN (restored below).
+                var numbers = x.fill_nan(null(DataType.FLOAT64))
+                exprs.append(x.mean().alias(p + "mean"))
+                exprs.append(numbers.min().alias(p + "min"))
+                exprs.append(numbers.max().alias(p + "max"))
+                if dtype.is_numeric():
+                    exprs.append(x.std().alias(p + "std"))
+                    for k in range(len(qs)):
+                        exprs.append(
+                            x.quantile(qs[k], interpolation).alias(
+                                p + "q" + String(k)
+                            )
+                        )
+            elif dtype == DataType.STRING:
+                exprs.append(c.min().alias(p + "min"))
+                exprs.append(c.max().alias(p + "max"))
+            elif dtype.is_temporal():
+                var x = c.cast(DataType.INT64)
+                exprs.append(x.cast(DataType.FLOAT64).mean().alias(p + "mean"))
+                exprs.append(x.min().alias(p + "min"))
+                exprs.append(x.max().alias(p + "max"))
+                for k in range(len(qs)):
+                    exprs.append(
+                        x.cast(DataType.FLOAT64)
+                        .quantile(qs[k], interpolation)
+                        .alias(p + "q" + String(k))
+                    )
+        var stats = self.select_exprs(exprs) if len(exprs) > 0 else Self(
+            List[Series](), height=1
+        )
+        var present = Dict[String, Bool]()
+        for name in stats.columns():
+            present[name] = True
+        var columns = List[Series](capacity=self.width() + 1)
+        columns.append(Series("statistic", Column[String](labels.copy())))
+        for i in range(self.width()):
+            ref column = self._columns[i]
+            var dtype = column.dtype()
+            var p = String(i) + "_"
+            var count = stats.column(p + "count").get(0).int64()
+            var nulls = stats.column(p + "null_count").get(0).int64()
+            # Stat name for each output row: "count", ..., "q0", ..., "max".
+            var keys: List[String] = ["count", "null_count", "mean", "std"]
+            keys.append("min")
+            for k in range(len(qs)):
+                keys.append("q" + String(k))
+            keys.append("max")
+            if (
+                dtype.is_numeric()
+                or dtype == DataType.BOOL
+                or dtype.is_nested()
+            ):
+                var values = List[Float64](capacity=rows)
+                var valid = List[Bool](capacity=rows)
+                for key in keys:
+                    if key == "count":
+                        values.append(Float64(count))
+                        valid.append(True)
+                    elif key == "null_count":
+                        values.append(Float64(nulls))
+                        valid.append(True)
+                    elif (p + key) in present:
+                        var value = stats.column(p + key).get(0)
+                        if (
+                            value.is_null()
+                            and count > 0
+                            and (key == "min" or key == "max")
+                        ):
+                            # Every valid value was NaN.
+                            values.append(Float64(0) / Float64(0))
+                            valid.append(True)
+                            continue
+                        valid.append(not value.is_null())
+                        values.append(0 if value.is_null() else value.float64())
+                    else:
+                        values.append(0)
+                        valid.append(False)
+                columns.append(
+                    Series(column.name(), Column[Float64](values^, valid^))
+                )
+                continue
+            var texts = List[String](capacity=rows)
+            var valid = List[Bool](capacity=rows)
+            if dtype.is_temporal():
+                # Physical values for min, percentiles and max, formatted
+                # together by one cast; the mean gets its own type.
+                var ticks = List[Int64]()
+                var ticks_valid = List[Bool]()
+                for key in keys:
+                    if key == "min" or key == "max" or key.startswith("q"):
+                        var value = stats.column(p + key).get(0)
+                        ticks_valid.append(not value.is_null())
+                        ticks.append(
+                            0 if value.is_null() else _round_ticks(
+                                value.float64()
+                            ) if key.startswith("q") else value.int64()
+                        )
+                var formatted = (
+                    Series("", Column[Int64](ticks^, ticks_valid^))
+                    .with_dtype(dtype)
+                    .cast(DataType.STRING)
+                )
+                var mean = stats.column(p + "mean").get(0)
+                var mean_type = dtype
+                var mean_ticks = Int64(0)
+                if not mean.is_null():
+                    var ticks_mean = mean.float64()
+                    if dtype.is_date():
+                        mean_type = DataType.datetime("us")
+                        ticks_mean *= 86400000000.0
+                    mean_ticks = _round_ticks(ticks_mean)
+                var mean_text = (
+                    Series(
+                        "",
+                        Column[Int64]([mean_ticks], [not mean.is_null()]),
+                    )
+                    .with_dtype(mean_type)
+                    .cast(DataType.STRING)
+                    .get(0)
+                )
+                var at = 0
+                for key in keys:
+                    if key == "count":
+                        texts.append(String(count))
+                        valid.append(True)
+                    elif key == "null_count":
+                        texts.append(String(nulls))
+                        valid.append(True)
+                    elif key == "mean":
+                        valid.append(not mean_text.is_null())
+                        texts.append(
+                            "" if mean_text.is_null() else mean_text.string()
+                        )
+                    elif key == "std":
+                        texts.append("")
+                        valid.append(False)
+                    else:
+                        var value = formatted.get(at)
+                        at += 1
+                        valid.append(not value.is_null())
+                        texts.append("" if value.is_null() else value.string())
+            else:
+                for key in keys:
+                    if key == "count":
+                        texts.append(String(count))
+                        valid.append(True)
+                    elif key == "null_count":
+                        texts.append(String(nulls))
+                        valid.append(True)
+                    elif (p + key) in present:
+                        var value = stats.column(p + key).get(0)
+                        valid.append(not value.is_null())
+                        texts.append("" if value.is_null() else value.string())
+                    else:
+                        texts.append("")
+                        valid.append(False)
+            columns.append(Series(column.name(), StringColumn(texts, valid)))
+        return Self(columns^, height=rows)
 
     def take(self, indices: List[Int]) raises -> Self:
         for i in indices:
@@ -1501,11 +1725,12 @@ struct DataFrame(Copyable, Sized, Writable):
         var modes = List[String]()
         for expression in bound:
             ref nodes = expression.expr._nodes
-            if nodes[len(nodes) - 1].op == MODE:
+            var top = nodes[len(nodes) - 1].op
+            if top == MODE or top == VALUE_COUNTS:
                 if has_rows:
                     raise Error(
-                        "mode() cannot be selected with row-valued"
-                        " expressions; its length differs"
+                        "mode() and value_counts() cannot be selected with"
+                        " row-valued expressions; their length differs"
                     )
                 modes.append(expression.expr._name)
         for expression in bound:
@@ -4546,3 +4771,40 @@ struct _StreamReduction(Movable):
         for column in values._columns:
             columns.append(column.copy())
         return _pack_struct_keys(DataFrame(columns^, height=self.keys.height()))
+
+
+def _round_ticks(value: Float64) -> Int64:
+    """Nearest integer tick, halves away from zero."""
+    return Int64(value + 0.5) if value >= 0 else -Int64(-value + 0.5)
+
+
+def _percent_label(q: Float64) -> String:
+    """A percentile's row label as Python formats f"{q * 100:g}%": six
+    significant digits, trailing zeros dropped (0.25 gives "25%")."""
+    var value = q * 100
+    if value == 0:
+        return "0%"
+    var decimals = 5
+    var scale = value
+    while scale >= 10:
+        scale /= 10
+        decimals -= 1
+    while scale < 1:
+        scale *= 10
+        decimals += 1
+    var scaled = value
+    for _ in range(decimals):
+        scaled *= 10
+    var digits = Int(scaled + 0.5)
+    while decimals > 0 and digits % 10 == 0:
+        digits //= 10
+        decimals -= 1
+    var factor = 1
+    for _ in range(decimals):
+        factor *= 10
+    if decimals == 0:
+        return String(digits) + "%"
+    var fraction = String(digits % factor)
+    while fraction.byte_length() < decimals:
+        fraction = "0" + fraction
+    return String(digits // factor) + "." + fraction + "%"

@@ -190,9 +190,10 @@ operands and use three-valued Kleene logic: `false & null` is false,
 propagate nulls. Mojo cannot overload `and`/`or`/`not`, so use the operators.
 `filter` keeps only true rows, so Kleene nulls are dropped.
 
-`null(dtype)` is a typed null literal. `is_null()`/`is_not_null()` accept any
-dtype and never return null. `is_nan`, `is_not_nan`, `is_finite`, and
-`is_infinite` require Float64 and propagate nulls.
+`null(dtype)` is a typed null literal; `dtype` is a `DataType` or its name.
+`is_null()`/`is_not_null()` accept any dtype and never return null. `is_nan`,
+`is_not_nan`, `is_finite`, and `is_infinite` require Float64 and propagate
+nulls.
 
 `fill_null(value)` replaces nulls with a matching-dtype value or column;
 `fill_nan(value)` replaces valid NaNs in Float64 input. `coalesce([a, b, ...])`
@@ -283,6 +284,7 @@ columns outside grouping.
 | `any()`, `all()` | Bool | Bool | false / true | yes |
 | `arg_min()`, `arg_max()` | any | UInt32 | null | needs partition order |
 | `mode()` | any | list of the input type | empty | yes (value counts) |
+| `value_counts(sort=False, name="count", normalize=False)` | any | list of struct {input, UInt32 or Float64} | empty | yes (value counts) |
 | `skew(bias=True)`, `kurtosis(fisher=True, bias=True)` | numeric | Float64 | null | yes (moments to the fourth) |
 | `corr(a, b, method="pearson")`, `cov(a, b, ddof=1)` | two numeric | Float64 | NaN / null | Pearson and `cov` yes; Spearman keeps pairs |
 
@@ -313,6 +315,16 @@ and null last; null counts as a value and `-0.0` equals `0.0`. In `select` it
 yields one row per mode and cannot be combined with row-valued expressions;
 in `group_by(...).agg(...)` it yields a list per group; it is not available
 in `over(...)`.
+
+`value_counts` returns each distinct value with its count as a struct whose
+fields are the input's name and `name` (`"count"`, or `"proportion"` with
+`normalize=True`, which gives Float64 shares of all rows, nulls included).
+Counts are UInt32. Values are ascending, with NaN above numbers and null
+last; `sort=True` orders by count, highest first, with ties in value order.
+Polars leaves both orders unspecified. Null counts as a value and `-0.0`
+equals `0.0`. Like `mode`, it yields one row per value in `select`, a list
+per group in `group_by(...).agg(...)`, and is not available in `over(...)`.
+`name` must differ from the input's name.
 
 `skew` and `kurtosis` follow scipy and Polars: `bias=False` applies the
 sample-size correction and gives null below three (skew) or four (kurtosis)

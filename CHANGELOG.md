@@ -11,6 +11,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
   `kurtosis(fisher, bias)`, and the two-column `corr(a, b, method)` (Pearson
   or Spearman) and `cov(a, b, ddof)`, globally, in `group_by(...).agg(...)`
   and in `over(...)` (except `mode`), with Polars' null and NaN rules (#226).
+- `DataFrame.describe(percentiles, interpolation)` in Polars' layout,
+  `sample(n, fraction, with_replacement, shuffle, seed)` on DataFrame and
+  Series with a seeded, platform-independent generator, and the reduction
+  `value_counts(sort, name, normalize)` (#220).
 - `write_parquet` writes supported logical and nested column types with zstd,
   snappy or uncompressed output and configurable row-group sizes.
 - `read_csv` accepts ordered `(name, dtype)` pairs as a concise explicit schema.

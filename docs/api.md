@@ -292,6 +292,10 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Prepend an Int64 row index starting at offset.
 - `def select(self, names: List[String]) -> Self`
 - `def select(self, expression: Expr, *, batch_size: Int = Int(1024)) -> Self`
+- `def sample(self, n: Optional[Int] = None, *, fraction: Optional[Float64] = None, with_replacement: Bool = False, shuffle: Bool = False, seed: Optional[Int] = None) -> Self`
+  A random sample of rows: n of them, or floor(fraction * height), or one row when neither is given.
+- `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> Self`
+  Summary statistics per column, laid out as Polars' describe().
 - `def take(self, indices: List[Int]) -> Self`
 - `def filter(self, mask: Column[Bool]) -> Self`
   Filter with a byte-per-value Boolean column (packed first).
@@ -690,6 +694,8 @@ A flat, topologically ordered tree; composition never evaluates data.
   Index of the first maximum; see arg_min.
 - `def mode(self) -> Self`
   Every most frequent value, ascending with null last (a null counts as a value). select() returns one row per mode; group_by() .agg() returns a list per group. Not available in over().
+- `def value_counts(self, sort: Bool = False, name: String = "", normalize: Bool = False) -> Self`
+  Each distinct value (null included) with its count, as a struct of the value (named after this expression) and `name` ("count", or "proportion" when normalize gives Float64 shares; counts are UInt32). Ascending by value with null last, or by count descending (ties by value) when sort. select() returns one row per value; group_by() .agg() returns a list per group. Not available in over().
 - `def skew(self, bias: Bool = True) -> Self`
   Sample skewness, Float64; bias=False applies the adjusted Fisher-Pearson correction (null below three values).
 - `def kurtosis(self, fisher: Bool = True, bias: Bool = True) -> Self`
@@ -944,7 +950,11 @@ def nth(index: Int) -> Expr
 
 ## `null`
 
-A typed null literal of any dtype name (see DataType.parse).
+A typed null literal of a DataType; null(name) takes a dtype name.
+
+```mojo
+def null(dtype: DataType) -> Expr
+```
 
 ```mojo
 def null(dtype: String) -> Expr
@@ -1111,6 +1121,8 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def any(self, ignore_nulls: Bool = True) -> AnyValue`
 - `def all(self, ignore_nulls: Bool = True) -> AnyValue`
 - `def head(self, n: Int = Int(5)) -> Self`
+- `def sample(self, n: Optional[Int] = None, *, fraction: Optional[Float64] = None, with_replacement: Bool = False, shuffle: Bool = False, seed: Optional[Int] = None) -> Self`
+  A random sample of values; see DataFrame.sample.
 - `def tail(self, n: Int = Int(5)) -> Self`
 - `def sort(self, descending: Bool = False, nulls_last: Bool = True) -> Self`
 - `def unique(self, maintain_order: Bool = False) -> Self`

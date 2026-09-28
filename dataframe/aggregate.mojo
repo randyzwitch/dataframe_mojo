@@ -38,6 +38,8 @@ from .expr import (
     KURTOSIS,
     CORR,
     COV,
+    VALUE_COUNTS,
+    SEP,
 )
 from .reductions import (
     CoMomentState,
@@ -47,7 +49,7 @@ from .reductions import (
     MomentState,
     VarState,
 )
-from .nested_column import ListColumn
+from .nested_column import ListColumn, StructColumn
 
 
 def _group(grouped: Bool, groups: List[Int], row: Int) -> Int:
@@ -530,7 +532,7 @@ struct Reducer(Movable):
         var summing = op == SUM or op == MEAN
         var arg = op == ARG_MIN or op == ARG_MAX
         var picking = op == MIN or op == MAX or op == FIRST or op == LAST or arg
-        var mode = op == MODE
+        var mode = op == MODE or op == VALUE_COUNTS
         var spearman = op == CORR and text == "spearman"
         var distinct = op == N_UNIQUE
         self.counts = List[Int64](length=n, fill=0)
@@ -694,7 +696,7 @@ struct Reducer(Movable):
         if op == ARG_MIN or op == ARG_MAX:
             self._update_arg(chunk, offset, grouped, groups)
             return
-        if op == MODE:
+        if op == MODE or op == VALUE_COUNTS:
             self._update_mode(chunk, offset, grouped, groups)
             return
         if op == COUNT or op == NULL_COUNT:
@@ -1096,7 +1098,7 @@ struct Reducer(Movable):
                         self.pair_y[g].append(value)
                 else:
                     self.comoments[g].merge(other.comoments[source])
-            elif op == MODE:
+            elif op == MODE or op == VALUE_COUNTS:
                 self.mode_nulls[g] += other.mode_nulls[source]
                 if len(self.mode_ints) > 0:
                     for item in other.mode_ints[source].items():
@@ -1211,6 +1213,8 @@ struct Reducer(Movable):
         var op = self.op
         if op == MODE:
             return self._finish_mode()
+        if op == VALUE_COUNTS:
+            return self._finish_value_counts()
         if (
             op == ARG_MIN
             or op == ARG_MAX
@@ -1324,6 +1328,145 @@ struct Reducer(Movable):
         if self.logical.is_temporal():
             child = child.with_dtype(self.logical)
         return Series("", ListColumn(offsets^, child.renamed("item")))
+
+    def _finish_value_counts(self) raises -> Series:
+        """Per group, a list of {value, count} structs: every distinct value
+        (null last), ascending by value, or by count descending when sorted
+        (ties by value)."""
+        var names = self.text.split(SEP)
+        var value_name = String(names[0])
+        var count_name = String(names[1])
+        var by_count = (self.integer & 1) != 0
+        var normalize = (self.integer & 2) != 0
+        var n = self.group_count
+        var offsets = List[Int64](capacity=n + 1)
+        offsets.append(0)
+        var counts = List[Int64]()
+        # Per group: distinct keys in value order, as (rank, count) pairs;
+        # `order` indexes into the flat value buffers built below.
+        var values_i = List[Int64]()
+        var values_f = List[Float64]()
+        var values_s = List[String]()
+        var valid = List[Bool]()
+        var totals = List[Int64]()
+        for g in range(n):
+            var keys_i = List[Int64]()
+            var keys_f = List[Float64]()
+            var keys_s = List[String]()
+            var key_counts = List[Int64]()
+            if len(self.mode_ints) > 0:
+                var ordered = List[Int64]()
+                for key in self.mode_ints[g].keys():
+                    ordered.append(key)
+                sort(ordered)
+                for key in ordered:
+                    keys_i.append(key)
+                    key_counts.append(self.mode_ints[g][key])
+            elif len(self.mode_floats) > 0:
+                var numbers = List[Float64]()
+                var nans = List[Float64]()
+                var lookup = Dict[UInt64, Int64]()
+                for item in self.mode_floats[g].items():
+                    var value = self.mode_float_values[g][item.key]
+                    lookup[float_key(value)] = item.value
+                    if isnan(value):
+                        nans.append(value)
+                    else:
+                        numbers.append(value)
+                sort(numbers)
+                for value in numbers:
+                    keys_f.append(value)
+                    key_counts.append(lookup[float_key(value)])
+                for value in nans:
+                    keys_f.append(value)
+                    key_counts.append(lookup[float_key(value)])
+            else:
+                var ordered = List[String]()
+                for key in self.mode_strings[g].keys():
+                    ordered.append(key)
+                sort(ordered)
+                for key in ordered:
+                    keys_s.append(key)
+                    key_counts.append(self.mode_strings[g][key])
+            var distinct = len(key_counts)
+            var slots = List[Int](capacity=distinct + 1)
+            for i in range(distinct):
+                slots.append(i)
+            if self.mode_nulls[g] > 0:
+                slots.append(-1)
+            if by_count:
+                # Stable insertion sort by count descending; value order
+                # (null last) breaks ties.
+                for i in range(1, len(slots)):
+                    var j = i
+                    while j > 0:
+                        var here = (
+                            key_counts[slots[j]] if slots[j]
+                            >= 0 else self.mode_nulls[g]
+                        )
+                        var before = (
+                            key_counts[slots[j - 1]] if slots[j - 1]
+                            >= 0 else self.mode_nulls[g]
+                        )
+                        if here <= before:
+                            break
+                        var swap = slots[j]
+                        slots[j] = slots[j - 1]
+                        slots[j - 1] = swap
+                        j -= 1
+            var total = self.mode_nulls[g]
+            for c in key_counts:
+                total += c
+            for slot in slots:
+                if slot < 0:
+                    counts.append(self.mode_nulls[g])
+                    valid.append(False)
+                    values_i.append(0)
+                    values_f.append(0)
+                    values_s.append("")
+                else:
+                    counts.append(key_counts[slot])
+                    valid.append(True)
+                    values_i.append(keys_i[slot] if len(keys_i) else 0)
+                    values_f.append(keys_f[slot] if len(keys_f) else 0)
+                    values_s.append(keys_s[slot] if len(keys_s) else "")
+                totals.append(total)
+            offsets.append(Int64(len(counts)))
+        var values: Series
+        if len(self.mode_ints) > 0:
+            if self.input == DataType.BOOL:
+                var flags = List[Bool](capacity=len(values_i))
+                for value in values_i:
+                    flags.append(value != 0)
+                values = Series("", BoolColumn(flags^, valid.copy()))
+            else:
+                values = _from_canonical(
+                    Series("", Column[Int64](values_i^, valid.copy())),
+                    self.input,
+                )
+        elif len(self.mode_floats) > 0:
+            values = _from_canonical(
+                Series("", Column[Float64](values_f^, valid.copy())),
+                self.input,
+            )
+        else:
+            values = Series("", StringColumn(values_s, valid))
+        if self.logical.is_temporal():
+            values = values.with_dtype(self.logical)
+        var tally: Series
+        if normalize:
+            var shares = List[Float64](capacity=len(counts))
+            for i in range(len(counts)):
+                shares.append(Float64(counts[i]) / Float64(totals[i]))
+            tally = Series(count_name, Column[Float64](shares^))
+        else:
+            var narrow = List[UInt32](capacity=len(counts))
+            for c in counts:
+                narrow.append(UInt32(c))
+            tally = Series(count_name, Column[UInt32](narrow^))
+        var fields: List[Series] = [values.renamed(value_name), tally^]
+        var structs = Series("", StructColumn(fields^))
+        return Series("", ListColumn(offsets^, structs.renamed("item")))
 
     def _integer_sum(self) raises -> Series:
         """Exact sums of narrow or unsigned integers in their sum type."""

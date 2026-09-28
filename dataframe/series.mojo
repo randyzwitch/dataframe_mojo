@@ -667,6 +667,28 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     def head(self, n: Int = 5) raises -> Self:
         return self._frame().head(n).column(self._name)
 
+    def sample(
+        self,
+        n: Optional[Int] = None,
+        *,
+        fraction: Optional[Float64] = None,
+        with_replacement: Bool = False,
+        shuffle: Bool = False,
+        seed: Optional[Int] = None,
+    ) raises -> Self:
+        """A random sample of values; see DataFrame.sample."""
+        return (
+            self._frame()
+            .sample(
+                n,
+                fraction=fraction,
+                with_replacement=with_replacement,
+                shuffle=shuffle,
+                seed=seed,
+            )
+            .column(self._name)
+        )
+
     def tail(self, n: Int = 5) raises -> Self:
         return self._frame().tail(n).column(self._name)
 
