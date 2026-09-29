@@ -386,6 +386,33 @@ def test_decimal_arithmetic_and_comparison_are_exact() raises:
     assert_false(lt.value(2))
 
 
+def test_decimal_rounding_matches_polars() raises:
+    """Products and quotients round the digits past the result scale half
+    to even, as Polars 1.44 does (#342); expected values are Polars'."""
+    var dtype = DataType.decimal(15, 2)
+    var a: List[Int128] = [25, 75, -25, 200, 100, -125, 5, 125, 125, -125, 25]
+    var b: List[Int128] = [200, 200, 200, 300, 800, 50, 50, 750, 50, 750, 10]
+    var frame = DataFrame(
+        [
+            Series("a", Column[Int128](a^)).with_dtype(dtype),
+            Series("b", Column[Int128](b^)).with_dtype(dtype),
+        ]
+    )
+    var result = frame.select_exprs(
+        [
+            (col("a") * col("b")).cast("string").alias("mul"),
+            (col("a") / col("b")).cast("string").alias("div"),
+        ]
+    )
+    var mul: List[String] = ["0.50", "1.50", "-0.50", "6.00", "8.00", "-0.62"]
+    mul += ["0.02", "9.38", "0.62", "-9.38", "0.02"]
+    var div: List[String] = ["0.12", "0.38", "-0.12", "0.67", "0.12", "-2.50"]
+    div += ["0.10", "0.17", "2.50", "-0.17", "2.50"]
+    for i in range(frame.height()):
+        assert_equal(result.item(i, "mul").string(), mul[i])
+        assert_equal(result.item(i, "div").string(), div[i])
+
+
 def test_scalar_broadcast_and_simd_width_agreement() raises:
     var values = List[Float64]()
     var valid = List[Bool]()

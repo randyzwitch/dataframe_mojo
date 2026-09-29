@@ -12,7 +12,13 @@ from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
 from .parse import parse_bool, parse_float64, parse_integer
-from .decimal import format_decimal, parse_decimal, pow10, check_precision
+from .decimal import (
+    check_precision,
+    divide_half_even,
+    format_decimal,
+    parse_decimal,
+    pow10,
+)
 from .series import Series
 from .temporal_kernels import cast_temporal
 
@@ -97,7 +103,8 @@ def _read_source(
         if target.is_float():
             values.floats[i] = Float64(raw) / Float64(pow10(source.scale()))
         else:
-            values.ints[i] = raw / pow10(source.scale())
+            # Half to even, as Polars casts: 1.5 to 2, 0.5 to 0 (#342).
+            values.ints[i] = divide_half_even(raw, pow10(source.scale()))
         return
     if source == DataType.STRING:
         # Numeric parsers consume borrowed slices; avoid an owned copy per row.
@@ -175,7 +182,9 @@ def cast_series(
                     if source.scale() <= target.scale():
                         raw *= pow10(target.scale() - source.scale())
                     else:
-                        raw /= pow10(source.scale() - target.scale())
+                        raw = divide_half_even(
+                            raw, pow10(source.scale() - target.scale())
+                        )
                     decimal_values[i] = check_precision(raw, target)
                 elif source.is_integer() or source == DataType.BOOL:
                     var intermediate = _Values(1, False)

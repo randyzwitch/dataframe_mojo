@@ -4,7 +4,12 @@ from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
-from .decimal import check_precision, pow10
+from .decimal import (
+    check_precision,
+    divide_half_even,
+    pow10,
+    round_half_even,
+)
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr import (
@@ -547,6 +552,11 @@ def _decimal_div(
         remainder *= 10
         result += remainder / denominator
         remainder %= denominator
+    # The digits past the result scale round half to even, as Polars does
+    # (#342): 0.25 / 2 is 0.12 at scale 2, 0.75 / 2 is 0.38.
+    result = check_precision(
+        round_half_even(result, remainder, denominator), dtype
+    )
     return -result if negative else result
 
 
@@ -597,7 +607,9 @@ def _decimal_binary[
             var raw = _decimal_mul(a._get(ai), b._get(bi))
             var source_scale = left.dtype().scale() + right.dtype().scale()
             if source_scale > result_dtype.scale():
-                raw /= pow10(source_scale - result_dtype.scale())
+                raw = divide_half_even(
+                    raw, pow10(source_scale - result_dtype.scale())
+                )
             values[i] = check_precision(raw, result_dtype)
         elif op == DIV:
             if b._get(bi) == 0:

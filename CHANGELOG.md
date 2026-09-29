@@ -14,7 +14,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
   arithmetic, comparisons, sorting, grouping and join keys, reductions, casts,
   explicit-schema CSV support, and Arrow `d:p,s` interoperability (#229).
   Decimal `mean` returns Float64, as Polars does, rather than a decimal
-  truncated to the input scale (#341).
+  truncated to the input scale (#341). Products, quotients and casts that
+  drop decimal digits round half to even, as Polars does (#342).
 - Reductions `arg_min`, `arg_max`, `mode`, `skew(bias)` and
   `kurtosis(fisher, bias)`, and the two-column `corr(a, b, method)` (Pearson
   or Spearman) and `cov(a, b, ddof)`, globally, in `group_by(...).agg(...)`
