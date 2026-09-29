@@ -36,6 +36,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
   batch. Large merges use the partitioned key encoder, and per-group state
   grows in place rather than being rebuilt. The 20 affected ClickBench
   queries run 22x faster (geometric mean; q32 434 s to 5 s) (#326).
+- Streaming group-by with many groups splits its state into hash parts that
+  merge on separate workers through a persistent key index, so no merge
+  re-encodes the groups already seen; groups are interleaved back into
+  first-occurrence order at the end. ClickBench q32 goes from 5.0 s to 1.9 s
+  and the affected queries run 1.23x faster than after #338 (#326).
 - Retired the in-repo benchmarks the external suites supersede or whose
   target code is gone: `bench_vs_polars` (`bench-polars`), the upstream join
   ports, `bench_progression`, `bench_aggregate_fusion` and `bench_agg_shapes`.

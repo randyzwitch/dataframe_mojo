@@ -1118,16 +1118,28 @@ struct Reducer(Movable):
             < self.strings[g]
         )
 
-    def merge(mut self, other: Self, groups: List[Int] = List[Int]()) raises:
+    def merge(
+        mut self,
+        other: Self,
+        groups: List[Int] = List[Int](),
+        sources: List[Int] = List[Int](),
+    ) raises:
         """Fold in the state of the next, disjoint row partition.
 
         Partitions are merged in row order, so first/last and tie-breaking
-        (ties keep the earlier value) match a single-threaded pass.
+        (ties keep the earlier value) match a single-threaded pass. `groups`
+        maps other's group ids to this reducer's. `sources` instead selects
+        other's groups in order, into this reducer's groups 0, 1, ...; a
+        streaming state uses it to copy one hash part's groups (#326).
         """
         var op = self.op
         var is_max = op == MAX
-        for source in range(other.group_count):
-            var g = groups[source] if len(groups) else source
+        var steps = len(sources) if len(sources) else other.group_count
+        for step in range(steps):
+            var source = sources[step] if len(sources) else step
+            var g = step if len(sources) else (
+                groups[source] if len(groups) else source
+            )
             if op == COUNT or op == NULL_COUNT or op == LEN:
                 self.counts[g] += other.counts[source]
             elif op == SUM or op == MEAN:
