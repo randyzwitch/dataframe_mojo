@@ -48,6 +48,21 @@ def gen_left(rng: random.Random, rows: int) -> pl.DataFrame:
     )
 
 
+def gen_prep_left() -> pl.DataFrame:
+    """Deterministic edge and null layout for issue 227 cases."""
+    return pl.DataFrame(
+        {
+            "k": ["a", "b", "a", "b", "a", "b", "a", "b", "a"],
+            "g": list(range(9)),
+            "x": [None, 0.0, 1.0, None, None, 5.0, 6.0, None, None],
+            "y": [float(i) for i in range(9)],
+            "n": list(range(9)),
+            "b": [True, False, True, False, True, False, True, False, True],
+        },
+        schema=LEFT,
+    )
+
+
 def gen_right(rng: random.Random, rows: int) -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -58,11 +73,16 @@ def gen_right(rng: random.Random, rows: int) -> pl.DataFrame:
     )
 
 
-KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal"]
+KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal", "prep"]
 
 
 def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
     kind = rng.choice(kinds)
+    if kind == "prep":
+        operation = rng.choice(["interpolate", "cut", "qcut"])
+        if operation == "interpolate":
+            return ["prep", operation, rng.choice(["global", "group"]), rng.choice(["linear", "nearest"])]
+        return ["prep", operation, rng.choice(["0", "1"])]
     if kind == "filter":
         column = rng.choice(["g", "x", "n", "k", "b"])
         op = rng.choice(["gt", "lt", "ge", "le", "eq", "ne"])
@@ -161,6 +181,17 @@ def stat_input(left: pl.DataFrame, fn: str, column: str) -> pl.DataFrame:
 
 def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.DataFrame:
     op = spec[0]
+    if op == "prep":
+        operation = spec[1]
+        if operation == "interpolate":
+            e = pl.col("x").interpolate(spec[3])
+            if spec[2] == "group":
+                e = e.over("k")
+        elif operation == "cut":
+            e = pl.col("x").cut([1.0, 5.0], left_closed=spec[2] == "1")
+        else:
+            e = pl.col("x").qcut([0.25, 0.5, 0.75], left_closed=spec[2] == "1")
+        return left.with_columns(e.alias("out"))
     if op == "filter":
         column, cmp, raw = spec[1], spec[2], spec[3]
         value = {"g": int, "n": int, "x": float, "k": str, "b": lambda t: t == "true"}[column](raw)
@@ -332,6 +363,8 @@ def main() -> int:
         rng = random.Random(seed)
         left, right = gen_left(rng, rng.randint(0, 12)), gen_right(rng, rng.randint(0, 6))
         spec = gen_op(rng, args.kinds.split(","))
+        if spec[0] == "prep":
+            left = gen_prep_left()
         problem = run_case(runner, left, right, spec, env)
         if args.mutation_check:
             expect_nonempty = expected(left, right, spec).height > 0

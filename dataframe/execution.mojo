@@ -61,6 +61,7 @@ from .expr import (
     STR_CONCAT,
     CAST,
     OVER,
+    INTERPOLATE_BY,
     is_dt_op,
     SEP,
     subtree,
@@ -80,7 +81,7 @@ from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows
-from .window import window_op
+from .window import window_op, interpolate_by_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
 from .bool_column import BoolColumn
@@ -1189,9 +1190,20 @@ def evaluate[
                 batch_size,
                 row_mode,
             )
-            states[node_index] = window_op(
-                node, input, groups.copy() if grouped else List[Int]()
-            )
+            var window_groups = groups.copy() if grouped else List[Int]()
+            if node.op == INTERPOLATE_BY:
+                var by = _full[width](
+                    bound,
+                    prepared_columns,
+                    states,
+                    node.right,
+                    height,
+                    batch_size,
+                    row_mode,
+                )
+                states[node_index] = interpolate_by_op(input, by, window_groups)
+            else:
+                states[node_index] = window_op(node, input, window_groups)
         elif node.op == OVER:
             states[node_index] = _over[width](
                 bound, prepared_columns, node_index, height, batch_size

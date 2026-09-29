@@ -80,6 +80,10 @@ from .expr import (
     ROLLING_MAX,
     FORWARD_FILL,
     BACKWARD_FILL,
+    INTERPOLATE,
+    INTERPOLATE_BY,
+    CUT,
+    QCUT,
     OVER,
     FLOORDIV,
     DT_YEAR,
@@ -212,6 +216,14 @@ def op_name(op: Int) -> String:
         return "any"
     if op == ALL:
         return "all"
+    if op == INTERPOLATE:
+        return "interpolate"
+    if op == INTERPOLATE_BY:
+        return "interpolate_by"
+    if op == CUT:
+        return "cut"
+    if op == QCUT:
+        return "qcut"
     if op == NULL_COUNT:
         return "null_count"
     if op == MIN:
@@ -871,7 +883,54 @@ def bind(
                     + input.name()
                 )
             dtype = input
-            if node.op == CUM_SUM or node.op == ROLLING_SUM:
+            if node.op == INTERPOLATE_BY:
+                if node.right < 0 or node.right >= i:
+                    raise Error("Invalid interpolate_by input")
+                if shapes[node.right] != ROWS:
+                    raise Error(
+                        "interpolate_by requires a row-valued by expression"
+                    )
+                if not _numeric(types[node.right]):
+                    raise Error(
+                        "interpolate_by requires a numeric by expression, found "
+                        + types[node.right].name()
+                    )
+            if node.op == INTERPOLATE or node.op == INTERPOLATE_BY:
+                if not _numeric(input):
+                    raise Error(
+                        op_name(node.op)
+                        + " requires a numeric expression, found "
+                        + input.name()
+                    )
+                if node.op == INTERPOLATE and (
+                    node.text != "linear" and node.text != "nearest"
+                ):
+                    raise Error("interpolate method must be linear or nearest")
+                if node.op == INTERPOLATE_BY or node.text == "linear":
+                    dtype = DataType.FLOAT64
+            elif node.op == CUT or node.op == QCUT:
+                if not _numeric(input):
+                    raise Error(
+                        op_name(node.op)
+                        + " requires a numeric expression, found "
+                        + input.name()
+                    )
+                var edge_count = 0 if node.text.byte_length() == 0 else len(
+                    node.text.split(SEP)
+                )
+                if (
+                    node.text2.byte_length() > 0
+                    and len(node.text2.split(SEP)) != edge_count + 1
+                ):
+                    raise Error("labels must have one more value than breaks")
+                if (node.integer & 2) != 0:
+                    dtype = DataType.struct(
+                        [String("breakpoint"), "category"],
+                        [DataType.FLOAT64, DataType.STRING],
+                    )
+                else:
+                    dtype = DataType.STRING
+            elif node.op == CUM_SUM or node.op == ROLLING_SUM:
                 if not _numeric(input) and not input.is_duration():
                     raise Error(
                         "cum_sum and rolling_sum require a numeric expression,"

@@ -136,6 +136,13 @@ comptime FORWARD_FILL = 120
 comptime BACKWARD_FILL = 121
 # Evaluate the child per partition of the SEP-joined key names in text2.
 comptime OVER = 122
+# Fill interior nulls in row position, or using a second numeric expression.
+comptime INTERPOLATE = 123
+comptime INTERPOLATE_BY = 124
+# Numeric binning. text holds SEP-joined edges/quantiles, text2 labels;
+# integer bit 0 is left_closed and bit 1 is include_breaks.
+comptime CUT = 125
+comptime QCUT = 126
 
 # Temporal field and conversion operations occupy 130..149 (text holds an
 # interval, format, or unit; text2 a target dtype name).
@@ -217,7 +224,7 @@ def is_dt_op(op: Int) -> Bool:
 
 
 def is_window(op: Int) -> Bool:
-    return op >= CUM_SUM and op <= BACKWARD_FILL
+    return op >= CUM_SUM and op <= QCUT and op != OVER
 
 
 def is_nested_op(op: Int) -> Bool:
@@ -737,6 +744,77 @@ struct Expr(Copyable):
 
     def backward_fill(self, limit: Int = -1) -> Self:
         return self._window(BACKWARD_FILL, Int64(limit))
+
+    def interpolate(self, method: String = "linear") -> Self:
+        """Fill interior nulls from neighboring values. `linear` returns
+        Float64; `nearest` preserves the input dtype. Leading and trailing
+        nulls remain null."""
+        return self._window(INTERPOLATE, text=method)
+
+    def interpolate_by(self, by: Self) -> Self:
+        """Linearly interpolate interior nulls using `by` as the x axis."""
+        return self._binary(by, INTERPOLATE_BY)
+
+    def cut(
+        self,
+        breaks: List[Float64],
+        labels: List[String] = List[String](),
+        left_closed: Bool = False,
+        include_breaks: Bool = False,
+    ) -> Self:
+        """Bin numeric values at explicit sorted edges. Default labels match
+        Polars, including the open-ended outer bins."""
+        return self._bins(
+            CUT, breaks, labels, left_closed, include_breaks, False
+        )
+
+    def qcut(
+        self,
+        quantiles: List[Float64],
+        labels: List[String] = List[String](),
+        left_closed: Bool = False,
+        include_breaks: Bool = False,
+        allow_duplicates: Bool = False,
+    ) -> Self:
+        """Bin numeric values at linear quantiles of the non-null column. Duplicate edges raise unless `allow_duplicates` is true."""
+        return self._bins(
+            QCUT,
+            quantiles,
+            labels,
+            left_closed,
+            include_breaks,
+            allow_duplicates,
+        )
+
+    def _bins(
+        self,
+        op: Int,
+        values: List[Float64],
+        labels: List[String],
+        left_closed: Bool,
+        include_breaks: Bool,
+        allow_duplicates: Bool,
+    ) -> Self:
+        var encoded = String()
+        for i in range(len(values)):
+            if i > 0:
+                encoded += SEP
+            encoded += String(values[i])
+        var nodes = self._nodes.copy()
+        nodes.append(
+            _node(
+                op,
+                len(nodes) - 1,
+                text=encoded,
+                text2=_joined(labels),
+                integer=(
+                    Int64(left_closed)
+                    + 2 * Int64(include_breaks)
+                    + 4 * Int64(allow_duplicates)
+                ),
+            )
+        )
+        return Self(nodes^, self._name)
 
     def over(self, partition_by: String) -> Self:
         return self.over([partition_by])

@@ -12,6 +12,7 @@ SPEC is one operation (see scripts/oracle.py for the generator):
   cum_sum COL                  output column "out"
   cast COL DTYPE               non-strict
   stat CONTEXT FN COL          CONTEXT in global, group, over (see oracle.py)
+  prep OP ...                  interpolate, cut, or qcut
 
 Setting DATAFRAME_ORACLE_INJECT=1 drops the last result row, so the harness
 can prove it detects a wrong answer.
@@ -73,6 +74,18 @@ def run(
     left: DataFrame, right: DataFrame, spec: List[String]
 ) raises -> DataFrame:
     var op = spec[0]
+    if op == "prep":
+        var operation = spec[1]
+        var e: Expr
+        if operation == "interpolate":
+            e = col("x").interpolate(spec[3])
+            if spec[2] == "group":
+                e = e.over("k")
+        elif operation == "cut":
+            e = col("x").cut([1.0, 5.0], left_closed=spec[2] == "1")
+        else:
+            e = col("x").qcut([0.25, 0.5, 0.75], left_closed=spec[2] == "1")
+        return left.with_columns(e.alias("out"))
     if op == "filter":
         var c = col(spec[1])
         var v = literal(left, spec[1], spec[3])
