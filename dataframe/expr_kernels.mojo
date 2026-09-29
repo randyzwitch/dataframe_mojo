@@ -2,7 +2,7 @@
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _bit
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import (
     check_precision,
@@ -639,6 +639,14 @@ def _arithmetic[
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if left._data.isa[Column[Scalar[D]]]():
+            comptime if is_comparison(op):
+                # A mask comes only from guarded when/then branches; those
+                # keep the per-row path, which clears masked rows.
+                if len(mask) == 0:
+                    return _compare_bits[op, D](
+                        left._data[Column[Scalar[D]]],
+                        right._data[Column[Scalar[D]]],
+                    )
             comptime if D.is_floating_point():
                 return _numeric_float[op, width, D](
                     left._data[Column[Scalar[D]]],
@@ -777,8 +785,194 @@ def _math[
     raise Error("Unsupported unary kernel")
 
 
+# --- packed-bit comparisons and Kleene logic (#327) -------------------------
+#
+# Comparisons and Boolean logic produce Arrow-style bitmaps directly: eight
+# rows per step, one output byte of values and one of validity. Validity is
+# the byte-wise AND of the operands' bitmaps, read at each window's bit
+# offset, so no per-row validity branch runs and nothing is packed twice.
+
+
+def _window_byte(bits: List[UInt8], bit: Int, empty: UInt8) -> UInt8:
+    """Eight bits of a bitmap starting at bit `bit`, LSB first; `empty`
+    when the bitmap is empty (no nulls). Bits past the end read as zero."""
+    if len(bits) == 0:
+        return empty
+    var j = bit >> 3
+    var shift = UInt8(bit & 7)
+    var low = bits[j] >> shift if j < len(bits) else UInt8(0)
+    if shift == 0:
+        return low
+    var high = bits[j + 1] << (8 - shift) if j + 1 < len(bits) else UInt8(0)
+    return low | high
+
+
+def _window_bytes(
+    bits: List[UInt8], offset: Int, length: Int, n: Int, empty: UInt8
+) -> List[UInt8]:
+    """The bitmap of an n-row result aligned to row 0: a window of `length`
+    rows starting at bit `offset`, or one row broadcast when length is 1."""
+    var count = (n + 7) // 8
+    if len(bits) == 0:
+        return List[UInt8](length=count, fill=empty)
+    if length == 1 and n != 1:
+        var one = _bit(bits, offset)
+        return List[UInt8](length=count, fill=UInt8(255) if one else UInt8(0))
+    var out = List[UInt8](length=count, fill=0)
+    var first = offset >> 3
+    var shift = UInt8(offset & 7)
+    # Bytes readable without running off the source bitmap.
+    var available = len(bits) - first
+    var src = bits.unsafe_ptr().unsafe_offset(first)
+    var dst = out.unsafe_ptr()
+    if shift == 0:
+        var copied = min(count, available)
+        for k in range(copied):
+            dst.unsafe_offset(k)[] = src.unsafe_offset(k)[]
+        return out^
+    var inner = max(min(count, available - 1), 0)
+    for k in range(inner):
+        dst.unsafe_offset(k)[] = (src.unsafe_offset(k)[] >> shift) | (
+            src.unsafe_offset(k + 1)[] << (8 - shift)
+        )
+    for k in range(inner, count):
+        dst.unsafe_offset(k)[] = _window_byte(bits, offset + 8 * k, empty)
+    return out^
+
+
+@always_inline
+def _compare_lanes[
+    op: Int, D: DType, width: Int
+](x: SIMD[D, width], y: SIMD[D, width]) -> SIMD[DType.bool, width]:
+    comptime if op == GT:
+        return x.gt(y)
+    elif op == LT:
+        return x.lt(y)
+    elif op == GE:
+        return x.ge(y)
+    elif op == LE:
+        return x.le(y)
+    elif op == EQ:
+        return x.eq(y)
+    else:
+        # SIMD ne is an ordered comparison; IEEE requires NaN != NaN.
+        return ~x.eq(y)
+
+
+def _compare_bits[
+    op: Int, D: DType
+](left: Column[Scalar[D]], right: Column[Scalar[D]]) raises -> Series:
+    """A numeric comparison written straight into value and validity
+    bitmaps. Null rows have a zero value bit, as before."""
+    var n = _length(len(left), len(right))
+    var count = (n + 7) // 8
+    var valid = _window_bytes(
+        left._bits[], left._offset, len(left), n, UInt8(255)
+    )
+    if len(right._bits[]) > 0:
+        var other = _window_bytes(
+            right._bits[], right._offset, len(right), n, UInt8(255)
+        )
+        for k in range(count):
+            valid[k] &= other[k]
+    var values = List[UInt8](length=count, fill=0)
+    if n == 0:
+        return Series("", BoolColumn(values=values^, bits=valid^, length=0))
+    var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+    var left_one = len(left) == 1
+    var right_one = len(right) == 1
+    var x_splat = SIMD[D, 8](left._get(0))
+    var y_splat = SIMD[D, 8](right._get(0))
+    var xs = left._ptr()
+    var ys = right._ptr()
+    var full = n // 8
+    for k in range(full):
+        var x = x_splat if left_one else xs.unsafe_load[width=8](8 * k)
+        var y = y_splat if right_one else ys.unsafe_load[width=8](8 * k)
+        var hits = _compare_lanes[op, D, 8](x, y).cast[DType.uint8]()
+        values[k] = (hits * weights).reduce_add() & valid[k]
+    if full < count:
+        var byte = UInt8(0)
+        for i in range(8 * full, n):
+            var x = left._get(0 if left_one else i)
+            var y = right._get(0 if right_one else i)
+            if _compare_lanes[op, D, 1](x, y)[0]:
+                byte |= UInt8(1) << UInt8(i - 8 * full)
+        values[full] = byte & valid[full]
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
+def _logical_bits[
+    op: Int
+](left: BoolColumn, right: BoolColumn) raises -> Series:
+    """Kleene AND, OR and XOR on bitmaps, a byte (eight rows) at a time.
+
+    With values v and validity m: AND is valid where both are, or where
+    either is a valid false; OR where both are, or where either is a valid
+    true; XOR only where both are. Value bits are cleared where the result
+    is null. Without nulls on either side this is plain bitwise logic.
+    """
+    var n = _length(len(left), len(right))
+    var count = (n + 7) // 8
+    var va = _window_bytes(left._data[], left._offset, len(left), n, 0)
+    var vb = _window_bytes(right._data[], right._offset, len(right), n, 0)
+    var a = va.unsafe_ptr()
+    var b = vb.unsafe_ptr()
+    if len(left._bits[]) == 0 and len(right._bits[]) == 0:
+        for k in range(count):
+            comptime if op == AND:
+                a.unsafe_offset(k)[] &= b.unsafe_offset(k)[]
+            elif op == OR:
+                a.unsafe_offset(k)[] |= b.unsafe_offset(k)[]
+            else:
+                a.unsafe_offset(k)[] ^= b.unsafe_offset(k)[]
+        return Series(
+            "",
+            BoolColumn(
+                values=va^, bits=List[UInt8](length=count, fill=255), length=n
+            ),
+        )
+    var ma = _window_bytes(left._bits[], left._offset, len(left), n, 255)
+    var mb = _window_bytes(right._bits[], right._offset, len(right), n, 255)
+    var p = ma.unsafe_ptr()
+    var q = mb.unsafe_ptr()
+    for k in range(count):
+        var x = a.unsafe_offset(k)[] & p.unsafe_offset(k)[]
+        var y = b.unsafe_offset(k)[] & q.unsafe_offset(k)[]
+        var m: UInt8
+        comptime if op == AND:
+            m = (
+                (p.unsafe_offset(k)[] & q.unsafe_offset(k)[])
+                | (p.unsafe_offset(k)[] & ~x)
+                | (q.unsafe_offset(k)[] & ~y)
+            )
+            a.unsafe_offset(k)[] = x & y & m
+        elif op == OR:
+            m = (p.unsafe_offset(k)[] & q.unsafe_offset(k)[]) | x | y
+            a.unsafe_offset(k)[] = (x | y) & m
+        else:
+            m = p.unsafe_offset(k)[] & q.unsafe_offset(k)[]
+            a.unsafe_offset(k)[] = (x ^ y) & m
+        p.unsafe_offset(k)[] = m
+    return Series("", BoolColumn(values=va^, bits=ma^, length=n))
+
+
+def _not_bits(column: BoolColumn) -> Series:
+    """Kleene NOT on bitmaps: nulls stay null, value bits cleared there."""
+    var n = len(column)
+    var count = (n + 7) // 8
+    var values = _window_bytes(column._data[], column._offset, n, n, 0)
+    var valid = _window_bytes(column._bits[], column._offset, n, n, 255)
+    for k in range(count):
+        values[k] = ~values[k] & valid[k]
+    if count > 0 and n % 8 != 0:
+        values[count - 1] &= UInt8((1 << (n % 8)) - 1)
+    return Series("", BoolColumn(values=values^, bits=valid^, length=n))
+
+
 def _logical[op: Int](left: BoolColumn, right: BoolColumn) raises -> Series:
-    """Kleene logic: a dominant operand decides even when the other is null."""
+    """Kleene logic: a dominant operand decides even when the other is null.
+    The scalar reference that _logical_bits replaced; kept for tests."""
     var n = _length(len(left), len(right))
     var values = List[Bool](length=n, fill=False)
     var valid = List[Bool](length=n, fill=False)
@@ -898,7 +1092,9 @@ def binary[
     if left.is_chunked() or right.is_chunked():
         return binary[op, width](left.rechunk(), right.rechunk(), mask)
     comptime if is_logical(op):
-        return _logical[op](left._data[BoolColumn], right._data[BoolColumn])
+        return _logical_bits[op](
+            left._data[BoolColumn], right._data[BoolColumn]
+        )
     elif op == FILL_NAN:
         if left._data.isa[Column[Float32]]():
             return _fill_nan(
@@ -995,13 +1191,7 @@ def unary[
             values.append(v if op == IS_NOT_NULL else not v)
         return Series("", BoolColumn(values^))
     elif op == NOT:
-        ref column = input._data[BoolColumn]
-        var values = List[Bool](capacity=len(column))
-        var valid = List[Bool](capacity=len(column))
-        for i in range(len(column)):
-            valid.append(column._valid(i))
-            values.append(column._valid(i) and not column._get(i))
-        return Series("", BoolColumn(values^, valid))
+        return _not_bits(input._data[BoolColumn])
     elif op >= IS_NAN and op <= IS_INFINITE:
         if input._data.isa[Column[Float32]]():
             return _float_predicate[op](input._data[Column[Float32]])

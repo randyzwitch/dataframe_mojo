@@ -292,7 +292,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def with_row_index(self, name: String = "index", offset: Int64 = Int64(0)) -> Self`
   Prepend an Int64 row index starting at offset.
 - `def select(self, names: List[String]) -> Self`
-- `def select(self, expression: Expr, *, batch_size: Int = Int(1024)) -> Self`
+- `def select(self, expression: Expr, *, batch_size: Int = Int(8192)) -> Self`
 - `def sample(self, n: Optional[Int] = None, *, fraction: Optional[Float64] = None, with_replacement: Bool = False, shuffle: Bool = False, seed: Optional[Int] = None) -> Self`
   A random sample of rows: n of them, or floor(fraction * height), or one row when neither is given.
 - `def describe(self, percentiles: List[Float64] = List(SIMD(0.25), SIMD(0.5), SIMD(0.75), __list_literal__=NoneType(None)), interpolation: String = "nearest") -> Self`
@@ -302,7 +302,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Filter with a byte-per-value Boolean column (packed first).
 - `def filter(self, mask: BoolColumn) -> Self`
   Keep true rows, dropping false and null mask entries, in input order.
-- `def filter(self, predicate: Expr, *, batch_size: Int = Int(1024)) -> Self`
+- `def filter(self, predicate: Expr, *, batch_size: Int = Int(8192)) -> Self`
 - `def explode(self, column: String) -> Self`
 - `def explode(self, columns: List[String]) -> Self`
   One output row per list element; other columns repeat. An empty or null list gives one row holding null. Several columns explode together and must have the same element count in every row.
@@ -333,7 +333,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Hash join on key columns of any dtype; null keys never match.
 - `def join(self, right: Self, *, how: String, suffix: String = "_right") -> Self`
   Cross join: every left row paired with every right row, left-major.
-- `def select_exprs(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> Self`
+- `def select_exprs(self, expressions: List[Expr], *, batch_size: Int = Int(8192)) -> Self`
   Evaluate against the original frame. Scalar-only output has one row.
 - `def with_columns(self, expression: Expr, *, batch_size: Int = Int(8192)) -> Self`
 - `def with_columns(self, expressions: List[Expr], *, batch_size: Int = Int(8192)) -> Self`

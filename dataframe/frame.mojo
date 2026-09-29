@@ -1700,14 +1700,18 @@ struct DataFrame(Copyable, Sized, Writable):
         return Self(columns^, height=total)
 
     def select(
-        self, expression: Expr, *, batch_size: Int = 1024
+        self, expression: Expr, *, batch_size: Int = 8192
     ) raises -> Self:
         return self.select_exprs([expression.copy()], batch_size=batch_size)
 
     def select_exprs(
-        self, expressions: List[Expr], *, batch_size: Int = 1024
+        self, expressions: List[Expr], *, batch_size: Int = 8192
     ) raises -> Self:
         """Evaluate against the original frame. Scalar-only output has one row.
+
+        Rows are evaluated in batches of `batch_size`. The default, as for
+        with_columns, amortizes each expression node's fixed per-batch cost:
+        with bitmap comparisons (#327) that cost dominated at 1024 rows.
 
         If any expression is row-valued, scalar results broadcast to height,
         including zero rows. An empty selection preserves the input height.
@@ -1783,7 +1787,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 columns[replacement] = result^
         return Self(columns^, height=self._height)
 
-    def filter(self, predicate: Expr, *, batch_size: Int = 1024) raises -> Self:
+    def filter(self, predicate: Expr, *, batch_size: Int = 8192) raises -> Self:
         var predicates = expand(predicate, self._columns)
         if len(predicates) != 1:
             raise Error("A filter selector must match exactly one column")
