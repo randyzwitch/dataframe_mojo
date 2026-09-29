@@ -216,7 +216,7 @@ support `+ - * / // % **`, comparisons `< <= > >=` plus `.eq()`/`.ne()`, unary
 Kleene `& | ^ ~`, `is_null`, `is_nan`, `fill_null`, `fill_nan`, `coalesce`,
 selectors (`all`, `col([...])`, `exclude`, `by_dtype`, `nth`), window
 operations (`cum_sum`, `shift`, `diff`, `rank`, `rolling_*`, `forward_fill`,
-`over`), `is_in`,
+`interpolate`, `interpolate_by`, `cut`, `qcut`, `over`), `is_in`,
 `is_between`, `cast`, `when(...).then(...).otherwise(...)`, a `.str()`
 namespace with `concat_str`, and the reductions `sum(min_count=0)`, `count`,
 `null_count`, `len`, `min`, `max`, `mean`, `first`, `last`, `n_unique`, `var`,

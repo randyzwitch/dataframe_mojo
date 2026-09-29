@@ -7,6 +7,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Expressions `interpolate`, `interpolate_by`, `cut`, and `qcut`, including
+  per-partition interpolation, Polars-compatible bin boundaries and labels,
+  and optional breakpoint structs (#227).
 - `DataType.decimal(precision, scale)` decimal128 fixed-point columns, including
   arithmetic, comparisons, sorting, grouping and join keys, reductions, casts,
   explicit-schema CSV support, and Arrow `d:p,s` interoperability (#229).

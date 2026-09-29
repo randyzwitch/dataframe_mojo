@@ -6,7 +6,7 @@ from std.testing import (
     assert_false,
     assert_raises,
 )
-from dataframe import Column, DataFrame, Expr, Series, col, lit
+from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 
 comptime MAX = Int64(9223372036854775807)
 
@@ -273,6 +273,147 @@ def test_over_partitions() raises:
         _ = df.select(col("x").sum().over("nope"))
     with assert_raises(contains="Window operations require a row-valued input"):
         _ = df.select(col("x").sum().cum_sum())
+
+
+def test_interpolate_and_interpolate_by() raises:
+    var df = DataFrame(
+        [
+            Series(
+                "v",
+                Column[Int64](
+                    [0, 1, 0, 0, 4, 0],
+                    [False, True, False, False, True, False],
+                ),
+            ),
+            Series("by", Column[Float64]([0, 1, 2, 3, 5, 8])),
+        ]
+    )
+    assert_equal(
+        cells(df, col("v").interpolate()),
+        [String("null"), "1.0", "2.0", "3.0", "4.0", "null"],
+    )
+    assert_equal(
+        cells(df, col("v").interpolate("nearest")),
+        [String("null"), "1", "1", "4", "4", "null"],
+    )
+    assert_equal(
+        cells(
+            DataFrame(
+                [Series("v", Column[Int64]([1, 0, 3], [True, False, True]))]
+            ),
+            col("v").interpolate("nearest"),
+        ),
+        [String("1"), "3", "3"],
+    )
+    assert_equal(
+        cells(df, col("v").interpolate_by(col("by"))),
+        [String("null"), "1.0", "1.75", "2.5", "4.0", "null"],
+    )
+    var grouped = DataFrame(
+        [
+            Series("g", Column[String](["a", "b", "a", "b", "a", "b"])),
+            Series(
+                "v",
+                Column[Int64](
+                    [1, 10, 0, 0, 5, 30],
+                    [True, True, False, False, True, True],
+                ),
+            ),
+        ]
+    )
+    assert_equal(
+        cells(grouped, col("v").interpolate().over("g")),
+        [String("1.0"), "10.0", "3.0", "20.0", "5.0", "30.0"],
+    )
+    with assert_raises(contains="method must be linear or nearest"):
+        _ = df.select(col("v").interpolate("cubic"))
+
+
+def test_cut_and_qcut_edges() raises:
+    var df = DataFrame(
+        [
+            Series(
+                "x",
+                Column[Float64](
+                    [0, 1, 3, 5, 6, nan()],
+                    [True, True, True, True, True, True],
+                ),
+            )
+        ]
+    )
+    assert_equal(
+        cells(df, col("x").cut([1.0, 5.0])),
+        [
+            String("(-inf, 1]"),
+            "(-inf, 1]",
+            "(1, 5]",
+            "(1, 5]",
+            "(5, inf]",
+            "null",
+        ],
+    )
+    assert_equal(
+        cells(df, col("x").cut([1.0, 5.0], left_closed=True)),
+        [
+            String("[-inf, 1)"),
+            "[1, 5)",
+            "[1, 5)",
+            "[5, inf)",
+            "[5, inf)",
+            "null",
+        ],
+    )
+    assert_equal(
+        cells(df, col("x").qcut([0.25, 0.5, 0.75])),
+        [
+            String("(-inf, 1]"),
+            "(-inf, 1]",
+            "(1, 3]",
+            "(3, 5]",
+            "(5, inf]",
+            "null",
+        ],
+    )
+    var included = (
+        df.select(col("x").cut([1.0, 5.0], include_breaks=True).alias("bin"))
+        .column("bin")
+        .struct_column()
+    )
+    assert_equal(included.field("breakpoint").get(0).float64(), 1.0)
+    assert_equal(included.field("breakpoint").get(1).float64(), 1.0)
+    assert_equal(included.field("breakpoint").get(2).float64(), 5.0)
+    assert_equal(included.field("category").get(4).string(), "(5, inf]")
+    assert_true(included.field("category").get(5).is_null())
+    assert_equal(
+        cells(df, col("x").cut([1.0], ["low", "high"])),
+        [String("low"), "low", "high", "high", "high", "null"],
+    )
+    with assert_raises(contains="labels must have one more"):
+        _ = df.select(col("x").cut([1.0, 5.0], ["few"]))
+    with assert_raises(contains="strictly increasing"):
+        _ = df.select(col("x").cut([5.0, 1.0]))
+    var duplicate = DataFrame([Series("x", Column[Float64]([0, 1, 2, 3, 4]))])
+    assert_equal(
+        cells(
+            duplicate,
+            col("x").qcut(
+                [0.5, 0.5],
+                ["low", "unused", "high"],
+                allow_duplicates=True,
+            ),
+        ),
+        [String("low"), "low", "low", "high", "high"],
+    )
+    with assert_raises(contains="unique"):
+        _ = duplicate.select(col("x").qcut([0.5, 0.5]))
+    var decimals = DataFrame([Series("s", Column[String](["0.5", "2.0"]))])
+    assert_equal(
+        cells(
+            decimals,
+            col("s").cast(DataType.decimal(4, 1)).cut([1.0]),
+        ),
+        [String("(-inf, 1]"), "(1, inf]"],
+    )
 
 
 def test_batch_independence_and_empty() raises:

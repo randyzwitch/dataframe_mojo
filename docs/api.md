@@ -658,6 +658,14 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def forward_fill(self, limit: Int = Int(-1)) -> Self`
   Fill nulls with the last valid value, at most limit rows ahead (-1 means unlimited).
 - `def backward_fill(self, limit: Int = Int(-1)) -> Self`
+- `def interpolate(self, method: String = "linear") -> Self`
+  Fill interior nulls from neighboring values. `linear` returns Float64; `nearest` preserves the input dtype. Leading and trailing nulls remain null.
+- `def interpolate_by(self, by: Self) -> Self`
+  Linearly interpolate interior nulls using `by` as the x axis.
+- `def cut(self, breaks: List[Float64], labels: List[String] = List(), left_closed: Bool = False, include_breaks: Bool = False) -> Self`
+  Bin numeric values at explicit sorted edges. Default labels match Polars, including the open-ended outer bins.
+- `def qcut(self, quantiles: List[Float64], labels: List[String] = List(), left_closed: Bool = False, include_breaks: Bool = False, allow_duplicates: Bool = False) -> Self`
+  Bin numeric values at linear quantiles of the non-null column. Duplicate edges raise unless `allow_duplicates` is true.
 - `def over(self, partition_by: String) -> Self`
 - `def over(self, partition_by: List[String]) -> Self`
   Evaluate within partitions of the key columns, keeping row order.

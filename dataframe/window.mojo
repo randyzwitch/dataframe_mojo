@@ -20,10 +20,21 @@ from .expr import (
     ROLLING_MAX,
     FORWARD_FILL,
     BACKWARD_FILL,
+    INTERPOLATE,
+    INTERPOLATE_BY,
+    CUT,
+    QCUT,
+    SEP,
 )
 from .expr_kernels import checked_add, validity
+from .string_column import StringColumn
+from .nested_column import StructColumn
+from .parse import parse_float64
+from .aggregate import quantile_of
+from .decimal import pow10
 from .reductions import WideInt
 from .series import Series, sort_indices
+from std.math import isnan, floor
 
 
 def partitions(n: Int, ids: List[Int]) -> List[List[Int]]:
@@ -167,6 +178,10 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         if is_int:
             return Series("", Column[Int64](ints^, valid))
         return Series("", Column[Float64](floats^, valid))
+    if op == INTERPOLATE:
+        return _interpolate(input, groups, node.text)
+    if op == CUT or op == QCUT:
+        return _bins(input, groups, node)
     if op == RANK:
         return _rank(input, groups, node.text, reverse)
     if op == ROLLING_SUM or op == ROLLING_MEAN:
@@ -229,6 +244,217 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                     if last >= 0 and (limit < 0 or distance <= limit):
                         source[row] = last
     return input.take_or_null(source)
+
+
+def _as_float(input: Series) raises -> Series:
+    """Convert a primitive numeric column to Float64, preserving validity."""
+    if input._data.isa[Column[Float64]]():
+        return input.copy()
+    var valid = validity(input)
+    if input.dtype().is_decimal():
+        ref column = input._data[Column[Int128]]
+        var values = List[Float64](capacity=len(column))
+        var divisor = pow10(input.dtype().scale()).cast[DType.float64]()
+        for i in range(len(column)):
+            values.append(column._get(i).cast[DType.float64]() / divisor)
+        return Series("", Column[Float64](values^, valid))
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if input._data.isa[Column[Scalar[D]]]():
+            ref column = input._data[Column[Scalar[D]]]
+            var values = List[Float64](capacity=len(column))
+            for i in range(len(column)):
+                values.append(column._get(i).cast[DType.float64]())
+            return Series("", Column[Float64](values^, valid))
+    raise Error("numeric window input has unsupported storage")
+
+
+def _interpolate(
+    input: Series, groups: List[List[Int]], method: String
+) raises -> Series:
+    var floats = _as_float(input)
+    var valid = validity(input)
+    ref values = floats._data[Column[Float64]]
+    var out = List[Float64](length=len(input), fill=0)
+    var source = List[Int](length=len(input), fill=-1)
+    for i in range(len(input)):
+        if valid[i]:
+            out[i] = values._get(i)
+            source[i] = i
+    for rows in groups:
+        var previous = -1
+        for j in range(len(rows)):
+            var row = rows[j]
+            if valid[row]:
+                previous = j
+                continue
+            if previous < 0:
+                continue
+            var following = j + 1
+            while following < len(rows) and not valid[rows[following]]:
+                following += 1
+            if following == len(rows):
+                continue
+            var before = rows[previous]
+            var after = rows[following]
+            if method == "nearest":
+                source[row] = before if j - previous < following - j else after
+            else:
+                var fraction = Float64(j - previous) / Float64(
+                    following - previous
+                )
+                out[row] = (
+                    values._get(before)
+                    + (values._get(after) - values._get(before)) * fraction
+                )
+                source[row] = row
+    if method == "nearest":
+        return input.take_or_null(source)
+    var out_valid = List[Bool](capacity=len(source))
+    for row in source:
+        out_valid.append(row >= 0)
+    return Series("", Column[Float64](out^, out_valid^))
+
+
+def interpolate_by_op(
+    input: Series, by: Series, ids: List[Int]
+) raises -> Series:
+    var floats = _as_float(input)
+    var axis = _as_float(by)
+    var valid = validity(input)
+    var by_valid = validity(by)
+    ref values = floats._data[Column[Float64]]
+    ref positions = axis._data[Column[Float64]]
+    var out = List[Float64](length=len(input), fill=0)
+    var out_valid = valid.copy()
+    for i in range(len(input)):
+        if valid[i]:
+            out[i] = values._get(i)
+    for rows in partitions(len(input), ids):
+        var previous = -1
+        for j in range(len(rows)):
+            var row = rows[j]
+            if valid[row] and by_valid[row]:
+                previous = j
+                continue
+            if valid[row] or not by_valid[row] or previous < 0:
+                continue
+            var following = j + 1
+            while following < len(rows) and not (
+                valid[rows[following]] and by_valid[rows[following]]
+            ):
+                following += 1
+            if following == len(rows):
+                continue
+            var before = rows[previous]
+            var after = rows[following]
+            var span = positions._get(after) - positions._get(before)
+            if span == 0:
+                continue
+            var fraction = (positions._get(row) - positions._get(before)) / span
+            out[row] = (
+                values._get(before)
+                + (values._get(after) - values._get(before)) * fraction
+            )
+            out_valid[row] = True
+    return Series("", Column[Float64](out^, out_valid))
+
+
+def _edge_text(value: Float64) -> String:
+    if value == Float64(1) / Float64(0):
+        return "inf"
+    if value == -Float64(1) / Float64(0):
+        return "-inf"
+    if (
+        value >= Float64(Int64.MIN)
+        and value <= Float64(Int64.MAX)
+        and value == floor(value)
+    ):
+        return String(Int64(value))
+    return String(value)
+
+
+def _bin_label(edges: List[Float64], bin: Int, left_closed: Bool) -> String:
+    var lower = "-inf" if bin == 0 else _edge_text(edges[bin - 1])
+    var upper = "inf" if bin == len(edges) else _edge_text(edges[bin])
+    if left_closed:
+        return "[" + lower + ", " + upper + ")"
+    return "(" + lower + ", " + upper + "]"
+
+
+def _bins(input: Series, groups: List[List[Int]], node: Node) raises -> Series:
+    var floats = _as_float(input)
+    ref values = floats._data[Column[Float64]]
+    var valid = validity(input)
+    var out_valid = valid.copy()
+    var categories = List[String](length=len(input), fill="")
+    var breakpoints = List[Float64](length=len(input), fill=0)
+    var specs = List[Float64]()
+    if node.text.byte_length() > 0:
+        for part in node.text.split(SEP):
+            specs.append(parse_float64(String(part)))
+    var custom = List[String]()
+    if node.text2.byte_length() > 0:
+        for label in node.text2.split(SEP):
+            custom.append(String(label))
+    var left_closed = (node.integer & 1) != 0
+    var allow_duplicates = (node.integer & 4) != 0
+    for rows in groups:
+        var edges = specs.copy()
+        var label_bins = List[Int]()
+        label_bins.append(0)
+        if node.op == QCUT:
+            var samples = List[Float64]()
+            for row in rows:
+                if valid[row] and not isnan(values._get(row)):
+                    samples.append(values._get(row))
+            edges = List[Float64]()
+            for i in range(len(specs)):
+                var q = specs[i]
+                if q < 0 or q > 1:
+                    raise Error("qcut quantiles must be between 0 and 1")
+                var edge = quantile_of(samples.copy(), q, "linear")
+                if not edge:
+                    continue
+                var value = edge.value()
+                if len(edges) > 0 and not value > edges[len(edges) - 1]:
+                    if not allow_duplicates or value != edges[len(edges) - 1]:
+                        raise Error(
+                            "breaks must be unique and strictly increasing"
+                        )
+                    label_bins[len(label_bins) - 1] = i + 1
+                else:
+                    edges.append(value)
+                    label_bins.append(i + 1)
+        else:
+            for i in range(1, len(edges)):
+                if not edges[i] > edges[i - 1]:
+                    raise Error("breaks must be unique and strictly increasing")
+            for i in range(len(edges)):
+                label_bins.append(i + 1)
+        for row in rows:
+            var value = values._get(row)
+            if not valid[row] or isnan(value):
+                out_valid[row] = False
+                continue
+            var bin = 0
+            while bin < len(edges) and (
+                value >= edges[bin] if left_closed else value > edges[bin]
+            ):
+                bin += 1
+            categories[row] = custom[label_bins[bin]] if len(
+                custom
+            ) > 0 else _bin_label(edges, bin, left_closed)
+            breakpoints[row] = edges[bin] if bin < len(edges) else Float64(
+                1
+            ) / Float64(0)
+    var labels = Series("category", StringColumn(categories^, out_valid.copy()))
+    if (node.integer & 2) == 0:
+        return labels.renamed("")
+    var breaks = Series(
+        "breakpoint", Column[Float64](breakpoints^, out_valid.copy())
+    )
+    return Series("", StructColumn([breaks^, labels^]))
 
 
 def _rolling_sum(

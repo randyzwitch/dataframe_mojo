@@ -110,6 +110,10 @@ row-valued. See the Narwhals order-dependence notes cited above.
 | `rank(method="average", descending=False)` | `average` Float64; `min`, `max`, `dense`, `ordinal` Int64 | nulls get null; ranks start at 1; `ordinal` breaks ties by row order; NaN ranks after numbers |
 | `rolling_sum/mean/min/max(window_size, min_samples=window_size)` | sum/min/max same dtype, mean Float64 | the window is the current row and the `window_size - 1` before it; nulls are skipped; fewer than `min_samples` valid values give null |
 | `forward_fill(limit=-1)`, `backward_fill(limit=-1)` | same dtype | fill from the nearest valid value at most `limit` rows away |
+| `interpolate(method="linear"|"nearest")` | Float64 for linear, input dtype for nearest | fills only interior nulls; nearest ties choose the following value |
+| `interpolate_by(by)` | Float64 | linear interpolation at the numeric `by` coordinates |
+| `cut(breaks, labels=None, left_closed=False, include_breaks=False)` | String, or a breakpoint/category struct | null and NaN stay null; outer bins are open-ended |
+| `qcut(quantiles, ..., allow_duplicates=False)` | as `cut` | uses linear quantiles of valid values as edges |
 
 `expr.over(partition_by)` evaluates `expr` separately in each partition of the
 key columns (one name or a list; null is its own key value) and keeps row
