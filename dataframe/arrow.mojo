@@ -275,7 +275,8 @@ def _format(dtype: DataType) raises -> String:
         return "+s"
     var unit = String(dtype.unit()[byte=0])
     if dtype.is_datetime():
-        return "ts" + unit + ":"
+        # Arrow's zone rides after the colon; empty means naive.
+        return "ts" + unit + ":" + dtype.time_zone()
     if dtype.is_duration():
         return "tD" + unit
     raise Error("Cannot export dtype " + dtype.name() + " to Arrow")
@@ -684,20 +685,22 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
             ),
         ).with_dtype(DataType.TIME)
     if format.startswith("ts") and format.byte_length() >= 4:
-        if format.byte_length() > 4:
-            raise Error(
-                "Arrow timestamps with a time zone are not supported: " + format
-            )
-        var dtype = DataType.datetime(_unit(format[byte=2]))
+        if String(format[byte=3]) != ":":
+            raise Error("Unsupported Arrow format: " + format)
+        # An IANA name or "+HH:MM" after the colon: the values are UTC.
+        var dtype = DataType.datetime(
+            _unit(format[byte=2]),
+            String(format[byte = 4 : format.byte_length()]),
+        )
         return Series(
             name,
-            _int64_column(_import_fixed[Int64](array, length, offset), bits^),
+            _int64_column(_ticks(array, length, offset, format), bits^),
         ).with_dtype(dtype)
     if format.startswith("tD") and format.byte_length() == 3:
         var dtype = DataType.duration(_unit(format[byte=2]))
         return Series(
             name,
-            _int64_column(_import_fixed[Int64](array, length, offset), bits^),
+            _int64_column(_ticks(array, length, offset, format), bits^),
         ).with_dtype(dtype)
     if format == "+L" or format == "+l":
         if array.n_children != 1 or schema.n_children != 1:
@@ -739,7 +742,27 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     raise Error("Unsupported Arrow format '" + format + "' for column " + name)
 
 
+def _ticks(
+    array: ArrowArray, length: Int, offset: Int, format: String
+) raises -> List[Int64]:
+    """Timestamp or duration values; seconds become milliseconds (the
+    coarsest unit here), as Polars imports them."""
+    if String(format[byte=2]) != "s":
+        return _import_fixed[Int64](array, length, offset)
+    var values = List[Int64](capacity=length)
+    var data = _buffer(array, 1)
+    for i in range(length):
+        var seconds = _read[Int64](data, offset + i)
+        if seconds > 9223372036854775 or seconds < -9223372036854775:
+            raise Error("Arrow seconds value overflows milliseconds")
+        values.append(seconds * 1000)
+    return values^
+
+
 def _unit(code: StringSlice) raises -> String:
+    if code == "s":
+        # Seconds are read as milliseconds (see _ticks).
+        return "ms"
     if code == "n":
         return "ns"
     if code == "u":

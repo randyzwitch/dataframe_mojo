@@ -28,6 +28,8 @@ from .expr import (
     DT_TOTAL,
     DT_STRFTIME,
     DT_STRPTIME,
+    DT_REPLACE_TZ,
+    DT_CONVERT_TZ,
 )
 from .series import Series
 from .temporal import (
@@ -40,12 +42,23 @@ from .temporal import (
     floor_div,
     floor_mod,
     format,
+    format_in,
     join,
+    localize,
     parse,
+    parse_in,
     parse_every,
+    parse_interval,
+    relocalize,
     split,
+    strptime_target,
     ticks_per_day,
+    to_local,
+    zone_of,
+    ambiguous_code,
+    non_existent_code,
 )
+from .timezone import TimeZone
 
 
 def temporal_binary(
@@ -142,6 +155,33 @@ def _truncate(value: Int64, dtype: DataType, every: String) raises -> Int64:
     return floor_div(value - origin, step) * step + origin
 
 
+def _offset_in(
+    value: Int64, dtype: DataType, by: String, zone: TimeZone
+) raises -> Int64:
+    """offset_by for a zone-aware datetime: months and days move the local
+    wall-clock time, then fixed units move the UTC instant (as Polars)."""
+    var interval = parse_interval(by)
+    var result = value
+    # Months, then days, each localized from the step before, as Polars
+    # does.
+    if interval[0] != 0:
+        var local = to_local(result, dtype, zone)
+        local = join(add_months(split(local, dtype), interval[0]), dtype)
+        result = relocalize(local, result, dtype, zone)
+    if interval[1] != 0:
+        var local = checked_add(
+            to_local(result, dtype, zone),
+            checked_mul(interval[1], ticks_per_day(dtype)),
+        )
+        result = relocalize(local, result, dtype, zone)
+    if interval[2] != 0:
+        var per_tick = Int64(1000000000) // dtype.per_second()
+        if interval[2] % per_tick != 0:
+            raise Error("offset " + by + " is finer than " + dtype.name())
+        result = checked_add(result, interval[2] // per_tick)
+    return result
+
+
 def _offset(value: Int64, dtype: DataType, by: String) raises -> Int64:
     var interval = parse_every(by)
     var result = value
@@ -194,15 +234,21 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
         return _strptime(
             input, node.dtypes[0].value(), node.text, node.integer == 1
         )
+    if op == DT_REPLACE_TZ:
+        return _replace_time_zone(input, dtype, node)
+    if op == DT_CONVERT_TZ:
+        return input.with_dtype(dtype.with_time_zone(node.text))
     ref column = input._data[Column[Int64]]
     var n = len(column)
     var valid = List[Bool](length=n, fill=False)
+    var aware = dtype.is_datetime() and dtype.time_zone().byte_length() > 0
+    var zone = zone_of(dtype)
     if op == DT_STRFTIME:
         var texts = List[String](length=n, fill="")
         for i in range(n):
             valid[i] = column._valid(i)
             if valid[i]:
-                texts[i] = format(column._get(i), dtype, node.text)
+                texts[i] = format_in(column._get(i), dtype, node.text, zone)
         return Series("", StringColumn(texts, valid))
     var values = List[Int64](length=n, fill=0)
     for i in range(n):
@@ -210,6 +256,23 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
         if not valid[i]:
             continue
         var v = column._get(i)
+        if aware and op == DT_TRUNCATE:
+            # Truncate the local time, then map back keeping the offset.
+            var per_second = dtype.per_second()
+            var offset = zone.offset_at(floor_div(v, per_second))
+            values[i] = relocalize(
+                _truncate(v + offset * per_second, dtype, node.text),
+                v,
+                dtype,
+                zone,
+            )
+            continue
+        if aware and op == DT_OFFSET_BY:
+            values[i] = _offset_in(v, dtype, node.text, zone)
+            continue
+        if aware:
+            # Every other operation reads local fields.
+            v = to_local(v, dtype, zone)
         if op == DT_TRUNCATE:
             values[i] = _truncate(v, dtype, node.text)
         elif op == DT_OFFSET_BY:
@@ -253,6 +316,40 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
     return result^
 
 
+def _replace_time_zone(
+    input: Series, dtype: DataType, node: Node
+) raises -> Series:
+    """Keep each wall-clock time and read it in the new zone."""
+    var target = dtype.with_time_zone(node.text)
+    var options = node.text2.split(",")
+    var ambiguous = ambiguous_code(String(options[0]))
+    var non_existent = non_existent_code(String(options[1]))
+    var source_zone = zone_of(dtype)
+    var target_zone = zone_of(target)
+    var aware = dtype.time_zone().byte_length() > 0
+    ref column = input._data[Column[Int64]]
+    var n = len(column)
+    var values = List[Int64](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        if not column._valid(i):
+            continue
+        var wall = column._get(i)
+        if aware:
+            wall = to_local(wall, dtype, source_zone)
+        if target.time_zone().byte_length() == 0:
+            values[i] = wall
+            valid[i] = True
+            continue
+        var instant = localize(
+            wall, target, target_zone, ambiguous, non_existent
+        )
+        if instant:
+            values[i] = instant.value()
+            valid[i] = True
+    return Series("", Column[Int64](values^, valid)).with_dtype(target)
+
+
 def _strptime(
     input: Series, target: DataType, format: String, strict: Bool
 ) raises -> Series:
@@ -260,16 +357,20 @@ def _strptime(
     var n = len(column)
     var values = List[Int64](length=n, fill=0)
     var valid = List[Bool](length=n, fill=False)
+    var result_type = strptime_target(target, format)
+    var zone = zone_of(result_type)
     for i in range(n):
         if not column._valid(i):
             continue
         try:
-            values[i] = parse(String(column._get(i)), target, format)
+            values[i] = parse_in(
+                String(column._get(i)), result_type, format, zone
+            )
             valid[i] = True
         except e:
             if strict:
                 raise e^
-    return Series("", Column[Int64](values^, valid)).with_dtype(target)
+    return Series("", Column[Int64](values^, valid)).with_dtype(result_type)
 
 
 def cast_temporal(
@@ -281,6 +382,9 @@ def cast_temporal(
     if input.is_chunked():
         return cast_temporal(input.rechunk(), source, target, strict)
     var n = len(input)
+    # A zone-aware source casts to date, time and string at local time;
+    # casts between datetimes keep the instant, as in Polars.
+    var zone = zone_of(source)
     if target == DataType.STRING:
         var texts = List[String](length=n, fill="")
         var valid = List[Bool](length=n, fill=False)
@@ -288,7 +392,7 @@ def cast_temporal(
         for i in range(n):
             valid[i] = column._valid(i)
             if valid[i]:
-                texts[i] = format(column._get(i), source)
+                texts[i] = format_in(column._get(i), source, "", zone)
         return Series(input.name(), StringColumn(texts, valid))
     if source == DataType.STRING:
         return _strptime(input, target, "", strict).renamed(input.name())
@@ -314,8 +418,11 @@ def cast_temporal(
             elif source.is_date() and target.is_datetime():
                 values[i] = checked_mul(v, ticks_per_day(target))
             elif source.is_datetime() and target.is_date():
-                values[i] = floor_div(v, ticks_per_day(source))
+                values[i] = floor_div(
+                    to_local(v, source, zone), ticks_per_day(source)
+                )
             elif source.is_datetime() and target.is_time():
+                v = to_local(v, source, zone)
                 values[i] = floor_mod(v, ticks_per_day(source)) * (
                     Int64(1000000000) // source.per_second()
                 )
@@ -340,9 +447,52 @@ def cast_temporal(
     )
 
 
+def _zoned_range(
+    start: String, end: String, interval: String, dtype: DataType, name: String
+) raises -> Series:
+    """A range in a time zone: calendar steps (d, w, mo, y) move the local
+    time from start, fixed steps move the instant, as in Polars."""
+    var zone = zone_of(dtype)
+    var first = parse_in(start, dtype, "", zone)
+    var last = parse_in(end, dtype, "", zone)
+    var step = parse_interval(interval)
+    if (
+        step[0] < 0
+        or step[1] < 0
+        or step[2] < 0
+        or (step[0] == 0 and step[1] == 0 and step[2] == 0)
+    ):
+        raise Error("range interval must be positive, found " + interval)
+    var fixed = _ticks(step[2], dtype, interval)
+    var per_second = dtype.per_second()
+    var offset = zone.offset_at(floor_div(first, per_second))
+    var local = checked_add(first, offset * per_second)
+    var values = List[Int64]()
+    var current = first
+    var count = Int64(0)
+    while current <= last:
+        values.append(current)
+        count += 1
+        current = first
+        if step[0] != 0 or step[1] != 0:
+            var shifted = local
+            if step[0] != 0:
+                shifted = join(
+                    add_months(split(local, dtype), step[0] * count), dtype
+                )
+            shifted = checked_add(
+                shifted, checked_mul(step[1] * count, ticks_per_day(dtype))
+            )
+            current = relocalize(shifted, first, dtype, zone)
+        current = checked_add(current, checked_mul(fixed, count))
+    return Series(name, Column[Int64](values^)).with_dtype(dtype)
+
+
 def _range(
     start: String, end: String, interval: String, dtype: DataType, name: String
 ) raises -> Series:
+    if dtype.time_zone().byte_length() > 0:
+        return _zoned_range(start, end, interval, dtype, name)
     var first = parse(start, dtype)
     var last = parse(end, dtype)
     var step = parse_every(interval)
@@ -391,6 +541,10 @@ def datetime_range(
     interval: String,
     unit: String = "us",
     name: String = "datetime",
+    time_zone: String = "",
 ) raises -> Series:
-    """Datetimes from start through end (inclusive) every interval."""
-    return _range(start, end, interval, DataType.datetime(unit), name)
+    """Datetimes from start through end (inclusive) every interval. With a
+    time zone, start and end are local times there."""
+    return _range(
+        start, end, interval, DataType.datetime(unit, time_zone), name
+    )

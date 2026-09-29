@@ -15,7 +15,8 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .csv_types import CsvField
 from .csv_integer import parse_csv_integer
 from .csv_numeric import parse_csv_float32, parse_csv_float64
-from .temporal import parse as parse_temporal
+from .temporal import parse_in, zone_of
+from .timezone import TimeZone
 from .decimal import parse_decimal
 
 
@@ -185,6 +186,8 @@ struct CsvCell(Copyable):
 struct CsvBuffer(Movable):
     var field: CsvField
     var storage: _Buffers
+    # A zone-aware datetime field's zone, loaded once (UTC otherwise).
+    var zone: TimeZone
 
     def __init__(
         out self,
@@ -194,6 +197,11 @@ struct CsvBuffer(Movable):
         lossy: Bool = False,
     ):
         self.field = field.copy()
+        try:
+            self.zone = zone_of(field.dtype)
+        except:
+            # The dtype was checked when it was made.
+            self.zone = TimeZone.utc()
         if field.dtype.is_decimal():
             self.storage = _Buffers(_NumericBuffer[DType.int128](capacity))
             return
@@ -264,8 +272,8 @@ struct CsvBuffer(Movable):
                 )
                 return
             if self.field.dtype.is_temporal():
-                var parsed = parse_temporal(
-                    String(text), self.field.dtype, self.field.format
+                var parsed = parse_in(
+                    String(text), self.field.dtype, self.field.format, self.zone
                 )
                 self.storage[_NumericBuffer[DType.int64]].append(parsed, True)
                 return

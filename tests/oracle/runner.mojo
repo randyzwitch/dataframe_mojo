@@ -13,6 +13,7 @@ SPEC is one operation (see scripts/oracle.py for the generator):
   cast COL DTYPE               non-strict
   stat CONTEXT FN COL          CONTEXT in global, group, over (see oracle.py)
   prep OP ...                  interpolate, cut, or qcut
+  tz ZONE BASE STEP OP ...     datetimes BASE + n * STEP (UTC us) in ZONE
 
 Setting DATAFRAME_ORACLE_INJECT=1 drops the last result row, so the harness
 can prove it detects a wrong answer.
@@ -74,6 +75,8 @@ def run(
     left: DataFrame, right: DataFrame, spec: List[String]
 ) raises -> DataFrame:
     var op = spec[0]
+    if op == "tz":
+        return time_zone_case(left, spec)
     if op == "prep":
         var operation = spec[1]
         var e: Expr
@@ -246,6 +249,50 @@ def run(
             col(spec[1]).cast(spec[2], strict=False).alias("out")
         )
     raise Error("unknown oracle operation: " + op)
+
+
+def time_zone_case(left: DataFrame, spec: List[String]) raises -> DataFrame:
+    var zone = spec[1]
+    var naive = (
+        lit(Int64(Int(spec[2]))) + col("n") * lit(Int64(Int(spec[3])))
+    ).cast("datetime[us]")
+    var aware = naive.dt().replace_time_zone("UTC").dt().convert_time_zone(zone)
+    var op = spec[4]
+    var e: Expr
+    if op == "field":
+        var f = spec[5]
+        var dt = aware.dt()
+        if f == "year":
+            e = dt.year()
+        elif f == "month":
+            e = dt.month()
+        elif f == "day":
+            e = dt.day()
+        elif f == "hour":
+            e = dt.hour()
+        elif f == "minute":
+            e = dt.minute()
+        elif f == "second":
+            e = dt.second()
+        elif f == "weekday":
+            e = dt.weekday()
+        elif f == "ordinal_day":
+            e = dt.ordinal_day()
+        elif f == "date":
+            e = dt.date().cast("int64")
+        else:
+            e = dt.time().cast("int64")
+    elif op == "strftime":
+        e = aware.dt().strftime(spec[5])
+    elif op == "truncate":
+        e = aware.dt().truncate(spec[5]).cast("int64")
+    elif op == "offset_by":
+        e = aware.dt().offset_by(spec[5]).cast("int64")
+    elif op == "replace":
+        e = naive.dt().replace_time_zone(zone, spec[5], spec[6]).cast("int64")
+    else:
+        e = aware.dt().replace_time_zone("").cast("int64")
+    return left.select_exprs([col("n"), e.alias("out")])
 
 
 def main() raises:

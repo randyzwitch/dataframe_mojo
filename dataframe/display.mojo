@@ -79,8 +79,13 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
                 return "null"
             comptime if D == DType.int64:
                 if series.dtype().is_temporal():
+                    var dtype = series.dtype()
+                    # A zone-aware datetime shows local time and the zone's
+                    # abbreviation, as Polars prints it.
                     return format_temporal(
-                        column._get(row).cast[DType.int64](), series.dtype()
+                        column._get(row).cast[DType.int64](),
+                        dtype,
+                        "%Y-%m-%d %H:%M:%S%f %Z" if dtype.time_zone() else "",
                     )
             return String(column._get(row))
     if series._data.isa[BoolColumn]():

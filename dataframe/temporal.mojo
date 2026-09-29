@@ -1,31 +1,38 @@
 """Calendar arithmetic, parsing, and formatting for temporal types.
 
 Dates are days since 1970-01-01 in the proleptic Gregorian calendar;
-datetimes are time-zone-naive ticks (ns, us, or ms) since that midnight; times
-are nanoseconds since midnight. Negative values count backwards, using floor
+datetimes are ticks (ns, us, or ms) since that midnight; times are
+nanoseconds since midnight. Negative values count backwards, using floor
 division so fields of pre-1970 instants are correct. Conversions between
-units are overflow-checked. There is no time zone or DST handling.
+units are overflow-checked.
+
+A naive datetime is a wall-clock reading. A zone-aware one holds UTC ticks
+and is shown, parsed and split into fields at its zone's local time (see
+timezone.mojo); `to_local` and `localize` convert between the two.
 
 Parsing and formatting support these directives: %Y (year, optional sign),
 %m, %d, %H, %M, %S (two digits when formatting, one or two when parsing), %f
 (fractional seconds: up to nine digits when parsing, the unit's precision
-when formatting), %j (day of year), and %%. Any other character must match
-literally.
+when formatting), %j (day of year), %z (UTC offset: +HHMM when formatting;
+Z, +HH, +HHMM or +HH:MM when parsing), %:z (+HH:MM), %Z (zone
+abbreviation, formatting only), and %%. Any other character must match
+literally. A parsed offset makes the value UTC.
 """
+from .calendar import (
+    civil_from_days,
+    days_from_civil,
+    days_in_month,
+    floor_div,
+    floor_mod,
+    is_leap,
+)
 from .dtype import DataType
+from .timezone import TimeZone
 
 comptime SECONDS_PER_DAY = Int64(86400)
 comptime NANOS_PER_DAY = Int64(86400000000000)
 comptime INT64_MAX = Int64(9223372036854775807)
 comptime INT64_MIN = Int64(-9223372036854775807) - 1
-
-
-def floor_div(a: Int64, b: Int64) -> Int64:
-    return a // b
-
-
-def floor_mod(a: Int64, b: Int64) -> Int64:
-    return a % b
 
 
 def checked_mul(a: Int64, b: Int64) raises -> Int64:
@@ -40,43 +47,6 @@ def checked_add(a: Int64, b: Int64) raises -> Int64:
     if (b > 0 and a > INT64_MAX - b) or (b < 0 and a < INT64_MIN - b):
         raise Error("temporal value overflows Int64")
     return a + b
-
-
-def days_from_civil(year: Int64, month: Int64, day: Int64) -> Int64:
-    """Days since 1970-01-01 for a proleptic Gregorian date."""
-    var y = year - (Int64(1) if month <= 2 else Int64(0))
-    var era = floor_div(y, 400)
-    var yoe = y - era * 400
-    var mp = (month + 9) % 12
-    var doy = (153 * mp + 2) // 5 + day - 1
-    var doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
-    return era * 146097 + doe - 719468
-
-
-def civil_from_days(days: Int64) -> Tuple[Int64, Int64, Int64]:
-    """(year, month, day) for days since 1970-01-01."""
-    var z = days + 719468
-    var era = floor_div(z, 146097)
-    var doe = z - era * 146097
-    var yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
-    var doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
-    var mp = (5 * doy + 2) // 153
-    var day = doy - (153 * mp + 2) // 5 + 1
-    var month = mp + 3 if mp < 10 else mp - 9
-    var year = yoe + era * 400 + (Int64(1) if month <= 2 else Int64(0))
-    return (year, month, day)
-
-
-def is_leap(year: Int64) -> Bool:
-    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
-
-
-def days_in_month(year: Int64, month: Int64) -> Int64:
-    if month == 2:
-        return 29 if is_leap(year) else 28
-    if month == 4 or month == 6 or month == 9 or month == 11:
-        return 30
-    return 31
 
 
 def ticks_per_day(dtype: DataType) -> Int64:
@@ -175,27 +145,177 @@ def default_format(dtype: DataType) -> String:
         return "%Y-%m-%d"
     if dtype.is_time():
         return "%H:%M:%S%f"
+    if dtype.time_zone().byte_length() > 0:
+        return "%Y-%m-%d %H:%M:%S%f%:z"
     return "%Y-%m-%d %H:%M:%S%f"
+
+
+# How localize treats a local time that occurs twice (clocks fall back) or
+# never (clocks spring forward), as in Polars' `ambiguous` and
+# `non_existent` options.
+comptime AMBIGUOUS_RAISE = 0
+comptime AMBIGUOUS_EARLIEST = 1
+comptime AMBIGUOUS_LATEST = 2
+comptime AMBIGUOUS_NULL = 3
+comptime NON_EXISTENT_RAISE = 0
+comptime NON_EXISTENT_NULL = 1
+
+
+def ambiguous_code(name: String) raises -> Int:
+    if name == "raise":
+        return AMBIGUOUS_RAISE
+    if name == "earliest":
+        return AMBIGUOUS_EARLIEST
+    if name == "latest":
+        return AMBIGUOUS_LATEST
+    if name == "null":
+        return AMBIGUOUS_NULL
+    raise Error(
+        "ambiguous must be 'raise', 'earliest', 'latest' or 'null', found '"
+        + name
+        + "'"
+    )
+
+
+def non_existent_code(name: String) raises -> Int:
+    if name == "raise":
+        return NON_EXISTENT_RAISE
+    if name == "null":
+        return NON_EXISTENT_NULL
+    raise Error("non_existent must be 'raise' or 'null', found '" + name + "'")
+
+
+def zone_of(dtype: DataType) raises -> TimeZone:
+    """The zone of a zone-aware datetime; UTC for other types."""
+    var name = dtype.time_zone()
+    if name.byte_length() == 0:
+        return TimeZone.utc()
+    return TimeZone.load(name)
+
+
+def to_local(value: Int64, dtype: DataType, zone: TimeZone) -> Int64:
+    """The wall-clock ticks in `zone` of UTC ticks `value`."""
+    var per_second = dtype.per_second()
+    return value + zone.offset_at(floor_div(value, per_second)) * per_second
+
+
+def localize(
+    local: Int64,
+    dtype: DataType,
+    zone: TimeZone,
+    ambiguous: Int,
+    non_existent: Int,
+) raises -> Optional[Int64]:
+    """The UTC ticks of wall-clock ticks `local` in `zone`; None when the
+    options ask for null. Raises, as Polars does, for a non-existent or
+    ambiguous time under the "raise" options."""
+    var per_second = dtype.per_second()
+    var seconds = floor_div(local, per_second)
+    var fraction = local - seconds * per_second
+    var found = zone.resolve(seconds)
+    var instant = found[1]
+    if found[0] == 0:
+        if non_existent == NON_EXISTENT_NULL:
+            return None
+        raise Error(
+            "datetime '"
+            + _naive_text(local, dtype)
+            + "' is non-existent in time zone '"
+            + zone.name
+            + "'; use non_existent='null' to return null instead"
+        )
+    if found[0] > 1:
+        if ambiguous == AMBIGUOUS_NULL:
+            return None
+        if ambiguous == AMBIGUOUS_RAISE:
+            raise Error(
+                "datetime '"
+                + _naive_text(local, dtype)
+                + "' is ambiguous in time zone '"
+                + zone.name
+                + "'; use ambiguous='earliest', 'latest' or 'null'"
+            )
+        if ambiguous == AMBIGUOUS_LATEST:
+            instant = found[2]
+    return checked_add(checked_mul(instant, per_second), fraction)
+
+
+def relocalize(
+    local: Int64, original: Int64, dtype: DataType, zone: TimeZone
+) raises -> Int64:
+    """UTC ticks for wall-clock ticks `local` produced by shifting the value
+    at UTC ticks `original` in local time (see TimeZone.relocalize)."""
+    var per_second = dtype.per_second()
+    var seconds = floor_div(local, per_second)
+    var instant = zone.relocalize(seconds, floor_div(original, per_second))
+    return checked_add(
+        checked_mul(instant, per_second), local - seconds * per_second
+    )
+
+
+def _naive_text(local: Int64, dtype: DataType) -> String:
+    return _render(local, dtype, "%Y-%m-%d %H:%M:%S%f", 0, "", False)
+
+
+def strptime_target(target: DataType, format: String) raises -> DataType:
+    """The dtype strptime produces: a naive datetime format with %z gives
+    UTC-aware values, as in Polars."""
+    if (
+        target.is_datetime()
+        and target.time_zone().byte_length() == 0
+        and (format.find("%z") >= 0 or format.find("%:z") >= 0)
+    ):
+        return target.with_time_zone("UTC")
+    return target
 
 
 def parse(text: String, dtype: DataType, format: String = "") raises -> Int64:
     """Parse text as a date, datetime, or time.
 
     With no format, dates accept YYYY-MM-DD; datetimes accept a date with an
-    optional time "T" or " " HH:MM[:SS[.fraction]]; times accept
-    HH:MM[:SS[.fraction]]. With a format, every directive must match.
+    optional time "T" or " " HH:MM[:SS[.fraction]] and an optional UTC
+    offset; times accept HH:MM[:SS[.fraction]]. With a format, every
+    directive must match. Loads a zone-aware dtype's zone on every call;
+    use `parse_in` for many values.
     """
+    return parse_in(text, dtype, format, zone_of(dtype))
+
+
+def parse_in(
+    text: String, dtype: DataType, format: String, zone: TimeZone
+) raises -> Int64:
+    """Parse as `parse` does. Text with an offset is converted to UTC; for a
+    zone-aware dtype, text without one is a wall-clock time in `zone`, and
+    raises when that time is non-existent or ambiguous there."""
+    var seen = False
+    var value: Int64
     try:
         if format.byte_length() > 0:
-            return _parse_format(text, dtype, format)
-        return _parse_iso(text, dtype)
+            value = _parse_format(text, dtype, format, seen)
+        else:
+            value = _parse_iso(text, dtype, seen)
     except e:
         raise Error(
             "cannot parse '" + text + "' as " + dtype.name() + ": " + String(e)
         )
+    if seen or dtype.time_zone().byte_length() == 0:
+        return value
+    return localize(
+        value, dtype, zone, AMBIGUOUS_RAISE, NON_EXISTENT_RAISE
+    ).value()
 
 
-def _parse_iso(text: String, dtype: DataType) raises -> Int64:
+def has_offset(text: String) -> Bool:
+    """Whether ISO text for a datetime parses with a UTC offset or Z."""
+    var seen = False
+    try:
+        _ = _parse_iso(text, DataType.datetime("us"), seen)
+    except:
+        return False
+    return seen
+
+
+def _parse_iso(text: String, dtype: DataType, mut seen: Bool) raises -> Int64:
     var bytes = text.as_bytes()
     var pos = 0
     var parts = Parts(1970, 1, 1, 0, 0, 0, 0)
@@ -225,34 +345,34 @@ def _parse_iso(text: String, dtype: DataType) raises -> Int64:
         pos += 1
         parts.second = _digits(text, pos, 2, 2)
         parts.nanos = _fraction(text, pos)
-    var offset = _zone(text, pos) if dtype.is_datetime() else Int64(0)
+    var offset = _zone(text, pos, seen) if dtype.is_datetime() else Int64(0)
     _end(text, pos)
     var value = join(parts, dtype)
     if offset != 0:
-        # Datetimes are time-zone-naive and hold UTC, so an offset is
-        # applied here rather than remembered: 12:00+01:00 is 11:00 UTC.
+        # An offset makes the value UTC: 12:00+01:00 is 11:00 UTC.
         value = checked_add(
             value, checked_mul(-offset * 60, dtype.per_second())
         )
     return value
 
 
-def _zone(text: String, mut pos: Int) raises -> Int64:
+def _zone(text: String, mut pos: Int, mut seen: Bool) raises -> Int64:
     """A trailing ISO 8601 zone designator, as minutes east of UTC.
 
     Accepts "Z" (and lowercase "z") for UTC, and "+HH:MM", "-HH:MM",
-    "+HHMM", "+HH". Returns 0 when there is no designator, which is the
-    naive case. The caller applies the shift; nothing here remembers the
-    zone, because datetimes in this library are naive UTC.
+    "+HHMM", "+HH". Returns 0 and leaves `seen` alone when there is no
+    designator; sets `seen` when there is one.
     """
     var bytes = text.as_bytes()
     if pos >= len(bytes):
         return 0
     if bytes[pos] == 90 or bytes[pos] == 122:  # Z or z
         pos += 1
+        seen = True
         return 0
     if bytes[pos] != 43 and bytes[pos] != 45:
         return 0
+    seen = True
     var negative = bytes[pos] == 45
     pos += 1
     var hours = _digits(text, pos, 2, 2)
@@ -294,7 +414,7 @@ def _end(text: String, pos: Int) raises:
 
 
 def _parse_format(
-    text: String, dtype: DataType, format: String
+    text: String, dtype: DataType, format: String, mut seen: Bool
 ) raises -> Int64:
     var f = format.as_bytes()
     var t = text.as_bytes()
@@ -302,10 +422,14 @@ def _parse_format(
     var i = 0
     var parts = Parts(1970, 1, 1, 0, 0, 0, 0)
     var ordinal = Int64(-1)
+    var offset = Int64(0)
     while i < len(f):
         if f[i] == 37 and i + 1 < len(f):
             var d = f[i + 1]
             i += 2
+            if d == 58 and i < len(f) and f[i] == 122:  # %:z
+                d = 122
+                i += 1
             # With no literal between this directive and the next, the field
             # has nothing to delimit it, so it must take exactly its width:
             # "%Y%m%d" over "20240228" is 4 then 2 then 2, not a greedy year.
@@ -332,6 +456,13 @@ def _parse_format(
                     parts.nanos = _fraction(text, pos)
             elif d == 106:  # j
                 ordinal = _digits(text, pos, 3 if packed else 1, 3)
+            elif d == 122:  # z
+                var before = seen
+                seen = False
+                offset = _zone(text, pos, seen)
+                if not seen:
+                    raise Error("expected a UTC offset")
+                seen = seen or before
             elif d == 37:
                 _expect(text, pos, 37)
             else:
@@ -349,7 +480,12 @@ def _parse_format(
         )
         parts.month = ymd[1]
         parts.day = ymd[2]
-    return join(parts, dtype)
+    var value = join(parts, dtype)
+    if offset != 0 and dtype.is_datetime():
+        value = checked_add(
+            value, checked_mul(-offset * 60, dtype.per_second())
+        )
+    return value
 
 
 def _pad(value: Int64, width: Int) -> String:
@@ -361,9 +497,58 @@ def _pad(value: Int64, width: Int) -> String:
 
 
 def format(value: Int64, dtype: DataType, pattern: String = "") -> String:
-    """Render a stored temporal value (see the module docstring)."""
+    """Render a stored temporal value (see the module docstring). Loads a
+    zone-aware dtype's zone on every call; use `format_in` for many."""
+    var zone: TimeZone
+    try:
+        zone = zone_of(dtype)
+    except:
+        # The zone was valid when the dtype was made; if its file has
+        # since gone, show UTC rather than fail to print.
+        zone = TimeZone.utc()
+    return format_in(value, dtype, pattern, zone)
+
+
+def format_in(
+    value: Int64, dtype: DataType, pattern: String, zone: TimeZone
+) -> String:
+    """Render as `format` does; a zone-aware value at `zone`'s local time."""
     if dtype.is_duration():
         return _format_duration(value, dtype)
+    if not dtype.is_datetime() or dtype.time_zone().byte_length() == 0:
+        return _render(value, dtype, pattern, 0, "", False)
+    var per_second = dtype.per_second()
+    var type = zone.type_at(floor_div(value, per_second))
+    var offset = zone.offset_of(type)
+    return _render(
+        value + offset * per_second,
+        dtype,
+        pattern,
+        offset,
+        zone.abbreviation(type),
+        True,
+    )
+
+
+def _offset_text(offset: Int64, colon: Bool) -> String:
+    var minutes = (offset if offset >= 0 else -offset) // 60
+    return (
+        ("+" if offset >= 0 else "-")
+        + _pad(minutes // 60, 2)
+        + (":" if colon else "")
+        + _pad(minutes % 60, 2)
+    )
+
+
+def _render(
+    value: Int64,
+    dtype: DataType,
+    pattern: String,
+    offset: Int64,
+    abbreviation: String,
+    aware: Bool,
+) -> String:
+    """Render wall-clock `value`; %z, %:z and %Z are empty unless aware."""
     var p = split(value, dtype)
     var f = (
         pattern if pattern.byte_length() > 0 else default_format(dtype)
@@ -395,6 +580,16 @@ def format(value: Int64, dtype: DataType, pattern: String = "") -> String:
                     + 1,
                     3,
                 )
+            elif d == 122:  # z
+                if aware:
+                    out += _offset_text(offset, False)
+            elif d == 58 and i < len(f) and f[i] == 122:  # %:z
+                i += 1
+                if aware:
+                    out += _offset_text(offset, True)
+            elif d == 90:  # Z
+                if aware:
+                    out += abbreviation
             else:
                 out += "%" + chr(Int(d))
         else:
@@ -462,6 +657,17 @@ def _format_duration(value: Int64, dtype: DataType) -> String:
 def parse_every(every: String) raises -> Tuple[Int64, Int64]:
     """Parse an interval like "3d", "1h30m", "2mo", or "1y" into
     (months, nanoseconds). Units: ns, us, ms, s, m, h, d, w, mo, y."""
+    var interval = parse_interval(every)
+    return (
+        interval[0],
+        checked_add(checked_mul(interval[1], NANOS_PER_DAY), interval[2]),
+    )
+
+
+def parse_interval(every: String) raises -> Tuple[Int64, Int64, Int64]:
+    """Parse an interval into (months, days, nanoseconds), keeping calendar
+    days (d, w) apart from fixed units: in a time zone a day is a local
+    calendar day, which is 23 or 25 hours across a DST change."""
     var bytes = every.as_bytes()
     if len(bytes) == 0:
         raise Error("empty interval")
@@ -470,6 +676,7 @@ def parse_every(every: String) raises -> Tuple[Int64, Int64]:
     if negative:
         pos = 1
     var months = Int64(0)
+    var days = Int64(0)
     var nanos = Int64(0)
     while pos < len(bytes):
         var amount = _digits(every, pos, 1, 18)
@@ -481,6 +688,10 @@ def parse_every(every: String) raises -> Tuple[Int64, Int64]:
             months = checked_add(months, checked_mul(amount, 12))
         elif unit == "mo":
             months = checked_add(months, amount)
+        elif unit == "d":
+            days = checked_add(days, amount)
+        elif unit == "w":
+            days = checked_add(days, checked_mul(amount, 7))
         else:
             var scale: Int64
             if unit == "ns":
@@ -495,16 +706,12 @@ def parse_every(every: String) raises -> Tuple[Int64, Int64]:
                 scale = 60000000000
             elif unit == "h":
                 scale = 3600000000000
-            elif unit == "d":
-                scale = NANOS_PER_DAY
-            elif unit == "w":
-                scale = 7 * NANOS_PER_DAY
             else:
                 raise Error("unknown interval unit '" + unit + "' in " + every)
             nanos = checked_add(nanos, checked_mul(amount, scale))
     if negative:
-        return (-months, -nanos)
-    return (months, nanos)
+        return (-months, -days, -nanos)
+    return (months, days, nanos)
 
 
 def add_months(parts: Parts, months: Int64) -> Parts:

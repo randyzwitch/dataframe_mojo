@@ -50,6 +50,9 @@ with tempfile.TemporaryDirectory() as directory:
         columns["timestamp_" + unit] = pa.array(
             [0, -123, 456], type=pa.timestamp(unit)
         )
+        columns["zoned_" + unit] = pa.array(
+            [0, -123, 456], type=pa.timestamp(unit, tz="America/New_York")
+        )
     expected["temporal.parquet"] = pa.table(columns)
     for codec in ("zstd", "snappy", "uncompressed"):
         for fixture, source in expected.items():

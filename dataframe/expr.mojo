@@ -186,6 +186,10 @@ comptime COV = 161
 # text: value field SEP count field; integer: bit 0 sort by count, bit 1
 # normalize (proportions).
 comptime VALUE_COUNTS = 162
+# Time zones of datetimes (#222). text: the zone ("" for naive). For
+# DT_REPLACE_TZ, text2 is "<ambiguous>,<non_existent>".
+comptime DT_REPLACE_TZ = 157
+comptime DT_CONVERT_TZ = 158
 
 
 def is_binary(op: Int) -> Bool:
@@ -220,7 +224,11 @@ def is_string_op(op: Int) -> Bool:
 
 
 def is_dt_op(op: Int) -> Bool:
-    return op >= DT_YEAR and op <= DT_STRPTIME
+    return (
+        (op >= DT_YEAR and op <= DT_STRPTIME)
+        or op == DT_REPLACE_TZ
+        or op == DT_CONVERT_TZ
+    )
 
 
 def is_window(op: Int) -> Bool:
@@ -1382,7 +1390,15 @@ struct StrNamespace(Copyable):
     def to_date(self, format: String = "") -> Expr:
         return self.strptime("date", format)
 
-    def to_datetime(self, format: String = "", unit: String = "us") -> Expr:
+    def to_datetime(
+        self, format: String = "", unit: String = "us", time_zone: String = ""
+    ) -> Expr:
+        """Parse as a datetime. A format with %z gives UTC-aware values;
+        with `time_zone`, text without an offset is local time there."""
+        if time_zone.byte_length() > 0:
+            return self.strptime(
+                "datetime[" + unit + ", " + time_zone + "]", format
+            )
         return self.strptime("datetime[" + unit + "]", format)
 
     def zfill(self, width: Int) -> Expr:
@@ -1517,7 +1533,10 @@ def subtree(expr: Expr, root: Int) -> Expr:
 struct DtNamespace(Copyable):
     """Temporal operations on date, datetime, time, and duration expressions.
 
-    Fields use the proleptic Gregorian calendar with no time zones. Nulls
+    Fields use the proleptic Gregorian calendar. For a datetime with a time
+    zone, fields, date, time, truncate, calendar offsets (d, w, mo, y) and
+    strftime use local time in that zone; fixed offsets (h, m, s, ...) and
+    duration arithmetic act on the UTC instant, as in Polars. Nulls
     propagate.
     """
 
@@ -1599,6 +1618,27 @@ struct DtNamespace(Copyable):
     def strftime(self, format: String) -> Expr:
         """Format as text; see dataframe/temporal.mojo for directives."""
         return self._op(DT_STRFTIME, format)
+
+    def replace_time_zone(
+        self,
+        time_zone: String,
+        ambiguous: String = "raise",
+        non_existent: String = "raise",
+    ) -> Expr:
+        """Read each datetime's wall-clock time as local time in
+        `time_zone` (empty makes it naive), keeping the wall time and
+        changing the instant. `ambiguous` ("raise", "earliest", "latest",
+        "null") picks between the two instants when clocks fall back;
+        `non_existent` ("raise", "null") handles times skipped when clocks
+        spring forward."""
+        return self._op(
+            DT_REPLACE_TZ, time_zone, ambiguous + "," + non_existent
+        )
+
+    def convert_time_zone(self, time_zone: String) -> Expr:
+        """The same instants shown in `time_zone`; naive input is read as
+        UTC."""
+        return self._op(DT_CONVERT_TZ, time_zone)
 
 
 def as_struct(fields: List[Expr], name: String = "") raises -> Expr:
