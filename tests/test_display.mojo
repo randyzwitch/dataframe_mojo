@@ -1,6 +1,6 @@
 """Deterministic, bounded text rendering of frames and series."""
 from std.testing import TestSuite, assert_equal, assert_true, assert_false
-from dataframe import Column, DataFrame, Series, col, lit
+from dataframe import Column, DataFrame, DataType, Series, col, lit
 
 
 def small() raises -> DataFrame:
@@ -39,6 +39,28 @@ def test_frame_layout() raises:
     )
     assert_equal(String(small()), expected)
     assert_equal(small().to_string(), expected)
+
+
+def test_decimal_columns() raises:
+    """Decimal columns print at their scale; they used to abort, falling
+    through to the String branch."""
+    var x = Series(
+        "d", Column[Int128]([Int128(10), -125, 0], [True, True, False])
+    ).with_dtype(DataType.decimal(15, 2))
+    var expected = String(
+        "shape: (3, 1)\n",
+        "┌───────────────┐\n",
+        "│ d             │\n",
+        "│ ---           │\n",
+        "│ decimal[15,2] │\n",
+        "╞═══════════════╡\n",
+        "│ 0.10          │\n",
+        "│ -1.25         │\n",
+        "│ null          │\n",
+        "└───────────────┘",
+    )
+    assert_equal(String(DataFrame([x.copy()])), expected)
+    assert_true(String(x).endswith("[\n\t0.10\n\t-1.25\n\tnull\n]"))
 
 
 def test_empty_shapes() raises:
