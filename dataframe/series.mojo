@@ -38,6 +38,7 @@ comptime FixedElements = Variant[
     UInt32,
     UInt64,
     Float32,
+    Int128,
 ]
 comptime Storage = Variant[
     Column[Int64],
@@ -52,6 +53,7 @@ comptime Storage = Variant[
     Column[UInt32],
     Column[UInt64],
     Column[Float32],
+    Column[Int128],
     ListColumn,
     StructColumn,
 ]
@@ -245,6 +247,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             comptime D = NUMERIC_DTYPES[i]
             if self._data.isa[Column[Scalar[D]]]():
                 return DataType.of(D)
+        if self._data.isa[Column[Int128]]():
+            return DataType.of(DType.int128)
         if self._data.isa[BoolColumn]():
             return DataType.BOOL
         if self._data.isa[ListColumn]():
@@ -341,6 +345,11 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             if column.is_null(index):
                 return AnyValue.null(self._dtype)
             return AnyValue(self._dtype, True, column._get(index), 0, False, "")
+        if self._dtype.is_decimal():
+            ref column = self._data[Column[Int128]]
+            if column.is_null(index):
+                return AnyValue.null(self._dtype)
+            return AnyValue.decimal(self._dtype, column._get(index))
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if self._data.isa[Column[Scalar[D]]]():
@@ -422,6 +431,15 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                         if x != y and not (x != x and y != y):
                             return False
                 return True
+        if self._data.isa[Column[Int128]]():
+            ref a = self._data[Column[Int128]]
+            ref b = other._data[Column[Int128]]
+            for row in range(len(a)):
+                if a._valid(row) != b._valid(row):
+                    return False
+                if a._valid(row) and a._get(row) != b._get(row):
+                    return False
+            return True
         if self._data.isa[BoolColumn]():
             ref a = self._data[BoolColumn]
             ref b = other._data[BoolColumn]
@@ -934,6 +952,11 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                     nan[i] = valid[i] and x != x
                     usable[i] = valid[i] and not nan[i]
                 distinct = _dense_ranks(column.to_list(), usable, ranks)
+        if self._data.isa[Column[Int128]]():
+            ref column = self._data[Column[Int128]]
+            for i in range(n):
+                valid[i] = column._valid(i)
+            distinct = _dense_ranks(column.to_list(), valid, ranks)
         if distinct >= 0:
             pass
         elif self._data.isa[BoolColumn]():
@@ -1098,6 +1121,10 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         """A column of `length` nulls with the requested dtype."""
         if dtype.is_temporal():
             return Self(name^, Column[Int64]._nulls(length, 0)).with_dtype(
+                dtype
+            )
+        if dtype.is_decimal():
+            return Self(name^, Column[Int128]._nulls(length, 0)).with_dtype(
                 dtype
             )
         comptime for i in range(len(NUMERIC_DTYPES)):

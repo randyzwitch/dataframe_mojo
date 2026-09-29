@@ -16,6 +16,7 @@ from .csv_types import CsvField
 from .csv_integer import parse_csv_integer
 from .csv_numeric import parse_csv_float32, parse_csv_float64
 from .temporal import parse as parse_temporal
+from .decimal import parse_decimal
 
 
 def _push_bit(mut bits: List[UInt8], index: Int, value: Bool):
@@ -155,6 +156,7 @@ comptime _Buffers = Variant[
     _NumericBuffer[DType.uint32],
     _NumericBuffer[DType.uint64],
     _NumericBuffer[DType.float32],
+    _NumericBuffer[DType.int128],
     _BoolBuffer,
     _Utf8Buffer,
 ]
@@ -192,6 +194,9 @@ struct CsvBuffer(Movable):
         lossy: Bool = False,
     ):
         self.field = field.copy()
+        if field.dtype.is_decimal():
+            self.storage = _Buffers(_NumericBuffer[DType.int128](capacity))
+            return
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if field.dtype.physical() == DataType.of(D):
@@ -203,6 +208,9 @@ struct CsvBuffer(Movable):
             self.storage = _Buffers(_Utf8Buffer(capacity, quote_char, lossy))
 
     def add_null(mut self) raises:
+        if self.storage.isa[_NumericBuffer[DType.int128]]():
+            self.storage[_NumericBuffer[DType.int128]].append(0, False)
+            return
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if self.storage.isa[_NumericBuffer[D]]():
@@ -250,6 +258,11 @@ struct CsvBuffer(Movable):
             return
         try:
             var text = StringSlice(unsafe_from_utf8=value)
+            if self.field.dtype.is_decimal():
+                self.storage[_NumericBuffer[DType.int128]].append(
+                    parse_decimal(text, self.field.dtype), True
+                )
+                return
             if self.field.dtype.is_temporal():
                 var parsed = parse_temporal(
                     String(text), self.field.dtype, self.field.format
@@ -359,6 +372,12 @@ struct CsvBuffer(Movable):
         return (first_record, first_message)
 
     def finish(mut self) raises -> Series:
+        if self.storage.isa[_NumericBuffer[DType.int128]]():
+            return (
+                self.storage[_NumericBuffer[DType.int128]]
+                .finish(self.field.name)
+                .with_dtype(self.field.dtype)
+            )
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if self.storage.isa[_NumericBuffer[D]]():

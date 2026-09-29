@@ -307,5 +307,42 @@ def test_var_state_merge_matches_whole() raises:
     assert_false(Bool(empty.variance(0)))
 
 
+def test_decimal_reductions_are_exact() raises:
+    var dtype = DataType.decimal(12, 2)
+    var frame = DataFrame(
+        [
+            Series(
+                "d",
+                Column[Int128](
+                    [Int128(10), -25, 30, 0],
+                    [True, True, True, False],
+                ),
+            ).with_dtype(dtype)
+        ]
+    )
+    var reduced = frame.select_exprs(
+        [
+            col("d").sum().cast("string").alias("sum"),
+            col("d").min().cast("string").alias("min"),
+            col("d").max().cast("string").alias("max"),
+            col("d").mean().cast("string").alias("mean"),
+        ]
+    )
+    assert_equal(reduced.item(0, "sum").string(), "0.15")
+    assert_equal(reduced.item(0, "min").string(), "-0.25")
+    assert_equal(reduced.item(0, "max").string(), "0.30")
+    assert_equal(reduced.item(0, "mean").string(), "0.05")
+    var million = Series(
+        "d", Column[Int128](List[Int128](length=1_000_000, fill=1))
+    ).with_dtype(dtype)
+    assert_equal(
+        DataFrame([million^])
+        .select(col("d").sum().cast("string"))
+        .item()
+        .string(),
+        "10000.00",
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

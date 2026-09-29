@@ -65,6 +65,8 @@ def encodable(column: Series) -> Bool:
     fits in `STRING_PREFIX_BYTES`, which is checked here rather than
     assumed -- the encoding is exact only within the prefix it stores.
     """
+    if column.dtype().is_decimal():
+        return False
     if column.dtype() != DataType.STRING:
         return True
     if column.is_chunked():

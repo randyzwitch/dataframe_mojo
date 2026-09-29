@@ -9,6 +9,7 @@ from std.testing import (
 from dataframe import (
     Column,
     CsvSchema,
+    DataType,
     DataFrame,
     Series,
     read_csv,
@@ -69,6 +70,28 @@ def tricky() raises -> DataFrame:
             ),
         ]
     )
+
+
+def test_decimal_csv_round_trip_uses_fixed_point_text() raises:
+    var dtype = DataType.decimal(38, 10)
+    var frame = DataFrame(
+        [
+            Series(
+                "amount",
+                Column[Int128](
+                    [Int128(-1234567890123), 10, 0],
+                    [True, True, False],
+                ),
+            ).with_dtype(dtype)
+        ]
+    )
+    assert_equal(
+        to_csv_string(frame),
+        "amount\n-123.4567890123\n0.0000000010\n\n",
+    )
+    write_csv(frame, PATH)
+    var back = read_csv(PATH, [("amount", dtype)])
+    assert_true(back.equals(frame))
 
 
 def test_round_trip_every_dtype_and_edge_value() raises:

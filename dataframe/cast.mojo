@@ -12,6 +12,7 @@ from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
 from .parse import parse_bool, parse_float64, parse_integer
+from .decimal import format_decimal, parse_decimal, pow10, check_precision
 from .series import Series
 from .temporal_kernels import cast_temporal
 
@@ -21,6 +22,10 @@ def _dtype(series: Series) -> DataType:
 
 
 def _text(series: Series, row: Int) -> String:
+    if series.dtype().is_decimal():
+        return format_decimal(
+            series._data[Column[Int128]]._get(row), series.dtype().scale()
+        )
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
@@ -31,6 +36,8 @@ def _text(series: Series, row: Int) -> String:
 
 
 def _valid(series: Series, row: Int) -> Bool:
+    if series.dtype().is_decimal():
+        return series._data[Column[Int128]]._valid(row)
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
@@ -85,6 +92,13 @@ def _read_source(
     mut values: _Values,
 ) raises:
     """Row i of input into the intermediate, parsing strings for target."""
+    if source.is_decimal():
+        var raw = input._data[Column[Int128]]._get(i)
+        if target.is_float():
+            values.floats[i] = Float64(raw) / Float64(pow10(source.scale()))
+        else:
+            values.ints[i] = raw / pow10(source.scale())
+        return
     if source == DataType.STRING:
         # Numeric parsers consume borrowed slices; avoid an owned copy per row.
         var text = input._data[StringColumn]._get(i)
@@ -146,6 +160,51 @@ def cast_series(
         return cast_temporal(observed, source, target, strict)
     var n = len(input)
     var valid = List[Bool](length=n, fill=False)
+    if target.is_decimal():
+        var decimal_values = List[Int128](length=n, fill=0)
+        for i in range(n):
+            if not _valid(input, i) or (len(mask) == n and not mask[i]):
+                continue
+            try:
+                if source == DataType.STRING:
+                    decimal_values[i] = parse_decimal(
+                        input._data[StringColumn]._get(i), target
+                    )
+                elif source.is_decimal():
+                    var raw = input._data[Column[Int128]]._get(i)
+                    if source.scale() <= target.scale():
+                        raw *= pow10(target.scale() - source.scale())
+                    else:
+                        raw /= pow10(source.scale() - target.scale())
+                    decimal_values[i] = check_precision(raw, target)
+                elif source.is_integer() or source == DataType.BOOL:
+                    var intermediate = _Values(1, False)
+                    _read_source(input, source, target, i, intermediate)
+                    decimal_values[i] = check_precision(
+                        intermediate.ints[0] * pow10(target.scale()), target
+                    )
+                else:
+                    decimal_values[i] = parse_decimal(
+                        StringSlice(String(_text(input, i))), target
+                    )
+                valid[i] = True
+            except e:
+                if strict:
+                    raise Error(
+                        "cast from "
+                        + source.name()
+                        + " to "
+                        + target.name()
+                        + " failed at row "
+                        + String(offset + i)
+                        + " for value \x27"
+                        + _text(input, i)
+                        + "\x27: "
+                        + String(e)
+                    )
+        return Series(
+            input.name(), Column[Int128](decimal_values^, valid)
+        ).with_dtype(target)
     if target == DataType.STRING:
         var out = StringBuilder(n)
         for i in range(n):

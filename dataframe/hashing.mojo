@@ -71,6 +71,8 @@ def column_codes(
                 return len(lookup)
             else:
                 return _codes_by_value(column, codes, nulls)
+    if series._data.isa[Column[Int128]]():
+        return _codes_by_value(series._data[Column[Int128]], codes, nulls)
     if series._data.isa[BoolColumn]():
         ref column = series._data[BoolColumn]
         for i in range(len(column)):

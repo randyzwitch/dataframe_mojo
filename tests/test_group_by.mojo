@@ -264,6 +264,30 @@ def test_validation_and_empty_input() raises:
     assert_equal(keys_only.width(), 1)
 
 
+def test_decimal_sort_group_and_join_keys() raises:
+    var dtype = DataType.decimal(6, 2)
+    var keys = Series(
+        "k",
+        Column[Int128](
+            [Int128(120), -50, 120, 0],
+            [True, True, True, False],
+        ),
+    ).with_dtype(dtype)
+    var frame = DataFrame([keys^, Series("v", Column[Int64]([0, 1, 2, 3]))])
+    var sorted = frame.sort("k", nulls_last=True)
+    assert_equal(String(sorted.item(0, "k")), "-0.50")
+    assert_equal(String(sorted.item(1, "k")), "1.20")
+    assert_equal(String(sorted.item(2, "k")), "1.20")
+    assert_true(sorted.item(3, "k").is_null())
+    var grouped = frame.group_by("k", maintain_order=True).len()
+    assert_equal(grouped.height(), 3)
+    assert_equal(grouped.item(0, "len").int64(), 2)
+    var right = DataFrame(
+        [Series("k", Column[Int128]([Int128(120), 999])).with_dtype(dtype)]
+    )
+    assert_equal(frame.join(right, "k").height(), 2)
+
+
 def test_many_groups() raises:
     var values = List[Int64]()
     for i in range(20000):

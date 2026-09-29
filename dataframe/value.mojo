@@ -6,6 +6,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .nested_column import _Box
 from .series import Series
 from .temporal import format as format_temporal
+from .decimal import format_decimal
 
 
 struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
@@ -95,6 +96,14 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
     @staticmethod
     def null(dtype: String) raises -> Self:
         return Self(DataType.parse(dtype), False, 0, 0, False, "")
+
+    @staticmethod
+    def decimal(dtype: DataType, value: Int128) raises -> Self:
+        if not dtype.is_decimal():
+            raise Error("AnyValue.decimal requires a decimal dtype")
+        return Self(
+            dtype, True, 0, 0, False, format_decimal(value, dtype.scale())
+        )
 
     @staticmethod
     def temporal(dtype: DataType, value: Int64) raises -> Self:

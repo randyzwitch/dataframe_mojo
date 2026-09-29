@@ -340,6 +340,14 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
                 + right.name()
             )
         return DataType.STRING
+    if left.is_decimal() or right.is_decimal():
+        if not left.is_decimal() or not right.is_decimal():
+            raise Error(op_name(op) + " requires two decimal operands")
+        if is_comparison(op):
+            return DataType.BOOL
+        if op == ADD or op == SUB or op == MUL or op == DIV:
+            return DataType.decimal(38, max(left.scale(), right.scale()))
+        raise Error(op_name(op) + " is not supported for decimal operands")
     if left != right:
         raise Error(
             op_name(op)
@@ -478,6 +486,8 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
             )
         return DataType.FLOAT64
     if op == MEAN or op == STD or op == VAR or op == MEDIAN or op == QUANTILE:
+        if op == MEAN and input.is_decimal():
+            return input
         if not _numeric(input):
             raise Error(
                 op_name(op)

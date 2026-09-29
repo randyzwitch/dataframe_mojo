@@ -20,6 +20,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
 from .series import Series
 from .temporal import format as format_temporal
+from .decimal import format_decimal
 
 
 def read_csv(
@@ -188,6 +189,10 @@ def _cell_text(series: Series, row: Int) raises -> String:
     if series.is_chunked():
         var part = series._chunk_at(row)
         return _cell_text(part[0], part[1])
+    if series.dtype().is_decimal():
+        return format_decimal(
+            series._data[Column[Int128]]._get(row), series.dtype().scale()
+        )
     if series.dtype().is_temporal():
         return format_temporal(
             series._data[Column[Int64]]._get(row), series.dtype()
@@ -209,6 +214,8 @@ def _cell_valid(series: Series, row: Int) raises -> Bool:
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
             return series._data[Column[Scalar[D]]]._valid(row)
+    if series._data.isa[Column[Int128]]():
+        return series._data[Column[Int128]]._valid(row)
     if series._data.isa[BoolColumn]():
         return series._data[BoolColumn]._valid(row)
     return series._data[StringColumn]._valid(row)

@@ -39,7 +39,7 @@ def gen_left(rng: random.Random, rows: int) -> pl.DataFrame:
         {
             "k": [maybe(rng, rng.choice(WORDS[:4])) for _ in range(rows)],
             "g": [maybe(rng, rng.randint(-3, 3)) for _ in range(rows)],
-            "x": [maybe(rng, rng.choice([-2.5, -0.0, 0.0, 0.5, 1.25, 3.0, 1e10])) for _ in range(rows)],
+            "x": [maybe(rng, rng.choice([-2.5, -0.0, 0.0, 0.1, 0.2, 0.5, 1.25, 3.0, 1e10])) for _ in range(rows)],
             "y": [maybe(rng, rng.choice([-1.0, 0.25, 2.0, 7.5])) for _ in range(rows)],
             "n": [maybe(rng, rng.randint(-1000, 1000)) for _ in range(rows)],
             "b": [maybe(rng, rng.random() < 0.5) for _ in range(rows)],
@@ -58,7 +58,7 @@ def gen_right(rng: random.Random, rows: int) -> pl.DataFrame:
     )
 
 
-KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts"]
+KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal"]
 
 
 def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
@@ -76,6 +76,8 @@ def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
             "b": rng.choice(["true", "false"]),
         }[column]
         return ["filter", column, op, value]
+    if kind == "decimal":
+        return ["decimal", rng.choice(["add", "sub", "mul", "sum", "mean", "cast"])]
     if kind == "arith":
         pair = rng.choice([("x", "y"), ("g", "n"), ("n", "g")])
         op = rng.choice(["add", "sub", "mul", "div"])
@@ -165,6 +167,16 @@ def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.Dat
         c = pl.col(column)
         pred = {"gt": c > value, "lt": c < value, "ge": c >= value, "le": c <= value, "eq": c == value, "ne": c != value}[cmp]
         return left.filter(pred)
+    if op == "decimal":
+        dtype = pl.Decimal(15, 2)
+        x, y = pl.col("x").cast(dtype), pl.col("y").cast(dtype)
+        if spec[1] == "cast":
+            return left.select(x.cast(pl.String).alias("out"))
+        if spec[1] in ("sum", "mean"):
+            e = x.sum() if spec[1] == "sum" else x.mean()
+            return left.select(e.cast(pl.String).alias("out"))
+        e = {"add": x + y, "sub": x - y, "mul": x * y}[spec[1]]
+        return left.select(e.cast(pl.String).alias("out"))
     if op == "arith":
         a, b = pl.col(spec[2]), pl.col(spec[3])
         e = {"add": a + b, "sub": a - b, "mul": a * b, "div": a / b}[spec[1]]
