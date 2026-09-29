@@ -1,12 +1,13 @@
 """Join matrix: every mode against a nested-loop reference, plus schemas."""
 from std.testing import (
+    assert_almost_equal,
     TestSuite,
     assert_equal,
     assert_true,
     assert_false,
     assert_raises,
 )
-from dataframe import AnyValue, DataType, Column, DataFrame, Series
+from dataframe import AnyValue, DataType, Column, DataFrame, Series, col
 
 
 def nan() -> Float64:
@@ -549,6 +550,56 @@ def test_parallel_full_join_preserves_both_unmatched_sides() raises:
     assert_equal(result.item(at, "right_row").int64(), Int64(7))
     at += 1
     assert_equal(result.height(), at)
+
+
+def test_decimal_payloads_survive_joins() raises:
+    """Decimal columns carried through a join keep their values; they used
+    to come back as zeros because the gather skipped Int128 storage."""
+    var dtype = DataType.decimal(12, 2)
+    var left = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2, 3, 4])),
+            Series("d", Column[Int128]([Int128(125), -50, 999, 1])).with_dtype(
+                dtype
+            ),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int64]([2, 4, 4])),
+            Series("e", Column[Int128]([Int128(10), 20, 30])).with_dtype(dtype),
+        ]
+    )
+    var inner = left.join(right, "k")
+    assert_equal(inner.height(), 3)
+    assert_equal(String(inner.item(0, "d")), "-0.50")
+    assert_equal(String(inner.item(1, "e")), "0.20")
+    assert_equal(String(inner.item(2, "d")), "0.01")
+    var outer = left.join(right, "k", how="left")
+    assert_equal(outer.height(), 5)
+    assert_equal(String(outer.item(0, "d")), "1.25")
+    assert_true(outer.item(0, "e").is_null())
+    assert_true(outer.column("e").dtype() == dtype)
+    # A larger frame, through the same gather job with more rows.
+    var keys = List[Int64]()
+    var cents = List[Int128]()
+    for i in range(40_000):
+        keys.append(Int64(i % 4) + 1)
+        cents.append(Int128(i % 7))
+    var many = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("c", Column[Int128](cents^)).with_dtype(dtype),
+        ]
+    )
+    var joined = many.join(right, "k")
+    var total = joined.select(col("c").cast(DataType.FLOAT64).sum()).item()
+    var expected = Float64(0)
+    for i in range(40_000):
+        var k = i % 4 + 1
+        var matches = 1 if k == 2 else (2 if k == 4 else 0)
+        expected += Float64(matches * (i % 7)) / 100
+    assert_almost_equal(total.float64(), expected, atol=1e-6)
 
 
 def main() raises:

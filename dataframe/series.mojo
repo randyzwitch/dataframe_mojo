@@ -861,6 +861,11 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                         indices, Scalar[D](0)
                     ),
                 )
+        if self._data.isa[Column[Int128]]():
+            return Self(
+                self._name,
+                self._data[Column[Int128]].take_or_null(indices, Int128(0)),
+            )
         if self._data.isa[BoolColumn]():
             return Self(
                 self._name,

@@ -288,6 +288,28 @@ def test_decimal_casts_round_half_to_even() raises:
         assert_equal(integers.item(i, "d").int64(), expected[i])
 
 
+def test_integer_columns_cast_to_decimal() raises:
+    """Every row converts; the cast used to read rows after the first out
+    of bounds."""
+    var frame = DataFrame(
+        [
+            Series(
+                "i", Column[Int64]([3, -4, 0, 5], [True, True, False, True])
+            ),
+            Series("b", Column[Bool]([True, False, True, True])),
+        ]
+    )
+    var dtype = DataType.decimal(10, 2)
+    assert_equal(
+        one(frame, col("i").cast(dtype).cast("string")),
+        [String("3.00"), "-4.00", "null", "5.00"],
+    )
+    assert_equal(
+        one(frame, col("b").cast(dtype).cast("string")),
+        [String("1.00"), "0.00", "1.00", "1.00"],
+    )
+
+
 def test_cast_nodes_keep_the_parsed_dtype() raises:
     var fields: List[String] = ["a", "b"]
     var types: List[DataType] = [DataType.INT32, DataType.list(DataType.STRING)]

@@ -19,6 +19,22 @@ from std.memory import ArcPointer, Pointer
 from .bool_column import BoolColumn
 from .column import Column, _bit, _validity_bit
 from .dtype import DataType, NUMERIC_DTYPES
+
+# Fixed-width payloads a gather copies: the numeric types plus Int128, the
+# storage of decimal columns, which joins used to return as nulls.
+comptime GATHER_DTYPES: Array[DType, 11] = [
+    DType.int64,
+    DType.float64,
+    DType.int8,
+    DType.int16,
+    DType.int32,
+    DType.uint8,
+    DType.uint16,
+    DType.uint32,
+    DType.uint64,
+    DType.float32,
+    DType.int128,
+]
 from .expr import GT, LT, GE, LE, EQ, NE
 from .parallel import (
     _performance_core_count,
@@ -744,8 +760,8 @@ struct _GatherJob(Job):
                 if column._valid(row):
                     out_bits.unsafe_offset(k // 8)[] |= mask
             return
-        comptime for d in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[d]
+        comptime for d in range(len(GATHER_DTYPES)):
+            comptime D = GATHER_DTYPES[d]
             if self.source._data.isa[Column[Scalar[D]]]():
                 ref column = self.source._data[Column[Scalar[D]]]
                 var out = Pointer[Scalar[D], MutAnyOrigin](
@@ -923,8 +939,8 @@ def _allocate(column: Series, m: Int) raises -> Series:
 def _payload_address(series: Series) -> Int:
     if series._data.isa[BoolColumn]():
         return Int(series._data[BoolColumn]._data[].unsafe_ptr())
-    comptime for d in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[d]
+    comptime for d in range(len(GATHER_DTYPES)):
+        comptime D = GATHER_DTYPES[d]
         if series._data.isa[Column[Scalar[D]]]():
             return Int(series._data[Column[Scalar[D]]]._ptr())
     return 0
@@ -934,8 +950,8 @@ def _set_bits(mut series: Series, var bits: List[UInt8]):
     if series._data.isa[BoolColumn]():
         series._data[BoolColumn]._bits = ArcPointer(bits^)
         return
-    comptime for d in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[d]
+    comptime for d in range(len(GATHER_DTYPES)):
+        comptime D = GATHER_DTYPES[d]
         if series._data.isa[Column[Scalar[D]]]():
             series._data[Column[Scalar[D]]]._bits = ArcPointer(bits^)
             return
@@ -945,8 +961,8 @@ def _set_shared_bits(mut series: Series, bits: ArcPointer[List[UInt8]]):
     if series._data.isa[BoolColumn]():
         series._data[BoolColumn]._bits = bits.copy()
         return
-    comptime for d in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[d]
+    comptime for d in range(len(GATHER_DTYPES)):
+        comptime D = GATHER_DTYPES[d]
         if series._data.isa[Column[Scalar[D]]]():
             series._data[Column[Scalar[D]]]._bits = bits.copy()
             return
