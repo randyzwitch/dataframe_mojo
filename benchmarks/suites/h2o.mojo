@@ -3,8 +3,8 @@ reference SQL and the Polars versions). Usage: see suite_common.mojo."""
 from std.collections import Dict
 from std.sys import argv
 
-from dataframe import DataFrame, Expr, col, lit
-from suite_common import run, unsupported
+from dataframe import DataFrame, Expr, col, corr, lit
+from suite_common import run
 
 
 def groupby(query: String, t: Dict[String, DataFrame]) raises -> DataFrame:
@@ -53,7 +53,9 @@ def groupby(query: String, t: Dict[String, DataFrame]) raises -> DataFrame:
             .select_exprs([col("id6"), col("v3").alias("largest2_v3")])
         )
     if query == "q9":
-        raise unsupported("corr() is not implemented (#226)")
+        return x.group_by(["id2", "id4"]).agg(
+            [corr(col("v1"), col("v2")).pow(lit(2.0)).alias("r2")]
+        )
     if query == "q10":
         return x.group_by(["id1", "id2", "id3", "id4", "id5", "id6"]).agg(
             [col("v3").sum().alias("v3"), col("v1").len().alias("count")]

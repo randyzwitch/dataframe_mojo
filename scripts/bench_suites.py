@@ -125,7 +125,7 @@ VARIANTS = {
         "k100_sorted": {"k": 100, "nas": 0, "sort": True},
     },
     "h2o_join": {"na0": {"nas": 0}, "na5": {"nas": 5}},
-    "pdsh": {"base": {}},
+    "pdsh": {"base": {}, "decimal": {"decimal": True}},
     "clickbench": {"base": {}},
 }
 
@@ -177,7 +177,7 @@ def tables(suite, variant, scale):
     if suite == "h2o_join":
         return datagen.h2o_join(size["h2o_rows"], spec["nas"])
     if suite == "pdsh":
-        root = datagen.pdsh(size["pdsh_sf"])
+        root = datagen.pdsh(size["pdsh_sf"], spec.get("decimal", False))
         return {name: root / f"{name}.parquet" for name in datagen.PDSH_TABLES}
     return {"hits": datagen.clickbench(size["clickbench_partitions"])}
 
