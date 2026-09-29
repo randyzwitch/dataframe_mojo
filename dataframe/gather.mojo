@@ -489,12 +489,26 @@ struct _SortedChunkTakeJob(Job):
                 next_row += len(chunk)
                 offset = end
                 continue
-            var local = List[Int]()
-            while next_row < len(rows) and rows[next_row] < end:
-                local.append(rows[next_row] - offset)
-                next_row += 1
-            if len(local) > 0:
-                selected.append(chunk.take(local))
+            # The indices are sorted: find this chunk's share by bisection
+            # and gather it in place, without copying it out (#328).
+            var low = next_row
+            var high = len(rows)
+            while low < high:
+                var middle = (low + high) // 2
+                if rows[middle] < end:
+                    low = middle + 1
+                else:
+                    high = middle
+            if low > next_row:
+                var gathered = chunk._take_range(rows, next_row, low, offset)
+                if gathered:
+                    selected.append(gathered.take())
+                else:
+                    var local = List[Int](capacity=low - next_row)
+                    for at in range(next_row, low):
+                        local.append(rows[at] - offset)
+                    selected.append(chunk.take(local))
+            next_row = low
             offset = end
         self.result = Series._from_chunks(selected^)
 

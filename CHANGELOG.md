@@ -43,6 +43,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
   already did. PDS-H q6's predicate on `lineitem` goes from 113 ms to 7 ms at
   8 threads, and the whole filter, including the row gather, from 127 ms to
   33 ms (#327).
+- Gathers copy runs of consecutive rows with `memcpy` instead of appending
+  row by row: fixed-width columns, and strings through their offsets, which
+  used to cost about 85 ns per row whatever their length. Chunked (Parquet)
+  columns gather each chunk's share of the filter indices in place. Filters
+  and joins get faster; PDS-H runs in 0.70 of the time (#328).
 - Streaming lazy group-by merges batch states in groups, sized so total merge
   work stays linear, instead of re-encoding every group seen so far on each
   batch. Large merges use the partitioned key encoder, and per-group state
