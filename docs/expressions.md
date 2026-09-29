@@ -69,11 +69,13 @@ and float64; use typed literals`.
 
 Decimal arithmetic follows current Polars result types: `+`, `-`, `*`, and `/`
 return precision 38 with the larger operand scale. Multiplication and division
-truncate discarded fractional digits toward zero. Decimal division by zero
-produces null. Decimal `sum`, `min`, and `max` keep the input's decimal type
-(`sum` is exact and raises when it exceeds the precision); `mean` returns
-Float64, as Polars does, computed from the exact sum so that only the final
-conversion rounds.
+round the digits past that scale half to even, as Polars does (0.625 becomes
+0.62, 0.375 becomes 0.38, and -0.625 becomes -0.62). Casts that drop decimal
+digits, to a smaller scale or to an integer, round the same way (1.5 and 2.5
+both become 2). Decimal division by zero produces null. Decimal `sum`, `min`,
+and `max` keep the input's decimal type (`sum` is exact and raises when it
+exceeds the precision); `mean` returns Float64, as Polars does, computed from
+the exact sum so that only the final conversion rounds.
 
 ### Selectors
 

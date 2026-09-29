@@ -268,6 +268,26 @@ def test_decimal_casts_are_exact_and_validate_precision() raises:
     )
 
 
+def test_decimal_casts_round_half_to_even() raises:
+    """Casts that drop decimal digits round half to even, as Polars does
+    (#342): to a smaller scale and to an integer."""
+    var four = Series(
+        "d", Column[Int128]([Int128(10050), 10150, -10050, 10051, 26750])
+    ).with_dtype(DataType.decimal(15, 4))
+    var frame = DataFrame([four^])
+    assert_equal(
+        one(frame, col("d").cast(DataType.decimal(15, 2)).cast("string")),
+        [String("1.00"), "1.02", "-1.00", "1.01", "2.68"],
+    )
+    var two = Series(
+        "d", Column[Int128]([Int128(150), -150, 270, -270, 50, 250])
+    ).with_dtype(DataType.decimal(15, 2))
+    var integers = DataFrame([two^]).select(col("d").cast("int64"))
+    var expected: List[Int64] = [2, -2, 3, -3, 0, 2]
+    for i in range(integers.height()):
+        assert_equal(integers.item(i, "d").int64(), expected[i])
+
+
 def test_cast_nodes_keep_the_parsed_dtype() raises:
     var fields: List[String] = ["a", "b"]
     var types: List[DataType] = [DataType.INT32, DataType.list(DataType.STRING)]

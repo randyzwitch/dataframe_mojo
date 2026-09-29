@@ -107,3 +107,30 @@ def decimal_mean(total: Int128, count: Int64, scale: Int) -> Float64:
         Float64(digits) + Float64(left) / Float64(count)
     ) / Float64(unit)
     return -mean if negative else mean
+
+
+def round_half_even(
+    magnitude: Int128, remainder: Int128, divisor: Int128
+) -> Int128:
+    """The quotient `magnitude` rounded half to even, given the nonnegative
+    `remainder` left over from dividing by `divisor` (#342). Polars rounds
+    decimal products, quotients and scale-reducing casts this way."""
+    var rest = (
+        divisor - remainder
+    )  # compared without doubling, which could overflow
+    if remainder > rest or (remainder == rest and magnitude % 2 == 1):
+        return magnitude + 1
+    return magnitude
+
+
+def divide_half_even(numerator: Int128, divisor: Int128) -> Int128:
+    """numerator / divisor rounded half to even; divisor must be positive.
+    Works on the magnitude, so a negative tie rounds like a positive one
+    (-0.625 to -0.62, as 0.625 to 0.62)."""
+    var negative = numerator < 0
+    var magnitude = -numerator if negative else numerator
+    var quotient = magnitude // divisor
+    var rounded = round_half_even(
+        quotient, magnitude - quotient * divisor, divisor
+    )
+    return -rounded if negative else rounded
