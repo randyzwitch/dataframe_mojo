@@ -2,7 +2,7 @@
 from .dtype import DataType, NUMERIC_DTYPES
 from std.utils import Variant
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, SCALAR_DTYPES, gather_scalars
 from .nested_column import ListColumn, StructColumn
 from .string_column import StringColumn
 from .string_view import StringViewStorage
@@ -829,12 +829,49 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         result._dtype = self._dtype
         return result^
 
+    def _take_range(
+        self, indices: List[Int], first: Int, last: Int, base: Int
+    ) raises -> Optional[Self]:
+        """Rows indices[first:last] minus `base`, through the bulk gathers
+        (#328), or None for storage without one. A physical chunk of a
+        larger column uses it to read its share of shared filter indices
+        without copying them."""
+        comptime for i in range(len(SCALAR_DTYPES)):
+            comptime D = SCALAR_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
+                var result = Self._wrap(
+                    self._name,
+                    gather_scalars[D](
+                        self._data[Column[Scalar[D]]],
+                        indices,
+                        False,
+                        first,
+                        last,
+                        base,
+                    ),
+                )
+                result._dtype = self._dtype
+                return result^
+        if self._data.isa[StringColumn]():
+            ref strings = self._data[StringColumn]
+            if not strings._is_view_storage():
+                var result = Self(
+                    self._name,
+                    strings._gather_offsets(indices, first, last, False, base),
+                )
+                result._dtype = self._dtype
+                return result^
+        return None
+
     def _take_storage(self, indices: List[Int]) raises -> Self:
-        comptime for i in range(len(FixedElements.Ts)):
-            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
-            if self._data.isa[Column[E]]():
+        comptime for i in range(len(SCALAR_DTYPES)):
+            comptime D = SCALAR_DTYPES[i]
+            if self._data.isa[Column[Scalar[D]]]():
                 return Self._wrap(
-                    self._name, self._data[Column[E]].take(indices)
+                    self._name,
+                    gather_scalars[D](
+                        self._data[Column[Scalar[D]]], indices, False
+                    ),
                 )
         if self._data.isa[BoolColumn]():
             return Self(self._name, self._data[BoolColumn].take(indices))
@@ -852,20 +889,15 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return result^
 
     def _take_or_null_storage(self, indices: List[Int]) raises -> Self:
-        comptime for i in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[i]
+        comptime for i in range(len(SCALAR_DTYPES)):
+            comptime D = SCALAR_DTYPES[i]
             if self._data.isa[Column[Scalar[D]]]():
-                return Self(
+                return Self._wrap(
                     self._name,
-                    self._data[Column[Scalar[D]]].take_or_null(
-                        indices, Scalar[D](0)
+                    gather_scalars[D](
+                        self._data[Column[Scalar[D]]], indices, True
                     ),
                 )
-        if self._data.isa[Column[Int128]]():
-            return Self(
-                self._name,
-                self._data[Column[Int128]].take_or_null(indices, Int128(0)),
-            )
         if self._data.isa[BoolColumn]():
             return Self(
                 self._name,

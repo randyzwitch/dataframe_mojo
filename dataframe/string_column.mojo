@@ -11,7 +11,7 @@ mutated while shared.
 Internal kernels read rows as borrowed `StringSlice`s via `_get`; public
 accessors return owned `String`s.
 """
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, unsafe_memcpy
 from .string_view import StringViewStorage
 from .column import (
     Column,
@@ -264,42 +264,111 @@ struct StringColumn(Copyable, Sized):
         return self._end(self._length - 1) - self._start(0)
 
     def take(self, indices: List[Int]) raises -> Self:
-        for i in indices:
-            self._check_index(i)
         if self._is_view_storage():
+            for i in indices:
+                self._check_index(i)
             var gathered = self._view_storage.value()._gather(
                 indices, self._offset
             )
             return Self(gathered^)
-        var total = 0
-        for i in indices:
-            total += self._byte_length(i)
-        var builder = StringBuilder(len(indices), total)
-        for i in indices:
-            builder._append_row(self, i)
-        return builder^.finish()
+        return self._gather_offsets(indices, 0, len(indices), False)
 
     def take_or_null(self, indices: List[Int], fill: String) raises -> Self:
         """Gather rows, treating only -1 as a missing row (for outer joins)."""
-        for i in indices:
-            if i != -1:
-                self._check_index(i)
         if self._is_view_storage():
+            for i in indices:
+                if i != -1:
+                    self._check_index(i)
             var gathered = self._view_storage.value()._gather(
                 indices, self._offset, allow_missing=True
             )
             return Self(gathered^)
-        var total = 0
-        for i in indices:
-            if i != -1:
-                total += self._byte_length(i)
-        var builder = StringBuilder(len(indices), total)
-        for i in indices:
-            if i == -1:
-                builder.append_null()
+        return self._gather_offsets(indices, 0, len(indices), True)
+
+    def _gather_offsets(
+        self,
+        indices: List[Int],
+        first: Int,
+        last: Int,
+        allow_missing: Bool,
+        base: Int = 0,
+    ) raises -> Self:
+        """Rows indices[first:last] of offset storage, in bulk (#328).
+
+        One pass checks bounds and prefix-sums the output offsets from the
+        source offsets; bytes are then copied with one memcpy per run of
+        consecutive source rows, which a filter produces in long stretches.
+        Validity is gathered only when the source has nulls or a row is
+        missing (-1 with allow_missing, as outer joins pass). Each index
+        has `base` subtracted, so a chunk of a larger column can read its
+        share of shared filter indices without a copy.
+        """
+        var n = last - first
+        var rows = indices.unsafe_ptr().unsafe_offset(first)
+        var source = self._offsets[].unsafe_ptr().unsafe_offset(self._offset)
+        var offsets = List[Int64](length=n + 1, fill=0)
+        var out = offsets.unsafe_ptr()
+        var total = Int64(0)
+        var missing = False
+        for k in range(n):
+            var row = rows.unsafe_offset(k)[]
+            if row != -1:
+                row -= base
+            if row == -1 and allow_missing:
+                missing = True
+            elif row < 0 or row >= self._length:
+                raise Error("Column index out of bounds")
             else:
-                builder._append_row(self, i)
-        return builder^.finish()
+                total += (
+                    source.unsafe_offset(row + 1)[]
+                    - source.unsafe_offset(row)[]
+                )
+            out.unsafe_offset(k + 1)[] = total
+        var bytes = List[UInt8](length=Int(total), fill=0)
+        var src = self._bytes[].unsafe_ptr()
+        var dst = bytes.unsafe_ptr()
+        var k = 0
+        while k < n:
+            var row = rows.unsafe_offset(k)[]
+            if row == -1:
+                k += 1
+                continue
+            row -= base
+            # Extend the run while source rows are consecutive.
+            var end = k + 1
+            while (
+                end < n
+                and rows.unsafe_offset(end)[]
+                == rows.unsafe_offset(end - 1)[] + 1
+            ):
+                end += 1
+            var start_byte = Int(source.unsafe_offset(row)[])
+            var count = (
+                Int(
+                    source.unsafe_offset(
+                        rows.unsafe_offset(end - 1)[] - base + 1
+                    )[]
+                )
+                - start_byte
+            )
+            if count > 0:
+                unsafe_memcpy(
+                    dest=dst.unsafe_offset(Int(out.unsafe_offset(k)[])),
+                    src=src.unsafe_offset(start_byte),
+                    count=count,
+                )
+            k = end
+        var bits = List[UInt8]()
+        ref source_bits = self._bits[]
+        if missing or len(source_bits) > 0:
+            bits = List[UInt8](length=(n + 7) // 8, fill=0)
+            for at in range(n):
+                var row = rows.unsafe_offset(at)[]
+                if row != -1 and _validity_bit(
+                    source_bits, self._offset + row - base
+                ):
+                    bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
+        return Self(bytes=bytes^, offsets=offsets^, bits=bits^, length=n)
 
     def _take_range(
         self,
@@ -314,19 +383,7 @@ struct StringColumn(Copyable, Sized):
                 indices, first, last, self._offset, allow_missing
             )
             return Self(gathered^)
-        var total = 0
-        for at in range(first, last):
-            var row = indices[at]
-            if row != -1 or not allow_missing:
-                total += self._byte_length(row)
-        var builder = StringBuilder(last - first, total)
-        for at in range(first, last):
-            var row = indices[at]
-            if row == -1 and allow_missing:
-                builder.append_null()
-            else:
-                builder._append_row(self, row)
-        return builder^.finish()
+        return self._gather_offsets(indices, first, last, allow_missing)
 
     def slice(self, offset: Int, length: Int) raises -> Self:
         """A zero-copy window sharing this column's buffers."""
