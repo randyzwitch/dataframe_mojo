@@ -28,6 +28,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Streaming lazy group-by merges batch states in groups, sized so total merge
+  work stays linear, instead of re-encoding every group seen so far on each
+  batch. Large merges use the partitioned key encoder, and per-group state
+  grows in place rather than being rebuilt. The 20 affected ClickBench
+  queries run 22x faster (geometric mean; q32 434 s to 5 s) (#326).
 - Retired the in-repo benchmarks the external suites supersede or whose
   target code is gone: `bench_vs_polars` (`bench-polars`), the upstream join
   ports, `bench_progression`, `bench_aggregate_fusion` and `bench_agg_shapes`.

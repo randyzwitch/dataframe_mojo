@@ -4659,6 +4659,35 @@ def _stream_reductions(expressions: List[Expr]) -> Bool:
     return True
 
 
+def _encode_in_order(keys: List[Series]) raises -> RowKeys:
+    """Dense ids in first-occurrence order, as `encode_rows` gives, using
+    the hash-partitioned parallel encoder for large high-cardinality keys.
+
+    A streaming merge encodes up to every group seen so far, and on 10M
+    distinct keys the single-dictionary `encode_rows` took 6 s where the
+    partitioned encoder takes a fraction of that (#326). Its numbering is
+    unspecified, so one pass over the ids renumbers them by first
+    occurrence and records each group's first row.
+    """
+    var n = len(keys[0])
+    var workers = worker_count(n)
+    if workers <= 1 or low_cardinality(keys):
+        return encode_rows(keys, nulls_equal=True)
+    var encoded = encode_partitioned(keys, workers, nulls_equal=True)
+    var renumbered = List[Int](length=encoded.count(), fill=-1)
+    var ids = List[Int](capacity=n)
+    var representatives = List[Int](capacity=encoded.count())
+    for row in range(n):
+        var id = encoded.ids[row]
+        var target = renumbered[id]
+        if target < 0:
+            target = len(representatives)
+            renumbered[id] = target
+            representatives.append(row)
+        ids.append(target)
+    return RowKeys(ids^, representatives^)
+
+
 struct _StreamReduction(Movable):
     var keys: DataFrame
     var states: List[Reducer]
@@ -4739,6 +4768,47 @@ struct _StreamReduction(Movable):
                 self.dtypes.append(bound.dtypes[i])
                 rewritten._nodes[i] = col(name)._nodes[0].copy()
             self.outputs.append(subtree(rewritten, len(rewritten._nodes) - 1))
+
+    def merge_all(mut self, others: List[Self]) raises:
+        """Merge several partial states in one pass.
+
+        The accumulated keys and every other state's keys are encoded
+        together once, so merging k batches costs time in proportion to
+        their groups plus the accumulated ones, not k times the accumulated
+        groups. Accumulated keys come first and are distinct, so existing
+        groups keep their ids and new ones follow in first-occurrence order.
+        """
+        if len(others) == 0:
+            return
+        var count = 1
+        var mappings = List[List[Int]](capacity=len(others))
+        if self.grouped:
+            var parts = List[DataFrame](capacity=len(others) + 1)
+            parts.append(self.keys.copy())
+            for j in range(len(others)):
+                parts.append(others[j].keys.copy())
+            var combined = concat(parts^)
+            var groups = _encode_in_order(combined._columns)
+            count = groups.count()
+            var start = self.keys.height()
+            for j in range(len(others)):
+                var height = others[j].keys.height()
+                var mapping = List[Int](capacity=height)
+                for i in range(height):
+                    mapping.append(groups.ids[start + i])
+                start += height
+                mappings.append(mapping^)
+            self.keys = combined.take(groups.representatives^)
+        else:
+            for _ in range(len(others)):
+                mappings.append(List[Int]())
+        for i in range(len(self.states)):
+            self.states[i].grow(count)
+            for j in range(len(others)):
+                self.states[i].merge(others[j].states[i], mappings[j])
+
+    def group_count(self) -> Int:
+        return self.keys.height()
 
     def merge(mut self, other: Self) raises:
         var mapping = List[Int]()

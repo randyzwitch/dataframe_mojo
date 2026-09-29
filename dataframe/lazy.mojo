@@ -607,6 +607,14 @@ struct LazyFrame(Copyable):
         var ended = False
         var outputs = List[DataFrame]()
         var reductions = List[_StreamReduction]()
+        # Batch states wait here and are merged together once their groups
+        # reach the accumulated count (or 64 batches). Each merge then covers
+        # at least as much new work as old, so total merge work stays linear
+        # in the input, where merging every batch on arrival re-encoded all
+        # accumulated groups each time (#326); pending state never exceeds
+        # about the accumulated state, which keeps memory bounded.
+        var pending = List[_StreamReduction]()
+        var pending_groups = 0
         while not ended:
             var jobs = List[_StreamJob]()
             for _ in range(workers):
@@ -654,7 +662,16 @@ struct LazyFrame(Copyable):
                     if len(reductions) == 0:
                         reductions.append(jobs[i].reduced.pop())
                     else:
-                        reductions[0].merge(jobs[i].reduced[0])
+                        var part = jobs[i].reduced.pop()
+                        pending_groups += part.group_count()
+                        pending.append(part^)
+                        if (
+                            pending_groups >= reductions[0].group_count()
+                            or len(pending) >= 64
+                        ):
+                            reductions[0].merge_all(pending)
+                            pending = List[_StreamReduction]()
+                            pending_groups = 0
                 else:
                     var part = jobs[i].frame.copy()
                     var dropped = min(skip, part.height())
@@ -669,6 +686,7 @@ struct LazyFrame(Copyable):
                 ended = True
         pool.release()
         if len(reductions):
+            reductions[0].merge_all(pending)
             return reductions[0].finish()
         if len(outputs):
             return concat(outputs)
