@@ -22,6 +22,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
   time_zone)`; CSV inference and `CsvField.datetime(time_zone)`; Arrow
   `tsu:<zone>` import and export; and Parquet timestamps keep their zone.
   Zones come from the system tzdata (#222).
+- `DataType.BINARY` columns of arbitrary bytes (Arrow `large_binary`):
+  `Series.binary(...)` and `AnyValue.bytes()`, byte-wise sorting, grouping,
+  joins and reductions, casts to and from string with UTF-8 checks, Polars'
+  `b"..."` display, Arrow `Z`/`z` import and export, and Parquet binary
+  columns read and written (#120).
 - Expressions `interpolate`, `interpolate_by`, `cut`, and `qcut`, including
   per-partition interpolation, Polars-compatible bin boundaries and labels,
   and optional breakpoint structs (#227).

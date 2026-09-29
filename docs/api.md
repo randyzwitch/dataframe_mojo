@@ -27,6 +27,10 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
 - `def __eq__(self, other: Self) -> Bool`
 - `def nested(dtype: DataType, var series: Series) -> Self`
   A list value (its elements as a series) or a struct value (a one-row series of the struct column).
+- `def binary(var row: Series) -> Self`
+  A binary value, held as a one-row binary series so its bytes never pass through a String.
+- `def bytes(self) -> List[UInt8]`
+  A binary value's bytes.
 - `def list(self) -> Series`
   A list value's elements.
 - `def struct_field(self, name: String) -> Self`
@@ -442,8 +446,9 @@ struct(names, dtypes) holds one value of each named field per row.
 - `def is_datetime(self) -> Bool`
 - `def is_duration(self) -> Bool`
 - `def is_time(self) -> Bool`
+- `def is_binary(self) -> Bool`
 - `def physical(self) -> Self`
-  The storage type: INT64 for temporal types, otherwise self.
+  The storage type: INT64 for temporal types, STRING for binary (the same offsets-and-bytes layout), otherwise self.
 - `def is_numeric(self) -> Bool`
 - `def is_integer(self) -> Bool`
 - `def is_float(self) -> Bool`
@@ -1105,10 +1110,13 @@ A named column of one supported dtype, plus expression-backed methods.
   Number of physical Arrow arrays backing this series.
 - `def chunks(self) -> List[Self]`
   Owned column views sharing the immutable buffers of each array.
+- `def binary(var name: String, values: List[List[UInt8]], valid: List[Bool]) -> Self`
+  A binary column: arbitrary bytes per row, never read as text.
+- `def binary(var name: String, values: List[List[UInt8]]) -> Self`
 - `def rechunk(self) -> Self`
   Materialize one contiguous Arrow array, preserving name and dtype.
 - `def with_dtype(self, dtype: DataType) -> Self`
-  The same values tagged with another logical type that shares their storage (temporal types and INT64).
+  The same values tagged with another logical type that shares their storage (temporal types and INT64, string and binary). Binary cannot be retagged as string: cast it, so its bytes are checked as UTF-8.
 - `def name(self) -> String`
 - `def write_to(self, mut writer: T)`
 - `def to_string(self, *, max_rows: Int = Int(10), max_string_length: Int = Int(32)) -> String`
@@ -1219,6 +1227,8 @@ A window onto shared UTF-8 bytes, Int64 offsets, and validity.
   Adopt finished buffers; offsets must have length + 1 entries.
 - `def __init__(out self, var storage: StringViewStorage)`
   Adopt finished Arrow Utf8View descriptors and their Arc blocks.
+- `def from_bytes(values: List[List[UInt8]], valid: List[Bool]) -> Self`
+  Arbitrary bytes per row, not checked for UTF-8: the storage of a binary column. Tag the Series `DataType.BINARY` before reading.
 - `def __len__(self) -> Int`
 - `def to_large_utf8(self) -> Self`
   Return an owned large_utf8 adapter when a contiguous ABI is needed.

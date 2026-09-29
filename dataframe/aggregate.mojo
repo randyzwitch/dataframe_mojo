@@ -577,7 +577,8 @@ struct Reducer(Movable):
             fill=False,
         )
         self.strings = List[String](
-            length=n if picking and input_dtype == DataType.STRING else 0,
+            length=n if picking
+            and input_dtype.physical() == DataType.STRING else 0,
             fill="",
         )
         self.int_sets = List[Dict[Int64, Bool]](
@@ -588,7 +589,8 @@ struct Reducer(Movable):
             fill=Dict[UInt64, Bool](),
         )
         self.string_sets = List[Dict[String, Bool]](
-            length=n if distinct and input_dtype == DataType.STRING else 0,
+            length=n if distinct
+            and input_dtype.physical() == DataType.STRING else 0,
             fill=Dict[String, Bool](),
         )
         self.positions = List[Int64](length=n if arg else 0, fill=0)
@@ -617,7 +619,8 @@ struct Reducer(Movable):
             length=n if mode and is_float else 0, fill=Dict[UInt64, Float64]()
         )
         self.mode_strings = List[Dict[String, Int64]](
-            length=n if mode and input_dtype == DataType.STRING else 0,
+            length=n if mode
+            and input_dtype.physical() == DataType.STRING else 0,
             fill=Dict[String, Int64](),
         )
         self.mode_nulls = List[Int64](length=n if mode else 0, fill=0)
@@ -1454,7 +1457,7 @@ struct Reducer(Movable):
                     total = len(values)
                 offsets.append(Int64(total))
             child = Series("", StringColumn(values, valid))
-        if self.logical.is_temporal():
+        if self.logical.is_temporal() or self.logical.is_binary():
             child = child.with_dtype(self.logical)
         return Series("", ListColumn(offsets^, child.renamed("item")))
 
@@ -1580,7 +1583,7 @@ struct Reducer(Movable):
             )
         else:
             values = Series("", StringColumn(values_s, valid))
-        if self.logical.is_temporal():
+        if self.logical.is_temporal() or self.logical.is_binary():
             values = values.with_dtype(self.logical)
         var tally: Series
         if normalize:

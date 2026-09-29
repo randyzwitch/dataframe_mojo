@@ -44,6 +44,11 @@ def main() raises:
                     "zoned_" + unit, Column[Int64]([0, -123, 456])
                 ).with_dtype(DataType.datetime(unit, "America/New_York"))
             )
+        columns.append(
+            Series.binary(
+                "binary", [[0xFF, 0x00], [], [0x61]], [True, False, True]
+            )
+        )
         write_parquet(
             DataFrame(columns^),
             directory + "/" + codec + "-temporal.parquet",

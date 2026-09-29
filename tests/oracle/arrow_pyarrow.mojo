@@ -368,6 +368,42 @@ def check_time_zone_round_trip() raises:
     assert_true(series.get(1).is_null())
 
 
+def check_binary_round_trip() raises:
+    """Arrow large_binary and binary arrays (#120) keep non-UTF-8 bytes,
+    and nulls, both ways."""
+    var pa = Python.import_module("pyarrow")
+    var builtins = Python.import_module("builtins")
+    var values = Python.list(
+        builtins.bytes(Python.list(255, 0, 122)),
+        Python.none(),
+        builtins.bytes(Python.list()),
+        builtins.bytes(Python.list(237, 160, 128)),
+        builtins.bytes(Python.list(97, 98, 99)),
+    )
+    for kind in ["large_binary", "binary"]:
+        var source = pa.array(
+            values,
+            type=pa.large_binary() if kind == "large_binary" else pa.binary(),
+        )
+        var c = CStructs()
+        source._export_to_c(c.array, c.schema)
+        var series = import_arrow_series(c.array, c.schema)
+        c.free()
+        assert_true(series.dtype() == DataType.BINARY, kind)
+        assert_true(series.get(1).is_null())
+        assert_equal(series.get(0).bytes(), [UInt8(255), 0, 122])
+        var back = CStructs()
+        export_arrow_series(
+            series,
+            _at[ArrowArray](back.array)[],
+            _at[ArrowSchema](back.schema)[],
+        )
+        var again = pa.Array._import_from_c(back.array, back.schema)
+        assert_equal(String(again.type), "large_binary")
+        assert_true(Bool(again.equals(source.cast(pa.large_binary()))), kind)
+        back.free()
+
+
 def main() raises:
     check_export_is_valid_arrow()
     check_round_trips_with_offsets()
@@ -375,5 +411,6 @@ def main() raises:
     check_pyarrow_nested_types()
     check_decimal128_round_trip()
     check_time_zone_round_trip()
+    check_binary_round_trip()
     check_unsupported_types_are_rejected()
     print("arrow C data interface: pyarrow interop ok")

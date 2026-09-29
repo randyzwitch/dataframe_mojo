@@ -743,6 +743,8 @@ struct _GatherJob(Job):
                     rows, self.start, self.end, self.or_null
                 ),
             )
+            # Keep the logical type: binary shares the string layout.
+            self.piece._dtype = self.source.dtype()
             return
         var out_bits = Pointer[UInt8, MutAnyOrigin](
             unsafe_from_address=self.bits

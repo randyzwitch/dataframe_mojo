@@ -4,6 +4,7 @@ from std.memory import ArcPointer
 
 from .dtype import DataType, NUMERIC_DTYPES
 from .nested_column import _Box
+from .string_column import StringColumn, escape_bytes
 from .series import Series
 from .temporal import format as format_temporal
 from .decimal import format_decimal
@@ -72,6 +73,24 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
         var result = Self(dtype, True, 0, 0, False, "")
         result._nested = ArcPointer(_Box[Series](series^))
         return result^
+
+    @staticmethod
+    def binary(var row: Series) -> Self:
+        """A binary value, held as a one-row binary series so its bytes
+        never pass through a String."""
+        var result = Self(DataType.BINARY, True, 0, 0, False, "")
+        result._nested = ArcPointer(_Box[Series](row^))
+        return result^
+
+    def bytes(self) raises -> List[UInt8]:
+        """A binary value's bytes."""
+        self._check(DataType.BINARY)
+        var out = List[UInt8]()
+        out.extend(self._binary_span())
+        return out^
+
+    def _binary_span(self) -> Span[UInt8, ImmutAnyOrigin]:
+        return self._nested.value()[].get()._data[StringColumn]._row_bytes(0)
 
     def list(self) raises -> Series:
         """A list value's elements."""
@@ -199,6 +218,15 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
             return both_nan or self._float == other._float
         if self._dtype == DataType.BOOL:
             return self._bool == other._bool
+        if self._dtype.is_binary():
+            var a = self._binary_span()
+            var b = other._binary_span()
+            if len(a) != len(b):
+                return False
+            for i in range(len(a)):
+                if a[i] != b[i]:
+                    return False
+            return True
         if self._dtype.is_nested():
             if not self._nested or not other._nested:
                 return False
@@ -212,6 +240,8 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
     def write_to(self, mut writer: Some[Writer]):
         if not self._valid:
             writer.write("null")
+        elif self._dtype.is_binary():
+            writer.write(escape_bytes(self._binary_span()))
         elif self._dtype.is_list():
             writer.write("[")
             try:

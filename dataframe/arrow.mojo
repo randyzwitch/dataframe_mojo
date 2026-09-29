@@ -265,6 +265,8 @@ def _format(dtype: DataType) raises -> String:
         return "b"
     if dtype == DataType.STRING:
         return "U"
+    if dtype.is_binary():
+        return "Z"
     if dtype == DataType.DATE:
         return "tdD"
     if dtype == DataType.TIME:
@@ -628,8 +630,10 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
                 length=length,
             ),
         )
-    if format == "U" or format == "u":
-        var large = format == "U"
+    if format == "U" or format == "u" or format == "Z" or format == "z":
+        # large_utf8/utf8 and large_binary/binary share one layout; binary
+        # is tagged so its bytes are never read as text.
+        var large = format == "U" or format == "Z"
         var offsets_address = _buffer(array, 1)
         var data = _buffer(array, 2)
 
@@ -645,12 +649,15 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
         var offsets = List[Int64](capacity=length + 1)
         for i in range(length + 1):
             offsets.append(Int64(text_offset(offset + i) - first))
-        return Series(
+        var result = Series(
             name,
             StringColumn(
                 bytes=text^, offsets=offsets^, bits=bits^, length=length
             ),
         )
+        if format == "Z" or format == "z":
+            return result.with_dtype(DataType.BINARY)
+        return result^
     if format == "tdD":
         return Series(
             name, _int64_column(_as_int64[Int32](array, length, offset), bits^)

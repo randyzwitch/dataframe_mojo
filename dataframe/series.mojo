@@ -189,6 +189,21 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             result._chunked = ArcPointer(_SeriesChunks(arrays^, ends^))
         return result^
 
+    @staticmethod
+    def binary(
+        var name: String, values: List[List[UInt8]], valid: List[Bool]
+    ) raises -> Self:
+        """A binary column: arbitrary bytes per row, never read as text."""
+        var result = Self(name^, StringColumn.from_bytes(values, valid))
+        result._dtype = DataType.BINARY
+        return result^
+
+    @staticmethod
+    def binary(var name: String, values: List[List[UInt8]]) raises -> Self:
+        return Self.binary(
+            name^, values, List[Bool](length=len(values), fill=True)
+        )
+
     def rechunk(self) raises -> Self:
         """Materialize one contiguous Arrow array, preserving name and dtype."""
         if not self.is_chunked():
@@ -218,7 +233,9 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             var merged = StringViewStorage._concat_many(
                 storages^, offsets^, lengths^
             )
-            return Self(self._name, StringColumn(merged^))
+            var merged_series = Self(self._name, StringColumn(merged^))
+            merged_series._dtype = self._dtype
+            return merged_series^
         result._reserve_rows(len(self), self._text_bytes())
         for i in range(1, len(parts)):
             result._append_series(parts[i])
@@ -259,7 +276,10 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
 
     def with_dtype(self, dtype: DataType) raises -> Self:
         """The same values tagged with another logical type that shares their
-        storage (temporal types and INT64)."""
+        storage (temporal types and INT64, string and binary). Binary cannot
+        be retagged as string: cast it, so its bytes are checked as UTF-8."""
+        if self._dtype.is_binary() and dtype == DataType.STRING:
+            raise Error("binary cannot be tagged as string; cast it instead")
         if dtype.physical() != self._dtype.physical():
             raise Error(
                 "cannot tag "
@@ -374,7 +394,9 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 self._dtype, Self(self._name, structs.slice(index, 1))
             )
         if self._data[StringColumn].is_null(index):
-            return AnyValue.null(DataType.STRING)
+            return AnyValue.null(self._dtype)
+        if self._dtype.is_binary():
+            return AnyValue.binary(self.slice(index, 1))
         return AnyValue(String(self._data[StringColumn]._get(index)))
 
     def equals(
@@ -1174,7 +1196,10 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return Self(name^, ListColumn._nulls(length, dtype.inner()))
         if dtype.is_struct():
             return Self(name^, StructColumn._nulls(length, dtype))
-        return Self(name^, StringColumn._nulls(length))
+        var strings = Self(name^, StringColumn._nulls(length))
+        if dtype.is_binary():
+            strings._dtype = DataType.BINARY
+        return strings^
 
     def append(self, other: Self) raises -> Self:
         """Return a new series with other's rows after this one's."""

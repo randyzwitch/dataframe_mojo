@@ -138,7 +138,7 @@ Float64 accepts the standard parser's values, including `nan`, and only explicit
 fields in the order given and `row_groups=[...]` selects row groups.
 Integer and float widths, strings, booleans, dates and timestamps carry
 over with their nulls. Dictionary columns arrive as plain strings, float16
-as float32, and a timestamp keeps its time zone. Lists and structs map recursively. Decimal128 columns map to `DataType.decimal(precision, scale)`; binary columns are not supported yet.
+as float32, and a timestamp keeps its time zone. Lists and structs map recursively. Decimal128 columns map to `DataType.decimal(precision, scale)`; binary columns map to `DataType.BINARY`.
 
 ```mojo
 from dataframe import read_parquet, scan_parquet, col, lit

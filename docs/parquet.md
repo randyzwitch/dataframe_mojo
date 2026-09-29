@@ -29,8 +29,7 @@ Arrow schema metadata preserves signed/unsigned integer widths, floating
 widths, strings, booleans, dates, timestamp/duration units, time, and nested
 list/struct fields. Nulls and empty typed frames are preserved. Other readers
 that ignore Arrow schema metadata may expose durations as their physical
-integer representation. Decimal and binary columns are not yet dataframe
-types. Timestamp zones cannot be restored after a read that discarded them.
+integer representation. Binary columns write as `large_binary`. Timestamp zones cannot be restored after a read that discarded them.
 
 The writer resolves `dfq_write_parquet` only when called. Reader-only use can
 still load a library with the existing read ABI; rebuild an older library

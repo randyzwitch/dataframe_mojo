@@ -161,6 +161,46 @@ def _integer_at(input: Series, i: Int) raises -> Int128:
     raise Error("expected an integer column, found " + input.dtype().name())
 
 
+def _cast_binary(
+    input: Series,
+    source: DataType,
+    target: DataType,
+    strict: Bool,
+    offset: Int,
+    mask: List[Bool],
+) raises -> Series:
+    """Binary casts, as in Polars: anything that casts to string casts to
+    binary as its UTF-8 bytes; binary casts only to string, and each value
+    must be valid UTF-8 (strict raises, otherwise the row is null)."""
+    if target.is_binary():
+        var text = input.copy() if source == DataType.STRING else cast_series(
+            input, DataType.STRING, strict, offset, mask
+        )
+        return text.with_dtype(DataType.BINARY)
+    if target != DataType.STRING:
+        raise Error(
+            "cannot cast binary to " + target.name() + "; cast to string first"
+        )
+    ref column = input._data[StringColumn]
+    var n = len(column)
+    var out = StringBuilder(n)
+    for i in range(n):
+        if not column._valid(i) or (len(mask) == n and not mask[i]):
+            out.append_null()
+            continue
+        try:
+            out.append(String(StringSlice(from_utf8=column._row_bytes(i))))
+        except:
+            if strict:
+                raise Error(
+                    "cast from binary to string failed at row "
+                    + String(offset + i)
+                    + ": the value is not valid UTF-8"
+                )
+            out.append_null()
+    return Series(input.name(), out^.finish())
+
+
 def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
@@ -178,6 +218,8 @@ def cast_series(
     var source = _dtype(input)
     if source == target:
         return input.copy()
+    if source.is_binary() or target.is_binary():
+        return _cast_binary(input, source, target, strict, offset, mask)
     if source.is_temporal() or target.is_temporal():
         var observed = input.copy()
         return cast_temporal(observed, source, target, strict)
