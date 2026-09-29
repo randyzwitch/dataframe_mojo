@@ -249,6 +249,25 @@ def test_series_cast_masks_and_validation() raises:
     )
 
 
+def test_decimal_casts_are_exact_and_validate_precision() raises:
+    var frame = DataFrame(
+        [Series("s", Column[String](["0.10", "-12.34", "999.99", "bad"]))]
+    )
+    var dtype = DataType.decimal(5, 2)
+    var decimals = frame.select(col("s").cast(dtype, strict=False))
+    assert_true(decimals.column("s").dtype() == dtype)
+    assert_equal(
+        one(decimals, col("s").cast("string")),
+        [String("0.10"), "-12.34", "999.99", "null"],
+    )
+    with assert_raises(contains="failed at row 3"):
+        _ = frame.select(col("s").cast(dtype))
+    var overflow = DataFrame([Series("s", Column[String](["1000.00"]))])
+    assert_equal(
+        one(overflow, col("s").cast(dtype, strict=False)), [String("null")]
+    )
+
+
 def test_cast_nodes_keep_the_parsed_dtype() raises:
     var fields: List[String] = ["a", "b"]
     var types: List[DataType] = [DataType.INT32, DataType.list(DataType.STRING)]

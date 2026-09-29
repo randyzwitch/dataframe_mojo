@@ -33,6 +33,10 @@ def _key_equal(left: Series, right: Series, i: Int, j: Int) -> Bool:
                 )
             else:
                 return a._get(i) == b._get(j)
+    if left._data.isa[Column[Int128]]():
+        ref a = left._data[Column[Int128]]
+        ref b = right._data[Column[Int128]]
+        return a._valid(i) and b._valid(j) and a._get(i) == b._get(j)
     if left._data.isa[BoolColumn]():
         ref a = left._data[BoolColumn]
         ref b = right._data[BoolColumn]
@@ -50,6 +54,8 @@ def _row_valid(keys: List[Series], row: Int) -> Bool:
             comptime D = NUMERIC_DTYPES[k]
             if key._data.isa[Column[Scalar[D]]]():
                 valid = key._data[Column[Scalar[D]]]._valid(row)
+        if key._data.isa[Column[Int128]]():
+            valid = key._data[Column[Int128]]._valid(row)
         if key._data.isa[BoolColumn]():
             valid = key._data[BoolColumn]._valid(row)
         elif key._data.isa[StringColumn]():

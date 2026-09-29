@@ -13,6 +13,7 @@ from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
+from .decimal import check_precision
 from .series import Series
 from .expr import (
     SUM,
@@ -483,6 +484,7 @@ struct Reducer(Movable):
     var picked_valid: List[Bool]
     var ints: List[Int64]
     var floats: List[Float64]
+    var decimals: List[Int128]
     var bools: List[Bool]
     var strings: List[String]
     var int_sets: List[Dict[Int64, Bool]]
@@ -520,7 +522,9 @@ struct Reducer(Movable):
         self.op = op
         self.input = input_dtype
         self.logical = logical.value() if logical else input_dtype
-        self.dtype = _state_type(input_dtype)
+        self.dtype = self.logical if self.logical.is_decimal() else _state_type(
+            input_dtype
+        )
         self.group_count = group_count
         self.min_count = min_count
         self.integer = integer
@@ -563,6 +567,10 @@ struct Reducer(Movable):
         self.ints = List[Int64](length=n if picking and is_int else 0, fill=0)
         self.floats = List[Float64](
             length=n if picking and is_float else 0, fill=0
+        )
+        self.decimals = List[Int128](
+            length=n if (picking or summing) and self.dtype.is_decimal() else 0,
+            fill=0,
         )
         self.bools = List[Bool](
             length=n if picking and input_dtype == DataType.BOOL else 0,
@@ -634,6 +642,9 @@ struct Reducer(Movable):
                         floats[0][i]
                     )
             return
+        if self.logical.is_decimal():
+            self._update(chunk, offset, grouped, groups)
+            return
         if self.input == self.dtype:
             self._update(chunk, offset, grouped, groups)
             return
@@ -701,6 +712,16 @@ struct Reducer(Movable):
             return
         if op == COUNT or op == NULL_COUNT:
             var nulls = op == NULL_COUNT
+            if chunk._data.isa[Column[Int128]]():
+                _count_valid(
+                    chunk._data[Column[Int128]],
+                    offset,
+                    grouped,
+                    groups,
+                    nulls,
+                    self.counts,
+                )
+                return
             if chunk._data.isa[Column[Int64]]():
                 _count_valid(
                     chunk._data[Column[Int64]],
@@ -740,6 +761,15 @@ struct Reducer(Movable):
         elif op == LEN:
             for i in range(len(chunk)):
                 self.counts[_group(grouped, groups, offset + i)] += 1
+        elif (op == SUM or op == MEAN) and self.dtype.is_decimal():
+            ref column = chunk._data[Column[Int128]]
+            for i in range(len(column)):
+                if column._valid(i):
+                    var g = _group(grouped, groups, offset + i)
+                    self.decimals[g] = check_precision(
+                        self.decimals[g] + column._get(i), self.dtype
+                    )
+                    self.counts[g] += 1
         elif (op == SUM or op == MEAN) and self.dtype == DataType.INT64:
             ref column = chunk._data[Column[Int64]]
             for i in range(len(column)):
@@ -778,6 +808,21 @@ struct Reducer(Movable):
                     self.samples[g].append(value)
         elif op == MIN or op == MAX:
             var is_max = op == MAX
+            if chunk._data.isa[Column[Int128]]():
+                ref column = chunk._data[Column[Int128]]
+                for i in range(len(column)):
+                    if not column._valid(i):
+                        continue
+                    var g = _group(grouped, groups, offset + i)
+                    var value = column._get(i)
+                    if (
+                        not self.seen[g]
+                        or (is_max and value > self.decimals[g])
+                        or (not is_max and value < self.decimals[g])
+                    ):
+                        self.decimals[g] = value
+                        self.seen[g] = True
+                return
             if chunk._data.isa[Column[Int64]]():
                 _extreme(
                     chunk._data[Column[Int64]],
@@ -826,6 +871,18 @@ struct Reducer(Movable):
                 )
         elif op == FIRST or op == LAST:
             var last = op == LAST
+            if chunk._data.isa[Column[Int128]]():
+                _pick(
+                    chunk._data[Column[Int128]],
+                    offset,
+                    grouped,
+                    groups,
+                    last,
+                    self.seen,
+                    self.picked_valid,
+                    self.decimals,
+                )
+                return
             if chunk._data.isa[Column[Int64]]():
                 _pick(
                     chunk._data[Column[Int64]],
@@ -1031,6 +1088,12 @@ struct Reducer(Movable):
 
     def _better(self, other: Self, g: Int, source: Int, is_max: Bool) -> Bool:
         """Whether other's value for `source` strictly beats ours for `g`."""
+        if self.dtype.is_decimal():
+            return (
+                other.decimals[source]
+                > self.decimals[g] if is_max else other.decimals[source]
+                < self.decimals[g]
+            )
         if self.dtype == DataType.INT64:
             return (
                 other.ints[source]
@@ -1055,7 +1118,7 @@ struct Reducer(Movable):
             < self.strings[g]
         )
 
-    def merge(mut self, other: Self, groups: List[Int] = List[Int]()):
+    def merge(mut self, other: Self, groups: List[Int] = List[Int]()) raises:
         """Fold in the state of the next, disjoint row partition.
 
         Partitions are merged in row order, so first/last and tie-breaking
@@ -1068,6 +1131,12 @@ struct Reducer(Movable):
             if op == COUNT or op == NULL_COUNT or op == LEN:
                 self.counts[g] += other.counts[source]
             elif op == SUM or op == MEAN:
+                if self.dtype.is_decimal():
+                    self.decimals[g] = check_precision(
+                        self.decimals[g] + other.decimals[source], self.dtype
+                    )
+                    self.counts[g] += other.counts[source]
+                    continue
                 if self.dtype == DataType.INT64:
                     self.int_sums[g].merge(other.int_sums[source])
                 else:
@@ -1148,7 +1217,15 @@ struct Reducer(Movable):
                     continue
                 var take = not self.seen[g]
                 if not take:
-                    if self.dtype == DataType.INT64:
+                    if self.dtype.is_decimal():
+                        take = (
+                            other.decimals[source]
+                            > self.decimals[g] if is_max else other.decimals[
+                                source
+                            ]
+                            < self.decimals[g]
+                        )
+                    elif self.dtype == DataType.INT64:
                         take = (
                             other.ints[source]
                             > self.ints[g] if is_max else other.ints[source]
@@ -1183,7 +1260,9 @@ struct Reducer(Movable):
 
     def _take_value(mut self, other: Self, g: Int, source: Int):
         self.seen[g] = True
-        if self.dtype == DataType.INT64:
+        if self.dtype.is_decimal():
+            self.decimals[g] = other.decimals[source]
+        elif self.dtype == DataType.INT64:
             self.ints[g] = other.ints[source]
         elif self.dtype == DataType.FLOAT64:
             self.floats[g] = other.floats[source]
@@ -1226,6 +1305,7 @@ struct Reducer(Movable):
         self.picked_valid.extend(added.picked_valid.copy())
         self.ints.extend(added.ints.copy())
         self.floats.extend(added.floats.copy())
+        self.decimals.extend(added.decimals.copy())
         self.bools.extend(added.bools.copy())
         self.strings.extend(added.strings.copy())
         self.int_sets.extend(added.int_sets.copy())
@@ -1258,6 +1338,8 @@ struct Reducer(Movable):
             or op == CORR
             or op == COV
         ):
+            return self._finish()
+        if self.logical.is_decimal():
             return self._finish()
         if self.input == self.dtype:
             return self._finish()
@@ -1569,6 +1651,21 @@ struct Reducer(Movable):
             return Series("", Column[Float64](output^, valid))
         if op == COUNT or op == NULL_COUNT or op == LEN:
             return Series("", Column[Int64](self.counts.copy()))
+        if (op == SUM or op == MEAN) and self.dtype.is_decimal():
+            var output = self.decimals.copy()
+            var decimal_valid = List[Bool](length=n, fill=False)
+            for g in range(n):
+                decimal_valid[g] = (
+                    self.counts[g]
+                    > 0 if op
+                    == MEAN else self.counts[g]
+                    >= Int64(self.min_count)
+                )
+                if op == MEAN and decimal_valid[g]:
+                    output[g] /= Int128(self.counts[g])
+            return Series(
+                "", Column[Int128](output^, decimal_valid)
+            ).with_dtype(self.dtype)
         if op == SUM and self.dtype == DataType.INT64:
             var output = List[Int64](length=n, fill=0)
             for g in range(n):
@@ -1643,6 +1740,10 @@ struct Reducer(Movable):
             var picked = op == FIRST or op == LAST
             for g in range(n):
                 valid[g] = self.seen[g] and (not picked or self.picked_valid[g])
+            if self.dtype.is_decimal():
+                return Series(
+                    "", Column[Int128](self.decimals.copy(), valid)
+                ).with_dtype(self.dtype)
             if self.dtype == DataType.INT64:
                 return Series("", Column[Int64](self.ints.copy(), valid))
             if self.dtype == DataType.FLOAT64:

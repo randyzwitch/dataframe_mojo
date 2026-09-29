@@ -33,6 +33,7 @@ structural: nulls equal nulls of the same dtype and NaN equals NaN.
   One field of a struct value.
 - `def null(dtype: DataType) -> Self`
 - `def null(dtype: String) -> Self`
+- `def decimal(dtype: DataType, value: Int128) -> Self`
 - `def temporal(dtype: DataType, value: Int64) -> Self`
   A date, datetime, duration, or time from its stored Int64.
 - `def to_physical(self) -> Int64`
@@ -412,6 +413,11 @@ struct(names, dtypes) holds one value of each named field per row.
   A time-zone-naive instant counted in unit since the epoch.
 - `def duration(unit: String = "us") -> Self`
   A signed length of time counted in unit.
+- `def decimal(precision: Int, scale: Int) -> Self`
+  An Arrow-compatible decimal128 type stored as a scaled Int128.
+- `def is_decimal(self) -> Bool`
+- `def precision(self) -> Int`
+- `def scale(self) -> Int`
 - `def parse(name: String) -> Self`
   The type with this canonical name; raises for unknown names.
 - `def is_known(name: String) -> Bool`
@@ -1041,7 +1047,7 @@ A named column of one supported dtype, plus expression-backed methods.
   Convert list-backed strings to the contiguous UTF-8 layout.
 - `def __init__(out self, var name: String, var column: ListColumn)`
 - `def __init__(out self, var name: String, var column: StructColumn)`
-- `def __init__(out self, var name: String, var storage: Variant[Column[Int64], Column[Float64], BoolColumn, StringColumn, Column[Int8], Column[Int16], Column[Int32], Column[UInt8], Column[UInt16], Column[UInt32], Column[UInt64], Column[Float32], ListColumn, StructColumn], dtype: DataType)`
+- `def __init__(out self, var name: String, var storage: Variant[Column[Int64], Column[Float64], BoolColumn, StringColumn, Column[Int8], Column[Int16], Column[Int32], Column[UInt8], Column[UInt16], Column[UInt32], Column[UInt64], Column[Float32], Column[Int128], ListColumn, StructColumn], dtype: DataType)`
 - `def __getitem__(self, index: Int) -> AnyValue`
   One cell; raises when out of bounds. Negative indices count from the end.
 - `def __neg__(self) -> Self`

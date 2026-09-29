@@ -22,6 +22,7 @@ comptime _DATE = 4
 comptime _DATETIME = 5
 comptime _DURATION = 6
 comptime _TIME = 7
+comptime _DECIMAL = 8
 comptime _LIST = 16
 # Marks a type without numeric storage (bool, string, nested). Bool columns
 # are bit-packed, so DType.bool never names a numeric storage type.
@@ -84,9 +85,10 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     def __init__(out self, code: Int, unit: Int):
         self._code = code
         self._unit = unit
-        self._storage = DType.int64 if (
-            code >= _DATE and code <= _TIME
-        ) else _NO_STORAGE
+        self._storage = (
+            DType.int128 if code == _DECIMAL else DType.int64 if code >= _DATE
+            and code <= _TIME else _NO_STORAGE
+        )
         self._nested = None
 
     def __init__(out self, storage: DType):
@@ -254,6 +256,24 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         return DataType(_DURATION, _unit_code(unit))
 
     @staticmethod
+    def decimal(precision: Int, scale: Int) raises -> DataType:
+        """An Arrow-compatible decimal128 type stored as a scaled Int128."""
+        if precision < 1 or precision > 38:
+            raise Error("decimal precision must be between 1 and 38")
+        if scale < 0 or scale > precision:
+            raise Error("decimal scale must be between 0 and precision")
+        return DataType(_DECIMAL, precision * 100 + scale)
+
+    def is_decimal(self) -> Bool:
+        return self._code == _DECIMAL
+
+    def precision(self) -> Int:
+        return self._unit // 100 if self.is_decimal() else 0
+
+    def scale(self) -> Int:
+        return self._unit % 100 if self.is_decimal() else 0
+
+    @staticmethod
     def parse(name: String) raises -> DataType:
         """The type with this canonical name; raises for unknown names."""
         if name == "int64":
@@ -276,6 +296,18 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return DataType.datetime()
         if name == "duration":
             return DataType.duration()
+        if name.startswith("decimal[") and name.endswith("]"):
+            var body = String(name[byte = 8 : name.byte_length() - 1])
+            var comma = body.find(",")
+            if comma < 0:
+                raise Error("Unknown dtype: " + name)
+            try:
+                return DataType.decimal(
+                    Int(String(body[byte=0:comma])),
+                    Int(String(body[byte = comma + 1 : body.byte_length()])),
+                )
+            except:
+                raise Error("Unknown dtype: " + name)
         for unit in ["ns", "us", "ms"]:
             if name == "datetime[" + unit + "]":
                 return DataType.datetime(unit)
@@ -325,6 +357,14 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return "datetime[" + self.unit() + "]"
         if self._code == _DURATION:
             return "duration[" + self.unit() + "]"
+        if self._code == _DECIMAL:
+            return (
+                "decimal["
+                + String(self.precision())
+                + ","
+                + String(self.scale())
+                + "]"
+            )
         if self._code == _UNTYPED_INT:
             return "integer literal"
         if self._code == _UNTYPED_FLOAT:
@@ -408,10 +448,12 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         """The storage type: INT64 for temporal types, otherwise self."""
         if self.is_temporal():
             return DataType.INT64
+        if self.is_decimal():
+            return DataType.of(DType.int128)
         return self
 
     def is_numeric(self) -> Bool:
-        return self.is_integer() or self.is_float()
+        return self.is_integer() or self.is_float() or self.is_decimal()
 
     def is_integer(self) -> Bool:
         return self._code == _NUMERIC and self._storage.is_integral()
@@ -430,6 +472,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         """Bits per value for fixed-width types; 0 for variable-width."""
         if self._code == _BOOL:
             return 1
+        if self.is_decimal():
+            return 128
         # A runtime DType cannot report its width in Mojo 1.2; match it
         # against the comptime list, whose members can.
         comptime for i in range(len(NUMERIC_DTYPES)):

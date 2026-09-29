@@ -287,10 +287,41 @@ def check_pyarrow_nested_types() raises:
     back.free()
 
 
+def check_decimal128_round_trip() raises:
+    var pa = Python.import_module("pyarrow")
+    var Decimal = Python.import_module("decimal").Decimal
+    var source = pa.array(
+        Python.list(
+            Decimal("-1234567890123456789012345678.1234567890"),
+            Python.none(),
+            Decimal("0.1000000000"),
+        ),
+        type=pa.decimal128(38, 10),
+    )
+    var c = CStructs()
+    source._export_to_c(c.array, c.schema)
+    var series = import_arrow_series(c.array, c.schema)
+    c.free()
+    assert_true(series.dtype() == DataType.decimal(38, 10))
+    assert_true(series.get(1).is_null())
+    assert_equal(
+        series.cast("string").string().value(0),
+        "-1234567890123456789012345678.1234567890",
+    )
+    var back = CStructs()
+    export_arrow_series(
+        series, _at[ArrowArray](back.array)[], _at[ArrowSchema](back.schema)[]
+    )
+    var again = pa.Array._import_from_c(back.array, back.schema)
+    assert_true(Bool(again.equals(source)), String(again))
+    back.free()
+
+
 def main() raises:
     check_export_is_valid_arrow()
     check_round_trips_with_offsets()
     check_pyarrow_produced_types()
     check_pyarrow_nested_types()
+    check_decimal128_round_trip()
     check_unsupported_types_are_rejected()
     print("arrow C data interface: pyarrow interop ok")

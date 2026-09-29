@@ -257,6 +257,8 @@ def _numeric_format(dtype: DType) -> String:
 
 
 def _format(dtype: DataType) raises -> String:
+    if dtype.is_decimal():
+        return "d:" + String(dtype.precision()) + "," + String(dtype.scale())
     if dtype.is_numeric():
         return _numeric_format(dtype.storage().value())
     if dtype == DataType.BOOL:
@@ -383,6 +385,13 @@ def _fill_array(
             state.children.append(child)
         array.n_children = Int64(len(state.children))
         array.children = Int(state.children.unsafe_ptr())
+    elif dtype.is_decimal():
+        ref column = kept._data[Column[Int128]]
+        array.offset = Int64(column._offset)
+        state.buffers.append(
+            Int(column.unsafe_validity()) if len(column._bits[]) != 0 else 0
+        )
+        state.buffers.append(Int(column._data[].unsafe_ptr()))
     elif dtype == DataType.DATE:
         # Arrow date32 holds Int32 days; narrow (range-checked) at export.
         ref column = kept._data[Column[Int64]]
@@ -589,6 +598,18 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     var bits = List[UInt8]() if _buffer(array, 0) == 0 else _import_bits(
         _buffer(array, 0), offset, length
     )
+    if format.startswith("d:"):
+        var comma = format.find(",")
+        if comma < 3:
+            raise Error("Invalid Arrow decimal format " + format)
+        var precision = Int(String(format[byte=2:comma]))
+        var scale = Int(String(format[byte = comma + 1 : format.byte_length()]))
+        return Series(
+            name,
+            Column[Int128](
+                values=_import_fixed[Int128](array, length, offset), bits=bits^
+            ),
+        ).with_dtype(DataType.decimal(precision, scale))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if format == _numeric_format(D):

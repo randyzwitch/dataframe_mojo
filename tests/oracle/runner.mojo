@@ -90,6 +90,24 @@ def run(
         else:
             p = c.ne(v)
         return left.filter(p)
+    if op == "decimal":
+        var dtype = DataType.decimal(15, 2)
+        var x = col("x").cast(dtype)
+        var y = col("y").cast(dtype)
+        var e: Expr
+        if spec[1] == "cast":
+            e = x.copy()
+        elif spec[1] == "sum":
+            e = x.sum()
+        elif spec[1] == "mean":
+            e = x.mean()
+        elif spec[1] == "add":
+            e = x + y
+        elif spec[1] == "sub":
+            e = x - y
+        else:
+            e = x * y
+        return left.select(e.cast("string").alias("out"))
     if op == "arith":
         var a = col(spec[2])
         var b = col(spec[3])

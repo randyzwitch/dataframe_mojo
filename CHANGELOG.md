@@ -7,6 +7,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- `DataType.decimal(precision, scale)` decimal128 fixed-point columns, including
+  arithmetic, comparisons, sorting, grouping and join keys, reductions, casts,
+  explicit-schema CSV support, and Arrow `d:p,s` interoperability (#229).
 - Reductions `arg_min`, `arg_max`, `mode`, `skew(bias)` and
   `kurtosis(fisher, bias)`, and the two-column `corr(a, b, method)` (Pearson
   or Spearman) and `cov(a, b, ddof)`, globally, in `group_by(...).agg(...)`

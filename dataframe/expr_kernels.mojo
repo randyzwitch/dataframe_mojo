@@ -3,7 +3,8 @@ from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
 from .column import Column
-from .dtype import NUMERIC_DTYPES
+from .dtype import DataType, NUMERIC_DTYPES
+from .decimal import check_precision, pow10
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr import (
@@ -517,9 +518,112 @@ def _compare_strings[
     return Series("", BoolColumn(values^, valid))
 
 
+def _decimal_result(
+    op: Int, left: DataType, right: DataType
+) raises -> DataType:
+    if is_comparison(op):
+        return DataType.BOOL
+    if op == ADD or op == SUB or op == MUL or op == DIV:
+        return DataType.decimal(38, max(left.scale(), right.scale()))
+    raise Error("decimal operation is not supported")
+
+
+def _decimal_mul(a: Int128, b: Int128) raises -> Int128:
+    if a != 0 and (b > Int128.MAX / abs(a) or b < Int128.MIN / abs(a)):
+        raise Error("decimal multiplication overflow")
+    return a * b
+
+
+def _decimal_div(
+    a: Int128, b: Int128, shift: Int, dtype: DataType
+) raises -> Int128:
+    var negative = (a < 0) != (b < 0)
+    var numerator = -a if a < 0 else a
+    var denominator = -b if b < 0 else b
+    var result = check_precision(numerator / denominator, dtype)
+    var remainder = numerator % denominator
+    for _ in range(shift):
+        result = check_precision(result * 10, dtype)
+        remainder *= 10
+        result += remainder / denominator
+        remainder %= denominator
+    return -result if negative else result
+
+
+def _decimal_binary[
+    op: Int
+](left: Series, right: Series, mask: List[Bool]) raises -> Series:
+    var result_dtype = _decimal_result(op, left.dtype(), right.dtype())
+    ref a = left._data[Column[Int128]]
+    ref b = right._data[Column[Int128]]
+    var n = _length(len(a), len(b))
+    var valid = List[Bool](length=n, fill=False)
+    comptime predicate = is_comparison(op)
+    var values = List[Int128](length=0 if predicate else n, fill=0)
+    var predicates = List[Bool](length=n if predicate else 0, fill=False)
+    var common_scale = max(left.dtype().scale(), right.dtype().scale())
+    for i in range(n):
+        var ai = 0 if len(a) == 1 else i
+        var bi = 0 if len(b) == 1 else i
+        valid[i] = a._valid(ai) and b._valid(bi)
+        if len(mask) == n and not mask[i]:
+            valid[i] = False
+        if not valid[i]:
+            continue
+        var x = _decimal_mul(
+            a._get(ai), pow10(common_scale - left.dtype().scale())
+        )
+        var y = _decimal_mul(
+            b._get(bi), pow10(common_scale - right.dtype().scale())
+        )
+        comptime if is_comparison(op):
+            if op == GT:
+                predicates[i] = x > y
+            elif op == LT:
+                predicates[i] = x < y
+            elif op == GE:
+                predicates[i] = x >= y
+            elif op == LE:
+                predicates[i] = x <= y
+            elif op == EQ:
+                predicates[i] = x == y
+            else:
+                predicates[i] = x != y
+        elif op == ADD or op == SUB:
+            values[i] = check_precision(
+                x + y if op == ADD else x - y, result_dtype
+            )
+        elif op == MUL:
+            var raw = _decimal_mul(a._get(ai), b._get(bi))
+            var source_scale = left.dtype().scale() + right.dtype().scale()
+            if source_scale > result_dtype.scale():
+                raw /= pow10(source_scale - result_dtype.scale())
+            values[i] = check_precision(raw, result_dtype)
+        elif op == DIV:
+            if b._get(bi) == 0:
+                valid[i] = False
+            else:
+                var shift = (
+                    result_dtype.scale()
+                    + right.dtype().scale()
+                    - left.dtype().scale()
+                )
+                values[i] = _decimal_div(
+                    a._get(ai), b._get(bi), shift, result_dtype
+                )
+    comptime if predicate:
+        return Series("", BoolColumn(predicates^, valid))
+    else:
+        return Series("", Column[Int128](values^, valid)).with_dtype(
+            result_dtype
+        )
+
+
 def _arithmetic[
     op: Int, width: Int
 ](left: Series, right: Series, mask: List[Bool]) raises -> Series:
+    if left.dtype().is_decimal():
+        return _decimal_binary[op](left, right, mask)
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if left._data.isa[Column[Scalar[D]]]():
@@ -735,6 +839,11 @@ def validity(series: Series) -> List[Bool]:
         return result^
     var n = len(series)
     var valid = List[Bool](capacity=n)
+    if series.dtype().is_decimal():
+        ref column = series._data[Column[Int128]]
+        for i in range(n):
+            valid.append(column._valid(i))
+        return valid^
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():

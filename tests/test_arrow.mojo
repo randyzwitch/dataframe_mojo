@@ -91,6 +91,26 @@ def test_every_dtype_round_trips() raises:
     assert_frames_equal(round_trip(frame), frame)
 
 
+def test_decimal128_round_trip() raises:
+    var dtype = DataType.decimal(38, 10)
+    assert_equal(dtype.name(), "decimal[38,10]")
+    assert_true(DataType.parse(dtype.name()) == dtype)
+    var source = Series(
+        "money",
+        Column[Int128](
+            [Int128(-1234567890123), 0, 999999999999999999],
+            [True, False, True],
+        ),
+    ).with_dtype(dtype)
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow_series(source, array, schema)
+    assert_equal(_read_c_string(schema.format), "d:38,10")
+    var back = import_arrow_series(array, schema)
+    assert_true(back.dtype() == dtype)
+    assert_true(back.equals(source))
+
+
 def test_sliced_and_empty_frames() raises:
     var frame = sample()
     for start in [0, 1, 3, 7, 8, 13]:

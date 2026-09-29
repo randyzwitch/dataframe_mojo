@@ -138,6 +138,15 @@ def _hash_column(
                 else:
                     write(i, bitcast[DType.uint64](Int64(value)))
             return
+    if series._data.isa[Column[Int128]]():
+        ref column = series._data[Column[Int128]]
+        for i in range(start, end):
+            if not column._valid(i):
+                write(i, _NULL_KEY)
+            else:
+                var key = bitcast[DType.uint128](column._get(i))
+                write(i, UInt64(key) ^ UInt64(key >> 64))
+        return
     if series._data.isa[BoolColumn]():
         ref bools = series._data[BoolColumn]
         for i in range(start, end):

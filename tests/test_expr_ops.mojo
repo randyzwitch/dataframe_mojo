@@ -343,6 +343,49 @@ def test_bind_errors_name_operator_and_dtypes() raises:
         _ = frame.clear().select(col("s") % col("s"))
 
 
+def test_decimal_arithmetic_and_comparison_are_exact() raises:
+    var frame = DataFrame(
+        [
+            Series("a", Column[String](["0.1", "-1.2", "2.5"])),
+            Series("b", Column[String](["0.2", "0.7", "2.5"])),
+        ]
+    ).select_exprs(
+        [
+            col("a").cast(DataType.decimal(3, 2)),
+            col("b").cast(DataType.decimal(3, 2)),
+        ]
+    )
+    var result = frame.select_exprs(
+        [
+            (col("a") + col("b")).cast("string").alias("add"),
+            (col("a") - col("b")).cast("string").alias("sub"),
+            (col("a") * col("b")).cast("string").alias("mul"),
+            (col("a") / col("b")).cast("string").alias("div"),
+            (col("a") < col("b")).alias("lt"),
+        ]
+    )
+    var add = result.column("add").string()
+    var sub = result.column("sub").string()
+    var mul = result.column("mul").string()
+    var div = result.column("div").string()
+    var lt = result.column("lt").bool()
+    assert_equal(add.value(0), "0.30")
+    assert_equal(add.value(1), "-0.50")
+    assert_equal(add.value(2), "5.00")
+    assert_equal(sub.value(0), "-0.10")
+    assert_equal(sub.value(1), "-1.90")
+    assert_equal(sub.value(2), "0.00")
+    assert_equal(mul.value(0), "0.02")
+    assert_equal(mul.value(1), "-0.84")
+    assert_equal(mul.value(2), "6.25")
+    assert_equal(div.value(0), "0.50")
+    assert_equal(div.value(1), "-1.71")
+    assert_equal(div.value(2), "1.00")
+    assert_true(lt.value(0))
+    assert_true(lt.value(1))
+    assert_false(lt.value(2))
+
+
 def test_scalar_broadcast_and_simd_width_agreement() raises:
     var values = List[Float64]()
     var valid = List[Bool]()

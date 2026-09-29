@@ -139,8 +139,7 @@ fields in the order given and `row_groups=[...]` selects row groups.
 Integer and float widths, strings, booleans, dates and timestamps carry
 over with their nulls. Dictionary columns arrive as plain strings, float16
 as float32, and a timestamp with a time zone as the same UTC instants
-without the zone. Lists and structs map recursively; decimals and binary are
-not supported yet.
+without the zone. Lists and structs map recursively. Decimal128 columns map to `DataType.decimal(precision, scale)`; binary columns are not supported yet.
 
 ```mojo
 from dataframe import read_parquet, scan_parquet, col, lit
