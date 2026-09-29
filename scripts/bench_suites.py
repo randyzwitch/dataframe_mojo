@@ -38,6 +38,7 @@ SUITES_DIR = ROOT / "benchmarks" / "suites"
 sys.path.insert(0, str(SUITES_DIR))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import bench_html  # noqa: E402
 import datagen  # noqa: E402
 from bench_host import compiler_processes  # noqa: E402
 
@@ -981,8 +982,15 @@ def main():
         )
     text = report(result)
     print(text)
+    page = bench_html.render(
+        result, evaluate(result), SUITES, VARIANTS, instrumented_paths()
+    )
     if args.output and not args.report_from:
         args.output.with_suffix(".md").write_text(text)
+        args.output.with_suffix(".html").write_text(page)
+    elif args.report_from:
+        args.report_from.with_suffix(".html").write_text(page)
+        print(f"wrote {args.report_from.with_suffix('.html')}", file=sys.stderr)
     if args.check:
         bad = [
             key

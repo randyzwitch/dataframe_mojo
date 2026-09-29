@@ -114,8 +114,10 @@ Both tiers give each (suite, variant, engine, round) its own process, which
 loads the tables once, untimed, then warms up and times each query. The
 driver waits while a compiler runs, records the load average before every
 worker and flags a busy host in the report. It writes raw samples with
-provenance to `build/suites/results.json` and the report beside it;
-`--report-from` re-renders a saved file.
+provenance to `build/suites/results.json` and the report beside it, as
+Markdown (`results.md`) and as a self-contained HTML page (`results.html`,
+from `scripts/bench_html.py`) that opens in any browser; `--report-from`
+re-renders both from a saved file.
 
 Two limits apply when reading a comparison. Timings on a shared machine move
 with its load: prefer a quiet host, and rerun before acting on a small
