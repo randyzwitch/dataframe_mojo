@@ -487,7 +487,9 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
         return DataType.FLOAT64
     if op == MEAN or op == STD or op == VAR or op == MEDIAN or op == QUANTILE:
         if op == MEAN and input.is_decimal():
-            return input
+            # Float64, as Polars returns (#341): a mean rarely has the
+            # input's scale, and truncating to it lost digits.
+            return DataType.FLOAT64
         if not _numeric(input):
             raise Error(
                 op_name(op)

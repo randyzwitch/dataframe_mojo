@@ -62,12 +62,18 @@ and UInt64 compute in 128 bits and range-check the result.
 Float `+ - * /` and all float comparisons use explicit SIMD kernels (Float64
 and Float32 alike); the other float operations run per lane. Fusion covers
 Float64 only. `sqrt`, `exp`, `log`, and `pow` use
-Decimal arithmetic follows current Polars result types: `+`, `-`, `*`, and `/` return precision 38 with the larger operand scale. Multiplication and division truncate discarded fractional digits toward zero. Decimal division by zero produces null.
-
 Mojo's `std.math`, whose results can differ from the correctly rounded value by
 about 1e-12 relative; tests compare them with a tolerance. Binder errors name
 the operator and dtypes, for example `/ requires matching dtypes, found int64
 and float64; use typed literals`.
+
+Decimal arithmetic follows current Polars result types: `+`, `-`, `*`, and `/`
+return precision 38 with the larger operand scale. Multiplication and division
+truncate discarded fractional digits toward zero. Decimal division by zero
+produces null. Decimal `sum`, `min`, and `max` keep the input's decimal type
+(`sum` is exact and raises when it exceeds the precision); `mean` returns
+Float64, as Polars does, computed from the exact sum so that only the final
+conversion rounds.
 
 ### Selectors
 

@@ -10,6 +10,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - `DataType.decimal(precision, scale)` decimal128 fixed-point columns, including
   arithmetic, comparisons, sorting, grouping and join keys, reductions, casts,
   explicit-schema CSV support, and Arrow `d:p,s` interoperability (#229).
+  Decimal `mean` returns Float64, as Polars does, rather than a decimal
+  truncated to the input scale (#341).
 - Reductions `arg_min`, `arg_max`, `mode`, `skew(bias)` and
   `kurtosis(fisher, bias)`, and the two-column `corr(a, b, method)` (Pearson
   or Spearman) and `cov(a, b, ddof)`, globally, in `group_by(...).agg(...)`

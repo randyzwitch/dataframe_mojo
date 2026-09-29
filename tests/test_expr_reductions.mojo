@@ -332,6 +332,9 @@ def test_decimal_reductions_are_exact() raises:
     assert_equal(reduced.item(0, "min").string(), "-0.25")
     assert_equal(reduced.item(0, "max").string(), "0.30")
     assert_equal(reduced.item(0, "mean").string(), "0.05")
+    assert_true(
+        frame.select(col("d").mean()).column("d").dtype() == DataType.FLOAT64
+    )
     var million = Series(
         "d", Column[Int128](List[Int128](length=1_000_000, fill=1))
     ).with_dtype(dtype)
@@ -341,6 +344,56 @@ def test_decimal_reductions_are_exact() raises:
         .item()
         .string(),
         "10000.00",
+    )
+
+
+def test_decimal_mean_is_float64_everywhere() raises:
+    """Decimal mean is Float64, as Polars returns, not a decimal truncated
+    to the input scale (#341): globally, grouped, in over() and streaming."""
+    var dtype = DataType.decimal(20, 2)
+    # Group 1: 0.00, 0.10, 0.50 -> 0.2; group 2: 1.25, 3.00, 1.25 ->
+    # 1.8333...; group 3: -0.07 and a null -> -0.07; group 4: all null.
+    var frame = DataFrame(
+        [
+            Series(
+                "d",
+                Column[Int128](
+                    [Int128(0), 10, 125, 300, 125, 50, -7, 0, 0],
+                    [True, True, True, True, True, True, True, False, False],
+                ),
+            ).with_dtype(dtype),
+            Series("g", Column[Int64]([1, 1, 2, 2, 2, 1, 3, 3, 4])),
+        ]
+    )
+    var whole = frame.select(col("d").mean()).item().float64()
+    assert_almost_equal(whole, 6.03 / 7, atol=1e-15)
+    var grouped = frame.group_by("g", maintain_order=True).agg(
+        [col("d").mean().alias("m")]
+    )
+    assert_true(grouped.column("m").dtype() == DataType.FLOAT64)
+    assert_equal(grouped.item(0, "m").float64(), 0.2)
+    assert_almost_equal(grouped.item(1, "m").float64(), 5.5 / 3, atol=1e-15)
+    assert_equal(grouped.item(2, "m").float64(), -0.07)
+    assert_true(grouped.item(3, "m").is_null())
+    var windowed = frame.select_exprs([col("d").mean().over("g").alias("m")])
+    assert_equal(windowed.item(5, "m").float64(), 0.2)
+    var streamed = (
+        frame.lazy()
+        .group_by(["g"], maintain_order=True)
+        .agg([col("d").mean().alias("m")])
+        .collect(batch_size=2)
+    )
+    assert_true(streamed.equals(grouped))
+    # Sums past 2^53 at scale 2 keep their digits: (10^17 + 1) / 2 cents.
+    var big = DataFrame(
+        [
+            Series(
+                "d", Column[Int128]([Int128(10) ** 17, Int128(1)])
+            ).with_dtype(dtype)
+        ]
+    )
+    assert_equal(
+        big.select(col("d").mean()).item().float64(), 500000000000000.005
     )
 
 

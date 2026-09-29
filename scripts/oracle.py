@@ -172,9 +172,12 @@ def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.Dat
         x, y = pl.col("x").cast(dtype), pl.col("y").cast(dtype)
         if spec[1] == "cast":
             return left.select(x.cast(pl.String).alias("out"))
-        if spec[1] in ("sum", "mean"):
-            e = x.sum() if spec[1] == "sum" else x.mean()
-            return left.select(e.cast(pl.String).alias("out"))
+        if spec[1] == "mean":
+            # Float64 in both engines (#341); compared as numbers, since
+            # the two round the last digit of a long quotient differently.
+            return left.select(x.mean().alias("out"))
+        if spec[1] == "sum":
+            return left.select(x.sum().cast(pl.String).alias("out"))
         e = {"add": x + y, "sub": x - y, "mul": x * y}[spec[1]]
         return left.select(e.cast(pl.String).alias("out"))
     if op == "arith":
