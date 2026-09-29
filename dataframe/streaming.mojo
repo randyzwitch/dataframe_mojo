@@ -3,4 +3,4 @@
 The state type lives in frame.mojo, where eager group_by also uses it to
 reduce worker row ranges before merging them.
 """
-from .frame import _StreamReduction
+from .frame import _StreamReduction, _StreamMergeJob, _finish_parts

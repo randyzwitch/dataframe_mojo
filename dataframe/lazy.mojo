@@ -20,13 +20,14 @@ the plan before execution:
 Filters never move past a slice, unique, group_by, or right/full join,
 because that would change which rows those operators see.
 """
+from std.os import getenv
 from std.collections import Dict, Optional
 from std.memory import ArcPointer
 from .csv_reader import _CsvBatches, _DecodeJob
 from .csv_types import _map_file
 from .parquet import _ParquetBatches
-from .parallel import Job, Pool, configured_workers
-from .streaming import _StreamReduction
+from .parallel import Job, Pool, configured_workers, run_jobs
+from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     SUM,
     COUNT,
@@ -179,6 +180,82 @@ def _stream_rows(node: PlanNode) -> Bool:
     return node.kind == DROP or node.kind == EXPLODE or node.kind == UNNEST
 
 
+def _stream_split_groups() -> Int:
+    """Groups in the first batch at which streaming aggregation splits its
+    state into hash parts. DATAFRAME_STREAM_SPLIT_GROUPS overrides it, so
+    tests can exercise the split path on small inputs."""
+    var setting = getenv("DATAFRAME_STREAM_SPLIT_GROUPS")
+    if setting.byte_length() > 0:
+        try:
+            return max(1, Int(setting))
+        except:
+            pass
+    return 4096
+
+
+def _stream_split_bits(workers: Int) -> Int:
+    """Hash parts for a split state: a power of two, at least the workers
+    (so every worker has a part to merge) and at least 2."""
+    var bits = 1
+    while (1 << bits) < workers and bits < 8:
+        bits += 1
+    return bits
+
+
+def _merge_parts(
+    mut states: List[_StreamReduction],
+    mut pending: List[List[_StreamReduction]],
+    mut pending_groups: List[Int],
+    workers: Int,
+    force: Bool,
+) raises:
+    """Merge each part whose pending groups reached its accumulated count
+    (or 64 batches), or every part when forced. One state merges in place;
+    parts are spread over `workers` jobs, each merging its parts in turn."""
+    var parts = len(states)
+    var due = List[Bool](capacity=parts)
+    var any_due = False
+    for p in range(parts):
+        var ready = len(pending[p]) > 0 and (
+            force
+            or states[p].indexing == 1
+            or pending_groups[p] >= states[p].group_count()
+            or len(pending[p]) >= 64
+        )
+        due.append(ready)
+        any_due = any_due or ready
+    if not any_due:
+        return
+    if parts == 1:
+        states[0].merge_all(pending[0])
+        pending[0] = List[_StreamReduction]()
+        pending_groups[0] = 0
+        return
+    var job_count = max(1, min(workers, parts))
+    var jobs = List[_StreamMergeJob](capacity=job_count)
+    for _ in range(job_count):
+        jobs.append(_StreamMergeJob())
+    # Part p goes to job p % job_count; parts not due keep their pending
+    # batches here and ride along with nothing to merge.
+    var carried = List[List[_StreamReduction]](capacity=parts)
+    for p in range(parts):
+        var state = states.pop(0)
+        var waiting = pending.pop(0)
+        ref job = jobs[p % job_count]
+        job.states.append(state^)
+        if due[p]:
+            job.pending.append(waiting^)
+            carried.append(List[_StreamReduction]())
+            pending_groups[p] = 0
+        else:
+            job.pending.append(List[_StreamReduction]())
+            carried.append(waiting^)
+    run_jobs(jobs)
+    for p in range(parts):
+        states.append(jobs[p % job_count].states.pop(0))
+        pending.append(carried.pop(0))
+
+
 struct _StreamJob(Job):
     var decode: List[_DecodeJob]
     var frame: DataFrame
@@ -188,6 +265,10 @@ struct _StreamJob(Job):
     var expressions: List[Expr]
     var keys: List[String]
     var reduced: List[_StreamReduction]
+    # Split a grouped state into 2^bits hash parts (0: keep one state), and
+    # the rows it was reduced from.
+    var bits: Int
+    var rows: Int
 
     def __init__(
         out self,
@@ -206,6 +287,13 @@ struct _StreamJob(Job):
         self.expressions = expressions.copy()
         self.keys = keys.copy()
         self.reduced = List[_StreamReduction]()
+        self.bits = 0
+        self.rows = 0
+
+    def take_reduced(mut self) -> List[_StreamReduction]:
+        var out = self.reduced^
+        self.reduced = List[_StreamReduction]()
+        return out^
 
     def run(mut self) raises:
         if len(self.decode):
@@ -241,9 +329,14 @@ struct _StreamJob(Job):
             elif node.kind == UNNEST:
                 self.frame = self.frame.unnest(node.text)
         if len(self.expressions):
-            self.reduced.append(
-                _StreamReduction(self.frame, self.expressions, self.keys)
+            var reduction = _StreamReduction(
+                self.frame, self.expressions, self.keys
             )
+            self.rows = reduction.rows
+            if self.bits > 0 and reduction.grouped:
+                self.reduced = reduction.split(self.bits)
+            else:
+                self.reduced.append(reduction^)
             self.frame = self.frame.clear()
 
 
@@ -606,15 +699,19 @@ struct LazyFrame(Copyable):
         var emitted = False
         var ended = False
         var outputs = List[DataFrame]()
-        var reductions = List[_StreamReduction]()
-        # Batch states wait here and are merged together once their groups
-        # reach the accumulated count (or 64 batches). Each merge then covers
-        # at least as much new work as old, so total merge work stays linear
-        # in the input, where merging every batch on arrival re-encoded all
-        # accumulated groups each time (#326); pending state never exceeds
-        # about the accumulated state, which keeps memory bounded.
-        var pending = List[_StreamReduction]()
-        var pending_groups = 0
+        # Aggregate state (#326). Batch states wait in `pending` and are
+        # merged together once their groups reach the accumulated count (or
+        # 64 batches), so each merge covers at least as much new work as old
+        # and total merge work stays linear, with pending state about the
+        # size of the accumulated state. When the first batch shows many
+        # groups, every batch state is split into hash parts that are merged
+        # on separate workers and interleaved by first occurrence at the end.
+        var states = List[_StreamReduction]()
+        var pending = List[List[_StreamReduction]]()
+        var pending_groups = List[Int]()
+        var bits = 0
+        var rows_seen = 0
+        var split_groups = _stream_split_groups()
         while not ended:
             var jobs = List[_StreamJob]()
             for _ in range(workers):
@@ -648,6 +745,7 @@ struct LazyFrame(Copyable):
                     keys,
                 )
                 job.decode = decode^
+                job.bits = bits
                 jobs.append(job^)
             if len(jobs) == 0:
                 break
@@ -659,19 +757,29 @@ struct LazyFrame(Copyable):
             # completion order. Merge states and assemble rows in that order.
             for i in range(len(jobs)):
                 if len(expressions):
-                    if len(reductions) == 0:
-                        reductions.append(jobs[i].reduced.pop())
-                    else:
-                        var part = jobs[i].reduced.pop()
-                        pending_groups += part.group_count()
-                        pending.append(part^)
-                        if (
-                            pending_groups >= reductions[0].group_count()
-                            or len(pending) >= 64
-                        ):
-                            reductions[0].merge_all(pending)
-                            pending = List[_StreamReduction]()
-                            pending_groups = 0
+                    var pieces = jobs[i].take_reduced()
+                    for k in range(len(pieces)):
+                        pieces[k].shift_firsts(rows_seen)
+                    rows_seen += jobs[i].rows
+                    if (
+                        len(states) == 0
+                        and pieces[0].grouped
+                        and pieces[0].group_count() >= split_groups
+                    ):
+                        bits = _stream_split_bits(workers)
+                    if bits > 0 and len(pieces) == 1 and pieces[0].grouped:
+                        var whole = pieces.pop()
+                        pieces = whole.split(bits)
+                    if len(states) == 0:
+                        for _ in range(len(pieces)):
+                            pending.append(List[_StreamReduction]())
+                            pending_groups.append(0)
+                        states = pieces^
+                        continue
+                    for p in range(len(pending)):
+                        var piece = pieces.pop(0)
+                        pending_groups[p] += piece.group_count()
+                        pending[p].append(piece^)
                 else:
                     var part = jobs[i].frame.copy()
                     var dropped = min(skip, part.height())
@@ -680,14 +788,18 @@ struct LazyFrame(Copyable):
                     if limit >= 0:
                         limit -= part.height()
                     outputs.append(part^)
+            if len(states):
+                _merge_parts(states, pending, pending_groups, workers, False)
             if len(csv):
                 csv[0].discard()
             if limit == 0:
                 ended = True
         pool.release()
-        if len(reductions):
-            reductions[0].merge_all(pending)
-            return reductions[0].finish()
+        if len(states):
+            _merge_parts(states, pending, pending_groups, workers, True)
+            if len(states) == 1:
+                return states[0].finish()
+            return _finish_parts(states^)
         if len(outputs):
             return concat(outputs)
         return None

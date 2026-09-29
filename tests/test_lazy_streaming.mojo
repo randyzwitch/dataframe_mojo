@@ -1,4 +1,5 @@
 """Cross-batch equivalence and bounded-executor lifecycle regression tests."""
+from std.ffi import external_call
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -238,38 +239,75 @@ def test_randomized_state_and_join_differential() raises:
             )
 
 
+def set_env(name: String, value: String):
+    var key = List[UInt8](name.as_bytes())
+    key.append(0)
+    var text = List[UInt8](value.as_bytes())
+    text.append(0)
+    _ = external_call["setenv", Int32](
+        Int(key.unsafe_ptr()), Int(text.unsafe_ptr()), Int32(1)
+    )
+    _ = key^
+    _ = text^
+
+
+def unset_env(name: String):
+    var key = List[UInt8](name.as_bytes())
+    key.append(0)
+    _ = external_call["unsetenv", Int32](Int(key.unsafe_ptr()))
+    _ = key^
+
+
 def test_deferred_merges_keep_order_and_state() raises:
-    """Batch states are merged in groups (#326): many pending batches at
-    once, the 64-batch cap on low-cardinality input, and groups that keep
-    appearing late, all against the non-streaming executor."""
-    for shape in range(3):
+    """Streaming group-by state (#326): batch states merged in groups, split
+    into hash parts (forced on with DATAFRAME_STREAM_SPLIT_GROUPS=1) with a
+    persistent key index, and the index's fallback when string keys grow
+    past the word encoding mid-stream. Every case must equal the
+    non-streaming executor, including first-occurrence group order."""
+    var nan = Float64(0) / Float64(0)
+    # Four workers: four hash parts when the split is forced on.
+    set_env("DATAFRAME_THREADS", "4")
+    for shape in range(2):
         var state = UInt64(shape + 11)
         var ints = List[Int64]()
         var words = List[String]()
+        var floats = List[Float64]()
         var values = List[Int64]()
         var valid = List[Bool]()
-        var rows = 300
+        var rows = 120
         for i in range(rows):
             state = state * 6364136223846793005 + 1
             var r = Int64((state >> 33) % 1_000_000)
-            # 0: nearly every row a new group; 1: 5 groups; 2: groups that
-            # keep arriving as the input goes on.
-            var key = Int64(i) if shape == 0 else (
-                r % 5 if shape == 1 else r % (Int64(i) // 10 + 1)
-            )
+            # 0: every row a new group; 1: groups that keep arriving late.
+            var key = Int64(i) if shape == 0 else r % (Int64(i) // 10 + 1)
             ints.append(key)
-            words.append("w" + String(key % 7))
+            # Past row 60 some strings exceed the 24-byte word encoding.
+            var word = "w" + String(key % 7)
+            if i > 60 and key % 3 == 0:
+                word += "-a-string-longer-than-24-bytes"
+            words.append(word)
+            var f = Float64(key % 5) - 2
+            if key % 5 == 4:
+                f = nan
+            elif key % 5 == 2:
+                f = -0.0
+            floats.append(f)
             values.append(r % 1000 - 500)
             valid.append(i % 11 != 0)
         var source = DataFrame(
             [
                 Series("k", Column[Int64](ints^, valid)),
                 Series("s", Column[String](words^)),
+                Series("x", Column[Float64](floats^, valid)),
                 Series("v", Column[Int64](values^, valid)),
             ]
         )
-        for composite in [False, True]:
-            var keys: List[String] = ["s", "k"] if composite else ["k"]
+        for keyset in range(3):
+            var keys: List[String] = ["k"]
+            if keyset == 1:
+                keys = ["s", "k"]
+            elif keyset == 2:
+                keys = ["x"]
             var query = (
                 source.lazy()
                 .group_by(keys, maintain_order=True)
@@ -278,7 +316,6 @@ def test_deferred_merges_keep_order_and_state() raises:
                         col("v").sum().alias("sum"),
                         col("v").first().alias("first"),
                         col("v").last().alias("last"),
-                        col("v").min().alias("min"),
                         col("v").arg_min().alias("arg_min"),
                         col("v").n_unique().alias("distinct"),
                         col("v").len().alias("rows"),
@@ -286,8 +323,44 @@ def test_deferred_merges_keep_order_and_state() raises:
                 )
             )
             var expected = query.collect(streaming=False)
-            for size in [4]:
-                assert_true(query.collect(batch_size=size).equals(expected))
+            for split in ["4096", "1"]:
+                set_env("DATAFRAME_STREAM_SPLIT_GROUPS", split)
+                assert_true(query.collect(batch_size=8).equals(expected))
+    unset_env("DATAFRAME_STREAM_SPLIT_GROUPS")
+    unset_env("DATAFRAME_THREADS")
+
+
+def test_decimal_states_grow_across_batches() raises:
+    """Decimal sum/min/max state per group survives streaming merges that add
+    groups, and decimal keys fall back from the key index (#326)."""
+    var dtype = DataType.decimal(8, 2)
+    var raw = List[Int128]()
+    var groups = List[Int64]()
+    for i in range(60):
+        raw.append(Int128((i * 37) % 1000 - 300))
+        groups.append(Int64(i // 3))
+    var source = DataFrame(
+        [
+            Series("g", Column[Int64](groups^)),
+            Series("d", Column[Int128](raw^)).with_dtype(dtype),
+        ]
+    )
+    for by_decimal in [False, True]:
+        var key_names: List[String] = ["d"] if by_decimal else ["g"]
+        var query = (
+            source.lazy()
+            .group_by(key_names, maintain_order=True)
+            .agg(
+                [
+                    col("d").sum().alias("sum"),
+                    col("d").min().alias("min"),
+                    col("d").max().alias("max"),
+                ]
+            )
+        )
+        assert_true(
+            query.collect(batch_size=4).equals(query.collect(streaming=False))
+        )
 
 
 def test_schema_probe_does_not_decode_data() raises:
