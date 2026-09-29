@@ -59,9 +59,12 @@ and UInt64 compute in 128 bits and range-check the result.
 | `.floor()`, `.ceil()`, `.round(decimals=0)` | numeric | same | identity for integers; `round` is half away from zero and accepts negative decimals |
 | `.clip(lower, upper)`, `.clip_min`, `.clip_max` | numeric | same | NaN inputs and NaN bounds leave the value unchanged |
 
-Float `+ - * /` and all float comparisons use explicit SIMD kernels (Float64
-and Float32 alike); the other float operations run per lane. Fusion covers
-Float64 only. `sqrt`, `exp`, `log`, and `pow` use
+Float `+ - * /` use explicit SIMD kernels (Float64 and Float32 alike); the
+other float operations run per lane. Comparisons on every numeric type, and
+`&`, `|`, `^` and `~` on Booleans, write packed value and validity bitmaps
+directly, eight rows per step. Fusion covers Float64 arithmetic, and
+comparisons over it; a comparison of two plain columns or literals uses the
+bitmap kernel instead. `sqrt`, `exp`, `log`, and `pow` use
 Mojo's `std.math`, whose results can differ from the correctly rounded value by
 about 1e-12 relative; tests compare them with a tolerance. Binder errors name
 the operator and dtypes, for example `/ requires matching dtypes, found int64

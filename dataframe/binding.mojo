@@ -548,7 +548,21 @@ def _fusible(expr: Expr, types: List[DataType], fuse: Bool) -> List[Bool]:
                 and types[node.left] == DataType.FLOAT64
                 and types[node.right] == DataType.FLOAT64
             )
+            # A comparison of two leaves (columns or literals) runs faster
+            # in the bitmap kernel than through the fused interpreter (#327);
+            # comparisons over arithmetic still fuse.
+            if (
+                is_comparison(node.op)
+                and _leaf(expr, node.left)
+                and _leaf(expr, node.right)
+            ):
+                result[i] = False
     return result^
+
+
+def _leaf(expr: Expr, index: Int) -> Bool:
+    var op = expr._nodes[index].op
+    return op == COL or op == LIT_FLOAT
 
 
 def _dt_dtype(node: Node, input: DataType) raises -> DataType:
