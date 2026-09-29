@@ -48,13 +48,16 @@ follow on every change; the full tier is what a report cites.
 |---|---|---|---:|---|
 | `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | 100, 10 and 2 groups per key; 5% nulls; sorted |
 | `h2o_join` | development | db-benchmark join | 5 | none; 5% nulls |
-| `pdsh` | held-out | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | — |
+| `pdsh` | held-out | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
 | `clickbench` | held-out | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
 
 The H2O data follows db-benchmark's R generators with seeded Polars sampling,
 so distributions match but values do not. TPC-H tables come from DuckDB's
-`dbgen`, with DECIMAL columns stored as DOUBLE because this library has no
-decimal type yet (#229). ClickBench uses the first N one-million-row
+`dbgen` in two variants: `base` stores the DECIMAL(15,2) money columns as
+DOUBLE, as the suite did before this library had decimals (#229), and
+`decimal` keeps them as DECIMAL(15,2), TPC-H's own type. The `base` numbers
+stay comparable with earlier reports; `decimal` measures decimal arithmetic,
+aggregation and joins. ClickBench uses the first N one-million-row
 partitions of `hits`, converted once from raw byte arrays and integer times to
 strings, timestamps and dates, as ClickBench's own Polars and DuckDB scripts
 do at load time. All engines read the same files.
@@ -66,13 +69,15 @@ Queries live in `benchmarks/suites/`:
   translations.
 - `h2o.mojo`, `pdsh.mojo`: this library's eager API, filtering each input
   before joining, because the lazy join cannot yet join on differently named
-  keys, which every TPC-H join needs.
+  keys, which every TPC-H join needs. In the `decimal` variant, `pdsh.mojo`
+  writes money literals as decimals and converts to Float64 where a query
+  divides or compares with an average, as DuckDB's DOUBLE division does;
+  this library does not mix decimal and float operands implicitly.
 - `clickbench.mojo`: the lazy API, whose projection pushdown reads only the
   columns each query uses from the 105-column table.
 
 A query this library cannot express is reported as unsupported with the
-missing feature: H2O q9 (`corr`, #226) and ClickBench q28 (regular
-expressions, #219).
+missing feature: ClickBench q28 (regular expressions, #219).
 
 ## Running
 

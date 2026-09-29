@@ -1,7 +1,11 @@
 """PDS-H: the 22 TPC-H-derived queries of Polars' benchmark, written with
 this library's eager API as a user would today: filter each table, then
 join (the eager API has no optimizer to reorder that). engines.py holds the
-Polars versions; DuckDB runs `tpch_queries()`. Usage: see suite_common.mojo.
+Polars versions; DuckDB runs `tpch_queries()`. The same queries run on both
+data variants (bench_suites.py): money columns as Float64, or as
+Decimal(15, 2), where literals must be decimals too (`money`) and ratios
+and comparisons with averages convert to Float64 (`real`). Usage: see
+suite_common.mojo.
 """
 from std.collections import Dict
 
@@ -42,6 +46,20 @@ def between_dates(name: String, low: String, high: String) raises -> Expr:
     return col(name).is_between(date_lit(low), date_lit(high), closed="left")
 
 
+def money(decimal: Bool, text: String) raises -> Expr:
+    """A literal of the money columns' type: Decimal(15, 2) in the `decimal`
+    data variant, where decimals only combine with decimals, else Float64."""
+    if decimal:
+        return lit(text).cast(DataType.decimal(15, 2))
+    return lit(Float64(text))
+
+
+def real(e: Expr) -> Expr:
+    """Float64, for ratios and comparisons with averages. DuckDB divides
+    decimals into DOUBLE; a decimal quotient would round to scale 2."""
+    return e.cast(DataType.FLOAT64)
+
+
 def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
     ref line = t["lineitem"]
     ref orders = t["orders"]
@@ -51,7 +69,10 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
     ref ps = t["partsupp"]
     ref nation = t["nation"]
     ref region = t["region"]
-    var disc_price = col("l_extendedprice") * (lit(1.0) - col("l_discount"))
+    var dec = line.column("l_discount").dtype().is_decimal()
+    var disc_price = col("l_extendedprice") * (
+        money(dec, "1") - col("l_discount")
+    )
     if q == "q1":
         return (
             line.filter(col("l_shipdate") <= date_lit("1998-09-02"))
@@ -61,7 +82,7 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
                     col("l_quantity").sum().alias("sum_qty"),
                     col("l_extendedprice").sum().alias("sum_base_price"),
                     disc_price.sum().alias("sum_disc_price"),
-                    (disc_price * (lit(1.0) + col("l_tax")))
+                    (disc_price * (money(dec, "1") + col("l_tax")))
                     .sum()
                     .alias("sum_charge"),
                     col("l_quantity").mean().alias("avg_qty"),
@@ -169,8 +190,10 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
     if q == "q6":
         return line.filter(
             between_dates("l_shipdate", "1994-01-01", "1995-01-01")
-            & col("l_discount").is_between(lit(0.05), lit(0.07))
-            & (col("l_quantity") < 24)
+            & col("l_discount").is_between(
+                money(dec, "0.05"), money(dec, "0.07")
+            )
+            & (col("l_quantity") < money(dec, "24"))
         ).select(
             (col("l_extendedprice") * col("l_discount")).sum().alias("revenue")
         )
@@ -258,10 +281,10 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
                 [
                     (
                         when(col("nation") == "BRAZIL")
-                        .then(col("volume"))
+                        .then(real(col("volume")))
                         .otherwise(lit(0.0))
                         .sum()
-                        / col("volume").sum()
+                        / real(col("volume").sum())
                     ).alias("mkt_share")
                 ]
             )
@@ -341,7 +364,7 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
             .with_columns(
                 [
                     (
-                        col("ps_supplycost")
+                        real(col("ps_supplycost"))
                         * col("ps_availqty").cast(DataType.FLOAT64)
                     ).alias("v")
                 ]
@@ -400,10 +423,10 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
                 (
                     lit(100.0)
                     * when(col("p_type").str().starts_with("PROMO"))
-                    .then(disc_price)
+                    .then(real(disc_price))
                     .otherwise(lit(0.0))
                     .sum()
-                    / disc_price.sum()
+                    / real(disc_price.sum())
                 ).alias("promo_revenue")
             )
         )
@@ -413,10 +436,11 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
             .group_by(["l_suppkey"])
             .agg([disc_price.sum().alias("total_revenue")])
         )
-        var top = revenue.select(col("total_revenue").max()).item().float64()
         return (
             supp.join(
-                revenue.filter(col("total_revenue") == lit(top)),
+                revenue.filter(
+                    col("total_revenue") == col("total_revenue").max()
+                ),
                 left_on=["s_suppkey"],
                 right_on=["l_suppkey"],
             )
@@ -460,14 +484,16 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
             (col("p_brand") == "Brand#23") & (col("p_container") == "MED BOX")
         ).join(line, left_on=["p_partkey"], right_on=["l_partkey"])
         return chosen.filter(
-            col("l_quantity")
+            real(col("l_quantity"))
             < lit(0.2) * col("l_quantity").mean().over("p_partkey")
-        ).select((col("l_extendedprice").sum() / lit(7.0)).alias("avg_yearly"))
+        ).select(
+            (real(col("l_extendedprice").sum()) / lit(7.0)).alias("avg_yearly")
+        )
     if q == "q18":
         var big = (
             line.group_by(["l_orderkey"])
             .agg([col("l_quantity").sum().alias("q")])
-            .filter(col("q") > 300)
+            .filter(col("q") > money(dec, "300"))
             .select(["l_orderkey"])
         )
         var grouped = (
@@ -507,12 +533,19 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
         var air: List[String] = ["AIR", "AIR REG"]
 
         def branch(
-            brand: String, containers: List[String], low: Float64, size: Int
+            brand: String,
+            containers: List[String],
+            low: Int,
+            size: Int,
+            decimal: Bool,
         ) raises -> Expr:
             return (
                 (col("p_brand") == brand)
                 & col("p_container").is_in(containers)
-                & col("l_quantity").is_between(lit(low), lit(low + 10))
+                & col("l_quantity").is_between(
+                    money(decimal, String(low)),
+                    money(decimal, String(low + 10)),
+                )
                 & col("p_size").is_between(Expr(1), Expr(size))
             )
 
@@ -523,9 +556,9 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
             )
             .join(part, left_on=["l_partkey"], right_on=["p_partkey"])
             .filter(
-                branch("Brand#12", sm, 1.0, 5)
-                | branch("Brand#23", med, 10.0, 10)
-                | branch("Brand#34", lg, 20.0, 15)
+                branch("Brand#12", sm, 1, 5, dec)
+                | branch("Brand#23", med, 10, 10, dec)
+                | branch("Brand#34", lg, 20, 15, dec)
             )
             .select(disc_price.sum().alias("revenue"))
         )
@@ -533,7 +566,7 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
         var shipped = (
             line.filter(between_dates("l_shipdate", "1994-01-01", "1995-01-01"))
             .group_by(["l_partkey", "l_suppkey"])
-            .agg([(lit(0.5) * col("l_quantity").sum()).alias("half")])
+            .agg([(lit(0.5) * real(col("l_quantity").sum())).alias("half")])
         )
         var forest = part.filter(col("p_name").str().starts_with("forest"))
         var suppliers = (
@@ -596,13 +629,13 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
             [col("c_phone").str().slice(0, 2).alias("cntrycode")]
         ).filter(col("cntrycode").is_in(codes))
         var average = (
-            chosen.filter(col("c_acctbal") > lit(0.0))
+            chosen.filter(col("c_acctbal") > money(dec, "0"))
             .select(col("c_acctbal").mean())
             .item()
             .float64()
         )
         return (
-            chosen.filter(col("c_acctbal") > lit(average))
+            chosen.filter(real(col("c_acctbal")) > lit(average))
             .join(
                 orders,
                 left_on=["c_custkey"],

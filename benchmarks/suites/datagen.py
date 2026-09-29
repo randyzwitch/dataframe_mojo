@@ -13,9 +13,10 @@ Suites and their provenance:
   `runif` calls are reproduced with seeded Polars sampling and hashing, so
   the distributions match but the exact values do not.
 - pdsh: TPC-H tables from DuckDB's `dbgen`, as used by Polars' PDS-H
-  benchmark (https://github.com/pola-rs/polars-benchmark). DECIMAL columns
-  become DOUBLE because this library has no decimal type yet (#229); every
-  engine reads the same doubles.
+  benchmark (https://github.com/pola-rs/polars-benchmark), in two variants:
+  `base` stores the DECIMAL(15,2) money columns as DOUBLE, as the suite did
+  before this library had decimals (#229), and `decimal` keeps them as
+  DECIMAL(15,2). Every engine reads the same files in each variant.
 - clickbench: the `hits` table from https://github.com/ClickHouse/ClickBench,
   downloaded in 1M-row partitions. Its Parquet files store text as untyped
   byte arrays and times as integers; like ClickBench's own Polars and DuckDB
@@ -220,11 +221,14 @@ PDSH_TABLES = [
 ]
 
 
-def pdsh(scale: float) -> Path:
-    """TPC-H tables from DuckDB dbgen, with DECIMAL columns as DOUBLE."""
+def pdsh(scale: float, decimal: bool = False) -> Path:
+    """TPC-H tables from DuckDB dbgen, with DECIMAL columns as DOUBLE, or
+    kept as DECIMAL(15,2) when `decimal`."""
     import duckdb
 
-    root = data_root() / "pdsh" / f"sf{scale:g}"
+    root = data_root() / "pdsh" / (
+        f"sf{scale:g}_decimal" if decimal else f"sf{scale:g}"
+    )
     if all((root / f"{t}.parquet").exists() for t in PDSH_TABLES):
         return root
     root.mkdir(parents=True, exist_ok=True)
@@ -239,7 +243,7 @@ def pdsh(scale: float) -> Path:
         ).fetchall()
         select = ", ".join(
             f"CAST({name} AS DOUBLE) AS {name}"
-            if kind.startswith("DECIMAL")
+            if kind.startswith("DECIMAL") and not decimal
             else f"CAST({name} AS BIGINT) AS {name}"
             if kind == "INTEGER"
             else name
