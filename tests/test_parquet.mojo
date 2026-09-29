@@ -150,10 +150,16 @@ def test_errors_are_reported() raises:
     assert_true(raised)
 
 
-def test_time_zone_timestamps_import_as_utc_instants() raises:
-    for name in [String("timestamp_utc"), "timestamp_tz"]:
-        var frame = read_parquet(FIXTURES + name + ".parquet")
-        assert_equal(frame.column("c").dtype(), DataType.datetime("us"))
+def test_time_zone_timestamps_keep_their_zone() raises:
+    # The values are UTC instants either way; the zone comes along (#222).
+    for fixture in [
+        ("timestamp_utc", "UTC"),
+        ("timestamp_tz", "America/New_York"),
+    ]:
+        var frame = read_parquet(FIXTURES + fixture[0] + ".parquet")
+        assert_equal(
+            frame.column("c").dtype(), DataType.datetime("us", fixture[1])
+        )
         var c = frame.column("c").with_dtype(DataType.INT64)
         assert_equal(c.get(0).int64(), 1)
         assert_true(c.get(1).is_null())

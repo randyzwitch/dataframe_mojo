@@ -96,6 +96,8 @@ from .expr import (
     DT_TOTAL,
     DT_STRFTIME,
     DT_STRPTIME,
+    DT_REPLACE_TZ,
+    DT_CONVERT_TZ,
     is_dt_op,
     is_window,
     STR_CONCAT,
@@ -132,7 +134,12 @@ from .expr import (
 )
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
-from .temporal import parse_every
+from .temporal import (
+    ambiguous_code,
+    non_existent_code,
+    parse_every,
+    strptime_target,
+)
 
 comptime SCALAR = 0
 comptime ROWS = 1
@@ -577,7 +584,25 @@ def _dt_dtype(node: Node, input: DataType) raises -> DataType:
         var target = node.dtypes[0].value()
         if not (target.is_date() or target.is_datetime() or target.is_time()):
             raise Error("strptime target must be date, datetime, or time")
-        return target
+        return strptime_target(target, node.text)
+    if op == DT_REPLACE_TZ or op == DT_CONVERT_TZ:
+        var name = (
+            "replace_time_zone" if op == DT_REPLACE_TZ else "convert_time_zone"
+        )
+        if not input.is_datetime():
+            raise Error(
+                name + " requires a datetime expression, found " + input.name()
+            )
+        if op == DT_CONVERT_TZ and node.text.byte_length() == 0:
+            raise Error(
+                "convert_time_zone needs a time zone; use"
+                " replace_time_zone('') to drop one"
+            )
+        if op == DT_REPLACE_TZ:
+            var options = node.text2.split(",")
+            _ = ambiguous_code(String(options[0]))
+            _ = non_existent_code(String(options[1]))
+        return input.with_time_zone(node.text)
     if op == DT_TOTAL:
         if not input.is_duration():
             raise Error(

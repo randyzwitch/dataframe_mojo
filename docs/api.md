@@ -213,7 +213,8 @@ means ISO 8601 (see dataframe/temporal.mojo).
 - `def bool(name: String, nullable: Bool = True) -> Self`
 - `def string(name: String, nullable: Bool = True) -> Self`
 - `def date(name: String, format: String = "", nullable: Bool = True) -> Self`
-- `def datetime(name: String, unit: String = "us", format: String = "", nullable: Bool = True) -> Self`
+- `def datetime(name: String, unit: String = "us", format: String = "", nullable: Bool = True, time_zone: String = "") -> Self`
+  A datetime field. With `time_zone`, text without a UTC offset is local time in that zone; text with one is converted.
 - `def time(name: String, format: String = "", nullable: Bool = True) -> Self`
 
 ## `CsvOptions`
@@ -373,8 +374,9 @@ A logical column type.
 
 Numeric: INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
 FLOAT32, FLOAT64. Also BOOL, STRING, DATE (days since 1970-01-01), TIME
-(nanoseconds since midnight), and datetime(unit) / duration(unit) with
-unit "ns", "us", or "ms". Temporal types are stored as Int64. Nested:
+(nanoseconds since midnight), and datetime(unit, time_zone) /
+duration(unit) with unit "ns", "us", or "ms". A datetime with a time zone
+holds UTC ticks, like an Arrow timestamp whose zone is set. Temporal types are stored as Int64. Nested:
 list(inner) holds a variable number of `inner` values per row, and
 struct(names, dtypes) holds one value of each named field per row.
 
@@ -382,6 +384,8 @@ struct(names, dtypes) holds one value of each named field per row.
 - `def __init__(out self, storage: DType)`
   A numeric type stored as Scalar[storage].
 - `def __init__(out self, code: Int, var spec: String)`
+- `def __init__(out self, code: Int, unit: Int, var zone: String)`
+  A datetime in a time zone; the zone rides in `_nested`.
 - `def __eq__(self, other: Self) -> Bool`
 - `def __ne__(self, other: Self) -> Bool`
 - `def list(inner) -> Self`
@@ -409,8 +413,12 @@ struct(names, dtypes) holds one value of each named field per row.
   The DataType stored as Scalar[dtype] (numeric types only).
 - `def storage(self) -> Optional[DType]`
   The numeric storage DType (int64 for temporal types); None for bool, string and nested types.
-- `def datetime(unit: String = "us") -> Self`
-  A time-zone-naive instant counted in unit since the epoch.
+- `def datetime(unit: String = "us", time_zone: String = "") -> Self`
+  An instant counted in unit since the epoch. Without a time zone it is naive (a wall-clock reading); with one it is UTC, shown and broken into fields in that zone. The zone is an IANA name, "UTC", or a fixed offset "+HH:MM", as in Arrow (see timezone.mojo).
+- `def time_zone(self) -> String`
+  A datetime's time zone; empty when naive or not a datetime.
+- `def with_time_zone(self, time_zone: String) -> Self`
+  This datetime's unit in `time_zone` (empty for naive).
 - `def duration(unit: String = "us") -> Self`
   A signed length of time counted in unit.
 - `def decimal(precision: Int, scale: Int) -> Self`
@@ -458,17 +466,20 @@ def date_range(start: String, end: String, interval: String = "1d", name: String
 
 ## `datetime_range`
 
-Datetimes from start through end (inclusive) every interval.
+Datetimes from start through end (inclusive) every interval. With a time zone, start and end are local times there.
 
 ```mojo
-def datetime_range(start: String, end: String, interval: String, unit: String = "us", name: String = "datetime") -> Series
+def datetime_range(start: String, end: String, interval: String, unit: String = "us", name: String = "datetime", time_zone: String = "") -> Series
 ```
 
 ## `DtNamespace`
 
 Temporal operations on date, datetime, time, and duration expressions.
 
-Fields use the proleptic Gregorian calendar with no time zones. Nulls
+Fields use the proleptic Gregorian calendar. For a datetime with a time
+zone, fields, date, time, truncate, calendar offsets (d, w, mo, y) and
+strftime use local time in that zone; fixed offsets (h, m, s, ...) and
+duration arithmetic act on the UTC instant, as in Polars. Nulls
 propagate.
 
 - `def year(self) -> Expr`
@@ -500,6 +511,10 @@ propagate.
 - `def total_milliseconds(self) -> Expr`
 - `def strftime(self, format: String) -> Expr`
   Format as text; see dataframe/temporal.mojo for directives.
+- `def replace_time_zone(self, time_zone: String, ambiguous: String = "raise", non_existent: String = "raise") -> Expr`
+  Read each datetime's wall-clock time as local time in `time_zone` (empty makes it naive), keeping the wall time and changing the instant. `ambiguous` ("raise", "earliest", "latest", "null") picks between the two instants when clocks fall back; `non_existent` ("raise", "null") handles times skipped when clocks spring forward.
+- `def convert_time_zone(self, time_zone: String) -> Expr`
+  The same instants shown in `time_zone`; naive input is read as UTC.
 
 ## `exclude`
 
@@ -1261,7 +1276,8 @@ String expressions. Character operations work on Unicode code points; there is n
 - `def strptime(self, dtype: String, format: String = "", strict: Bool = True) -> Expr`
   Parse text as "date", "datetime[unit]", or "time" using a strftime-style format (ISO 8601 when empty); unparseable text raises when strict, or is null otherwise.
 - `def to_date(self, format: String = "") -> Expr`
-- `def to_datetime(self, format: String = "", unit: String = "us") -> Expr`
+- `def to_datetime(self, format: String = "", unit: String = "us", time_zone: String = "") -> Expr`
+  Parse as a datetime. A format with %z gives UTC-aware values; with `time_zone`, text without an offset is local time there.
 - `def zfill(self, width: Int) -> Expr`
   Left-pad with zeros, after a leading + or - sign.
 - `def split(self, by: String, inclusive: Bool = False) -> Expr`

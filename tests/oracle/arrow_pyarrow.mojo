@@ -17,6 +17,7 @@ from dataframe import (
     DataType,
     Series,
     StringColumn,
+    col,
     export_arrow_series,
     import_arrow,
     import_arrow_series,
@@ -222,7 +223,6 @@ def check_unsupported_types_are_rejected() raises:
     var pa = Python.import_module("pyarrow")
     # Lists and structs import since nested columns exist; maps do not yet.
     var cases = Python.list(
-        pa.array(Python.list(1, 2), type=pa.timestamp("us", tz="UTC")),
         pa.array(Python.list("a", "b")).dictionary_encode(),
         pa.array(
             Python.list(Python.list(Python.tuple("k", 1))),
@@ -317,11 +317,63 @@ def check_decimal128_round_trip() raises:
     back.free()
 
 
+def check_time_zone_round_trip() raises:
+    """Zone-aware timestamps (#222) keep their zone both ways, and their
+    values are the same UTC instants pyarrow holds."""
+    var pa = Python.import_module("pyarrow")
+    var values = Python.list(
+        1710052200000000, Python.none(), 1730611800000000, -86400000001
+    )
+    for zone in ["America/New_York", "Australia/Lord_Howe", "UTC", "+05:30"]:
+        var source = pa.array(values, type=pa.timestamp("us", tz=zone))
+        var c = CStructs()
+        source._export_to_c(c.array, c.schema)
+        var series = import_arrow_series(c.array, c.schema)
+        c.free()
+        assert_true(series.dtype() == DataType.datetime("us", zone), zone)
+        assert_true(series.get(1).is_null())
+        assert_equal(
+            series._data[Column[Int64]]._get(2), Int64(1730611800000000)
+        )
+        # Local fields agree with Python's own zone arithmetic.
+        var expected = source.to_pylist()
+        var hours = (
+            DataFrame([series.renamed("t")])
+            .select(col("t").dt().hour())
+            .column("t")
+        )
+        for i in [0, 2, 3]:
+            assert_equal(hours.get(i).int64(), Int64(py=expected[i].hour), zone)
+        var back = CStructs()
+        export_arrow_series(
+            series,
+            _at[ArrowArray](back.array)[],
+            _at[ArrowSchema](back.schema)[],
+        )
+        var again = pa.Array._import_from_c(back.array, back.schema)
+        assert_equal(String(again.type), String(source.type))
+        assert_true(Bool(again.equals(source)), zone)
+        back.free()
+    # Seconds read as milliseconds, zone and nulls kept.
+    var seconds = pa.array(
+        Python.list(1710052200, Python.none()),
+        type=pa.timestamp("s", tz="Europe/Paris"),
+    )
+    var c = CStructs()
+    seconds._export_to_c(c.array, c.schema)
+    var series = import_arrow_series(c.array, c.schema)
+    c.free()
+    assert_true(series.dtype() == DataType.datetime("ms", "Europe/Paris"))
+    assert_equal(series._data[Column[Int64]]._get(0), Int64(1710052200000))
+    assert_true(series.get(1).is_null())
+
+
 def main() raises:
     check_export_is_valid_arrow()
     check_round_trips_with_offsets()
     check_pyarrow_produced_types()
     check_pyarrow_nested_types()
     check_decimal128_round_trip()
+    check_time_zone_round_trip()
     check_unsupported_types_are_rejected()
     print("arrow C data interface: pyarrow interop ok")

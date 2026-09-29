@@ -18,7 +18,7 @@ from std.collections import Dict
 from .csv_types import CsvField, CsvOptions, CsvSchema
 from .csv_splitfields import CsvSplitFields
 from .dtype import DataType
-from .temporal import parse as parse_temporal
+from .temporal import has_offset, parse as parse_temporal
 
 
 comptime _BOOL = 1
@@ -28,6 +28,9 @@ comptime _STRING = 8
 comptime _DATE = 16
 comptime _DATETIME = 32
 comptime _TIME = 64
+# Datetimes that all carry a UTC offset infer as UTC-aware, as in Polars;
+# a column mixing them with naive datetimes stays String.
+comptime _DATETIME_UTC = 128
 
 
 @fieldwise_init
@@ -216,7 +219,7 @@ def _infer_temporal(raw: Span[UInt8, ImmutAnyOrigin]) -> Int:
         pass
     try:
         _ = parse_temporal(text, DataType.datetime("us"))
-        return _DATETIME
+        return _DATETIME_UTC if has_offset(text) else _DATETIME
     except:
         return _STRING
 
@@ -438,6 +441,8 @@ def infer_csv_schema(
             dtype = DataType.DATE
         elif candidates[i] == _DATETIME:
             dtype = DataType.datetime("us")
+        elif candidates[i] == _DATETIME_UTC:
+            dtype = DataType.datetime("us", "UTC")
         elif candidates[i] == _TIME:
             dtype = DataType.TIME
         elif candidates[i] == _STRING:

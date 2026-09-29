@@ -10,8 +10,8 @@
 //
 // Column types the caller cannot hold are coerced on the way out:
 // dictionary columns are decoded to their value type, float16 widens to
-// float32, string/binary views become plain string/binary, and a timestamp
-// with a time zone loses the zone (its values are already UTC instants).
+// float32, and string/binary views become plain string/binary. Timestamps
+// keep their time zone.
 #include <arrow/array.h>
 #include <arrow/array/builder_base.h>
 #include <arrow/array/builder_primitive.h>
@@ -61,11 +61,6 @@ std::shared_ptr<arrow::DataType> CoercedType(
       return arrow::utf8();
     case arrow::Type::BINARY_VIEW:
       return arrow::binary();
-    case arrow::Type::TIMESTAMP: {
-      const auto& ts = static_cast<const arrow::TimestampType&>(*type);
-      if (!ts.timezone().empty()) return arrow::timestamp(ts.unit());
-      return type;
-    }
     default:
       return type;
   }

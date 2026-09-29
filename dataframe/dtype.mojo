@@ -4,7 +4,8 @@
 constants (`DataType.INT64`) and compare with `==`. `String(dtype)` gives the
 canonical name used in schemas, casts, and error messages, and
 `DataType.parse(name)` is its inverse. Parameterized types (such as datetime
-units) keep their parameter in `_unit`; nested types (`DataType.list(inner)`
+units) keep their parameter in `_unit`, and a datetime's time zone is kept
+as text behind the same shared pointer nested types use; nested types (`DataType.list(inner)`
 and `DataType.struct(names, dtypes)`) keep their child types as an encoded
 spec behind a shared pointer and decode them on demand. A DataType cannot
 hold a `List[DataType]`, even indirectly: Mojo rejects that cycle in an
@@ -13,6 +14,8 @@ imported module.
 from std.collections import Optional
 from std.memory import ArcPointer
 from std.sys import size_of
+
+from .timezone import canonical_zone
 
 # Every numeric type shares one code; its DType tells them apart.
 comptime _NUMERIC = 0
@@ -69,8 +72,9 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
 
     Numeric: INT8, INT16, INT32, INT64, UINT8, UINT16, UINT32, UINT64,
     FLOAT32, FLOAT64. Also BOOL, STRING, DATE (days since 1970-01-01), TIME
-    (nanoseconds since midnight), and datetime(unit) / duration(unit) with
-    unit "ns", "us", or "ms". Temporal types are stored as Int64. Nested:
+    (nanoseconds since midnight), and datetime(unit, time_zone) /
+    duration(unit) with unit "ns", "us", or "ms". A datetime with a time zone
+    holds UTC ticks, like an Arrow timestamp whose zone is set. Temporal types are stored as Int64. Nested:
     list(inner) holds a variable number of `inner` values per row, and
     struct(names, dtypes) holds one value of each named field per row.
     """
@@ -104,6 +108,12 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         self._storage = _NO_STORAGE
         self._nested = ArcPointer(_NestedSpec(spec^))
 
+    def __init__(out self, code: Int, unit: Int, var zone: String):
+        """A datetime in a time zone; the zone rides in `_nested`."""
+        self = DataType(code, unit)
+        if zone.byte_length() > 0:
+            self._nested = ArcPointer(_NestedSpec(zone^))
+
     @staticmethod
     def list(inner: DataType) -> DataType:
         """A list column whose elements have dtype `inner`."""
@@ -131,7 +141,7 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     def _encode(self) -> String:
         """A self-delimiting spec: P<len>:<name> for a flat type,
         L<inner> for a list, S<n>:(<len>:<name><dtype>)* for a struct."""
-        if self._nested:
+        if self.is_nested():
             return self._nested.value()[].text
         var name = self.name()
         return "P" + String(name.byte_length()) + ":" + name
@@ -246,9 +256,27 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         return self._storage
 
     @staticmethod
-    def datetime(unit: String = "us") raises -> DataType:
-        """A time-zone-naive instant counted in unit since the epoch."""
-        return DataType(_DATETIME, _unit_code(unit))
+    def datetime(
+        unit: String = "us", time_zone: String = ""
+    ) raises -> DataType:
+        """An instant counted in unit since the epoch. Without a time zone
+        it is naive (a wall-clock reading); with one it is UTC, shown and
+        broken into fields in that zone. The zone is an IANA name, "UTC",
+        or a fixed offset "+HH:MM", as in Arrow (see timezone.mojo)."""
+        var code = _unit_code(unit)
+        if time_zone.byte_length() == 0:
+            return DataType(_DATETIME, code)
+        return DataType(_DATETIME, code, canonical_zone(time_zone))
+
+    def time_zone(self) -> String:
+        """A datetime's time zone; empty when naive or not a datetime."""
+        if self._code == _DATETIME and self._nested:
+            return self._nested.value()[].text
+        return ""
+
+    def with_time_zone(self, time_zone: String) raises -> DataType:
+        """This datetime's unit in `time_zone` (empty for naive)."""
+        return DataType.datetime(self.unit(), time_zone)
 
     @staticmethod
     def duration(unit: String = "us") raises -> DataType:
@@ -311,6 +339,12 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         for unit in ["ns", "us", "ms"]:
             if name == "datetime[" + unit + "]":
                 return DataType.datetime(unit)
+            var prefix = "datetime[" + unit + ","
+            if name.startswith(prefix) and name.endswith("]"):
+                var zone = String(
+                    name[byte = prefix.byte_length() : name.byte_length() - 1]
+                ).strip()
+                return DataType.datetime(unit, String(zone))
             if name == "duration[" + unit + "]":
                 return DataType.duration(unit)
         if name.startswith("list[") and name.endswith("]"):
@@ -354,6 +388,9 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         if self._code == _TIME:
             return "time"
         if self._code == _DATETIME:
+            var zone = self.time_zone()
+            if zone.byte_length() > 0:
+                return "datetime[" + self.unit() + ", " + zone + "]"
             return "datetime[" + self.unit() + "]"
         if self._code == _DURATION:
             return "duration[" + self.unit() + "]"

@@ -64,8 +64,13 @@ struct CsvField(Copyable):
         unit: String = "us",
         format: String = "",
         nullable: Bool = True,
+        time_zone: String = "",
     ) raises -> CsvField:
-        return CsvField(name, DataType.datetime(unit), nullable, format)
+        """A datetime field. With `time_zone`, text without a UTC offset is
+        local time in that zone; text with one is converted."""
+        return CsvField(
+            name, DataType.datetime(unit, time_zone), nullable, format
+        )
 
     @staticmethod
     def time(

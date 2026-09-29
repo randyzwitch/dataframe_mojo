@@ -19,7 +19,8 @@ from .string_column import StringColumn
 from .dtype import DataType, NUMERIC_DTYPES
 from .frame import DataFrame
 from .series import Series
-from .temporal import format as format_temporal
+from .temporal import format_in, zone_of
+from .timezone import TimeZone
 from .decimal import format_decimal
 
 
@@ -184,18 +185,19 @@ def _render_field(
     return text
 
 
-def _cell_text(series: Series, row: Int) raises -> String:
-    """Canonical text for a valid cell; floats use the round-trip form."""
+def _cell_text(series: Series, row: Int, zone: TimeZone) raises -> String:
+    """Canonical text for a valid cell; floats use the round-trip form, and
+    zone-aware datetimes carry their UTC offset (`zone` is the column's)."""
     if series.is_chunked():
         var part = series._chunk_at(row)
-        return _cell_text(part[0], part[1])
+        return _cell_text(part[0], part[1], zone)
     if series.dtype().is_decimal():
         return format_decimal(
             series._data[Column[Int128]]._get(row), series.dtype().scale()
         )
     if series.dtype().is_temporal():
-        return format_temporal(
-            series._data[Column[Int64]]._get(row), series.dtype()
+        return format_in(
+            series._data[Column[Int64]]._get(row), series.dtype(), "", zone
         )
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
@@ -227,9 +229,12 @@ struct _CsvWriter:
     var quote_style: String
     var null_value: String
     var line_terminator: String
+    # Each column's time zone (UTC unless zone-aware), loaded once.
+    var zones: List[TimeZone]
 
     def __init__(
         out self,
+        frame: DataFrame,
         separator: String,
         quote_style: String,
         null_value: String,
@@ -262,6 +267,9 @@ struct _CsvWriter:
         self.quote_style = quote_style
         self.null_value = null_value
         self.line_terminator = line_terminator
+        self.zones = List[TimeZone]()
+        for c in range(frame.width()):
+            self.zones.append(zone_of(frame._columns[c].dtype()))
 
     def header(self, frame: DataFrame) -> String:
         var line = String()
@@ -291,7 +299,7 @@ struct _CsvWriter:
                 or column.dtype() == DataType.BOOL
             )
             line += _render_field(
-                _cell_text(column, row),
+                _cell_text(column, row, self.zones[c]),
                 is_string,
                 self.quote_style,
                 self.separator_byte,
@@ -311,7 +319,9 @@ def to_csv_string(
 ) raises -> String:
     """Render the whole frame as CSV text; use write_csv for large frames."""
     _reject_nested(frame)
-    var writer = _CsvWriter(separator, quote_style, null_value, line_terminator)
+    var writer = _CsvWriter(
+        frame, separator, quote_style, null_value, line_terminator
+    )
     var out = String()
     if has_header:
         out += writer.header(frame)
@@ -340,7 +350,9 @@ def write_csv(
     _reject_nested(frame)
     if buffer_size <= 0:
         raise Error("CSV buffer_size must be positive")
-    var writer = _CsvWriter(separator, quote_style, null_value, line_terminator)
+    var writer = _CsvWriter(
+        frame, separator, quote_style, null_value, line_terminator
+    )
     with open(path, "w") as file:
         var chunk = String()
         if has_header:

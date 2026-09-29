@@ -73,11 +73,79 @@ def gen_right(rng: random.Random, rows: int) -> pl.DataFrame:
     )
 
 
-KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal", "prep"]
+KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal", "prep", "tz"]
+
+# Time-zone cases (#222): instants near a DST switch or a historical offset
+# change, in UTC microseconds. Rows are BASE + n * STEP, so a 7-minute step
+# covers the switch and a day-and-a-bit step crosses years of switches
+# (including dates past 2037, which only the TZif footer rule describes).
+TZ_BASES = [
+    ("America/New_York", 1710054000000000),  # 2024-03-10 spring forward
+    ("America/New_York", 1730613600000000),  # 2024-11-03 fall back
+    ("America/New_York", 2372994000000000),  # 2045-03-12, footer rule
+    ("America/New_York", -1633280400000000),  # 1918, first US DST
+    ("Europe/London", 1711846800000000),  # 2024-03-31
+    ("Europe/London", 1729990800000000),  # 2024-10-27
+    ("Europe/London", -59004000000000),  # 1968-02-18, all-year BST begins
+    ("Australia/Lord_Howe", 1728142200000000),  # 2024-10-06, 30-minute gap
+    ("Australia/Lord_Howe", 1712415600000000),  # 2024-04-07, 30-minute overlap
+    ("Pacific/Apia", 1325239200000000),  # 2011-12-30 skipped: -10 to +14
+    ("Europe/Moscow", 1414274400000000),  # 2014-10-26, +4 to +3 for good
+    ("America/Caracas", 1462086000000000),  # 2016-05-01, -4:30 to -4
+]
+TZ_STEPS = [420_000_000, 1_800_000_000, 87_780_000_000]
+TZ_FIELDS = ["year", "month", "day", "hour", "minute", "second", "weekday", "ordinal_day", "date", "time"]
+TZ_FORMATS = ["%Y-%m-%d %H:%M:%S %z", "%H:%M %Z", "%j %:z"]
+
+
+def gen_tz(rng: random.Random) -> list[str]:
+    zone, base = rng.choice(TZ_BASES)
+    spec = ["tz", zone, str(base), str(rng.choice(TZ_STEPS))]
+    op = rng.choice(["field", "strftime", "truncate", "offset_by", "replace", "naive"])
+    if op == "field":
+        return spec + [op, rng.choice(TZ_FIELDS)]
+    if op == "strftime":
+        return spec + [op, rng.choice(TZ_FORMATS)]
+    if op == "truncate":
+        return spec + [op, rng.choice(["30m", "1h", "2h", "1d", "1w", "1mo"])]
+    if op == "offset_by":
+        return spec + [op, rng.choice(["1d", "-1d", "1w", "1mo", "-1mo", "90m", "1d1h", "1y"])]
+    if op == "replace":
+        # Wall-clock times around the switch, so rows land in the gap or
+        # the overlap: the naive base is the switch's local time.
+        wall = pl.select(pl.lit(base).cast(pl.Datetime("us", "UTC")).dt.convert_time_zone(zone).dt.replace_time_zone(None).cast(pl.Int64)).item()
+        spec[2] = str(wall)
+        spec[3] = str(TZ_STEPS[0])
+        return spec + [op, rng.choice(["raise", "earliest", "latest", "null"]), rng.choice(["raise", "null"])]
+    return spec + [op]
+
+
+def tz_expected(left: pl.DataFrame, spec: list[str]) -> pl.DataFrame:
+    zone, base, step, op = spec[1], int(spec[2]), int(spec[3]), spec[4]
+    naive = (pl.lit(base) + pl.col("n") * step).cast(pl.Datetime("us"))
+    aware = naive.dt.replace_time_zone("UTC").dt.convert_time_zone(zone)
+    if op == "field":
+        e = getattr(aware.dt, spec[5])()
+        if spec[5] in ("date", "time"):
+            e = e.cast(pl.Int64)
+    elif op == "strftime":
+        e = aware.dt.strftime(spec[5])
+    elif op == "truncate":
+        e = aware.dt.truncate(spec[5]).cast(pl.Int64)
+    elif op == "offset_by":
+        e = aware.dt.offset_by(spec[5]).cast(pl.Int64)
+    elif op == "replace":
+        e = naive.dt.replace_time_zone(zone, ambiguous=spec[5], non_existent=spec[6]).cast(pl.Int64)
+    else:
+        # Aware to naive keeps the wall-clock time.
+        e = aware.dt.replace_time_zone(None).cast(pl.Int64)
+    return left.select(pl.col("n"), e.alias("out"))
 
 
 def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
     kind = rng.choice(kinds)
+    if kind == "tz":
+        return gen_tz(rng)
     if kind == "prep":
         operation = rng.choice(["interpolate", "cut", "qcut"])
         if operation == "interpolate":
@@ -181,6 +249,8 @@ def stat_input(left: pl.DataFrame, fn: str, column: str) -> pl.DataFrame:
 
 def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.DataFrame:
     op = spec[0]
+    if op == "tz":
+        return tz_expected(left, spec)
     if op == "prep":
         operation = spec[1]
         if operation == "interpolate":
@@ -293,7 +363,15 @@ def run_case(runner: Path, left: pl.DataFrame, right: pl.DataFrame, spec: list[s
         lp, rp, out, exp = (Path(tmp) / n for n in ("l.csv", "r.csv", "o.csv", "e.csv"))
         left.write_csv(lp)
         right.write_csv(rp)
-        want = expected(left, right, spec)
+        try:
+            want = expected(left, right, spec)
+        except pl.exceptions.ComputeError as error:
+            # Polars refuses the input (a non-existent or ambiguous local
+            # time under "raise"); Mojo must refuse it too.
+            proc = subprocess.run([str(runner), str(lp), str(rp), str(out), *spec], capture_output=True, text=True, env=env)
+            if proc.returncode == 0:
+                return "Polars raised but Mojo did not: " + str(error).splitlines()[0]
+            return None
         want.write_csv(exp)
         proc = subprocess.run([str(runner), str(lp), str(rp), str(out), *spec], capture_output=True, text=True, env=env)
         if proc.returncode != 0:
@@ -368,9 +446,15 @@ def main() -> int:
         spec = gen_op(rng, args.kinds.split(","))
         if spec[0] == "prep":
             left = gen_prep_left()
+        if spec[0] == "tz":
+            # Keep rows within a few steps of the switch.
+            left = left.with_columns(pl.Series("n", [maybe(rng, rng.randint(-40, 40)) for _ in range(left.height)], dtype=pl.Int64))
         problem = run_case(runner, left, right, spec, env)
         if args.mutation_check:
-            expect_nonempty = expected(left, right, spec).height > 0
+            try:
+                expect_nonempty = expected(left, right, spec).height > 0
+            except pl.exceptions.ComputeError:
+                expect_nonempty = False
             detected += bool(problem) or not expect_nonempty
             continue
         if problem:

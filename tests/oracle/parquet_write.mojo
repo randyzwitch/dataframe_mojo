@@ -39,6 +39,11 @@ def main() raises:
                     "timestamp_" + unit, Column[Int64]([0, -123, 456])
                 ).with_dtype(DataType.datetime(unit))
             )
+            columns.append(
+                Series(
+                    "zoned_" + unit, Column[Int64]([0, -123, 456])
+                ).with_dtype(DataType.datetime(unit, "America/New_York"))
+            )
         write_parquet(
             DataFrame(columns^),
             directory + "/" + codec + "-temporal.parquet",

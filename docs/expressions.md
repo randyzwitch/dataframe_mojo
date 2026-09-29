@@ -131,12 +131,12 @@ linear apart from `rank`, which sorts each partition.
 
 ### Temporal types
 
-`DataType.DATE` (days since 1970-01-01), `DataType.datetime(unit)`
-(time-zone-naive ticks since the epoch), `DataType.duration(unit)`, and
-`DataType.TIME` (nanoseconds since midnight) are stored as Int64, with unit
-`"ns"`, `"us"` (default), or `"ms"`. The calendar is proleptic Gregorian with
-no time zones or DST. Sorting, grouping, joins, `unique`, windows, `min`/`max`,
-and comparisons between equal types work on the stored values.
+`DataType.DATE` (days since 1970-01-01), `DataType.datetime(unit, time_zone)`
+(ticks since the epoch), `DataType.duration(unit)`, and `DataType.TIME`
+(nanoseconds since midnight) are stored as Int64, with unit `"ns"`, `"us"`
+(default), or `"ms"`. The calendar is proleptic Gregorian. Sorting, grouping,
+joins, `unique`, windows, `min`/`max`, and comparisons between equal types
+work on the stored values.
 
 | Operation | Result |
 |---|---|
@@ -170,6 +170,50 @@ display compactly (`1d 2h 3.5s`). `date_range(start, end, interval="1d")` and
 `datetime_range(start, end, interval, unit)` build inclusive sequences; month
 steps are measured from the start, so `2024-01-31` stepping `1mo` gives
 `2024-02-29`, `2024-03-31`, ...
+
+#### Time zones
+
+A datetime without a time zone is naive: a wall-clock reading. With one
+(`DataType.datetime("us", "America/New_York")`, shown as
+`datetime[us, America/New_York]`), it holds UTC instants, exactly as an Arrow
+timestamp with its zone set, and the zone decides how values are shown,
+parsed and split into fields. Zones are IANA names, `"UTC"`, or Arrow fixed
+offsets such as `"+05:30"`. Dtypes in different zones are different types:
+comparing, subtracting, joining or concatenating them raises, as in Polars.
+
+- `dt().replace_time_zone(zone, ambiguous="raise", non_existent="raise")`
+  keeps each wall-clock time and reads it in `zone` (`""` makes it naive).
+  When clocks fall back a local time happens twice: `ambiguous` is
+  `"raise"`, `"earliest"`, `"latest"` or `"null"`. When they spring forward
+  it never happens: `non_existent` is `"raise"` or `"null"`.
+- `dt().convert_time_zone(zone)` keeps the instant and changes the zone
+  (a naive input is read as UTC).
+- Fields, `date()`, `time()`, `strftime`, `truncate`, and calendar offsets
+  (`d`, `w`, `mo`, `y`) use local time; fixed offsets (`h`, `m`, `s`, ...)
+  and duration arithmetic move the UTC instant. A shifted or truncated
+  local time that falls in a DST gap or overlap is resolved as Polars does
+  (RFC 5545): the result keeps the original's daylight-saving state.
+- Casting to string, date or time uses local time; casting between
+  datetimes keeps the instant, so a zone-aware value cast to a naive
+  datetime is its UTC time.
+- `strptime` with `%z` in the format gives UTC-aware values; with a
+  zone-aware target (`to_datetime(time_zone=...)`), text without an offset
+  is local time in that zone. `%z` formats as `+HHMM`, `%:z` as `+HH:MM`,
+  and `%Z` as the zone's abbreviation (`EDT`). `datetime_range(...,
+  time_zone=...)` steps calendar units in local time.
+- `read_csv` with `try_parse_dates=True` reads a column whose values all
+  carry an offset as `datetime[us, UTC]` (a column mixing offsets with
+  naive text stays a string); `CsvField.datetime(name, time_zone=...)`
+  reads offset-free text as local time. `write_csv` writes the local time
+  and its offset, so the instant reads back exactly (in UTC).
+
+Zone rules come from the system time-zone database (compiled TZif files):
+`$TZDIR`, then `$CONDA_PREFIX/share/zoneinfo` (the conda `tzdata` package),
+then `/usr/share/zoneinfo`. Reading the system copy keeps the package small
+and follows tzdata updates, so results for recently changed zones follow the
+machine's tzdata version; a container without tzdata needs the conda
+package or `TZDIR`. Instants after a file's last transition use its POSIX
+rule. Leap-second (`right/`) files are not supported.
 
 ### Casts
 

@@ -5,8 +5,23 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ## Unreleased
 
+### Breaking
+
+- Parquet timestamps with a time zone now read as zone-aware datetimes
+  instead of naive UTC ones, and Arrow import accepts them instead of
+  raising (#222).
+
 ### Added
 
+- Zone-aware datetimes: `DataType.datetime(unit, time_zone)` holds UTC
+  instants shown and split into fields at local time, like an Arrow timestamp
+  with its zone set. `dt().replace_time_zone(zone, ambiguous, non_existent)`
+  and `dt().convert_time_zone(zone)`; local-time fields, `truncate`,
+  `offset_by`, `strftime` (`%z`, `%:z`, `%Z`) and casts with Polars' DST
+  rules; `strptime` with `%z` gives UTC-aware values; `datetime_range(...,
+  time_zone)`; CSV inference and `CsvField.datetime(time_zone)`; Arrow
+  `tsu:<zone>` import and export; and Parquet timestamps keep their zone.
+  Zones come from the system tzdata (#222).
 - Expressions `interpolate`, `interpolate_by`, `cut`, and `qcut`, including
   per-partition interpolation, Polars-compatible bin boundaries and labels,
   and optional breakpoint structs (#227).

@@ -10,10 +10,9 @@ statistics frame per file, so a Mojo-native reader replaces the two
 `_..._with_dfparquet` functions and nothing above them changes.
 
 Column types the importer cannot hold are coerced by the reader: dictionary
-columns are decoded to their value type, float16 widens to float32, string
-views become strings, and a timestamp with a time zone loses the zone. Its
-values are UTC instants, so the result is the same moment as a naive UTC
-datetime; the zone name is not kept. Lists and structs map recursively;
+columns are decoded to their value type, float16 widens to float32, and
+string views become strings. A timestamp keeps its time zone. Lists and
+structs map recursively;
 decimal and binary columns still raise.
 
 The backend exports an Arrow C stream with one batch per selected row group.
@@ -220,7 +219,7 @@ def read_parquet(
     the default reads them all, and an empty list reads none and returns the
     schema with no rows. Column types map as the Arrow importer maps them:
     integer and float widths are kept, `date32` becomes Date, timestamps
-    keep their unit (a time zone is dropped; values stay UTC instants), and
+    keep their unit and time zone, and
     strings, booleans and nulls carry over. Dictionary columns arrive as
     plain strings and float16 as float32. Lists and structs map recursively;
     decimals and binary are not supported yet.

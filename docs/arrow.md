@@ -35,15 +35,19 @@ the shape pyarrow imports with `RecordBatch._import_from_c` and Polars with
 | String | `U` large_utf8 | zero-copy | `u` utf8 (offsets widened) |
 | Bool | `b` bool | zero-copy | |
 | Date | `tdD` date32 | days narrowed to Int32 | `tdm` date64 |
-| Datetime(unit) | `ts{s,m,u,n}:` timestamp | zero-copy | |
-| Duration(unit) | `tD{s,m,u,n}` duration | zero-copy | |
+| Datetime(unit, time_zone) | `ts{m,u,n}:<zone>` timestamp | zero-copy | `tss:<zone>` (as ms) |
+| Duration(unit) | `tD{m,u,n}` duration | zero-copy | `tDs` (as ms) |
 | Time | `ttn` time64[ns] | zero-copy | `ttu`, `ttm`, `tts` |
 
 Validity bitmaps are always shared. A sliced column exports its window offset
 as the ArrowArray `offset` instead of copying. Only Date builds a new value
 buffer (Int64 days narrowed to Arrow's Int32).
 
-Import rejects, with an error naming the format: timestamps with a time zone, dictionary-encoded
+A zone-aware datetime exports its zone after the colon (`tsu:Europe/Paris`,
+`tsu:+05:30`) and holds UTC values, as Arrow requires; import reads the zone
+back and raises when the zone database does not know it.
+
+Import rejects, with an error naming the format: dictionary-encoded
 arrays, nested types other than the top-level struct, and struct arrays with
 null rows.
 
