@@ -13,7 +13,7 @@ from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
-from .decimal import check_precision
+from .decimal import check_precision, decimal_mean
 from .series import Series
 from .expr import (
     SUM,
@@ -1663,20 +1663,21 @@ struct Reducer(Movable):
             return Series("", Column[Float64](output^, valid))
         if op == COUNT or op == NULL_COUNT or op == LEN:
             return Series("", Column[Int64](self.counts.copy()))
-        if (op == SUM or op == MEAN) and self.dtype.is_decimal():
-            var output = self.decimals.copy()
+        if op == MEAN and self.dtype.is_decimal():
+            var means = List[Float64](length=n, fill=0)
+            for g in range(n):
+                valid[g] = self.counts[g] > 0
+                if valid[g]:
+                    means[g] = decimal_mean(
+                        self.decimals[g], self.counts[g], self.dtype.scale()
+                    )
+            return Series("", Column[Float64](means^, valid))
+        if op == SUM and self.dtype.is_decimal():
             var decimal_valid = List[Bool](length=n, fill=False)
             for g in range(n):
-                decimal_valid[g] = (
-                    self.counts[g]
-                    > 0 if op
-                    == MEAN else self.counts[g]
-                    >= Int64(self.min_count)
-                )
-                if op == MEAN and decimal_valid[g]:
-                    output[g] /= Int128(self.counts[g])
+                decimal_valid[g] = self.counts[g] >= Int64(self.min_count)
             return Series(
-                "", Column[Int128](output^, decimal_valid)
+                "", Column[Int128](self.decimals.copy(), decimal_valid)
             ).with_dtype(self.dtype)
         if op == SUM and self.dtype == DataType.INT64:
             var output = List[Int64](length=n, fill=0)

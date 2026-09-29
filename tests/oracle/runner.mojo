@@ -107,6 +107,8 @@ def run(
             e = x - y
         else:
             e = x * y
+        if spec[1] == "mean":
+            return left.select(e.alias("out"))
         return left.select(e.cast("string").alias("out"))
     if op == "arith":
         var a = col(spec[2])

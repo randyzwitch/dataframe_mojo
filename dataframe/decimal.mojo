@@ -78,3 +78,32 @@ def format_decimal(value: Int128, scale: Int) -> String:
         + "."
         + String(digits[byte = split : digits.byte_length()])
     )
+
+
+def decimal_mean(total: Int128, count: Int64, scale: Int) -> Float64:
+    """The mean of `count` decimals whose unscaled sum is `total`, as the
+    nearest Float64 up to the final addition (#341).
+
+    Dividing first by the count and then by 10^scale, in Int128 and keeping
+    both remainders, never forms count x 10^scale (which overflows Int128
+    at large scales) and rounds only when the parts are converted and added.
+    Converting `total` to Float64 first would lose digits above 2^53.
+    """
+    # Work on the magnitude so the whole and fractional parts share a sign;
+    # floor division of a negative total would subtract them and cancel
+    # digits. Int128.MIN has no magnitude, but check_precision keeps sums
+    # within 38 digits, far from it.
+    var negative = total < 0
+    var magnitude = -total if negative else total
+    var divisor = Int128(count)
+    var per_row = magnitude // divisor
+    var left = magnitude - per_row * divisor
+    var unit = Int128(1)
+    for _ in range(scale):
+        unit *= 10
+    var whole = per_row // unit
+    var digits = per_row - whole * unit
+    var mean = Float64(whole) + (
+        Float64(digits) + Float64(left) / Float64(count)
+    ) / Float64(unit)
+    return -mean if negative else mean
