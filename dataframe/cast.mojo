@@ -145,6 +145,22 @@ def _read_source(
                     values.ints[i] = x.cast[DType.int128]()
 
 
+def _integer_at(input: Series, i: Int) raises -> Int128:
+    """Row i of an integer or Bool column as Int128. The integer-to-decimal
+    cast used to read it through a one-row buffer indexed by i, which went
+    out of bounds from the second row on."""
+    if input._data.isa[BoolColumn]():
+        return Int128(1) if input._data[BoolColumn]._get(i) else Int128(0)
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if D.is_integral():
+            if input._data.isa[Column[Scalar[D]]]():
+                return (
+                    input._data[Column[Scalar[D]]]._get(i).cast[DType.int128]()
+                )
+    raise Error("expected an integer column, found " + input.dtype().name())
+
+
 def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
@@ -187,10 +203,8 @@ def cast_series(
                         )
                     decimal_values[i] = check_precision(raw, target)
                 elif source.is_integer() or source == DataType.BOOL:
-                    var intermediate = _Values(1, False)
-                    _read_source(input, source, target, i, intermediate)
                     decimal_values[i] = check_precision(
-                        intermediate.ints[0] * pow10(target.scale()), target
+                        _integer_at(input, i) * pow10(target.scale()), target
                     )
                 else:
                     decimal_values[i] = parse_decimal(
