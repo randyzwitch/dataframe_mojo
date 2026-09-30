@@ -281,8 +281,17 @@ def _count_set(bits: List[UInt8], offset: Int, length: Int) -> Int:
         count += Int(_bit(bits, offset + i))
         i += 1
     var byte = (offset + i) // 8
+    # Whole 64-bit words first: a byte at a time through the list's checked
+    # indexing cost about 3 ns per byte, 3.7 ms to count 10M rows (#333).
+    var ptr = bits.unsafe_ptr()
+    while length - i >= 64:
+        count += Int(
+            pop_count(ptr.unsafe_offset(byte).bitcast[UInt64]().unsafe_load())
+        )
+        byte += 8
+        i += 64
     while length - i >= 8:
-        count += Int(pop_count(bits[byte]))
+        count += Int(pop_count(ptr.unsafe_offset(byte)[]))
         byte += 1
         i += 8
     while i < length:
