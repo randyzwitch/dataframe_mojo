@@ -6,6 +6,7 @@ string concatenation or hash collisions: equality is exact per column.
 Float64 keys treat every NaN as one value and -0.0 as equal to 0.0.
 """
 from std.collections import Dict
+from std.memory import Pointer, unsafe_memcpy
 from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column
@@ -113,6 +114,7 @@ struct _InlineStringCodes(Movable):
         self.fallback = Dict[UInt128, Int]()
         self.use_fallback = False
 
+    @always_inline
     def get_or_insert(mut self, key: UInt128, next_id: Int) -> Int:
         if self.use_fallback:
             var code = self.fallback.get(key, -1)
@@ -124,12 +126,14 @@ struct _InlineStringCodes(Movable):
         hash_value = (hash_value ^ (hash_value >> 30)) * 0xBF58476D1CE4E5B9
         hash_value = (hash_value ^ (hash_value >> 27)) * 0x94D049BB133111EB
         var slot = Int((hash_value ^ (hash_value >> 31)) & 511)
-        while self.codes[slot] >= 0:
-            if self.keys[slot] == key:
-                return self.codes[slot]
+        var keys = self.keys.unsafe_ptr()
+        var codes = self.codes.unsafe_ptr()
+        while codes[slot] >= 0:
+            if keys[slot] == key:
+                return codes[slot]
             slot = (slot + 1) & 511
-        self.keys[slot] = key
-        self.codes[slot] = next_id
+        keys[slot] = key
+        codes[slot] = next_id
         self.count += 1
         if self.count == 256:
             for i in range(512):
@@ -192,32 +196,56 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
                 ids.append(code)
                 row += 1
         else:
-            for i in range(len(column)):
-                if not column._valid(i):
+            # Offsets and bytes are read in place: a short value's key is
+            # one copy into the inline-view layout (length, then bytes from
+            # byte 4), not a loop over its bytes, and a row equal to the one
+            # before reuses its code.
+            var m = len(column)
+            var start_len = len(ids)
+            ids.resize(start_len + m, -1)
+            var out = ids.unsafe_ptr() + start_len
+            var offsets = column._offsets[].unsafe_ptr() + column._offset
+            var bytes = column._base()
+            # A missing bitmap means no nulls; counting them is O(n).
+            var nulls = len(column._bits[]) != 0
+            var last_key = UInt128(0)
+            var last_code = -1
+            for i in range(m):
+                if nulls and not column._valid(i):
                     if nulls_equal:
                         if null_code < 0:
                             null_code = len(representatives)
-                            representatives.append(row)
-                        ids.append(null_code)
-                    else:
-                        ids.append(-1)
-                    row += 1
+                            representatives.append(row + i)
+                        out[i] = null_code
                     continue
-                var value = column._get(i)
-                var code = -1
-                if value.byte_length() <= 12:
-                    code = inline.get_or_insert(
-                        _inline_view_key(value), len(representatives)
+                var start = Int(offsets[i])
+                var length = Int(offsets[i + 1]) - start
+                var code: Int
+                if length <= 12:
+                    var key = UInt128(length)
+                    unsafe_memcpy(
+                        dest=Pointer(to=key)
+                        .unsafe_bitcast[UInt8]()
+                        .unsafe_offset(4),
+                        src=bytes.unsafe_offset(start),
+                        count=length,
                     )
+                    if key == last_key and last_code >= 0:
+                        out[i] = last_code
+                        continue
+                    code = inline.get_or_insert(key, len(representatives))
+                    last_key = key
+                    last_code = code
                 else:
+                    var value = column._get(i)
                     code = long_lookup.get(value, -1)
                     if code < 0:
                         code = len(representatives)
                         long_lookup[value] = code
                 if code == len(representatives):
-                    representatives.append(row)
-                ids.append(code)
-                row += 1
+                    representatives.append(row + i)
+                out[i] = code
+            row += m
     return RowKeys(ids^, representatives^)
 
 

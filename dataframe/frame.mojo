@@ -68,7 +68,12 @@ from .gather import (
     filter_range_int64_chunks,
 )
 from .parallel import Job, Pool, partitions, run_jobs, worker_count
-from .partition import Partitioner, encode_partitioned, low_cardinality
+from .partition import (
+    Partitioner,
+    encode_bucket,
+    encode_partitioned,
+    low_cardinality,
+)
 from .join_hash import (
     direct_hash_join_rows,
     direct_hash_semi_anti_rows,
@@ -4320,6 +4325,78 @@ struct _BucketJob(Job):
         self.firsts = groups.representatives.copy()
 
 
+struct _HashedBucketJob(Job):
+    """Group one hash bucket from the partitioner's key hashes (#334): the
+    keys stay in the source columns, compared in place on a hash match, and
+    only the aggregated columns were gathered into bucket order."""
+
+    var keys: List[Series]
+    var hashes: Int
+    var order: Int
+    var lo: Int
+    var hi: Int
+    var columns: List[Series]
+    var expressions: List[Expr]
+    var batch_size: Int
+    var result: List[Series]
+    var firsts: List[Int]
+
+    def __init__(
+        out self,
+        keys: List[Series],
+        hashes: Int,
+        order: Int,
+        lo: Int,
+        hi: Int,
+        var columns: List[Series],
+        expressions: List[Expr],
+        batch_size: Int,
+    ):
+        self.keys = keys.copy()
+        self.hashes = hashes
+        self.order = order
+        self.lo = lo
+        self.hi = hi
+        self.columns = columns^
+        self.expressions = expressions.copy()
+        self.batch_size = batch_size
+        self.result = List[Series]()
+        self.firsts = List[Int]()
+
+    def run(mut self) raises:
+        ref hashes = Pointer[List[UInt64], MutAnyOrigin](
+            unsafe_from_address=self.hashes
+        )[]
+        ref order = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.order
+        )[]
+        var ids = List[Int]()
+        var firsts = List[Int]()
+        encode_bucket(
+            self.keys,
+            Span(hashes)[self.lo : self.hi],
+            Span(order)[self.lo : self.hi],
+            ids,
+            firsts,
+        )
+        for key in self.keys:
+            self.result.append(key.take(firsts))
+        var bound = _bind_all(self.expressions, self.columns)
+        for expression in bound:
+            self.result.append(
+                evaluate(
+                    expression,
+                    self.columns,
+                    self.hi - self.lo,
+                    batch_size=self.batch_size,
+                    grouped=True,
+                    groups=ids,
+                    group_count=len(firsts),
+                )
+            )
+        self.firsts = firsts^
+
+
 @fieldwise_init
 struct GroupBy(Copyable):
     """An eager grouping request. No per-group dataframe materialization.
@@ -4472,9 +4549,56 @@ struct GroupBy(Copyable):
             return self._agg_whole(bound, batch_size)
         trace_path("group_by.partitioned")
         var partitioner = Partitioner(self._keys, workers)
-        var parts = partitioner.scatter(workers)
+        var parts = partitioner.scatter(workers, with_hashes=True)
         var buckets = parts.buckets()
         var referenced = self._referenced(bound)
+        # Heavy: a bucket big enough to serialize the batch on its own. It
+        # must be large relative to the frame, not only to its share, or
+        # low cardinality (few occupied buckets) would count as heavy.
+        var heavy_rows = max(height // 8, 4 * height // buckets)
+        var any_heavy = False
+        for b in range(buckets):
+            if parts.bounds[b + 1] - parts.bounds[b] > heavy_rows:
+                any_heavy = True
+        if not any_heavy:
+            # Encode each bucket from the key hashes; gather only values.
+            var values = take_parallel(referenced, parts.order.copy(), workers)
+            var jobs = List[_HashedBucketJob]()
+            for b in range(buckets):
+                var lo = parts.bounds[b]
+                var hi = parts.bounds[b + 1]
+                if hi == lo:
+                    continue
+                var bucket_columns = List[Series](capacity=len(values))
+                for column in values:
+                    bucket_columns.append(column.slice(lo, hi - lo))
+                jobs.append(
+                    _HashedBucketJob(
+                        partitioner.keys,
+                        Int(Pointer(to=parts.hashes)),
+                        Int(Pointer(to=parts.order)),
+                        lo,
+                        hi,
+                        bucket_columns^,
+                        expressions,
+                        batch_size,
+                    )
+                )
+            run_jobs(jobs)
+            var frames = List[DataFrame](capacity=len(jobs))
+            var starts = List[Int]()
+            for j in range(len(jobs)):
+                frames.append(
+                    DataFrame(jobs[j].result.copy(), height=len(jobs[j].firsts))
+                )
+                for row in jobs[j].firsts:
+                    starts.append(row)
+            _ = partitioner^
+            _ = parts^
+            var grouped = concat(frames)
+            if not self._maintain_order:
+                return grouped^
+            return grouped.take(sort_indices([starts^]))
         var sources = List[Series](capacity=len(self._keys) + len(referenced))
         for key in self._keys:
             sources.append(key.copy())
@@ -4488,10 +4612,6 @@ struct GroupBy(Copyable):
                 keys.append(gathered[i].copy())
             else:
                 columns.append(gathered[i].copy())
-        # Heavy: a bucket big enough to serialize the batch on its own. It
-        # must be large relative to the frame, not only to its share, or
-        # low cardinality (few occupied buckets) would count as heavy.
-        var heavy_rows = max(height // 8, 4 * height // buckets)
         var light = List[_BucketJob]()
         var light_offsets = List[Int]()
         var done = List[_BucketJob]()
