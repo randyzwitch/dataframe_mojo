@@ -835,6 +835,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> LazyGroupBy`
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> LazyGroupBy`
 - `def sort(self, by: List[String], descending: Bool = False, nulls_last: Bool = True) -> Self`
+- `def sort(self, by: List[String], *, descending: List[Bool], nulls_last: List[Bool]) -> Self`
+  Sort with a direction and null placement per key, as the eager DataFrame.sort takes them.
 - `def sort(self, by: String, descending: Bool = False) -> Self`
 - `def slice(self, offset: Int, length: Int = Int(-1)) -> Self`
 - `def head(self, n: Int = Int(5)) -> Self`
@@ -846,9 +848,11 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def explode(self, column: String) -> Self`
 - `def unnest(self, column: String) -> Self`
   Replace a struct column with its fields; see DataFrame.unnest.
-- `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right") -> Self`
-  Join with another lazy plan; see DataFrame.join.
-- `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right") -> Self`
+- `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+  Join with another lazy plan on keys named alike on both sides; see DataFrame.join.
+- `def join(self, other: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+  Join with another lazy plan on paired keys: left_on[i] matches right_on[i], as in DataFrame.join. Projection and predicate pushdown see both key lists, so each input reads only its own keys and the columns used above the join.
+- `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
 - `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`
   Optimize (unless disabled) and execute the plan.
 - `def fetch(self, n: Int = Int(5)) -> DataFrame`

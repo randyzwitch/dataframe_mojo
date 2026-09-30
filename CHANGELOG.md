@@ -13,6 +13,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- `LazyFrame.join(other, left_on=..., right_on=..., how, suffix, coalesce)`
+  joins on differently named key pairs, as the eager join does; projection
+  pushdown passes each input only its own keys and used columns, predicate
+  pushdown moves filters to the side that owns them, and `explain()` shows
+  the key pairs. `LazyFrame.sort` takes a direction and null placement per
+  key. Multi-table queries such as TPC-H's can now be written lazily
+  (#329).
 - Zone-aware datetimes: `DataType.datetime(unit, time_zone)` holds UTC
   instants shown and split into fields at local time, like an Arrow timestamp
   with its zone set. `dt().replace_time_zone(zone, ambiguous, non_existent)`
