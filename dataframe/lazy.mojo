@@ -111,6 +111,10 @@ struct PlanNode(Copyable):
     # A JOIN's type code (see join_type); -1 for an unknown name, which the
     # eager join reports from the original text when the plan executes.
     var how: Int
+    # A JOIN's right-side key names, paired with `names` (the left keys),
+    # and whether key columns coalesce into the left names.
+    var right_keys: List[String]
+    var coalesce: Bool
 
 
 def _plan_node(
@@ -126,6 +130,8 @@ def _plan_node(
     length: Int = -1,
     maintain_order: Bool = False,
     how: Int = -1,
+    right_keys: List[String] = List[String](),
+    coalesce: Bool = True,
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -140,6 +146,8 @@ def _plan_node(
         length,
         maintain_order,
         how,
+        right_keys.copy(),
+        coalesce,
     )
 
 
@@ -304,17 +312,20 @@ struct _StreamJob(Job):
                 self.frame = self.frame._join_impl(
                     self.joins[][node.offset],
                     left_on=node.names,
-                    right_on=node.names,
+                    right_on=node.right_keys,
                     how=node.how,
                     suffix=node.names2[0],
+                    coalesce=node.coalesce,
                     prepared=self.indexes[][node.offset],
                 )
             elif node.kind == JOIN:
                 self.frame = self.frame.join(
                     self.joins[][node.offset],
-                    node.names,
-                    node.text,
-                    node.names2[0],
+                    left_on=node.names,
+                    right_on=node.right_keys,
+                    how=node.text,
+                    suffix=node.names2[0],
+                    coalesce=node.coalesce,
                 )
             elif node.kind == FILTER:
                 self.frame = self.frame.filter(node.exprs[0])
@@ -415,6 +426,21 @@ struct LazyFrame(Copyable):
             )
         )
 
+    def sort(
+        self,
+        by: List[String],
+        *,
+        descending: List[Bool],
+        nulls_last: List[Bool],
+    ) raises -> Self:
+        """Sort with a direction and null placement per key, as the eager
+        DataFrame.sort takes them."""
+        if len(descending) != len(by) or len(nulls_last) != len(by):
+            raise Error("sort needs one descending and nulls_last flag per key")
+        return self._push(
+            _plan_node(SORT, names=by, flags=descending + nulls_last.copy())
+        )
+
     def sort(self, by: String, descending: Bool = False) -> Self:
         return self.sort([by], descending)
 
@@ -460,8 +486,33 @@ struct LazyFrame(Copyable):
         on: List[String],
         how: String = "inner",
         suffix: String = "_right",
+        coalesce: Bool = True,
     ) -> Self:
-        """Join with another lazy plan; see DataFrame.join."""
+        """Join with another lazy plan on keys named alike on both sides;
+        see DataFrame.join."""
+        return self.join(
+            other,
+            left_on=on,
+            right_on=on,
+            how=how,
+            suffix=suffix,
+            coalesce=coalesce,
+        )
+
+    def join(
+        self,
+        other: Self,
+        *,
+        left_on: List[String],
+        right_on: List[String],
+        how: String = "inner",
+        suffix: String = "_right",
+        coalesce: Bool = True,
+    ) -> Self:
+        """Join with another lazy plan on paired keys: left_on[i] matches
+        right_on[i], as in DataFrame.join. Projection and predicate
+        pushdown see both key lists, so each input reads only its own keys
+        and the columns used above the join."""
         var result = self.copy()
         var left_root = len(result._nodes) - 1
         var shift = len(result._nodes)
@@ -483,9 +534,11 @@ struct LazyFrame(Copyable):
             JOIN,
             left_root,
             len(result._nodes) - 1,
-            names=on,
+            names=left_on,
             text=how,
             how=join_code(how),
+            right_keys=right_on,
+            coalesce=coalesce,
         )
         join.names2 = [suffix]
         result._nodes.append(join^)
@@ -497,8 +550,9 @@ struct LazyFrame(Copyable):
         on: String,
         how: String = "inner",
         suffix: String = "_right",
+        coalesce: Bool = True,
     ) -> Self:
-        return self.join(other, [on], how, suffix)
+        return self.join(other, [on], how, suffix, coalesce)
 
     def collect(
         self,
@@ -623,10 +677,13 @@ struct LazyFrame(Copyable):
                     # compact lookup. Validate once and retain its prepared
                     # state instead of falling back to eager progression scans.
                     ref build_node = self._nodes[node.right]
-                    if build_node.kind == SCAN_FRAME and len(node.names) == 1:
+                    if (
+                        build_node.kind == SCAN_FRAME
+                        and len(node.right_keys) == 1
+                    ):
                         var sources: List[Series] = [
                             self._frames[build_node.offset][
-                                node.names[0]
+                                node.right_keys[0]
                             ].copy()
                         ]
                         prepared = prepare_progression_index(sources)
@@ -639,7 +696,7 @@ struct LazyFrame(Copyable):
                     ref build = joins[len(joins) - 1]
                     var sources = List[Series]()
                     var supported = build.height() <= Int(Int32.MAX)
-                    for name in node.names:
+                    for name in node.right_keys:
                         var key = build[name]
                         supported = supported and not key.dtype().is_nested()
                         sources.append(key.copy())
@@ -919,7 +976,14 @@ struct LazyFrame(Copyable):
             ).agg(node.exprs)
         if node.kind == JOIN:
             var right = self._execute(node.right, empty, streaming, batch_size)
-            return input.join(right, node.names, node.text, node.names2[0])
+            return input.join(
+                right,
+                left_on=node.names,
+                right_on=node.right_keys,
+                how=node.text,
+                suffix=node.names2[0],
+                coalesce=node.coalesce,
+            )
         if node.kind == SORT:
             var n = len(node.names)
             var descending = List[Bool]()
@@ -1011,7 +1075,12 @@ struct LazyFrame(Copyable):
                     or below.how == JOIN_ANTI
                 ):
                     var left_cols = self._columns_of(below.left)
-                    var right_cols = self._columns_of(below.right)
+                    var right_cols = List[String]()
+                    for c in self._columns_of(below.right):
+                        # Coalesced right keys are not in the join output,
+                        # so no filter above can mean them.
+                        if not (below.coalesce and c in below.right_keys):
+                            right_cols.append(c)
                     var side = -1
                     if _covers(left_cols, reads.value()):
                         side = 0
@@ -1215,10 +1284,14 @@ struct LazyFrame(Copyable):
         var want = Dict[String, Bool]()
         for w in wanted:
             want[w] = True
+        if not node.coalesce:
+            # Right keys then appear in the output as well; do not prune.
+            return None
         var keep_left = Dict[String, Bool]()
         var keep_right = Dict[String, Bool]()
         for k in node.names:
             keep_left[k] = True
+        for k in node.right_keys:
             keep_right[k] = True
         for c in left_cols:
             if c in want:
@@ -1309,7 +1382,7 @@ struct LazyFrame(Copyable):
                 + _joined(_output_names(node.exprs))
             )
         elif node.kind == JOIN:
-            label = "JOIN " + node.text + " on " + _joined(node.names)
+            label = "JOIN " + node.text + " on " + _key_pairs(node)
         elif node.kind == SORT:
             label = "SORT " + _joined(node.names)
         elif node.kind == SLICE:
@@ -1384,6 +1457,18 @@ def _covers(columns: List[String], reads: List[String]) -> Bool:
         if not found:
             return False
     return True
+
+
+def _key_pairs(node: PlanNode) -> String:
+    """`a` for keys named alike, `a = b` for differently named pairs."""
+    var out = String()
+    for i in range(len(node.names)):
+        if i > 0:
+            out += ", "
+        out += node.names[i]
+        if i < len(node.right_keys) and node.right_keys[i] != node.names[i]:
+            out += " = " + node.right_keys[i]
+    return out^
 
 
 def _covers_exclusive(

@@ -7,6 +7,12 @@ nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
 rows. `explain()` prints the optimized plan with execution annotations, root first; `explain(optimize=False)`
 and `collect(optimize=False)` show and run the plan as written.
 
+`join(other, on, how)` joins on keys named alike on both sides;
+`join(other, left_on=[...], right_on=[...], how, suffix, coalesce)` pairs
+differently named keys (`o_custkey` with `c_custkey`), with the eager join's
+output rules. `explain()` shows the pairs as `JOIN inner on o_custkey =
+c_custkey`.
+
 `collect(streaming=True, batch_size=65536)` is the default. Contiguous
 row-wise operations run as ordered batches on a scoped worker pool. At most
 one wave of batches (one per active worker) is in flight; workers return
@@ -68,7 +74,8 @@ raw samples and reproduction commands.
   it reads none of the columns that node produces (for `select`, only plain
   column selections), and into the side of a join that owns every column it
   reads: either side of an inner join, the left side of left, semi, and anti
-  joins. Row-local filters also move below a stable sort, since filtering the
+  joins. A coalesced right key is not an output column, so no filter moves
+  to the right side on its account. Row-local filters also move below a stable sort, since filtering the
   sorted rows preserves their relative order. Whole-column filters stay above
   the sort. A row-local filter directly above a CSV scan without a row limit
   runs on each decoded range before the ranges are assembled. Filters never
@@ -76,7 +83,9 @@ raw samples and reproduction commands.
   change which rows those operators see.
 - **Projection pushdown.** Scans read only the columns some operator above them
   uses; CSV scans pass them as `columns=`, so other fields are never decoded.
-  Selectors and joins conservatively keep every column. A plain column
+  A join passes each input only its own keys (the left keys to the left
+  input, the right keys to the right) and the columns read above it from that
+  side. Selectors, and joins with `coalesce=False`, keep every column. A plain column
   projection directly after a sort keeps the sorted row permutation and gathers
   only the selected output columns; sort-only key columns are not materialized
   in the result.
