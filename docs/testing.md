@@ -4,7 +4,22 @@
 `TEST_JOBS` sets the concurrency (default: CPU count; `TEST_JOBS=1` is serial),
 and `bash scripts/run_tests.sh tests/test_x.mojo ...` runs chosen modules.
 Output is printed per module in a stable order, followed by a summary naming
-every failed module. Modules must not share temporary file paths. Beyond hand-written
+every failed module. Modules must not share temporary file paths.
+
+Compiling, not running, is nearly all of a test run: each program compiles
+the library code it uses again, 30 to 180 seconds per module, while every
+test together runs in under a minute. So a full run builds about
+`TEST_GROUPS` programs (default 10), each running several modules' tests
+(`scripts/test_drivers.py`), instead of one program per module. A module
+joins a group when its `main` only runs its tests; one whose `main` does more
+(the Parquet modules) stays a program of its own. Modules in a group share a
+process, so a test that changes process state, such as `DATAFRAME_THREADS`,
+affects the modules after it: the driver resets `DATAFRAME_THREADS` before
+each module, and anything else a test changes it must undo. Test functions
+are imported by name, so every test is a top-level `def test_...() raises`.
+Tests that declare a C function with `external_call`, such as `setenv`,
+must pass it the same argument types everywhere, or a group fails to link;
+pass addresses as `Int`. Beyond hand-written
 contract tests, three generative layers look for interaction bugs.
 
 ## Differential testing against Polars

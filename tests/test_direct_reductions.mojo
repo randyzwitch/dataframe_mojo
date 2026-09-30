@@ -10,8 +10,10 @@ def set_threads(n: Int):
     var name = String("DATAFRAME_THREADS")
     var value = String(n)
     _ = external_call["setenv", Int32](
-        name.unsafe_ptr(), value.unsafe_ptr(), Int32(1)
+        Int(name.unsafe_ptr()), Int(value.unsafe_ptr()), Int32(1)
     )
+    _ = name^
+    _ = value^
 
 
 def check_float_window(offset: Int, length: Int, mode: Int) raises:
