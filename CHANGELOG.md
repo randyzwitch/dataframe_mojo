@@ -64,6 +64,18 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Sorting packs each row's keys and its row index into one 64- or 128-bit
+  integer and sorts those directly, bucketed by their top bits and then
+  sorted per bucket in parallel, instead of ranking string keys with a sort
+  of their own and merging row indices through per-key lookups. Keys are
+  stored relative to their range and strings past their shared prefix, so
+  most sorts by one to three keys pack; long strings settle ties by
+  comparing the strings, and anything wider keeps the general path. At 8
+  threads on 10M rows `arg_sort` by a Float64 goes from 1,110 ms to 142 ms,
+  by a short string from 2,009 ms to 217 ms, and by a string and a Float64
+  from 3,205 ms to 286 ms. Gathers no longer zero their output first, and
+  string gathers read each source offset once and copy short values inline;
+  a 9-column `sort` goes from 1,556 ms to 489 ms (#331).
 - Numeric comparisons and Boolean `&`, `|`, `^` and `~` write packed bitmaps
   directly, eight rows per step, instead of looping per row; `select_exprs`,
   `select` and `filter` default to 8192-row batches, as `with_columns`

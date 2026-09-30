@@ -1026,6 +1026,14 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         self, descending: Bool = False, nulls_last: Bool = True
     ) raises -> List[Int]:
         """Stable sort order: ranks are resolved once, then merged by Int."""
+        from .packed_sort import packed_arg_sort
+
+        if not self._dtype.is_nested():
+            var packed = packed_arg_sort(
+                [self.copy()], [descending], [nulls_last]
+            )
+            if packed:
+                return packed.take()
         return sort_indices([self._sort_ranks(descending, nulls_last)])
 
     def _sort_ranks(

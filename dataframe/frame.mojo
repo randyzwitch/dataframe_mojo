@@ -98,6 +98,7 @@ from .join_type import (
 from .nested_column import ListColumn, StructColumn
 from .trace import trace_path
 from .row_encode import STRING_PREFIX_BYTES, encodable, encode_sort_keys
+from .packed_sort import packed_arg_sort
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
 from .groups import GroupIndices
@@ -916,6 +917,18 @@ struct DataFrame(Copyable, Sized, Writable):
                     + " column: "
                     + name
                 )
+        if (
+            len(by) > 0
+            and len(descending) == len(by)
+            and len(nulls_last) == len(by)
+        ):
+            var keys = List[Series](capacity=len(by))
+            for name in by:
+                keys.append(self.column(name))
+            var packed = packed_arg_sort(keys, descending, nulls_last)
+            if packed:
+                trace_path("sort.packed")
+                return packed.take()
         return sort_indices(self._sort_ranks(by, descending, nulls_last))
 
     def top_k(self, k: Int, by: List[String]) raises -> Self:

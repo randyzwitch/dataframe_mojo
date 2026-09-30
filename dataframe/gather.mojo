@@ -785,10 +785,13 @@ struct _GatherJob(Job):
                 )
                 # Callers validate indices or construct them from source row positions.
                 var input = column._ptr()
+                # The output starts uninitialized (see `_allocate`), so a
+                # null-extended slot is written too, as zero.
                 if self.skip_validity:
                     for k in range(self.start, self.end):
                         var row = rows[k]
                         if self.or_null and row < 0:
+                            out.unsafe_offset(k)[] = 0
                             continue
                         out.unsafe_offset(k)[] = input.unsafe_offset(row)[]
                         if self.or_null and not self.share_validity:
@@ -799,6 +802,7 @@ struct _GatherJob(Job):
                 for k in range(self.start, self.end):
                     var row = rows[k]
                     if self.or_null and row < 0:
+                        out.unsafe_offset(k)[] = 0
                         continue
                     out.unsafe_offset(k)[] = input.unsafe_offset(row)[]
                     if column._valid(row):
@@ -946,9 +950,25 @@ def take_parallel(
 
 
 def _allocate(column: Series, m: Int) raises -> Series:
-    """An m-row column of column's dtype whose payloads workers overwrite."""
+    """An m-row column of column's dtype whose payloads workers overwrite.
+
+    Fixed-width payloads are left uninitialized: every gather job writes
+    each position in its range, so filling them first only adds a serial
+    pass -- about 35 ms per 10M-row column, most of a sort's gather -- and
+    leaves the workers' first touch of each page to happen on one thread.
+    The validity bitmap is set by the caller afterwards.
+    """
     if column._data.isa[StringColumn]():
         return column.copy()
+    comptime for d in range(len(GATHER_DTYPES)):
+        comptime D = GATHER_DTYPES[d]
+        if column._data.isa[Column[Scalar[D]]]():
+            var output = Series(
+                column.name(),
+                Column[Scalar[D]](List[Scalar[D]](unsafe_uninit_length=m)),
+            )
+            output._dtype = column.dtype()
+            return output^
     return Series.full_null(column.name(), column.dtype(), m)
 
 
