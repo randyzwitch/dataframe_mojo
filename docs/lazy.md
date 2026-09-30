@@ -49,7 +49,8 @@ validate field/plan structure without evaluating data values.
   in first-occurrence order. Memory grows with groups and distinct-value
   state, rather than total input rows.
 - Inner/left/semi/anti/cross joins retain the build side once and stream probe
-  batches. Right/full joins, sort, unique, windows, median/quantile, implode
+  batches. Right/full joins, sort (except a sort cut short by a slice, which
+  keeps each batch's first rows), unique, windows, median/quantile, implode
   and unsupported aggregate compositions retain materialization boundaries.
   Pipelines resume after these boundaries. Collect itself retains its final
   output, so collecting all rows is not a constant-memory operation.
@@ -92,6 +93,14 @@ raw samples and reproduction commands.
 - **Slice pushdown.** `head(n)` moves below row-local `select`/`with_columns`
   (no reductions, windows, or `over`), and a leading slice directly over a CSV
   scan becomes the reader's `n_rows`, so the rest of the file is not read.
+- **Top-k.** A slice directly above a sort (`sort(...).head(k)` or
+  `slice(offset, k)`, SQL's `ORDER BY ... LIMIT`) needs only the sort's
+  first `offset + k` rows, so the sort selects them instead of sorting every
+  row, and `explain()` shows it as `TOP_K`. The result is exactly the full
+  sort's rows, including stable ties and null and NaN placement. When the
+  plan streams, each batch keeps its own first rows, so memory stays at a
+  batch plus those rows. At a tenth of the input or more, the full sort is
+  used and cut short.
 - **Row-group pruning.** A row-local filter directly above a Parquet scan
   first reads the file's footer statistics (`parquet_row_group_statistics`)
   and decodes only the row groups whose minimum and maximum admit a match.

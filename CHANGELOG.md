@@ -64,6 +64,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A lazy sort followed by `head(k)` or `slice(offset, k)` selects its first
+  `offset + k` rows instead of sorting every row; `explain()` shows it as
+  `TOP_K`, and streaming plans keep each batch's first rows. Eager `top_k`
+  and `bottom_k` use the same selection, one 65,536-row chunk per worker. At
+  8 threads on 10M rows, `sort("v3").head(10)` goes from 494 ms to 15 ms and
+  `top_k(10, "v3")` from 133 ms to 12 ms (#332).
 - Sorting packs each row's keys and its row index into one 64- or 128-bit
   integer and sorts those directly, bucketed by their top bits and then
   sorted per bucket in parallel, instead of ranking string keys with a sort

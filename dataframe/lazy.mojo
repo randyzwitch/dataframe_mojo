@@ -339,6 +339,19 @@ struct _StreamJob(Job):
                 self.frame = self.frame.explode(node.names)
             elif node.kind == UNNEST:
                 self.frame = self.frame.unnest(node.text)
+            elif node.kind == SORT:
+                # A sort limited to its first rows (#332): this batch's own
+                # first rows, selected on this worker alone.
+                var n = len(node.names)
+                self.frame = self.frame.take(
+                    self.frame._arg_sort_head(
+                        node.names,
+                        List[Bool](node.flags[:n]),
+                        List[Bool](node.flags[n:]),
+                        node.length,
+                        threads=1,
+                    )
+                )
         if len(self.expressions):
             var reduction = _StreamReduction(
                 self.frame, self.expressions, self.keys
@@ -646,6 +659,31 @@ struct LazyFrame(Copyable):
             skip = terminal.offset
             limit = terminal.length
             cursor = terminal.left
+        # A sort limited to its first rows (#332) streams: each batch keeps
+        # its own first rows, which contain the overall first rows, since a
+        # row among those is among its own batch's. Batches arrive in input
+        # order, so ties keep the stable sort's order.
+        var top = -1
+        var top_node = -1
+        var top_names = List[String]()
+        var top_descending = List[Bool]()
+        var top_nulls_last = List[Bool]()
+        if (
+            terminal.kind == SLICE
+            and cursor >= 0
+            and self._nodes[cursor].kind == SORT
+            and self._nodes[cursor].length >= 0
+        ):
+            top = self._nodes[cursor].length
+            top_node = cursor
+            top_names = self._nodes[cursor].names.copy()
+            var n = len(top_names)
+            for k in range(n):
+                top_descending.append(self._nodes[cursor].flags[k])
+                top_nulls_last.append(self._nodes[cursor].flags[n + k])
+            cursor = self._nodes[cursor].left
+        var candidates = List[DataFrame]()
+        var candidate_rows = 0
         var operations = List[PlanNode]()
         var joins = List[DataFrame]()
         var indexes = List[Optional[PreparedHashIndex]]()
@@ -714,6 +752,13 @@ struct LazyFrame(Copyable):
         ):
             return None
         operations.reverse()
+        if top >= 0:
+            # Over a frame already in memory with nothing to apply first,
+            # batches save no memory, and the eager selection already works
+            # in cache-sized chunks on every worker.
+            if len(operations) == 0 and self._nodes[cursor].kind == SCAN_FRAME:
+                return None
+            operations.append(self._nodes[top_node].copy())
         var shared_joins = ArcPointer(joins^)
         var shared_indexes = ArcPointer(indexes^)
         ref source = self._nodes[cursor]
@@ -837,6 +882,10 @@ struct LazyFrame(Copyable):
                         var piece = pieces.pop(0)
                         pending_groups[p] += piece.group_count()
                         pending[p].append(piece^)
+                elif top >= 0:
+                    # The job has already cut its batch to its first rows.
+                    candidate_rows += jobs[i].frame.height()
+                    candidates.append(jobs[i].frame.copy())
                 else:
                     var part = jobs[i].frame.copy()
                     var dropped = min(skip, part.height())
@@ -847,9 +896,18 @@ struct LazyFrame(Copyable):
                     outputs.append(part^)
             if len(states):
                 _merge_parts(states, pending, pending_groups, workers, False)
+            if top >= 0 and len(candidates) > 1 and candidate_rows > 4 * top:
+                var merged = concat(candidates)
+                merged = merged.take(
+                    merged._arg_sort_head(
+                        top_names, top_descending, top_nulls_last, top
+                    )
+                )
+                candidate_rows = merged.height()
+                candidates = [merged^]
             if len(csv):
                 csv[0].discard()
-            if limit == 0:
+            if limit == 0 and top < 0:
                 ended = True
         pool.release()
         if len(states):
@@ -857,6 +915,16 @@ struct LazyFrame(Copyable):
             if len(states) == 1:
                 return states[0].finish()
             return _finish_parts(states^)
+        if top >= 0:
+            if len(candidates) == 0:
+                return None
+            var merged = concat(candidates)
+            merged = merged.take(
+                merged._arg_sort_head(
+                    top_names, top_descending, top_nulls_last, top
+                )
+            )
+            return merged.slice(skip, limit)
         if len(outputs):
             return concat(outputs)
         return None
@@ -930,7 +998,9 @@ struct LazyFrame(Copyable):
                     for i in range(n):
                         descending.append(sorted.flags[i])
                         nulls_last.append(sorted.flags[n + i])
-                    var order = source.arg_sort(
+                    var order = source._arg_sort_head(
+                        sorted.names, descending, nulls_last, sorted.length
+                    ) if sorted.length >= 0 else source.arg_sort(
                         sorted.names,
                         descending=descending,
                         nulls_last=nulls_last,
@@ -991,6 +1061,12 @@ struct LazyFrame(Copyable):
             for i in range(n):
                 descending.append(node.flags[i])
                 nulls_last.append(node.flags[n + i])
+            if node.length >= 0:
+                return input.take(
+                    input._arg_sort_head(
+                        node.names, descending, nulls_last, node.length
+                    )
+                )
             return input.sort(
                 node.names, descending=descending, nulls_last=nulls_last
             )
@@ -1012,6 +1088,7 @@ struct LazyFrame(Copyable):
         var plan = self.copy()
         plan._push_predicates()
         plan._push_slices()
+        plan._fuse_top_k()
         plan._push_projections()
         return plan^
 
@@ -1174,6 +1251,23 @@ struct LazyFrame(Copyable):
                 scan.length < 0 or scan.length > node.length
             ):
                 self._nodes[node.left].length = node.length
+
+    def _fuse_top_k(mut self):
+        """A slice directly above a sort needs only the sort's first
+        offset + length rows (SQL's ORDER BY ... LIMIT), so the sort records
+        that limit and selects those rows instead of sorting them all
+        (#332). The slice stays to apply its offset; a sort holds its limit
+        in `length`, which it otherwise leaves at -1."""
+        for i in range(len(self._nodes)):
+            ref node = self._nodes[i]
+            if node.kind != SLICE or node.offset < 0 or node.length < 0:
+                continue
+            ref below = self._nodes[node.left]
+            if below.kind != SORT:
+                continue
+            var limit = node.offset + node.length
+            if below.length < 0 or limit < below.length:
+                self._nodes[node.left].length = limit
 
     def _push_projections(mut self) raises:
         """Scans read only columns that some operator above them uses.
@@ -1383,6 +1477,10 @@ struct LazyFrame(Copyable):
             )
         elif node.kind == JOIN:
             label = "JOIN " + node.text + " on " + _key_pairs(node)
+        elif node.kind == SORT and node.length >= 0:
+            label = (
+                "TOP_K " + String(node.length) + " by " + _joined(node.names)
+            )
         elif node.kind == SORT:
             label = "SORT " + _joined(node.names)
         elif node.kind == SLICE:
@@ -1425,6 +1523,8 @@ struct LazyFrame(Copyable):
                     label += " [small left input; materialize unless compact progression]"
                 else:
                     label += " [stream probe; materialize build]"
+            elif node.kind == SORT and node.length >= 0:
+                label += " [stream top-k state]"
             elif node.kind == SLICE and node.offset >= 0:
                 label += " [ordered slice]"
             else:
