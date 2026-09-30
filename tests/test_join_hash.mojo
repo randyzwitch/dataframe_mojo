@@ -1,5 +1,5 @@
 """Exact row-hash join matches across nulls, duplicates, and key dtypes."""
-from std.testing import TestSuite, assert_equal, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from dataframe import Column, DataFrame, Series
 from dataframe.join_hash import (
     direct_hash_join_rows,
@@ -25,18 +25,24 @@ def test_bounded_int64_rows_keep_duplicates_nulls_and_extremes() raises:
         "k",
         Column[Int64]([low, low, low + 2, 0], [True, True, True, False]),
     )
-    var inner = _bounded_int64_join_rows(left, right, False)
-    assert_equal(inner[0], True)
-    assert_equal(inner[1], [0, 0, 2])
-    assert_equal(inner[2], [0, 1, 2])
-    var outer = _bounded_int64_join_rows(left, right, True)
-    assert_equal(outer[1], [0, 0, 1, 2, 3, 4])
-    assert_equal(outer[2], [0, 1, -1, 2, -1, -1])
+    var left_rows = List[Int]()
+    var right_rows = List[Int]()
+    assert_true(
+        _bounded_int64_join_rows(left, right, False, left_rows, right_rows)
+    )
+    assert_equal(left_rows, [0, 0, 2])
+    assert_equal(right_rows, [0, 1, 2])
+    assert_true(
+        _bounded_int64_join_rows(left, right, True, left_rows, right_rows)
+    )
+    assert_equal(left_rows, [0, 0, 1, 2, 3, 4])
+    assert_equal(right_rows, [0, 1, -1, 2, -1, -1])
     var wide = Series("k", Column[Int64]([Int64.MIN, Int64.MAX]))
     # A span from Int64.MIN to Int64.MAX is too wide to address directly;
     # the hash index handles it (see test_join_integer_range extremes).
-    var extreme = _bounded_int64_join_rows(left, wide, False)
-    assert_equal(extreme[0], False)
+    assert_false(
+        _bounded_int64_join_rows(left, wide, False, left_rows, right_rows)
+    )
 
 
 def test_parallel_bounded_index_keeps_duplicate_row_order() raises:
@@ -47,10 +53,15 @@ def test_parallel_bounded_index_keeps_duplicate_row_order() raises:
         valid.append(row != 2_000_001)
     var build = Series("k", Column[Int64](keys^, valid^))
     var probe = Series("k", Column[Int64]([0, 1, 99_999, 1_999_999, 2_000_000]))
-    var rows = _bounded_int64_join_rows(probe, build, True)
-    assert_equal(rows[0], True)
-    assert_equal(rows[1], [0, 0, 1, 2, 2, 3, 4])
-    assert_equal(rows[2], [0, 2_000_000, 1, 99_999, 2_099_999, 1_999_999, -1])
+    var left_rows = List[Int]()
+    var right_rows = List[Int]()
+    assert_true(
+        _bounded_int64_join_rows(probe, build, True, left_rows, right_rows)
+    )
+    assert_equal(left_rows, [0, 0, 1, 2, 2, 3, 4])
+    assert_equal(
+        right_rows, [0, 2_000_000, 1, 99_999, 2_099_999, 1_999_999, -1]
+    )
 
 
 def test_integer_duplicates_nulls_and_unmatched() raises:
