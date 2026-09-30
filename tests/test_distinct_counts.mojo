@@ -21,8 +21,12 @@ from dataframe import (
     col,
     concat,
     lit,
+    scan_csv,
+    write_csv,
 )
 from dataframe.string_view import StringViewBuilder
+
+comptime CSV_PATH = "/tmp/dataframe_mojo_distinct_counts.csv"
 
 
 struct Lcg(Movable):
@@ -255,6 +259,15 @@ def test_lazy_streaming_matches_eager() raises:
         .collect(batch_size=4096)
     )
     assert_true(lazy.equals(eager))
+    # A file scan still streams, keeping per-batch sets.
+    write_csv(frame, CSV_PATH)
+    var streamed = (
+        scan_csv(CSV_PATH)
+        .group_by("g", maintain_order=True)
+        .agg([col("v").n_unique().alias("u")])
+        .collect(batch_size=4096)
+    )
+    assert_true(streamed.equals(eager))
 
 
 def main() raises:

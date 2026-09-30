@@ -77,8 +77,8 @@ def _same_bytes(
     var i = 0
     while i + 8 <= n:
         if (
-            x.unsafe_offset(i).bitcast[UInt64]().unsafe_load()
-            != y.unsafe_offset(i).bitcast[UInt64]().unsafe_load()
+            x.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
+            != y.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
         ):
             return False
         i += 8
@@ -197,10 +197,10 @@ struct _RowsJob(Job):
         the slot."""
         var slot = Int(hash) & (_SEEN_SLOTS - 1)
         if (
-            self.seen.unsafe_ptr()[slot]
-            and self.seen_hash.unsafe_ptr()[slot] == hash
+            self.seen.unsafe_ptr()[unsafe_offset=slot]
+            and self.seen_hash.unsafe_ptr()[unsafe_offset=slot] == hash
         ):
-            var other = self.seen_key.unsafe_ptr()[slot]
+            var other = self.seen_key.unsafe_ptr()[unsafe_offset=slot]
             if (other >> 64) == (key >> 64):
                 if not strings or (key & _NULL_FLAG) != 0:
                     if other == key:
@@ -210,25 +210,25 @@ struct _RowsJob(Job):
                     bytes.get(Int(key & _LOW) - self.piece.base),
                 ):
                     return True
-        self.seen.unsafe_ptr()[slot] = True
-        self.seen_hash.unsafe_ptr()[slot] = hash
-        self.seen_key.unsafe_ptr()[slot] = key
+        self.seen.unsafe_ptr()[unsafe_offset=slot] = True
+        self.seen_hash.unsafe_ptr()[unsafe_offset=slot] = hash
+        self.seen_key.unsafe_ptr()[unsafe_offset=slot] = key
         return False
 
     @always_inline
     def _emit(mut self, key: UInt128, hash: UInt64):
         var p = Int(hash >> UInt64(self.shift)) if self.shift < 64 else 0
         if not self.write:
-            self.counts.unsafe_ptr()[p] += 1
+            self.counts.unsafe_ptr()[unsafe_offset=p] += 1
             return
-        var slot = self.next.unsafe_ptr()[p]
-        self.next.unsafe_ptr()[p] = slot + 1
+        var slot = self.next.unsafe_ptr()[unsafe_offset=p]
+        self.next.unsafe_ptr()[unsafe_offset=p] = slot + 1
         Pointer[List[UInt128], MutAnyOrigin](
             unsafe_from_address=self.keys
-        )[].unsafe_ptr()[slot] = key
+        )[].unsafe_ptr()[unsafe_offset=slot] = key
         Pointer[List[UInt64], MutAnyOrigin](
             unsafe_from_address=self.hashes
-        )[].unsafe_ptr()[slot] = hash
+        )[].unsafe_ptr()[unsafe_offset=slot] = hash
 
     @always_inline
     def _group(self, row: Int) -> UInt128:
@@ -238,7 +238,7 @@ struct _RowsJob(Job):
         var groups = Pointer[List[Int], MutAnyOrigin](
             unsafe_from_address=self.groups
         )[].unsafe_ptr()
-        return UInt128(groups[self.piece.base + row]) << 65
+        return UInt128(groups[unsafe_offset=self.piece.base + row]) << 65
 
     def run(mut self) raises:
         # A local handle (buffers are shared): references into self.chunk
@@ -383,24 +383,24 @@ struct _CountJob(Job):
             table.resize(capacity, -1)
             var slots = table.unsafe_ptr()
             for j in range(size):
-                var key = keys[start + j]
-                var hash = hashes[start + j]
+                var key = keys[unsafe_offset=start + j]
+                var hash = hashes[unsafe_offset=start + j]
                 var at = Int(hash) & mask
                 while True:
-                    var held = Int(slots[at])
+                    var held = Int(slots[unsafe_offset=at])
                     if held < 0:
-                        slots[at] = Int32(j)
+                        slots[unsafe_offset=at] = Int32(j)
                         self.distinct += 1
                         if self.grouped:
                             self.new_groups.append(Int(key >> 65))
                         break
-                    var other = keys[start + held]
+                    var other = keys[unsafe_offset=start + held]
                     # Equal hashes and equal groups and null flags; then a
                     # number or a null compares its low half, and a string
                     # its bytes.
-                    if hashes[start + held] == hash and (other >> 64) == (
-                        key >> 64
-                    ):
+                    if hashes[unsafe_offset=start + held] == hash and (
+                        other >> 64
+                    ) == (key >> 64):
                         if not strings or (key & _NULL_FLAG) != 0:
                             if other == key:
                                 break

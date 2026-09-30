@@ -374,7 +374,9 @@ struct _RenumberJob(Job):
         var mapping = self.mapping.unsafe_ptr()
         for i in range(len(local)):
             var code = local[i]
-            out[self.first + i] = mapping[code] if code >= 0 else -1
+            out[unsafe_offset=self.first + i] = (
+                mapping[unsafe_offset=code] if code >= 0 else -1
+            )
 
 
 def encode_rows_parallel(
