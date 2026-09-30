@@ -64,6 +64,16 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Ungrouped `len()` returns the row count without reading its column, and
+  integer `sum`, `mean`, `min` and `max` scan eight values (64 bytes when
+  there are no nulls) per step instead of one row at a time. Sums stay
+  exact in 128 bits: 64-bit values add as 32-bit halves in separate lanes.
+  `cast(Int64)` of a narrower integer column before one of these reads the
+  column itself instead of materializing the cast. Counting validity bits
+  (`count()`, `null_count()`) goes a 64-bit word at a time. On 10M ClickBench
+  rows at 8 threads: `len()` from 10 ms to 0.01 ms, Int16 `sum` from 17 ms to
+  0.3 ms, Int16 `max` from 5.8 ms to 0.3 ms, `ClientIP.cast(Int64).sum()` from
+  133 ms to 1 ms, and `count()` from 0.7 ms to 0.2 ms (#333).
 - A lazy sort followed by `head(k)` or `slice(offset, k)` selects its first
   `offset + k` rows instead of sorting every row; `explain()` shows it as
   `TOP_K`, and streaming plans keep each batch's first rows. Eager `top_k`

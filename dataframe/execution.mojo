@@ -20,6 +20,7 @@ from .expr import (
     SUM,
     MEAN,
     COUNT,
+    LEN,
     MIN,
     MAX,
     LT,
@@ -94,6 +95,7 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
 from std.memory import ArcPointer
 from std.math import isnan
+from std.sys import size_of
 
 
 # Rows below which a fused expression copies chunked Float64 sources into
@@ -787,6 +789,157 @@ def _direct_float_sum(
     return True
 
 
+@always_inline
+def _valid_lanes(
+    bits: Pointer[UInt8, MutAnyOrigin], bit: Int
+) -> SIMD[DType.bool, 8]:
+    """Validity of the 8 rows starting at bitmap position `bit`."""
+    var mask = UInt16(bits.unsafe_load(bit // 8)) >> UInt16(bit % 8)
+    if bit % 8 > 0:
+        mask |= UInt16(bits.unsafe_load(bit // 8 + 1)) << UInt16(8 - bit % 8)
+    return (
+        SIMD[DType.uint16, 8](mask)
+        & SIMD[DType.uint16, 8](1, 2, 4, 8, 16, 32, 64, 128)
+    ).ne(SIMD[DType.uint16, 8](0))
+
+
+# Rows summed in Int64 lanes before folding into the 128-bit total. Each of
+# 8 lanes adds at most 2**27 values below 2**32 in magnitude (narrow values
+# whole, 64-bit ones as 32-bit halves), so no lane can overflow.
+comptime _SUM_BLOCK = 1 << 30
+
+
+def _direct_int_sum[
+    D: DType
+](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
+    """Exact integer sum of rows [start, end), eight at a time (#333).
+
+    Values narrower than 64 bits widen into Int64 lanes. A 64-bit value
+    is split into its high and low 32-bit halves, summed in separate lanes
+    and recombined in 128 bits, which keeps the sum exact without 128-bit
+    lanes. Nulls are masked to zero, eight validity bits at a time.
+    """
+    comptime wide = D == DType.int64 or D == DType.uint64
+    var values = column._ptr()
+    var count = _count_valid(
+        column._bits[], column._offset + start, end - start
+    )
+    var all_valid = count == end - start
+    var bits = column.unsafe_validity()
+    var total = Scalar[DType.int128](0)
+    var i = start
+    comptime lanes = 64 // size_of[Scalar[D]]()
+    if all_valid:
+        # No nulls: whole 64-byte vectors. 8- and 16-bit values sum in
+        # Int32 lanes over blocks short enough that a lane stays below
+        # 2**31 (2**14 additions of values below 2**16), then fold.
+        comptime if size_of[Scalar[D]]() <= 2:
+            while i + lanes <= end:
+                var block_end = min(end, i + lanes * (1 << 14))
+                var acc = SIMD[DType.int32, lanes](0)
+                while i + lanes <= block_end:
+                    acc += values.unsafe_load[width=lanes](i).cast[
+                        DType.int32
+                    ]()
+                    i += lanes
+                total += (
+                    acc.cast[DType.int64]().reduce_add().cast[DType.int128]()
+                )
+    while i + 8 <= end:
+        var block_end = min(end, i + _SUM_BLOCK)
+        var low = SIMD[DType.int64, 8](0)
+        var high = SIMD[DType.int64, 8](0)
+        while i + 8 <= block_end:
+            var v = values.unsafe_load[width=8](i)
+            if not all_valid:
+                v = _valid_lanes(bits, column._offset + i).select(
+                    v, SIMD[D, 8](0)
+                )
+            comptime if wide:
+                low += (v & SIMD[D, 8](0xFFFF_FFFF)).cast[DType.int64]()
+                high += (v >> SIMD[D, 8](32)).cast[DType.int64]()
+            else:
+                low += v.cast[DType.int64]()
+            i += 8
+        total += low.reduce_add().cast[DType.int128]() + (
+            high.reduce_add().cast[DType.int128]() << 32
+        )
+    while i < end:
+        if all_valid or column._valid(i):
+            total += column._get(i).cast[DType.int128]()
+        i += 1
+    reducer.int_sums[0].total += total
+    reducer.int_sums[0].count += Int64(count)
+
+
+def _direct_int_extreme[
+    D: DType, is_max: Bool
+](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
+    """Integer min or max of rows [start, end), eight at a time (#333);
+    nulls are masked to the identity, so they never win."""
+    var count = _count_valid(
+        column._bits[], column._offset + start, end - start
+    )
+    if count == 0:
+        return
+    var all_valid = count == end - start
+    var identity = Scalar[D].MIN if is_max else Scalar[D].MAX
+    var values = column._ptr()
+    var bits = column.unsafe_validity()
+    var lanes = SIMD[D, 8](identity)
+    var i = start
+    if all_valid:
+        comptime width = 64 // size_of[Scalar[D]]()
+        var wide = SIMD[D, width](identity)
+        while i + width <= end:
+            comptime if is_max:
+                wide = max(wide, values.unsafe_load[width=width](i))
+            else:
+                wide = min(wide, values.unsafe_load[width=width](i))
+            i += width
+        comptime if is_max:
+            lanes = SIMD[D, 8](wide.reduce_max())
+        else:
+            lanes = SIMD[D, 8](wide.reduce_min())
+    while i + 8 <= end:
+        var v = values.unsafe_load[width=8](i)
+        if not all_valid:
+            v = _valid_lanes(bits, column._offset + i).select(
+                v, SIMD[D, 8](identity)
+            )
+        comptime if is_max:
+            lanes = max(lanes, v)
+        else:
+            lanes = min(lanes, v)
+        i += 8
+    var best: Scalar[D]
+    comptime if is_max:
+        best = lanes.reduce_max()
+    else:
+        best = lanes.reduce_min()
+    while i < end:
+        if all_valid or column._valid(i):
+            comptime if is_max:
+                best = max(best, column._get(i))
+            else:
+                best = min(best, column._get(i))
+        i += 1
+    var integer: Int64
+    comptime if D == DType.uint64:
+        integer = (best.cast[DType.uint64]() ^ (UInt64(1) << 63)).cast[
+            DType.int64
+        ]()
+    else:
+        integer = best.cast[DType.int64]()
+    if (
+        not reducer.seen[0]
+        or (is_max and integer > reducer.ints[0])
+        or (not is_max and integer < reducer.ints[0])
+    ):
+        reducer.ints[0] = integer
+        reducer.seen[0] = True
+
+
 def _direct_numeric_column[
     D: DType
 ](
@@ -802,6 +955,16 @@ def _direct_numeric_column[
             _count_valid(column._bits[], column._offset + start, end - start)
         )
         return True
+    comptime if D.is_integral():
+        if op == SUM or op == MEAN:
+            _direct_int_sum[D](reducer, column, start, end)
+            return True
+        if op == MAX:
+            _direct_int_extreme[D, True](reducer, column, start, end)
+            return True
+        if op == MIN:
+            _direct_int_extreme[D, False](reducer, column, start, end)
+            return True
     for i in range(start, end):
         if not column._valid(i):
             continue
@@ -862,6 +1025,31 @@ def _direct_numeric_part(
     return False
 
 
+def _widening_cast(bound: BoundExpr, columns: List[Series], node: Node) -> Bool:
+    """Whether a sum, mean, min or max reads `cast(Int64)` of a signed or
+    narrower unsigned integer column: widening keeps every value, so the
+    reduction reads the column itself instead of a materialized cast."""
+    if node.op != SUM and node.op != MEAN and node.op != MIN and node.op != MAX:
+        return False
+    ref cast = bound.expr._nodes[node.left]
+    if cast.op != CAST or len(cast.dtypes) == 0 or not cast.dtypes[0]:
+        return False
+    if cast.dtypes[0].value() != DataType.INT64:
+        return False
+    if bound.expr._nodes[cast.left].op != COL:
+        return False
+    var source = columns[bound.sources[cast.left]].dtype()
+    return source in (
+        DataType.INT8,
+        DataType.INT16,
+        DataType.INT32,
+        DataType.INT64,
+        DataType.UINT8,
+        DataType.UINT16,
+        DataType.UINT32,
+    )
+
+
 def _direct_numeric_reduction(
     mut reducer: Reducer,
     bound: BoundExpr,
@@ -871,9 +1059,20 @@ def _direct_numeric_reduction(
     end: Int,
     grouped: Bool,
 ) raises -> Bool:
-    if grouped or bound.expr._nodes[node.left].op != COL:
+    if grouped:
         return False
-    if _direct_float_sum(reducer, bound, columns, node, start, end, grouped):
+    var input = node.left
+    if node.op == LEN and bound.expr._nodes[input].op == COL:
+        # The answer is the row count; the column is never read.
+        reducer.counts[0] += Int64(end - start)
+        return True
+    if _widening_cast(bound, columns, node):
+        input = bound.expr._nodes[input].left
+    elif bound.expr._nodes[input].op != COL:
+        return False
+    if input == node.left and _direct_float_sum(
+        reducer, bound, columns, node, start, end, grouped
+    ):
         return True
     if (
         node.op != SUM
@@ -883,7 +1082,7 @@ def _direct_numeric_reduction(
         and node.op != MAX
     ):
         return False
-    ref series = columns[bound.sources[node.left]]
+    ref series = columns[bound.sources[input]]
     if not series.is_chunked():
         return _direct_numeric_part(reducer, series, node.op, start, end)
     var chunk_start = 0
@@ -899,6 +1098,32 @@ def _direct_numeric_reduction(
         if chunk_start >= end:
             break
     return True
+
+
+def _scan_width(bound: BoundExpr, columns: List[Series], node: Node) -> Int:
+    """Bytes per row a direct scan reads."""
+    var input = node.left
+    if _widening_cast(bound, columns, node):
+        input = bound.expr._nodes[input].left
+    return max(
+        1, columns[bound.sources[input]].dtype().physical().bit_width() // 8
+    )
+
+
+def _direct_scan(bound: BoundExpr, columns: List[Series], node: Node) -> Bool:
+    """Whether an ungrouped reduction runs as one SIMD scan of a numeric
+    column: Float64 sum and mean, integer sum, mean, min and max."""
+    var input = node.left
+    if _widening_cast(bound, columns, node):
+        input = bound.expr._nodes[input].left
+    if bound.expr._nodes[input].op != COL:
+        return False
+    var dtype = columns[bound.sources[input]].dtype().physical()
+    if node.op == SUM or node.op == MEAN:
+        return dtype == DataType.FLOAT64 or dtype.is_integer()
+    if node.op == MIN or node.op == MAX:
+        return dtype.is_integer()
+    return False
 
 
 def _reduce[
@@ -917,15 +1142,22 @@ def _reduce[
     """Reduce every row of `node.left`: one pass, or one worker per row
     partition with states merged in partition order (#6, #8)."""
     var workers = worker_count(height)
+    if not grouped and _direct_scan(bound, columns, node):
+        # A SIMD scan saturates memory bandwidth with few workers, and each
+        # worker's thread costs more to start than scanning a few MB: 10M
+        # Int16 values sum in 0.45 ms on 4 workers and 0.62 ms on 8.
+        workers = min(
+            workers,
+            min(8, max(1, height * _scan_width(bound, columns, node) >> 22)),
+        )
     if (
         not grouped
-        and (node.op == SUM or node.op == MEAN)
+        and (node.op == LEN or node.op == COUNT)
         and bound.expr._nodes[node.left].op == COL
-        and columns[bound.sources[node.left]].dtype() == DataType.FLOAT64
     ):
-        # SIMD scans saturate memory bandwidth with fewer workers; avoid
-        # paying thread startup costs for small contiguous partitions.
-        workers = min(workers, min(8, max(1, height // 250_000)))
+        # The row count, or a popcount of the validity bitmap: less work
+        # than starting a thread.
+        workers = 1
     if grouped:
         # Each worker holds state for every group and merges it afterwards;
         # with many groups that costs more than it saves, so require an
