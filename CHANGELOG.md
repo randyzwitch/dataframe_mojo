@@ -68,6 +68,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
   used to cost about 85 ns per row whatever their length. Chunked (Parquet)
   columns gather each chunk's share of the filter indices in place. Filters
   and joins get faster; PDS-H runs in 0.70 of the time (#328).
+- `rank` of numeric and temporal columns, globally and with `over`, sorts
+  each partition once: every row packs into one 128-bit integer (an
+  order-preserving key above its row), partitions are bucketed and ranked on
+  all workers, a single large partition is sorted in parallel runs and
+  merged, and very many small partitions share one parallel sort. H2O q8
+  at 10M rows goes from 3.7 s to 0.62 s (10.8x to 1.66x Polars), and every
+  data variant runs 4.5-6x faster. Descending ranks now put NaN
+  first, as Polars does; the old path put it last (#330).
 - Streaming lazy group-by merges batch states in groups, sized so total merge
   work stays linear, instead of re-encoding every group seen so far on each
   batch. Large merges use the partitioned key encoder, and per-group state

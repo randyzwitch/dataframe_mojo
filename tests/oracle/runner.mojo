@@ -14,6 +14,7 @@ SPEC is one operation (see scripts/oracle.py for the generator):
   stat CONTEXT FN COL          CONTEXT in global, group, over (see oracle.py)
   prep OP ...                  interpolate, cut, or qcut
   tz ZONE BASE STEP OP ...     datetimes BASE + n * STEP (UTC us) in ZONE
+  rank METHOD DESC COL CONTEXT CONTEXT in global, over (by "g")
 
 Setting DATAFRAME_ORACLE_INJECT=1 drops the last result row, so the harness
 can prove it detects a wrong answer.
@@ -77,6 +78,14 @@ def run(
     var op = spec[0]
     if op == "tz":
         return time_zone_case(left, spec)
+    if op == "rank":
+        var c = col(spec[3])
+        if spec[3] == "xn":
+            c = col("x") * (col("x") / col("x"))
+        var e = c.rank(spec[1], descending=spec[2] == "1")
+        if spec[4] == "over":
+            e = e.over("g")
+        return left.with_columns(e.alias("out"))
     if op == "prep":
         var operation = spec[1]
         var e: Expr
