@@ -64,6 +64,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Joins concatenate their workers' matched rows on every worker instead of
+  appending them one at a time on one thread, probe each chunk of a Parquet
+  key in place instead of copying it into one buffer, and hand their row
+  lists to the gathers without copying them. On H2O's joins at 8 threads,
+  10M rows by 10,000 on `id2` goes from 222 ms to 153 ms (Polars: 114 ms),
+  the same join with one value per side from 117 ms to 45 ms (Polars: 35
+  ms), and the left join from 129 ms to 66 ms (#335).
 - Grouped and global `median` and `quantile` find the one or two positions
   they read by selection instead of sorting every value, and groups finish
   on every worker, several per worker in ranges of equal size. Results are

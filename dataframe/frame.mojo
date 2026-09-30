@@ -2,7 +2,7 @@
 from .dtype import DataType
 from std.collections import Dict, Optional
 from std.sys import num_physical_cores
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, unsafe_memcpy
 from .bool_column import BoolColumn
 from .column import Column, _append_validity, _pack_bits
 from .string_column import StringColumn, StringBuilder
@@ -75,6 +75,7 @@ from .partition import (
     low_cardinality,
 )
 from .join_hash import (
+    RowsCopyJob,
     direct_hash_join_rows,
     direct_hash_semi_anti_rows,
     int64_progression,
@@ -1306,22 +1307,29 @@ struct DataFrame(Copyable, Sized, Writable):
                     if pairs[0][i] != i:
                         identity = False
                         break
+            # The row lists are swapped out of the tuple: copying them
+            # doubled the index traffic of a 10M-row join (#335).
+            var output_height = len(pairs[1])
+            var left_rows = List[Int]()
+            var right_rows = List[Int]()
+            swap(left_rows, pairs[0])
+            swap(right_rows, pairs[1])
             if not identity:
                 columns = take_parallel(
-                    columns^, pairs[0].copy(), workers, or_null=False
+                    columns^, left_rows^, workers, or_null=False
                 )
             var right_sources = List[Series]()
             for c in right_output:
                 right_sources.append(right._columns[c].copy())
             var gathered = take_parallel(
                 right_sources,
-                pairs[1].copy(),
+                right_rows^,
                 workers,
                 or_null=how == JOIN_LEFT,
             )
             for k in range(len(right_output)):
                 columns.append(gathered[k].renamed(right_names[k]))
-            return Self(columns^, height=len(pairs[1]))
+            return Self(columns^, height=output_height)
         if (how == JOIN_INNER or how == JOIN_LEFT) and len(left_keys) == 1:
             var dense = _dense_right_int64_rows(
                 self._columns[left_keys[0]],
@@ -1339,6 +1347,7 @@ struct DataFrame(Copyable, Sized, Writable):
                         if left_rows[i] != i:
                             left_identity = False
                             break
+                var output_height = len(left_rows)
                 if not left_identity:
                     var ordered_chunks = how == JOIN_INNER
                     for column in columns:
@@ -1350,13 +1359,13 @@ struct DataFrame(Copyable, Sized, Writable):
                     if ordered_chunks:
                         columns = take_sorted_chunked(
                             columns^,
-                            left_rows.copy(),
+                            left_rows^,
                             workers,
                             allow_repeats=True,
                         )
                     else:
                         columns = take_parallel(
-                            columns^, left_rows.copy(), workers, or_null=False
+                            columns^, left_rows^, workers, or_null=False
                         )
                 var right_sources = List[Series]()
                 for c in right_output:
@@ -1369,7 +1378,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 )
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
-                return Self(columns^, height=len(left_rows))
+                return Self(columns^, height=output_height)
         if (how == JOIN_SEMI or how == JOIN_ANTI) and len(left_keys) == 1:
             var aligned_chunks = can_filter_aligned_chunks(self._columns)
             if aligned_chunks:
@@ -1429,17 +1438,17 @@ struct DataFrame(Copyable, Sized, Writable):
                 var pairs = _smaller_build_join_rows(
                     left_sources, right_sources, how == JOIN_LEFT
                 )
-                left_rows = pairs[0].copy()
-                right_rows = pairs[1].copy()
+                swap(left_rows, pairs[0])
+                swap(right_rows, pairs[1])
                 direct = True
             if not direct and len(left_keys) == 1:
-                var range_rows = _bounded_int64_join_rows(
-                    left_sources[0], right_sources[0], how == JOIN_LEFT
+                direct = _bounded_int64_join_rows(
+                    left_sources[0],
+                    right_sources[0],
+                    how == JOIN_LEFT,
+                    left_rows,
+                    right_rows,
                 )
-                if range_rows[0]:
-                    direct = True
-                    left_rows = range_rows[1].copy()
-                    right_rows = range_rows[2].copy()
             if (
                 not direct
                 and right.height() <= Int(Int32.MAX)
@@ -1453,8 +1462,8 @@ struct DataFrame(Copyable, Sized, Writable):
                 )
                 direct = True
                 direct_identity = pairs[2]
-                left_rows = pairs[0].copy()
-                right_rows = pairs[1].copy()
+                swap(left_rows, pairs[0])
+                swap(right_rows, pairs[1])
             if direct:
                 var workers = worker_count(len(right_rows))
                 var columns = self._columns.copy()
@@ -1477,13 +1486,13 @@ struct DataFrame(Copyable, Sized, Writable):
                     if ordered_chunks:
                         columns = take_sorted_chunked(
                             columns^,
-                            left_rows.copy(),
+                            left_rows^,
                             workers,
                             allow_repeats=True,
                         )
                     else:
                         columns = take_parallel(
-                            columns^, left_rows.copy(), workers, or_null=False
+                            columns^, left_rows^, workers, or_null=False
                         )
                 var right_output_sources = List[Series]()
                 for c in right_output:
@@ -1511,13 +1520,13 @@ struct DataFrame(Copyable, Sized, Writable):
                 right_probe_keys.append(right._columns[right_keys[k]].copy())
                 left_build_keys.append(self._columns[left_keys[k]].copy())
             if len(left_keys) == 1:
-                var range_rows = _bounded_int64_join_rows(
-                    right_probe_keys[0], left_build_keys[0], True
+                direct_right = _bounded_int64_join_rows(
+                    right_probe_keys[0],
+                    left_build_keys[0],
+                    True,
+                    right_rows,
+                    left_rows,
                 )
-                if range_rows[0]:
-                    direct_right = True
-                    right_rows = range_rows[1].copy()
-                    left_rows = range_rows[2].copy()
             if (
                 not direct_right
                 and self.height() <= Int(Int32.MAX)
@@ -1527,8 +1536,8 @@ struct DataFrame(Copyable, Sized, Writable):
                     right_probe_keys, left_build_keys, True
                 )
                 direct_right = True
-                right_rows = pairs[0].copy()
-                left_rows = pairs[1].copy()
+                swap(right_rows, pairs[0])
+                swap(left_rows, pairs[1])
         if not direct_right:
             trace_path("join.dictionary")
             var ids = _joint_key_ids(self, right, left_keys, right_keys)
@@ -1578,8 +1587,8 @@ struct DataFrame(Copyable, Sized, Writable):
                     var pairs = _parallel_join_rows(
                         right_ids, left_starts, left_flat, right_workers, True
                     )
-                    right_rows = pairs[0].copy()
-                    left_rows = pairs[1].copy()
+                    swap(right_rows, pairs[0])
+                    swap(left_rows, pairs[1])
                 else:
                     for j in range(len(right_ids)):
                         var id = right_ids[j]
@@ -1601,8 +1610,8 @@ struct DataFrame(Copyable, Sized, Writable):
                     count,
                     worker_count(len(left_ids)),
                 )
-                left_rows = pairs[0].copy()
-                right_rows = pairs[1].copy()
+                swap(left_rows, pairs[0])
+                swap(right_rows, pairs[1])
             elif (how == JOIN_INNER or how == JOIN_LEFT) and worker_count(
                 len(left_ids)
             ) > 1:
@@ -1613,8 +1622,8 @@ struct DataFrame(Copyable, Sized, Writable):
                     worker_count(len(left_ids)),
                     how == JOIN_LEFT,
                 )
-                left_rows = pairs[0].copy()
-                right_rows = pairs[1].copy()
+                swap(left_rows, pairs[0])
+                swap(right_rows, pairs[1])
             else:
                 var right_matched = List[Bool](
                     length=len(right_ids), fill=False
@@ -2645,7 +2654,11 @@ def _dense_right_int64_rows(
             left, base, stride, len(right), include_unmatched
         )
         trace_path("join.progression")
-        return (True, pairs[0].copy(), pairs[1].copy())
+        var left_rows = List[Int]()
+        var right_rows = List[Int]()
+        swap(left_rows, pairs[0])
+        swap(right_rows, pairs[1])
+        return (True, left_rows^, right_rows^)
     var row = 0
     if stride == 1:
         var right_limit = UInt64(len(right))
@@ -2910,9 +2923,11 @@ struct _RangeMembershipJob(Job):
 
 
 struct _RangeJoinProbeJob(Job):
-    """Match one left-row range against a bounded right Int64 index."""
+    """Match rows [start, end) of one left chunk, which begins at row
+    `base`, against a bounded right Int64 index."""
 
     var left: Column[Int64]
+    var base: Int
     var heads: ArcPointer[List[Int]]
     var next_rows: ArcPointer[List[Int]]
     var low: Int64
@@ -2935,8 +2950,10 @@ struct _RangeJoinProbeJob(Job):
         start: Int,
         end: Int,
         include_unmatched: Bool,
+        base: Int = 0,
     ):
         self.left = left.copy()
+        self.base = base
         self.heads = heads.copy()
         self.next_rows = next_rows.copy()
         self.low = low
@@ -2950,23 +2967,27 @@ struct _RangeJoinProbeJob(Job):
 
     def run(mut self) raises:
         var all_valid = len(self.left._bits[]) == 0
+        var values = self.left._ptr()
+        var heads = self.heads[].unsafe_ptr()
+        var next_rows = self.next_rows[].unsafe_ptr()
+        var base = self.base
         for i in range(self.start, self.end):
             var j = -1
             if all_valid or self.left._valid(i):
-                var value = self.left._get(i)
+                var value = values.unsafe_offset(i)[]
                 if value >= self.low and value <= self.high:
-                    j = self.heads[][Int(value - self.low)]
+                    j = heads.unsafe_offset(Int(value - self.low))[]
             if j >= 0:
                 if self.unique_keys:
-                    self.left_rows.append(i)
+                    self.left_rows.append(base + i)
                     self.right_rows.append(j)
                 else:
                     while j >= 0:
-                        self.left_rows.append(i)
+                        self.left_rows.append(base + i)
                         self.right_rows.append(j)
-                        j = self.next_rows[][j]
+                        j = next_rows.unsafe_offset(j)[]
             elif self.include_unmatched:
-                self.left_rows.append(i)
+                self.left_rows.append(base + i)
                 self.right_rows.append(-1)
 
 
@@ -3019,15 +3040,22 @@ struct _RangeIndexBuildJob(Job):
 
 
 def _bounded_int64_join_rows(
-    left: Series, right: Series, include_unmatched: Bool
-) raises -> Tuple[Bool, List[Int], List[Int]]:
-    """Direct-address right-row chains when its Int64 domain is compact."""
+    left: Series,
+    right: Series,
+    include_unmatched: Bool,
+    mut left_rows: List[Int],
+    mut right_rows: List[Int],
+) raises -> Bool:
+    """Direct-address right-row chains when its Int64 domain is compact.
+    On success the matched row pairs are written to `left_rows` and
+    `right_rows` (returned in place: a tuple's lists had to be copied out,
+    about 9M rows each on H2O's joins)."""
     if (
         left.dtype().physical() != DataType.INT64
         or right.dtype().physical() != DataType.INT64
         or len(right) == 0
     ):
-        return (False, List[Int](), List[Int]())
+        return False
     var cap = _range_join_table_capacity(len(right), 8)
     # Beyond the cache-sized allowance, a sparse head table only ties or
     # loses to hashing. Both limits are computed without row-count overflow.
@@ -3058,7 +3086,7 @@ def _bounded_int64_join_rows(
                     sample_low = min(sample_low, value)
                     sample_high = max(sample_high, value)
                 if not _range_join_span_fits(sample_low, sample_high, cap):
-                    return (False, List[Int](), List[Int]())
+                    return False
             row += sample_step
     var right_values = right.int64()
     var found = False
@@ -3076,7 +3104,7 @@ def _bounded_int64_join_rows(
             low = min(low, value)
             high = max(high, value)
     if not found or not _range_join_span_fits(low, high, cap):
-        return (False, List[Int](), List[Int]())
+        return False
     var heads = List[Int](length=Int(high - low) + 1, fill=-1)
     var next_rows = List[Int](length=len(right_values), fill=-1)
     var unique_keys = True
@@ -3108,38 +3136,65 @@ def _bounded_int64_join_rows(
                     unique_keys = False
                 next_rows[j] = heads[slot]
                 heads[slot] = j
-    var left_values = left.int64()
-    var workers = worker_count(len(left_values))
-    var bounds = partitions(len(left_values), workers, 1)
+    # Probe each chunk of the left key in place (a Parquet column is
+    # chunked; copying it into one buffer first was a serial pass), in
+    # pieces of about equal rows that never span a chunk.
+    var height = len(left)
+    var workers = worker_count(height)
+    var step = max(1, (height + workers - 1) // workers)
     var shared_heads = ArcPointer(heads^)
     var shared_next = ArcPointer(next_rows^)
-    var jobs = List[_RangeJoinProbeJob](capacity=workers)
-    for worker in range(workers):
-        jobs.append(
-            _RangeJoinProbeJob(
-                left_values,
-                shared_heads,
-                shared_next,
-                low,
-                high,
-                unique_keys,
-                bounds[worker],
-                bounds[worker + 1],
-                include_unmatched,
+    var jobs = List[_RangeJoinProbeJob]()
+    var base = 0
+    for part in left.chunks():
+        ref chunk = part._data[Column[Int64]]
+        var at = 0
+        while at < len(chunk):
+            var end = min(len(chunk), at + step)
+            jobs.append(
+                _RangeJoinProbeJob(
+                    chunk,
+                    shared_heads,
+                    shared_next,
+                    low,
+                    high,
+                    unique_keys,
+                    at,
+                    end,
+                    include_unmatched,
+                    base,
+                )
+            )
+            at = end
+        base += len(chunk)
+    run_jobs(jobs)
+    # Concatenate on every worker: each job's matches are copied to their
+    # offset in the output. One thread appending them row by row was a
+    # third of a join's time on 10M rows.
+    var offsets = List[Int](capacity=len(jobs) + 1)
+    offsets.append(0)
+    for job in range(len(jobs)):
+        offsets.append(offsets[job] + len(jobs[job].left_rows))
+    var total = offsets[len(jobs)]
+    left_rows = List[Int](unsafe_uninit_length=total)
+    right_rows = List[Int](unsafe_uninit_length=total)
+    var copies = List[RowsCopyJob](capacity=len(jobs))
+    for job in range(len(jobs)):
+        copies.append(
+            RowsCopyJob(
+                Int(Pointer(to=jobs[job].left_rows)),
+                Int(Pointer(to=jobs[job].right_rows)),
+                0,
+                len(jobs[job].left_rows),
+                Int(Pointer(to=left_rows)),
+                Int(Pointer(to=right_rows)),
+                offsets[job],
             )
         )
-    run_jobs(jobs)
-    var total = 0
-    for worker in range(workers):
-        total += len(jobs[worker].left_rows)
-    var left_rows = List[Int](capacity=total)
-    var right_rows = List[Int](capacity=total)
-    for worker in range(workers):
-        for i in range(len(jobs[worker].left_rows)):
-            left_rows.append(jobs[worker].left_rows[i])
-            right_rows.append(jobs[worker].right_rows[i])
+    run_jobs(copies)
+    _ = jobs^
     trace_path("join.bounded_index")
-    return (True, left_rows^, right_rows^)
+    return True
 
 
 @fieldwise_init

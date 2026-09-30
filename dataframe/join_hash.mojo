@@ -6,7 +6,7 @@ continue to the next slot. Exact column equality resolves hash collisions.
 Building in reverse row order and probing disjoint left ranges preserves the
 join's documented left-major, right-input match order.
 """
-from std.memory import ArcPointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 
 from .aggregate import float_key
 from .bool_column import BoolColumn
@@ -841,6 +841,73 @@ def prepared_hash_semi_anti_rows(
     return rows^
 
 
+struct RowsCopyJob(Job):
+    """Copy one probe job's matched rows to their offset in the output
+    lists, so join row lists are concatenated on every worker (#335).
+    A `left` address of 0 means the job's left rows are its own range
+    [first, first + count) in order, which is written directly."""
+
+    var left: Int
+    var right: Int
+    var first: Int
+    var count: Int
+    var out_left: Int
+    var out_right: Int
+    var at: Int
+
+    def __init__(
+        out self,
+        left: Int,
+        right: Int,
+        first: Int,
+        count: Int,
+        out_left: Int,
+        out_right: Int,
+        at: Int,
+    ):
+        self.left = left
+        self.right = right
+        self.first = first
+        self.count = count
+        self.out_left = out_left
+        self.out_right = out_right
+        self.at = at
+
+    def run(mut self) raises:
+        if self.count == 0:
+            return
+        if self.out_left != 0:
+            var target = (
+                Pointer[List[Int], MutAnyOrigin](
+                    unsafe_from_address=self.out_left
+                )[]
+                .unsafe_ptr()
+                .unsafe_offset(self.at)
+            )
+            if self.left == 0:
+                for k in range(self.count):
+                    target.unsafe_offset(k)[] = self.first + k
+            else:
+                unsafe_memcpy(
+                    dest=target,
+                    src=Pointer[List[Int], MutAnyOrigin](
+                        unsafe_from_address=self.left
+                    )[].unsafe_ptr(),
+                    count=self.count,
+                )
+        unsafe_memcpy(
+            dest=Pointer[List[Int], MutAnyOrigin](
+                unsafe_from_address=self.out_right
+            )[]
+            .unsafe_ptr()
+            .unsafe_offset(self.at),
+            src=Pointer[List[Int], MutAnyOrigin](
+                unsafe_from_address=self.right
+            )[].unsafe_ptr(),
+            count=self.count,
+        )
+
+
 def direct_hash_join_rows(
     left_keys: List[Series],
     right_keys: List[Series],
@@ -908,18 +975,29 @@ def prepared_hash_join_rows(
     for worker in range(len(jobs)):
         total += len(jobs[worker].right_rows)
         identity = identity and jobs[worker].identity
-    var left_rows = List[Int](capacity=0 if identity else total)
-    var right_rows = List[Int](capacity=total)
+    # Every worker copies its own matches to their offset in the output.
+    var left_rows = List[Int](unsafe_uninit_length=0 if identity else total)
+    var right_rows = List[Int](unsafe_uninit_length=total)
+    var copies = List[RowsCopyJob](capacity=len(jobs))
+    var at = 0
     for worker in range(len(jobs)):
-        if not identity:
-            if jobs[worker].identity:
-                for row in range(jobs[worker].start, jobs[worker].end):
-                    left_rows.append(row)
-            else:
-                for row in jobs[worker].left_rows:
-                    left_rows.append(row)
-        for row in jobs[worker].right_rows:
-            right_rows.append(row)
+        var count = len(jobs[worker].right_rows)
+        copies.append(
+            RowsCopyJob(
+                0 if jobs[worker].identity else Int(
+                    Pointer(to=jobs[worker].left_rows)
+                ),
+                Int(Pointer(to=jobs[worker].right_rows)),
+                jobs[worker].start,
+                count,
+                0 if identity else Int(Pointer(to=left_rows)),
+                Int(Pointer(to=right_rows)),
+                at,
+            )
+        )
+        at += count
+    run_jobs(copies)
+    _ = jobs^
     return (left_rows^, right_rows^, identity)
 
 
