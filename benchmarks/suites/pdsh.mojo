@@ -1,7 +1,9 @@
 """PDS-H: the 22 TPC-H-derived queries of Polars' benchmark, written with
-this library's eager API as a user would today: filter each table, then
-join (the eager API has no optimizer to reorder that). engines.py holds the
-Polars versions; DuckDB runs `tpch_queries()`. The same queries run on both
+this library's lazy API, as the Polars versions are: each query builds one
+plan over the tables and collects it, so projection and predicate pushdown
+decide which columns and rows reach each join (#329). q11 and q22 collect a
+scalar subquery first and use its value, as a user would. engines.py holds
+the Polars versions; DuckDB runs `tpch_queries()`. The same queries run on both
 data variants (bench_suites.py): money columns as Float64, or as
 Decimal(15, 2), where literals must be decimals too (`money`) and ratios
 and comparisons with averages convert to Float64 (`real`). Usage: see
@@ -9,13 +11,13 @@ suite_common.mojo.
 """
 from std.collections import Dict
 
-from dataframe import DataFrame, DataType, Expr, col, lit, when
+from dataframe import DataFrame, DataType, Expr, LazyFrame, col, lit, when
 from suite_common import date_lit, run
 
 
 def sort_by(
-    frame: DataFrame, names: List[String], descending: List[Bool]
-) raises -> DataFrame:
+    frame: LazyFrame, names: List[String], descending: List[Bool]
+) raises -> LazyFrame:
     var nulls_last = List[Bool](length=len(names), fill=True)
     return frame.sort(names, descending=descending, nulls_last=nulls_last)
 
@@ -61,15 +63,19 @@ def real(e: Expr) -> Expr:
 
 
 def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
-    ref line = t["lineitem"]
-    ref orders = t["orders"]
-    ref cust = t["customer"]
-    ref part = t["part"]
-    ref supp = t["supplier"]
-    ref ps = t["partsupp"]
-    ref nation = t["nation"]
-    ref region = t["region"]
-    var dec = line.column("l_discount").dtype().is_decimal()
+    return plan(q, t).collect()
+
+
+def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
+    var line = t["lineitem"].lazy()
+    var orders = t["orders"].lazy()
+    var cust = t["customer"].lazy()
+    var part = t["part"].lazy()
+    var supp = t["supplier"].lazy()
+    var ps = t["partsupp"].lazy()
+    var nation = t["nation"].lazy()
+    var region = t["region"].lazy()
+    var dec = t["lineitem"].column("l_discount").dtype().is_decimal()
     var disc_price = col("l_extendedprice") * (
         money(dec, "1") - col("l_discount")
     )
@@ -370,7 +376,9 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
                 ]
             )
         )
-        var threshold = german.select(col("v").sum()).item().float64() * 0.0001
+        var threshold = (
+            german.select(col("v").sum()).collect().item().float64() * 0.0001
+        )
         return (
             german.group_by(["ps_partkey"])
             .agg([col("v").sum().alias("value")])
@@ -631,6 +639,7 @@ def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
         var average = (
             chosen.filter(col("c_acctbal") > money(dec, "0"))
             .select(col("c_acctbal").mean())
+            .collect()
             .item()
             .float64()
         )
