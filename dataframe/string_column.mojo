@@ -336,8 +336,15 @@ struct StringColumn(Copyable, Sized):
         var n = last - first
         var rows = indices.unsafe_ptr().unsafe_offset(first)
         var source = self._offsets[].unsafe_ptr().unsafe_offset(self._offset)
-        var offsets = List[Int64](length=n + 1, fill=0)
+        # Every entry is written below, so neither buffer is filled first.
+        var offsets = List[Int64](unsafe_uninit_length=n + 1)
         var out = offsets.unsafe_ptr()
+        out[] = 0
+        # Each row's source start, saved while its offsets are in cache: the
+        # copy pass would otherwise miss on them a second time, which for a
+        # random order (a sort) is most of the cost.
+        var starts = List[Int64](unsafe_uninit_length=n)
+        var start_ptr = starts.unsafe_ptr()
         var total = Int64(0)
         var missing = False
         for k in range(n):
@@ -346,15 +353,15 @@ struct StringColumn(Copyable, Sized):
                 row -= base
             if row == -1 and allow_missing:
                 missing = True
+                start_ptr.unsafe_offset(k)[] = 0
             elif row < 0 or row >= self._length:
                 raise Error("Column index out of bounds")
             else:
-                total += (
-                    source.unsafe_offset(row + 1)[]
-                    - source.unsafe_offset(row)[]
-                )
+                var start = source.unsafe_offset(row)[]
+                start_ptr.unsafe_offset(k)[] = start
+                total += source.unsafe_offset(row + 1)[] - start
             out.unsafe_offset(k + 1)[] = total
-        var bytes = List[UInt8](length=Int(total), fill=0)
+        var bytes = List[UInt8](unsafe_uninit_length=Int(total))
         var src = self._bytes[].unsafe_ptr()
         var dst = bytes.unsafe_ptr()
         var k = 0
@@ -363,7 +370,6 @@ struct StringColumn(Copyable, Sized):
             if row == -1:
                 k += 1
                 continue
-            row -= base
             # Extend the run while source rows are consecutive.
             var end = k + 1
             while (
@@ -372,21 +378,22 @@ struct StringColumn(Copyable, Sized):
                 == rows.unsafe_offset(end - 1)[] + 1
             ):
                 end += 1
-            var start_byte = Int(source.unsafe_offset(row)[])
-            var count = (
-                Int(
-                    source.unsafe_offset(
-                        rows.unsafe_offset(end - 1)[] - base + 1
-                    )[]
-                )
-                - start_byte
-            )
-            if count > 0:
+            var at = Int(out.unsafe_offset(k)[])
+            var count = Int(out.unsafe_offset(end)[]) - at
+            var from_byte = Int(start_ptr.unsafe_offset(k)[])
+            if count > 16:
                 unsafe_memcpy(
-                    dest=dst.unsafe_offset(Int(out.unsafe_offset(k)[])),
-                    src=src.unsafe_offset(start_byte),
+                    dest=dst.unsafe_offset(at),
+                    src=src.unsafe_offset(from_byte),
                     count=count,
                 )
+            else:
+                # Short values, the usual case for keys: a call per value
+                # costs more than the copy.
+                for b in range(count):
+                    dst.unsafe_offset(at + b)[] = src.unsafe_offset(
+                        from_byte + b
+                    )[]
             k = end
         var bits = List[UInt8]()
         ref source_bits = self._bits[]

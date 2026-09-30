@@ -74,6 +74,24 @@ breaking changes can happen in any release and are listed under **Breaking**.
   rows at 8 threads: `len()` from 10 ms to 0.01 ms, Int16 `sum` from 17 ms to
   0.3 ms, Int16 `max` from 5.8 ms to 0.3 ms, `ClientIP.cast(Int64).sum()` from
   133 ms to 1 ms, and `count()` from 0.7 ms to 0.2 ms (#333).
+- A lazy sort followed by `head(k)` or `slice(offset, k)` selects its first
+  `offset + k` rows instead of sorting every row; `explain()` shows it as
+  `TOP_K`, and streaming plans keep each batch's first rows. Eager `top_k`
+  and `bottom_k` use the same selection, one 65,536-row chunk per worker. At
+  8 threads on 10M rows, `sort("v3").head(10)` goes from 494 ms to 15 ms and
+  `top_k(10, "v3")` from 133 ms to 12 ms (#332).
+- Sorting packs each row's keys and its row index into one 64- or 128-bit
+  integer and sorts those directly, bucketed by their top bits and then
+  sorted per bucket in parallel, instead of ranking string keys with a sort
+  of their own and merging row indices through per-key lookups. Keys are
+  stored relative to their range and strings past their shared prefix, so
+  most sorts by one to three keys pack; long strings settle ties by
+  comparing the strings, and anything wider keeps the general path. At 8
+  threads on 10M rows `arg_sort` by a Float64 goes from 1,110 ms to 142 ms,
+  by a short string from 2,009 ms to 217 ms, and by a string and a Float64
+  from 3,205 ms to 286 ms. Gathers no longer zero their output first, and
+  string gathers read each source offset once and copy short values inline;
+  a 9-column `sort` goes from 1,556 ms to 489 ms (#331).
 - Numeric comparisons and Boolean `&`, `|`, `^` and `~` write packed bitmaps
   directly, eight rows per step, instead of looping per row; `select_exprs`,
   `select` and `filter` default to 8192-row batches, as `with_columns`

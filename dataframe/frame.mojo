@@ -98,6 +98,14 @@ from .join_type import (
 from .nested_column import ListColumn, StructColumn
 from .trace import trace_path
 from .row_encode import STRING_PREFIX_BYTES, encodable, encode_sort_keys
+from .packed_sort import (
+    chunked_top_rows,
+    packed_arg_sort,
+    packed_top_rows,
+)
+
+# A head of a sort at least 1/this of the rows sorts fully (#332).
+comptime _TOP_K_FRACTION = 10
 from .value import AnyValue
 from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
 from .groups import GroupIndices
@@ -916,21 +924,31 @@ struct DataFrame(Copyable, Sized, Writable):
                     + " column: "
                     + name
                 )
+        if (
+            len(by) > 0
+            and len(descending) == len(by)
+            and len(nulls_last) == len(by)
+        ):
+            var keys = List[Series](capacity=len(by))
+            for name in by:
+                keys.append(self.column(name))
+            var packed = packed_arg_sort(keys, descending, nulls_last)
+            if packed:
+                trace_path("sort.packed")
+                return packed.take()
         return sort_indices(self._sort_ranks(by, descending, nulls_last))
 
     def top_k(self, k: Int, by: List[String]) raises -> Self:
         """The k rows that sort(by, descending=True) would put first.
 
-        Nulls rank last. Selection is O(n log k) rather than a full sort.
+        Nulls rank last. Selection is about one pass rather than a full sort.
         """
         var n = len(by)
         return self.take(
-            smallest_indices(
-                self._sort_ranks(
-                    by,
-                    List[Bool](length=n, fill=True),
-                    List[Bool](length=n, fill=True),
-                ),
+            self._arg_sort_head(
+                by,
+                List[Bool](length=n, fill=True),
+                List[Bool](length=n, fill=True),
                 k,
             )
         )
@@ -942,14 +960,67 @@ struct DataFrame(Copyable, Sized, Writable):
         """The k rows that sort(by) would put first; nulls rank last."""
         var n = len(by)
         return self.take(
-            smallest_indices(
-                self._sort_ranks(
-                    by,
-                    List[Bool](length=n, fill=False),
-                    List[Bool](length=n, fill=True),
-                ),
+            self._arg_sort_head(
+                by,
+                List[Bool](length=n, fill=False),
+                List[Bool](length=n, fill=True),
                 k,
             )
+        )
+
+    def _arg_sort_head(
+        self,
+        by: List[String],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        k: Int,
+        threads: Int = 0,
+    ) raises -> List[Int]:
+        """The first k rows of arg_sort(by, ...), in order (#332).
+
+        `threads` caps the selection's workers (0: the configured count); a
+        streaming batch, already on a worker, passes 1.
+
+
+        Small k selects the rows instead of sorting all of them: with packed
+        keys when they pack, else a heap over dense ranks. Past a tenth of
+        the rows selection stops paying and the full sort is cut short.
+        """
+        if k < 0:
+            raise Error("k must be nonnegative")
+        var take = min(k, self._height)
+        if take * _TOP_K_FRACTION >= self._height:
+            var order = self.arg_sort(
+                by, descending=descending, nulls_last=nulls_last
+            )
+            order.shrink(take)
+            return order^
+        for name in by:
+            if self.column(name).dtype().is_nested():
+                raise Error(
+                    "cannot sort by a "
+                    + self.column(name).dtype().name()
+                    + " column: "
+                    + name
+                )
+        if (
+            len(by) > 0
+            and len(descending) == len(by)
+            and len(nulls_last) == len(by)
+        ):
+            var keys = List[Series](capacity=len(by))
+            for name in by:
+                keys.append(self.column(name))
+            var packed = packed_top_rows(
+                keys, descending, nulls_last, take, threads
+            ) if threads > 0 else chunked_top_rows(
+                keys, descending, nulls_last, take
+            )
+            if packed:
+                trace_path("sort.top_k")
+                return packed.take()
+        return smallest_indices(
+            self._sort_ranks(by, descending, nulls_last), take
         )
 
     def bottom_k(self, k: Int, by: String) raises -> Self:
