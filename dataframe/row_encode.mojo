@@ -67,7 +67,7 @@ def encodable(column: Series) -> Bool:
     """
     if column.dtype().is_decimal():
         return False
-    if column.dtype() != DataType.STRING:
+    if column.dtype().physical() != DataType.STRING:
         return True
     if column.is_chunked():
         for part in column.chunks():

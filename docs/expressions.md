@@ -243,6 +243,29 @@ exactly when the same text would load from CSV: no surrounding whitespace, an
 optional sign, and only explicit infinity spellings. Casting numbers and
 Booleans to string and back reproduces them exactly, including `-0.0` and NaN.
 
+Binary casts follow Polars: anything that casts to string casts to binary as
+its UTF-8 bytes, and binary casts only to string, where each value must be
+valid UTF-8 (strict raises; otherwise the row is null, where Polars raises).
+
+### Binary
+
+`DataType.BINARY` holds arbitrary bytes per row, the Arrow `large_binary`
+type. It shares the string layout (one byte buffer, Int64 offsets, validity)
+but its bytes are never read as text, so they need not be UTF-8. Build one
+with `Series.binary(name, values, valid)` from `List[List[UInt8]]`, by
+casting, or from Arrow or Parquet; `get(i).bytes()` reads a value back.
+
+Operations that do not interpret the bytes work as they do for strings,
+comparing bytes: filtering, `take`, `slice`, `concat`, sorting, `unique`,
+grouping and join keys, `min`/`max`/`first`/`last`/`mode`/`n_unique`/
+`count`/`value_counts`, `fill_null`, `when`, windows, and equality and
+ordering comparisons (a string literal stands for its UTF-8 bytes:
+`col("b") == "abc"`). Binary and string are different dtypes, so joining
+or stacking one with the other raises, as in Polars; `.str()` operations
+need a cast to string. Values display as `b"..."` with non-printable bytes
+escaped (`b"\xff\x00z"`). `write_csv` rejects binary columns, as Polars
+does, since CSV has no agreed encoding for raw bytes.
+
 ### Boolean logic and nulls
 
 `&`, `|`, `^`, and `~` (also `and_`, `or_`, `xor`, `not_`) require Bool

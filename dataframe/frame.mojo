@@ -539,7 +539,7 @@ struct DataFrame(Copyable, Sized, Writable):
                                 p + "q" + String(k)
                             )
                         )
-            elif dtype == DataType.STRING:
+            elif dtype.physical() == DataType.STRING:
                 exprs.append(c.min().alias(p + "min"))
                 exprs.append(c.max().alias(p + "max"))
             elif dtype.is_temporal():
@@ -678,7 +678,14 @@ struct DataFrame(Copyable, Sized, Writable):
                     elif (p + key) in present:
                         var value = stats.column(p + key).get(0)
                         valid.append(not value.is_null())
-                        texts.append("" if value.is_null() else value.string())
+                        # Binary min and max print as b"...", as values do.
+                        texts.append(
+                            "" if value.is_null() else (
+                                String(
+                                    value
+                                ) if dtype.is_binary() else value.string()
+                            )
+                        )
                     else:
                         texts.append("")
                         valid.append(False)
@@ -4711,7 +4718,7 @@ def _equality_words(columns: List[Series]) raises -> List[List[Int]]:
     for k in range(len(columns)):
         var encoded = encode_sort_keys([columns[k].copy()], [False], [True])
         var expected = 2
-        if columns[k].dtype() == DataType.STRING:
+        if columns[k].dtype().physical() == DataType.STRING:
             expected += STRING_PREFIX_BYTES // 8
         if len(encoded) == expected:
             ref ranks = encoded[0]

@@ -51,6 +51,32 @@ struct StringColumn(Copyable, Sized):
         self = Self(values)
         self._bits = ArcPointer(_pack_bits(valid))
 
+    @staticmethod
+    def from_bytes(
+        values: List[List[UInt8]], valid: List[Bool]
+    ) raises -> StringColumn:
+        """Arbitrary bytes per row, not checked for UTF-8: the storage of a
+        binary column. Tag the Series `DataType.BINARY` before reading."""
+        if len(values) != len(valid):
+            raise Error("Column values and validity must have equal lengths")
+        var total = 0
+        for i in range(len(values)):
+            if valid[i]:
+                total += len(values[i])
+        var bytes = List[UInt8](capacity=total)
+        var offsets = List[Int64](capacity=len(values) + 1)
+        offsets.append(0)
+        for i in range(len(values)):
+            if valid[i]:
+                bytes.extend(Span(values[i]))
+            offsets.append(Int64(len(bytes)))
+        return StringColumn(
+            bytes=bytes^,
+            offsets=offsets^,
+            bits=_pack_bits(valid),
+            length=len(values),
+        )
+
     def __init__(out self, column: Column[String]):
         """Convert a list-backed string column into the UTF-8 layout."""
         var builder = StringBuilder(len(column))
@@ -124,6 +150,10 @@ struct StringColumn(Copyable, Sized):
                 length=self._end(i) - start,
             )
         )
+
+    def _row_bytes(self, i: Int) -> Span[UInt8, ImmutAnyOrigin]:
+        """Unchecked borrowed read of a row's raw bytes (text or binary)."""
+        return self._get(i).as_bytes()
 
     def _equal_at(self, other: Self, i: Int, j: Int) -> Bool:
         """Compare two row values, treating nulls as unequal."""
@@ -598,3 +628,28 @@ struct StringBuilder(Copyable):
             bits=self._bits^,
             length=self._length,
         )
+
+
+def escape_bytes(bytes: Span[UInt8, _]) -> String:
+    """Bytes as b"..." with printable ASCII kept and everything else
+    escaped (\\n, \\t, \\r, \\", \\\\, \\xNN), as Polars prints binary."""
+    comptime HEX = "0123456789abcdef"
+    var out = String('b"')
+    for byte in bytes:
+        if byte == 10:
+            out += "\\n"
+        elif byte == 9:
+            out += "\\t"
+        elif byte == 13:
+            out += "\\r"
+        elif byte == 34:
+            out += '\\"'
+        elif byte == 92:
+            out += "\\\\"
+        elif byte >= 32 and byte < 127:
+            out += chr(Int(byte))
+        else:
+            out += "\\x"
+            out += HEX[byte=Int(byte >> 4)]
+            out += HEX[byte=Int(byte & 15)]
+    return out + '"'

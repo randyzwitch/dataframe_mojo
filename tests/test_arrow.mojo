@@ -220,7 +220,7 @@ def test_unsupported_formats_raise_and_release() raises:
         Int(Pointer(to=releases)),
     )
     # Pretend the producer declared a type we do not support.
-    var fake = List[UInt8]([UInt8(ord("z")), 0])
+    var fake = List[UInt8]([UInt8(ord("e")), 0])
     var real_format = schema.format
     schema.format = Int(fake.unsafe_ptr())
     var message = String()
@@ -228,7 +228,7 @@ def test_unsupported_formats_raise_and_release() raises:
         _ = import_arrow_series(array, schema)
     except e:
         message = String(e)
-    assert_true("Unsupported Arrow format 'z'" in message)
+    assert_true("Unsupported Arrow format 'e'" in message)
     assert_equal(releases, 1)
     _ = real_format
     _ = fake^
@@ -261,7 +261,7 @@ def test_parallel_batch_order_offsets_and_error_release() raises:
         # Parent slicing must still apply to every column after parallel copy.
         array.offset = 3
         array.length -= 5
-        var fake = List[UInt8]([UInt8(ord("z")), 0])
+        var fake = List[UInt8]([UInt8(ord("e")), 0])
         if fail:
             _at[ArrowSchema](_at[Int](schema.children + 8)[])[].format = Int(
                 fake.unsafe_ptr()
@@ -272,7 +272,7 @@ def test_parallel_batch_order_offsets_and_error_release() raises:
             assert_frames_equal(result, source.slice(3, n - 5))
         except e:
             failed = True
-            assert_true("Unsupported Arrow format 'z'" in String(e))
+            assert_true("Unsupported Arrow format 'e'" in String(e))
         assert_equal(failed, fail != 0)
         assert_equal(releases, 1 + source.width())
         assert_equal(array.release, 0)

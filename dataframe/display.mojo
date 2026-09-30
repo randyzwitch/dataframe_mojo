@@ -4,7 +4,7 @@ from .temporal import format as format_temporal
 from .bool_column import BoolColumn
 from .column import Column
 from .decimal import format_decimal
-from .string_column import StringColumn, StringBuilder
+from .string_column import StringColumn, StringBuilder, escape_bytes
 from .series import Series
 
 comptime ELLIPSIS = "…"
@@ -107,6 +107,11 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
     ref column = series._data[StringColumn]
     if not column._valid(row):
         return "null"
+    if series.dtype().is_binary():
+        # b"..." with non-printable bytes escaped, as Polars shows binary.
+        return _truncate(
+            escape_bytes(column._row_bytes(row)), max_string_length
+        )
     return format_string(String(column._get(row)), max_string_length)
 
 

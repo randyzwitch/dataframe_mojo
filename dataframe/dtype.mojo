@@ -26,6 +26,8 @@ comptime _DATETIME = 5
 comptime _DURATION = 6
 comptime _TIME = 7
 comptime _DECIMAL = 8
+# Arbitrary bytes in the string layout (Arrow large_binary); no UTF-8.
+comptime _BINARY = 9
 comptime _LIST = 16
 # Marks a type without numeric storage (bool, string, nested). Bool columns
 # are bit-packed, so DType.bool never names a numeric storage type.
@@ -218,6 +220,7 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime FLOAT64 = DataType(DType.float64)
     comptime BOOL = DataType(_BOOL, 0)
     comptime STRING = DataType(_STRING, 0)
+    comptime BINARY = DataType(_BINARY, 0)
     comptime DATE = DataType(_DATE, 0)
     comptime TIME = DataType(_TIME, 0)
     comptime INT8 = DataType(DType.int8)
@@ -312,6 +315,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return DataType.BOOL
         if name == "string":
             return DataType.STRING
+        if name == "binary":
+            return DataType.BINARY
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if name == String(D):
@@ -383,6 +388,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return String(self._storage)
         if self._code == _BOOL:
             return "bool"
+        if self._code == _BINARY:
+            return "binary"
         if self._code == _DATE:
             return "date"
         if self._code == _TIME:
@@ -481,10 +488,16 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     def is_time(self) -> Bool:
         return self._code == _TIME
 
+    def is_binary(self) -> Bool:
+        return self._code == _BINARY
+
     def physical(self) -> DataType:
-        """The storage type: INT64 for temporal types, otherwise self."""
+        """The storage type: INT64 for temporal types, STRING for binary
+        (the same offsets-and-bytes layout), otherwise self."""
         if self.is_temporal():
             return DataType.INT64
+        if self._code == _BINARY:
+            return DataType.STRING
         if self.is_decimal():
             return DataType.of(DType.int128)
         return self

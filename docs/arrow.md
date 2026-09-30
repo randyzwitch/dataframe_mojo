@@ -33,6 +33,7 @@ the shape pyarrow imports with `RecordBatch._import_from_c` and Polars with
 | UInt8–UInt64 | `C` `S` `I` `L` | zero-copy | |
 | Float32, Float64 | `f` `g` | zero-copy | |
 | String | `U` large_utf8 | zero-copy | `u` utf8 (offsets widened) |
+| Binary | `Z` large_binary | zero-copy | `z` binary (offsets widened) |
 | Bool | `b` bool | zero-copy | |
 | Date | `tdD` date32 | days narrowed to Int32 | `tdm` date64 |
 | Datetime(unit, time_zone) | `ts{m,u,n}:<zone>` timestamp | zero-copy | `tss:<zone>` (as ms) |

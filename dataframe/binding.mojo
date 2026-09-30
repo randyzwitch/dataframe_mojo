@@ -1205,6 +1205,15 @@ def bind(
                     _adopt(nodes, types, node.left, _target(right))
                 elif right.is_untyped():
                     _adopt(nodes, types, node.right, _target(left))
+                # A string literal compared with binary stands for its
+                # UTF-8 bytes, as in Polars; both share one storage layout.
+                if is_comparison(node.op):
+                    if left.is_binary() and nodes[node.right].op == LIT_STRING:
+                        types[node.right] = DataType.BINARY
+                    elif (
+                        right.is_binary() and nodes[node.left].op == LIT_STRING
+                    ):
+                        types[node.left] = DataType.BINARY
                 dtype = _binary_dtype(
                     node.op, types[node.left], types[node.right]
                 )
