@@ -34,6 +34,7 @@ from .aggregate import quantile_of
 from .decimal import pow10
 from .reductions import WideInt
 from .series import Series, sort_indices
+from .rank import rank_numeric
 from std.math import isnan, floor
 
 
@@ -143,6 +144,11 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         if op_code == ROLLING_MEAN:
             return result^
         return _narrow_sum(result, input.dtype().sum_type())
+    if op_code == RANK:
+        # Numeric columns sort once per partition, in parallel (#330).
+        var fast = rank_numeric(input, ids, node.text, node.min_count == 1)
+        if fast:
+            return fast.value().copy()
     var n = len(input)
     var valid = validity(input)
     var groups = partitions(n, ids)

@@ -73,7 +73,7 @@ def gen_right(rng: random.Random, rows: int) -> pl.DataFrame:
     )
 
 
-KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal", "prep", "tz"]
+KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal", "prep", "tz", "rank"]
 
 # Time-zone cases (#222): instants near a DST switch or a historical offset
 # change, in UTC microseconds. Rows are BASE + n * STEP, so a 7-minute step
@@ -146,6 +146,10 @@ def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
     kind = rng.choice(kinds)
     if kind == "tz":
         return gen_tz(rng)
+    if kind == "rank":
+        # x has ties, -0.0 and 0.0; xn adds NaN; k is a string (general path).
+        return ["rank", rng.choice(["ordinal", "min", "max", "dense", "average"]), rng.choice(["0", "1"]),
+                rng.choice(["x", "xn", "g", "n", "k"]), rng.choice(["global", "over"])]
     if kind == "prep":
         operation = rng.choice(["interpolate", "cut", "qcut"])
         if operation == "interpolate":
@@ -251,6 +255,10 @@ def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.Dat
     op = spec[0]
     if op == "tz":
         return tz_expected(left, spec)
+    if op == "rank":
+        c = pl.col("x") * (pl.col("x") / pl.col("x")) if spec[3] == "xn" else pl.col(spec[3])
+        e = c.rank(spec[1], descending=spec[2] == "1")
+        return left.with_columns((e.over("g") if spec[4] == "over" else e).alias("out"))
     if op == "prep":
         operation = spec[1]
         if operation == "interpolate":
