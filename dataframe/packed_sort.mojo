@@ -865,6 +865,214 @@ def _sort_packed[
     return rows^
 
 
+@always_inline
+def _pack_row[
+    T: DType
+](
+    keys: List[_Key],
+    order_ptrs: List[UnsafePointer[UInt64, MutAnyOrigin]],
+    tier_ptrs: List[UnsafePointer[UInt8, MutAnyOrigin]],
+    i: Int,
+) -> Scalar[T]:
+    var p = Scalar[T](i)
+    for k in range(len(keys)):
+        p |= keys[k].pack[T](order_ptrs[k][i], tier_ptrs[k][i])
+    return p
+
+
+def _key_pointers(
+    orders: List[Int], tiers: List[Int]
+) -> Tuple[
+    List[UnsafePointer[UInt64, MutAnyOrigin]],
+    List[UnsafePointer[UInt8, MutAnyOrigin]],
+]:
+    var order_ptrs = List[UnsafePointer[UInt64, MutAnyOrigin]]()
+    var tier_ptrs = List[UnsafePointer[UInt8, MutAnyOrigin]]()
+    for k in range(len(orders)):
+        order_ptrs.append(
+            Pointer[List[UInt64], MutAnyOrigin](
+                unsafe_from_address=orders[k]
+            )[].unsafe_ptr()
+        )
+        tier_ptrs.append(
+            Pointer[List[UInt8], MutAnyOrigin](
+                unsafe_from_address=tiers[k]
+            )[].unsafe_ptr()
+        )
+    return (order_ptrs^, tier_ptrs^)
+
+
+struct _SelectJob[T: DType](Job):
+    """The `limit` smallest packed rows of [first, last), ascending.
+
+    Accepted values collect in a buffer of twice the limit; when it fills,
+    it is sorted and cut back to the limit, whose largest value becomes the
+    bar a row must beat. Most rows of a large range fail that one
+    comparison, so selection costs about one pass plus O(k log k) per k
+    accepted rows.
+    """
+
+    var keys: List[_Key]
+    var orders: List[Int]
+    var tiers: List[Int]
+    var first: Int
+    var last: Int
+    var limit: Int
+    var best: List[Scalar[Self.T]]
+
+    def __init__(
+        out self,
+        keys: List[_Key],
+        orders: List[Int],
+        tiers: List[Int],
+        first: Int,
+        last: Int,
+        limit: Int,
+    ):
+        self.keys = keys.copy()
+        self.orders = orders.copy()
+        self.tiers = tiers.copy()
+        self.first = first
+        self.last = last
+        self.limit = limit
+        self.best = List[Scalar[Self.T]]()
+
+    def run(mut self) raises:
+        var pointers = _key_pointers(self.orders, self.tiers)
+        var buffer = List[Scalar[Self.T]](capacity=2 * self.limit + 1)
+        var bar = Scalar[Self.T].MAX
+        var full = False
+        for i in range(self.first, self.last):
+            var p = _pack_row[Self.T](self.keys, pointers[0], pointers[1], i)
+            if full and p >= bar:
+                continue
+            buffer.append(p)
+            if len(buffer) >= 2 * self.limit:
+                sort(buffer)
+                buffer.shrink(self.limit)
+                bar = buffer[self.limit - 1]
+                full = True
+        sort(buffer)
+        if len(buffer) > self.limit:
+            buffer.shrink(self.limit)
+        self.best = buffer^
+
+
+struct _TiedJob[T: DType](Job):
+    """Rows of [first, last) whose packed bits above the row equal `head`:
+    the rows tied with the boundary of a selection whose ties still need
+    settling by the strings."""
+
+    var keys: List[_Key]
+    var orders: List[Int]
+    var tiers: List[Int]
+    var first: Int
+    var last: Int
+    var head: Scalar[Self.T]
+    var row_bits: Int
+    var tied: List[Scalar[Self.T]]
+
+    def __init__(
+        out self,
+        keys: List[_Key],
+        orders: List[Int],
+        tiers: List[Int],
+        first: Int,
+        last: Int,
+        head: Scalar[Self.T],
+        row_bits: Int,
+    ):
+        self.keys = keys.copy()
+        self.orders = orders.copy()
+        self.tiers = tiers.copy()
+        self.first = first
+        self.last = last
+        self.head = head
+        self.row_bits = row_bits
+        self.tied = List[Scalar[Self.T]]()
+
+    def run(mut self) raises:
+        var pointers = _key_pointers(self.orders, self.tiers)
+        var shift = Scalar[Self.T](self.row_bits)
+        for i in range(self.first, self.last):
+            var p = _pack_row[Self.T](self.keys, pointers[0], pointers[1], i)
+            if (p >> shift) == self.head:
+                self.tied.append(p)
+
+
+def _select_packed[
+    T: DType
+](
+    mut pool: Pool,
+    bounds: List[Int],
+    keys: List[_Key],
+    orders: List[Int],
+    tiers: List[Int],
+    row_bits: Int,
+    settle: _Settle,
+    limit: Int,
+) raises -> List[Int]:
+    """The first `limit` rows of the packed order.
+
+    Each range keeps its `limit` smallest packed values; the answer is
+    among their union, since a row among the global first `limit` is among
+    its own range's. When a long string key leaves ties to settle, rows
+    whose keys equal the boundary row's may be missing from the union, so
+    they are collected in a second pass and settled with the rest.
+    """
+    if limit == 0:
+        return List[Int]()
+    var ranges = len(bounds) - 1
+    var jobs = List[_SelectJob[T]](capacity=ranges)
+    for r in range(ranges):
+        jobs.append(
+            _SelectJob[T](keys, orders, tiers, bounds[r], bounds[r + 1], limit)
+        )
+    pool.run(jobs)
+    var candidates = List[Scalar[T]]()
+    for r in range(ranges):
+        candidates.extend(Span(jobs[r].best))
+    sort(candidates)
+    var row_mask = (Scalar[T](1) << Scalar[T](row_bits)) - 1
+    if settle.active and len(candidates) > 0:
+        var take = min(limit, len(candidates))
+        var shift = Scalar[T](row_bits)
+        var head = candidates[take - 1] >> shift
+        if settle.is_long[T](candidates[take - 1]):
+            var tied_jobs = List[_TiedJob[T]](capacity=ranges)
+            for r in range(ranges):
+                tied_jobs.append(
+                    _TiedJob[T](
+                        keys,
+                        orders,
+                        tiers,
+                        bounds[r],
+                        bounds[r + 1],
+                        head,
+                        row_bits,
+                    )
+                )
+            pool.run(tied_jobs)
+            var merged = List[Scalar[T]]()
+            for c in candidates:
+                if (c >> shift) < head:
+                    merged.append(c)
+            for r in range(ranges):
+                merged.extend(Span(tied_jobs[r].tied))
+            sort(merged)
+            candidates = merged^
+        _settle_runs[T](
+            candidates.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin](),
+            0,
+            len(candidates),
+            settle,
+        )
+    var rows = List[Int](capacity=min(limit, len(candidates)))
+    for i in range(min(limit, len(candidates))):
+        rows.append(Int(candidates[i] & row_mask))
+    return rows^
+
+
 def packed_arg_sort(
     columns: List[Series],
     descending: List[Bool],
@@ -873,6 +1081,35 @@ def packed_arg_sort(
     """Row order of the stable sort by `columns`, or None when the keys do
     not pack (see the module docstring); the caller then sorts generally.
     """
+    return _packed_order(columns, descending, nulls_last, -1)
+
+
+def packed_top_rows(
+    columns: List[Series],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    k: Int,
+    threads: Int = 0,
+) raises -> Optional[List[Int]]:
+    """The first `k` rows of `packed_arg_sort`'s order, selected in about
+    one pass instead of sorting every row; None when the keys do not pack.
+    `threads` caps the workers (0: the configured count), for callers that
+    already run on a worker.
+    """
+    if k < 0:
+        raise Error("k must be nonnegative")
+    return _packed_order(columns, descending, nulls_last, k, threads)
+
+
+def _packed_order(
+    columns: List[Series],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    limit: Int,
+    threads: Int = 0,
+) raises -> Optional[List[Int]]:
+    """The sorted row order, or its first `limit` rows when `limit` is not
+    negative and smaller than the row count."""
     var n = len(columns[0])
     for column in columns:
         var dtype = column.dtype()
@@ -888,6 +1125,8 @@ def packed_arg_sort(
         if not supported and not column.is_chunked():
             return None
     var workers = configured_workers() if n >= _MIN_PARALLEL_ROWS else 1
+    if threads > 0:
+        workers = min(workers, threads)
     var ranges = max(1, min(workers, n // 8192))
     var bounds = List[Int](capacity=ranges + 1)
     for r in range(ranges + 1):
@@ -1008,34 +1247,147 @@ def packed_arg_sort(
         settle.width = last.width
 
     var result: Optional[List[Int]] = None
+    var select = limit >= 0 and limit < n
     if total_bits <= 64:
-        result = _sort_packed[DType.uint64](
-            pool,
-            workers,
-            bounds,
-            keys,
-            orders,
-            tiers,
-            n,
-            total_bits,
-            row_bits,
-            settle,
-        )
+        if select:
+            result = _select_packed[DType.uint64](
+                pool, bounds, keys, orders, tiers, row_bits, settle, limit
+            )
+        else:
+            result = _sort_packed[DType.uint64](
+                pool,
+                workers,
+                bounds,
+                keys,
+                orders,
+                tiers,
+                n,
+                total_bits,
+                row_bits,
+                settle,
+            )
     elif total_bits <= 128:
-        result = _sort_packed[DType.uint128](
-            pool,
-            workers,
-            bounds,
-            keys,
-            orders,
-            tiers,
-            n,
-            total_bits,
-            row_bits,
-            settle,
-        )
+        if select:
+            result = _select_packed[DType.uint128](
+                pool, bounds, keys, orders, tiers, row_bits, settle, limit
+            )
+        else:
+            result = _sort_packed[DType.uint128](
+                pool,
+                workers,
+                bounds,
+                keys,
+                orders,
+                tiers,
+                n,
+                total_bits,
+                row_bits,
+                settle,
+            )
     pool.release()
     _ = order_lists^
     _ = tier_lists^
     _ = owned^
     return result^
+
+
+# Rows per chunk when a large selection is split across workers.
+comptime _SELECT_CHUNK = 1 << 16
+
+
+struct _ChunkTopJob(Job):
+    """The first `limit` rows of one chunk of rows, as whole-column rows."""
+
+    var columns: List[Series]
+    var descending: List[Bool]
+    var nulls_last: List[Bool]
+    var start: Int
+    var length: Int
+    var limit: Int
+    var rows: List[Int]
+    var packed: Bool
+
+    def __init__(
+        out self,
+        columns: List[Series],
+        descending: List[Bool],
+        nulls_last: List[Bool],
+        start: Int,
+        length: Int,
+        limit: Int,
+    ):
+        self.columns = columns.copy()
+        self.descending = descending.copy()
+        self.nulls_last = nulls_last.copy()
+        self.start = start
+        self.length = length
+        self.limit = limit
+        self.rows = List[Int]()
+        self.packed = False
+
+    def run(mut self) raises:
+        var chunk = List[Series](capacity=len(self.columns))
+        for column in self.columns:
+            chunk.append(column.slice(self.start, self.length))
+        var rows = packed_top_rows(
+            chunk, self.descending, self.nulls_last, self.limit, threads=1
+        )
+        if not rows:
+            return
+        self.packed = True
+        for row in rows.value():
+            self.rows.append(self.start + row)
+
+
+def chunked_top_rows(
+    columns: List[Series],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    k: Int,
+) raises -> Optional[List[Int]]:
+    """`packed_top_rows` for a large input: each 65,536-row chunk selects
+    its own first `k` rows on one worker, then the first `k` of those
+    candidates are selected again. A row among the overall first `k` is
+    among its chunk's, and candidates are taken in row order, so ties keep
+    the stable order. Chunks fit in cache, where packing the whole column
+    first would stream it through memory twice; streaming execution does
+    the same per batch. None when the keys do not pack."""
+    if k < 0:
+        raise Error("k must be nonnegative")
+    var n = len(columns[0])
+    var chunks = (n + _SELECT_CHUNK - 1) // _SELECT_CHUNK
+    var workers = configured_workers()
+    if chunks < 4 or workers <= 1:
+        return packed_top_rows(columns, descending, nulls_last, k)
+    var jobs = List[_ChunkTopJob](capacity=chunks)
+    for c in range(chunks):
+        var start = c * _SELECT_CHUNK
+        jobs.append(
+            _ChunkTopJob(
+                columns,
+                descending,
+                nulls_last,
+                start,
+                min(_SELECT_CHUNK, n - start),
+                k,
+            )
+        )
+    var pool = Pool(min(workers, chunks))
+    pool.run(jobs, claim=True)
+    pool.release()
+    var candidates = List[Int]()
+    for c in range(chunks):
+        if not jobs[c].packed:
+            return None
+        candidates.extend(Span(jobs[c].rows))
+    sort(candidates)
+    var gathered = List[Series](capacity=len(columns))
+    for column in columns:
+        gathered.append(column.take(candidates))
+    var picked = packed_top_rows(gathered, descending, nulls_last, k, threads=1)
+    if not picked:
+        return None
+    var rows = List[Int](capacity=len(picked.value()))
+    for i in picked.value():
+        rows.append(candidates[i])
+    return rows^
