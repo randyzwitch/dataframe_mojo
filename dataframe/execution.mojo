@@ -1128,13 +1128,15 @@ def _direct_scan(bound: BoundExpr, columns: List[Series], node: Node) -> Bool:
     return False
 
 
-def _distinct_by_partition(bound: BoundExpr, node: Node) -> Bool:
+def _distinct_by_partition(bound: BoundExpr, node: Node, height: Int) -> Bool:
     """Whether `n_unique` counts its input by hash partition (#336) rather
     than with the reducer's per-group sets: every value but a nested or a
-    decimal one. Partitions are counted on every worker, however skewed the
-    groups, and beat the sets even on a handful of distinct values (see
-    dataframe/distinct.mojo)."""
-    if node.op != N_UNIQUE:
+    decimal one, over enough rows to pay for the partitions' setup.
+    Partitions are counted on every worker, however skewed the groups, and
+    beat the sets even on a handful of distinct values (see
+    dataframe/distinct.mojo); below 65,536 rows, as in each small bucket of
+    a many-group aggregation, the sets' lower fixed cost wins."""
+    if node.op != N_UNIQUE or height < (1 << 16):
         return False
     var dtype = bound.dtypes[node.left]
     return not (dtype.is_nested() or dtype.is_decimal())
@@ -1436,7 +1438,9 @@ def evaluate[
             if row_mode:
                 state = state.take(groups)
             states[node_index] = state^
-        elif is_reduction(node.op) and _distinct_by_partition(bound, node):
+        elif is_reduction(node.op) and _distinct_by_partition(
+            bound, node, height
+        ):
             var state = _n_unique_partitioned[width](
                 bound,
                 prepared_columns,
