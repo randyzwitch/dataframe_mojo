@@ -71,6 +71,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
   10M rows by 10,000 on `id2` goes from 222 ms to 153 ms (Polars: 114 ms),
   the same join with one value per side from 117 ms to 45 ms (Polars: 35
   ms), and the left join from 129 ms to 66 ms (#335).
+- Grouped and global `median` and `quantile` find the one or two positions
+  they read by selection instead of sorting every value, and groups finish
+  on every worker, several per worker in ranges of equal size. Results are
+  unchanged to the bit. On 10M H2O rows at 8 threads, `median` by `id4, id5`
+  over 4 groups goes from 1,280 ms to 201 ms (Polars: 140 ms) and over
+  10,000 groups from 252 ms to 227 ms (#337).
 - `n_unique` counts distinct values by hash partition instead of keeping a
   Dict per group: rows are keyed (group, value), scattered by hash into
   cache-sized partitions on every worker, and each partition's distinct keys
