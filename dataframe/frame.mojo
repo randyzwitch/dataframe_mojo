@@ -107,7 +107,12 @@ from .packed_sort import (
 # A head of a sort at least 1/this of the rows sorts fully (#332).
 comptime _TOP_K_FRACTION = 10
 from .value import AnyValue
-from .hashing import RowKeys, encode_rows, encode_string_rows_parallel
+from .hashing import (
+    RowKeys,
+    encode_rows,
+    encode_rows_parallel,
+    encode_string_rows_parallel,
+)
 from .groups import GroupIndices
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
@@ -4517,7 +4522,11 @@ struct GroupBy(Copyable):
         var workers = worker_count(self._frame.height())
         var result: DataFrame
         var ranged = Optional[DataFrame]()
-        if workers > 1 and _stream_reductions(expressions):
+        if (
+            workers > 1
+            and _stream_reductions(expressions)
+            and not self._many_distinct(expressions)
+        ):
             ranged = self._agg_ranges(expressions, key_names, workers)
         if ranged:
             result = ranged.take()
@@ -4528,6 +4537,39 @@ struct GroupBy(Copyable):
         else:
             result = self._agg_whole(bound, batch_size)
         return _pack_struct_keys(result)
+
+    def _many_distinct(self, expressions: List[Expr]) raises -> Bool:
+        """Whether some `n_unique` reads many distinct values (#336).
+
+        Per-range sets of (group, value) pairs merge on one thread, which
+        is cheap only when values repeat: grouping IsRefresh by RegionID's
+        3,586 values takes 57 ms that way and 75 ms through the whole-frame
+        path's hash partitions, while UserID's 1.5M values take 314 ms and
+        87 ms. A sample of evenly spaced rows tells them apart: at most a
+        tenth of it distinct (RegionID shows 9%, SearchPhrase 14%, UserID
+        all) keeps the ranges. Any input that is not a column is assumed
+        to have many values.
+        """
+        var height = self._frame.height()
+        var sample = min(height, 4096)
+        if sample == 0:
+            return False
+        var rows = List[Int](capacity=sample)
+        for k in range(sample):
+            rows.append(k * height // sample)
+        for expression in expressions:
+            ref nodes = expression._nodes
+            for node in nodes:
+                if node.op != N_UNIQUE:
+                    continue
+                ref input = nodes[node.left]
+                if input.op != COL:
+                    return True
+                var picked = self._frame.column(input.text).take(rows)
+                var distinct = encode_rows([picked^], nulls_equal=True).count()
+                if 10 * distinct > sample:
+                    return True
+        return False
 
     def _agg_ranges(
         self,
@@ -4743,7 +4785,9 @@ struct GroupBy(Copyable):
                 self._keys[0], True, worker_count(self._frame.height())
             )
         else:
-            groups = encode_rows(self._keys, nulls_equal=True)
+            groups = encode_rows_parallel(
+                self._keys, True, worker_count(self._frame.height())
+            )
         # First-occurrence representatives are ordered by source row.
         var columns = take_sorted_chunked(
             self._keys, groups.representatives.copy(), 1

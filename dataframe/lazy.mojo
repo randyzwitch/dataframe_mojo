@@ -752,6 +752,19 @@ struct LazyFrame(Copyable):
         ):
             return None
         operations.reverse()
+        if (
+            len(expressions)
+            and self._nodes[cursor].kind == SCAN_FRAME
+            and _counts_distinct(expressions)
+            and _row_steps_only(operations)
+        ):
+            # Batch states keep n_unique's values in per-group sets that
+            # merge on one thread; over a frame already in memory, filtered
+            # or projected at most, the eager aggregation counts them by
+            # hash partition on every worker instead (#336), at no memory
+            # cost batches would save. Plans with a join keep streaming,
+            # whose batched probes beat the eager join.
+            return None
         if top >= 0:
             # Over a frame already in memory with nothing to apply first,
             # batches save no memory, and the eager selection already works
@@ -1534,6 +1547,21 @@ struct LazyFrame(Copyable):
             self._describe(node.left, depth + 1, out, streaming)
         if node.right >= 0:
             self._describe(node.right, depth + 1, out, streaming)
+
+
+def _row_steps_only(operations: List[PlanNode]) -> Bool:
+    for operation in operations:
+        if operation.kind not in [FILTER, SELECT, WITH_COLUMNS, DROP]:
+            return False
+    return True
+
+
+def _counts_distinct(expressions: List[Expr]) -> Bool:
+    for expression in expressions:
+        for node in expression._nodes:
+            if node.op == N_UNIQUE:
+                return True
+    return False
 
 
 def _is_scan(kind: Int) -> Bool:

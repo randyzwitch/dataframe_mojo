@@ -64,6 +64,19 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `n_unique` counts distinct values by hash partition instead of keeping a
+  Dict per group: rows are keyed (group, value), scattered by hash into
+  cache-sized partitions on every worker, and each partition's distinct keys
+  are counted on its own, so no merge runs on one thread however skewed the
+  groups. Each worker first drops keys it has just seen, which keeps a
+  dominant value from filling one partition. Grouping by several
+  low-cardinality keys also encodes them on every worker. A lazy plan over an
+  in-memory frame counts distinct values this way rather than in streamed
+  batch sets; file scans still stream. On 10M ClickBench
+  rows at 8 threads: `UserID.n_unique()` from 276 ms to 33 ms,
+  `SearchPhrase.n_unique()` from 414 ms to 46 ms, and
+  `group_by("MobilePhoneModel").agg(col("UserID").n_unique())` from 288 ms to
+  104 ms (#336).
 - Ungrouped `len()` returns the row count without reading its column, and
   integer `sum`, `mean`, `min` and `max` scan eight values (64 bytes when
   there are no nulls) per step instead of one row at a time. Sums stay
