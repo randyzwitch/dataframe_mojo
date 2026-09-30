@@ -20,6 +20,7 @@ from .decimal import (
     pow10,
 )
 from .series import Series
+from .parallel import Job, configured_workers, run_jobs
 from .temporal_kernels import cast_temporal
 
 
@@ -201,6 +202,156 @@ def _cast_binary(
     return Series(input.name(), out^.finish())
 
 
+struct _ParseJob[D: DType](Job):
+    """Parse rows [first, last) of a string column into `values` (#149).
+
+    Integers parse as Int64 and are range-checked into D (UInt64 parses
+    directly), floats parse as Float64 and narrow to D: exactly the generic
+    cast's steps, so accepted text, rounding and messages are unchanged.
+    The first failing row is recorded rather than raised, so the caller can
+    report the earliest across ranges, as a serial loop would."""
+
+    var column: StringColumn
+    var values: Int
+    var valid: Int
+    var mask: Int
+    var first: Int
+    var last: Int
+    var failed_row: Int
+    var message: String
+
+    def __init__(
+        out self,
+        column: StringColumn,
+        values: Int,
+        valid: Int,
+        mask: Int,
+        first: Int,
+        last: Int,
+    ):
+        self.column = column.copy()
+        self.values = values
+        self.valid = valid
+        self.mask = mask
+        self.first = first
+        self.last = last
+        self.failed_row = -1
+        self.message = String()
+
+    def run(mut self) raises:
+        var out = Pointer[List[Scalar[Self.D]], MutAnyOrigin](
+            unsafe_from_address=self.values
+        )[].unsafe_ptr()
+        var valid = Pointer[List[Bool], MutAnyOrigin](
+            unsafe_from_address=self.valid
+        )[].unsafe_ptr()
+        ref mask = Pointer[List[Bool], MutAnyOrigin](
+            unsafe_from_address=self.mask
+        )[]
+        var masked = len(mask) > 0
+        var nulls = self.column.null_count() > 0
+        var views = self.column._is_view_storage()
+        var offsets = (
+            self.column._offsets[]
+            .unsafe_ptr()
+            .unsafe_offset(
+                self.column._offset
+            ) if not views else self.column._offsets[]
+            .unsafe_ptr()
+        )
+        var data = self.column._bytes[].unsafe_ptr()
+        for i in range(self.first, self.last):
+            if (nulls and not self.column._valid(i)) or (
+                masked and not mask[i]
+            ):
+                valid.unsafe_offset(i)[] = False
+                continue
+            var text: StringSlice[ImmutAnyOrigin]
+            if views:
+                text = self.column._get(i)
+            else:
+                var start = Int(offsets.unsafe_offset(i)[])
+                text = StringSlice[ImmutAnyOrigin](
+                    unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
+                        unsafe_ptr=data.unsafe_offset(start)
+                        .unsafe_mut_cast[False]()
+                        .unsafe_origin_cast[ImmutAnyOrigin](),
+                        length=Int(offsets.unsafe_offset(i + 1)[]) - start,
+                    )
+                )
+            try:
+                comptime if Self.D.is_floating_point():
+                    out.unsafe_offset(i)[] = parse_float64(text).cast[Self.D]()
+                elif Self.D == DType.uint64:
+                    out.unsafe_offset(i)[] = rebind[Scalar[Self.D]](
+                        parse_integer[DType.uint64](text)
+                    )
+                else:
+                    out.unsafe_offset(i)[] = _to_integer[Self.D](
+                        parse_integer[DType.int64](text).cast[DType.int128]()
+                    )
+                valid.unsafe_offset(i)[] = True
+            except e:
+                valid.unsafe_offset(i)[] = False
+                if self.failed_row < 0:
+                    self.failed_row = i
+                    self.message = String(e)
+
+
+def _parse_strings[
+    D: DType
+](
+    input: Series,
+    source: DataType,
+    target: DataType,
+    strict: Bool,
+    offset: Int,
+    mask: List[Bool],
+) raises -> Series:
+    """String to a number type in one pass per row range, on every worker
+    (#149). The generic loop re-dispatched on the source and target types
+    for every row and built a 128-bit intermediate: about 125 ns per row,
+    where the parse itself is a few."""
+    ref column = input._data[StringColumn]
+    var n = len(column)
+    var values = List[Scalar[D]](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=False)
+    var observed = mask.copy() if len(mask) == n else List[Bool]()
+    var workers = configured_workers() if n >= (1 << 16) else 1
+    var jobs = List[_ParseJob[D]](capacity=workers)
+    for w in range(workers):
+        jobs.append(
+            _ParseJob[D](
+                column,
+                Int(Pointer(to=values)),
+                Int(Pointer(to=valid)),
+                Int(Pointer(to=observed)),
+                n * w // workers,
+                n * (w + 1) // workers,
+            )
+        )
+    run_jobs(jobs)
+    # The jobs read the mask by address; keep it alive past them.
+    _ = observed^
+    if strict:
+        for w in range(len(jobs)):
+            if jobs[w].failed_row >= 0:
+                var row = jobs[w].failed_row
+                raise Error(
+                    "cast from "
+                    + source.name()
+                    + " to "
+                    + target.name()
+                    + " failed at row "
+                    + String(offset + row)
+                    + " for value '"
+                    + _text(input, row)
+                    + "': "
+                    + jobs[w].message
+                )
+    return Series(input.name(), Column[Scalar[D]](values^, valid))
+
+
 def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
@@ -223,6 +374,13 @@ def cast_series(
     if source.is_temporal() or target.is_temporal():
         var observed = input.copy()
         return cast_temporal(observed, source, target, strict)
+    if source == DataType.STRING and (target.is_integer() or target.is_float()):
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if target == DataType.of(D):
+                return _parse_strings[D](
+                    input, source, target, strict, offset, mask
+                )
     var n = len(input)
     var valid = List[Bool](length=n, fill=False)
     if target.is_decimal():

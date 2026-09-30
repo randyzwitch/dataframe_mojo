@@ -71,6 +71,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
   10M rows by 10,000 on `id2` goes from 222 ms to 153 ms (Polars: 114 ms),
   the same join with one value per side from 117 ms to 45 ms (Polars: 35
   ms), and the left join from 129 ms to 66 ms (#335).
+- Casting strings to integers and floats parses each row straight into the
+  output type, in row ranges on every worker, instead of dispatching on the
+  source and target types per row through a 128-bit intermediate; accepted
+  text, results and error messages are unchanged, and a strict cast still
+  names the first failing row. On 5M rows at 8 threads, short integers to
+  Int64 go from 82 ms to 13 ms (Polars: 10 ms) and decimals to Float64 from
+  82 ms to 18 ms (Polars: 14 ms) (#149).
 - Grouped and global `median` and `quantile` find the one or two positions
   they read by selection instead of sorting every value, and groups finish
   on every worker, several per worker in ranges of equal size. Results are
