@@ -21,6 +21,7 @@ from .expr import (
     MEAN,
     COUNT,
     LEN,
+    N_UNIQUE,
     MIN,
     MAX,
     LT,
@@ -82,6 +83,7 @@ from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows
+from .distinct import distinct_counts
 from .window import window_op, interpolate_by_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
@@ -1126,6 +1128,44 @@ def _direct_scan(bound: BoundExpr, columns: List[Series], node: Node) -> Bool:
     return False
 
 
+def _distinct_by_partition(bound: BoundExpr, node: Node) -> Bool:
+    """Whether `n_unique` counts its input by hash partition (#336) rather
+    than with the reducer's per-group sets: every value but a nested or a
+    decimal one. Partitions are counted on every worker, however skewed the
+    groups, and beat the sets even on a handful of distinct values (see
+    dataframe/distinct.mojo)."""
+    if node.op != N_UNIQUE:
+        return False
+    var dtype = bound.dtypes[node.left]
+    return not (dtype.is_nested() or dtype.is_decimal())
+
+
+def _n_unique_partitioned[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    node: Node,
+    height: Int,
+    batch_size: Int,
+    grouped: Bool,
+    groups: List[Int],
+    group_count: Int,
+) raises -> Series:
+    """Distinct values of the input, overall or per group; nulls are one
+    value, every NaN is one value and -0.0 equals 0.0."""
+    var values: Series
+    if bound.expr._nodes[node.left].op == COL:
+        values = columns[bound.sources[node.left]].copy()
+    else:
+        values = _full[width](
+            bound, columns, states, node.left, height, batch_size, False
+        )
+    var counts = distinct_counts(values, groups, group_count, grouped)
+    return Series("", Column[Int64](counts.take()))
+
+
 def _reduce[
     width: Int
 ](
@@ -1383,6 +1423,21 @@ def evaluate[
         var node = bound.expr._nodes[node_index].copy()
         if node.op == IMPLODE:
             var state = _implode[width](
+                bound,
+                prepared_columns,
+                states,
+                node,
+                height,
+                batch_size,
+                grouped,
+                groups,
+                group_count,
+            )
+            if row_mode:
+                state = state.take(groups)
+            states[node_index] = state^
+        elif is_reduction(node.op) and _distinct_by_partition(bound, node):
+            var state = _n_unique_partitioned[width](
                 bound,
                 prepared_columns,
                 states,

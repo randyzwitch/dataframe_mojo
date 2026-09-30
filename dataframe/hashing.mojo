@@ -319,6 +319,121 @@ def encode_string_rows_parallel(
     return RowKeys(ids^, representatives^)
 
 
+struct _RangeEncodeJob(Job):
+    """encode_rows over rows [first, last) of every key."""
+
+    var keys: List[Series]
+    var first: Int
+    var last: Int
+    var nulls_equal: Bool
+    var ids: List[Int]
+    var representatives: List[Int]
+
+    def __init__(
+        out self, keys: List[Series], first: Int, last: Int, nulls_equal: Bool
+    ):
+        self.keys = keys.copy()
+        self.first = first
+        self.last = last
+        self.nulls_equal = nulls_equal
+        self.ids = List[Int]()
+        self.representatives = List[Int]()
+
+    def run(mut self) raises:
+        var window = List[Series](capacity=len(self.keys))
+        for key in self.keys:
+            window.append(key.slice(self.first, self.last - self.first))
+        var local = encode_rows(window, self.nulls_equal)
+        self.ids = local.ids.copy()
+        self.representatives = local.representatives.copy()
+
+
+struct _RenumberJob(Job):
+    """Replace one range's local ids by global ones."""
+
+    var ids: Int
+    var local: Int
+    var mapping: List[Int]
+    var first: Int
+
+    def __init__(
+        out self, ids: Int, local: Int, var mapping: List[Int], first: Int
+    ):
+        self.ids = ids
+        self.local = local
+        self.mapping = mapping^
+        self.first = first
+
+    def run(mut self) raises:
+        var out = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.ids
+        )[].unsafe_ptr()
+        ref local = Pointer[List[Int], MutAnyOrigin](
+            unsafe_from_address=self.local
+        )[]
+        var mapping = self.mapping.unsafe_ptr()
+        for i in range(len(local)):
+            var code = local[i]
+            out[self.first + i] = mapping[code] if code >= 0 else -1
+
+
+def encode_rows_parallel(
+    keys: List[Series], nulls_equal: Bool, workers: Int
+) raises -> RowKeys:
+    """`encode_rows` for keys with few distinct rows, on every worker.
+
+    Each worker encodes a contiguous range of rows. The ranges' distinct
+    rows, taken in range order and each range's first-occurrence order, are
+    then encoded once more, which numbers them in first-occurrence order
+    over the whole input, and each range's ids are renumbered in parallel.
+    The merge encodes one row per distinct key per range, so this suits the
+    few distinct keys a whole-frame group_by is chosen for; many distinct
+    keys belong to the hash-partitioned encoder.
+    """
+    var n = len(keys[0]) if len(keys) > 0 else 0
+    if workers <= 1 or n < 2 * workers:
+        return encode_rows(keys, nulls_equal)
+    var bounds = partitions(n, workers, 1)
+    var jobs = List[_RangeEncodeJob](capacity=workers)
+    for w in range(workers):
+        if bounds[w + 1] > bounds[w]:
+            jobs.append(
+                _RangeEncodeJob(keys, bounds[w], bounds[w + 1], nulls_equal)
+            )
+    run_jobs(jobs)
+    var rows = List[Int]()
+    for job in range(len(jobs)):
+        for local in jobs[job].representatives:
+            rows.append(jobs[job].first + local)
+    var firsts = List[Series](capacity=len(keys))
+    for key in keys:
+        firsts.append(key.take(rows))
+    var merged = encode_rows(firsts, nulls_equal)
+    var representatives = List[Int](capacity=merged.count())
+    for r in merged.representatives:
+        representatives.append(rows[r])
+    var ids = List[Int](length=n, fill=-1)
+    var renumber = List[_RenumberJob](capacity=len(jobs))
+    var at = 0
+    for job in range(len(jobs)):
+        var count = len(jobs[job].representatives)
+        var mapping = List[Int](capacity=count)
+        for k in range(count):
+            mapping.append(merged.ids[at + k])
+        at += count
+        renumber.append(
+            _RenumberJob(
+                Int(Pointer(to=ids)),
+                Int(Pointer(to=jobs[job].ids)),
+                mapping^,
+                jobs[job].first,
+            )
+        )
+    run_jobs(renumber)
+    _ = jobs^
+    return RowKeys(ids^, representatives^)
+
+
 def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     """Assign dense ids to distinct key rows, in first-occurrence order.
 
