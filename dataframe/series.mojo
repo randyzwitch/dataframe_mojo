@@ -846,10 +846,56 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
 
     def take(self, indices: List[Int]) raises -> Self:
         if self.is_chunked():
+            if len(indices) * 8 < len(self):
+                return self._take_from_chunks(indices)
             return self.rechunk().take(indices)
         var result = self._take_storage(indices)
         result._dtype = self._dtype
         return result^
+
+    def _take_from_chunks(self, indices: List[Int]) raises -> Self:
+        """A few rows of a chunked column without rechunking it: each chunk
+        gathers its own rows, then one small take restores the order."""
+        ref chunks = self._chunked.value()[]
+        var count = len(chunks.ends)
+        var local = List[List[Int]](length=count, fill=List[Int]())
+        var home = List[Int](capacity=len(indices))
+        var slot = List[Int](capacity=len(indices))
+        for index in indices:
+            if index < 0 or index >= len(self):
+                raise Error("Column index out of bounds")
+            var lo = 0
+            var hi = count
+            while lo < hi:
+                var mid = (lo + hi) // 2
+                if index < chunks.ends[mid]:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            var start = 0 if lo == 0 else chunks.ends[lo - 1]
+            home.append(lo)
+            slot.append(len(local[lo]))
+            local[lo].append(index - start)
+        var parts = List[Self]()
+        var offsets = List[Int](length=count, fill=0)
+        var total = 0
+        for c in range(count):
+            offsets[c] = total
+            if len(local[c]) == 0:
+                continue
+            var part = Self(self._name, chunks.arrays[c].copy(), self._dtype)
+            parts.append(part.take(local[c]))
+            total += len(local[c])
+        if len(parts) == 0:
+            return self.slice(0, 0).rechunk()
+        var gathered = (
+            parts[0].copy() if len(parts)
+            == 1 else Self._from_chunks(parts^).rechunk()
+        )
+        var order = List[Int](capacity=len(indices))
+        for k in range(len(indices)):
+            order.append(offsets[home[k]] + slot[k])
+        return gathered.take(order)
 
     def _take_range(
         self, indices: List[Int], first: Int, last: Int, base: Int

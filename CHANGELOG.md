@@ -76,6 +76,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
   at 10M rows goes from 3.7 s to 0.62 s (10.8x to 1.66x Polars), and every
   data variant runs 4.5-6x faster. Descending ranks now put NaN
   first, as Polars does; the old path put it last (#330).
+- String group keys cost much less. The row-range encoder reads offsets and
+  bytes in place, builds a short key with one copy and reuses the previous
+  row's code; hash-partitioned grouping encodes each bucket from the key
+  hashes the partitioner already computed, comparing rows in place on a
+  match (with prefetching), so key columns are no longer gathered or
+  re-hashed; and taking a few rows of a chunked column no longer rechunks
+  it. At 10M rows and 8 threads, `group_by(...).agg(len())` on id1 goes from
+  90 to 30 ms, id3 from 299 to 171 ms, and (id1, id2) from 351 to 209 ms
+  (1.8x, 1.16x and 1.21x Polars) (#334).
 - Streaming lazy group-by merges batch states in groups, sized so total merge
   work stays linear, instead of re-encoding every group seen so far on each
   batch. Large merges use the partitioned key encoder, and per-group state

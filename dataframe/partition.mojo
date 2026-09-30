@@ -23,6 +23,7 @@ values. The sample is a few thousand rows, so deciding costs far less than
 the hash pass it guards, and nothing is wasted when the answer is no.
 """
 from std.memory import ArcPointer, Pointer, bitcast
+from std.sys.intrinsics import prefetch
 from std.collections import Dict
 
 from .aggregate import float_key
@@ -157,22 +158,38 @@ def _hash_column(
         return
     ref strings = series._data[StringColumn]
     if not strings._is_view_storage():
+        # Offsets and bytes are read in place; the hash is the same one
+        # _hash_bytes gives, so every storage of a string hashes alike.
         ref data = strings._bytes[]
+        var size = len(data)
+        var base = data.unsafe_ptr()
+        var offsets = strings._offsets[].unsafe_ptr() + strings._offset
+        # A missing bitmap means no nulls; this runs per sampled row too,
+        # so it must not count them.
+        var nulls = len(strings._bits[]) != 0
         for i in range(start, end):
-            if not strings._valid(i):
+            if nulls and not strings._valid(i):
                 write(i, _NULL_KEY)
                 continue
-            var byte_start = strings._start(i)
-            var length = strings._end(i) - byte_start
-            if length <= 8 and byte_start <= len(data) - 8:
+            var byte_start = Int(offsets[i])
+            var length = Int(offsets[i + 1]) - byte_start
+            if length <= 8 and byte_start <= size - 8:
                 var word = bitcast[DType.uint64, 1](
-                    data.unsafe_ptr()
-                    .unsafe_offset(byte_start)
-                    .unsafe_load[width=8]()
+                    base.unsafe_offset(byte_start).unsafe_load[width=8]()
                 )
                 write(i, _short_hash(word, length))
             else:
-                write(i, _hash_bytes(strings._get(i).as_bytes()))
+                write(
+                    i,
+                    _hash_bytes(
+                        Span[UInt8, ImmutAnyOrigin](
+                            unsafe_ptr=base.unsafe_offset(byte_start)
+                            .unsafe_mut_cast[False]()
+                            .unsafe_origin_cast[ImmutAnyOrigin](),
+                            length=length,
+                        )
+                    ),
+                )
         return
     for i in range(start, end):
         if not strings._valid(i):
@@ -220,6 +237,8 @@ struct _ScatterJob(Job):
     var end: Int
     var hashes: Int
     var order: Int
+    # Where to write each row's hash in bucket order too (0: nowhere).
+    var ordered_hashes: Int
     var fold: Int
     var next: List[Int]
 
@@ -229,6 +248,7 @@ struct _ScatterJob(Job):
         end: Int,
         hashes: Int,
         order: Int,
+        ordered_hashes: Int,
         fold: Int,
         var next: List[Int],
     ):
@@ -236,17 +256,25 @@ struct _ScatterJob(Job):
         self.end = end
         self.hashes = hashes
         self.order = order
+        self.ordered_hashes = ordered_hashes
         self.fold = fold
         self.next = next^
 
     def run(mut self) raises:
         var h = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=self.hashes)
         var o = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
+        var oh = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.ordered_hashes
+        )
         for i in range(self.start, self.end):
-            var slot = Int(h.unsafe_offset(i)[] >> UInt64(_SLOT_SHIFT))
+            var hash = h.unsafe_offset(i)[]
+            var slot = Int(hash >> UInt64(_SLOT_SHIFT))
             var bucket = slot >> self.fold
-            o.unsafe_offset(self.next[bucket])[] = i
-            self.next[bucket] += 1
+            var at = self.next[bucket]
+            o.unsafe_offset(at)[] = i
+            if self.ordered_hashes != 0:
+                oh.unsafe_offset(at)[] = hash
+            self.next[bucket] = at + 1
 
 
 @fieldwise_init
@@ -258,6 +286,8 @@ struct Partitioned(Movable):
 
     var order: List[Int]
     var bounds: List[Int]
+    # Each row's key hash in the same order as `order`, when requested.
+    var hashes: List[UInt64]
 
     def buckets(self) -> Int:
         return len(self.bounds) - 1
@@ -376,6 +406,9 @@ struct Partitioner(Movable):
     var histogram: List[Int]
     var worker_histograms: List[List[Int]]
     var rows: Int
+    # The key columns in one chunk each, as hashed; rows are compared here
+    # when a bucket is encoded from hashes (encode_bucket).
+    var keys: List[Series]
 
     def __init__(out self, keys: List[Series], workers: Int) raises:
         for key in keys:
@@ -387,6 +420,7 @@ struct Partitioner(Movable):
         for key in keys:
             contiguous.append(key.rechunk() if key.is_chunked() else key.copy())
         self.rows = len(contiguous[0])
+        self.keys = contiguous.copy()
         self.hashes = List[UInt64](length=self.rows, fill=0)
         self.histogram = List[Int](length=_SLOTS, fill=0)
         self.worker_histograms = List[List[Int]](capacity=workers)
@@ -408,8 +442,11 @@ struct Partitioner(Movable):
                 self.histogram[s] += counts[s]
             self.worker_histograms.append(counts^)
 
-    def scatter(mut self, workers: Int) raises -> Partitioned:
-        """Build the stable permutation, folding slots into buckets."""
+    def scatter(
+        mut self, workers: Int, with_hashes: Bool = False
+    ) raises -> Partitioned:
+        """Build the stable permutation, folding slots into buckets; with
+        `with_hashes`, also each row's hash in the same order."""
         var buckets = 1
         var fold = 8
         while buckets < 2 * workers and buckets < _SLOTS:
@@ -432,6 +469,9 @@ struct Partitioner(Movable):
                 counts[s >> fold] += self.worker_histograms[w][s]
             per_worker.append(counts^)
         var order = List[Int](length=self.rows, fill=0)
+        var ordered = List[UInt64](
+            length=self.rows if with_hashes else 0, fill=0
+        )
         var cursor = starts.copy()
         var jobs = List[_ScatterJob](capacity=workers)
         for w in range(workers):
@@ -445,12 +485,13 @@ struct Partitioner(Movable):
                     bounds[w + 1],
                     Int(self.hashes.unsafe_ptr()),
                     Int(order.unsafe_ptr()),
+                    Int(ordered.unsafe_ptr()) if with_hashes else 0,
                     fold,
                     next^,
                 )
             )
         run_jobs(jobs)
-        return Partitioned(order^, starts^)
+        return Partitioned(order^, starts^, ordered^)
 
 
 struct _EncodeJob(Job):
@@ -527,3 +568,162 @@ def encode_partitioned(
                 representatives[base + local] = parts.order[lo + i]
         base += jobs[j].count
     return RowKeys(ids^, representatives^)
+
+
+def _same_value(series: Series, a: Int, b: Int) -> Bool:
+    """Whether rows a and b hold equal keys, as `encode_rows` compares them:
+    nulls are equal to each other, every NaN is one value, -0.0 equals 0.0,
+    and strings compare by bytes."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            var present = column._valid(a)
+            if present != column._valid(b):
+                return False
+            if not present:
+                return True
+            comptime if D.is_floating_point():
+                return float_key(Float64(column._get(a))) == float_key(
+                    Float64(column._get(b))
+                )
+            else:
+                return column._get(a) == column._get(b)
+    if series._data.isa[Column[Int128]]():
+        ref column = series._data[Column[Int128]]
+        var present = column._valid(a)
+        if present != column._valid(b):
+            return False
+        return not present or column._get(a) == column._get(b)
+    if series._data.isa[BoolColumn]():
+        ref bools = series._data[BoolColumn]
+        var present = bools._valid(a)
+        if present != bools._valid(b):
+            return False
+        return not present or bools._get(a) == bools._get(b)
+    ref strings = series._data[StringColumn]
+    var present = strings._valid(a)
+    if present != strings._valid(b):
+        return False
+    return not present or strings._equal_at_valid(strings, a, b)
+
+
+@always_inline
+def _same_key(keys: List[Series], a: Int, b: Int) -> Bool:
+    for k in range(len(keys)):
+        if not _same_value(keys[k], a, b):
+            return False
+    return True
+
+
+def encode_bucket(
+    keys: List[Series],
+    hashes: Span[UInt64, _],
+    rows: Span[Int, _],
+    mut ids: List[Int],
+    mut firsts: List[Int],
+):
+    """Group ids for one bucket's rows, in first-occurrence order, from the
+    key hashes the partitioner already computed (`hashes[p]` belongs to
+    `rows[p]`). A hash match is confirmed by comparing the two rows' keys in
+    place, so the key columns are never gathered and never hashed again.
+    `firsts` gets each group's first row (a row of `keys`, not a bucket
+    position)."""
+    var m = len(rows)
+    ids.resize(m, 0)
+    firsts.clear()
+    var group_hashes = List[UInt64]()
+    var capacity = 1024
+    var table = List[Int32](length=capacity, fill=-1)
+    var out = ids.unsafe_ptr()
+    # One offsets-backed string key without nulls, the common case, is
+    # compared directly; everything else through _same_key.
+    var direct = (
+        len(keys) == 1
+        and keys[0]._data.isa[StringColumn]()
+        and not keys[0]._data[StringColumn]._is_view_storage()
+        and len(keys[0]._data[StringColumn]._bits[]) == 0
+    )
+    var offsets_at = 0
+    var bytes_at = 0
+    if direct:
+        ref strings = keys[0]._data[StringColumn]
+        offsets_at = Int(strings._offsets[].unsafe_ptr()) + 8 * strings._offset
+        bytes_at = Int(strings._bytes[].unsafe_ptr())
+    var offsets = Pointer[Int64, MutAnyOrigin](unsafe_from_address=offsets_at)
+    var bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=bytes_at)
+    # Every offsets-backed string key, for prefetching its rows ahead.
+    var fetch_offsets = List[Int]()
+    var fetch_bytes = List[Int]()
+    for key in keys:
+        if key._data.isa[StringColumn]():
+            ref strings = key._data[StringColumn]
+            if not strings._is_view_storage():
+                fetch_offsets.append(
+                    Int(strings._offsets[].unsafe_ptr()) + 8 * strings._offset
+                )
+                fetch_bytes.append(Int(strings._bytes[].unsafe_ptr()))
+    for p in range(m):
+        var row = rows[p]
+        var hash = hashes[p]
+        # Rows arrive in bucket order, so their strings are scattered:
+        # fetch the offsets of a row 16 ahead and the bytes of one 8 ahead
+        # (its offsets are in cache by now) while this one probes.
+        for k in range(len(fetch_offsets)):
+            var key_offsets = Pointer[Int64, MutAnyOrigin](
+                unsafe_from_address=fetch_offsets[k]
+            )
+            if p + 16 < m:
+                prefetch(key_offsets.unsafe_offset(rows[p + 16]))
+            if p + 8 < m:
+                var ahead = Int(key_offsets.unsafe_offset(rows[p + 8])[])
+                prefetch(
+                    Pointer[UInt8, MutAnyOrigin](
+                        unsafe_from_address=fetch_bytes[k]
+                    ).unsafe_offset(ahead)
+                )
+        var mask = capacity - 1
+        var slot = Int(hash) & mask
+        var cells = table.unsafe_ptr()
+        var known = group_hashes.unsafe_ptr()
+        var first_rows = firsts.unsafe_ptr()
+        while True:
+            var g = Int(cells[slot])
+            if g < 0:
+                g = len(firsts)
+                cells[slot] = Int32(g)
+                firsts.append(row)
+                group_hashes.append(hash)
+                out[p] = g
+                break
+            if known[g] == hash:
+                var same: Bool
+                if direct:
+                    var other = first_rows[g]
+                    var a = Int(offsets.unsafe_offset(row)[])
+                    var length = Int(offsets.unsafe_offset(row + 1)[]) - a
+                    var b = Int(offsets.unsafe_offset(other)[])
+                    same = length == Int(offsets.unsafe_offset(other + 1)[]) - b
+                    var i = 0
+                    while same and i < length:
+                        same = (
+                            bytes.unsafe_offset(a + i)[]
+                            == bytes.unsafe_offset(b + i)[]
+                        )
+                        i += 1
+                else:
+                    same = _same_key(keys, first_rows[g], row)
+                if same:
+                    out[p] = g
+                    break
+            slot = (slot + 1) & mask
+        if 2 * len(firsts) > capacity:
+            # Rehash from the stored group hashes; ids do not change.
+            capacity *= 2
+            table = List[Int32](length=capacity, fill=-1)
+            var grown = table.unsafe_ptr()
+            for g in range(len(firsts)):
+                var at = Int(group_hashes[g]) & (capacity - 1)
+                while grown[at] >= 0:
+                    at = (at + 1) & (capacity - 1)
+                grown[at] = Int32(g)
