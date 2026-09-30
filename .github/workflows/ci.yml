@@ -50,7 +50,7 @@ jobs:
       # Arrow version lives in build.sh, so a bump changes the key.
       - name: Restore libdfparquet
         id: dfparquet
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/dfparquet/libdfparquet.so

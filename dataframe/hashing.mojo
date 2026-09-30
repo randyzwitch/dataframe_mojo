@@ -128,12 +128,12 @@ struct _InlineStringCodes(Movable):
         var slot = Int((hash_value ^ (hash_value >> 31)) & 511)
         var keys = self.keys.unsafe_ptr()
         var codes = self.codes.unsafe_ptr()
-        while codes[slot] >= 0:
-            if keys[slot] == key:
-                return codes[slot]
+        while codes[unsafe_offset=slot] >= 0:
+            if keys[unsafe_offset=slot] == key:
+                return codes[unsafe_offset=slot]
             slot = (slot + 1) & 511
-        keys[slot] = key
-        codes[slot] = next_id
+        keys[unsafe_offset=slot] = key
+        codes[unsafe_offset=slot] = next_id
         self.count += 1
         if self.count == 256:
             for i in range(512):
@@ -203,8 +203,10 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
             var m = len(column)
             var start_len = len(ids)
             ids.resize(start_len + m, -1)
-            var out = ids.unsafe_ptr() + start_len
-            var offsets = column._offsets[].unsafe_ptr() + column._offset
+            var out = ids.unsafe_ptr().unsafe_offset(start_len)
+            var offsets = (
+                column._offsets[].unsafe_ptr().unsafe_offset(column._offset)
+            )
             var bytes = column._base()
             # A missing bitmap means no nulls; counting them is O(n).
             var nulls = len(column._bits[]) != 0
@@ -216,10 +218,10 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
                         if null_code < 0:
                             null_code = len(representatives)
                             representatives.append(row + i)
-                        out[i] = null_code
+                        out[unsafe_offset=i] = null_code
                     continue
-                var start = Int(offsets[i])
-                var length = Int(offsets[i + 1]) - start
+                var start = Int(offsets[unsafe_offset=i])
+                var length = Int(offsets[unsafe_offset=i + 1]) - start
                 var code: Int
                 if length <= 12:
                     var key = UInt128(length)
@@ -231,7 +233,7 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
                         count=length,
                     )
                     if key == last_key and last_code >= 0:
-                        out[i] = last_code
+                        out[unsafe_offset=i] = last_code
                         continue
                     code = inline.get_or_insert(key, len(representatives))
                     last_key = key
@@ -244,7 +246,7 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
                         long_lookup[value] = code
                 if code == len(representatives):
                     representatives.append(row + i)
-                out[i] = code
+                out[unsafe_offset=i] = code
             row += m
     return RowKeys(ids^, representatives^)
 

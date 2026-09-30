@@ -124,7 +124,7 @@ def round_half_even(
 
 
 def divide_half_even(numerator: Int128, divisor: Int128) -> Int128:
-    """numerator / divisor rounded half to even; divisor must be positive.
+    """The quotient numerator / divisor rounded half to even; divisor must be positive.
     Works on the magnitude, so a negative tie rounds like a positive one
     (-0.625 to -0.62, as 0.625 to 0.62)."""
     var negative = numerator < 0

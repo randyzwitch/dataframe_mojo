@@ -163,7 +163,9 @@ def _hash_column(
         ref data = strings._bytes[]
         var size = len(data)
         var base = data.unsafe_ptr()
-        var offsets = strings._offsets[].unsafe_ptr() + strings._offset
+        var offsets = (
+            strings._offsets[].unsafe_ptr().unsafe_offset(strings._offset)
+        )
         # A missing bitmap means no nulls; this runs per sampled row too,
         # so it must not count them.
         var nulls = len(strings._bits[]) != 0
@@ -171,8 +173,8 @@ def _hash_column(
             if nulls and not strings._valid(i):
                 write(i, _NULL_KEY)
                 continue
-            var byte_start = Int(offsets[i])
-            var length = Int(offsets[i + 1]) - byte_start
+            var byte_start = Int(offsets[unsafe_offset=i])
+            var length = Int(offsets[unsafe_offset=i + 1]) - byte_start
             if length <= 8 and byte_start <= size - 8:
                 var word = bitcast[DType.uint64, 1](
                     base.unsafe_offset(byte_start).unsafe_load[width=8]()
@@ -688,18 +690,18 @@ def encode_bucket(
         var known = group_hashes.unsafe_ptr()
         var first_rows = firsts.unsafe_ptr()
         while True:
-            var g = Int(cells[slot])
+            var g = Int(cells[unsafe_offset=slot])
             if g < 0:
                 g = len(firsts)
-                cells[slot] = Int32(g)
+                cells[unsafe_offset=slot] = Int32(g)
                 firsts.append(row)
                 group_hashes.append(hash)
-                out[p] = g
+                out[unsafe_offset=p] = g
                 break
-            if known[g] == hash:
+            if known[unsafe_offset=g] == hash:
                 var same: Bool
                 if direct:
-                    var other = first_rows[g]
+                    var other = first_rows[unsafe_offset=g]
                     var a = Int(offsets.unsafe_offset(row)[])
                     var length = Int(offsets.unsafe_offset(row + 1)[]) - a
                     var b = Int(offsets.unsafe_offset(other)[])
@@ -712,9 +714,9 @@ def encode_bucket(
                         )
                         i += 1
                 else:
-                    same = _same_key(keys, first_rows[g], row)
+                    same = _same_key(keys, first_rows[unsafe_offset=g], row)
                 if same:
-                    out[p] = g
+                    out[unsafe_offset=p] = g
                     break
             slot = (slot + 1) & mask
         if 2 * len(firsts) > capacity:
@@ -724,6 +726,6 @@ def encode_bucket(
             var grown = table.unsafe_ptr()
             for g in range(len(firsts)):
                 var at = Int(group_hashes[g]) & (capacity - 1)
-                while grown[at] >= 0:
+                while grown[unsafe_offset=at] >= 0:
                     at = (at + 1) & (capacity - 1)
-                grown[at] = Int32(g)
+                grown[unsafe_offset=at] = Int32(g)
