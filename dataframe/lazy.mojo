@@ -64,6 +64,7 @@ from .parquet import (
     read_parquet,
 )
 from .series import Series
+from .hashing import encode_rows
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -615,6 +616,36 @@ struct LazyFrame(Copyable):
 
     # --- execution -----------------------------------------------------
 
+    def _many_groups(self, keys: List[String], frame: Int) raises -> Bool:
+        """Whether the grouping keys, read from an in-memory frame, have
+        many distinct values: more than half of 4,096 evenly spaced rows.
+
+        Streaming's cost grows with the groups every batch state holds and
+        merges again, and the eager group-by's does not. Measured on 10M
+        ClickBench rows, keys whose sample is mostly distinct (UserID,
+        URL, ClientIP) group eagerly in 60-40% of the time, while keys
+        whose values repeat stream faster, even with many groups overall:
+        RegionID (9% of the sample distinct) in 44 ms against 118, and
+        SearchPhrase (14%, one dominant value) in 383 ms against 868. Keys
+        the frame does not hold, made by an earlier step, keep streaming.
+        """
+        if len(keys) == 0:
+            return False
+        ref source = self._frames[frame]
+        var height = source.height()
+        var sample = min(height, 4096)
+        if sample == 0:
+            return False
+        var rows = List[Int](capacity=sample)
+        for k in range(sample):
+            rows.append(k * height // sample)
+        var picked = List[Series](capacity=len(keys))
+        for name in keys:
+            if name not in source.columns():
+                return False
+            picked.append(source.column(name).take(rows))
+        return 2 * encode_rows(picked, nulls_equal=True).count() > sample
+
     def _known_height(self, index: Int) -> Int:
         """Exact cheap cardinalities only; -1 means execution is required."""
         ref node = self._nodes[index]
@@ -755,15 +786,31 @@ struct LazyFrame(Copyable):
         if (
             len(expressions)
             and self._nodes[cursor].kind == SCAN_FRAME
-            and _counts_distinct(expressions)
             and _row_steps_only(operations)
+            and (
+                _counts_distinct(expressions)
+                or (
+                    self._frames[self._nodes[cursor].offset].height()
+                    >= 32 * batch_size
+                    and self._many_groups(keys, self._nodes[cursor].offset)
+                )
+            )
         ):
-            # Batch states keep n_unique's values in per-group sets that
-            # merge on one thread; over a frame already in memory, filtered
-            # or projected at most, the eager aggregation counts them by
-            # hash partition on every worker instead (#336), at no memory
-            # cost batches would save. Plans with a join keep streaming,
-            # whose batched probes beat the eager join.
+            # Over a frame already in memory, filtered or projected at most,
+            # batches save no memory, and two kinds of aggregation run
+            # faster eagerly. n_unique keeps per-group sets in batch states
+            # that the eager aggregation replaces with hash partitions on
+            # every worker (#336). And with many groups, every batch state
+            # holds most of them and each is merged again, where the eager
+            # group-by encodes the keys once by hash partition: grouping 10M
+            # rows by UserID takes 207 ms streamed and 125 ms eagerly (#326).
+            # That cost grows with the batches, so a frame under 32 batches
+            # (2M rows at the default size) keeps streaming, which there is
+            # faster: 1M ClickBench rows group by UserID in 16 ms streamed
+            # and 20 ms eagerly. Few groups keep streaming at any size, which
+            # is faster: RegionID takes 44 ms against 118 on 10M rows. Plans
+            # with a join keep streaming too, whose batched probes beat the
+            # eager join.
             return None
         if top >= 0:
             # Over a frame already in memory with nothing to apply first,
