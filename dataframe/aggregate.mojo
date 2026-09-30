@@ -673,6 +673,10 @@ struct Reducer(Movable):
     var strings: List[String]
     var int_sets: List[Dict[Int64, Bool]]
     var float_sets: List[Dict[UInt64, Bool]]
+    # A group's first distinct number is held here, and its set is used only
+    # from the second (see `_add_distinct`): 0 none, 1 one, 2 in the set.
+    var distinct_first: List[UInt64]
+    var distinct_state: List[UInt8]
     var string_sets: List[Dict[String, Bool]]
     # arg_min/arg_max: index of the best value and of the first NaN, within
     # each group; `counts` holds the rows seen per group.
@@ -771,6 +775,12 @@ struct Reducer(Movable):
         self.float_sets = List[Dict[UInt64, Bool]](
             length=n if distinct and is_float else 0,
             fill=Dict[UInt64, Bool](),
+        )
+        self.distinct_first = List[UInt64](
+            length=n if distinct and (is_int or is_float) else 0, fill=0
+        )
+        self.distinct_state = List[UInt8](
+            length=n if distinct and (is_int or is_float) else 0, fill=0
         )
         self.string_sets = List[Dict[String, Bool]](
             length=n if distinct
@@ -1116,20 +1126,21 @@ struct Reducer(Movable):
                 )
         elif op == N_UNIQUE:
             if chunk._data.isa[Column[Int64]]():
-                _distinct(
-                    chunk._data[Column[Int64]],
-                    offset,
-                    grouped,
-                    groups,
-                    self.int_sets,
-                    self.picked_valid,
-                )
+                ref column = chunk._data[Column[Int64]]
+                for i in range(len(column)):
+                    var g = _group(grouped, groups, offset + i)
+                    if column._valid(i):
+                        self._add_distinct(
+                            g, bitcast[DType.uint64](column._get(i))
+                        )
+                    else:
+                        self.picked_valid[g] = True
             elif chunk._data.isa[Column[Float64]]():
                 ref column = chunk._data[Column[Float64]]
                 for i in range(len(column)):
                     var g = _group(grouped, groups, offset + i)
                     if column._valid(i):
-                        self.float_sets[g][float_key(column._get(i))] = True
+                        self._add_distinct(g, float_key(column._get(i)))
                     else:
                         self.picked_valid[g] = True
             elif chunk._data.isa[BoolColumn]():
@@ -1305,6 +1316,32 @@ struct Reducer(Movable):
             < self.strings[g]
         )
 
+    @always_inline
+    def _add_distinct(mut self, g: Int, key: UInt64):
+        """Count `key` (a number's equality key) among group g's distinct
+        values. The first is held in `distinct_first` and the group's set
+        is used only from a second: a set's first insertion allocates it,
+        about 350 ns, which was nearly all of n_unique over 1.5M groups
+        that each hold one value (#326)."""
+        var state = self.distinct_state[g]
+        if state == 0:
+            self.distinct_first[g] = key
+            self.distinct_state[g] = 1
+        elif state == 1:
+            if self.distinct_first[g] != key:
+                self._spill_distinct(g, self.distinct_first[g])
+                self._spill_distinct(g, key)
+                self.distinct_state[g] = 2
+        else:
+            self._spill_distinct(g, key)
+
+    @always_inline
+    def _spill_distinct(mut self, g: Int, key: UInt64):
+        if self.dtype == DataType.INT64:
+            self.int_sets[g][bitcast[DType.int64](key)] = True
+        else:
+            self.float_sets[g][key] = True
+
     def merge(
         mut self,
         other: Self,
@@ -1397,12 +1434,19 @@ struct Reducer(Movable):
                 self.picked_valid[g] = (
                     self.picked_valid[g] or other.picked_valid[source]
                 )
-                if self.dtype == DataType.INT64:
-                    for key in other.int_sets[source].keys():
-                        self.int_sets[g][key] = True
-                elif self.dtype == DataType.FLOAT64:
-                    for key in other.float_sets[source].keys():
-                        self.float_sets[g][key] = True
+                if (
+                    self.dtype == DataType.INT64
+                    or self.dtype == DataType.FLOAT64
+                ):
+                    var state = other.distinct_state[source]
+                    if state == 1:
+                        self._add_distinct(g, other.distinct_first[source])
+                    elif state == 2 and self.dtype == DataType.INT64:
+                        for key in other.int_sets[source].keys():
+                            self._add_distinct(g, bitcast[DType.uint64](key))
+                    elif state == 2:
+                        for key in other.float_sets[source].keys():
+                            self._add_distinct(g, key)
                 else:
                     for key in other.string_sets[source].keys():
                         self.string_sets[g][key] = True
@@ -1508,6 +1552,8 @@ struct Reducer(Movable):
         self.strings.extend(added.strings.copy())
         self.int_sets.extend(added.int_sets.copy())
         self.float_sets.extend(added.float_sets.copy())
+        self.distinct_first.extend(added.distinct_first.copy())
+        self.distinct_state.extend(added.distinct_state.copy())
         self.string_sets.extend(added.string_sets.copy())
         self.positions.extend(added.positions.copy())
         self.nan_positions.extend(added.nan_positions.copy())
@@ -1916,10 +1962,18 @@ struct Reducer(Movable):
             var output = List[Int64](length=n, fill=0)
             for g in range(n):
                 var count: Int
-                if self.dtype == DataType.INT64:
-                    count = len(self.int_sets[g]) + Int(self.picked_valid[g])
-                elif self.dtype == DataType.FLOAT64:
-                    count = len(self.float_sets[g]) + Int(self.picked_valid[g])
+                if (
+                    self.dtype == DataType.INT64
+                    or self.dtype == DataType.FLOAT64
+                ):
+                    var state = self.distinct_state[g]
+                    count = Int(self.picked_valid[g]) + (
+                        Int(state) if state
+                        < 2 else (
+                            len(self.int_sets[g]) if self.dtype
+                            == DataType.INT64 else len(self.float_sets[g])
+                        )
+                    )
                 elif self.dtype == DataType.BOOL:
                     ref state = self.logic[g]
                     count = (

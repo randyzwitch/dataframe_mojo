@@ -77,6 +77,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
   unchanged to the bit. On 10M H2O rows at 8 threads, `median` by `id4, id5`
   over 4 groups goes from 1,280 ms to 201 ms (Polars: 140 ms) and over
   10,000 groups from 252 ms to 227 ms (#337).
+- A lazy group-by over an in-memory frame streams only when its keys repeat
+  (at most half of 4,096 sampled rows distinct), and otherwise runs the eager
+  group-by, whose hash-partitioned encoding beats merging every batch's
+  groups again; keys that repeat stream, which is faster than eager for
+  them. Each group's first distinct number for `n_unique` is kept inline, and
+  its set is created only for a second. On 10M ClickBench rows at 8 threads,
+  lazy grouping by URL goes from 904 ms to 351 ms and by WatchID and ClientIP
+  from 1,406 ms to 322 ms, and a streamed Parquet scan grouped by UserID
+  with `n_unique` from 1,510 ms to 383 ms (#326).
 - `n_unique` counts distinct values by hash partition instead of keeping a
   Dict per group: rows are keyed (group, value), scattered by hash into
   cache-sized partitions on every worker, and each partition's distinct keys
