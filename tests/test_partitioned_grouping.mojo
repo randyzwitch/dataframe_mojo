@@ -296,6 +296,10 @@ def test_group_indices_numbering_matches_ordered_output() raises:
     var groups = df.group_indices("s")
     assert_equal(groups.count(), ordered.height())
     var sizes = groups.sizes()
+    var total = 0
+    for size in sizes:
+        total += size
+    assert_equal(total, df.height())
     for g in range(groups.count()):
         var expected = df.item(groups.representative(g), "s")
         var actual = ordered.item(g, "s")

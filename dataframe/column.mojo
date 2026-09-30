@@ -286,7 +286,9 @@ def _count_set(bits: List[UInt8], offset: Int, length: Int) -> Int:
     var ptr = bits.unsafe_ptr()
     while length - i >= 64:
         count += Int(
-            pop_count(ptr.unsafe_offset(byte).bitcast[UInt64]().unsafe_load())
+            pop_count(
+                ptr.unsafe_offset(byte).unsafe_bitcast[UInt64]().unsafe_load()
+            )
         )
         byte += 8
         i += 64

@@ -97,7 +97,7 @@ def _string_order(
     for b in range(width):
         key <<= 8
         if b < rest:
-            key |= UInt64(ptr[prefix + b])
+            key |= UInt64(ptr[unsafe_offset=prefix + b])
     return (key << UInt64(_length_bits(width))) | UInt64(min(rest, width + 1))
 
 
@@ -198,7 +198,9 @@ struct _PrefixJob(Job):
             var limit = min(self.prefix, length)
             var ptr = bytes.unsafe_ptr()
             var p = 0
-            while p < limit and ptr[p] == ref_ptr[p]:
+            while (
+                p < limit and ptr[unsafe_offset=p] == ref_ptr[unsafe_offset=p]
+            ):
                 p += 1
             self.prefix = p
 
@@ -257,17 +259,17 @@ struct _OrderJob(Job):
                 ref typed = self.column._data[Column[Scalar[D]]]
                 for i in range(self.first, self.last):
                     if self.nulls and not typed._valid(i):
-                        tier[i] = _ROW_NULL
+                        tier[unsafe_offset=i] = _ROW_NULL
                         continue
                     var value = typed._get(i)
                     comptime if D.is_floating_point():
                         if value != value:
-                            tier[i] = _ROW_NAN
+                            tier[unsafe_offset=i] = _ROW_NAN
                             self.nan = True
                             continue
                     var o = _order[D](value)
-                    order[i] = o
-                    tier[i] = _ROW_VALUE
+                    order[unsafe_offset=i] = o
+                    tier[unsafe_offset=i] = _ROW_VALUE
                     low = min(low, o)
                     high = max(high, o)
                 self.low = low
@@ -277,24 +279,24 @@ struct _OrderJob(Job):
             ref typed = self.column._data[BoolColumn]
             for i in range(self.first, self.last):
                 if self.nulls and not typed._valid(i):
-                    tier[i] = _ROW_NULL
+                    tier[unsafe_offset=i] = _ROW_NULL
                     continue
                 var o = UInt64(Int(typed._get(i)))
-                order[i] = o
-                tier[i] = _ROW_VALUE
+                order[unsafe_offset=i] = o
+                tier[unsafe_offset=i] = _ROW_VALUE
                 low = min(low, o)
                 high = max(high, o)
         else:
             ref typed = self.column._data[StringColumn]
             for i in range(self.first, self.last):
                 if self.nulls and not typed._valid(i):
-                    tier[i] = _ROW_NULL
+                    tier[unsafe_offset=i] = _ROW_NULL
                     continue
                 var o = _string_order(
                     typed._row_bytes(i), self.prefix, self.width
                 )
-                order[i] = o
-                tier[i] = _ROW_VALUE
+                order[unsafe_offset=i] = o
+                tier[unsafe_offset=i] = _ROW_VALUE
                 low = min(low, o)
                 high = max(high, o)
         self.low = low
@@ -357,12 +359,14 @@ struct _PackJob[T: DType](Job):
                 unsafe_from_address=self.tiers[0]
             )[].unsafe_ptr()
             for i in range(self.first, self.last):
-                var p = key.pack[Self.T](order[i], tier[i]) | Scalar[Self.T](i)
-                out[i] = p
-                counts[_bucket(p, self.bucket_shift)] += 1
+                var p = key.pack[Self.T](
+                    order[unsafe_offset=i], tier[unsafe_offset=i]
+                ) | Scalar[Self.T](i)
+                out[unsafe_offset=i] = p
+                counts[unsafe_offset=_bucket(p, self.bucket_shift)] += 1
             return
-        var order_ptrs = List[UnsafePointer[UInt64, MutAnyOrigin]]()
-        var tier_ptrs = List[UnsafePointer[UInt8, MutAnyOrigin]]()
+        var order_ptrs = List[Pointer[UInt64, MutAnyOrigin]]()
+        var tier_ptrs = List[Pointer[UInt8, MutAnyOrigin]]()
         for k in range(len(self.keys)):
             order_ptrs.append(
                 Pointer[List[UInt64], MutAnyOrigin](
@@ -378,10 +382,11 @@ struct _PackJob[T: DType](Job):
             var p = Scalar[Self.T](i)
             for k in range(len(self.keys)):
                 p |= self.keys[k].pack[Self.T](
-                    order_ptrs[k][i], tier_ptrs[k][i]
+                    order_ptrs[k][unsafe_offset=i],
+                    tier_ptrs[k][unsafe_offset=i],
                 )
-            out[i] = p
-            counts[_bucket(p, self.bucket_shift)] += 1
+            out[unsafe_offset=i] = p
+            counts[unsafe_offset=_bucket(p, self.bucket_shift)] += 1
 
 
 struct _ScatterJob[T: DType](Job):
@@ -419,17 +424,17 @@ struct _ScatterJob[T: DType](Job):
         )[].unsafe_ptr()
         var next = self.next.unsafe_ptr()
         for i in range(self.first, self.last):
-            var p = src[i]
+            var p = src[unsafe_offset=i]
             var b = _bucket(p, self.bucket_shift)
-            dst[next[b]] = p
-            next[b] += 1
+            dst[unsafe_offset=next[unsafe_offset=b]] = p
+            next[unsafe_offset=b] += 1
 
 
 def _is_sorted[
     T: DType
-](data: UnsafePointer[Scalar[T], MutAnyOrigin], start: Int, end: Int) -> Bool:
+](data: Pointer[Scalar[T], MutAnyOrigin], start: Int, end: Int) -> Bool:
     for i in range(start + 1, end):
-        if data[i] < data[i - 1]:
+        if data[unsafe_offset=i] < data[unsafe_offset=i - 1]:
             return False
     return True
 
@@ -482,7 +487,7 @@ struct _Settle(ImplicitlyCopyable, Movable):
 def _settle_runs[
     T: DType
 ](
-    data: UnsafePointer[Scalar[T], MutAnyOrigin],
+    data: Pointer[Scalar[T], MutAnyOrigin],
     start: Int,
     end: Int,
     settle: _Settle,
@@ -503,18 +508,18 @@ def _settle_runs[
 
     var i = start
     while i < end:
-        var head = data[i] >> row_bits
+        var head = data[unsafe_offset=i] >> row_bits
         var j = i + 1
-        while j < end and (data[j] >> row_bits) == head:
+        while j < end and (data[unsafe_offset=j] >> row_bits) == head:
             j += 1
-        if j - i > 1 and settle.is_long[T](data[i]):
+        if j - i > 1 and settle.is_long[T](data[unsafe_offset=i]):
             var rows = List[Int](capacity=j - i)
             for k in range(i, j):
-                rows.append(Int(data[k] & row_mask))
+                rows.append(Int(data[unsafe_offset=k] & row_mask))
             sort(rows, less)
-            var high = data[i] & ~row_mask
+            var high = data[unsafe_offset=i] & ~row_mask
             for k in range(len(rows)):
-                data[i + k] = high | Scalar[T](rows[k])
+                data[unsafe_offset=i + k] = high | Scalar[T](rows[k])
         i = j
 
 
@@ -621,18 +626,23 @@ struct _MergeJob[T: DType](Job):
         var hi = min(k, self.mid - self.start)
         while lo < hi:
             var h = (lo + hi) // 2
-            if src[self.start + h] < src[self.mid + k - h - 1]:
+            if (
+                src[unsafe_offset=self.start + h]
+                < src[unsafe_offset=self.mid + k - h - 1]
+            ):
                 lo = h + 1
             else:
                 hi = h
         var i = self.start + lo
         var j = self.mid + (k - lo)
         for at in range(self.first, self.last):
-            if j >= self.end or (i < self.mid and src[i] < src[j]):
-                dst[at] = src[i]
+            if j >= self.end or (
+                i < self.mid and src[unsafe_offset=i] < src[unsafe_offset=j]
+            ):
+                dst[unsafe_offset=at] = src[unsafe_offset=i]
                 i += 1
             else:
-                dst[at] = src[j]
+                dst[unsafe_offset=at] = src[unsafe_offset=j]
                 j += 1
 
 
@@ -695,7 +705,7 @@ def _sort_heavy[
         var dst = data.unsafe_ptr()
         var src = scratch.unsafe_ptr()
         for i in range(start, end):
-            dst[i] = src[i]
+            dst[unsafe_offset=i] = src[unsafe_offset=i]
 
 
 struct _RowsJob[T: DType](Job):
@@ -729,7 +739,7 @@ struct _RowsJob[T: DType](Job):
             unsafe_from_address=self.rows
         )[].unsafe_ptr()
         for i in range(self.first, self.last):
-            dst[i] = Int(src[i] & self.mask)
+            dst[unsafe_offset=i] = Int(src[unsafe_offset=i] & self.mask)
 
 
 def _sort_packed[
@@ -870,24 +880,26 @@ def _pack_row[
     T: DType
 ](
     keys: List[_Key],
-    order_ptrs: List[UnsafePointer[UInt64, MutAnyOrigin]],
-    tier_ptrs: List[UnsafePointer[UInt8, MutAnyOrigin]],
+    order_ptrs: List[Pointer[UInt64, MutAnyOrigin]],
+    tier_ptrs: List[Pointer[UInt8, MutAnyOrigin]],
     i: Int,
 ) -> Scalar[T]:
     var p = Scalar[T](i)
     for k in range(len(keys)):
-        p |= keys[k].pack[T](order_ptrs[k][i], tier_ptrs[k][i])
+        p |= keys[k].pack[T](
+            order_ptrs[k][unsafe_offset=i], tier_ptrs[k][unsafe_offset=i]
+        )
     return p
 
 
 def _key_pointers(
     orders: List[Int], tiers: List[Int]
 ) -> Tuple[
-    List[UnsafePointer[UInt64, MutAnyOrigin]],
-    List[UnsafePointer[UInt8, MutAnyOrigin]],
+    List[Pointer[UInt64, MutAnyOrigin]],
+    List[Pointer[UInt8, MutAnyOrigin]],
 ]:
-    var order_ptrs = List[UnsafePointer[UInt64, MutAnyOrigin]]()
-    var tier_ptrs = List[UnsafePointer[UInt8, MutAnyOrigin]]()
+    var order_ptrs = List[Pointer[UInt64, MutAnyOrigin]]()
+    var tier_ptrs = List[Pointer[UInt8, MutAnyOrigin]]()
     for k in range(len(orders)):
         order_ptrs.append(
             Pointer[List[UInt64], MutAnyOrigin](

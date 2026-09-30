@@ -44,7 +44,7 @@ def like_two(name: String, first: String, second: String) -> Expr:
 
 
 def between_dates(name: String, low: String, high: String) raises -> Expr:
-    """low <= name < high."""
+    """Whether low <= name < high."""
     return col(name).is_between(date_lit(low), date_lit(high), closed="left")
 
 

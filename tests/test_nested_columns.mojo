@@ -23,7 +23,6 @@ def sample_lists() raises -> Series:
 def sample_structs() raises -> Series:
     var a = Series("a", Column[Int64]([1, 2, 3]))
     var b = Series("b", StringColumn(["x", "y", "z"]))
-    var valid: List[Bool] = [True, False, True]
     var bits = List[UInt8]()
     bits.append(0b101)
     return Series("s", StructColumn([a^, b^], bits^))

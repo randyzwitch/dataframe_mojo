@@ -112,7 +112,7 @@ struct _Outputs(ImplicitlyCopyable, Movable):
 
     def assign_runs(
         self,
-        sorted: UnsafePointer[UInt128, MutAnyOrigin],
+        sorted: Pointer[UInt128, MutAnyOrigin],
         size: Int,
         first: Int,
         last: Int,
@@ -125,40 +125,36 @@ struct _Outputs(ImplicitlyCopyable, Movable):
         of each value are its row and the bits above them its key."""
         var mask = (UInt128(1) << UInt128(row_bits)) - 1
         var shift = UInt128(row_bits)
-        var ints = UnsafePointer[Int64, MutAnyOrigin](
-            unsafe_from_address=self.ints
-        )
-        var floats = UnsafePointer[Float64, MutAnyOrigin](
+        var ints = Pointer[Int64, MutAnyOrigin](unsafe_from_address=self.ints)
+        var floats = Pointer[Float64, MutAnyOrigin](
             unsafe_from_address=self.floats
         )
-        var valid = UnsafePointer[Bool, MutAnyOrigin](
-            unsafe_from_address=self.valid
-        )
+        var valid = Pointer[Bool, MutAnyOrigin](unsafe_from_address=self.valid)
         if self.method == _ORDINAL:
             for p in range(first, last):
-                var row = Int(sorted[p] & mask)
-                valid[row] = True
-                ints[row] = Int64(p + 1)
+                var row = Int(sorted[unsafe_offset=p] & mask)
+                valid[unsafe_offset=row] = True
+                ints[unsafe_offset=row] = Int64(p + 1)
             return
         var start = first
         var dense = dense_before
         while start < last:
-            var key = sorted[start] >> shift
+            var key = sorted[unsafe_offset=start] >> shift
             var end = start + 1
-            while end < size and sorted[end] >> shift == key:
+            while end < size and sorted[unsafe_offset=end] >> shift == key:
                 end += 1
             dense += 1
             for p in range(start, end):
-                var row = Int(sorted[p] & mask)
-                valid[row] = True
+                var row = Int(sorted[unsafe_offset=p] & mask)
+                valid[unsafe_offset=row] = True
                 if self.method == _AVERAGE:
-                    floats[row] = Float64(start + 1 + end) / 2
+                    floats[unsafe_offset=row] = Float64(start + 1 + end) / 2
                 elif self.method == _MIN:
-                    ints[row] = Int64(start + 1)
+                    ints[unsafe_offset=row] = Int64(start + 1)
                 elif self.method == _MAX:
-                    ints[row] = Int64(end)
+                    ints[unsafe_offset=row] = Int64(end)
                 else:
-                    ints[row] = Int64(dense)
+                    ints[unsafe_offset=row] = Int64(dense)
             start = end
 
 
@@ -195,19 +191,19 @@ struct _RankGroupsJob(Job):
             unsafe_from_address=self.starts
         )[].unsafe_ptr()
         for g in range(self.first, self.last):
-            var start = starts[g]
-            var m = starts[g + 1] - start
+            var start = starts[unsafe_offset=g]
+            var m = starts[unsafe_offset=g + 1] - start
             if m >= _LARGE:
                 continue  # sorted on every worker afterwards
-            var slice = base + start
+            var slice = base.unsafe_offset(start)
             if m <= _SMALL:
                 for i in range(1, m):
-                    var item = slice[i]
+                    var item = slice[unsafe_offset=i]
                     var j = i
-                    while j > 0 and slice[j - 1] > item:
-                        slice[j] = slice[j - 1]
+                    while j > 0 and slice[unsafe_offset=j - 1] > item:
+                        slice[unsafe_offset=j] = slice[unsafe_offset=j - 1]
                         j -= 1
-                    slice[j] = item
+                    slice[unsafe_offset=j] = item
             else:
                 sort(Span(packed)[start : start + m])
             self.outputs.assign_runs(slice, m, 0, m, 0)
@@ -251,12 +247,12 @@ struct _CountJob(Job):
         if not partitioned:
             for i in range(self.first, self.last):
                 if self.all_valid or bits[i]:
-                    counts[0] += 1
+                    counts[unsafe_offset=0] += 1
             return
         var id = ids.unsafe_ptr()
         for i in range(self.first, self.last):
             if self.all_valid or bits[i]:
-                counts[id[i]] += 1
+                counts[unsafe_offset=id[unsafe_offset=i]] += 1
 
 
 struct _ScatterJob[D: DType](Job):
@@ -314,12 +310,12 @@ struct _ScatterJob[D: DType](Job):
         for i in range(self.first, self.last):
             if not self.all_valid and not valid[i]:
                 continue
-            var g = id[i] if partitioned else 0
-            var slot = next[g]
-            out[Int(slot)] = _pack(
+            var g = id[unsafe_offset=i] if partitioned else 0
+            var slot = next[unsafe_offset=g]
+            out[unsafe_offset=Int(slot)] = _pack(
                 _key[Self.D](column._get(i), self.descending), i
             )
-            next[g] = slot + 1
+            next[unsafe_offset=g] = slot + 1
 
 
 struct _SortRunJob(Job):
@@ -377,7 +373,7 @@ struct _MergeRunsJob(Job):
         self.first = first
         self.last = last
 
-    def _split(self, src: UnsafePointer[UInt128, MutAnyOrigin], k: Int) -> Int:
+    def _split(self, src: Pointer[UInt128, MutAnyOrigin], k: Int) -> Int:
         """How many of the first k merged values come from the left run."""
         var left = self.mid - self.start
         var right = self.end - self.mid
@@ -385,7 +381,10 @@ struct _MergeRunsJob(Job):
         var hi = min(k, left)
         while lo < hi:
             var i = (lo + hi) // 2
-            if src[self.start + i] < src[self.mid + k - i - 1]:
+            if (
+                src[unsafe_offset=self.start + i]
+                < src[unsafe_offset=self.mid + k - i - 1]
+            ):
                 lo = i + 1
             else:
                 hi = i
@@ -403,11 +402,13 @@ struct _MergeRunsJob(Job):
         var i = self.start + from_left
         var j = self.mid + (k - from_left)
         for at in range(self.first, self.last):
-            if j >= self.end or (i < self.mid and src[i] < src[j]):
-                dst[at] = src[i]
+            if j >= self.end or (
+                i < self.mid and src[unsafe_offset=i] < src[unsafe_offset=j]
+            ):
+                dst[unsafe_offset=at] = src[unsafe_offset=i]
                 i += 1
             else:
-                dst[at] = src[j]
+                dst[unsafe_offset=at] = src[unsafe_offset=j]
                 j += 1
 
 
@@ -486,7 +487,11 @@ struct _CountRunsJob(Job):
             unsafe_from_address=self.data
         )[].unsafe_ptr()
         for p in range(self.first, self.last):
-            if p == 0 or sorted[p] >> 64 != sorted[p - 1] >> 64:
+            if (
+                p == 0
+                or sorted[unsafe_offset=p] >> 64
+                != sorted[unsafe_offset=p - 1] >> 64
+            ):
                 self.count += 1
 
 
@@ -527,7 +532,8 @@ struct _AssignJob(Job):
             self.outputs.method != _ORDINAL
             and start < self.last
             and start > 0
-            and sorted[start] >> 64 == sorted[start - 1] >> 64
+            and sorted[unsafe_offset=start] >> 64
+            == sorted[unsafe_offset=start - 1] >> 64
         ):
             start += 1
         self.outputs.assign_runs(
@@ -616,7 +622,7 @@ struct _PackGroupedJob[D: DType](Job):
             if not valid[i]:
                 continue
             var key = _key[Self.D](column._get(i), self.descending)
-            out[at] = (
+            out[unsafe_offset=at] = (
                 (UInt128(ids[i]) << 96) | (UInt128(key) << 32) | UInt128(i)
             )
             at += 1
@@ -645,12 +651,12 @@ struct _AssignGroupedJob(Job):
         var n = len(data)
         var start = self.first
         while start < self.last:
-            var group = sorted[start] >> 96
+            var group = sorted[unsafe_offset=start] >> 96
             var end = start + 1
-            while end < n and sorted[end] >> 96 == group:
+            while end < n and sorted[unsafe_offset=end] >> 96 == group:
                 end += 1
             self.outputs.assign_runs(
-                sorted + start, end - start, 0, end - start, 0, 32
+                sorted.unsafe_offset(start), end - start, 0, end - start, 0, 32
             )
             start = end
 
