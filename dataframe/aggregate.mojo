@@ -51,6 +51,7 @@ from .reductions import (
     VarState,
 )
 from .nested_column import ListColumn, StructColumn
+from .parallel import Job, Pool, configured_workers
 
 
 def _group(grouped: Bool, groups: List[Int], row: Int) -> Int:
@@ -422,27 +423,121 @@ def float_key(value: Float64) -> UInt64:
     return bitcast[DType.uint64](value)
 
 
+def _select(mut values: List[Float64], k: Int):
+    """Reorder `values` (no NaN) so values[k] is what sorting would put
+    there, with nothing larger before it and nothing smaller after (#337).
+
+    Quickselect with a median-of-three pivot and a three-way partition, so
+    runs of equal values finish in one pass; after more rounds than a
+    balanced split would need, the remaining range is sorted instead,
+    which bounds the worst case at a sort's.
+    """
+    var data = values.unsafe_ptr()
+    var lo = 0
+    var hi = len(values)
+    var rounds = 0
+    var limit = 2 * _bit_length(hi) + 8
+    while hi - lo > 24:
+        if rounds == limit:
+            sort(Span(values)[lo:hi])
+            return
+        rounds += 1
+        var a = data[unsafe_offset=lo]
+        var b = data[unsafe_offset=(lo + hi) // 2]
+        var c = data[unsafe_offset=hi - 1]
+        var pivot = max(min(a, b), min(max(a, b), c))
+        var lt = lo
+        var i = lo
+        var gt = hi
+        while i < gt:
+            var x = data[unsafe_offset=i]
+            if x < pivot:
+                data[unsafe_offset=i] = data[unsafe_offset=lt]
+                data[unsafe_offset=lt] = x
+                lt += 1
+                i += 1
+            elif x > pivot:
+                gt -= 1
+                data[unsafe_offset=i] = data[unsafe_offset=gt]
+                data[unsafe_offset=gt] = x
+            else:
+                i += 1
+        if k < lt:
+            hi = lt
+        elif k >= gt:
+            lo = gt
+        else:
+            return
+    for i in range(lo + 1, hi):
+        var x = data[unsafe_offset=i]
+        var j = i
+        while j > lo and data[unsafe_offset=j - 1] > x:
+            data[unsafe_offset=j] = data[unsafe_offset=j - 1]
+            j -= 1
+        data[unsafe_offset=j] = x
+
+
+@always_inline
+def _bit_length(n: Int) -> Int:
+    var bits = 0
+    var x = n
+    while x > 0:
+        bits += 1
+        x >>= 1
+    return bits
+
+
 def quantile_of(
     var values: List[Float64], q: Float64, method: String
 ) -> Optional[Float64]:
     """Order statistic with NaN sorted above every number."""
+    return quantile_in(Span(values), q, method)
+
+
+def quantile_in(
+    values: Span[Float64, _], q: Float64, method: String
+) -> Optional[Float64]:
+    """Order statistic of `values`, which are left unchanged, with NaN
+    sorted above every number.
+
+    Only the one or two positions the method reads are found, by selection
+    rather than sorting every value (#337); each is the value a sort would
+    put there, so results are those of the sort.
+    """
     var n = len(values)
     if n == 0:
         return None
     var ordered = List[Float64](capacity=n)
-    var nans = 0
     for value in values:
-        if isnan(value):
-            nans += 1
-        else:
+        if not isnan(value):
             ordered.append(value)
-    sort(ordered)
-    for _ in range(nans):
-        ordered.append(Float64(0) / Float64(0))
+    var numbers = len(ordered)
     var position = q * Float64(n - 1)
     var lower = Int(floor(position))
     var upper = min(Int(ceil(position)), n - 1)
     var fraction = position - Float64(lower)
+    var wanted = lower
+    if method == "higher":
+        wanted = upper
+    elif method == "nearest":
+        wanted = min(Int(floor(position + 0.5)), n - 1)
+    if wanted < numbers:
+        _select(ordered, wanted)
+        if upper == wanted + 1 and upper < numbers:
+            # The next value up is the least of what follows; move it
+            # next to the selected one, where the sort would have put it.
+            var least = upper
+            for i in range(upper + 1, numbers):
+                if ordered[i] < ordered[least]:
+                    least = i
+            var held = ordered[upper]
+            ordered[upper] = ordered[least]
+            ordered[least] = held
+    # NaN sorts above every number. With the positions read now holding
+    # what a sort would put there, the arithmetic below is the sort-based
+    # version's, operation for operation, so results match to the bit.
+    for _ in range(n - numbers):
+        ordered.append(Float64(0) / Float64(0))
     if method == "lower":
         return ordered[lower]
     if method == "higher":
@@ -454,6 +549,95 @@ def quantile_of(
     if method == "midpoint":
         return (ordered[lower] + ordered[upper]) / 2
     return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+struct _QuantileJob(Job):
+    """quantile_of for groups [first, last), written to their slots."""
+
+    var samples: Int
+    var output: Int
+    var valid: Int
+    var first: Int
+    var last: Int
+    var q: Float64
+    var method: String
+
+    def __init__(
+        out self,
+        samples: Int,
+        output: Int,
+        valid: Int,
+        first: Int,
+        last: Int,
+        q: Float64,
+        method: String,
+    ):
+        self.samples = samples
+        self.output = output
+        self.valid = valid
+        self.first = first
+        self.last = last
+        self.q = q
+        self.method = method
+
+    def run(mut self) raises:
+        ref samples = Pointer[List[List[Float64]], MutAnyOrigin](
+            unsafe_from_address=self.samples
+        )[]
+        var output = Pointer[List[Float64], MutAnyOrigin](
+            unsafe_from_address=self.output
+        )[].unsafe_ptr()
+        var valid = Pointer[List[Bool], MutAnyOrigin](
+            unsafe_from_address=self.valid
+        )[].unsafe_ptr()
+        for g in range(self.first, self.last):
+            var result = quantile_in(Span(samples[g]), self.q, self.method)
+            valid[unsafe_offset=g] = Bool(result)
+            if result:
+                output[unsafe_offset=g] = result.value()
+
+
+def _group_quantiles(
+    samples: List[List[Float64]],
+    q: Float64,
+    method: String,
+    mut output: List[Float64],
+    mut valid: List[Bool],
+) raises:
+    """Each group's quantile, groups finished in parallel (#337).
+
+    Groups are dealt out as contiguous ranges of about equal sample counts,
+    several per worker and claimed dynamically, so a few large groups do
+    not leave the other workers idle behind them.
+    """
+    var n = len(samples)
+    var total = 0
+    for g in range(n):
+        total += len(samples[g])
+    var workers = configured_workers() if total >= (1 << 16) else 1
+    var jobs = List[_QuantileJob]()
+    var share = max(1, total // (4 * workers))
+    var first = 0
+    var rows = 0
+    for g in range(n):
+        rows += len(samples[g])
+        if rows >= share or g == n - 1:
+            jobs.append(
+                _QuantileJob(
+                    Int(Pointer(to=samples)),
+                    Int(Pointer(to=output)),
+                    Int(Pointer(to=valid)),
+                    first,
+                    g + 1,
+                    q,
+                    method,
+                )
+            )
+            first = g + 1
+            rows = 0
+    var pool = Pool(min(workers, len(jobs)))
+    pool.run(jobs, claim=True)
+    pool.release()
 
 
 struct Reducer(Movable):
@@ -1203,8 +1387,7 @@ struct Reducer(Movable):
                             self.mode_strings[g].get(item.key, 0) + item.value
                         )
             elif op == MEDIAN or op == QUANTILE:
-                for value in other.samples[source]:
-                    self.samples[g].append(value)
+                self.samples[g].extend(Span(other.samples[source]))
             elif op == ANY or op == ALL:
                 self.logic[g].merge(other.logic[source])
             elif op == N_UNIQUE:
@@ -1725,13 +1908,9 @@ struct Reducer(Movable):
             return Series("", Column[Float64](output^, valid))
         if op == MEDIAN or op == QUANTILE:
             var output = List[Float64](length=n, fill=0)
-            for g in range(n):
-                var result = quantile_of(
-                    self.samples[g].copy(), self.floating, self.text
-                )
-                valid[g] = Bool(result)
-                if result:
-                    output[g] = result.value()
+            _group_quantiles(
+                self.samples, self.floating, self.text, output, valid
+            )
             return Series("", Column[Float64](output^, valid))
         if op == N_UNIQUE:
             var output = List[Int64](length=n, fill=0)
