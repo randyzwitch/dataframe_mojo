@@ -34,6 +34,7 @@ the shape pyarrow imports with `RecordBatch._import_from_c` and Polars with
 | Float32, Float64 | `f` `g` | zero-copy | |
 | String | `U` large_utf8 | zero-copy | `u` utf8 (offsets widened) |
 | Binary | `Z` large_binary | zero-copy | `z` binary (offsets widened) |
+| Categorical | `I` indices, `U` dictionary | codes zero-copy, dictionary copied | any integer indices; `u` or `U` values |
 | Bool | `b` bool | zero-copy | |
 | Date | `tdD` date32 | days narrowed to Int32 | `tdm` date64 |
 | Datetime(unit, time_zone) | `ts{m,u,n}:<zone>` timestamp | zero-copy | `tss:<zone>` (as ms) |
@@ -48,9 +49,15 @@ A zone-aware datetime exports its zone after the colon (`tsu:Europe/Paris`,
 `tsu:+05:30`) and holds UTC values, as Arrow requires; import reads the zone
 back and raises when the zone database does not know it.
 
-Import rejects, with an error naming the format: dictionary-encoded
-arrays, nested types other than the top-level struct, and struct arrays with
-null rows.
+A categorical exports as Arrow dictionary encoding: its UInt32 codes are the
+index array and its dictionary the `dictionary` array (large_utf8). Import
+keeps a producer's dictionary and codes when the values are distinct and
+non-null and every index is in range, so a dictionary array round-trips
+unchanged; otherwise the values are decoded and encoded again. A Parquet file
+written from a categorical reads back as String.
+
+Import rejects, with an error naming the format: nested types other than the
+top-level struct, and struct arrays with null rows.
 
 ## Lifetimes and ownership
 

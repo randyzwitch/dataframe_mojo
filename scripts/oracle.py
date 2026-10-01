@@ -73,7 +73,7 @@ def gen_right(rng: random.Random, rows: int) -> pl.DataFrame:
     )
 
 
-KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal", "prep", "tz", "rank"]
+KINDS = ["filter", "arith", "agg", "sort", "join", "unique", "cum_sum", "cast", "stat", "describe", "value_counts", "decimal", "prep", "tz", "rank", "cat"]
 
 # Time-zone cases (#222): instants near a DST switch or a historical offset
 # change, in UTC microseconds. Rows are BASE + n * STEP, so a 7-minute step
@@ -146,6 +146,20 @@ def gen_op(rng: random.Random, kinds: list[str] = KINDS) -> list[str]:
     kind = rng.choice(kinds)
     if kind == "tz":
         return gen_tz(rng)
+    if kind == "cat":
+        # k cast to categorical (#106); results must equal those on strings.
+        op = rng.choice(["group", "join", "unique", "sort", "value_counts", "filter"])
+        if op == "group":
+            return ["cat", op, rng.choice(["sum", "count", "n_unique", "first", "max"])]
+        if op == "join":
+            # "both": each side categorical, with its own dictionary; "string":
+            # the right key stays a string.
+            return ["cat", op, rng.choice(["inner", "left", "semi", "anti"]), rng.choice(["both", "string"])]
+        if op == "sort":
+            return ["cat", op, rng.choice("01")]
+        if op == "filter":
+            return ["cat", op, rng.choice(["a", "b", "c"])]
+        return ["cat", op]
     if kind == "rank":
         # x has ties, -0.0 and 0.0; xn adds NaN; k is a string (general path).
         return ["rank", rng.choice(["ordinal", "min", "max", "dense", "average"]), rng.choice(["0", "1"]),
@@ -255,6 +269,23 @@ def expected(left: pl.DataFrame, right: pl.DataFrame, spec: list[str]) -> pl.Dat
     op = spec[0]
     if op == "tz":
         return tz_expected(left, spec)
+    if op == "cat":
+        # Computed on the strings: a categorical must give the same result.
+        sub = spec[1]
+        if sub == "group":
+            c = pl.col("n")
+            e = {"sum": c.sum(), "count": c.count(), "n_unique": c.n_unique(), "first": c.first(), "max": c.max()}[spec[2]]
+            return left.group_by("k", maintain_order=True).agg(e.alias("out"))
+        if sub == "join":
+            order = "left_right" if spec[2] in ("inner", "left") else "left"
+            return left.join(right, on="k", how=spec[2], maintain_order=order)
+        if sub == "unique":
+            return left.unique(subset=["k"], keep="first", maintain_order=True)
+        if sub == "sort":
+            return left.sort(["k", "n"], descending=[spec[2] == "1", False], nulls_last=True, maintain_order=True)
+        if sub == "filter":
+            return left.filter(pl.col("k") == spec[2])
+        return left.select(pl.col("k").value_counts(sort=True, name="count")).unnest("k").sort(["count", "k"], descending=[True, False], nulls_last=True)
     if op == "rank":
         c = pl.col("x") * (pl.col("x") / pl.col("x")) if spec[3] == "xn" else pl.col(spec[3])
         e = c.rank(spec[1], descending=spec[2] == "1")

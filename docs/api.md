@@ -409,6 +409,12 @@ struct(names, dtypes) holds one value of each named field per row.
   A struct's field types, in order (empty for other types).
 - `def field_index(self, name: String) -> Int`
 - `def field_dtype(self, index: Int) -> Self`
+- `def categorical(var dictionary: CategoricalDictionary) -> Self`
+  A categorical whose codes index `dictionary`.
+- `def is_categorical(self) -> Bool`
+- `def has_dictionary(self) -> Bool`
+- `def dictionary(self) -> ArcPointer[CategoricalDictionary]`
+  The dictionary of a categorical that has one (check first).
 - `def is_untyped(self) -> Bool`
   Whether this is an untyped literal awaiting a dtype (binder only).
 - `def default(self) -> Self`

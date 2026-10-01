@@ -28,6 +28,9 @@ comptime _TIME = 7
 comptime _DECIMAL = 8
 # Arbitrary bytes in the string layout (Arrow large_binary); no UTF-8.
 comptime _BINARY = 9
+# Dictionary-encoded strings (Arrow dictionary<uint32, large_utf8>): UInt32
+# codes into a dictionary of distinct values carried by the DataType.
+comptime _CATEGORICAL = 10
 comptime _LIST = 16
 # Marks a type without numeric storage (bool, string, nested). Bool columns
 # are bit-packed, so DType.bool never names a numeric storage type.
@@ -60,6 +63,57 @@ comptime US = 2
 comptime MS = 3
 
 
+struct CategoricalDictionary(Movable, Sized):
+    """The distinct values of a categorical column, in code order, as UTF-8
+    bytes and Int64 offsets (the large_utf8 layout). Kept to plain lists so
+    a DataType can hold one without importing StringColumn."""
+
+    var bytes: List[UInt8]
+    var offsets: List[Int64]
+
+    def __init__(out self):
+        self.bytes = List[UInt8]()
+        self.offsets = [0]
+
+    def __init__(out self, var bytes: List[UInt8], var offsets: List[Int64]):
+        self.bytes = bytes^
+        self.offsets = offsets^
+
+    def __len__(self) -> Int:
+        return len(self.offsets) - 1
+
+    def get(self, code: Int) -> StringSlice[ImmutAnyOrigin]:
+        """The value with this code (unchecked)."""
+        var start = Int(self.offsets[code])
+        return StringSlice[ImmutAnyOrigin](
+            unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=self.bytes.unsafe_ptr()
+                .unsafe_offset(start)
+                .unsafe_mut_cast[False]()
+                .unsafe_origin_cast[ImmutAnyOrigin](),
+                length=Int(self.offsets[code + 1]) - start,
+            )
+        )
+
+    def append(mut self, value: StringSlice):
+        self.bytes.extend(value.as_bytes())
+        self.offsets.append(Int64(len(self.bytes)))
+
+    def copy_values(self) -> Self:
+        return Self(self.bytes.copy(), self.offsets.copy())
+
+    def same_values(self, other: Self) -> Bool:
+        if len(self) != len(other):
+            return False
+        for i in range(len(self.offsets)):
+            if self.offsets[i] != other.offsets[i]:
+                return False
+        for i in range(len(self.bytes)):
+            if self.bytes[i] != other.bytes[i]:
+                return False
+        return True
+
+
 struct _NestedSpec(Copyable, Movable):
     """The encoded child types of a nested DataType (see _encode)."""
 
@@ -87,15 +141,21 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     # temporal types, _NO_STORAGE for bool, string and nested types.
     var _storage: DType
     var _nested: Optional[ArcPointer[_NestedSpec]]
+    # A categorical's dictionary; None for other types, and for the bare
+    # CATEGORICAL used as a cast target or schema entry.
+    var _dictionary: Optional[ArcPointer[CategoricalDictionary]]
 
     def __init__(out self, code: Int, unit: Int):
         self._code = code
         self._unit = unit
         self._storage = (
             DType.int128 if code == _DECIMAL else DType.int64 if code >= _DATE
-            and code <= _TIME else _NO_STORAGE
+            and code
+            <= _TIME else DType.uint32 if code
+            == _CATEGORICAL else _NO_STORAGE
         )
         self._nested = None
+        self._dictionary = None
 
     def __init__(out self, storage: DType):
         """A numeric type stored as Scalar[storage]."""
@@ -103,12 +163,14 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         self._unit = 0
         self._storage = storage
         self._nested = None
+        self._dictionary = None
 
     def __init__(out self, code: Int, var spec: String):
         self._code = code
         self._unit = 0
         self._storage = _NO_STORAGE
         self._nested = ArcPointer(_NestedSpec(spec^))
+        self._dictionary = None
 
     def __init__(out self, code: Int, unit: Int, var zone: String):
         """A datetime in a time zone; the zone rides in `_nested`."""
@@ -221,6 +283,26 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime BOOL = DataType(_BOOL, 0)
     comptime STRING = DataType(_STRING, 0)
     comptime BINARY = DataType(_BINARY, 0)
+    # Categorical with no dictionary yet: a cast target or schema entry.
+    comptime CATEGORICAL = DataType(_CATEGORICAL, 0)
+
+    @staticmethod
+    def categorical(var dictionary: CategoricalDictionary) -> DataType:
+        """A categorical whose codes index `dictionary`."""
+        var dtype = DataType(_CATEGORICAL, 0)
+        dtype._dictionary = ArcPointer(dictionary^)
+        return dtype^
+
+    def is_categorical(self) -> Bool:
+        return self._code == _CATEGORICAL
+
+    def has_dictionary(self) -> Bool:
+        return Bool(self._dictionary)
+
+    def dictionary(self) -> ArcPointer[CategoricalDictionary]:
+        """The dictionary of a categorical that has one (check first)."""
+        return self._dictionary.value()
+
     comptime DATE = DataType(_DATE, 0)
     comptime TIME = DataType(_TIME, 0)
     comptime INT8 = DataType(DType.int8)
@@ -317,6 +399,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return DataType.STRING
         if name == "binary":
             return DataType.BINARY
+        if name == "categorical" or name == "cat":
+            return DataType.CATEGORICAL
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if name == String(D):
@@ -373,6 +457,20 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             or self._storage != other._storage
         ):
             return False
+        if self._code == _CATEGORICAL:
+            # A categorical without a dictionary (a cast target or schema
+            # entry) matches any; two dictionaries must hold the same
+            # values in the same order, so that codes mean the same.
+            if not self._dictionary or not other._dictionary:
+                return True
+            if (
+                self._dictionary.value().ptr()
+                == other._dictionary.value().ptr()
+            ):
+                return True
+            return self._dictionary.value()[].same_values(
+                other._dictionary.value()[]
+            )
         if not self._nested and not other._nested:
             return True
         if not self._nested or not other._nested:
@@ -390,6 +488,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return "bool"
         if self._code == _BINARY:
             return "binary"
+        if self._code == _CATEGORICAL:
+            return "categorical"
         if self._code == _DATE:
             return "date"
         if self._code == _TIME:
@@ -443,6 +543,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return "bool"
         if self._code == _STRING:
             return "str"
+        if self._code == _CATEGORICAL:
+            return "cat"
         if self._code == _LIST:
             try:
                 return "list[" + self.inner().short_name() + "]"
@@ -498,6 +600,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return DataType.INT64
         if self._code == _BINARY:
             return DataType.STRING
+        if self._code == _CATEGORICAL:
+            return DataType.of(DType.uint32)
         if self.is_decimal():
             return DataType.of(DType.int128)
         return self

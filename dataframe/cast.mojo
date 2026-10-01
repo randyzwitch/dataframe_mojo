@@ -21,6 +21,7 @@ from .decimal import (
 )
 from .series import Series
 from .parallel import Job, configured_workers, run_jobs
+from .categorical import decode, encode, recode
 from .temporal_kernels import cast_temporal
 
 
@@ -367,6 +368,24 @@ def cast_series(
             + ": list and struct casts are not supported yet"
         )
     var source = _dtype(input)
+    if source.is_categorical() or target.is_categorical():
+        # Categoricals convert through their values (#106): decode, cast
+        # the strings, and encode when the target is categorical.
+        if source.is_categorical() and target.is_categorical():
+            if not target.has_dictionary() or source == target:
+                return input.copy()
+            return recode(input, target)
+        if source.is_categorical():
+            return cast_series(decode(input), target, strict, offset, mask)
+        var strings = (
+            input.copy() if source.physical()
+            == DataType.STRING else cast_series(
+                input, DataType.STRING, strict, offset, mask
+            )
+        )
+        if target.has_dictionary():
+            return recode(strings, target)
+        return encode(strings)
     if source == target:
         return input.copy()
     if source.is_binary() or target.is_binary():

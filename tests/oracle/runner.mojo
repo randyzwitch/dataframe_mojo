@@ -78,6 +78,44 @@ def run(
     var op = spec[0]
     if op == "tz":
         return time_zone_case(left, spec)
+    if op == "cat":
+        # k as a categorical (#106); results are compared with the strings'.
+        var cats = left.with_columns([col("k").cast("categorical")])
+        var sub = spec[1]
+        if sub == "group":
+            var c = col("n")
+            var e = c.sum()
+            if spec[2] == "count":
+                e = c.count()
+            elif spec[2] == "n_unique":
+                e = c.n_unique()
+            elif spec[2] == "first":
+                e = c.first()
+            elif spec[2] == "max":
+                e = c.max()
+            return cats.group_by("k", maintain_order=True).agg([e.alias("out")])
+        if sub == "join":
+            var other = (
+                right.with_columns([col("k").cast("categorical")]) if spec[3]
+                == "both" else right.copy()
+            )
+            return cats.join(other, "k", spec[2])
+        if sub == "unique":
+            return cats.unique(["k"], keep="first", maintain_order=True)
+        if sub == "sort":
+            return cats.sort(
+                ["k", "n"],
+                descending=[spec[2] == "1", False],
+                nulls_last=[True, True],
+            )
+        if sub == "filter":
+            return cats.filter(col("k") == lit(spec[2]))
+        var counts = cats.group_by("k").len("count")
+        return counts.sort(
+            ["count", "k"],
+            descending=[True, False],
+            nulls_last=[True, True],
+        )
     if op == "rank":
         var c = col(spec[3])
         if spec[3] == "xn":
