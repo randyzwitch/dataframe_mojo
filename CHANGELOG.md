@@ -85,6 +85,17 @@ breaking changes can happen in any release and are listed under **Breaking**.
   copying every byte: values of up to 12 bytes sit in the view, longer ones
   point into the shared buffer. A gathered column keeps its source's byte
   buffer alive, as Polars' does (#375).
+- `filter` copies fixed-width and Boolean columns straight from the mask's
+  64-bit words, copying all-true words in bulk and skipping empty ones,
+  instead of building a list of kept row numbers and gathering every column
+  from it. String and nested columns still use the row list (#376).
+- Comparing a string column with a literal (`==`, `!=`, `<`, `<=`, `>`,
+  `>=`, either side) runs on every worker over the raw bytes and writes the
+  result bitmap directly, instead of building a string slice per row on one
+  thread. `is_in` over string literals is one operation that compares each
+  row once (a hash table for more than eight values) instead of a chain of
+  `==`, `fill_null` and `|` per value; other `is_in` values work as before
+  (#373).
 - Joins concatenate their workers' matched rows on every worker instead of
   appending them one at a time on one thread, probe each chunk of a Parquet
   key in place instead of copying it into one buffer, and hand their row

@@ -1159,6 +1159,7 @@ def _row_wise(op: Int) -> Bool:
         or op == LIT_NULL
         or is_binary(op)
         or is_unary(op)
+        or is_string_op(op)
         or op == WHEN
         or op == CUT
         or is_dt_op(op)

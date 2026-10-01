@@ -87,6 +87,9 @@ comptime STR_REVERSE = 77
 comptime STR_PAD = 78
 # Cast: text holds the target dtype, integer is 1 for strict.
 comptime CAST = 79
+# `is_in` over string literals, one string op: text holds the values, each
+# as its byte length, ':' and its bytes (string_predicates.decode_values).
+comptime STR_IS_IN = 170
 
 # Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
 comptime MIN = 80
@@ -220,7 +223,7 @@ def is_comparison(op: Int) -> Bool:
 
 
 def is_string_op(op: Int) -> Bool:
-    return op >= STR_LEN_CHARS and op <= STR_PAD
+    return (op >= STR_LEN_CHARS and op <= STR_PAD) or op == STR_IS_IN
 
 
 def is_dt_op(op: Int) -> Bool:
@@ -583,6 +586,24 @@ struct Expr(Copyable):
 
         A null in `values` never matches. An empty list yields false.
         """
+        # String literals are one node that hashes or compares each row
+        # once (#373); other values compare one at a time.
+        var strings = String()
+        var only_strings = True
+        var any_string = False
+        for value in values:
+            if len(value._nodes) != 1:
+                only_strings = False
+                break
+            ref node = value._nodes[0]
+            if node.op == LIT_STRING:
+                strings += String(node.text.byte_length()) + ":" + node.text
+                any_string = True
+            elif node.op != LIT_NULL:
+                only_strings = False
+                break
+        if only_strings and any_string:
+            return self.str()._op(STR_IS_IN, strings)
         var found = lit(False)
         for value in values:
             found = found._binary(

@@ -29,7 +29,7 @@ from .parallel import Job, Pool, configured_workers
 from .partition import _combine, _hash_bytes, _mix
 from .series import Series
 from .string_column import StringColumn
-from .string_view import StringViewStorage
+from .string_bytes import _Bytes, _same_bytes
 
 # Rows per partition to aim for: a table of twice that many 16-byte keys and
 # 8-byte hashes stays within a core's L2.
@@ -61,74 +61,6 @@ struct _Piece(ImplicitlyCopyable, Movable):
         self.base = base
         self.first = first
         self.last = last
-
-
-@always_inline
-def _same_bytes(
-    a: Span[UInt8, ImmutAnyOrigin], b: Span[UInt8, ImmutAnyOrigin]
-) -> Bool:
-    """Byte equality eight bytes at a time; Span's == checks the bounds of
-    each byte, which was most of a string count."""
-    var n = len(a)
-    if n != len(b):
-        return False
-    var x = a.unsafe_ptr()
-    var y = b.unsafe_ptr()
-    var i = 0
-    while i + 8 <= n:
-        if (
-            x.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
-            != y.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
-        ):
-            return False
-        i += 8
-    while i < n:
-        if x.unsafe_offset(i)[] != y.unsafe_offset(i)[]:
-            return False
-        i += 1
-    return True
-
-
-struct _Bytes(Copyable, Movable):
-    """Row bytes of one string chunk, read from its buffers directly: the
-    column's own accessor re-checks its storage kind and copies the view
-    storage handle, whose reference count every worker shares, per row."""
-
-    var column: StringColumn
-    var storage: List[StringViewStorage]
-    var offsets: Int
-    var data: Int
-
-    def __init__(out self, column: StringColumn):
-        self.column = column.copy()
-        self.storage = List[StringViewStorage]()
-        self.offsets = 0
-        self.data = 0
-        if column._is_view_storage():
-            self.storage.append(column._view_storage_unchecked())
-        else:
-            self.offsets = Int(column.unsafe_offsets()) + 8 * column._offset
-            self.data = Int(column.unsafe_bytes())
-
-    @always_inline
-    def get(self, i: Int) -> Span[UInt8, ImmutAnyOrigin]:
-        if len(self.storage) > 0:
-            return (
-                self.storage[0]
-                ._get_unchecked(self.column._offset + i)
-                .as_bytes()
-            )
-        var offsets = Pointer[Int64, ImmutAnyOrigin](
-            unsafe_from_address=self.offsets
-        )
-        var start = Int(offsets.unsafe_offset(i)[])
-        var end = Int(offsets.unsafe_offset(i + 1)[])
-        return Span[UInt8, ImmutAnyOrigin](
-            unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
-                unsafe_from_address=self.data + start
-            ),
-            length=end - start,
-        )
 
 
 @always_inline

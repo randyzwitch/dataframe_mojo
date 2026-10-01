@@ -12,6 +12,7 @@ from .decimal import (
 )
 from .string_column import StringColumn, StringBuilder
 from .series import Series
+from .string_predicates import compare_with_literal
 from .expr import (
     ADD,
     SUB,
@@ -497,6 +498,11 @@ def _compare_strings[
     op: Int
 ](left: StringColumn, right: StringColumn) raises -> Series:
     """Byte-wise comparison of borrowed UTF-8 rows (code point order)."""
+    # A column against a literal runs on every worker over raw bytes (#373).
+    if len(right) == 1 and len(left) != 1 and right._valid(0):
+        return compare_with_literal(left, op, right._get(0), False)
+    if len(left) == 1 and len(right) != 1 and left._valid(0):
+        return compare_with_literal(right, op, left._get(0), True)
     var n = _length(len(left), len(right))
     var values = List[Bool](length=n, fill=False)
     var valid = List[Bool](length=n, fill=False)

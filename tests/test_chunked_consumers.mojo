@@ -275,7 +275,10 @@ def test_large_chunked_filter_with_misaligned_columns_and_null_mask() raises:
     var mask = Column[Bool](chosen^, valid^)
     var actual = parts.filter(mask)
     assert_same(actual, whole.filter(mask), "large chunked filter")
-    assert_true(actual.column("id").is_chunked())
+    # Fixed-width columns are filtered from the mask into one array (#376);
+    # strings still gather chunk by chunk and keep their arrays.
+    assert_true(not actual.column("id").is_chunked())
+    assert_true(actual.column("label").is_chunked())
     var reject_all = Column[Bool](List[Bool](length=1024, fill=False))
     assert_same(
         parts.filter(reject_all), whole.filter(reject_all), "empty filter"

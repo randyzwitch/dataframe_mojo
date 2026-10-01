@@ -57,6 +57,7 @@ from .binding import bind, BoundExpr, ROWS, AGGREGATE
 from .execution import evaluate, _ReduceJob
 from .aggregate import Reducer
 from .sampling import sample_size, sample_indices
+from .mask_filter import filter_columns
 from .gather import (
     SORTED_GATHER_MIN_CHUNKS,
     take_parallel,
@@ -736,10 +737,37 @@ struct DataFrame(Copyable, Sized, Writable):
         return self.filter(BoolColumn(mask))
 
     def filter(self, mask: BoolColumn) raises -> Self:
-        """Keep true rows, dropping false and null mask entries, in input order."""
+        """Keep true rows, dropping false and null mask entries, in input order.
+
+        Fixed-width and Boolean columns are filtered from the mask's words
+        directly (#376); string and nested columns from a list of rows.
+        """
         if len(mask) != self._height:
             raise Error("Filter mask must match dataframe height")
-        return self._filter_rows(true_rows(mask))
+        var filtered = filter_columns(self._columns, mask)
+        ref others = filtered[1]
+        var count = filtered[2]
+        var rest = List[Series]()
+        if len(others) > 0:
+            var subset = List[Series](capacity=len(others))
+            for i in others:
+                subset.append(self._columns[i].copy())
+            rest = (
+                Self(subset^, height=self._height)
+                ._filter_rows(true_rows(mask))
+                ._columns.copy()
+            )
+        var columns = List[Series](capacity=self.width())
+        var next_fixed = 0
+        var next_other = 0
+        for i in range(self.width()):
+            if next_other < len(others) and others[next_other] == i:
+                columns.append(rest[next_other].copy())
+                next_other += 1
+            else:
+                columns.append(filtered[0][next_fixed].copy())
+                next_fixed += 1
+        return Self(columns^, height=count)
 
     def explode(self, column: String) raises -> Self:
         return self.explode([column])
