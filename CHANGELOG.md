@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Parallel steps run on one set of worker threads kept for the life of the
+  process instead of creating threads for every step: an empty 8-job round
+  costs 4 µs instead of 276 µs, and short queries are up to 2.8 times faster
+  (ClickBench q0 0.5 → 0.2 ms). The threads are joined when the Mojo runtime
+  shuts down, which also works under `mojo run` (#372).
 - Joins concatenate their workers' matched rows on every worker instead of
   appending them one at a time on one thread, probe each chunk of a Parquet
   key in place instead of copying it into one buffer, and hand their row

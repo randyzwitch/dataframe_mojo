@@ -1,16 +1,23 @@
-"""A scoped worker pool: same results as run_jobs, and no threads at exit.
+"""Worker pools: same results as run_jobs, and no crash at exit.
 
 The exit behaviour is the point of the design. PR #114 kept a process-wide
 pool whose workers were never joined, and the process crashed on the way out
-about one run in three under `mojo run`, after every test had passed. So the
-last test here runs many pools back to back and the suite's own clean exit is
-the check -- a leaked worker would take the process down with it.
+about one run in three under `mojo run`, after every test had passed. The
+process-wide threads of #372 are joined by the Mojo runtime's shutdown hook
+instead, so this suite's own clean exit, after many pools and nested
+rounds, is the check -- a leaked worker would take the process down with it.
 """
 from std.ffi import external_call
 from std.sys import num_physical_cores
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 
-from dataframe.parallel import Job, Pool, configured_workers, _ProducedJobs
+from dataframe.parallel import (
+    Job,
+    Pool,
+    configured_workers,
+    run_jobs,
+    _ProducedJobs,
+)
 
 
 def c_string(text: String) -> List[UInt8]:
@@ -264,6 +271,59 @@ def test_oversubscribed_parked_pool_reuses_rounds_and_propagates_errors() raises
     pool.run(final)
     assert_equal(final[0].output, 49)
     pool.release()
+
+
+struct Nested(Job):
+    """A job that runs a parallel step of its own, as a lazy batch does."""
+
+    var input: Int
+    var output: Int
+
+    def __init__(out self, input: Int):
+        self.input = input
+        self.output = -1
+
+    def run(mut self) raises:
+        var inner = List[Square]()
+        for i in range(6):
+            inner.append(Square(self.input + i))
+        run_jobs(inner)
+        var total = 0
+        for i in range(len(inner)):
+            total += inner[i].output
+        self.output = total
+
+
+def test_nested_rounds_start_their_own_threads() raises:
+    # The outer round leases the process-wide threads; each job's inner
+    # round finds them busy and must not wait for them.
+    set_threads(8)
+    var jobs = List[Nested]()
+    for i in range(12):
+        jobs.append(Nested(i))
+    run_jobs(jobs)
+    for i in range(12):
+        var expected = 0
+        for k in range(6):
+            expected += (i + k) * (i + k)
+        assert_equal(jobs[i].output, expected, "job " + String(i))
+
+
+def test_leased_pool_keeps_its_own_limit() raises:
+    set_threads(8)
+    var large = Pool(8)
+    assert_equal(large.workers(), 7)
+    large.release()
+    # The shared threads are still 7; a smaller lease must use only 2.
+    var small = Pool(3)
+    assert_equal(small.workers(), 2)
+    var jobs = List[Square]()
+    for i in range(10):
+        jobs.append(Square(i))
+    small.run(jobs, claim=True)
+    for i in range(10):
+        assert_equal(jobs[i].output, i * i)
+    small.release()
 
 
 def main() raises:

@@ -15,24 +15,30 @@ their reference counts are atomic and they are never mutated while shared.
 else the physical core count, capped so each worker gets at least
 `MIN_ROWS_PER_WORKER` rows (small inputs stay single-threaded).
 
-An algorithm that runs several rounds of jobs -- a sort's run pass and then
-its merge rounds -- would pay that creation cost once per round. `Pool`
-creates the threads once and wakes them for each round instead, which is
-about twenty times cheaper per round. Its workers are **joined when the
-pool is released**, which is the whole design: a pool that outlives the
-work, holding threads parked until the process exits, crashes on the way
-out. Under `mojo run` the JIT frees the compiled code while those threads
-are still parked in it -- reproducibly, about one run in three -- and there
-is no point at which Mojo code can run at process exit to join them first
-(`atexit` is not a dynamic symbol under glibc, and a `__cxa_atexit` handler
-crashes under the JIT even with no threads involved). So a pool is scoped
-to the operation that creates it and never becomes process-wide. See #103.
+Creating threads per round costs more than most rounds' work, so `Pool`
+keeps them: one set of threads for the whole process, started by the first
+parallel step and woken for each round, which is about twenty times cheaper
+per round (#103, #372). `run_jobs` and every operation's `Pool` lease those
+threads; a pool asked for while they are leased (a job that runs a
+parallel step itself, or two operations at once on different threads)
+starts and joins threads of its own instead.
+
+Threads still parked at process exit used to crash under `mojo run`, where
+the JIT frees the compiled code they are parked in, and no `atexit`-style
+hook was usable. The process-wide threads are therefore registered as a
+Mojo runtime global (`_get_global`), whose destroy function joins them when
+the runtime shuts down, before the JIT code is freed.
 """
 from std.atomic import Atomic
-from std.ffi import external_call
+from std.ffi import _get_global, external_call
 from std.memory import Pointer
 from std.os import getenv
-from std.sys import CompilationTarget, num_physical_cores, size_of
+from std.sys import (
+    CompilationTarget,
+    llvm_intrinsic,
+    num_physical_cores,
+    size_of,
+)
 
 # Threadripper 3970X and M1, 4/8/16-worker sweeps: 16k helps 100k-row
 # expressions on M1 but makes cheap counts 5-7x slower and oversubscribed
@@ -53,9 +59,19 @@ comptime _SYNC_BYTES = 128
 # worker that spins first catches the next round without a park/wake pair
 # at all, and the same round costs 11.3 ms. Measured knee: 200,000 is too
 # short (21 ms), 1,000,000 is enough, and beyond that nothing improves.
-# A pool is scoped to one operation, so this only ever burns a core during
-# that operation's own serial gaps, and never while the process is idle.
+# After that the worker parks, so an idle process uses no CPU.
+#
+# Each spin pauses the core (`_cpu_relax`): with the process-wide threads
+# of #372, workers spin through the caller's serial work between rounds,
+# and without the hint a spinning hyperthread slows its sibling. ClickBench
+# q14 at 10M rows: 581 ms without the hint, 502 ms with it (main: 536 ms).
+# With the pause, 2,000,000 spins last about 30 ms on a Threadripper 3970X;
+# shorter limits lost to parking and waking (200,000: 563 ms; 50,000: 605
+# ms on the same query).
 comptime _SPIN_LIMIT = 2_000_000
+
+# The most participants one `run_jobs` round uses; more jobs are claimed.
+comptime _MAX_PARTICIPANTS = 64
 
 
 def _read_performance_core_count(
@@ -93,6 +109,16 @@ def _pool_spin_limit(participants: Int) -> Int:
     # Four workers still benefit from spinning (3.7 -> 3.1 ms).
     # Threadripper and M1 sweeps: docs/worker-calibration.md (#273).
     return 0 if participants > cores else _SPIN_LIMIT
+
+
+@always_inline
+def _cpu_relax():
+    """Tell the core this thread is spinning (x86 `pause`, Arm `yield`), so
+    a busy hyperthread sibling gets its execution units back (#372)."""
+    comptime if CompilationTarget.is_x86():
+        llvm_intrinsic["llvm.x86.sse2.pause", NoneType]()
+    elif CompilationTarget.is_arm():
+        llvm_intrinsic["llvm.aarch64.hint", NoneType](Int32(1))
 
 
 trait Job(Deinitable, Movable):
@@ -179,6 +205,10 @@ struct _Shared(Movable):
     var closed: Atomic[Int64]
     # Set once, at release, to let parked workers return instead of waiting.
     var stopping: Atomic[Int64]
+    # Participants in the current round, the caller included. A pool leased
+    # from the process-wide one (see `Pool`) may have more threads than the
+    # round asked for; workers past this many skip the round.
+    var active: Atomic[Int64]
     var threads: Int
     var spin_limit: Int
 
@@ -194,6 +224,7 @@ struct _Shared(Movable):
         self.mode = Atomic[Int64](0)
         self.closed = Atomic[Int64](0)
         self.stopping = Atomic[Int64](0)
+        self.active = Atomic[Int64](0)
         self.threads = 0
         self.spin_limit = _SPIN_LIMIT
 
@@ -294,6 +325,7 @@ def _worker(argument: Int) abi("C") -> Int:
             and shared.generation.load() == seen
             and shared.stopping.load() == 0
         ):
+            _cpu_relax()
             spins += 1
         if shared.generation.load() == seen and shared.stopping.load() == 0:
             _ = external_call["pthread_mutex_lock", Int32](shared._mutex())
@@ -307,12 +339,14 @@ def _worker(argument: Int) abi("C") -> Int:
         if shared.stopping.load() != 0:
             return 0
         seen = shared.generation.load()
-        if shared.mode.load() == 1:
-            shared._run_claim()
-        elif shared.mode.load() == 2:
-            shared._run_produced()
-        else:
-            shared._run_share(index, shared.threads + 1)
+        var active = Int(shared.active.load())
+        if index < active - 1:
+            if shared.mode.load() == 1:
+                shared._run_claim()
+            elif shared.mode.load() == 2:
+                shared._run_produced()
+            else:
+                shared._run_share(index, active)
         _ = shared.arrived.fetch_add(1)
 
 
@@ -345,7 +379,7 @@ struct _ProducedJobs[J: Job](Movable):
             unsafe_from_address=self.address
         )[]
 
-    def _begin(mut self, address: Int):
+    def _begin(mut self, address: Int, active: Int):
         self.address = address
         self.started = address != 0
         if not self.started:
@@ -358,6 +392,7 @@ struct _ProducedJobs[J: Job](Movable):
         shared.done.store(0)
         shared.arrived.store(0)
         shared.closed.store(0)
+        shared.active.store(Int64(active))
         shared.mode.store(2)
         _ = shared.generation.fetch_add(1)
         _ = external_call["pthread_cond_broadcast", Int32](shared._cond())
@@ -428,12 +463,16 @@ struct _ProducedJobs[J: Job](Movable):
 
 
 struct Pool(Movable):
-    """Worker threads reused across rounds, for the life of one operation.
+    """Worker threads for rounds of jobs, at most `workers` per round.
 
-    Create one where several rounds of jobs are about to run, call `run` per
-    round, and `release` when done -- which joins every worker. Nothing may
-    outlive `release`, so a pool must not be stored anywhere that survives
-    the call that made it; see the module docstring for why.
+    A pool normally leases the process-wide threads (#372): the first pool
+    starts them, later pools reuse them, and `release` hands them back
+    without joining. If they are already leased -- a job of one round that
+    runs a parallel step itself, or two threads running operations at once
+    -- the pool starts threads of its own and joins them on `release`, as
+    every pool did before. The process-wide threads are joined when the
+    Mojo runtime shuts down (`_destroy_global_pool`), which also happens
+    under `mojo run` before the JIT frees the code they are parked in.
     """
 
     var address: Int
@@ -442,14 +481,33 @@ struct Pool(Movable):
     # (shared address, participant index) pairs, one per worker, on the C
     # heap so a worker's argument stays valid however the pool is moved.
     var _args: Int
+    # Most participants in one round, the caller included.
+    var _limit: Int
+    # Whether `address` is the process-wide pool's, to hand back on release.
+    var _lease: Bool
 
-    def __init__(out self, workers: Int):
-        """Start `workers` - 1 threads; the caller is the remaining worker."""
+    def __init__(out self, workers: Int, *, own: Bool = False):
+        """Up to `workers` - 1 threads beside the caller: the process-wide
+        ones when free, or new threads (always, with `own`)."""
         self.address = 0
         self._ids = List[UInt64]()
         self._args = 0
+        self._limit = max(1, workers)
+        self._lease = False
         if workers <= 1:
             return
+        if not own:
+            ref shared_pool = _global_pool()
+            var expected = Int64(0)
+            if shared_pool.busy.compare_exchange(expected, Int64(1)):
+                if shared_pool.pool.workers() < workers - 1:
+                    shared_pool.pool.release()
+                    shared_pool.pool = Pool(workers, own=True)
+                if shared_pool.pool.address != 0:
+                    self.address = shared_pool.pool.address
+                    self._lease = True
+                    return
+                shared_pool.busy.store(0)
         var address = external_call["malloc", Int](size_of[_Shared]())
         if address == 0:
             return
@@ -464,6 +522,7 @@ struct Pool(Movable):
         pointer.unsafe_write(_Shared())
         ref shared = pointer[]
         shared.spin_limit = _pool_spin_limit(workers)
+
         _ = external_call["pthread_mutex_init", Int32](shared._mutex(), 0)
         _ = external_call["pthread_cond_init", Int32](shared._cond(), 0)
         var entry: _Entry = _worker
@@ -494,16 +553,21 @@ struct Pool(Movable):
         self._ids = threads^
 
     def workers(self) -> Int:
-        """Threads started, not counting the caller."""
+        """Threads a round can use, not counting the caller."""
         if self.address == 0:
             return 0
-        return Pointer[_Shared, MutAnyOrigin](
-            unsafe_from_address=self.address
-        )[].threads
+        return min(
+            self._limit - 1,
+            Pointer[_Shared, MutAnyOrigin](
+                unsafe_from_address=self.address
+            )[].threads,
+        )
 
     def run_produced[J: Job](mut self, mut jobs: _ProducedJobs[J]):
         """Start a produced round; call `submit` while discovering work."""
-        jobs._begin(self.address if self.workers() > 0 else 0)
+        jobs._begin(
+            self.address if self.workers() > 0 else 0, self.workers() + 1
+        )
 
     def run[J: Job](mut self, mut jobs: List[J], *, claim: Bool = False) raises:
         """Run one round of jobs, returning them with their results.
@@ -532,6 +596,9 @@ struct Pool(Movable):
             var tasks = List[_Task](capacity=len(slots))
             for t in range(len(slots)):
                 tasks.append(_Task(entry_address, Int(Pointer(to=slots[t]))))
+            # Never more participants than tasks: the rest would only wake.
+            var active = min(self.workers() + 1, len(slots))
+            shared.active.store(Int64(active))
             shared.tasks.store(Int64(Int(Pointer(to=tasks))))
             shared.count.store(Int64(len(tasks)))
             shared.next.store(0)
@@ -546,9 +613,8 @@ struct Pool(Movable):
             if claim:
                 shared._run_claim()
             else:
-                # The caller takes the last share, as run_jobs has it run the
-                # last job itself.
-                shared._run_share(shared.threads, shared.threads + 1)
+                # The caller takes the last share.
+                shared._run_share(active - 1, active)
             while shared.done.load() < Int64(len(tasks)):
                 _ = external_call["sched_yield", Int32]()
             while shared.arrived.load() < Int64(shared.threads):
@@ -576,6 +642,11 @@ struct Pool(Movable):
         """
         if self.address == 0:
             return
+        if self._lease:
+            self.address = 0
+            self._lease = False
+            _global_pool().busy.store(0)
+            return
         ref shared = Pointer[_Shared, MutAnyOrigin](
             unsafe_from_address=self.address
         )[]
@@ -599,42 +670,64 @@ struct Pool(Movable):
         self.release()
 
 
+struct _GlobalPool(Movable):
+    """The process-wide pool and whether a `Pool` currently leases it."""
+
+    var busy: Atomic[Int64]
+    var pool: Pool
+
+    def __init__(out self):
+        self.busy = Atomic[Int64](0)
+        self.pool = Pool(1, own=True)
+
+
+comptime _GlobalAddress = Optional[Pointer[NoneType, MutUntrackedOrigin]]
+
+
+def _init_global_pool() -> _GlobalAddress:
+    var address = external_call["malloc", Int](size_of[_GlobalPool]())
+    Pointer[_GlobalPool, MutAnyOrigin](
+        unsafe_from_address=address
+    ).unsafe_write(_GlobalPool())
+    return _GlobalAddress(
+        Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+    )
+
+
+def _destroy_global_pool(address: _GlobalAddress):
+    """Join the process-wide threads; the runtime calls this at shutdown."""
+    if not address:
+        return
+    Pointer[_GlobalPool, MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[].pool.release()
+
+
+def _global_pool() -> ref[MutAnyOrigin] _GlobalPool:
+    var address = _get_global[
+        "dataframe_mojo.parallel.pool", _init_global_pool, _destroy_global_pool
+    ]()
+    return Pointer[_GlobalPool, MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
 def run_jobs[J: Job](mut jobs: List[J]) raises:
-    """Run each job on its own thread and return them with their results."""
+    """Run the jobs in parallel and return them, in order, with their
+    results; the first error in job order is re-raised.
+
+    As when each job had a thread of its own, every job (up to
+    `_MAX_PARTICIPANTS`) runs at once, now on the process-wide threads.
+    Callers that cut work into more jobs than `configured_workers()` (the
+    partitioned group-by makes twice as many hash buckets) therefore still
+    use more threads than that; capping them at the configured count made
+    10M-row group-bys 1.2-1.4 times slower (#372).
+    """
     if len(jobs) == 0:
         return
-    var slots = List[_Slot[J]](capacity=len(jobs))
-    while len(jobs) > 0:
-        slots.append(_Slot[J](jobs.pop(0)))
-    var entry: _Entry = _entry[J]
-    var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
-    var spawned = len(slots) - 1
-    var threads = List[UInt64](length=spawned, fill=0)
-    var started = 0
-    var spawn_error = String()
-    for t in range(spawned):
-        var rc = external_call["pthread_create", Int32](
-            Int(threads.unsafe_ptr()) + 8 * t,
-            0,
-            entry_address,
-            Int(Pointer(to=slots[t])),
-        )
-        if rc != 0:
-            spawn_error = "pthread_create failed with code " + String(rc)
-            break
-        started += 1
-    # The caller does the last job itself (or every unstarted job on error).
-    for t in range(started, len(slots)):
-        slots[t].run()
-    for t in range(started):
-        _ = external_call["pthread_join", Int32](threads[t], 0)
-    if spawn_error:
-        raise Error(spawn_error)
-    for t in range(len(slots)):
-        if slots[t].failed:
-            raise Error(slots[t].message)
-    while len(slots) > 0:
-        jobs.append(slots.pop(0).into_job())
+    var pool = Pool(min(len(jobs), _MAX_PARTICIPANTS))
+    pool.run(jobs, claim=len(jobs) > pool.workers() + 1)
+    pool.release()
 
 
 def configured_workers() -> Int:

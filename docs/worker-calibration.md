@@ -62,6 +62,27 @@ The exact production-policy comparison on M1 is:
 | 16 | 100k | 2 | 26.55 | 3.15 |
 | 16 | 1M | 2 | 67.37 | 46.91 |
 
+### One process-wide set of worker threads (#372)
+
+`run_jobs` used to create and join one thread per job on every call, and
+each operation's `Pool` started its own threads. Both now lease one set of
+threads kept for the life of the process (registered with the Mojo
+runtime, which joins them at shutdown). Threadripper 3970X, 8 threads:
+
+| Measurement | Before | After |
+|---|---:|---:|
+| `run_jobs` round of 8 empty jobs | 276 µs | 4 µs |
+| Sort of 1M Float64, best of 25 | 26.3–26.5 ms | 25.5–27.2 ms |
+
+A round uses at most as many threads as it has jobs (or the pool's limit).
+`run_jobs` still runs every job at once, up to 64, as when each job had its
+own thread: steps that cut work into more jobs than `DATAFRAME_THREADS`
+(the partitioned group-by makes twice as many hash buckets as workers) use
+more threads than configured. Capping `run_jobs` at the configured count
+made 10M-row H2O group-bys 1.2-1.4 times slower, so that is left to a
+separate change. A pool requested while the shared threads are leased -- a
+job that runs a parallel step itself -- starts its own threads as before.
+
 ### Bound builders and gather partitions by cores
 
 The bounded-index cap remains 16, additionally limited by physical cores and
