@@ -12,7 +12,13 @@ Internal kernels read rows as borrowed `StringSlice`s via `_get`; public
 accessors return owned `String`s.
 """
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
-from .string_view import StringViewStorage
+from .string_view import (
+    StringView,
+    StringViewStorage,
+    _external_view,
+    _inline_view,
+    STRING_VIEW_INLINE_BYTES,
+)
 from .column import (
     Column,
     _append_bits,
@@ -301,7 +307,7 @@ struct StringColumn(Copyable, Sized):
                 indices, self._offset
             )
             return Self(gathered^)
-        return self._gather_offsets(indices, 0, len(indices), False)
+        return self._gather_views(indices, 0, len(indices), False)
 
     def take_or_null(self, indices: List[Int], fill: String) raises -> Self:
         """Gather rows, treating only -1 as a missing row (for outer joins)."""
@@ -313,7 +319,7 @@ struct StringColumn(Copyable, Sized):
                 indices, self._offset, allow_missing=True
             )
             return Self(gathered^)
-        return self._gather_offsets(indices, 0, len(indices), True)
+        return self._gather_views(indices, 0, len(indices), True)
 
     def _gather_offsets(
         self,
@@ -407,6 +413,73 @@ struct StringColumn(Copyable, Sized):
                     bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
         return Self(bytes=bytes^, offsets=offsets^, bits=bits^, length=n)
 
+    def _gather_views(
+        self,
+        indices: List[Int],
+        first: Int,
+        last: Int,
+        allow_missing: Bool,
+        base: Int = 0,
+    ) raises -> Self:
+        """Rows indices[first:last] of offset storage as views (#375).
+
+        Each output row is a 16-byte view: a value of up to 12 bytes inline,
+        a longer one as its length, first four bytes and position in this
+        column's byte buffer, which the result shares instead of copying.
+        This is how Polars gathers strings (`take_binview_unchecked`, which
+        clones the data buffers). A buffer too large for a view's 32-bit
+        offsets is copied as before (`_gather_offsets`). Arguments are as in
+        `_gather_offsets`.
+        """
+        if len(self._bytes[]) > 4_294_967_295:
+            return self._gather_offsets(
+                indices, first, last, allow_missing, base
+            )
+        var n = last - first
+        var rows = indices.unsafe_ptr().unsafe_offset(first)
+        var source = self._offsets[].unsafe_ptr().unsafe_offset(self._offset)
+        var data = self._base()
+        var views = List[StringView](capacity=n)
+        var total = 0
+        var missing = False
+        for k in range(n):
+            var row = rows.unsafe_offset(k)[]
+            if row != -1:
+                row -= base
+            if row == -1 and allow_missing:
+                missing = True
+                views.append(StringView(0, 0, 0, 0))
+                continue
+            if row < 0 or row >= self._length:
+                raise Error("Column index out of bounds")
+            var start = Int(source.unsafe_offset(row)[])
+            var length = Int(source.unsafe_offset(row + 1)[]) - start
+            total += length
+            var bytes = Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=data.unsafe_offset(start), length=length
+            )
+            if length <= STRING_VIEW_INLINE_BYTES:
+                views.append(_inline_view(bytes))
+            else:
+                views.append(_external_view(bytes, 0, UInt32(start)))
+        var bits = List[UInt8]()
+        ref source_bits = self._bits[]
+        if missing or len(source_bits) > 0:
+            bits = List[UInt8](length=(n + 7) // 8, fill=0)
+            for at in range(n):
+                var row = rows.unsafe_offset(at)[]
+                if row != -1 and _validity_bit(
+                    source_bits, self._offset + row - base
+                ):
+                    bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
+        var buffers = List[ArcPointer[List[UInt8]]]()
+        buffers.append(self._bytes.copy())
+        return Self(
+            StringViewStorage(
+                views^, buffers^, bits^, n, total, len(self._bytes[])
+            )
+        )
+
     def _take_range(
         self,
         indices: List[Int],
@@ -420,7 +493,7 @@ struct StringColumn(Copyable, Sized):
                 indices, first, last, self._offset, allow_missing
             )
             return Self(gathered^)
-        return self._gather_offsets(indices, first, last, allow_missing)
+        return self._gather_views(indices, first, last, allow_missing)
 
     def slice(self, offset: Int, length: Int) raises -> Self:
         """A zero-copy window sharing this column's buffers."""

@@ -933,7 +933,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             if not strings._is_view_storage():
                 var result = Self(
                     self._name,
-                    strings._gather_offsets(indices, first, last, False, base),
+                    strings._gather_views(indices, first, last, False, base),
                 )
                 result._dtype = self._dtype
                 return result^

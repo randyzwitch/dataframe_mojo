@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Gathering string rows (`take`, and the gathers behind filters, joins and
+  sorts) returns 16-byte views into the source column's bytes instead of
+  copying every byte: values of up to 12 bytes sit in the view, longer ones
+  point into the shared buffer. A gathered column keeps its source's byte
+  buffer alive, as Polars' does (#375).
 - `filter` copies fixed-width and Boolean columns straight from the mask's
   64-bit words, copying all-true words in bulk and skipping empty ones,
   instead of building a list of kept row numbers and gathering every column
