@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Gathering string rows (`take`, and the gathers behind filters, joins and
+  sorts) returns 16-byte views into the source column's bytes instead of
+  copying every byte: values of up to 12 bytes sit in the view, longer ones
+  point into the shared buffer. A gathered column keeps its source's byte
+  buffer alive, as Polars' does (#375).
 - Joins concatenate their workers' matched rows on every worker instead of
   appending them one at a time on one thread, probe each chunk of a Parquet
   key in place instead of copying it into one buffer, and hand their row
