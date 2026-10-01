@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `filter` copies fixed-width and Boolean columns straight from the mask's
+  64-bit words, copying all-true words in bulk and skipping empty ones,
+  instead of building a list of kept row numbers and gathering every column
+  from it. String and nested columns still use the row list (#376).
 - Joins concatenate their workers' matched rows on every worker instead of
   appending them one at a time on one thread, probe each chunk of a Parquet
   key in place instead of copying it into one buffer, and hand their row
