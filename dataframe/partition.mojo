@@ -423,7 +423,8 @@ struct Partitioner(Movable):
             contiguous.append(key.rechunk() if key.is_chunked() else key.copy())
         self.rows = len(contiguous[0])
         self.keys = contiguous.copy()
-        self.hashes = List[UInt64](length=self.rows, fill=0)
+        # Every row's hash is written by exactly one _HashJob (#388).
+        self.hashes = List[UInt64](unsafe_uninit_length=self.rows)
         self.histogram = List[Int](length=_SLOTS, fill=0)
         self.worker_histograms = List[List[Int]](capacity=workers)
         var bounds = partitions(self.rows, workers, 64)
@@ -470,9 +471,11 @@ struct Partitioner(Movable):
             for s in range(_SLOTS):
                 counts[s >> fold] += self.worker_histograms[w][s]
             per_worker.append(counts^)
-        var order = List[Int](length=self.rows, fill=0)
+        # Both are permutations of every row, each slot written once by
+        # the scatter jobs, so neither is filled first (#388).
+        var order = List[Int](unsafe_uninit_length=self.rows)
         var ordered = List[UInt64](
-            length=self.rows if with_hashes else 0, fill=0
+            unsafe_uninit_length=self.rows if with_hashes else 0
         )
         var cursor = starts.copy()
         var jobs = List[_ScatterJob](capacity=workers)

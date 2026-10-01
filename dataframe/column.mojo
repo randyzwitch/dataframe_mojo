@@ -513,7 +513,9 @@ def gather_scalars[
     var rows = indices.unsafe_ptr().unsafe_offset(first)
     var limit = len(column)
     var missing = False
-    var values = List[Scalar[D]](length=n, fill=0)
+    # Every position is written below: copied rows by the run copies, and
+    # missing rows (-1) with an explicit zero, so nothing is filled first.
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
     var src = column._ptr()
     var dst = values.unsafe_ptr()
     var k = 0
@@ -525,6 +527,7 @@ def gather_scalars[
         if row < 0 or row >= limit:
             if row == -1 and allow_missing:
                 missing = True
+                dst.unsafe_offset(k)[] = 0
                 k += 1
                 continue
             raise Error("Column index out of bounds")
