@@ -107,6 +107,7 @@ from .expr import (
     STR_STARTS_WITH,
     STR_ENDS_WITH,
     STR_CONTAINS,
+    STR_IS_IN,
     STR_SLICE,
     STR_PAD,
     is_string_op,
@@ -1056,6 +1057,13 @@ def bind(
             if node.left < 0 or node.left >= i:
                 raise Error("Invalid string expression input")
             if types[node.left] != DataType.STRING:
+                # `is_in` with string values reads as `==` (#373).
+                if node.op == STR_IS_IN:
+                    raise Error(
+                        "eq requires matching dtypes, found "
+                        + types[node.left].name()
+                        + " and string; use typed literals"
+                    )
                 raise Error(
                     "str operations require a string expression, found "
                     + types[node.left].name()
@@ -1073,6 +1081,7 @@ def bind(
                 node.op == STR_STARTS_WITH
                 or node.op == STR_ENDS_WITH
                 or node.op == STR_CONTAINS
+                or node.op == STR_IS_IN
             ):
                 dtype = DataType.BOOL
             else:
