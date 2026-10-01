@@ -7,7 +7,8 @@ dictionary layout (`dictionary<uint32, large_utf8>`), so it exports and
 imports without conversion. Operations that only need equality (grouping,
 joins, unique, value counts) work on the codes as integers; sorting orders
 by the values through a rank per code; anything reading the text decodes
-it here.
+it here. A row-wise expression over a categorical alone runs once per
+dictionary value, and `gather` spreads its results over the rows by code.
 
 Two categoricals index the same values only if their dictionaries match.
 Joining or concatenating columns with different dictionaries first moves
@@ -16,10 +17,12 @@ are unchanged.
 """
 from std.collections import Dict
 
+from .bool_column import BoolColumn
 from .column import Column
-from .dtype import CategoricalDictionary, DataType
+from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
+from .gather import take_parallel
 from .hashing import encode_string_rows_parallel
-from .parallel import worker_count
+from .parallel import Job, run_jobs, worker_count
 from .series import Series
 from .string_column import StringBuilder, StringColumn
 
@@ -176,3 +179,166 @@ def sort_ranks(values: Series) raises -> Series:
         else:
             valid[i] = False
     return Series(values.name(), Column[UInt32](ranks^, valid))
+
+
+struct _GatherJob[D: DType, packed: Bool](Job):
+    """Rows [first, last) of a gather by code: each row takes its code's
+    entry of a small per-value table, or entry `null_index` when its code
+    is null. `first` is a multiple of 8, so every job writes whole bytes of
+    the validity bitmap, and of the values bitmap when `packed` (Booleans,
+    whose table holds 0 or 1)."""
+
+    var codes: Column[UInt32]
+    var nulls: Bool
+    var table: List[Scalar[Self.D]]
+    var table_valid: List[UInt8]
+    var null_index: Int
+    var values: Int
+    var bits: Int
+    var first: Int
+    var last: Int
+
+    def __init__(
+        out self,
+        codes: Column[UInt32],
+        nulls: Bool,
+        table: List[Scalar[Self.D]],
+        table_valid: List[UInt8],
+        values: Int,
+        bits: Int,
+        first: Int,
+        last: Int,
+    ):
+        self.codes = codes.copy()
+        self.nulls = nulls
+        self.table = table.copy()
+        self.table_valid = table_valid.copy()
+        self.null_index = len(table) - 1
+        self.values = values
+        self.bits = bits
+        self.first = first
+        self.last = last
+
+    def run(mut self) raises:
+        var codes = self.codes.unsafe_values()
+        var table = self.table.unsafe_ptr()
+        var table_valid = self.table_valid.unsafe_ptr()
+        var bits = Pointer[List[UInt8], MutAnyOrigin](
+            unsafe_from_address=self.bits
+        )[].unsafe_ptr()
+        var row = self.first
+        while row < self.last:
+            var end = min(row + 8, self.last)
+            var valid: UInt8 = 0
+            var packed_values: UInt8 = 0
+            for i in range(row, end):
+                var index = Int(codes.unsafe_offset(i)[])
+                if self.nulls and not self.codes._valid(i):
+                    index = self.null_index
+                var shift = UInt8(i - row)
+                valid |= table_valid.unsafe_offset(index)[] << shift
+                comptime if Self.packed:
+                    packed_values |= (
+                        rebind[UInt8](table.unsafe_offset(index)[]) << shift
+                    )
+                else:
+                    Pointer[List[Scalar[Self.D]], MutAnyOrigin](
+                        unsafe_from_address=self.values
+                    )[].unsafe_ptr().unsafe_offset(i)[] = table.unsafe_offset(
+                        index
+                    )[]
+            bits.unsafe_offset(row // 8)[] = valid
+            comptime if Self.packed:
+                Pointer[List[UInt8], MutAnyOrigin](
+                    unsafe_from_address=self.values
+                )[].unsafe_ptr().unsafe_offset(row // 8)[] = packed_values
+            row = end
+
+
+def _gather[
+    D: DType, packed: Bool
+](
+    codes: Column[UInt32],
+    table: List[Scalar[D]],
+    table_valid: List[UInt8],
+    mut values: List[Scalar[D]],
+    mut bits: List[UInt8],
+) raises:
+    var n = len(codes)
+    var nulls = codes.null_count() > 0
+    var workers = worker_count(n)
+    var jobs = List[_GatherJob[D, packed]](capacity=workers)
+    for w in range(workers):
+        var first = (n * w // workers) // 8 * 8
+        var last = n if w == workers - 1 else (n * (w + 1) // workers) // 8 * 8
+        jobs.append(
+            _GatherJob[D, packed](
+                codes,
+                nulls,
+                table,
+                table_valid,
+                Int(Pointer(to=values)),
+                Int(Pointer(to=bits)),
+                first,
+                last,
+            )
+        )
+    run_jobs(jobs)
+
+
+def gather(per_value: Series, codes: Series) raises -> Series:
+    """Each row of a categorical `codes` column given its value's entry of
+    `per_value`, which holds one row per dictionary value and then one for
+    null: an expression evaluated on the dictionary, spread over the rows.
+    """
+    var flat_codes = codes.rechunk() if codes.is_chunked() else codes.copy()
+    var table = (
+        per_value.rechunk() if per_value.is_chunked() else per_value.copy()
+    )
+    ref column = flat_codes._data[Column[UInt32]]
+    var n = len(column)
+    var entries = len(table)
+    var table_valid = List[UInt8](capacity=entries)
+    var all_valid = True
+    for i in range(entries):
+        var ok = not table.get(i).is_null()
+        table_valid.append(UInt8(1) if ok else UInt8(0))
+        all_valid = all_valid and ok
+    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    if table._data.isa[BoolColumn]():
+        ref source = table._data[BoolColumn]
+        var lookup = List[UInt8](capacity=entries)
+        for i in range(entries):
+            lookup.append(UInt8(1) if source._get(i) else UInt8(0))
+        var values = List[UInt8](length=(n + 7) // 8, fill=0)
+        _gather[DType.uint8, True](column, lookup, table_valid, values, bits)
+        if all_valid:
+            bits = List[UInt8]()
+        var result = Series(
+            per_value.name(), BoolColumn(values=values^, bits=bits^, length=n)
+        )
+        result._dtype = per_value._dtype
+        return result^
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        if table._data.isa[Column[Scalar[D]]]():
+            ref source = table._data[Column[Scalar[D]]]
+            var lookup = List[Scalar[D]](capacity=entries)
+            for i in range(entries):
+                lookup.append(source._get(i))
+            var values = List[Scalar[D]](unsafe_uninit_length=n)
+            _gather[D, False](column, lookup, table_valid, values, bits)
+            if all_valid:
+                bits = List[UInt8]()
+            var result = Series(
+                per_value.name(), Column[Scalar[D]](values=values^, bits=bits^)
+            )
+            result._dtype = per_value._dtype
+            return result^
+    # Strings and other values: a row gather.
+    var rows = List[Int](length=n, fill=entries - 1)
+    for i in range(n):
+        if column._valid(i):
+            rows[i] = Int(column._get(i))
+    var gathered = take_parallel([table^], rows^, worker_count(n))
+    return gathered.pop()
