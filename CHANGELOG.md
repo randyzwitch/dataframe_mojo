@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `filter` copies fixed-width and Boolean columns straight from the mask's
+  64-bit words, copying all-true words in bulk and skipping empty ones,
+  instead of building a list of kept row numbers and gathering every column
+  from it. String and nested columns still use the row list (#376).
 - Comparing a string column with a literal (`==`, `!=`, `<`, `<=`, `>`,
   `>=`, either side) runs on every worker over the raw bytes and writes the
   result bitmap directly, instead of building a string slice per row on one
