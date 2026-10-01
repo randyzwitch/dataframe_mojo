@@ -4,7 +4,13 @@ A categorical must behave like the String column it encodes: every result
 here is compared with the same operation on the strings. It stores UInt32
 codes plus a dictionary, and grouping, joins and unique work on the codes.
 """
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+)
 
 from dataframe import (
     Column,
@@ -15,8 +21,10 @@ from dataframe import (
     StringColumn,
     col,
     concat,
+    concat_str,
     lit,
     read_csv,
+    when,
     write_csv,
 )
 from dataframe.arrow import ArrowArray, ArrowSchema, export_arrow, import_arrow
@@ -100,6 +108,14 @@ def test_expressions_read_the_strings() raises:
         col("k").is_null().alias("missing"),
         col("k").n_unique().alias("distinct"),
         col("k").max().alias("largest"),
+        col("k").is_in(["fig", "kiwi", "plum"]).alias("listed"),
+        col("k").fill_null("none").alias("filled"),
+        concat_str([col("k"), lit("!")]).alias("shouted"),
+        when(col("k").str().starts_with("p"))
+        .then(lit(Int64(1)))
+        .otherwise(col("k").str().len_chars())
+        .alias("branch"),
+        col("k").str().slice(0, 2).cast("categorical").alias("prefix"),
     ]
     for e in exprs:
         assert_true(
@@ -109,6 +125,24 @@ def test_expressions_read_the_strings() raises:
         cats.filter(col("k") == lit("apple")),
         plain.filter(col("k") == lit("apple")),
         "filter",
+    )
+    same(
+        cats.filter(col("k").is_in(["fig", "pear"]) | col("k").is_null()),
+        plain.filter(col("k").is_in(["fig", "pear"]) | col("k").is_null()),
+        "is_in filter",
+    )
+    # Expressions run once per dictionary value; a failing strict cast
+    # still names the first failing row.
+    with assert_raises(contains="failed at row 0 for value 'pear'"):
+        _ = cats.select_exprs([col("k").cast("int64")])
+    # Grouped n_unique counts codes, nulls as one value.
+    var grouped = cats.group_by("v", maintain_order=True).agg(
+        [col("k").n_unique()]
+    )
+    assert_true(
+        grouped.equals(
+            plain.group_by("v", maintain_order=True).agg([col("k").n_unique()])
+        )
     )
 
 

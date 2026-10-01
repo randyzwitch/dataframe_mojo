@@ -60,6 +60,9 @@ from .expr import (
     ALL,
     NULL_COUNT,
     WHEN,
+    CUT,
+    is_binary,
+    is_unary,
     STR_CONCAT,
     CAST,
     OVER,
@@ -81,7 +84,7 @@ from .str_kernels import string_op, concat_strings
 from .list_kernels import nested_op
 from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
-from .categorical import decode, encode
+from .categorical import decode, encode, gather
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows
 from .distinct import distinct_counts
@@ -1145,6 +1148,85 @@ def _direct_scan(bound: BoundExpr, columns: List[Series], node: Node) -> Bool:
     return False
 
 
+def _row_wise(op: Int) -> Bool:
+    """Whether op's value in a row depends on that row alone (and on scalar
+    literals), so it may run on any set of rows in any order."""
+    return (
+        op == LIT_INT
+        or op == LIT_FLOAT
+        or op == LIT_BOOL
+        or op == LIT_STRING
+        or op == LIT_NULL
+        or is_binary(op)
+        or is_unary(op)
+        or op == WHEN
+        or op == CUT
+        or is_dt_op(op)
+        or is_nested_op(op)
+    )
+
+
+def _dictionary_source(
+    bound: BoundExpr, columns: List[Series], height: Int
+) raises -> Int:
+    """The categorical column a row-wise expression reads, when it reads no
+    other column and its dictionary has under half as many values as there
+    are rows: the expression then runs once per value (#106). -1 if not."""
+    if bound.shape() != ROWS:
+        return -1
+    var source = -1
+    for i in range(len(bound.expr._nodes)):
+        var op = bound.expr._nodes[i].op
+        if op == COL:
+            var read = bound.sources[i]
+            if read < 0 or (source >= 0 and read != source):
+                return -1
+            source = read
+        elif not _row_wise(op):
+            return -1
+    if source < 0:
+        return -1
+    var dtype = columns[source].dtype()
+    if not dtype.is_categorical() or not dtype.has_dictionary():
+        return -1
+    if (len(dtype.dictionary()[]) + 1) * 2 > height:
+        return -1
+    return source
+
+
+def _on_dictionary[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    source: Int,
+    height: Int,
+    batch_size: Int,
+) raises -> Series:
+    """A row-wise expression over a categorical, evaluated on each
+    dictionary value and on null, then gathered by every row's code."""
+    var codes = (
+        columns[source]
+        .rechunk() if columns[source]
+        .is_chunked() else columns[source]
+        .copy()
+    )
+    var dictionary = codes.dtype().dictionary()
+    var count = len(dictionary[])
+    var values = StringBuilder(count + 1)
+    for code in range(count):
+        values.append(dictionary[].get(code))
+    values.append_null()
+    var inputs = columns.copy()
+    inputs[source] = Series(codes.name(), values^.finish())
+    var per_value = evaluate[width](
+        bound, inputs, count + 1, batch_size=batch_size
+    )
+    var result = gather(per_value, codes)
+    result._name = bound.expr._name
+    return result^
+
+
 def _distinct_by_partition(bound: BoundExpr, node: Node, height: Int) -> Bool:
     """Whether `n_unique` counts its input by hash partition (#336) rather
     than with the reducer's per-group sets: every value but a nested or a
@@ -1394,6 +1476,29 @@ def evaluate[
         var column = columns[bound.sources[0]].copy()
         column._name = bound.expr._name
         return column^
+    # n_unique of a categorical counts its codes.
+    if (
+        count == 2
+        and bound.expr._nodes[root].op == N_UNIQUE
+        and bound.expr._nodes[root].left == 0
+        and bound.expr._nodes[0].op == COL
+        and bound.sources[0] >= 0
+        and columns[bound.sources[0]].dtype().is_categorical()
+    ):
+        var codes = columns[bound.sources[0]].with_dtype(DataType.UINT32)
+        var counts = distinct_counts(codes, groups, group_count, grouped)
+        var result = Series(bound.expr._name, Column[Int64](counts.take()))
+        return result^
+    if not grouped:
+        var source = _dictionary_source(bound, columns, height)
+        if source >= 0:
+            try:
+                return _on_dictionary[width](
+                    bound, columns, source, height, batch_size
+                )
+            except:
+                # Rerun row by row, so that an error names its row.
+                pass
     # Fused kernels read source buffers directly. Small chunked inputs are
     # made contiguous once; large inputs use source chunk windows.
     var prepared_columns = columns.copy()

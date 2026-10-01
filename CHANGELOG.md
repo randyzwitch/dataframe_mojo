@@ -23,6 +23,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
   dictionary (pyarrow round-trips unchanged). On 1M rows with 100 distinct
   20-byte values, grouping takes 4.9 ms against 8.6 ms for String (Int64: 3.2
   ms), and the column takes 4 MB against 28 MB (#106).
+- An expression over a categorical that reads no other column and works row
+  by row (comparisons, `is_in`, `.str()` operations, `when`, casts) runs
+  once per dictionary value and is spread over the rows by code, and
+  `n_unique` counts codes. On 1M rows with 100 distinct values, `==` takes
+  0.5 ms against 12.7 ms for String and 46 ms before, `to_uppercase` 9 ms
+  against 85 ms, and `n_unique` 1.9 ms against 54 ms before (#106).
 - `LazyFrame.join(other, left_on=..., right_on=..., how, suffix, coalesce)`
   joins on differently named key pairs, as the eager join does; projection
   pushdown passes each input only its own keys and used columns, predicate
