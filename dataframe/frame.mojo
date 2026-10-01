@@ -99,6 +99,7 @@ from .join_type import (
 from .nested_column import ListColumn, StructColumn
 from .trace import trace_path
 from .row_encode import STRING_PREFIX_BYTES, encodable, encode_sort_keys
+from .categorical import recode, sort_ranks, unify, union_of
 from .packed_sort import (
     chunked_top_rows,
     packed_arg_sort,
@@ -922,6 +923,11 @@ struct DataFrame(Copyable, Sized, Writable):
         nulls_last: List[Bool],
     ) raises -> List[Int]:
         """Row order of a stable sort; equal keys keep input order."""
+        var ranked = self._categorical_ranks(by)
+        if ranked:
+            return ranked.value().arg_sort(
+                by, descending=descending, nulls_last=nulls_last
+            )
         for name in by:
             if self.column(name).dtype().is_nested():
                 raise Error(
@@ -974,6 +980,21 @@ struct DataFrame(Copyable, Sized, Writable):
             )
         )
 
+    def _categorical_ranks(self, by: List[String]) raises -> Optional[Self]:
+        """This frame with each categorical sort key replaced by the rank of
+        its value, or None when no key is categorical: codes number values
+        in the order they first appeared, not in sorted order (#106)."""
+        var found = False
+        for name in by:
+            found = found or self.column(name).dtype().is_categorical()
+        if not found:
+            return None
+        var columns = self._columns.copy()
+        for i in range(len(columns)):
+            if columns[i].name() in by and columns[i].dtype().is_categorical():
+                columns[i] = sort_ranks(columns[i])
+        return Self(columns^, height=self._height)
+
     def _arg_sort_head(
         self,
         by: List[String],
@@ -994,6 +1015,11 @@ struct DataFrame(Copyable, Sized, Writable):
         """
         if k < 0:
             raise Error("k must be nonnegative")
+        var ranked = self._categorical_ranks(by)
+        if ranked:
+            return ranked.value()._arg_sort_head(
+                by, descending, nulls_last, k, threads
+            )
         var take = min(k, self._height)
         if take * _TOP_K_FRACTION >= self._height:
             var order = self.arg_sort(
@@ -1173,6 +1199,44 @@ struct DataFrame(Copyable, Sized, Writable):
         if len(left_on) == 0 or len(left_on) != len(right_on):
             raise Error(
                 "Join requires the same nonzero number of left and right keys"
+            )
+        # A categorical key joins on codes, which compare only on a shared
+        # dictionary (#106): both key columns move onto the union of theirs
+        # (a String key is encoded into it), leaving the left codes as they
+        # are. Unchanged pairs join as before.
+        var unified = False
+        var left_frame = self.copy()
+        var right_frame = right.copy()
+        for i in range(len(left_on)):
+            var l = self._index(left_on[i])
+            var r = right._index(right_on[i])
+            var ltype = self._columns[l].dtype()
+            var rtype = right._columns[r].dtype()
+            if (ltype.is_categorical() or rtype.is_categorical()) and not (
+                ltype.is_categorical()
+                and rtype.is_categorical()
+                and ltype == rtype
+            ):
+                var lkey = left_frame._columns[l].copy()
+                var rkey = right_frame._columns[r].copy()
+                if (
+                    ltype.is_categorical()
+                    or ltype.physical() == DataType.STRING
+                ):
+                    unify(lkey, rkey)
+                    left_frame._columns[l] = lkey^
+                    right_frame._columns[r] = rkey^
+                    unified = True
+        if unified:
+            return left_frame._join_impl(
+                right_frame,
+                left_on=left_on,
+                right_on=right_on,
+                how=how,
+                suffix=suffix,
+                coalesce=coalesce,
+                prepared=None,
+                range_filtered=range_filtered,
             )
         var left_keys = List[Int]()
         var right_keys = List[Int]()
@@ -4138,6 +4202,51 @@ def _concat_column(
         into._append_series(frames[f]._columns[column])
 
 
+def _shared_dictionaries(
+    frames: List[DataFrame], how: String
+) raises -> List[DataFrame]:
+    """The frames with each categorical column, matched by position
+    (vertical) or name (diagonal), on the union of its dictionaries, so the
+    codes of every piece mean the same values (#106). Frames whose
+    dictionaries already match are returned as they are."""
+    var out = frames.copy()
+    if how != "vertical" and how != "diagonal":
+        return out^
+    var names = List[String]()
+    for frame in frames:
+        for column in frame._columns:
+            if column.dtype().is_categorical() and column.name() not in names:
+                names.append(column.name())
+    for name in names:
+        var dtype = Optional[DataType]()
+        var differ = False
+        for frame in frames:
+            if name not in frame.columns():
+                continue
+            var d = frame.column(name).dtype()
+            if not d.is_categorical() or not d.has_dictionary():
+                continue
+            if not dtype:
+                dtype = d
+            elif not dtype.value() == d:
+                differ = True
+        if not differ or not dtype:
+            continue
+        var merged = dtype.value().dictionary()[].copy_values()
+        for frame in frames:
+            if name in frame.columns():
+                var d = frame.column(name).dtype()
+                if d.is_categorical() and d.has_dictionary():
+                    merged = union_of(merged, d.dictionary()[])
+        var target = DataType.categorical(merged^)
+        for f in range(len(out)):
+            if name in out[f].columns():
+                var i = out[f]._index(name)
+                if out[f]._columns[i].dtype().is_categorical():
+                    out[f]._columns[i] = recode(out[f]._columns[i], target)
+    return out^
+
+
 def concat(
     frames: List[DataFrame], how: String = "vertical"
 ) raises -> DataFrame:
@@ -4147,14 +4256,17 @@ def concat(
     columns by name in first-seen order and fills missing columns with nulls;
     shared names must share a dtype. Horizontal requires equal heights and
     unique names. All inputs are validated before any column is built.
+    Categorical columns with different dictionaries are first moved onto
+    the union of them.
     """
-    if len(frames) == 0:
+    var shared = _shared_dictionaries(frames, how)
+    if len(shared) == 0:
         raise Error("concat requires at least one dataframe")
     if how == "vertical":
-        var first = frames[0].schema()
+        var first = shared[0].schema()
         var height = 0
-        for f in range(len(frames)):
-            var schema = frames[f].schema()
+        for f in range(len(shared)):
+            var schema = shared[f].schema()
             if len(schema) != len(first):
                 raise Error(
                     "concat vertical: frame "
@@ -4183,21 +4295,21 @@ def concat(
                         + ":"
                         + first[c].dtype.name()
                     )
-            height += frames[f].height()
+            height += shared[f].height()
         # Polars accumulate_dataframes_vertical / vstack_mut_owned:
         # append Arrow array references; keep the output multi-chunk.
         var columns = List[Series](capacity=len(first))
         for c in range(len(first)):
-            var parts = List[Series](capacity=len(frames))
-            for frame in frames:
+            var parts = List[Series](capacity=len(shared))
+            for frame in shared:
                 parts.append(frame._columns[c].copy())
             columns.append(Series._from_chunks(parts))
         return DataFrame(columns^, height=height)
     if how == "diagonal":
         var names = List[String]()
         var dtypes = Dict[String, DataType]()
-        for f in range(len(frames)):
-            for field in frames[f].schema():
+        for f in range(len(shared)):
+            for field in shared[f].schema():
                 if field.name not in dtypes:
                     dtypes[field.name] = field.dtype
                     names.append(field.name)
@@ -4212,8 +4324,8 @@ def concat(
                         + ", expected "
                         + dtypes[field.name].name()
                     )
-        var aligned = List[DataFrame](capacity=len(frames))
-        for frame in frames:
+        var aligned = List[DataFrame](capacity=len(shared))
+        for frame in shared:
             var columns = List[Series](capacity=len(names))
             for name in names:
                 var found = -1
@@ -4230,19 +4342,19 @@ def concat(
             aligned.append(DataFrame(columns^, height=frame.height()))
         return concat(aligned, "vertical")
     if how == "horizontal":
-        var height = frames[0].height()
+        var height = shared[0].height()
         var seen = Dict[String, Bool]()
-        for f in range(len(frames)):
-            if frames[f].height() != height:
+        for f in range(len(shared)):
+            if shared[f].height() != height:
                 raise Error(
                     "concat horizontal: frame "
                     + String(f)
                     + " has height "
-                    + String(frames[f].height())
+                    + String(shared[f].height())
                     + ", expected "
                     + String(height)
                 )
-            for column in frames[f]._columns:
+            for column in shared[f]._columns:
                 if column.name() in seen:
                     raise Error(
                         "concat horizontal: duplicate column "
@@ -4252,7 +4364,7 @@ def concat(
                     )
                 seen[column.name()] = True
         var columns = List[Series]()
-        for frame in frames:
+        for frame in shared:
             for column in frame._columns:
                 columns.append(column.copy())
         return DataFrame(columns^, height=height)

@@ -71,6 +71,15 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
                 return format_cell(part, remaining, max_string_length)
             remaining -= len(part)
         return ""
+    if series.dtype().is_categorical() and series.dtype().has_dictionary():
+        # A categorical shows its value, as a string would.
+        try:
+            var cell = series.get(row)
+            if cell.is_null():
+                return "null"
+            return format_string(cell.string(), max_string_length)
+        except:
+            return "?"
     comptime for i in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[i]
         if series._data.isa[Column[Scalar[D]]]():

@@ -81,6 +81,7 @@ from .str_kernels import string_op, concat_strings
 from .list_kernels import nested_op
 from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
+from .categorical import decode, encode
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows
 from .distinct import distinct_counts
@@ -128,6 +129,9 @@ def _numeric_literal(node: Node) raises -> Series:
 
 
 def _empty(dtype: DataType) raises -> Series:
+    # Inside an expression a categorical is carried as its strings (#106).
+    if dtype.is_categorical():
+        return Series.full_null("", DataType.STRING, 0)
     return Series.full_null("", dtype, 0)
 
 
@@ -268,8 +272,21 @@ def _eval[
     if is_dt_op(node.op):
         return dt_op(node, left, bound.dtypes[node.left])
     if node.op == CAST:
+        # Categoricals are carried as strings inside an expression and
+        # encoded once the whole result is assembled (see evaluate).
+        if node.dtypes[0].value().is_categorical():
+            return cast_series(
+                left,
+                DataType.STRING,
+                node.integer == 1,
+                offset if len(left) == length else 0,
+                List[Bool](),
+            )
         # Kernel outputs carry physical tags; restore the bound logical type.
-        if bound.dtypes[node.left] != left.dtype():
+        if (
+            bound.dtypes[node.left] != left.dtype()
+            and not bound.dtypes[node.left].is_categorical()
+        ):
             left = left.with_dtype(bound.dtypes[node.left])
         var observed = fit_mask(mask, len(left))
         # A scalar input is observed if any row is; its offset is not a row.
@@ -1371,9 +1388,20 @@ def evaluate[
         raise Error("Invalid group mapping")
     var count = len(bound.expr._nodes)
     var root = count - 1
+    # A bare column is itself, categoricals included; any other expression
+    # reads a categorical as its strings (#106).
+    if count == 1 and bound.expr._nodes[0].op == COL and bound.sources[0] >= 0:
+        var column = columns[bound.sources[0]].copy()
+        column._name = bound.expr._name
+        return column^
     # Fused kernels read source buffers directly. Small chunked inputs are
     # made contiguous once; large inputs use source chunk windows.
     var prepared_columns = columns.copy()
+    for i in range(count):
+        if bound.expr._nodes[i].op == COL and bound.sources[i] >= 0:
+            var source = bound.sources[i]
+            if prepared_columns[source].dtype().is_categorical():
+                prepared_columns[source] = decode(prepared_columns[source])
     var has_fused = False
     for i in range(count):
         if bound.fusible[i] and bound.expr._nodes[i].left >= 0:
@@ -1542,5 +1570,7 @@ def evaluate[
         while len(jobs) > 0:
             parts.append(jobs.pop(0).into_result())
         result = Series._from_chunks(parts^)
+    if bound.dtypes[root].is_categorical():
+        result = encode(result)
     result._name = bound.expr._name
     return result^

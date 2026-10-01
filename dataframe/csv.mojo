@@ -17,6 +17,7 @@ from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn
 from .dtype import DataType, NUMERIC_DTYPES
+from .categorical import decode
 from .frame import DataFrame
 from .series import Series
 from .temporal import format_in, zone_of
@@ -350,15 +351,20 @@ def write_csv(
     _reject_nested(frame)
     if buffer_size <= 0:
         raise Error("CSV buffer_size must be positive")
+    # A categorical is written as its values (#106).
+    var data = frame.copy()
+    for i in range(len(data._columns)):
+        if data._columns[i].dtype().is_categorical():
+            data._columns[i] = decode(data._columns[i])
     var writer = _CsvWriter(
-        frame, separator, quote_style, null_value, line_terminator
+        data, separator, quote_style, null_value, line_terminator
     )
     with open(path, "w") as file:
         var chunk = String()
         if has_header:
-            chunk += writer.header(frame)
-        for row in range(frame.height()):
-            chunk += writer.row(frame, row)
+            chunk += writer.header(data)
+        for row in range(data.height()):
+            chunk += writer.row(data, row)
             if chunk.byte_length() >= buffer_size:
                 file.write(chunk)
                 chunk = String()

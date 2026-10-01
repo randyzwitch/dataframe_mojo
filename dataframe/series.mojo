@@ -370,6 +370,14 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             if column.is_null(index):
                 return AnyValue.null(self._dtype)
             return AnyValue.decimal(self._dtype, column._get(index))
+        if self._dtype.is_categorical() and self._dtype.has_dictionary():
+            # A categorical cell reads as its value, a string.
+            ref codes = self._data[Column[UInt32]]
+            if codes.is_null(index):
+                return AnyValue.null(DataType.STRING)
+            return AnyValue(
+                String(self._dtype.dictionary()[].get(Int(codes._get(index))))
+            )
         comptime for i in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[i]
             if self._data.isa[Column[Scalar[D]]]():
@@ -1026,7 +1034,11 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         self, descending: Bool = False, nulls_last: Bool = True
     ) raises -> List[Int]:
         """Stable sort order: ranks are resolved once, then merged by Int."""
+        from .categorical import sort_ranks
         from .packed_sort import packed_arg_sort
+
+        if self._dtype.is_categorical():
+            return sort_ranks(self).argsort(descending, nulls_last)
 
         if not self._dtype.is_nested():
             var packed = packed_arg_sort(

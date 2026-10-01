@@ -221,9 +221,8 @@ def check_pyarrow_produced_types() raises:
 
 def check_unsupported_types_are_rejected() raises:
     var pa = Python.import_module("pyarrow")
-    # Lists and structs import since nested columns exist; maps do not yet.
+    # Lists, structs and dictionaries import; maps do not yet.
     var cases = Python.list(
-        pa.array(Python.list("a", "b")).dictionary_encode(),
         pa.array(
             Python.list(Python.list(Python.tuple("k", 1))),
             type=pa.map_(pa.string(), pa.int64()),
@@ -241,6 +240,44 @@ def check_unsupported_types_are_rejected() raises:
         # Released on failure too: the structs are consumed.
         assert_equal(_at[ArrowArray](c.array)[].release, 0)
         c.free()
+
+
+def check_dictionary_round_trip() raises:
+    """A pyarrow dictionary array imports as a categorical with the same
+    dictionary and codes, and exports back as the same array (#106)."""
+    var pa = Python.import_module("pyarrow")
+    var none = Python.none()
+    var source = pa.array(
+        Python.list("b", "a", none, "b", "c", "a")
+    ).dictionary_encode()
+    var c = CStructs()
+    source._export_to_c(c.array, c.schema)
+    var cats = import_arrow_series(c.array, c.schema)
+    c.free()
+    assert_true(cats.dtype().is_categorical())
+    assert_equal(cats.get(0).string(), "b")
+    assert_true(cats.get(2).is_null())
+    assert_equal(cats.get(4).string(), "c")
+    var back = CStructs()
+    export_arrow_series(
+        cats, _at[ArrowArray](back.array)[], _at[ArrowSchema](back.schema)[]
+    )
+    var again = pa.Array._import_from_c(back.array, back.schema)
+    var expected = source.cast(pa.dictionary(pa.uint32(), pa.large_string()))
+    assert_true(Bool(again.equals(expected)), String(again))
+    back.free()
+    # A dictionary with a repeated value imports with its values intact.
+    var repeated = pa.DictionaryArray.from_arrays(
+        pa.array(Python.list(0, 1, 2, none), type=pa.int8()),
+        pa.array(Python.list("x", "y", "x")),
+    )
+    var d = CStructs()
+    repeated._export_to_c(d.array, d.schema)
+    var values = import_arrow_series(d.array, d.schema)
+    d.free()
+    assert_equal(values.get(0).string(), "x")
+    assert_equal(values.get(2).string(), "x")
+    assert_true(values.get(3).is_null())
 
 
 def check_pyarrow_nested_types() raises:
@@ -412,5 +449,6 @@ def main() raises:
     check_decimal128_round_trip()
     check_time_zone_round_trip()
     check_binary_round_trip()
+    check_dictionary_round_trip()
     check_unsupported_types_are_rejected()
     print("arrow C data interface: pyarrow interop ok")

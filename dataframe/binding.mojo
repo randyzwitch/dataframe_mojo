@@ -793,6 +793,10 @@ def bind(
             if source < 0:
                 raise Error("Unknown expression column: " + node.text)
             dtype = columns[source].dtype()
+            # Expressions read a categorical as its strings (#106); a bare
+            # column keeps its type, since evaluate returns it as is.
+            if dtype.is_categorical() and len(nodes) > 1:
+                dtype = DataType.STRING
             shape = ROWS
         elif node.op == LIT_INT:
             if node.text == UNTYPED:

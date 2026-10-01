@@ -13,6 +13,16 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Categorical columns (dictionary-encoded strings): `cast("categorical")`
+  from String and back, stored as UInt32 codes with the dictionary of
+  distinct values carried by the dtype, as Arrow's
+  `dictionary<uint32, large_utf8>`. Grouping, joins, `unique` and value counts
+  work on the codes; sorting is by value; joins and `concat` across different
+  dictionaries move both sides onto the union; expressions, display, `get`
+  and CSV writing read the values. Arrow export and import keep the
+  dictionary (pyarrow round-trips unchanged). On 1M rows with 100 distinct
+  20-byte values, grouping takes 4.9 ms against 8.6 ms for String (Int64: 3.2
+  ms), and the column takes 4 MB against 28 MB (#106).
 - `LazyFrame.join(other, left_on=..., right_on=..., how, suffix, coalesce)`
   joins on differently named key pairs, as the eager join does; projection
   pushdown passes each input only its own keys and used columns, predicate

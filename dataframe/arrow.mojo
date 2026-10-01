@@ -32,13 +32,15 @@ nullable and Mojo `Pointer`s are not.
 from std.memory import Allocation, ArcPointer, Layout, Pointer, alloc, dealloc
 from .bool_column import BoolColumn
 from .column import Column, _copy_bits, _copy_validity
-from .dtype import DataType, NUMERIC_DTYPES
+from std.collections import Dict
+from .categorical import encode
+from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from .frame import DataFrame
 from .parallel import Job, Pool, worker_count
 from std.sys import CompilationTarget
 from .nested_column import ListColumn, StructColumn
 from .series import Series
-from .string_column import StringColumn
+from .string_column import StringBuilder, StringColumn
 
 
 struct ArrowSchema(Movable):
@@ -158,11 +160,13 @@ struct _SchemaState(Movable):
     var format: List[UInt8]
     var name: List[UInt8]
     var children: List[Int]  # ArrowSchema* (heap), owned
+    var dictionary: Int  # ArrowSchema* (heap), owned; 0 if none
 
     def __init__(out self, format: String, name: String):
         self.format = _c_string(format)
         self.name = _c_string(name)
         self.children = List[Int]()
+        self.dictionary = 0
 
 
 struct _ArrayState(Movable):
@@ -177,6 +181,7 @@ struct _ArrayState(Movable):
     var owned: List[List[UInt8]]
     var buffers: List[Int]  # the `const void**` array
     var children: List[Int]  # ArrowArray* (heap), owned
+    var dictionary: Int  # ArrowArray* (heap), owned; 0 if none
     var releases: Int  # optional Int* counter, for tests
 
     def __init__(out self):
@@ -184,6 +189,7 @@ struct _ArrayState(Movable):
         self.owned = List[List[UInt8]]()
         self.buffers = List[Int]()
         self.children = List[Int]()
+        self.dictionary = 0
         self.releases = 0
 
 
@@ -194,6 +200,11 @@ def _release_schema(schema: Pointer[ArrowSchema, MutAnyOrigin]) abi("C"):
         if pointer[].release != 0:
             _call_schema_release(pointer)
         _ = _reclaim[ArrowSchema](child)
+    if state.dictionary != 0:
+        var pointer = _at[ArrowSchema](state.dictionary)
+        if pointer[].release != 0:
+            _call_schema_release(pointer)
+        _ = _reclaim[ArrowSchema](state.dictionary)
     schema[].release = 0
 
 
@@ -204,6 +215,11 @@ def _release_array(array: Pointer[ArrowArray, MutAnyOrigin]) abi("C"):
         if pointer[].release != 0:
             _call_array_release(pointer)
         _ = _reclaim[ArrowArray](child)
+    if state.dictionary != 0:
+        var pointer = _at[ArrowArray](state.dictionary)
+        if pointer[].release != 0:
+            _call_array_release(pointer)
+        _ = _reclaim[ArrowArray](state.dictionary)
     if state.releases != 0:
         _at[Int](state.releases)[] += 1
     array[].release = 0
@@ -256,7 +272,27 @@ def _numeric_format(dtype: DType) -> String:
     return "g"
 
 
+def _dictionary_values(dtype: DataType) raises -> Series:
+    """A categorical's dictionary as a String series (Arrow's dictionary
+    values array)."""
+    var dictionary = dtype.dictionary()
+    var n = len(dictionary[])
+    return Series(
+        "",
+        StringColumn(
+            bytes=dictionary[].bytes.copy(),
+            offsets=dictionary[].offsets.copy(),
+            bits=List[UInt8](),
+            length=n,
+        ),
+    )
+
+
 def _format(dtype: DataType) raises -> String:
+    if dtype.is_categorical():
+        # Arrow dictionary encoding: the format names the index type; the
+        # values ride in the schema's and array's `dictionary` (#106).
+        return "I"
     if dtype.is_decimal():
         return "d:" + String(dtype.precision()) + "," + String(dtype.scale())
     if dtype.is_numeric():
@@ -312,6 +348,11 @@ def _fill_schema(mut schema: ArrowSchema, series: Series) raises:
         Int(state.children.unsafe_ptr()) if len(state.children) > 0 else 0
     )
     schema.dictionary = 0
+    if dtype.is_categorical():
+        var values = _leak(ArrowSchema())
+        _fill_schema(_at[ArrowSchema](values)[], _dictionary_values(dtype))
+        state.dictionary = values
+        schema.dictionary = values
     schema.private_data = _leak(state^)
     schema.release = _schema_release_address()
 
@@ -426,6 +467,13 @@ def _fill_array(
                     != 0 else 0
                 )
                 state.buffers.append(Int(column._data[].unsafe_ptr()))
+    if dtype.is_categorical():
+        var values = _leak(ArrowArray())
+        _fill_array(
+            _at[ArrowArray](values)[], _dictionary_values(dtype), releases
+        )
+        state.dictionary = values
+        array.dictionary = values
     array.n_buffers = Int64(len(state.buffers))
     array.buffers = Int(state.buffers.unsafe_ptr())
     array.private_data = _leak(state^)
@@ -591,13 +639,92 @@ def _int64_column(
     return Column[Int64](values=values^, bits=bits^)
 
 
+def _import_dictionary(
+    array: ArrowArray, schema: ArrowSchema, name: String
+) raises -> Series:
+    """A dictionary-encoded array as a categorical (#106). Its indices are
+    an integer array and its values a string array. A dictionary of
+    distinct, non-null values with indices in range is kept as it is, codes
+    included, so a round trip is unchanged; any other is decoded and
+    encoded again."""
+    var index_array = ArrowArray()
+    index_array.length = array.length
+    index_array.null_count = array.null_count
+    index_array.offset = array.offset
+    index_array.n_buffers = array.n_buffers
+    index_array.n_children = array.n_children
+    index_array.buffers = array.buffers
+    index_array.children = array.children
+    var index_schema = ArrowSchema()
+    index_schema.format = schema.format
+    index_schema.name = schema.name
+    index_schema.flags = schema.flags
+    var indices = _import_child(index_array, index_schema)
+    var values = _import_child(
+        _at[ArrowArray](array.dictionary)[],
+        _at[ArrowSchema](schema.dictionary)[],
+    )
+    if values.dtype().physical() != DataType.STRING:
+        raise Error(
+            "Arrow dictionaries of "
+            + values.dtype().name()
+            + " are not supported"
+        )
+    var count = len(values)
+    var wide = indices.cast(DataType.INT64).rechunk()
+    ref index_column = wide._data[Column[Int64]]
+    var codes = List[UInt32](capacity=len(indices))
+    var valid = List[Bool](capacity=len(indices))
+    var in_range = True
+    for i in range(len(index_column)):
+        if not index_column._valid(i):
+            codes.append(0)
+            valid.append(False)
+            continue
+        var index = index_column._get(i)
+        if index < 0 or index >= Int64(count):
+            in_range = False
+            break
+        codes.append(UInt32(index))
+        valid.append(True)
+    var distinct = in_range and values.null_count() == 0
+    if distinct:
+        var seen = Dict[String, Bool]()
+        for i in range(count):
+            var text = values.get(i).string()
+            if text in seen:
+                distinct = False
+                break
+            seen[text] = True
+    if not in_range:
+        raise Error("Arrow dictionary index out of range")
+    if not distinct:
+        var strings = StringBuilder(len(codes))
+        for i in range(len(codes)):
+            if valid[i]:
+                strings.append(values.get(Int(codes[i])).string())
+            else:
+                strings.append_null()
+        return encode(Series(name, strings^.finish()))
+    var dictionary = CategoricalDictionary()
+    var flat = values.rechunk()
+    ref column = flat._data[StringColumn]
+    for i in range(count):
+        dictionary.append(column._get(i))
+    return Series(name, Column[UInt32](codes^, valid)).with_dtype(
+        DataType.categorical(dictionary^)
+    )
+
+
 def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     var format = _read_c_string(schema.format)
     var name = _read_c_string(schema.name)
     var length = Int(array.length)
     var offset = Int(array.offset)
+    if array.dictionary != 0 and schema.dictionary != 0:
+        return _import_dictionary(array, schema, name)
     if array.dictionary != 0 or schema.dictionary != 0:
-        raise Error("Arrow dictionary arrays are not supported")
+        raise Error("Arrow dictionary array without its dictionary")
     var bits = List[UInt8]() if _buffer(array, 0) == 0 else _import_bits(
         _buffer(array, 0), offset, length
     )
