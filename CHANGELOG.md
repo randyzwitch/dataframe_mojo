@@ -80,6 +80,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Comparing a string column with a literal (`==`, `!=`, `<`, `<=`, `>`,
+  `>=`, either side) runs on every worker over the raw bytes and writes the
+  result bitmap directly, instead of building a string slice per row on one
+  thread. `is_in` over string literals is one operation that compares each
+  row once (a hash table for more than eight values) instead of a chain of
+  `==`, `fill_null` and `|` per value; other `is_in` values work as before
+  (#373).
 - Joins concatenate their workers' matched rows on every worker instead of
   appending them one at a time on one thread, probe each chunk of a Parquet
   key in place instead of copying it into one buffer, and hand their row

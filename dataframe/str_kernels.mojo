@@ -13,12 +13,14 @@ from .expr import (
     STR_STARTS_WITH,
     STR_ENDS_WITH,
     STR_CONTAINS,
+    STR_IS_IN,
     STR_REPLACE,
     STR_SLICE,
     STR_REVERSE,
     STR_PAD,
 )
 from .series import Series
+from .string_predicates import decode_values, is_in_literals
 
 
 def _codepoints(text: String) -> List[String]:
@@ -112,6 +114,8 @@ def string_op(node: Node, input: Series) raises -> Series:
     if input.is_chunked():
         return string_op(node, input.rechunk())
     ref column = input._data[StringColumn]
+    if node.op == STR_IS_IN:
+        return is_in_literals(column, decode_values(node.text))
     var n = len(column)
     var valid = List[Bool](capacity=n)
     for i in range(n):
