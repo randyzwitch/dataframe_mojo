@@ -505,8 +505,15 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
                     representatives.append(i)
                 ids[i] = slots[slot]
             return RowKeys(ids^, representatives^)
-    var ids = List[Int](length=n, fill=0)
-    var excluded = List[Bool](length=n, fill=False)
+    # Every row gets an id (or -1) below before any is read (#388).
+    var ids = List[Int](unsafe_uninit_length=n)
+    # Null flags are kept only for columns that have nulls, and exclusion
+    # only when nulls drop rows, so a null-free key fills nothing (#388).
+    var any_nulls = False
+    for key in keys:
+        any_nulls = any_nulls or key.null_count() > 0
+    var exclude = any_nulls and not nulls_equal
+    var excluded = List[Bool](length=n if exclude else 0, fill=False)
     var representatives = List[Int]()
 
     if len(keys) == 1:
@@ -523,13 +530,16 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         # too, so one null early in the column shifts every id after it.
         # Booleans code by value rather than by order, and this renumbers
         # them correctly as well.
-        var codes = List[Int](length=n, fill=0)
-        var nulls = List[Bool](length=n, fill=False)
+        # column_codes writes every valid row; null rows are given their
+        # code below before it is read, so nothing is filled first (#388).
+        var codes = List[Int](unsafe_uninit_length=n)
+        var has_nulls = keys[0].null_count() > 0
+        var nulls = List[Bool](length=n if has_nulls else 0, fill=False)
         var distinct = column_codes(keys[0], codes, nulls)
         var renumber = List[Int](length=distinct + 1, fill=-1)
         var next_id = 0
         for i in range(n):
-            if nulls[i]:
+            if has_nulls and nulls[i]:
                 if not nulls_equal:
                     ids[i] = -1
                     continue
@@ -543,19 +553,22 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         return RowKeys(ids^, representatives^)
 
     for j in range(len(keys)):
-        var codes = List[Int](length=n, fill=0)
-        var nulls = List[Bool](length=n, fill=False)
+        # column_codes writes every valid row; null rows are given their
+        # code below before it is read, so nothing is filled first (#388).
+        var codes = List[Int](unsafe_uninit_length=n)
+        var has_nulls = keys[j].null_count() > 0
+        var nulls = List[Bool](length=n if has_nulls else 0, fill=False)
         var distinct = column_codes(keys[j], codes, nulls)
         # Reserve code `distinct` for null so it is one ordinary value.
         var radix = distinct + 1
         var lookup = Dict[Int, Int]()
         representatives = List[Int]()
         for i in range(n):
-            if nulls[i]:
+            if has_nulls and nulls[i]:
                 if not nulls_equal:
                     excluded[i] = True
                 codes[i] = distinct
-            if excluded[i]:
+            if exclude and excluded[i]:
                 ids[i] = -1
                 continue
             var combined = ids[i] * radix + codes[i] if j > 0 else codes[i]
