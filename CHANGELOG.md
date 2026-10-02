@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Group keys are numbered without standard-library dictionaries: number
+  columns through a typed open-addressing table, string columns through the
+  single-key path that packs short strings into 128-bit keys, and several
+  columns combined through a direct array or the same table. H2O group-by
+  with 500,000 groups by two string keys (k2 q2) 144 → 95 ms (#380).
 - `+`, `-` and `*` on signed 8-, 16- and 32-bit columns without nulls run
   16 rows at a time with one overflow check per block, and an ungrouped
   `sum`, `mean`, `min` or `max` of a computed column reads it with SIMD
