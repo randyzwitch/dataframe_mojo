@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Decimal arithmetic, comparisons and sums no longer divide 128-bit
+  integers on every row: `pow10` (read by every precision check) is two
+  multiplications instead of a loop of up to 38, same-scale operands skip
+  rescaling, and products of 64-bit values skip the overflow division.
+  PDS-H decimal q1 1,022 → 427 ms and q6 216 → 38 ms at scale 1 (#385).
 - Gathering string rows (`take`, and the gathers behind filters, joins and
   sorts) returns 16-byte views into the source column's bytes instead of
   copying every byte: values of up to 12 bytes sit in the view, longer ones

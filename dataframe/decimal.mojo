@@ -2,11 +2,20 @@
 from .dtype import DataType
 
 
+@always_inline
 def pow10(scale: Int) -> Int128:
+    """10**scale (1 for scale <= 0). Built from 10**18 steps and a short
+    64-bit loop: at most two 128-bit multiplies, where a loop of 38 of them
+    for `check_precision`'s 10**38 was most of a decimal sum (#385)."""
     var value = Int128(1)
-    for _ in range(scale):
-        value *= 10
-    return value
+    var left = scale
+    while left >= 18:
+        value *= Int128(1_000_000_000_000_000_000)
+        left -= 18
+    var small = Int64(1)
+    for _ in range(left):
+        small *= 10
+    return value * Int128(small)
 
 
 def precision_limit(precision: Int) -> Int128:
@@ -129,6 +138,16 @@ def divide_half_even(numerator: Int128, divisor: Int128) -> Int128:
     (-0.625 to -0.62, as 0.625 to 0.62)."""
     var negative = numerator < 0
     var magnitude = -numerator if negative else numerator
+    # Both fit 64 bits: one hardware division, not a 128-bit library call.
+    if magnitude <= Int128(Int64.MAX) and divisor <= Int128(Int64.MAX):
+        var m = Int64(magnitude)
+        var d = Int64(divisor)
+        var q = m // d
+        var r = m - q * d
+        var rest = d - r
+        if r > rest or (r == rest and q % 2 == 1):
+            q += 1
+        return Int128(-q) if negative else Int128(q)
     var quotient = magnitude // divisor
     var rounded = round_half_even(
         quotient, magnitude - quotient * divisor, divisor
