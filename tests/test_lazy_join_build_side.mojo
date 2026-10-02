@@ -1,8 +1,8 @@
 """Lazy joins whose left input a filter makes small (#377), or another join
 makes of unknown size: a plan's single join, and such a join inside a
 chain, run eagerly so the hash table is built on the smaller side, and the
-rest of a chain streams. Results must
-equal the eager plan, row for row once sorted.
+rest of a chain streams. Results must equal the eager plan, row for row
+once sorted.
 """
 from std.testing import TestSuite, assert_equal, assert_true
 
