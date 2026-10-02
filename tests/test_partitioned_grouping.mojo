@@ -1,11 +1,25 @@
 """Hash-partitioned grouping must equal the serial path at every key dtype,
 null pattern and cardinality, in order when asked and as a set otherwise."""
+from std.collections import Dict
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_true
 
-from dataframe import Column, DataFrame, Expr, Series, StringColumn, col
+from dataframe import (
+    Column,
+    DataFrame,
+    Expr,
+    Series,
+    StringColumn,
+    col,
+    concat,
+)
 from dataframe.parallel import MIN_ROWS_PER_WORKER, worker_count
-from dataframe.partition import _hash_bytes, _hash_column, low_cardinality
+from dataframe.partition import (
+    _hash_bytes,
+    _hash_column,
+    low_cardinality,
+    small_key_product,
+)
 from dataframe.string_view import StringViewBuilder
 
 comptime ROWS = 200_000
@@ -399,6 +413,55 @@ def test_worker_range_aggregation_matches_row_by_row_totals() raises:
             if "lo" in result.columns():
                 assert_equal(result.item(row, "lo").int64(), lows[slot])
                 assert_equal(result.item(row, "hi").int64(), highs[slot])
+
+
+def test_few_values_per_key_group_by_ranges() raises:
+    """Two string keys of 60 and 70 values form 4,200 pairs: a sample of
+    rows looks mostly distinct, but each key's sample shows its few values,
+    so the pairs group by worker ranges. Totals, first-occurrence order and
+    the null key must match a row-by-row reference, over chunked keys."""
+    var n = 4 * MIN_ROWS_PER_WORKER + 17
+    var a = List[String](capacity=n)
+    var a_valid = List[Bool](capacity=n)
+    var b = List[String](capacity=n)
+    var v = List[Int64](capacity=n)
+    var totals = Dict[String, Int64]()
+    var order = List[String]()
+    for i in range(n):
+        var x = (i * 7919) % 60
+        var y = (i * 104729) % 70
+        a.append("left" + String(x))
+        a_valid.append(i % 97 != 5)
+        b.append("right" + String(y))
+        v.append(Int64(i % 1000))
+        var pair = (a[i] if a_valid[i] else String("<null>")) + "|" + b[i]
+        if pair not in totals:
+            totals[pair] = 0
+            order.append(pair)
+        totals[pair] += v[i]
+    var whole = DataFrame(
+        [
+            Series("a", StringColumn(a, a_valid)),
+            Series("b", Column[String](b^)),
+            Series("v", Column[Int64](v^)),
+        ]
+    )
+    var half = n // 2
+    var frame = concat([whole.slice(0, half), whole.slice(half, n - half)])
+    var keys: List[Series] = [frame.column("a"), frame.column("b")]
+    assert_true(small_key_product(keys))
+    assert_true(not small_key_product([frame.column("v"), frame.column("b")]))
+    var result = frame.group_by(["a", "b"]).agg([col("v").sum().alias("s")])
+    assert_equal(result.height(), len(order))
+    for row in range(result.height()):
+        var cell = result.item(row, "a")
+        var pair = (
+            (String("<null>") if cell.is_null() else cell.string())
+            + "|"
+            + result.item(row, "b").string()
+        )
+        assert_equal(pair, order[row])
+        assert_equal(result.item(row, "s").int64(), totals[pair])
 
 
 def main() raises:
