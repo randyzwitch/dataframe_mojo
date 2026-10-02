@@ -80,6 +80,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- In a lazy chain of joins, a join whose left input a filter bounds to at
+  most an eighth of a large right input now runs eagerly, building its hash
+  table on the smaller side, and the joins above stream from its result.
+  Before, only a plan's single join did (#377); in a chain the streaming
+  join built on the right. PDS-H q8 158 → 62 ms and q9 224 → 128 ms at
+  scale 1.
 - `DATAFRAME_THREADS` is now a limit: at most that many threads run jobs
   at once, across nested and concurrent parallel steps. Steps that cut work
   into more jobs than threads used to give every job its own thread, and a
