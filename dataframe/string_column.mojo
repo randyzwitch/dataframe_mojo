@@ -15,8 +15,6 @@ from std.memory import ArcPointer, Pointer, unsafe_memcpy
 from .string_view import (
     StringView,
     StringViewStorage,
-    _external_view,
-    _inline_view,
     STRING_VIEW_INLINE_BYTES,
 )
 from .column import (
@@ -439,7 +437,11 @@ struct StringColumn(Copyable, Sized):
         var rows = indices.unsafe_ptr().unsafe_offset(first)
         var source = self._offsets[].unsafe_ptr().unsafe_offset(self._offset)
         var data = self._base()
-        var views = List[StringView](capacity=n)
+        # Each view is built in two 64-bit words and stored directly: the
+        # length and up to 4 bytes, then 8 more inline bytes -- or a 4-byte
+        # prefix, then buffer 0 and the offset (#395).
+        var views = List[StringView](unsafe_uninit_length=n)
+        var words = views.unsafe_ptr().unsafe_bitcast[UInt64]()
         var total = 0
         var missing = False
         for k in range(n):
@@ -448,20 +450,34 @@ struct StringColumn(Copyable, Sized):
                 row -= base
             if row == -1 and allow_missing:
                 missing = True
-                views.append(StringView(0, 0, 0, 0))
+                words.unsafe_offset(2 * k)[] = 0
+                words.unsafe_offset(2 * k + 1)[] = 0
                 continue
             if row < 0 or row >= self._length:
                 raise Error("Column index out of bounds")
             var start = Int(source.unsafe_offset(row)[])
             var length = Int(source.unsafe_offset(row + 1)[]) - start
             total += length
-            var bytes = Span[UInt8, ImmutAnyOrigin](
-                unsafe_ptr=data.unsafe_offset(start), length=length
-            )
+            var bytes = data.unsafe_offset(start)
+            var low = UInt64(length)
+            var high = UInt64(0)
             if length <= STRING_VIEW_INLINE_BYTES:
-                views.append(_inline_view(bytes))
+                for b in range(min(length, 4)):
+                    low |= UInt64(bytes.unsafe_offset(b)[]) << UInt64(
+                        32 + 8 * b
+                    )
+                for b in range(4, length):
+                    high |= UInt64(bytes.unsafe_offset(b)[]) << UInt64(
+                        8 * (b - 4)
+                    )
             else:
-                views.append(_external_view(bytes, 0, UInt32(start)))
+                for b in range(4):
+                    low |= UInt64(bytes.unsafe_offset(b)[]) << UInt64(
+                        32 + 8 * b
+                    )
+                high = UInt64(start) << 32
+            words.unsafe_offset(2 * k)[] = low
+            words.unsafe_offset(2 * k + 1)[] = high
         var bits = List[UInt8]()
         ref source_bits = self._bits[]
         if missing or len(source_bits) > 0:
