@@ -2,7 +2,7 @@
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
-from .column import Column, _bit
+from .column import Column, _bit, _pack_bits
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import (
     check_limit,
@@ -508,19 +508,60 @@ def _compare_bools[
 
 
 def _fill_null_bools(left: BoolColumn, right: BoolColumn) raises -> BoolColumn:
+    """Left where it is valid, else right, on bitmaps a byte (eight rows) at
+    a time. Numeric `is_in` runs this once per listed value."""
     var n = _length(len(left), len(right))
-    var values = List[Bool](capacity=n)
-    var valid = List[Bool](capacity=n)
-    for i in range(n):
-        var a = 0 if len(left) == 1 else i
-        var b = 0 if len(right) == 1 else i
-        if left._valid(a):
-            values.append(left._get(a))
-            valid.append(True)
-        else:
-            values.append(right._get(b))
-            valid.append(right._valid(b))
-    return BoolColumn(values^, valid)
+    var count = (n + 7) // 8
+    var values = _window_bytes(left._data[], left._offset, len(left), n, 0)
+    var valid = _window_bytes(left._bits[], left._offset, len(left), n, 255)
+    var other = _window_bytes(right._data[], right._offset, len(right), n, 0)
+    var other_valid = _window_bytes(
+        right._bits[], right._offset, len(right), n, 255
+    )
+    var v = values.unsafe_ptr()
+    var m = valid.unsafe_ptr()
+    var w = other.unsafe_ptr()
+    var p = other_valid.unsafe_ptr()
+    for k in range(count):
+        var mine = m.unsafe_offset(k)[]
+        var either = mine | p.unsafe_offset(k)[]
+        v.unsafe_offset(k)[] = (
+            (v.unsafe_offset(k)[] & mine) | (w.unsafe_offset(k)[] & ~mine)
+        ) & either
+        m.unsafe_offset(k)[] = either
+    return BoolColumn(values=values^, bits=valid^, length=n)
+
+
+def _validity_bytes(series: Series, n: Int) -> List[UInt8]:
+    """A series' validity as an n-row bitmap, read from its column."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if series._data.isa[Column[Scalar[D]]]():
+            ref column = series._data[Column[Scalar[D]]]
+            return _window_bytes(
+                column._bits[], column._offset, len(column), n, 255
+            )
+    if series._data.isa[BoolColumn]():
+        ref bools = series._data[BoolColumn]
+        return _window_bytes(bools._bits[], bools._offset, len(bools), n, 255)
+    return _pack_bits(validity(series))
+
+
+def _keep_nulls_bits(left: Series, right: BoolColumn) raises -> BoolColumn:
+    """Right's values, null where left is null: bitmaps, a byte at a time."""
+    var n = _length(len(left), len(right))
+    var count = (n + 7) // 8
+    var mask = _validity_bytes(left, n)
+    var values = _window_bytes(right._data[], right._offset, len(right), n, 0)
+    var valid = _window_bytes(right._bits[], right._offset, len(right), n, 255)
+    var v = values.unsafe_ptr()
+    var m = valid.unsafe_ptr()
+    var l = mask.unsafe_ptr()
+    for k in range(count):
+        var keep = m.unsafe_offset(k)[] & l.unsafe_offset(k)[]
+        m.unsafe_offset(k)[] = keep
+        v.unsafe_offset(k)[] &= keep
+    return BoolColumn(values=values^, bits=valid^, length=n)
 
 
 def _keep_nulls_bools(mask: List[Bool], right: BoolColumn) raises -> BoolColumn:
@@ -1205,6 +1246,10 @@ def binary[
                 out._append_row(b, 0 if len(b) == 1 else i)
         return Series("", out^.finish())
     elif op == KEEP_NULLS:
+        if right._data.isa[BoolColumn]() and (
+            len(left) == 1 or len(right) == 1 or len(left) == len(right)
+        ):
+            return Series("", _keep_nulls_bits(left, right._data[BoolColumn]))
         var mask = validity(left)
         comptime for k in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[k]

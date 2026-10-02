@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Boolean `fill_null`, and the step that keeps nulls in numeric `is_in`,
+  work on bitmaps a byte (eight rows) at a time instead of building two
+  lists of Booleans per row and packing them. Numeric `is_in` runs both
+  once per listed value. ClickBench q40 (10M rows) 63 → 29 ms.
 - A lazy join whose left input is made by other joins, so its size is
   unknown until it runs, against a right input of 512K rows or more, also
   leaves the stream and runs eagerly on the smaller side; the joins above
