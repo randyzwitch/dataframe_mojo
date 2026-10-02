@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `str.contains`, `starts_with` and `ends_with` run on every worker over
+  raw bytes, `contains` with a SIMD first- and last-byte filter, and
+  `str.slice` returns views into the source's bytes. New `str.like(pattern)`
+  evaluates SQL `LIKE` ('%' and '_') without regex. ClickBench q20 89 → 47
+  ms and PDS-H q22 105 → 42 ms at full scale (#374).
 - Gathering string rows (`take`, and the gathers behind filters, joins and
   sorts) returns 16-byte views into the source column's bytes instead of
   copying every byte: values of up to 12 bytes sit in the view, longer ones
