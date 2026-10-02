@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Decimal addition, subtraction, multiplication and sums read the
+  precision limit once per column instead of computing `10^precision` for
+  every row, and a decimal sum without nulls reads values and group ids
+  through pointers. PDS-H decimal q1 322 → 188 ms at scale 1.
 - `DATAFRAME_THREADS` is now a limit: at most that many threads run jobs
   at once, across nested and concurrent parallel steps. Steps that cut work
   into more jobs than threads used to give every job its own thread, and a

@@ -5,7 +5,9 @@ from .bool_column import BoolColumn
 from .column import Column, _bit
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import (
+    check_limit,
     check_precision,
+    precision_limit,
     divide_half_even,
     pow10,
     round_half_even,
@@ -642,6 +644,9 @@ def _decimal_binary[
     # Per-column constants, read once instead of per row (#385).
     var left_factor = pow10(common_scale - left.dtype().scale())
     var right_factor = pow10(common_scale - right.dtype().scale())
+    var limit = precision_limit(result_dtype.precision())
+    var source_scale = left.dtype().scale() + right.dtype().scale()
+    var rescale = pow10(max(source_scale - result_dtype.scale(), 0))
     for i in range(n):
         var ai = 0 if len(a) == 1 else i
         var bi = 0 if len(b) == 1 else i
@@ -670,17 +675,14 @@ def _decimal_binary[
             else:
                 predicates[i] = x != y
         elif op == ADD or op == SUB:
-            values[i] = check_precision(
-                x + y if op == ADD else x - y, result_dtype
+            values[i] = check_limit(
+                x + y if op == ADD else x - y, limit, result_dtype
             )
         elif op == MUL:
             var raw = _decimal_mul(a._get(ai), b._get(bi))
-            var source_scale = left.dtype().scale() + right.dtype().scale()
-            if source_scale > result_dtype.scale():
-                raw = divide_half_even(
-                    raw, pow10(source_scale - result_dtype.scale())
-                )
-            values[i] = check_precision(raw, result_dtype)
+            if rescale != 1:
+                raw = divide_half_even(raw, rescale)
+            values[i] = check_limit(raw, limit, result_dtype)
         elif op == DIV:
             if b._get(bi) == 0:
                 valid[i] = False

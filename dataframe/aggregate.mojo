@@ -13,7 +13,12 @@ from .bool_column import BoolColumn
 from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
-from .decimal import check_precision, decimal_mean
+from .decimal import (
+    check_limit,
+    check_precision,
+    decimal_mean,
+    precision_limit,
+)
 from .series import Series
 from .expr import (
     SUM,
@@ -1039,13 +1044,30 @@ struct Reducer(Movable):
                 self.counts[_group(grouped, groups, offset + i)] += 1
         elif (op == SUM or op == MEAN) and self.dtype.is_decimal():
             ref column = chunk._data[Column[Int128]]
-            for i in range(len(column)):
-                if column._valid(i):
-                    var g = _group(grouped, groups, offset + i)
-                    self.decimals[g] = check_precision(
-                        self.decimals[g] + column._get(i), self.dtype
+            var limit = precision_limit(self.dtype.precision())
+            var sums = self.decimals.unsafe_ptr()
+            var counts = self.counts.unsafe_ptr()
+            if column.null_count() == 0:
+                # No validity to read: values and group ids through
+                # pointers, as the integer and float sums do (#382).
+                var values = (
+                    column._data[].unsafe_ptr().unsafe_offset(column._offset)
+                )
+                var ids = groups.unsafe_ptr().unsafe_offset(offset)
+                for i in range(len(column)):
+                    var g = ids[i] if grouped else 0
+                    sums[g] = check_limit(
+                        sums[g] + values[i], limit, self.dtype
                     )
-                    self.counts[g] += 1
+                    counts[g] += 1
+            else:
+                for i in range(len(column)):
+                    if column._valid(i):
+                        var g = _group(grouped, groups, offset + i)
+                        sums[g] = check_limit(
+                            sums[g] + column._get(i), limit, self.dtype
+                        )
+                        counts[g] += 1
         elif (op == SUM or op == MEAN) and self.dtype == DataType.INT64:
             _sum_ints(
                 chunk._data[Column[Int64]],
@@ -1439,6 +1461,9 @@ struct Reducer(Movable):
         """
         var op = self.op
         var is_max = op == MAX
+        var limit = precision_limit(
+            self.dtype.precision()
+        ) if self.dtype.is_decimal() else Int128(0)
         var steps = len(sources) if len(sources) else other.group_count
         for step in range(steps):
             var source = sources[step] if len(sources) else step
@@ -1449,8 +1474,10 @@ struct Reducer(Movable):
                 self.counts[g] += other.counts[source]
             elif op == SUM or op == MEAN:
                 if self.dtype.is_decimal():
-                    self.decimals[g] = check_precision(
-                        self.decimals[g] + other.decimals[source], self.dtype
+                    self.decimals[g] = check_limit(
+                        self.decimals[g] + other.decimals[source],
+                        limit,
+                        self.dtype,
                     )
                     self.counts[g] += other.counts[source]
                     continue
