@@ -754,7 +754,6 @@ struct LazyFrame(Copyable):
                 var right_rows = self._known_height(node.right)
                 if (
                     (node.how == JOIN_INNER or node.how == JOIN_LEFT)
-                    and len(joins) == 0
                     and self._known_height(node.left) < 0
                     and bound >= 0
                     and right_rows >= 524288
@@ -762,11 +761,21 @@ struct LazyFrame(Copyable):
                 ):
                     # The bound only says the left side may be small; the
                     # eager join then decides with the real heights (a
-                    # filter often keeps far fewer rows than it scans). Only
-                    # for a plan's single join: a chain of joins above this
-                    # one streams faster than it runs eagerly (PDS-H q8 and
-                    # q9 were 1.5 times slower eager).
-                    return None
+                    # filter often keeps far fewer rows than it scans).
+                    if len(joins) == 0:
+                        return None
+                    # Joins above this one stream faster than they run
+                    # eagerly (PDS-H q8 and q9 were 1.5 times slower eager),
+                    # so only this join leaves the stream: it becomes the
+                    # stream's source, executed as a plan of its own, where
+                    # the rule above runs it eagerly. PDS-H q8 hashed 6M
+                    # lineitem rows to match the 1,300 parts its filter
+                    # keeps. Leaving the stream costs the joins above their
+                    # prepared probe of this one's output, so it takes a
+                    # wider margin: PDS-H q16 (200K parts at most, 800K
+                    # partsupp rows) was 10% slower leaving it.
+                    if 8 * bound <= right_rows:
+                        break
                 if (
                     self._known_height(node.left) <= batch_size
                     and (node.how == JOIN_INNER or node.how == JOIN_LEFT)
