@@ -80,6 +80,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Grouping or partitioning by one numeric key without nulls numbers each
+  hash bucket by hash alone: the key's hash is a bijection on its 64 bits,
+  so equal hashes are equal keys and rows need no comparison, which read
+  both rows' keys at random. H2O q5 (10M rows) 358 → 264 ms at k=2 and 200
+  → 159 ms at k=100; ClickBench q8, q9, q15 and q35 11-14% faster; PDS-H
+  q18 137 → 118 ms and q21 483 → 442 ms at scale 1.
 - A filter whose mask keeps every row (`is_not_null()` on a column
   without nulls) returns the frame's columns instead of copying them, and a
   rank over many small partitions sorts every row once by (partition, key)
