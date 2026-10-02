@@ -84,6 +84,18 @@ breaking changes can happen in any release and are listed under **Breaking**.
   precision limit once per column instead of computing `10^precision` for
   every row, and a decimal sum without nulls reads values and group ids
   through pointers. PDS-H decimal q1 322 → 188 ms at scale 1.
+- In a lazy chain of joins, a join whose left input a filter bounds to at
+  most an eighth of a large right input now runs eagerly, building its hash
+  table on the smaller side, and the joins above stream from its result.
+  Before, only a plan's single join did (#377); in a chain the streaming
+  join built on the right. PDS-H q8 158 → 62 ms and q9 224 → 128 ms at
+  scale 1.
+- A group-by on several keys with few values each (at most 256 in a
+  sample of each key, at most 65,536 combinations) aggregates by worker row
+  ranges instead of hash partitions. A sample of whole key rows looked
+  mostly distinct for two 100-value keys, so 10,000 groups took the
+  partitioned path built for millions. H2O (10M rows, k=100) q2 322 → 103
+  ms and q9 294 → 108 ms.
 - `DATAFRAME_THREADS` is now a limit: at most that many threads run jobs
   at once, across nested and concurrent parallel steps. Steps that cut work
   into more jobs than threads used to give every job its own thread, and a
