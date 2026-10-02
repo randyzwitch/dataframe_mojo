@@ -80,6 +80,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A filter whose mask keeps every row (`is_not_null()` on a column
+  without nulls) returns the frame's columns instead of copying them, and a
+  rank over many small partitions sorts every row once by (partition, key)
+  sooner: when partitions times workers exceed the row count rather than
+  four times it, which also skips a serial prefix over partitions times
+  workers. A rank of a column without nulls fills its validity in one call.
+  H2O q8 (top two per group, 10M rows) 898 → 611 ms at k=2, 554 → 511 ms at
+  k=10 and 470 → 444 ms at k=100; ClickBench q27 137 → 106 ms.
 - Decimal addition, subtraction and multiplication of columns without
   nulls read values through pointers and build no validity, and a product's
   rounding division by 10 to 10,000 is specialized when compiling, so a

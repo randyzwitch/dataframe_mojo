@@ -739,18 +739,21 @@ def _rank_typed[
     var count = 1
     for id in ids:
         count = max(count, id + 1)
-    var valid = List[Bool](capacity=n)
-    var all_valid = True
-    for i in range(n):
-        var present = column._valid(i)
-        valid.append(present)
-        all_valid = all_valid and present
+    # Without nulls the list is one fill, not a read of every row's bit.
+    var all_valid = column.null_count() == 0
+    var valid: List[Bool]
+    if all_valid:
+        valid = List[Bool](length=n, fill=True)
+    else:
+        valid = List[Bool](capacity=n)
+        for i in range(n):
+            valid.append(column._valid(i))
     var workers = configured_workers()
     # Per-worker counts cost workers x partitions; with very many
     # partitions one worker buckets alone.
     var threads = max(1, min(workers, n // 65536))
     if (
-        count * threads > 4 * n
+        count * threads > n
         and threads > 1
         and n < (1 << 32)
         and count < (1 << 32)
