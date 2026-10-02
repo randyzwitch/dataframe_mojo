@@ -90,6 +90,8 @@ comptime CAST = 79
 # `is_in` over string literals, one string op: text holds the values, each
 # as its byte length, ':' and its bytes (string_predicates.decode_values).
 comptime STR_IS_IN = 170
+# SQL LIKE: text holds the pattern ('%' any run, '_' one character).
+comptime STR_LIKE = 171
 
 # Reductions occupy 80..99; ANY/ALL keep ignore_nulls in `integer`.
 comptime MIN = 80
@@ -223,7 +225,11 @@ def is_comparison(op: Int) -> Bool:
 
 
 def is_string_op(op: Int) -> Bool:
-    return (op >= STR_LEN_CHARS and op <= STR_PAD) or op == STR_IS_IN
+    return (
+        (op >= STR_LEN_CHARS and op <= STR_PAD)
+        or op == STR_IS_IN
+        or op == STR_LIKE
+    )
 
 
 def is_dt_op(op: Int) -> Bool:
@@ -1359,6 +1365,13 @@ struct StrNamespace(Copyable):
     def contains(self, literal: String) -> Expr:
         """Literal substring test; regular expressions are not supported."""
         return self._op(STR_CONTAINS, literal)
+
+    def like(self, pattern: String) -> Expr:
+        """SQL LIKE: '%' matches any run of characters (including none) and
+        '_' exactly one; every other character matches itself. There is no
+        escape character. `like("%special%requests%")` is SQL's
+        `LIKE '%special%requests%'`."""
+        return self._op(STR_LIKE, pattern)
 
     def replace(self, pattern: String, value: String) -> Expr:
         """Replace the first occurrence of a literal pattern."""
