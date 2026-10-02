@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Decimal addition, subtraction, multiplication and sums read the
+  precision limit once per column instead of computing `10^precision` for
+  every row, and a decimal sum without nulls reads values and group ids
+  through pointers. PDS-H decimal q1 322 → 188 ms at scale 1.
 - In a lazy chain of joins, a join whose left input a filter bounds to at
   most an eighth of a large right input now runs eagerly, building its hash
   table on the smaller side, and the joins above stream from its result.

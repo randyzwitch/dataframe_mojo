@@ -23,7 +23,13 @@ def precision_limit(precision: Int) -> Int128:
 
 
 def check_precision(value: Int128, dtype: DataType) raises -> Int128:
-    var limit = precision_limit(dtype.precision())
+    return check_limit(value, precision_limit(dtype.precision()), dtype)
+
+
+@always_inline
+def check_limit(value: Int128, limit: Int128, dtype: DataType) raises -> Int128:
+    """`check_precision` with `limit` (`precision_limit` of `dtype`) read
+    once per column by the caller, not computed again for every row."""
     if value <= -limit or value >= limit:
         raise Error(
             "value exceeds decimal precision " + String(dtype.precision())
