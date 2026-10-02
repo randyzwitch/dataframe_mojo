@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Aggregation loops read values and group ids through pointers, skip
+  validity checks for columns without nulls, and keep ungrouped totals in a
+  local: H2O group-by q4 (`mean` of three columns by `id4`) 53 → 35 ms at
+  10M rows (#382).
 - Group keys are numbered without standard-library dictionaries: number
   columns through a typed open-addressing table, string columns through the
   single-key path that packs short strings into 128-bit keys, and several
