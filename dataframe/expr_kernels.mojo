@@ -331,12 +331,69 @@ def _int_binary[
             return result.cast[D]()
 
 
+def _vector_int[
+    op: Int, D: DType
+](left: Column[Scalar[D]], right: Column[Scalar[D]], n: Int) raises -> Series:
+    """`+`, `-` or `*` of signed 8-, 16- or 32-bit columns without nulls,
+    16 rows at a time in Int64 lanes, with each block's range checked once
+    (#384). An overflowing block is redone row by row, so the error is the
+    checked operation's own."""
+    comptime lanes = 16
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var a = left._ptr()
+    var b = right._ptr()
+    var a_scalar = len(left) == 1
+    var b_scalar = len(right) == 1
+    var low = SIMD[DType.int64, lanes](Int64(Scalar[D].MIN))
+    var high = SIMD[DType.int64, lanes](Int64(Scalar[D].MAX))
+    var i = 0
+    while i + lanes <= n:
+        var x = SIMD[DType.int64, lanes](
+            Int64(a[])
+        ) if a_scalar else a.unsafe_load[width=lanes](i).cast[DType.int64]()
+        var y = SIMD[DType.int64, lanes](
+            Int64(b[])
+        ) if b_scalar else b.unsafe_load[width=lanes](i).cast[DType.int64]()
+        var r: SIMD[DType.int64, lanes]
+        comptime if op == ADD:
+            r = x + y
+        elif op == SUB:
+            r = x - y
+        else:
+            r = x * y
+        if (r.lt(low) | r.gt(high)).reduce_or():
+            for k in range(lanes):
+                _ = _int_binary[op, D](
+                    left._get(0 if a_scalar else i + k),
+                    right._get(0 if b_scalar else i + k),
+                )
+        out.unsafe_store(i, r.cast[D]())
+        i += lanes
+    while i < n:
+        out.unsafe_offset(i)[] = _int_binary[op, D](
+            left._get(0 if a_scalar else i), right._get(0 if b_scalar else i)
+        )
+        i += 1
+    return Series("", Column[Scalar[D]](values^))
+
+
 def _numeric_int[
     op: Int, D: DType
 ](
     left: Column[Scalar[D]], right: Column[Scalar[D]], mask: List[Bool]
 ) raises -> Series:
     var n = _length(len(left), len(right))
+    comptime if (op == ADD or op == SUB or op == MUL) and (
+        D == DType.int8 or D == DType.int16 or D == DType.int32
+    ):
+        if (
+            len(mask) == 0
+            and n > 0
+            and left.null_count() == 0
+            and right.null_count() == 0
+        ):
+            return _vector_int[op, D](left, right, n)
     var active = fit_mask(mask, n)
     var valid = List[Bool](length=n, fill=False)
     comptime predicate = is_comparison(op)
