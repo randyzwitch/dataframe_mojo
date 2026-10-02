@@ -23,24 +23,8 @@ def sort_by(
 
 
 def like_two(name: String, first: String, second: String) -> Expr:
-    """SQL `name LIKE '%first%second%'` without regular expressions: the
-    first occurrence of `first` ends before the last `second` starts."""
-    var text = col(name)
-    var before = text.str().split(first)
-    var after = text.str().split(second)
-    var first_end = before.list().first().str().len_chars() + lit(
-        Int64(first.byte_length())
-    )
-    var last_start = (
-        text.str().len_chars()
-        - after.list().last().str().len_chars()
-        - lit(Int64(second.byte_length()))
-    )
-    return (
-        (before.list().len() > 1)
-        & (after.list().len() > 1)
-        & (first_end <= last_start)
-    )
+    """SQL `name LIKE '%first%second%'`, as the query text has it."""
+    return col(name).str().like("%" + first + "%" + second + "%")
 
 
 def between_dates(name: String, low: String, high: String) raises -> Expr:
