@@ -6,7 +6,7 @@ string concatenation or hash collisions: equality is exact per column.
 Float64 keys treat every NaN as one value and -0.0 as equal to 0.0.
 """
 from std.collections import Dict
-from std.memory import Pointer, unsafe_memcpy
+from std.memory import Pointer, bitcast, unsafe_memcpy
 from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column
@@ -48,6 +48,52 @@ def _codes_by_value[
     return len(lookup)
 
 
+struct _U64Codes(Movable):
+    """Dense codes for 64-bit keys in first-insertion order: an
+    open-addressing table with a multiplicative hash, growing at half load
+    (#380). A standard-library `Dict` lookup per row was most of a
+    low-cardinality group-by's key numbering."""
+
+    var keys: List[UInt64]
+    var slots: List[Int32]
+    var count: Int
+    var shift: UInt64
+
+    def __init__(out self):
+        self.keys = List[UInt64]()
+        self.slots = List[Int32](length=1024, fill=-1)
+        self.count = 0
+        self.shift = 64 - 10
+
+    @always_inline
+    def code(mut self, key: UInt64) -> Int:
+        """`key`'s code, assigning the next one to a new key."""
+        var mask = len(self.slots) - 1
+        var slot = Int((key * 0x9E3779B97F4A7C15) >> self.shift)
+        while True:
+            var at = Int(self.slots[slot])
+            if at < 0:
+                self.slots[slot] = Int32(self.count)
+                self.keys.append(key)
+                self.count += 1
+                if 2 * self.count > len(self.slots):
+                    self._grow()
+                return self.count - 1
+            if self.keys[at] == key:
+                return at
+            slot = (slot + 1) & mask
+
+    def _grow(mut self):
+        var size = 2 * len(self.slots)
+        self.shift -= 1
+        self.slots = List[Int32](length=size, fill=-1)
+        for at in range(self.count):
+            var slot = Int((self.keys[at] * 0x9E3779B97F4A7C15) >> self.shift)
+            while self.slots[slot] >= 0:
+                slot = (slot + 1) & (size - 1)
+            self.slots[slot] = Int32(at)
+
+
 def column_codes(
     series: Series, mut codes: List[Int], mut nulls: List[Bool]
 ) -> Int:
@@ -56,22 +102,25 @@ def column_codes(
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
             ref column = series._data[Column[Scalar[D]]]
-            comptime if D.is_floating_point():
-                # Every NaN is one key and -0.0 equals 0.0 (exact widening).
-                var lookup = Dict[UInt64, Int]()
-                for i in range(len(column)):
-                    if not column._valid(i):
-                        nulls[i] = True
-                        continue
-                    var key = float_key(Float64(column._get(i)))
-                    var code = lookup.get(key, -1)
-                    if code < 0:
-                        code = len(lookup)
-                        lookup[key] = code
-                    codes[i] = code
-                return len(lookup)
-            else:
-                return _codes_by_value(column, codes, nulls)
+            # Values of up to 64 bits are their own keys: every NaN is one
+            # key and -0.0 equals 0.0 (float_key), integers by bit pattern.
+            var table = _U64Codes()
+            var has_nulls = column.null_count() > 0
+            for i in range(len(column)):
+                if has_nulls and not column._valid(i):
+                    nulls[i] = True
+                    continue
+                comptime if D.is_floating_point():
+                    codes[i] = table.code(float_key(Float64(column._get(i))))
+                else:
+                    codes[i] = table.code(
+                        bitcast[DType.uint64](
+                            column._get(i).cast[DType.int64]()
+                        ) if D.is_signed() else column._get(i).cast[
+                            DType.uint64
+                        ]()
+                    )
+            return table.count
     if series._data.isa[Column[Int128]]():
         return _codes_by_value(series._data[Column[Int128]], codes, nulls)
     if series._data.isa[BoolColumn]():
@@ -82,20 +131,16 @@ def column_codes(
             else:
                 codes[i] = Int(column._get(i))
         return 2
-    # Keys borrow the column's UTF-8 buffer; no String is allocated per row.
-    ref column = series._data[StringColumn]
-    var lookup = Dict[StringSlice[ImmutAnyOrigin], Int]()
-    for i in range(len(column)):
-        if not column._valid(i):
+    # Strings take the single-key path, which keys values of up to 12
+    # bytes as 128-bit integers in its own table (#380).
+    var keys = _encode_string_rows(series, False)
+    for i in range(len(keys.ids)):
+        var id = keys.ids[i]
+        if id < 0:
             nulls[i] = True
-            continue
-        var value = column._get(i)
-        var code = lookup.get(value, -1)
-        if code < 0:
-            code = len(lookup)
-            lookup[value] = code
-        codes[i] = code
-    return len(lookup)
+        else:
+            codes[i] = id
+    return keys.count()
 
 
 struct _InlineStringCodes(Movable):
@@ -505,7 +550,12 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         var distinct = column_codes(keys[j], codes, nulls)
         # Reserve code `distinct` for null so it is one ordinary value.
         var radix = distinct + 1
-        var lookup = Dict[Int, Int]()
+        # Combined codes index a direct array when there are few enough of
+        # them, else a 64-bit table; both replace a `Dict` lookup (#380).
+        var combinations = (len(representatives) if j > 0 else 1) * radix
+        var direct = combinations <= max(4 * n, 1 << 20)
+        var dense = List[Int](length=combinations if direct else 0, fill=-1)
+        var table = _U64Codes()
         representatives = List[Int]()
         for i in range(n):
             if has_nulls and nulls[i]:
@@ -516,10 +566,17 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
                 ids[i] = -1
                 continue
             var combined = ids[i] * radix + codes[i] if j > 0 else codes[i]
-            var id = lookup.get(combined, -1)
-            if id < 0:
-                id = len(lookup)
-                lookup[combined] = id
-                representatives.append(i)
+            var id: Int
+            if direct:
+                id = dense[combined]
+                if id < 0:
+                    id = len(representatives)
+                    dense[combined] = id
+                    representatives.append(i)
+            else:
+                var before = table.count
+                id = table.code(UInt64(combined))
+                if table.count > before:
+                    representatives.append(i)
             ids[i] = id
     return RowKeys(ids^, representatives^)

@@ -88,6 +88,32 @@ breaking changes can happen in any release and are listed under **Breaking**.
   (10M rows) q18 1,647 → 377 ms, q14 470 → 69 ms, q12 355 → 66 ms, q39 364
   → 97 ms and q27 171 → 145 ms; an eager group-by on SearchPhrase 910 → 375
   ms (#381).
+- `over()` numbers its partition keys on every worker instead of one, and
+  the partitioned key encoder writes ids back to row order in parallel.
+  H2O q8 (top two per group) 2,090 → 850 ms at k=2 and 570 → 443 ms at
+  k=100 on 10M rows (#387).
+- The hash join's Int64 probe reads hashes, keys and bucket slots through
+  pointers, and the build and probe hashes are moved into the index instead
+  of copied. H2O join q5 571 → 490 ms; PDS-H q3 85 → 74 ms, q5 117 → 102
+  ms, q9 211 → 192 ms and q21 441 → 416 ms at scale 1 (#378).
+- A lazy plan whose single join has a left input bounded to a quarter of
+  a large right input (a filtered scan, for example) runs eagerly, so the
+  join builds its hash table on the smaller side instead of the right one.
+  PDS-H q17 97 → 42 ms at scale 1 (#377).
+- Aggregation loops read values and group ids through pointers, skip
+  validity checks for columns without nulls, and keep ungrouped totals in a
+  local: H2O group-by q4 (`mean` of three columns by `id4`) 53 → 35 ms at
+  10M rows (#382).
+- Group keys are numbered without standard-library dictionaries: number
+  columns through a typed open-addressing table, string columns through the
+  single-key path that packs short strings into 128-bit keys, and several
+  columns combined through a direct array or the same table. H2O group-by
+  with 500,000 groups by two string keys (k2 q2) 144 → 95 ms (#380).
+- `+`, `-` and `*` on signed 8-, 16- and 32-bit columns without nulls run
+  16 rows at a time with one overflow check per block, and an ungrouped
+  `sum`, `mean`, `min` or `max` of a computed column reads it with SIMD
+  loops instead of copying it to Int64 first. ClickBench q29 (90 sums of
+  `ResolutionWidth + i`) 3.5 s → 0.45 s at 10M rows (#384).
 - Decimal arithmetic, comparisons and sums no longer divide 128-bit
   integers on every row: `pow10` (read by every precision check) is two
   multiplications instead of a loop of up to 38, same-scale operands skip

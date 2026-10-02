@@ -636,6 +636,29 @@ struct LazyFrame(Copyable):
             picked.append(source.column(name).take(rows))
         return encode_rows(picked, nulls_equal=True).count()
 
+    def _height_bound(self, index: Int) -> Int:
+        """An upper bound on the rows a node yields without executing it:
+        the scanned frame's height through steps that only drop or keep
+        rows; -1 when unknown (joins, aggregations, file scans)."""
+        ref node = self._nodes[index]
+        if node.kind == SCAN_FRAME:
+            return self._frames[node.offset].height()
+        if (
+            node.kind == FILTER
+            or node.kind == DROP
+            or (
+                (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and _stream_rows(node)
+            )
+        ):
+            return self._height_bound(node.left)
+        if node.kind == SLICE:
+            var height = self._height_bound(node.left)
+            if height >= 0 and node.length >= 0:
+                return min(height, node.length)
+            return height
+        return -1
+
     def _known_height(self, index: Int) -> Int:
         """Exact cheap cardinalities only; -1 means execution is required."""
         ref node = self._nodes[index]
@@ -720,6 +743,30 @@ struct LazyFrame(Copyable):
                 JOIN_CROSS,
             ]:
                 var prepared = Optional[PreparedHashIndex]()
+                # A left input that can only be small next to a large known
+                # right may be the side to hash: decline streaming, so the
+                # plan runs eagerly and `DataFrame.join` builds on the smaller
+                # side, as Polars' `det_hash_prone_order` and DuckDB's
+                # build/probe optimizer do (#377). Streaming would build on
+                # the right: PDS-H q17 hashed 6M lineitem rows to match the
+                # few hundred parts its filter keeps.
+                var bound = self._height_bound(node.left)
+                var right_rows = self._known_height(node.right)
+                if (
+                    (node.how == JOIN_INNER or node.how == JOIN_LEFT)
+                    and len(joins) == 0
+                    and self._known_height(node.left) < 0
+                    and bound >= 0
+                    and right_rows >= 524288
+                    and 4 * bound <= right_rows
+                ):
+                    # The bound only says the left side may be small; the
+                    # eager join then decides with the real heights (a
+                    # filter often keeps far fewer rows than it scans). Only
+                    # for a plan's single join: a chain of joins above this
+                    # one streams faster than it runs eagerly (PDS-H q8 and
+                    # q9 were 1.5 times slower eager).
+                    return None
                 if (
                     self._known_height(node.left) <= batch_size
                     and (node.how == JOIN_INNER or node.how == JOIN_LEFT)
