@@ -445,6 +445,10 @@ struct Partitioner(Movable):
                 self.histogram[s] += counts[s]
             self.worker_histograms.append(counts^)
 
+    def into_hashes(deinit self) -> List[UInt64]:
+        """The row hashes, moved out (no 8-bytes-a-row copy)."""
+        return self.hashes^
+
     def scatter(
         mut self, workers: Int, with_hashes: Bool = False
     ) raises -> Partitioned:

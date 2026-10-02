@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- The hash join's Int64 probe reads hashes, keys and bucket slots through
+  pointers, and the build and probe hashes are moved into the index instead
+  of copied. H2O join q5 571 → 490 ms; PDS-H q3 85 → 74 ms, q5 117 → 102
+  ms, q9 211 → 192 ms and q21 441 → 416 ms at scale 1 (#378).
 - A lazy plan whose single join has a left input bounded to a quarter of
   a large right input (a filtered scan, for example) runs eagerly, so the
   join builds its hash table on the smaller side instead of the right one.

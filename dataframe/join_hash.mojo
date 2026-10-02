@@ -409,20 +409,27 @@ struct _HashProbeJob(Job):
         ):
             ref left = self.left_keys[0]._data[Column[Int64]]
             var left_all_valid = len(left._bits[]) == 0
+            # Hashes, keys and buckets through pointers: no reference-count
+            # or bounds check per row (#378).
+            var hashes = self.left_hashes[].unsafe_ptr()
+            var keys = left._ptr()
+            var buckets = self.buckets[].unsafe_ptr()
             for i in range(self.start, self.end):
                 if not (left_all_valid or left._valid(i)):
                     if self.include_unmatched:
                         self.left_rows.append(i)
                         self.right_rows.append(-1)
                     continue
-                var hash = self.left_hashes[][i]
+                var hash = hashes.unsafe_offset(i)[]
                 var bucket = Int(hash >> 56) >> self.fold
-                ref index = self.buckets[][bucket]
-                var position = Int(hash & UInt64(index.mask()))
+                ref index = buckets.unsafe_offset(bucket)[]
+                var slots = index.slots.unsafe_ptr()
+                var mask = len(index.slots) - 1
+                var position = Int(hash & UInt64(mask))
                 var matched = False
-                var key = bitcast[DType.uint64](left._get(i))
-                while index.slots[position].row >= 0:
-                    ref slot = index.slots[position]
+                var key = bitcast[DType.uint64](keys.unsafe_offset(i)[])
+                while slots.unsafe_offset(position)[].row >= 0:
+                    ref slot = slots.unsafe_offset(position)[]
                     if key == slot.key:
                         self.left_rows.append(i)
                         self.right_rows.append(Int(slot.row))
@@ -435,7 +442,7 @@ struct _HashProbeJob(Job):
                         )
                         matched = True
                         break
-                    position = (position + 1) & index.mask()
+                    position = (position + 1) & mask
                 if not matched and self.include_unmatched:
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
@@ -645,7 +652,7 @@ struct PreparedHashIndex(Copyable):
         return _HashIndex(
             left^,
             self.right.copy(),
-            ArcPointer(hashes.hashes.copy()),
+            ArcPointer(hashes^.into_hashes()),
             self.indexes.copy(),
             self.fold,
             workers,
@@ -745,8 +752,11 @@ def prepare_hash_index(
         )
     var right_hashes = Partitioner(right, worker_count(len(right[0])))
     var right_parts = right_hashes.scatter(worker_count(len(right[0])))
-    var shared_right_hashes = ArcPointer(right_hashes.hashes.copy())
-    var shared_order = ArcPointer(right_parts.order.copy())
+    # Moved, not copied: each is 8 bytes a row (#378).
+    var order = List[Int]()
+    swap(order, right_parts.order)
+    var shared_right_hashes = ArcPointer(right_hashes^.into_hashes())
+    var shared_order = ArcPointer(order^)
     var typed_int = len(right) == 1 and right[0]._data.isa[Column[Int64]]()
     var skip_nulls = False
     for key in right:
