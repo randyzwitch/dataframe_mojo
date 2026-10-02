@@ -80,6 +80,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Lazy group-bys over an in-memory frame run eagerly when that is faster:
+  after a filter, on keys made by an earlier step, and on keys with few or
+  mostly distinct values. Unfiltered keys in between still stream. The
+  parallel string-key encoder merges its ranges with the string encoder on
+  every worker instead of a `Dict[String, Int]` on one thread. ClickBench
+  (10M rows) q18 1,647 → 377 ms, q14 470 → 69 ms, q12 355 → 66 ms, q39 364
+  → 97 ms and q27 171 → 145 ms; an eager group-by on SearchPhrase 910 → 375
+  ms (#381).
 - Decimal arithmetic, comparisons and sums no longer divide 128-bit
   integers on every row: `pow10` (read by every precision check) is two
   multiplications instead of a loop of up to 38, same-scale operands skip
