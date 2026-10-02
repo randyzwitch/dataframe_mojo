@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- The hash join's Int64 probe reads hashes, keys and bucket slots through
+  pointers, and the build and probe hashes are moved into the index instead
+  of copied. H2O join q5 571 → 490 ms; PDS-H q3 85 → 74 ms, q5 117 → 102
+  ms, q9 211 → 192 ms and q21 441 → 416 ms at scale 1 (#378).
 - Decimal arithmetic, comparisons and sums no longer divide 128-bit
   integers on every row: `pow10` (read by every precision check) is two
   multiplications instead of a loop of up to 38, same-scale operands skip
