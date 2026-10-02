@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A lazy plan whose single join has a left input bounded to a quarter of
+  a large right input (a filtered scan, for example) runs eagerly, so the
+  join builds its hash table on the smaller side instead of the right one.
+  PDS-H q17 97 → 42 ms at scale 1 (#377).
 - Aggregation loops read values and group ids through pointers, skip
   validity checks for columns without nulls, and keep ungrouped totals in a
   local: H2O group-by q4 (`mean` of three columns by `id4`) 53 → 35 ms at
