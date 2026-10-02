@@ -186,6 +186,27 @@ struct StringViewStorage(Copyable, Sized):
             indices, 0, len(indices), offset, allow_missing
         )
 
+    @staticmethod
+    def _sharing(
+        var views: List[StringView],
+        buffers: ArcPointer[List[ArcPointer[List[UInt8]]]],
+        var bits: List[UInt8],
+        length: Int,
+        total_bytes: Int,
+        total_buffer_bytes: Int,
+    ) -> Self:
+        """Storage over `views` that shares an existing buffer list."""
+        var result = Self(
+            views^,
+            List[ArcPointer[List[UInt8]]](),
+            bits^,
+            length,
+            total_bytes,
+            total_buffer_bytes,
+        )
+        result._buffers = buffers.copy()
+        return result^
+
     def _gather_range(
         self,
         indices: List[Int],
@@ -196,43 +217,45 @@ struct StringViewStorage(Copyable, Sized):
     ) raises -> Self:
         """Copy descriptors/validity while retaining every referenced block.
 
-        Arrow view descriptors use storage-local buffer indexes, so retaining
-        the complete Arc buffer list leaves external descriptors unchanged.
-        This is the zero-payload-copy gather route used by StringColumn.
+        Arrow view descriptors use storage-local buffer indexes, so sharing
+        the source's buffer list leaves external descriptors unchanged. The
+        list itself is shared (one reference count), not copied entry by
+        entry, and views and validity bits are written directly (#395).
         """
         var count = last - first
         var views = List[StringView](capacity=count)
-        var buffers = List[ArcPointer[List[UInt8]]](
-            capacity=len(self._buffers[])
+        var source_views = self._views[].unsafe_ptr()
+        var nulls = len(self._bits[]) > 0
+        var bits = List[UInt8](
+            length=(count + 7) // 8 if (nulls or allow_missing) else 0, fill=0
         )
-        for buffer in self._buffers[]:
-            buffers.append(buffer.copy())
-        var bits = List[UInt8]()
+        var missing = False
         var total_bytes = 0
         var total_buffer_bytes = 0
-        for at in range(first, last):
-            var index = indices[at]
+        var rows = indices.unsafe_ptr().unsafe_offset(first)
+        for k in range(count):
+            var index = rows.unsafe_offset(k)[]
             if index == -1 and allow_missing:
-                _append_validity_bit(bits, len(views), False, count)
+                missing = True
                 views.append(StringView(0, 0, 0, 0))
                 continue
             if index < 0 or index >= self._length - offset:
                 raise Error("string view gather index out of bounds")
             var source = offset + index
-            var view = self._view_unchecked(source)
-            _append_validity_bit(
-                bits,
-                len(views),
-                _validity_bit(self._bits[], source),
-                count,
-            )
+            var view = source_views.unsafe_offset(source)[].copy()
+            if len(bits) > 0 and (
+                not nulls or _validity_bit(self._bits[], source)
+            ):
+                bits[k >> 3] |= UInt8(1) << UInt8(k & 7)
             total_bytes += Int(view.length)
             if not view.is_inline():
                 total_buffer_bytes += Int(view.length)
             views.append(view^)
-        return Self(
+        if not nulls and not missing:
+            bits = List[UInt8]()
+        return Self._sharing(
             views^,
-            buffers^,
+            self._buffers,
             bits^,
             count,
             total_bytes,
@@ -324,31 +347,48 @@ struct StringViewStorage(Copyable, Sized):
                 raise Error("String view concat window out of bounds")
             rows += lengths[i]
             buffers_count += parts[i].buffer_count()
+        # Each distinct byte block is listed once: gathered pieces of one
+        # column usually share the same blocks, and listing them again per
+        # piece made the lists, and every later gather's copy of them, grow
+        # with each merge (#395).
         var views = List[StringView](capacity=rows)
-        var buffers = List[ArcPointer[List[UInt8]]](capacity=buffers_count)
-        var bits = List[UInt8]()
+        var buffers = List[ArcPointer[List[UInt8]]]()
+        var position = Dict[Int, Int]()
+        var any_nulls = False
+        for p in range(len(parts)):
+            any_nulls = any_nulls or len(parts[p]._bits[]) > 0
+        var bits = List[UInt8](
+            length=(rows + 7) // 8 if any_nulls else 0, fill=0
+        )
         var total_bytes = 0
         var total_buffer_bytes = 0
-        var buffer_base = 0
+        var row = 0
         for p in range(len(parts)):
-            var storage = parts[p].copy()
+            ref storage = parts[p]
+            var remap = List[UInt32](capacity=storage.buffer_count())
             for buffer in storage._buffers[]:
-                buffers.append(buffer.copy())
+                var key = Int(buffer.ptr())
+                var at = position.get(key, -1)
+                if at < 0:
+                    at = len(buffers)
+                    position[key] = at
+                    buffers.append(buffer.copy())
+                remap.append(UInt32(at))
+            var source_views = storage._views[].unsafe_ptr()
+            var nulls = len(storage._bits[]) > 0
             for i in range(lengths[p]):
                 var source = offsets[p] + i
-                var view = storage._view_unchecked(source)
+                var view = source_views.unsafe_offset(source)[].copy()
                 if not view.is_inline():
-                    view.buffer_index += UInt32(buffer_base)
+                    view.buffer_index = remap[Int(view.buffer_index)]
                     total_buffer_bytes += Int(view.length)
-                _append_validity_bit(
-                    bits,
-                    len(views),
-                    _validity_bit(storage._bits[], source),
-                    rows,
-                )
+                if any_nulls and (
+                    not nulls or _validity_bit(storage._bits[], source)
+                ):
+                    bits[row >> 3] |= UInt8(1) << UInt8(row & 7)
                 total_bytes += Int(view.length)
                 views.append(view^)
-            buffer_base += storage.buffer_count()
+                row += 1
         return Self(
             views^, buffers^, bits^, rows, total_bytes, total_buffer_bytes
         )

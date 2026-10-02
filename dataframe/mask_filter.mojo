@@ -225,6 +225,42 @@ struct _CompressJob(Job):
                             )
                 k += 64
                 continue
+            if base + 64 <= chunks.ends[chunk]:
+                # The word lies in one array: copy each run of kept rows
+                # with one memcpy, reading through this array's pointer
+                # (#395; a filter keeping most rows leaves long runs).
+                var local = base - start
+                var nulls = out_valid_address != 0 and len(part._bits[]) > 0
+                while word != 0 and k < self.last:
+                    var b0 = Int(count_trailing_zeros(word))
+                    var rest = word >> UInt64(b0)
+                    var ones = 64 - b0 if rest == (
+                        _FULL >> UInt64(b0)
+                    ) else Int(count_trailing_zeros(~rest))
+                    var run = min(ones, self.last - k)
+                    unsafe_memcpy(
+                        dest=out.unsafe_offset(k),
+                        src=src.unsafe_offset(local + b0),
+                        count=run,
+                    )
+                    if out_valid_address != 0:
+                        var bits = Pointer[List[UInt8], MutAnyOrigin](
+                            unsafe_from_address=out_valid_address
+                        )[].unsafe_ptr()
+                        for i in range(run):
+                            if not nulls or part._valid(local + b0 + i):
+                                var at = k + i
+                                bits.unsafe_offset(at >> 3)[] |= UInt8(
+                                    1
+                                ) << UInt8(at & 7)
+                    k += run
+                    if b0 + run >= 64:
+                        word = 0
+                    else:
+                        word &= ~(
+                            ((UInt64(1) << UInt64(run)) - 1) << UInt64(b0)
+                        )
+                continue
             while word != 0 and k < self.last:
                 var r = base + Int(count_trailing_zeros(word))
                 word &= word - 1
