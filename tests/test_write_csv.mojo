@@ -113,6 +113,30 @@ def test_round_trip_every_dtype_and_edge_value() raises:
     )
 
 
+def test_special_floats_round_trip_with_inferred_types() raises:
+    # NaN is written as Polars writes it; `nan` would read back as a
+    # string column here and in Polars (#368).
+    var frame = DataFrame(
+        [
+            Series("f", Column[Float64]([nan(), -0.0, inf(), -inf(), 1.5])),
+            Series(
+                "g",
+                Column[Float32]([Float32(1.0) / Float32(0.0) * 0, 2, 3, 4, 5]),
+            ),
+        ]
+    )
+    assert_equal(
+        to_csv_string(frame),
+        "f,g\nNaN,NaN\n-0.0,2.0\ninf,3.0\n-inf,4.0\n1.5,5.0\n",
+    )
+    write_csv(frame, PATH)
+    var back = read_csv(PATH)
+    assert_true(back.column("f").dtype() == DataType.FLOAT64)
+    assert_true(back.column("g").dtype() == DataType.FLOAT64)
+    assert_true(back.column("f").equals(frame.column("f")))
+    assert_equal(String(back.item(1, "f")), "-0.0")
+
+
 def test_exact_text_and_quote_styles() raises:
     var frame = DataFrame(
         [

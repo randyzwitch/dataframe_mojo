@@ -392,6 +392,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
   -- a pipe, a character device -- still reads, through the block reader
   (#107).
 
+### Fixed
+
+- `write_csv` writes a float NaN as `NaN`, as Polars does, instead of
+  `nan`, which both `read_csv` and Polars read back as a string, so a
+  Float64 column with NaN now round-trips as Float64 (#368).
+
 ## 0.2.0 - 2026-09-21
 
 ### Breaking
