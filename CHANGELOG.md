@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `+`, `-` and `*` on signed 8-, 16- and 32-bit columns without nulls run
+  16 rows at a time with one overflow check per block, and an ungrouped
+  `sum`, `mean`, `min` or `max` of a computed column reads it with SIMD
+  loops instead of copying it to Int64 first. ClickBench q29 (90 sums of
+  `ResolutionWidth + i`) 3.5 s → 0.45 s at 10M rows (#384).
 - Decimal arithmetic, comparisons and sums no longer divide 128-bit
   integers on every row: `pow10` (read by every precision check) is two
   multiplications instead of a loop of up to 38, same-scale operands skip
