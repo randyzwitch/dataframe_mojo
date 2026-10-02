@@ -80,6 +80,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `DATAFRAME_THREADS` is now a limit: at most that many threads run jobs
+  at once, across nested and concurrent parallel steps. Steps that cut work
+  into more jobs than threads used to give every job its own thread, and a
+  grouped reduce inside each hash bucket, or a median, started rounds of
+  their own; H2O q6 ran up to 118 threads at `DATAFRAME_THREADS=8`. Extra
+  jobs are now claimed by the allowed threads, and a job that starts jobs
+  while every thread is busy runs them itself. Benchmarks at 8 threads are
+  now measured on 8; that makes some slower than reported before (#390).
 - Lazy group-bys over an in-memory frame run eagerly when that is faster:
   after a filter, on keys made by an earlier step, and on keys with few or
   mostly distinct values. Unfiltered keys in between still stream. The

@@ -11,6 +11,10 @@ the others, and re-raises the first worker error on the caller (errors cannot
 unwind across threads). Shared column buffers are safe to read concurrently:
 their reference counts are atomic and they are never mutated while shared.
 
+Threads come from one process-wide budget of `DATAFRAME_THREADS` - 1
+helpers, shared by every `run_jobs` call and `Pool` round, nested or
+concurrent, so the setting is a limit on threads running jobs (#390).
+
 `worker_count` sizes the pool: `DATAFRAME_THREADS` (1 disables parallelism),
 else the physical core count, capped so each worker gets at least
 `MIN_ROWS_PER_WORKER` rows (small inputs stay single-threaded).
@@ -29,7 +33,7 @@ crashes under the JIT even with no threads involved). So a pool is scoped
 to the operation that creates it and never becomes process-wide. See #103.
 """
 from std.atomic import Atomic
-from std.ffi import external_call
+from std.ffi import _get_global, external_call
 from std.memory import Pointer
 from std.os import getenv
 from std.sys import CompilationTarget, num_physical_cores, size_of
@@ -93,6 +97,54 @@ def _pool_spin_limit(participants: Int) -> Int:
     # Four workers still benefit from spinning (3.7 -> 3.1 ms).
     # Threadripper and M1 sweeps: docs/worker-calibration.md (#273).
     return 0 if participants > cores else _SPIN_LIMIT
+
+
+def _budget_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var address = external_call["calloc", Int](1, size_of[Atomic[Int64]]())
+    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+
+
+def _budget_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    # Never freed: a worker of another operation may still decrement it
+    # while the process exits.
+    pass
+
+
+def _helpers() -> ref[MutAnyOrigin] Atomic[Int64]:
+    """Helper threads running jobs right now, across the whole process."""
+    var address = _get_global[
+        "DATAFRAME_HELPER_THREADS", _budget_init, _budget_keep
+    ]()
+    return Pointer[Atomic[Int64], MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
+def _reserve_helpers(wanted: Int) -> Int:
+    """Claim up to `wanted` helper threads from the process-wide budget.
+
+    The budget is `configured_workers() - 1` helpers: with the thread that
+    asks, never more than `DATAFRAME_THREADS` threads run jobs at once
+    (#390). A job that starts jobs of its own -- a grouped reduce inside a
+    hash bucket -- therefore gets helpers only if others are idle, and
+    otherwise runs its jobs on its own thread.
+    """
+    if wanted <= 0:
+        return 0
+    var limit = Int64(configured_workers() - 1)
+    ref helpers = _helpers()
+    var busy = helpers.load()
+    while True:
+        var granted = min(Int64(wanted), limit - busy)
+        if granted <= 0:
+            return 0
+        if helpers.compare_exchange(busy, busy + granted):
+            return Int(granted)
+
+
+def _release_helpers(count: Int):
+    if count > 0:
+        _ = _helpers().fetch_sub(Int64(count))
 
 
 trait Job(Deinitable, Movable):
@@ -180,6 +232,9 @@ struct _Shared(Movable):
     # Set once, at release, to let parked workers return instead of waiting.
     var stopping: Atomic[Int64]
     var threads: Int
+    # Workers taking part in the current round: the first `participants`
+    # by index. The rest arrive at once, as the budget had no room for them.
+    var participants: Atomic[Int64]
     var spin_limit: Int
 
     def __init__(out self):
@@ -195,6 +250,7 @@ struct _Shared(Movable):
         self.closed = Atomic[Int64](0)
         self.stopping = Atomic[Int64](0)
         self.threads = 0
+        self.participants = Atomic[Int64](0)
         self.spin_limit = _SPIN_LIMIT
 
     def _mutex(self) -> Int:
@@ -307,12 +363,17 @@ def _worker(argument: Int) abi("C") -> Int:
         if shared.stopping.load() != 0:
             return 0
         seen = shared.generation.load()
-        if shared.mode.load() == 1:
-            shared._run_claim()
-        elif shared.mode.load() == 2:
-            shared._run_produced()
-        else:
-            shared._run_share(index, shared.threads + 1)
+        var participants = Int(shared.participants.load())
+        if index < participants:
+            if shared.mode.load() == 1:
+                shared._run_claim()
+            elif shared.mode.load() == 2:
+                shared._run_produced()
+            else:
+                shared._run_share(index, participants + 1)
+            # Done with this round: the reservation made for this worker
+            # is returned as soon as its share is.
+            _release_helpers(1)
         _ = shared.arrived.fetch_add(1)
 
 
@@ -331,8 +392,10 @@ struct _ProducedJobs[J: Job](Movable):
     var capacity: Int
     var started: Bool
     var finished: Bool
+    var helpers: Int
 
     def __init__(out self, capacity: Int):
+        self.helpers = 0
         self.address = 0
         self.slots = List[_Slot[Self.J]](capacity=capacity)
         self.tasks = List[_Task](capacity=capacity)
@@ -351,6 +414,12 @@ struct _ProducedJobs[J: Job](Movable):
         if not self.started:
             return
         ref shared = self._shared()
+        self.helpers = _reserve_helpers(shared.threads)
+        if self.helpers == 0:
+            # Every helper is busy: run each job as it is submitted.
+            self.started = False
+            return
+        shared.participants.store(Int64(self.helpers))
         _ = external_call["pthread_mutex_lock", Int32](shared._mutex())
         shared.tasks.store(Int64(Int(self.tasks.unsafe_ptr())))
         shared.count.store(0)
@@ -407,6 +476,8 @@ struct _ProducedJobs[J: Job](Movable):
             _ = external_call["sched_yield", Int32]()
         shared.count.store(0)
         shared.tasks.store(0)
+        # Each participating worker returned its own reservation.
+        self.helpers = 0
         self.finished = True
 
     def finish(mut self) raises -> List[Self.J]:
@@ -532,6 +603,8 @@ struct Pool(Movable):
             var tasks = List[_Task](capacity=len(slots))
             for t in range(len(slots)):
                 tasks.append(_Task(entry_address, Int(Pointer(to=slots[t]))))
+            var helpers = _reserve_helpers(min(shared.threads, len(slots) - 1))
+            shared.participants.store(Int64(helpers))
             shared.tasks.store(Int64(Int(Pointer(to=tasks))))
             shared.count.store(Int64(len(tasks)))
             shared.next.store(0)
@@ -548,7 +621,7 @@ struct Pool(Movable):
             else:
                 # The caller takes the last share, as run_jobs has it run the
                 # last job itself.
-                shared._run_share(shared.threads, shared.threads + 1)
+                shared._run_share(helpers, helpers + 1)
             while shared.done.load() < Int64(len(tasks)):
                 _ = external_call["sched_yield", Int32]()
             while shared.arrived.load() < Int64(shared.threads):
@@ -558,6 +631,7 @@ struct Pool(Movable):
             shared.count.store(0)
             shared.tasks.store(0)
             shared.mode.store(0)
+            # Each participating worker returned its own reservation.
             # `tasks` and `slots` must outlive every worker's use of them.
             _ = tasks^
 
@@ -599,8 +673,59 @@ struct Pool(Movable):
         self.release()
 
 
+struct _Claims(Movable):
+    """A completed job list that a fixed number of threads share: each takes
+    the next unclaimed slot until none are left."""
+
+    var slots: Int
+    var stride: Int
+    var count: Int
+    var entry: Int
+    var next: Atomic[Int64]
+
+    def __init__(out self, slots: Int, stride: Int, count: Int, entry: Int):
+        self.slots = slots
+        self.stride = stride
+        self.count = count
+        self.entry = entry
+        self.next = Atomic[Int64](0)
+
+    def run(mut self):
+        var entry = Pointer(to=self.entry).unsafe_bitcast[_Entry]()[]
+        while True:
+            var i = Int(self.next.fetch_add(1))
+            if i >= self.count:
+                return
+            _ = entry(self.slots + i * self.stride)
+
+
+def _claim_worker(address: Int) abi("C") -> Int:
+    Pointer[_Claims, MutAnyOrigin](unsafe_from_address=address)[].run()
+    # Out of work: give the thread back to the budget now, not when the
+    # round ends, so a job still running can start helpers of its own.
+    _release_helpers(1)
+    return 0
+
+
+def _helper_entry[J: Job](address: Int) abi("C") -> Int:
+    """`_entry` for a helper thread that runs one job, then returns itself
+    to the budget."""
+    Pointer[_Slot[J], MutAnyOrigin](unsafe_from_address=address)[].run()
+    _release_helpers(1)
+    return 0
+
+
 def run_jobs[J: Job](mut jobs: List[J]) raises:
-    """Run each job on its own thread and return them with their results."""
+    """Run every job and return them, in order, with their results.
+
+    Threads come from the process-wide budget (`_reserve_helpers`), so at
+    most `configured_workers()` threads run jobs at once, across nested and
+    concurrent calls (#390). When the budget covers a thread per job, the
+    caller runs the last one. Otherwise the threads it does cover, and the
+    caller, claim jobs one at a time until none are left: a caller may cut
+    work finer than the thread count for balance, and a job that starts
+    jobs while every helper is busy runs them on its own thread.
+    """
     if len(jobs) == 0:
         return
     var slots = List[_Slot[J]](capacity=len(jobs))
@@ -608,26 +733,54 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
         slots.append(_Slot[J](jobs.pop(0)))
     var entry: _Entry = _entry[J]
     var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
-    var spawned = len(slots) - 1
+    var helper: _Entry = _helper_entry[J]
+    var helper_address = Pointer(to=helper).unsafe_bitcast[Int]()[]
+    var spawned = _reserve_helpers(len(slots) - 1)
+    # With a thread per job, the caller runs the last one; with fewer, the
+    # threads and the caller claim jobs until none are left.
+    var claiming = spawned < len(slots) - 1
+    var claims = _Claims(
+        Int(slots.unsafe_ptr()), size_of[_Slot[J]](), len(slots), entry_address
+    )
     var threads = List[UInt64](length=spawned, fill=0)
     var started = 0
     var spawn_error = String()
+    var claim_entry: _Entry = _claim_worker
+    var claim_address = Pointer(to=claim_entry).unsafe_bitcast[Int]()[]
     for t in range(spawned):
-        var rc = external_call["pthread_create", Int32](
-            Int(threads.unsafe_ptr()) + 8 * t,
-            0,
-            entry_address,
-            Int(Pointer(to=slots[t])),
-        )
+        var rc: Int32
+        if claiming:
+            rc = external_call["pthread_create", Int32](
+                Int(threads.unsafe_ptr()) + 8 * t,
+                0,
+                claim_address,
+                Int(Pointer(to=claims)),
+            )
+        else:
+            rc = external_call["pthread_create", Int32](
+                Int(threads.unsafe_ptr()) + 8 * t,
+                0,
+                helper_address,
+                Int(Pointer(to=slots[t])),
+            )
         if rc != 0:
             spawn_error = "pthread_create failed with code " + String(rc)
             break
         started += 1
-    # The caller does the last job itself (or every unstarted job on error).
-    for t in range(started, len(slots)):
-        slots[t].run()
+    if claiming:
+        # The caller claims too; if a thread failed to start, it and the
+        # threads that did start still finish every job.
+        claims.run()
+    else:
+        # The caller does the last job itself (or every unstarted job on
+        # error).
+        for t in range(started, len(slots)):
+            slots[t].run()
     for t in range(started):
         _ = external_call["pthread_join", Int32](threads[t], 0)
+    # Started threads returned their own; these never started.
+    _release_helpers(spawned - started)
+    _ = claims^
     if spawn_error:
         raise Error(spawn_error)
     for t in range(len(slots)):
