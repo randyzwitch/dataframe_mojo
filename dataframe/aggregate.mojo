@@ -1055,19 +1055,23 @@ struct Reducer(Movable):
                 )
                 var ids = groups.unsafe_ptr().unsafe_offset(offset)
                 for i in range(len(column)):
-                    var g = ids[i] if grouped else 0
-                    sums[g] = check_limit(
-                        sums[g] + values[i], limit, self.dtype
+                    var g = ids[unsafe_offset=i] if grouped else 0
+                    sums[unsafe_offset=g] = check_limit(
+                        sums[unsafe_offset=g] + values[unsafe_offset=i],
+                        limit,
+                        self.dtype,
                     )
-                    counts[g] += 1
+                    counts[unsafe_offset=g] += 1
             else:
                 for i in range(len(column)):
                     if column._valid(i):
                         var g = _group(grouped, groups, offset + i)
-                        sums[g] = check_limit(
-                            sums[g] + column._get(i), limit, self.dtype
+                        sums[unsafe_offset=g] = check_limit(
+                            sums[unsafe_offset=g] + column._get(i),
+                            limit,
+                            self.dtype,
                         )
-                        counts[g] += 1
+                        counts[unsafe_offset=g] += 1
         elif (op == SUM or op == MEAN) and self.dtype == DataType.INT64:
             _sum_ints(
                 chunk._data[Column[Int64]],
