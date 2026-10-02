@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Decimal addition, subtraction and multiplication of columns without
+  nulls read values through pointers and build no validity, and a product's
+  rounding division by 10 to 10,000 is specialized when compiling, so a
+  quotient that fits 64 bits needs no division instruction. PDS-H decimal q1
+  180 → 143 ms at scale 1.
 - Boolean `fill_null`, and the step that keeps nulls in numeric `is_in`,
   work on bitmaps a byte (eight rows) at a time instead of building two
   lists of Booleans per row and packing them. Numeric `is_in` runs both

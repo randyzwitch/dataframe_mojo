@@ -670,6 +670,66 @@ def _decimal_div(
     return -result if negative else result
 
 
+@always_inline
+def _round_div[divisor: Int](numerator: Int128) -> Int128:
+    """`divide_half_even` by a power of ten known when compiling, so a
+    quotient that fits 64 bits is a multiply and shift, not a division."""
+    var negative = numerator < 0
+    var magnitude = -numerator if negative else numerator
+    if magnitude > Int128(Int64.MAX):
+        return divide_half_even(numerator, Int128(divisor))
+    comptime d = Int64(divisor)
+    var m = Int64(magnitude)
+    var q = m // d
+    var r = m - q * d
+    var rest = d - r
+    if r > rest or (r == rest and q % 2 == 1):
+        q += 1
+    return Int128(-q) if negative else Int128(q)
+
+
+def _decimal_dense[
+    op: Int, divisor: Int
+](
+    a: Column[Int128],
+    b: Column[Int128],
+    n: Int,
+    left_factor: Int128,
+    right_factor: Int128,
+    rescale: Int128,
+    limit: Int128,
+    dtype: DataType,
+) raises -> List[Int128]:
+    """Decimal ADD, SUB or MUL with no nulls on either side: values through
+    pointers, no validity to build. `divisor` is the multiplication's
+    rescaling power of ten when it is one the compiler can specialize (0
+    otherwise, which divides by `rescale` at run time)."""
+    var values = List[Int128](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var xs = a._ptr()
+    var ys = b._ptr()
+    var left_one = len(a) == 1
+    var right_one = len(b) == 1
+    for i in range(n):
+        var x = xs[unsafe_offset=0 if left_one else i]
+        var y = ys[unsafe_offset=0 if right_one else i]
+        var value: Int128
+        comptime if op == MUL:
+            value = _decimal_mul(x, y)
+            comptime if divisor > 1:
+                value = _round_div[divisor](value)
+            elif divisor == 0:
+                value = divide_half_even(value, rescale)
+        else:
+            if left_factor != 1:
+                x = _decimal_mul(x, left_factor)
+            if right_factor != 1:
+                y = _decimal_mul(y, right_factor)
+            value = x + y if op == ADD else x - y
+        out[unsafe_offset=i] = check_limit(value, limit, dtype)
+    return values^
+
+
 def _decimal_binary[
     op: Int
 ](left: Series, right: Series, mask: List[Bool]) raises -> Series:
@@ -677,6 +737,49 @@ def _decimal_binary[
     ref a = left._data[Column[Int128]]
     ref b = right._data[Column[Int128]]
     var n = _length(len(a), len(b))
+    comptime if op == ADD or op == SUB or op == MUL:
+        if len(mask) == 0 and a.null_count() == 0 and b.null_count() == 0:
+            var common = max(left.dtype().scale(), right.dtype().scale())
+            var lf = pow10(common - left.dtype().scale())
+            var rf = pow10(common - right.dtype().scale())
+            var lim = precision_limit(result_dtype.precision())
+            var shift = (
+                left.dtype().scale()
+                + right.dtype().scale()
+                - result_dtype.scale()
+            )
+            var scale = pow10(max(shift, 0))
+            var dense: List[Int128]
+            comptime if op == MUL:
+                if shift <= 0:
+                    dense = _decimal_dense[op, 1](
+                        a, b, n, lf, rf, scale, lim, result_dtype
+                    )
+                elif shift == 1:
+                    dense = _decimal_dense[op, 10](
+                        a, b, n, lf, rf, scale, lim, result_dtype
+                    )
+                elif shift == 2:
+                    dense = _decimal_dense[op, 100](
+                        a, b, n, lf, rf, scale, lim, result_dtype
+                    )
+                elif shift == 3:
+                    dense = _decimal_dense[op, 1000](
+                        a, b, n, lf, rf, scale, lim, result_dtype
+                    )
+                elif shift == 4:
+                    dense = _decimal_dense[op, 10000](
+                        a, b, n, lf, rf, scale, lim, result_dtype
+                    )
+                else:
+                    dense = _decimal_dense[op, 0](
+                        a, b, n, lf, rf, scale, lim, result_dtype
+                    )
+            else:
+                dense = _decimal_dense[op, 1](
+                    a, b, n, lf, rf, scale, lim, result_dtype
+                )
+            return Series("", Column[Int128](dense^)).with_dtype(result_dtype)
     var valid = List[Bool](length=n, fill=False)
     comptime predicate = is_comparison(op)
     var values = List[Int128](length=0 if predicate else n, fill=0)
