@@ -203,7 +203,13 @@ def _cell_text(series: Series, row: Int, zone: TimeZone) raises -> String:
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
-            return String(series._data[Column[Scalar[D]]]._get(row))
+            var value = series._data[Column[Scalar[D]]]._get(row)
+            comptime if D.is_floating_point():
+                # Polars writes and reads `NaN`; `nan` reads back as a
+                # string in both libraries (#368).
+                if value != value:
+                    return "NaN"
+            return String(value)
     if series._data.isa[BoolColumn]():
         return "true" if series._data[BoolColumn]._get(row) else "false"
     return String(series._data[StringColumn]._get(row))
