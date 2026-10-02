@@ -74,6 +74,7 @@ from .partition import (
     encode_bucket,
     encode_partitioned,
     low_cardinality,
+    small_key_product,
 )
 from .join_hash import (
     RowsCopyJob,
@@ -4787,7 +4788,7 @@ struct GroupBy(Copyable):
         # The same sampled estimate that picks whole-frame encoding over
         # hash partitioning: every range of a high-cardinality key would
         # hold most groups, and merging those states serially loses.
-        if not low_cardinality(self._keys):
+        if not (low_cardinality(self._keys) or small_key_product(self._keys)):
             return None
         var bounds = partitions(height, workers, 64)
         var jobs = List[_RangeAggJob](capacity=workers)

@@ -46,6 +46,10 @@ comptime _SLOT_SHIFT = 56
 
 # Rows hashed to estimate cardinality before committing to a full pass.
 comptime _SAMPLE_ROWS = 4096
+# Keys with at most this many sampled values each, whose product is at
+# most _SMALL_KEY_PRODUCT, group by row ranges (`small_key_product`).
+comptime _SMALL_KEY_VALUES = 256
+comptime _SMALL_KEY_PRODUCT = 65536
 
 
 def _mix(value: UInt64) -> UInt64:
@@ -350,6 +354,44 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
         taken += 1
         i = taken * stride + (taken * 7919) % stride
     return _prefer_whole_sample(occupied, taken, counts, hashes)
+
+
+def small_key_product(keys: List[Series]) raises -> Bool:
+    """Whether several keys, each with few values, can only form few groups.
+
+    A sample of key rows looks mostly distinct when two keys of 100 values
+    each form 10,000 groups (H2O q2), so `low_cardinality` says no, and the
+    partitioned group-by is chosen for what per-range states aggregate in
+    a third of the time. Each key on its own shows its few values: when
+    every key's sample holds at most 256 distinct values, the groups can
+    be no more than the product of those counts.
+    """
+    var rows = len(keys[0]) if len(keys) > 1 else 0
+    if rows == 0:
+        return False
+    var sample = min(rows, _SAMPLE_ROWS)
+    var picked = List[Int](capacity=sample)
+    for k in range(sample):
+        picked.append(k * rows // sample)
+    var product = 1
+    for key in keys:
+        # One gather and one hashing pass over the sampled rows.
+        var values = key.take(picked)
+        var hashes = List[UInt64](length=sample, fill=0)
+        _hash_column(
+            values, 0, sample, Int(hashes.unsafe_ptr()), True, output_offset=0
+        )
+        sort(hashes)
+        var distinct = 0
+        for k in range(len(hashes)):
+            if k == 0 or hashes[k] != hashes[k - 1]:
+                distinct += 1
+        if distinct > _SMALL_KEY_VALUES:
+            return False
+        product *= distinct
+        if product > _SMALL_KEY_PRODUCT:
+            return False
+    return True
 
 
 def _low_cardinality_chunked(keys: List[Series]) raises -> Bool:
