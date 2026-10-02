@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A lazy plan whose single join has a left input bounded to a quarter of
+  a large right input (a filtered scan, for example) runs eagerly, so the
+  join builds its hash table on the smaller side instead of the right one.
+  PDS-H q17 97 → 42 ms at scale 1 (#377).
 - Decimal arithmetic, comparisons and sums no longer divide 128-bit
   integers on every row: `pow10` (read by every precision check) is two
   multiplications instead of a loop of up to 38, same-scale operands skip
