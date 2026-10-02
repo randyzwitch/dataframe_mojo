@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Boolean `fill_null`, and the step that keeps nulls in numeric `is_in`,
+  work on bitmaps a byte (eight rows) at a time instead of building two
+  lists of Booleans per row and packing them. Numeric `is_in` runs both
+  once per listed value. ClickBench q40 (10M rows) 63 → 29 ms.
 - Decimal addition, subtraction, multiplication and sums read the
   precision limit once per column instead of computing `10^precision` for
   every row, and a decimal sum without nulls reads values and group ids
