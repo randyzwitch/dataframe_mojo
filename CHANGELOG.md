@@ -80,6 +80,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A lazy join whose left input is made by other joins, so its size is
+  unknown until it runs, against a right input of 512K rows or more, also
+  leaves the stream and runs eagerly on the smaller side; the joins above
+  still stream. PDS-H q5 123 → 68 ms, q18 242 → 140 ms, q11 44 → 27 ms, q7
+  158 → 114 ms and q2 35 → 28 ms at scale 1. q9, whose left input there is
+  large, is 14% slower than with the bounded rule alone.
 - Decimal addition, subtraction, multiplication and sums read the
   precision limit once per column instead of computing `10^precision` for
   every row, and a decimal sum without nulls reads values and group ids

@@ -1,7 +1,8 @@
-"""Lazy joins whose left input a filter makes small (#377): a plan's single
-join, and the deepest join of a chain, run eagerly so the hash table is
-built on the small side, and the rest of a chain streams. Results must
-equal the eager plan, row for row once sorted.
+"""Lazy joins whose left input a filter makes small (#377), or another join
+makes of unknown size: a plan's single join, and such a join inside a
+chain, run eagerly so the hash table is built on the smaller side, and the
+rest of a chain streams. Results must equal the eager plan, row for row
+once sorted.
 """
 from std.testing import TestSuite, assert_equal, assert_true
 
@@ -106,6 +107,33 @@ def test_chain_builds_its_deepest_join_on_the_small_side() raises:
         .join(t[2], "g", how="left")
     )
     same(outer, outer_eager)
+
+
+def test_left_input_made_by_a_join() raises:
+    # The deep join's left input comes from another join, so it has no
+    # bound until it runs: it runs first, then joins the large table on
+    # whichever side is smaller, and the join above still streams.
+    var t = tables()
+    var kinds = DataFrame(
+        [
+            Series("kind", Column[Int64]([Int64(3), Int64(5)])),
+            Series("label", Column[String](["three", "five"])),
+        ]
+    )
+    var eager = (
+        kinds.join(t[0], "kind")
+        .join(t[1], left_on=["id"], right_on=["k"])
+        .join(t[2], "g")
+    )
+    var lazy = (
+        kinds.lazy()
+        .join(t[0].lazy(), "kind")
+        .join(t[1].lazy(), left_on=["id"], right_on=["k"])
+        .join(t[2].lazy(), "g")
+        .collect()
+    )
+    assert_true(eager.height() > 0)
+    same(lazy, eager)
 
 
 def main() raises:
