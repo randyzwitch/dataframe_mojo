@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `over()` numbers its partition keys on every worker instead of one, and
+  the partitioned key encoder writes ids back to row order in parallel.
+  H2O q8 (top two per group) 2,090 → 850 ms at k=2 and 570 → 443 ms at
+  k=100 on 10M rows (#387).
 - The hash join's Int64 probe reads hashes, keys and bucket slots through
   pointers, and the build and probe hashes are moved into the index instead
   of copied. H2O join q5 571 → 490 ms; PDS-H q3 85 → 74 ms, q5 117 → 102

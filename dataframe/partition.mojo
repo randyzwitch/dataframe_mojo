@@ -519,8 +519,54 @@ struct _EncodeJob(Job):
 
     def run(mut self) raises:
         var keys = encode_rows(self.keys, self.nulls_equal)
-        self.ids = keys.ids.copy()
         self.count = keys.count()
+        swap(self.ids, keys.ids)
+
+
+struct _PlaceJob(Job):
+    """Write one bucket's local ids back to row order, offset to global.
+
+    Buckets hold disjoint rows and disjoint id ranges, so every bucket
+    writes its own slots of the shared outputs on its own thread.
+    """
+
+    var local: List[Int]
+    var lo: Int
+    var base: Int
+    var order: Int
+    var ids: Int
+    var representatives: Int
+
+    def __init__(
+        out self,
+        var local: List[Int],
+        lo: Int,
+        base: Int,
+        order: Int,
+        ids: Int,
+        representatives: Int,
+    ):
+        self.local = local^
+        self.lo = lo
+        self.base = base
+        self.order = order
+        self.ids = ids
+        self.representatives = representatives
+
+    def run(mut self) raises:
+        var o = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.order)
+        var out = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.ids)
+        var reps = Pointer[Int, MutAnyOrigin](
+            unsafe_from_address=self.representatives
+        )
+        for i in range(len(self.local)):
+            var local = self.local[i]
+            # -1 marks a null key that must not match; it carries through.
+            if local >= 0:
+                var row = o.unsafe_offset(self.lo + i)[]
+                out.unsafe_offset(row)[] = local + self.base
+                # One row per id, for callers that need a key value back.
+                reps.unsafe_offset(self.base + local)[] = row
 
 
 def encode_partitioned(
@@ -559,23 +605,28 @@ def encode_partitioned(
     run_jobs(jobs)
 
     var ids = List[Int](length=rows, fill=-1)
-    var representatives = List[Int]()
+    var total = 0
+    for j in range(len(jobs)):
+        total += jobs[j].count
+    var representatives = List[Int](length=total, fill=0)
+    var places = List[_PlaceJob](capacity=len(jobs))
     var base = 0
     for j in range(len(jobs)):
-        var lo = offsets[j]
-        for i in range(len(jobs[j].ids)):
-            var local = jobs[j].ids[i]
-            # -1 marks a null key that must not match; it carries through.
-            if local >= 0:
-                ids[parts.order[lo + i]] = local + base
-        for _ in range(jobs[j].count):
-            representatives.append(0)
-        # One row per id, for callers that need a key value back.
-        for i in range(len(jobs[j].ids)):
-            var local = jobs[j].ids[i]
-            if local >= 0:
-                representatives[base + local] = parts.order[lo + i]
+        var local = List[Int]()
+        swap(local, jobs[j].ids)
+        places.append(
+            _PlaceJob(
+                local^,
+                offsets[j],
+                base,
+                Int(parts.order.unsafe_ptr()),
+                Int(ids.unsafe_ptr()),
+                Int(representatives.unsafe_ptr()),
+            )
+        )
         base += jobs[j].count
+    run_jobs(places)
+    _ = parts^
     return RowKeys(ids^, representatives^)
 
 
