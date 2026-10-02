@@ -108,6 +108,7 @@ from .expr import (
     STR_ENDS_WITH,
     STR_CONTAINS,
     STR_IS_IN,
+    STR_LIKE,
     STR_SLICE,
     STR_PAD,
     is_string_op,
@@ -1082,6 +1083,7 @@ def bind(
                 or node.op == STR_ENDS_WITH
                 or node.op == STR_CONTAINS
                 or node.op == STR_IS_IN
+                or node.op == STR_LIKE
             ):
                 dtype = DataType.BOOL
             else:

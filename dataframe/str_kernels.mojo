@@ -14,13 +14,22 @@ from .expr import (
     STR_ENDS_WITH,
     STR_CONTAINS,
     STR_IS_IN,
+    STR_LIKE,
     STR_REPLACE,
     STR_SLICE,
     STR_REVERSE,
     STR_PAD,
 )
 from .series import Series
-from .string_predicates import decode_values, is_in_literals
+from .string_predicates import (
+    decode_values,
+    is_in_literals,
+    slice_strings,
+    string_contains,
+    string_ends_with,
+    string_like,
+    string_starts_with,
+)
 
 
 def _codepoints(text: String) -> List[String]:
@@ -116,6 +125,21 @@ def string_op(node: Node, input: Series) raises -> Series:
     ref column = input._data[StringColumn]
     if node.op == STR_IS_IN:
         return is_in_literals(column, decode_values(node.text))
+    # Predicates and slices over the raw bytes, on every worker (#374).
+    if node.op == STR_STARTS_WITH:
+        return string_starts_with(column, node.text)
+    if node.op == STR_ENDS_WITH:
+        return string_ends_with(column, node.text)
+    if node.op == STR_CONTAINS:
+        return string_contains(column, node.text)
+    if node.op == STR_LIKE:
+        return string_like(column, node.text)
+    if node.op == STR_SLICE and (
+        column._is_view_storage() or len(column._bytes[]) <= 4_294_967_295
+    ):
+        return Series(
+            "", slice_strings(column, Int(node.integer), node.min_count)
+        )
     var n = len(column)
     var valid = List[Bool](capacity=n)
     for i in range(n):

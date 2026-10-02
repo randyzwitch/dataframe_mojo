@@ -1281,6 +1281,8 @@ String expressions. Character operations work on Unicode code points; there is n
 - `def ends_with(self, suffix: String) -> Expr`
 - `def contains(self, literal: String) -> Expr`
   Literal substring test; regular expressions are not supported.
+- `def like(self, pattern: String) -> Expr`
+  SQL LIKE: '%' matches any run of characters (including none) and '_' exactly one; every other character matches itself. There is no escape character. `like("%special%requests%")` is SQL's `LIKE '%special%requests%'`.
 - `def replace(self, pattern: String, value: String) -> Expr`
   Replace the first occurrence of a literal pattern.
 - `def replace_all(self, pattern: String, value: String) -> Expr`
