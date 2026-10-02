@@ -68,9 +68,86 @@ def _count_valid[
     nulls: Bool,
     mut counts: List[Int64],
 ):
-    for i in range(len(column)):
+    var n = len(column)
+    var has_nulls = column.null_count() > 0
+    if not has_nulls:
+        # Every row is valid: all count, or none (#382).
+        if nulls:
+            return
+        if not grouped:
+            counts[0] += Int64(n)
+            return
+        var g = groups.unsafe_ptr().unsafe_offset(offset)
+        var c = counts.unsafe_ptr()
+        for i in range(n):
+            c.unsafe_offset(g.unsafe_offset(i)[])[] += 1
+        return
+    for i in range(n):
         if column._valid(i) != nulls:
             counts[_group(grouped, groups, offset + i)] += 1
+
+
+def _sum_ints(
+    column: Column[Int64],
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    mut sums: List[IntSumState],
+):
+    """Int64 sums: separate grouped and ungrouped loops, a no-nulls loop
+    without validity reads, and an ungrouped total kept in a local (#382)."""
+    var n = len(column)
+    var values = column._ptr()
+    var nulls = column.null_count() > 0
+    if not grouped:
+        var total = Int128(0)
+        var count = 0
+        for i in range(n):
+            if not nulls or column._valid(i):
+                total += values.unsafe_offset(i)[].cast[DType.int128]()
+                count += 1
+        sums[0].total += total
+        sums[0].count += Int64(count)
+        return
+    var g = groups.unsafe_ptr().unsafe_offset(offset)
+    var s = sums.unsafe_ptr()
+    for i in range(n):
+        if nulls and not column._valid(i):
+            continue
+        ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
+        state.total += values.unsafe_offset(i)[].cast[DType.int128]()
+        state.count += 1
+
+
+def _sum_floats(
+    column: Column[Float64],
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    mut sums: List[FloatSumState],
+):
+    """Float64 sums, as `_sum_ints` (#382)."""
+    var n = len(column)
+    var values = column._ptr()
+    var nulls = column.null_count() > 0
+    if not grouped:
+        var total = Float64(0)
+        var count = 0
+        for i in range(n):
+            if not nulls or column._valid(i):
+                total += values.unsafe_offset(i)[]
+                count += 1
+        sums[0].total += total
+        sums[0].count += Int64(count)
+        return
+    var g = groups.unsafe_ptr().unsafe_offset(offset)
+    var s = sums.unsafe_ptr()
+    for i in range(n):
+        if nulls and not column._valid(i):
+            continue
+        ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
+        state.total += values.unsafe_offset(i)[]
+        state.count += 1
 
 
 def _extreme[
@@ -85,10 +162,12 @@ def _extreme[
     mut best: List[T],
 ):
     """Track the extreme valid value; ties keep the earlier value."""
+    var nulls = column.null_count() > 0
+    var g_ptr = groups.unsafe_ptr().unsafe_offset(offset if grouped else 0)
     for i in range(len(column)):
-        if not column._valid(i):
+        if nulls and not column._valid(i):
             continue
-        var g = _group(grouped, groups, offset + i)
+        var g = g_ptr.unsafe_offset(i)[] if grouped else 0
         ref value = column._get(i)
         if (
             not seen[g]
@@ -968,19 +1047,21 @@ struct Reducer(Movable):
                     )
                     self.counts[g] += 1
         elif (op == SUM or op == MEAN) and self.dtype == DataType.INT64:
-            ref column = chunk._data[Column[Int64]]
-            for i in range(len(column)):
-                if column._valid(i):
-                    self.int_sums[_group(grouped, groups, offset + i)].add(
-                        column._get(i)
-                    )
+            _sum_ints(
+                chunk._data[Column[Int64]],
+                offset,
+                grouped,
+                groups,
+                self.int_sums,
+            )
         elif op == SUM or op == MEAN:
-            ref column = chunk._data[Column[Float64]]
-            for i in range(len(column)):
-                if column._valid(i):
-                    self.float_sums[_group(grouped, groups, offset + i)].add(
-                        column._get(i)
-                    )
+            _sum_floats(
+                chunk._data[Column[Float64]],
+                offset,
+                grouped,
+                groups,
+                self.float_sums,
+            )
         elif op == ANY or op == ALL:
             ref column = chunk._data[BoolColumn]
             for i in range(len(column)):

@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Aggregation loops read values and group ids through pointers, skip
+  validity checks for columns without nulls, and keep ungrouped totals in a
+  local: H2O group-by q4 (`mean` of three columns by `id4`) 53 → 35 ms at
+  10M rows (#382).
 - Gathering string rows (`take`, and the gathers behind filters, joins and
   sorts) returns 16-byte views into the source column's bytes instead of
   copying every byte: values of up to 12 bytes sit in the view, longer ones
