@@ -512,6 +512,22 @@ def _feed[
         )
         reducer.update_pair(chunk, other, offset, grouped, groups)
     else:
+        # An ungrouped sum, mean, min, max or count of a computed numeric
+        # batch reads it with the same SIMD loops as a column (#384).
+        if (
+            not grouped
+            and (
+                node.op == SUM
+                or node.op == MEAN
+                or node.op == MIN
+                or node.op == MAX
+                or node.op == COUNT
+            )
+            and not chunk.is_chunked()
+            and not chunk.dtype().is_decimal()
+            and _direct_numeric_part(reducer, chunk, node.op, 0, len(chunk))
+        ):
+            return
         reducer.update(chunk, offset, grouped, groups)
 
 
