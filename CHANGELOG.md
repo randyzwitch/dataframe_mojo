@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `over()` numbers its partition keys on every worker instead of one, and
+  the partitioned key encoder writes ids back to row order in parallel.
+  H2O q8 (top two per group) 2,090 → 850 ms at k=2 and 570 → 443 ms at
+  k=100 on 10M rows (#387).
 - Decimal arithmetic, comparisons and sums no longer divide 128-bit
   integers on every row: `pow10` (read by every precision check) is two
   multiplications instead of a loop of up to 38, same-scale operands skip

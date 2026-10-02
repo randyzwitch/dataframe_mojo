@@ -86,7 +86,8 @@ from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
 from .categorical import decode, encode, gather
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
-from .hashing import encode_rows
+from .hashing import encode_rows, encode_rows_parallel
+from .partition import encode_partitioned, low_cardinality
 from .distinct import distinct_counts
 from .window import window_op, interpolate_by_op
 from .fusion import fused
@@ -1427,7 +1428,16 @@ def _over[
         for column in columns:
             if column.name() == String(part):
                 keys.append(column.copy())
-    var partitions = encode_rows(keys, nulls_equal=True)
+    # Partition ids need only be consistent, not in first-occurrence order:
+    # number them on every worker (#387). Few distinct keys encode row
+    # ranges and merge (#336); many encode one hash bucket at a time. One
+    # thread numbering 5M partition keys was most of H2O q8 at k2.
+    var workers = worker_count(height)
+    var partitions = encode_rows(keys, nulls_equal=True) if workers <= 1 else (
+        encode_rows_parallel(keys, True, workers) if low_cardinality(
+            keys
+        ) else encode_partitioned(keys, workers, nulls_equal=True)
+    )
     var result = evaluate[width](
         inner,
         columns,
