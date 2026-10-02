@@ -616,35 +616,25 @@ struct LazyFrame(Copyable):
 
     # --- execution -----------------------------------------------------
 
-    def _many_groups(self, keys: List[String], frame: Int) raises -> Bool:
-        """Whether the grouping keys, read from an in-memory frame, have
-        many distinct values: more than half of 4,096 evenly spaced rows.
-
-        Streaming's cost grows with the groups every batch state holds and
-        merges again, and the eager group-by's does not. Measured on 10M
-        ClickBench rows, keys whose sample is mostly distinct (UserID,
-        URL, ClientIP) group eagerly in 60-40% of the time, while keys
-        whose values repeat stream faster, even with many groups overall:
-        RegionID (9% of the sample distinct) in 44 ms against 118, and
-        SearchPhrase (14%, one dominant value) in 383 ms against 868. Keys
-        the frame does not hold, made by an earlier step, keep streaming.
+    def _sampled_groups(self, keys: List[String], frame: Int) raises -> Int:
+        """Distinct grouping keys among 4,096 evenly spaced rows of an
+        in-memory frame, or -1 when the frame does not hold every key (one
+        made by an earlier step).
         """
-        if len(keys) == 0:
-            return False
         ref source = self._frames[frame]
         var height = source.height()
         var sample = min(height, 4096)
         if sample == 0:
-            return False
+            return -1
         var rows = List[Int](capacity=sample)
         for k in range(sample):
             rows.append(k * height // sample)
         var picked = List[Series](capacity=len(keys))
         for name in keys:
             if name not in source.columns():
-                return False
+                return -1
             picked.append(source.column(name).take(rows))
-        return 2 * encode_rows(picked, nulls_equal=True).count() > sample
+        return encode_rows(picked, nulls_equal=True).count()
 
     def _height_bound(self, index: Int) -> Int:
         """An upper bound on the rows a node yields without executing it:
@@ -830,34 +820,51 @@ struct LazyFrame(Copyable):
         ):
             return None
         operations.reverse()
+        # Grouped aggregations over an in-memory frame, filtered or
+        # projected at most: whether the eager group-by is faster.
+        var eager = False
         if (
             len(expressions)
             and self._nodes[cursor].kind == SCAN_FRAME
             and _row_steps_only(operations)
-            and (
-                _counts_distinct(expressions)
-                or (
-                    self._frames[self._nodes[cursor].offset].height()
-                    >= 32 * batch_size
-                    and self._many_groups(keys, self._nodes[cursor].offset)
-                )
-            )
         ):
+            if _counts_distinct(expressions):
+                eager = True
+            elif len(keys) > 0:
+                if _filters(operations):
+                    eager = True
+                else:
+                    var frame = self._nodes[cursor].offset
+                    var sampled = self._sampled_groups(keys, frame)
+                    var sample = min(self._frames[frame].height(), 4096)
+                    eager = (
+                        sampled < 0 or sampled <= 192 or 2 * sampled > sample
+                    )
+        if eager:
             # Over a frame already in memory, filtered or projected at most,
-            # batches save no memory, and two kinds of aggregation run
-            # faster eagerly. n_unique keeps per-group sets in batch states
-            # that the eager aggregation replaces with hash partitions on
-            # every worker (#336). And with many groups, every batch state
-            # holds most of them and each is merged again, where the eager
-            # group-by encodes the keys once by hash partition: grouping 10M
-            # rows by UserID takes 207 ms streamed and 125 ms eagerly (#326).
-            # That cost grows with the batches, so a frame under 32 batches
-            # (2M rows at the default size) keeps streaming, which there is
-            # faster: 1M ClickBench rows group by UserID in 16 ms streamed
-            # and 20 ms eagerly. Few groups keep streaming at any size, which
-            # is faster: RegionID takes 44 ms against 118 on 10M rows. Plans
-            # with a join keep streaming too, whose batched probes beat the
-            # eager join.
+            # batches save no memory, and most grouped aggregations run
+            # faster eagerly, measured on 10M ClickBench rows (#381):
+            # - n_unique keeps per-group sets in batch states that the eager
+            #   aggregation replaces with hash partitions on every worker
+            #   (#336).
+            # - After a filter, the eager group-by only sees the kept rows,
+            #   where every batch state holds and merges its groups again:
+            #   non-empty SearchPhrase counts take 66 ms against 358
+            #   streamed, and q39's five keys 99 against 371.
+            # - Keys made by an earlier step, which the sample cannot read:
+            #   q18's (UserID, minute, SearchPhrase) take 354 ms against
+            #   1,645 streamed.
+            # - Few groups (at most 192 in the sample) take 33 ms against
+            #   64; ResolutionWidth (134 in the sample) 35 against 67.
+            # - Many groups (more than half the sample) are encoded once by
+            #   hash partition, where every batch state would hold most of
+            #   them: on 1M rows URL takes 40 ms against 63 streamed.
+            # Unfiltered keys in between keep streaming, which is faster
+            # there: RegionID (364 in the sample) takes 75 ms against 99,
+            # and SearchPhrase (574, one dominant value) 353 against 375,
+            # or on 1M rows (212) 8 against 13.
+            # Ungrouped reductions stream, as do plans with a join, whose
+            # batched probes beat the eager join.
             return None
         if top >= 0:
             # Over a frame already in memory with nothing to apply first,
@@ -1648,6 +1655,13 @@ def _row_steps_only(operations: List[PlanNode]) -> Bool:
         if operation.kind not in [FILTER, SELECT, WITH_COLUMNS, DROP]:
             return False
     return True
+
+
+def _filters(operations: List[PlanNode]) -> Bool:
+    for operation in operations:
+        if operation.kind == FILTER:
+            return True
+    return False
 
 
 def _counts_distinct(expressions: List[Expr]) -> Bool:

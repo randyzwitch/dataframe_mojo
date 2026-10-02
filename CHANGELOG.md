@@ -80,6 +80,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Lazy group-bys over an in-memory frame run eagerly when that is faster:
+  after a filter, on keys made by an earlier step, and on keys with few or
+  mostly distinct values. Unfiltered keys in between still stream. The
+  parallel string-key encoder merges its ranges with the string encoder on
+  every worker instead of a `Dict[String, Int]` on one thread. ClickBench
+  (10M rows) q18 1,647 → 377 ms, q14 470 → 69 ms, q12 355 → 66 ms, q39 364
+  → 97 ms and q27 171 → 145 ms; an eager group-by on SearchPhrase 910 → 375
+  ms (#381).
 - `over()` numbers its partition keys on every worker instead of one, and
   the partitioned key encoder writes ids back to row order in parallel.
   H2O q8 (top two per group) 2,090 → 850 ms at k=2 and 570 → 443 ms at
