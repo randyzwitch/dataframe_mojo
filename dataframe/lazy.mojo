@@ -636,6 +636,19 @@ struct LazyFrame(Copyable):
             picked.append(source.column(name).take(rows))
         return encode_rows(picked, nulls_equal=True).count()
 
+    def _joins_below(self, index: Int) -> Bool:
+        """Whether a join sits under `index` along its left inputs, through
+        the row-local steps a stream applies."""
+        var cursor = index
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == JOIN:
+                return True
+            if _is_scan(node.kind):
+                return False
+            cursor = node.left
+        return False
+
     def _height_bound(self, index: Int) -> Int:
         """An upper bound on the rows a node yields without executing it:
         the scanned frame's height through steps that only drop or keep
@@ -752,12 +765,14 @@ struct LazyFrame(Copyable):
                 # few hundred parts its filter keeps.
                 var bound = self._height_bound(node.left)
                 var right_rows = self._known_height(node.right)
+                # A left input made by another join has no bound; how many
+                # rows it holds is known only once it has run.
+                var unbounded = bound < 0 and self._joins_below(node.left)
                 if (
                     (node.how == JOIN_INNER or node.how == JOIN_LEFT)
                     and self._known_height(node.left) < 0
-                    and bound >= 0
                     and right_rows >= 524288
-                    and 4 * bound <= right_rows
+                    and (unbounded or (bound >= 0 and 4 * bound <= right_rows))
                 ):
                     # The bound only says the left side may be small; the
                     # eager join then decides with the real heights (a
@@ -773,8 +788,13 @@ struct LazyFrame(Copyable):
                     # keeps. Leaving the stream costs the joins above their
                     # prepared probe of this one's output, so it takes a
                     # wider margin: PDS-H q16 (200K parts at most, 800K
-                    # partsupp rows) was 10% slower leaving it.
-                    if 8 * bound <= right_rows:
+                    # partsupp rows) was 10% slower leaving it. A left input
+                    # made by other joins has no bound and leaves too: PDS-H
+                    # q5 hashed 6M lineitem rows for about 45K orders, and
+                    # q18, q11, q7 and q2 gained 15-44%. Where that input is
+                    # large, streaming was faster: q9's partsupp and orders
+                    # joins (about 320K rows on the left) are 14% slower.
+                    if unbounded or 8 * bound <= right_rows:
                         break
                 if (
                     self._known_height(node.left) <= batch_size
