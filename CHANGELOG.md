@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Decimal arithmetic, comparisons and sums no longer divide 128-bit
+  integers on every row: `pow10` (read by every precision check) is two
+  multiplications instead of a loop of up to 38, same-scale operands skip
+  rescaling, and products of 64-bit values skip the overflow division.
+  PDS-H decimal q1 1,022 → 427 ms and q6 216 → 38 ms at scale 1 (#385).
 - `str.contains`, `starts_with` and `ends_with` run on every worker over
   raw bytes, `contains` with a SIMD first- and last-byte filter, and
   `str.slice` returns views into the source's bytes. New `str.like(pattern)`
