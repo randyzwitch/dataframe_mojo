@@ -107,3 +107,109 @@ def _order_bytes(
     if len(a) == len(b):
         return 0
     return -1 if len(a) < len(b) else 1
+
+
+@always_inline
+def _find_bytes(
+    hay: Span[UInt8, ImmutAnyOrigin],
+    needle: Span[UInt8, ImmutAnyOrigin],
+    start: Int,
+) -> Int:
+    """The first position at or after `start` where `needle` occurs in
+    `hay`, or -1. Candidates are filtered on the needle's first and last
+    bytes before the rest is compared (#374)."""
+    var m = len(needle)
+    var n = len(hay)
+    if m == 0:
+        return start if start <= n else -1
+    if m > n - start:
+        return -1
+    var h = hay.unsafe_ptr()
+    var p = needle.unsafe_ptr()
+    var first = p[]
+    var last = p.unsafe_offset(m - 1)[]
+    # 32 candidate positions at a time: compare them with the needle's
+    # first and last bytes, and verify only where both match (#374).
+    comptime lanes = 32
+    var firsts = SIMD[DType.uint8, lanes](first)
+    var lasts = SIMD[DType.uint8, lanes](last)
+    var i = start
+    while i + m - 1 + lanes <= n:
+        var hits = h.unsafe_load[width=lanes](i).eq(firsts) & h.unsafe_load[
+            width=lanes
+        ](i + m - 1).eq(lasts)
+        if hits.reduce_or():
+            for k in range(lanes):
+                if hits[k]:
+                    var same = True
+                    for j in range(1, m - 1):
+                        if h.unsafe_offset(i + k + j)[] != p.unsafe_offset(j)[]:
+                            same = False
+                            break
+                    if same:
+                        return i + k
+        i += lanes
+    for i in range(i, n - m + 1):
+        if (
+            h.unsafe_offset(i)[] == first
+            and h.unsafe_offset(i + m - 1)[] == last
+        ):
+            var same = True
+            for k in range(1, m - 1):
+                if h.unsafe_offset(i + k)[] != p.unsafe_offset(k)[]:
+                    same = False
+                    break
+            if same:
+                return i
+    return -1
+
+
+@always_inline
+def _utf8_width(byte: UInt8) -> Int:
+    if byte < 0x80:
+        return 1
+    if byte < 0xE0:
+        return 2
+    if byte < 0xF0:
+        return 3
+    return 4
+
+
+def _match_at(
+    value: Span[UInt8, ImmutAnyOrigin],
+    at: Int,
+    segment: Span[UInt8, ImmutAnyOrigin],
+) -> Int:
+    """Where `segment` (a LIKE pattern piece without '%', in which '_'
+    matches one code point) ends when matched at `at`, or -1."""
+    var i = at
+    var v = value.unsafe_ptr()
+    for k in range(len(segment)):
+        var b = segment.unsafe_ptr().unsafe_offset(k)[]
+        if i >= len(value):
+            return -1
+        if b == 95:
+            i += _utf8_width(v.unsafe_offset(i)[])
+        elif v.unsafe_offset(i)[] == b:
+            i += 1
+        else:
+            return -1
+    return i if i <= len(value) else -1
+
+
+def _search(
+    value: Span[UInt8, ImmutAnyOrigin],
+    at: Int,
+    segment: Span[UInt8, ImmutAnyOrigin],
+    wildcards: Bool,
+) -> Tuple[Int, Int]:
+    """The first match of `segment` at or after `at`: (start, end), or
+    (-1, -1)."""
+    if not wildcards:
+        var found = _find_bytes(value, segment, at)
+        return (found, found + len(segment)) if found >= 0 else (-1, -1)
+    for p in range(at, len(value) + 1):
+        var end = _match_at(value, p, segment)
+        if end >= 0:
+            return (p, end)
+    return (-1, -1)
