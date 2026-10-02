@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- String view columns list each byte buffer once when chunks are merged,
+  gathers share a view column's buffer list instead of copying it, views
+  are built in registers, and the mask filter copies runs of kept rows.
+  This undoes the slowdowns #375 and #376 caused: ClickBench q18 2,137 →
+  1,640 ms and PDS-H q1 201 → 167 ms at full scale (#395).
 - Gathering string rows (`take`, and the gathers behind filters, joins and
   sorts) returns 16-byte views into the source column's bytes instead of
   copying every byte: values of up to 12 bytes sit in the view, longer ones
