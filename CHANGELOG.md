@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Group keys are numbered without standard-library dictionaries: number
+  columns through a typed open-addressing table, string columns through the
+  single-key path that packs short strings into 128-bit keys, and several
+  columns combined through a direct array or the same table. H2O group-by
+  with 500,000 groups by two string keys (k2 q2) 144 → 95 ms (#380).
 - Gathering string rows (`take`, and the gathers behind filters, joins and
   sorts) returns 16-byte views into the source column's bytes instead of
   copying every byte: values of up to 12 bytes sit in the view, longer ones
