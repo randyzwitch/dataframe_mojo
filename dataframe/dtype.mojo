@@ -123,6 +123,15 @@ struct _NestedSpec(Copyable, Movable):
         self.text = text^
 
 
+def _decimal_storage(unit: Int) -> DType:
+    """The integer a decimal's `unit` (width code, precision, scale) is
+    stored in."""
+    var code = unit // 10000
+    return DType.int128 if code == 0 else (
+        DType.int64 if code == 1 else DType.int32
+    )
+
+
 struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     """A logical column type.
 
@@ -149,7 +158,9 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         self._code = code
         self._unit = unit
         self._storage = (
-            DType.int128 if code == _DECIMAL else DType.int64 if code >= _DATE
+            _decimal_storage(unit) if code
+            == _DECIMAL else DType.int64 if code
+            >= _DATE
             and code
             <= _TIME else DType.uint32 if code
             == _CATEGORICAL else _NO_STORAGE
@@ -369,22 +380,42 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         return DataType(_DURATION, _unit_code(unit))
 
     @staticmethod
-    def decimal(precision: Int, scale: Int) raises -> DataType:
-        """An Arrow-compatible decimal128 type stored as a scaled Int128."""
-        if precision < 1 or precision > 38:
-            raise Error("decimal precision must be between 1 and 38")
+    def decimal(
+        precision: Int, scale: Int, width: Int = 128
+    ) raises -> DataType:
+        """An Arrow decimal: a scaled integer of `width` bits (Arrow's
+        decimal32, decimal64 or decimal128), kept at the width its source
+        declares. Results that could exceed it widen to 128 bits."""
+        if width != 128 and width != 64 and width != 32:
+            raise Error("decimal width must be 32, 64 or 128")
+        var most = 38 if width == 128 else (18 if width == 64 else 9)
+        if precision < 1 or precision > most:
+            raise Error(
+                "decimal"
+                + ("" if width == 128 else String(width))
+                + " precision must be between 1 and "
+                + String(most)
+            )
         if scale < 0 or scale > precision:
             raise Error("decimal scale must be between 0 and precision")
-        return DataType(_DECIMAL, precision * 100 + scale)
+        var code = 0 if width == 128 else (1 if width == 64 else 2)
+        return DataType(_DECIMAL, code * 10000 + precision * 100 + scale)
 
     def is_decimal(self) -> Bool:
         return self._code == _DECIMAL
 
     def precision(self) -> Int:
-        return self._unit // 100 if self.is_decimal() else 0
+        return (self._unit % 10000) // 100 if self.is_decimal() else 0
 
     def scale(self) -> Int:
         return self._unit % 100 if self.is_decimal() else 0
+
+    def decimal_width(self) -> Int:
+        """Bits per value of a decimal (32, 64 or 128); 0 otherwise."""
+        if not self.is_decimal():
+            return 0
+        var code = self._unit // 10000
+        return 128 if code == 0 else (64 if code == 1 else 32)
 
     @staticmethod
     def parse(name: String) raises -> DataType:
@@ -413,8 +444,20 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return DataType.datetime()
         if name == "duration":
             return DataType.duration()
-        if name.startswith("decimal[") and name.endswith("]"):
-            var body = String(name[byte = 8 : name.byte_length() - 1])
+        var width = 128
+        var open = 8
+        if name.startswith("decimal64["):
+            width = 64
+            open = 10
+        elif name.startswith("decimal32["):
+            width = 32
+            open = 10
+        if (
+            name.startswith("decimal[")
+            or name.startswith("decimal64[")
+            or name.startswith("decimal32[")
+        ) and name.endswith("]"):
+            var body = String(name[byte = open : name.byte_length() - 1])
             var comma = body.find(",")
             if comma < 0:
                 raise Error("Unknown dtype: " + name)
@@ -422,6 +465,7 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
                 return DataType.decimal(
                     Int(String(body[byte=0:comma])),
                     Int(String(body[byte = comma + 1 : body.byte_length()])),
+                    width,
                 )
             except:
                 raise Error("Unknown dtype: " + name)
@@ -502,8 +546,12 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         if self._code == _DURATION:
             return "duration[" + self.unit() + "]"
         if self._code == _DECIMAL:
+            var width = self.decimal_width()
             return (
-                "decimal["
+                (
+                    "decimal[" if width
+                    == 128 else "decimal" + String(width) + "["
+                )
                 + String(self.precision())
                 + ","
                 + String(self.scale())
@@ -603,7 +651,7 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         if self._code == _CATEGORICAL:
             return DataType.of(DType.uint32)
         if self.is_decimal():
-            return DataType.of(DType.int128)
+            return DataType.of(_decimal_storage(self._unit))
         return self
 
     def is_numeric(self) -> Bool:
@@ -627,7 +675,7 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         if self._code == _BOOL:
             return 1
         if self.is_decimal():
-            return 128
+            return self.decimal_width()
         # A runtime DType cannot report its width in Mojo 1.2; match it
         # against the comptime list, whose members can.
         comptime for i in range(len(NUMERIC_DTYPES)):
@@ -641,6 +689,12 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         and 16-bit integers widen to INT64; other types keep their type."""
         if self.is_integer() and self.bit_width() <= 16:
             return DataType.INT64
+        if self.is_decimal() and self.decimal_width() != 128:
+            # A decimal32 or decimal64 sum can outgrow its width: widen it.
+            try:
+                return DataType.decimal(38, self.scale())
+            except:
+                return self
         return self
 
     def write_to(self, mut writer: Some[Writer]):
