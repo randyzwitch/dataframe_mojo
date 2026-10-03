@@ -118,6 +118,7 @@ from .hashing import (
     encode_string_rows_parallel,
 )
 from .groups import GroupIndices
+from .hash_agg import hash_agg_eligible, hash_aggregate
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
 from .lazy import LazyFrame
@@ -4751,6 +4752,13 @@ struct GroupBy(Copyable):
                 )
         var workers = worker_count(self._frame.height())
         var result: DataFrame
+        if (
+            workers > 1
+            and len(self._keys) == 1
+            and not low_cardinality(self._keys)
+            and hash_agg_eligible(self._keys[0], bound, self._frame._columns)
+        ):
+            return _pack_struct_keys(self._agg_hash(bound, workers))
         var ranged = Optional[DataFrame]()
         if (
             workers > 1
@@ -4767,6 +4775,30 @@ struct GroupBy(Copyable):
         else:
             result = self._agg_whole(bound, batch_size)
         return _pack_struct_keys(result)
+
+    def _agg_hash(
+        self, bound: List[BoundExpr], workers: Int
+    ) raises -> DataFrame:
+        """Many groups of one Int64 key: states updated in place per worker
+        range, then merged by hash part (`hash_agg.mojo`), with no column
+        gathered into bucket order."""
+        trace_path("group_by.hash_agg")
+        var parts = hash_aggregate(
+            self._keys[0], bound, self._frame._columns, workers
+        )
+        ref firsts = parts[0]
+        var columns = List[Series](capacity=len(bound) + 1)
+        columns.append(self._keys[0].take(firsts))
+        for j in range(len(bound)):
+            var pieces = List[Series](capacity=len(parts[1]))
+            for p in range(len(parts[1])):
+                pieces.append(parts[1][p][j].copy())
+            var merged = Series._from_chunks(pieces).rechunk()
+            columns.append(merged.renamed(bound[j].expr._name))
+        var grouped = DataFrame(columns^, height=len(firsts))
+        if not self._maintain_order:
+            return grouped^
+        return grouped.take(sort_indices([firsts.copy()]))
 
     def _many_distinct(self, expressions: List[Expr]) raises -> Bool:
         """Whether some `n_unique` reads many distinct values (#336).
