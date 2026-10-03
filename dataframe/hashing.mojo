@@ -427,6 +427,78 @@ def encode_rows_parallel(
     return RowKeys(ids^, representatives^)
 
 
+def _encode_dense_int64(
+    column: Column[Int64], nulls_equal: Bool
+) raises -> Optional[RowKeys]:
+    """Ids by direct lookup when the key's values span fewer than 4,096
+    integers, avoiding a hash-table probe and a renumbering pass per row.
+    Values and ids go through pointers, and a column without nulls reads no
+    validity: H2O's 100-value id4 spent most of a group-by here."""
+    var n = len(column)
+    var values = column._ptr()
+    var nulls = column.null_count() > 0
+    var first = True
+    var low = Int64(0)
+    var high = Int64(0)
+    if not nulls and n > 0:
+        low = values[unsafe_offset=0]
+        high = low
+        first = False
+        for i in range(1, n):
+            var value = values[unsafe_offset=i]
+            low = min(low, value)
+            high = max(high, value)
+    else:
+        for i in range(n):
+            if not column._valid(i):
+                continue
+            var value = values[unsafe_offset=i]
+            if first:
+                low = value
+                high = value
+                first = False
+            else:
+                low = min(low, value)
+                high = max(high, value)
+    if not first and UInt64(high) - UInt64(low) >= 4096:
+        return None
+    var span = 1 if first else Int(UInt64(high) - UInt64(low)) + 1
+    var slots = List[Int](length=span, fill=-1)
+    var table = slots.unsafe_ptr()
+    var ids = List[Int](unsafe_uninit_length=n)
+    var out = ids.unsafe_ptr()
+    var representatives = List[Int]()
+    if not nulls:
+        for i in range(n):
+            var slot = Int(UInt64(values[unsafe_offset=i]) - UInt64(low))
+            var id = table[unsafe_offset=slot]
+            if id < 0:
+                id = len(representatives)
+                table[unsafe_offset=slot] = id
+                representatives.append(i)
+            out[unsafe_offset=i] = id
+        return RowKeys(ids^, representatives^)
+    var null_id = -1
+    for i in range(n):
+        if not column._valid(i):
+            if nulls_equal:
+                if null_id < 0:
+                    null_id = len(representatives)
+                    representatives.append(i)
+                out[unsafe_offset=i] = null_id
+            else:
+                out[unsafe_offset=i] = -1
+            continue
+        var slot = Int(UInt64(values[unsafe_offset=i]) - UInt64(low))
+        var id = table[unsafe_offset=slot]
+        if id < 0:
+            id = len(representatives)
+            table[unsafe_offset=slot] = id
+            representatives.append(i)
+        out[unsafe_offset=i] = id
+    return RowKeys(ids^, representatives^)
+
+
 def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     """Assign dense ids to distinct key rows, in first-occurrence order.
 
@@ -455,45 +527,11 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     if n >= 2147483647:
         raise Error("Row key encoding supports fewer than 2**31 rows")
     if len(keys) == 1 and keys[0]._data.isa[Column[Int64]]():
-        ref column = keys[0]._data[Column[Int64]]
-        var first = True
-        var low = Int64(0)
-        var high = Int64(0)
-        for i in range(n):
-            if not column._valid(i):
-                continue
-            var value = column._get(i)
-            if first:
-                low = value
-                high = value
-                first = False
-            else:
-                low = min(low, value)
-                high = max(high, value)
-        # A compact integer domain can be encoded by direct lookup, avoiding
-        # a hash-table probe and a second renumbering pass for every row.
-        if first or UInt64(high) - UInt64(low) < 4096:
-            var slots = List[Int](
-                length=1 if first else Int(UInt64(high) - UInt64(low)) + 1,
-                fill=-1,
-            )
-            var ids = List[Int](length=n, fill=-1)
-            var representatives = List[Int]()
-            var null_id = -1
-            for i in range(n):
-                if not column._valid(i):
-                    if nulls_equal:
-                        if null_id < 0:
-                            null_id = len(representatives)
-                            representatives.append(i)
-                        ids[i] = null_id
-                    continue
-                var slot = Int(UInt64(column._get(i)) - UInt64(low))
-                if slots[slot] < 0:
-                    slots[slot] = len(representatives)
-                    representatives.append(i)
-                ids[i] = slots[slot]
-            return RowKeys(ids^, representatives^)
+        var dense = _encode_dense_int64(
+            keys[0]._data[Column[Int64]], nulls_equal
+        )
+        if dense:
+            return dense.take()
     # Every row gets an id (or -1) below before any is read (#388).
     var ids = List[Int](unsafe_uninit_length=n)
     # Null flags are kept only for columns that have nulls, and exclusion

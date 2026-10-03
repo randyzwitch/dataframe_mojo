@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Numbering an Int64 key whose values span fewer than 4,096 integers reads
+  values and writes ids through pointers, and reads no validity when the key
+  has no nulls. H2O q4 (10M rows) 34 → 23 ms at k=100 and 34 → 25 ms at k=2.
 - A chunked series (a Parquet table's row groups) keeps the contiguous
   array its first `rechunk` makes, shared by every copy, instead of merging
   the same chunks again for every join, kernel and gather that needs it.
