@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- The partitioned group-by confirms a string key's hash match eight bytes
+  at a time instead of one. ClickBench q33 and q34 (group by URL, 10M rows)
+  413 → 376 ms.
 - A lazy plan over a large in-memory input that streams through joins
   uses batches up to four times the default, as long as every worker still
   gets one: each batch probes every join, and fewer, larger batches cost

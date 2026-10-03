@@ -830,7 +830,19 @@ def encode_bucket(
                     var length = Int(offsets.unsafe_offset(row + 1)[]) - a
                     var b = Int(offsets.unsafe_offset(other)[])
                     same = length == Int(offsets.unsafe_offset(other + 1)[]) - b
+                    # Eight bytes at a time: URLs average about 70 bytes,
+                    # and a byte loop was most of ClickBench q33's grouping.
                     var i = 0
+                    while same and i + 8 <= length:
+                        same = (
+                            bytes.unsafe_offset(a + i)
+                            .unsafe_bitcast[UInt64]()
+                            .unsafe_load()
+                            == bytes.unsafe_offset(b + i)
+                            .unsafe_bitcast[UInt64]()
+                            .unsafe_load()
+                        )
+                        i += 8
                     while same and i < length:
                         same = (
                             bytes.unsafe_offset(a + i)[]
