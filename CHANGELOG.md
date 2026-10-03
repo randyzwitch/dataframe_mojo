@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A semi or anti join whose right side is at least 512K rows and four
+  times the left hashes the left keys and scans the right, marking the left
+  rows it matches, instead of hashing the right. A lazy plan decides this
+  from both real sizes once its right side has run, and runs neither side
+  twice. PDS-H q4 59 → 48 ms and q22 45 → 35 ms at scale 1.
 - Numbering an Int64 key whose values span fewer than 4,096 integers reads
   values and writes ids through pointers, and reads no validity when the key
   has no nulls. H2O q4 (10M rows) 34 → 23 ms at k=100 and 34 → 25 ms at k=2.
