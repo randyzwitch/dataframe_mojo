@@ -1496,6 +1496,35 @@ struct DataFrame(Copyable, Sized, Writable):
                 )
                 if membership[0]:
                     return self._filter_rows(membership[1].copy())
+        # A small left side against a large right one: hash the left keys
+        # and scan the right rows, marking the left rows they match, as
+        # DuckDB builds on the smaller side. PDS-H q4 hashed 3.8M late
+        # lineitem rows to test about 57K orders.
+        if (
+            (how == JOIN_SEMI or how == JOIN_ANTI)
+            and right.height() >= 524288
+            and self.height() > 0
+            and 4 * self.height() <= right.height()
+            and self.height() <= Int(Int32.MAX)
+        ):
+            trace_path("join.membership_left_build")
+            var left_sources = List[Series](capacity=len(left_keys))
+            var right_sources = List[Series](capacity=len(right_keys))
+            for k in range(len(left_keys)):
+                left_sources.append(self._columns[left_keys[k]].copy())
+                right_sources.append(right._columns[right_keys[k]].copy())
+            var pairs = direct_hash_join_rows(
+                right_sources, left_sources, False
+            )
+            var marked = List[Bool](length=self.height(), fill=False)
+            for row in pairs[1]:
+                marked[row] = True
+            var keep = how == JOIN_SEMI
+            var rows = List[Int]()
+            for i in range(self.height()):
+                if marked[i] == keep:
+                    rows.append(i)
+            return self._filter_rows(rows^)
         # Semi and anti joins on keys the bounded path declined: probe a
         # right-row hash index for membership only. The dictionary path
         # below would encode both inputs and group every right row first.
