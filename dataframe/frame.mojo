@@ -118,6 +118,7 @@ from .hashing import (
     encode_string_rows_parallel,
 )
 from .groups import GroupIndices
+from .top_k import top_k_mask
 from .hash_agg import hash_agg_eligible, hash_aggregate
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
@@ -2020,6 +2021,11 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error("Filter expression must return Boolean values")
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        # Each partition's first k rows by ordinal rank: no rank computed.
+        var top = top_k_mask(bound, self._columns, self._height)
+        if top:
+            trace_path("filter.top_k_per_partition")
+            return self.filter(top.value())
         if len(bound.expr._nodes) == 3:
             ref node = bound.expr._nodes[2]
             if (
