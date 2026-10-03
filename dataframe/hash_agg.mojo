@@ -80,7 +80,7 @@ def _moderate_groups(key: Series) raises -> Bool:
 def hash_agg_eligible(
     key: Series, bound: List[BoundExpr], columns: List[Series]
 ) raises -> Bool:
-    if key.dtype() != DataType.INT64 or key.null_count() > 0:
+    if key.dtype() != DataType.INT64:
         return False
     if len(bound) == 0:
         return False
@@ -102,6 +102,9 @@ struct _RangeTableJob(Job):
     var hashes: List[UInt64]
     var firsts: List[Int]
     var reducers: List[Reducer]
+    # The range's null-key group, -1 when it has no null key. Null keys are
+    # one group, kept out of the hash table (whose hashes are values').
+    var null_group: Int
     var bits: Int
     # This range's groups by hash part, each in first-row order.
     var members: List[List[Int]]
@@ -124,6 +127,7 @@ struct _RangeTableJob(Job):
         self.hashes = List[UInt64]()
         self.firsts = List[Int]()
         self.reducers = List[Reducer]()
+        self.null_group = -1
         self.bits = bits
         self.members = List[List[Int]]()
 
@@ -132,12 +136,22 @@ struct _RangeTableJob(Job):
         var key = self.key.slice(self.start, n)
         if key.is_chunked():
             key = key.rechunk()
-        var values = key._data[Column[Int64]]._ptr()
+        ref column = key._data[Column[Int64]]
+        var values = column._ptr()
+        var nulls = column.null_count() > 0
         var ids = List[Int](unsafe_uninit_length=n)
         var out = ids.unsafe_ptr()
         var capacity = 1024
         var table = List[Int32](length=capacity, fill=-1)
         for i in range(n):
+            if nulls and not column._valid(i):
+                if self.null_group < 0:
+                    self.null_group = len(self.keys)
+                    self.keys.append(0)
+                    self.hashes.append(0)
+                    self.firsts.append(self.start + i)
+                out[unsafe_offset=i] = self.null_group
+                continue
             var bits = bitcast[DType.uint64](values[unsafe_offset=i])
             var hash = _mix(bits)
             var mask = capacity - 1
@@ -154,7 +168,7 @@ struct _RangeTableJob(Job):
                     out[unsafe_offset=i] = g
                     break
                 # `_mix` is a bijection: equal hashes are equal keys.
-                if self.hashes[g] == hash:
+                if self.hashes[g] == hash and g != self.null_group:
                     out[unsafe_offset=i] = g
                     break
                 slot = (slot + 1) & mask
@@ -163,6 +177,8 @@ struct _RangeTableJob(Job):
                 table = List[Int32](length=capacity, fill=-1)
                 var grown = table.unsafe_ptr()
                 for g in range(len(self.keys)):
+                    if g == self.null_group:
+                        continue
                     var at = Int(self.hashes[g]) & (capacity - 1)
                     while grown[unsafe_offset=at] >= 0:
                         at = (at + 1) & (capacity - 1)
@@ -172,7 +188,8 @@ struct _RangeTableJob(Job):
         var shift = UInt64(64 - self.bits)
         self.members = List[List[Int]](length=parts, fill=List[Int]())
         for g in range(groups):
-            self.members[Int(self.hashes[g] >> shift)].append(g)
+            if g != self.null_group:
+                self.members[Int(self.hashes[g] >> shift)].append(g)
         for j in range(len(self.bound)):
             ref node = self.bound[j].expr._nodes[1]
             var reducer = _new_reducer(self.bound[j], node, groups)
@@ -316,6 +333,20 @@ struct _PartMergeJob(Job):
                         break
                     slot = (slot + 1) & mask
             maps.append(map^)
+        # Part 0 also holds the null-key group, merged from every range.
+        var null_final = -1
+        if self.part == 0:
+            for w in range(len(jobs)):
+                var g = jobs[w].null_group
+                if g < 0:
+                    continue
+                if null_final < 0:
+                    null_final = len(final_hashes)
+                    final_hashes.append(0)
+                    origin_range.append(w)
+                    origin_group.append(g)
+                members[w].append(g)
+                maps[w].append(null_final)
         var count = len(final_hashes)
         for f in range(count):
             self.firsts.append(jobs[origin_range[f]].firsts[origin_group[f]])

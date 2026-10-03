@@ -117,5 +117,40 @@ def test_equals_the_partitioned_and_serial_paths() raises:
                 assert_true(abs(u - v) <= 1e-9 * max(1.0, abs(v)), name)
 
 
+def test_null_keys_form_one_group() raises:
+    # A null key is one group of its own, merged across every range, and
+    # equal to the serial path's answer.
+    var n = ROWS
+    var keys = List[Int64](capacity=n)
+    var valid = List[Bool](capacity=n)
+    var ones = List[Int64](capacity=n)
+    for i in range(n):
+        keys.append(Int64((i * 7919) % GROUPS))
+        valid.append(i % 23 != 7)
+        ones.append(1)
+    var data = DataFrame(
+        [
+            Series("k", Column[Int64](keys^, valid^)),
+            Series("one", Column[Int64](ones^)),
+        ]
+    )
+    set_threads(8)
+    var parallel = data.group_by("k", maintain_order=True).agg(
+        [col("one").sum().alias("s"), col("one").len().alias("rows")]
+    )
+    set_threads(1)
+    var serial = data.group_by("k", maintain_order=True).agg(
+        [col("one").sum().alias("s"), col("one").len().alias("rows")]
+    )
+    set_threads(8)
+    assert_true(parallel.equals(serial))
+    var nulls = 0
+    for g in range(parallel.height()):
+        if parallel.item(g, "k").is_null():
+            nulls += 1
+            assert_equal(Int(parallel.item(g, "rows").int64()), (n + 15) // 23)
+    assert_equal(nulls, 1)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

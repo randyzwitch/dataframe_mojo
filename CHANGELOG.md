@@ -85,8 +85,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
   worker numbers its row range with its own hash table and reduces its
   values in row order, and the ranges' groups merge by hash part on every
   worker, so no aggregated column is gathered into bucket order (#383).
-  Serves sum, mean, min, max, count and len of Int64 and Float64 columns.
-  H2O q5 (10M rows, 100K groups) 133 → 64 ms.
+  Serves sum, mean, min, max, count and len of Int64 and Float64 columns,
+  and keys with nulls (a null key is one group). H2O q5 (10M rows, 100K
+  groups) 133 → 64 ms, and 233 → 73 ms with 5% null keys.
 - The partitioned group-by confirms a string key's hash match eight bytes
   at a time instead of one. ClickBench q33 and q34 (group by URL, 10M rows)
   413 → 376 ms.
