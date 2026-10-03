@@ -80,6 +80,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A filter on `a & b & ...` over 4,096 rows or more evaluates its parts
+  one at a time, each only on the rows the earlier ones kept, with parts
+  reading strings last. It narrows while a part keeps at most an eighth
+  of its rows (half when a string part is still to come); otherwise the
+  remaining parts run together and the masks combine. ClickBench q22
+  97 → 45 ms, q37 63 → 49 ms, q40 27 → 16 ms, q41 22 → 14 ms, q38 26 →
+  16 ms. Turning a mask into row numbers now reads 64 rows at a time.
 - Grouping by one Int64 key without nulls into a moderate number of groups
   (about 200K or fewer, from a 65,536-row sample) aggregates in place: each
   worker numbers its row range with its own hash table and reduces its

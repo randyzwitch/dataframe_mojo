@@ -1532,6 +1532,23 @@ def concat_str(exprs: List[Expr], separator: String = "") raises -> Expr:
     return result^
 
 
+def conjuncts(expr: Expr) -> List[Expr]:
+    """The operands of the chain of `&` at the root of expr, left to right;
+    expr alone when its root is another operator."""
+    var parts = List[Expr]()
+    _conjuncts(expr, len(expr._nodes) - 1, parts)
+    return parts^
+
+
+def _conjuncts(expr: Expr, index: Int, mut parts: List[Expr]):
+    ref node = expr._nodes[index]
+    if node.op == AND and node.left >= 0 and node.right >= 0:
+        _conjuncts(expr, node.left, parts)
+        _conjuncts(expr, node.right, parts)
+    else:
+        parts.append(subtree(expr, index))
+
+
 def subtree(expr: Expr, root: Int) -> Expr:
     """The nodes reachable from root, renumbered, as a standalone Expr."""
     var keep = List[Bool](length=root + 1, fill=False)
