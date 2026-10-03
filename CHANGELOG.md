@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Numbering an Int64 key whose values span fewer than 4,096 integers reads
+  values and writes ids through pointers, and reads no validity when the key
+  has no nulls. H2O q4 (10M rows) 34 → 23 ms at k=100 and 34 → 25 ms at k=2.
 - A lazy plan over a large in-memory input that streams through joins
   uses batches up to four times the default, as long as every worker still
   gets one: each batch probes every join, and fewer, larger batches cost
