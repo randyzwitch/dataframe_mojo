@@ -15,6 +15,7 @@ from .parallel import (
     partitions,
     run_jobs,
 )
+from std.atomic import Atomic
 from std.memory import ArcPointer
 from .cast import cast_series
 from .expr import Expr, col, lit
@@ -60,9 +61,33 @@ comptime Storage = Variant[
 
 
 @fieldwise_init
+struct _MergedCache(Movable):
+    """The contiguous array a chunked series rechunks into, made once.
+
+    Parquet tables arrive in row-group chunks, and joins, kernels and
+    gathers each rechunk the same key or value column: PDS-H q2 spent a
+    fifth of its time merging the same chunks again. The chunks never
+    change, so the first merge is kept. `state` is 0 (empty), 1 (one caller
+    is filling it) or 2 (ready); a caller that loses the race to fill it
+    merges its own copy without storing it."""
+
+    var state: Atomic[Int64]
+    var merged: Optional[Storage]
+
+    def __init__(out self):
+        self.state = Atomic[Int64](0)
+        self.merged = None
+
+
 struct _SeriesChunks(Copyable, Deinitable, Movable):
     var arrays: List[Storage]
     var ends: List[Int]
+    var cache: ArcPointer[_MergedCache]
+
+    def __init__(out self, var arrays: List[Storage], var ends: List[Int]):
+        self.arrays = arrays^
+        self.ends = ends^
+        self.cache = ArcPointer(_MergedCache())
 
 
 struct Series(Copyable, Deinitable, Movable, Sized, Writable):
@@ -205,9 +230,23 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         )
 
     def rechunk(self) raises -> Self:
-        """Materialize one contiguous Arrow array, preserving name and dtype."""
+        """Materialize one contiguous Arrow array, preserving name and dtype.
+
+        The first rechunk of a chunked series is kept and shared by every
+        copy of it (`_MergedCache`)."""
         if not self.is_chunked():
             return self.copy()
+        ref cache = self._chunked.value()[].cache[]
+        if cache.state.load() == 2:
+            return Self(self._name, cache.merged.value().copy(), self._dtype)
+        var merged = self._merge_chunks()
+        var empty = Int64(0)
+        if cache.state.compare_exchange(empty, 1):
+            cache.merged = merged._data.copy()
+            cache.state.store(2)
+        return merged^
+
+    def _merge_chunks(self) raises -> Self:
         var parts = self.chunks()
         var result = parts[0].copy()
         # Utf8View chunks concatenate descriptors and Arc byte blocks. Calling
