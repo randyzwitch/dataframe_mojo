@@ -351,7 +351,8 @@ struct StringViewStorage(Copyable, Sized):
         # column usually share the same blocks, and listing them again per
         # piece made the lists, and every later gather's copy of them, grow
         # with each merge (#395).
-        var views = List[StringView](capacity=rows)
+        var views = List[StringView](unsafe_uninit_length=rows)
+        var out = views.unsafe_ptr()
         var buffers = List[ArcPointer[List[UInt8]]]()
         var position = Dict[Int, Int]()
         var any_nulls = False
@@ -376,19 +377,38 @@ struct StringViewStorage(Copyable, Sized):
                 remap.append(UInt32(at))
             var source_views = storage._views[].unsafe_ptr()
             var nulls = len(storage._bits[]) > 0
-            for i in range(lengths[p]):
-                var source = offsets[p] + i
-                var view = source_views.unsafe_offset(source)[].copy()
+            var identity = True
+            for k in range(len(remap)):
+                identity = identity and Int(remap[k]) == k
+            var maps = remap.unsafe_ptr()
+            var count = lengths[p]
+            var first = source_views.unsafe_offset(offsets[p])
+            if identity:
+                # Buffer indexes stay as they are: one block copy of the
+                # descriptors, then only their lengths are read.
+                unsafe_memcpy(
+                    dest=out.unsafe_offset(row), src=first, count=count
+                )
+            for i in range(count):
+                ref view = first.unsafe_offset(i)[]
+                var length = Int(view.length)
                 if not view.is_inline():
-                    view.buffer_index = remap[Int(view.buffer_index)]
-                    total_buffer_bytes += Int(view.length)
+                    total_buffer_bytes += length
+                    if not identity:
+                        var moved = view.copy()
+                        moved.buffer_index = maps[
+                            unsafe_offset=Int(view.buffer_index)
+                        ]
+                        out.unsafe_offset(row + i)[] = moved^
+                elif not identity:
+                    out.unsafe_offset(row + i)[] = view.copy()
+                total_bytes += length
                 if any_nulls and (
-                    not nulls or _validity_bit(storage._bits[], source)
+                    not nulls or _validity_bit(storage._bits[], offsets[p] + i)
                 ):
-                    bits[row >> 3] |= UInt8(1) << UInt8(row & 7)
-                total_bytes += Int(view.length)
-                views.append(view^)
-                row += 1
+                    var at = row + i
+                    bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
+            row += count
         return Self(
             views^, buffers^, bits^, rows, total_bytes, total_buffer_bytes
         )
