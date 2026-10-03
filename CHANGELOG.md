@@ -80,6 +80,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- The partitioned group-by no longer gathers aggregated columns into bucket
+  order when every aggregation is a sum, mean, min, max, count or len of an
+  Int64 or Float64 column: each bucket reads values at their source rows
+  and updates its groups' states in place. ClickBench q15 124 → 105 ms, q16
+  206 → 175 ms, q35 108 → 84 ms; H2O q3 (10M rows) 99 → 78 ms, and 137 →
+  114 ms with 5% nulls.
 - A filter on `rank("ordinal").over(keys) <= k` (or `< k + 1`), the "top
   N per group" idiom, keeps each partition's first k rows by scanning the
   rows once with a small sorted list per partition, instead of ranking

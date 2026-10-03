@@ -722,3 +722,42 @@ def test_direct_numeric_sum_count_reads_aligned_chunks() raises:
         serial.sort("i64").equals(unordered.sort("i64")),
         "aligned direct unordered grouped result differs",
     )
+
+
+def test_indexed_reductions_match_serial() raises:
+    """Plain reductions on the partitioned path read values at their
+    source rows (`indexed_reduce.mojo`): NaN in min and max, Int64 with
+    nulls under every reduction, len, and values split into chunks."""
+    var df = frame(ROWS, ROWS // 10)
+    var n_values = df.column("n").int64().to_list()
+    var n_valid = List[Bool](capacity=ROWS)
+    var w = List[Float64](capacity=ROWS)
+    for i in range(ROWS):
+        n_valid.append(i % 5 != 2)
+        w.append(Float64(0) / Float64(0) if i % 9 == 4 else Float64(i % 31))
+    df = df.with_column(Series("n", Column[Int64](n_values^, n_valid^)))
+    df = df.with_column(Series("w", Column[Float64](w^)))
+    var source = df.column("n")
+    df = df.with_column(
+        Series._from_chunks(
+            [source.slice(0, 37_001), source.slice(37_001, ROWS - 37_001)]
+        )
+    )
+    var expressions: List[Expr] = [
+        col("n").sum().alias("nsum"),
+        col("n").mean().alias("nmean"),
+        col("n").min().alias("nmin"),
+        col("n").max().alias("nmax"),
+        col("n").count().alias("ncount"),
+        col("w").min().alias("wmin"),
+        col("w").max().alias("wmax"),
+        col("w").count().alias("wcount"),
+        col("v").len().alias("len"),
+    ]
+    var key_sets: List[List[String]] = [["s"], ["s", "i32"]]
+    for keys in key_sets:
+        set_threads(1)
+        var serial = df.group_by(keys, maintain_order=True).agg(expressions)
+        set_threads(32)
+        var parallel = df.group_by(keys, maintain_order=True).agg(expressions)
+        assert_true(serial.equals(parallel), "indexed grouped result differs")
