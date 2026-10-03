@@ -136,5 +136,44 @@ def test_left_input_made_by_a_join() raises:
     same(lazy, eager)
 
 
+def test_semi_and_anti_against_a_large_right_side() raises:
+    # The right side runs first; once it proves large, the left runs too
+    # and the join is decided from both real sizes: a small left is joined
+    # eagerly (hashing the left), a large one keeps streaming. Either way
+    # the rows must equal the eager join, and keep the left's order.
+    var t = tables()
+    for kind in [3, -1]:
+        var left = (
+            t[0].filter(col("kind") == kind) if kind >= 0 else t[0].copy()
+        )
+        var lazy_left = (
+            t[0].lazy().filter(col("kind") == kind) if kind
+            >= 0 else t[0].lazy()
+        )
+        var right = t[1].filter(col("g") != 49)
+        var lazy_right = t[1].lazy().filter(col("g") != 49)
+        for how in ["semi", "anti"]:
+            var eager = left.join(
+                right, left_on=["id"], right_on=["k"], how=how
+            )
+            var lazy = lazy_left.join(
+                lazy_right, left_on=["id"], right_on=["k"], how=how
+            ).collect()
+            assert_true(lazy.equals(eager), how + " kind " + String(kind))
+    # A left as large as the right keeps streaming from its computed rows.
+    var big = t[1].filter(col("g") != 7)
+    var big_right = t[1].filter(col("k") % 3 != 0)
+    for how in ["semi", "anti"]:
+        var eager = big.join(big_right, "k", how=how)
+        var lazy = (
+            t[1]
+            .lazy()
+            .filter(col("g") != 7)
+            .join(t[1].lazy().filter(col("k") % 3 != 0), "k", how=how)
+            .collect()
+        )
+        assert_true(lazy.equals(eager), how + " large left")
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

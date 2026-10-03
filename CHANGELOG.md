@@ -84,6 +84,21 @@ breaking changes can happen in any release and are listed under **Breaking**.
   values with an empty (all-valid) bitmap, instead of filling an all-ones
   bitmap, applying it to every output byte, and handing it to every later
   AND. ClickBench filter queries q1, q7 and q36-q42 4-13% faster.
+- A semi or anti join whose right side is at least 512K rows and four
+  times the left hashes the left keys and scans the right, marking the left
+  rows it matches, instead of hashing the right. A lazy plan decides this
+  from both real sizes once its right side has run, and runs neither side
+  twice. PDS-H q4 59 → 48 ms and q22 45 → 35 ms at scale 1.
+- Numbering an Int64 key whose values span fewer than 4,096 integers reads
+  values and writes ids through pointers, and reads no validity when the key
+  has no nulls. H2O q4 (10M rows) 34 → 23 ms at k=100 and 34 → 25 ms at k=2.
+- A chunked series (a Parquet table's row groups) keeps the contiguous
+  array its first `rechunk` makes, shared by every copy, instead of merging
+  the same chunks again for every join, kernel and gather that needs it.
+  Merging string-view chunks copies each chunk's descriptors in one block
+  when its buffer indexes do not change. H2O join (10M rows) q1 127 → 80 ms,
+  q2 142 → 96 ms, q4 242 → 176 ms and q5 530 → 419 ms; H2O group-by q3 199
+  → 153 ms and q10 802 → 681 ms; PDS-H q14 17 → 12 ms and q19 46 → 37 ms.
 - A lazy plan over a large in-memory input that streams through joins
   uses batches up to four times the default, as long as every worker still
   gets one: each batch probes every join, and fewer, larger batches cost
