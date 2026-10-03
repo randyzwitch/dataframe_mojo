@@ -718,12 +718,23 @@ def _same_key(keys: List[Series], a: Int, b: Int) -> Bool:
     return True
 
 
+def _numeric_key(key: Series) -> Bool:
+    """A fixed-width number whose 64-bit hash key `_hash_column` writes
+    without folding (every numeric dtype; not Int128 decimals)."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if key._data.isa[Column[Scalar[D]]]():
+            return True
+    return False
+
+
 def encode_bucket(
     keys: List[Series],
     hashes: Span[UInt64, _],
     rows: Span[Int, _],
     mut ids: List[Int],
     mut firsts: List[Int],
+    exact_hashes: Bool = False,
 ):
     """Group ids for one bucket's rows, in first-occurrence order, from the
     key hashes the partitioner already computed (`hashes[p]` belongs to
@@ -745,6 +756,17 @@ def encode_bucket(
         and keys[0]._data.isa[StringColumn]()
         and not keys[0]._data[StringColumn]._is_view_storage()
         and len(keys[0]._data[StringColumn]._bits[]) == 0
+    )
+    # With `exact_hashes` (the hashes are `_hash_column`'s), one fixed-width
+    # numeric key without nulls is hashed by `_mix` alone, a bijection on
+    # its 64 bits: equal hashes are equal keys, and the rows need no
+    # comparison (no random read of either row's key). Other callers' hashes
+    # only find candidates.
+    var exact = (
+        exact_hashes
+        and len(keys) == 1
+        and _numeric_key(keys[0])
+        and keys[0].null_count() == 0
     )
     var offsets_at = 0
     var bytes_at = 0
@@ -800,7 +822,9 @@ def encode_bucket(
                 break
             if known[unsafe_offset=g] == hash:
                 var same: Bool
-                if direct:
+                if exact:
+                    same = True
+                elif direct:
                     var other = first_rows[unsafe_offset=g]
                     var a = Int(offsets.unsafe_offset(row)[])
                     var length = Int(offsets.unsafe_offset(row + 1)[]) - a
