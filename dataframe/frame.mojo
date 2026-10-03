@@ -4654,6 +4654,7 @@ struct _HashedBucketJob(Job):
             Span(order)[self.lo : self.hi],
             ids,
             firsts,
+            exact_hashes=True,
         )
         for key in self.keys:
             self.result.append(key.take(firsts))

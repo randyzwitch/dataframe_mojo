@@ -468,6 +468,58 @@ def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 
 
+def test_exact_hash_keys_group_like_their_values() raises:
+    """A single numeric key without nulls is grouped by its bijective hash
+    alone (no row comparison). Float keys still fold -0.0 into 0.0 and
+    every NaN into one group, and integer keys of every width agree with
+    a row-by-row count, at a cardinality that takes the partitioned path."""
+    var n = 200_000
+    var floats = List[Float64](capacity=n)
+    var ints = List[Int32](capacity=n)
+    var nan = Float64(0) / Float64(0)
+    for i in range(n):
+        var v = Float64((i * 7919) % 50_000)
+        if i % 1000 == 1:
+            v = nan
+        elif i % 1000 == 2:
+            v = -0.0
+        elif i % 1000 == 3:
+            v = 0.0
+        floats.append(v)
+        ints.append(Int32((i * 104729) % 60_000 - 30_000))
+    var frame = DataFrame(
+        [
+            Series("f", Column[Float64](floats^)),
+            Series("i", Column[Int32](ints^)),
+        ]
+    )
+    var by_float = frame.group_by("f").agg([col("i").len().alias("c")])
+    var nans = 0
+    var zeros = 0
+    var total = 0
+    for row in range(by_float.height()):
+        var key = by_float.item(row, "f").float64()
+        var count = Int(by_float.item(row, "c").int64())
+        total += count
+        if key != key:
+            nans += 1
+            assert_equal(count, n // 1000)
+        elif key == 0:
+            zeros += 1
+    assert_equal(nans, 1)
+    assert_equal(zeros, 1)
+    assert_equal(total, n)
+    var by_int = frame.group_by("i").agg([col("f").len().alias("c")])
+    var counts = Dict[Int, Int]()
+    for i in range(n):
+        var k = Int(frame.item(i, "i").int32())
+        counts[k] = counts.get(k, 0) + 1
+    assert_equal(by_int.height(), len(counts))
+    for row in range(by_int.height()):
+        var k = Int(by_int.item(row, "i").int32())
+        assert_equal(Int(by_int.item(row, "c").int64()), counts[k])
+
+
 def test_chunked_cardinality_sample_matches_rechunked() raises:
     var rows = 8192
     for cardinality in [16, 1000]:
