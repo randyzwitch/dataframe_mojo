@@ -689,10 +689,10 @@ def _round_div[divisor: Int](numerator: Int128) -> Int128:
 
 
 def _decimal_dense[
-    op: Int, divisor: Int
+    op: Int, divisor: Int, A: DType, B: DType
 ](
-    a: Column[Int128],
-    b: Column[Int128],
+    a: Column[Scalar[A]],
+    b: Column[Scalar[B]],
     n: Int,
     left_factor: Int128,
     right_factor: Int128,
@@ -711,8 +711,9 @@ def _decimal_dense[
     var left_one = len(a) == 1
     var right_one = len(b) == 1
     for i in range(n):
-        var x = xs[unsafe_offset=0 if left_one else i]
-        var y = ys[unsafe_offset=0 if right_one else i]
+        # decimal64 inputs are read at their width and widened per value.
+        var x = Int128(xs[unsafe_offset=0 if left_one else i])
+        var y = Int128(ys[unsafe_offset=0 if right_one else i])
         var value: Int128
         comptime if op == MUL:
             value = _decimal_mul(x, y)
@@ -730,56 +731,138 @@ def _decimal_dense[
     return values^
 
 
+def _dense_decimal[
+    op: Int, A: DType, B: DType
+](
+    a: Column[Scalar[A]],
+    b: Column[Scalar[B]],
+    left_dtype: DataType,
+    right_dtype: DataType,
+    result_dtype: DataType,
+) raises -> Series:
+    """Decimal ADD, SUB or MUL of columns without nulls, at their storage
+    widths (Int64 or Int128); the result is decimal128."""
+    var n = _length(len(a), len(b))
+    var common = max(left_dtype.scale(), right_dtype.scale())
+    var lf = pow10(common - left_dtype.scale())
+    var rf = pow10(common - right_dtype.scale())
+    var lim = precision_limit(result_dtype.precision())
+    var shift = left_dtype.scale() + right_dtype.scale() - result_dtype.scale()
+    var scale = pow10(max(shift, 0))
+    var dense: List[Int128]
+    comptime if op == MUL:
+        if shift <= 0:
+            dense = _decimal_dense[op, 1, A, B](
+                a, b, n, lf, rf, scale, lim, result_dtype
+            )
+        elif shift == 1:
+            dense = _decimal_dense[op, 10, A, B](
+                a, b, n, lf, rf, scale, lim, result_dtype
+            )
+        elif shift == 2:
+            dense = _decimal_dense[op, 100, A, B](
+                a, b, n, lf, rf, scale, lim, result_dtype
+            )
+        elif shift == 3:
+            dense = _decimal_dense[op, 1000, A, B](
+                a, b, n, lf, rf, scale, lim, result_dtype
+            )
+        elif shift == 4:
+            dense = _decimal_dense[op, 10000, A, B](
+                a, b, n, lf, rf, scale, lim, result_dtype
+            )
+        else:
+            dense = _decimal_dense[op, 0, A, B](
+                a, b, n, lf, rf, scale, lim, result_dtype
+            )
+    else:
+        dense = _decimal_dense[op, 1, A, B](
+            a, b, n, lf, rf, scale, lim, result_dtype
+        )
+    return Series("", Column[Int128](dense^)).with_dtype(result_dtype)
+
+
+def _decimal_side(
+    series: Series, common: Int
+) raises -> Optional[Column[Int64]]:
+    """One side of a decimal comparison as Int64 at scale `common`, without
+    widening: a decimal64 column already at that scale, or a one-row value
+    rescaled exactly. None when that is not possible."""
+    var scale = series.dtype().scale()
+    if series._data.isa[Column[Int64]]():
+        if scale != common:
+            return None
+        return series._data[Column[Int64]].copy()
+    if len(series) != 1 or not series._data.isa[Column[Int128]]():
+        return None
+    ref column = series._data[Column[Int128]]
+    if not column._valid(0):
+        return Column[Int64]([Int64(0)], [False])
+    var value = column._get(0) * pow10(common - scale)
+    if value > Int128(Int64.MAX) or value < Int128(Int64.MIN):
+        return None
+    return Column[Int64]([Int64(value)])
+
+
 def _decimal_binary[
     op: Int
 ](left: Series, right: Series, mask: List[Bool]) raises -> Series:
     var result_dtype = _decimal_result(op, left.dtype(), right.dtype())
+    var narrow = (
+        left._data.isa[Column[Int64]]() or right._data.isa[Column[Int64]]()
+    )
+    var no_nulls = left.null_count() == 0 and right.null_count() == 0
+    comptime if op == ADD or op == SUB or op == MUL:
+        if len(mask) == 0 and no_nulls:
+            var ld = left.dtype()
+            var rd = right.dtype()
+            if left._data.isa[Column[Int64]]():
+                if right._data.isa[Column[Int64]]():
+                    return _dense_decimal[op, DType.int64, DType.int64](
+                        left._data[Column[Int64]],
+                        right._data[Column[Int64]],
+                        ld,
+                        rd,
+                        result_dtype,
+                    )
+                return _dense_decimal[op, DType.int64, DType.int128](
+                    left._data[Column[Int64]],
+                    right._data[Column[Int128]],
+                    ld,
+                    rd,
+                    result_dtype,
+                )
+            if right._data.isa[Column[Int64]]():
+                return _dense_decimal[op, DType.int128, DType.int64](
+                    left._data[Column[Int128]],
+                    right._data[Column[Int64]],
+                    ld,
+                    rd,
+                    result_dtype,
+                )
+            return _dense_decimal[op, DType.int128, DType.int128](
+                left._data[Column[Int128]],
+                right._data[Column[Int128]],
+                ld,
+                rd,
+                result_dtype,
+            )
+    if narrow:
+        comptime if is_comparison(op):
+            # decimal64 values compare at their width when both sides are
+            # at one scale (a literal rescaled exactly to the column's).
+            if len(mask) == 0:
+                var common = max(left.dtype().scale(), right.dtype().scale())
+                var x = _decimal_side(left, common)
+                var y = _decimal_side(right, common)
+                if Bool(x) and Bool(y):
+                    return _compare_bits[op, DType.int64](x.value(), y.value())
+        return _decimal_binary[op](
+            left._decimal128(), right._decimal128(), mask
+        )
     ref a = left._data[Column[Int128]]
     ref b = right._data[Column[Int128]]
     var n = _length(len(a), len(b))
-    comptime if op == ADD or op == SUB or op == MUL:
-        if len(mask) == 0 and a.null_count() == 0 and b.null_count() == 0:
-            var common = max(left.dtype().scale(), right.dtype().scale())
-            var lf = pow10(common - left.dtype().scale())
-            var rf = pow10(common - right.dtype().scale())
-            var lim = precision_limit(result_dtype.precision())
-            var shift = (
-                left.dtype().scale()
-                + right.dtype().scale()
-                - result_dtype.scale()
-            )
-            var scale = pow10(max(shift, 0))
-            var dense: List[Int128]
-            comptime if op == MUL:
-                if shift <= 0:
-                    dense = _decimal_dense[op, 1](
-                        a, b, n, lf, rf, scale, lim, result_dtype
-                    )
-                elif shift == 1:
-                    dense = _decimal_dense[op, 10](
-                        a, b, n, lf, rf, scale, lim, result_dtype
-                    )
-                elif shift == 2:
-                    dense = _decimal_dense[op, 100](
-                        a, b, n, lf, rf, scale, lim, result_dtype
-                    )
-                elif shift == 3:
-                    dense = _decimal_dense[op, 1000](
-                        a, b, n, lf, rf, scale, lim, result_dtype
-                    )
-                elif shift == 4:
-                    dense = _decimal_dense[op, 10000](
-                        a, b, n, lf, rf, scale, lim, result_dtype
-                    )
-                else:
-                    dense = _decimal_dense[op, 0](
-                        a, b, n, lf, rf, scale, lim, result_dtype
-                    )
-            else:
-                dense = _decimal_dense[op, 1](
-                    a, b, n, lf, rf, scale, lim, result_dtype
-                )
-            return Series("", Column[Int128](dense^)).with_dtype(result_dtype)
     var valid = List[Bool](length=n, fill=False)
     comptime predicate = is_comparison(op)
     var values = List[Int128](length=0 if predicate else n, fill=0)
@@ -1275,9 +1358,8 @@ def validity(series: Series) -> List[Bool]:
     var n = len(series)
     var valid = List[Bool](capacity=n)
     if series.dtype().is_decimal():
-        ref column = series._data[Column[Int128]]
         for i in range(n):
-            valid.append(column._valid(i))
+            valid.append(series._decimal_valid(i))
         return valid^
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
@@ -1320,6 +1402,12 @@ def binary[
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
         return binary[op, width](left.rechunk(), right.rechunk(), mask)
+    # decimal64 operands go to the decimal kernels at their width, which
+    # widen what they do not cover; decimal32 operands are widened here.
+    if (left.dtype().is_decimal() and left.dtype().decimal_width() == 32) or (
+        right.dtype().is_decimal() and right.dtype().decimal_width() == 32
+    ):
+        return binary[op, width](left._decimal128(), right._decimal128(), mask)
     comptime if is_logical(op):
         return _logical_bits[op](
             left._data[BoolColumn], right._data[BoolColumn]
@@ -1417,6 +1505,8 @@ def unary[
 ) raises -> Series:
     if input.is_chunked():
         return unary[op, width](input.rechunk(), integer, mask)
+    if input.dtype().is_decimal() and input.dtype().decimal_width() != 128:
+        return unary[op, width](input._decimal128(), integer, mask)
     comptime if op == IS_NULL or op == IS_NOT_NULL:
         var valid = validity(input)
         var values = List[Bool](capacity=len(valid))

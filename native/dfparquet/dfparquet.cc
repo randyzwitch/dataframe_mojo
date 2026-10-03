@@ -103,6 +103,9 @@ arrow::Status Open(const char* path, bool use_threads,
   parquet::ArrowReaderProperties properties;
   properties.set_use_threads(use_threads);
   properties.set_pre_buffer(true);
+  // A decimal stored as INT32 or INT64 reads as decimal32 or decimal64,
+  // the width its file declares, not widened to decimal128.
+  properties.set_smallest_decimal_enabled(true);
   parquet::arrow::FileReaderBuilder builder;
   ARROW_RETURN_NOT_OK(builder.Open(file));
   builder.properties(properties);

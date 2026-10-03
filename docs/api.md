@@ -431,11 +431,13 @@ struct(names, dtypes) holds one value of each named field per row.
   This datetime's unit in `time_zone` (empty for naive).
 - `def duration(unit: String = "us") -> Self`
   A signed length of time counted in unit.
-- `def decimal(precision: Int, scale: Int) -> Self`
-  An Arrow-compatible decimal128 type stored as a scaled Int128.
+- `def decimal(precision: Int, scale: Int, width: Int = Int(128)) -> Self`
+  An Arrow decimal: a scaled integer of `width` bits (Arrow's decimal32, decimal64 or decimal128), kept at the width its source declares. Results that could exceed it widen to 128 bits.
 - `def is_decimal(self) -> Bool`
 - `def precision(self) -> Int`
 - `def scale(self) -> Int`
+- `def decimal_width(self) -> Int`
+  Bits per value of a decimal (32, 64 or 128); 0 otherwise.
 - `def parse(name: String) -> Self`
   The type with this canonical name; raises for unknown names.
 - `def is_known(name: String) -> Bool`

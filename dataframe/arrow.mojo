@@ -294,7 +294,12 @@ def _format(dtype: DataType) raises -> String:
         # values ride in the schema's and array's `dictionary` (#106).
         return "I"
     if dtype.is_decimal():
-        return "d:" + String(dtype.precision()) + "," + String(dtype.scale())
+        var format = (
+            "d:" + String(dtype.precision()) + "," + String(dtype.scale())
+        )
+        # decimal128 has no width suffix; decimal32 and decimal64 do.
+        var width = dtype.decimal_width()
+        return format if width == 128 else format + "," + String(width)
     if dtype.is_numeric():
         return _numeric_format(dtype.storage().value())
     if dtype == DataType.BOOL:
@@ -429,6 +434,20 @@ def _fill_array(
             state.children.append(child)
         array.n_children = Int64(len(state.children))
         array.children = Int(state.children.unsafe_ptr())
+    elif dtype.is_decimal() and dtype.decimal_width() == 64:
+        ref column = kept._data[Column[Int64]]
+        array.offset = Int64(column._offset)
+        state.buffers.append(
+            Int(column.unsafe_validity()) if len(column._bits[]) != 0 else 0
+        )
+        state.buffers.append(Int(column._data[].unsafe_ptr()))
+    elif dtype.is_decimal() and dtype.decimal_width() == 32:
+        ref column = kept._data[Column[Int32]]
+        array.offset = Int64(column._offset)
+        state.buffers.append(
+            Int(column.unsafe_validity()) if len(column._bits[]) != 0 else 0
+        )
+        state.buffers.append(Int(column._data[].unsafe_ptr()))
     elif dtype.is_decimal():
         ref column = kept._data[Column[Int128]]
         array.offset = Int64(column._offset)
@@ -729,17 +748,36 @@ def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
         _buffer(array, 0), offset, length
     )
     if format.startswith("d:"):
-        var comma = format.find(",")
-        if comma < 3:
+        # "d:precision,scale" is decimal128; a third field names the width.
+        var parts = String(format[byte = 2 : format.byte_length()]).split(",")
+        if len(parts) < 2 or len(parts) > 3:
             raise Error("Invalid Arrow decimal format " + format)
-        var precision = Int(String(format[byte=2:comma]))
-        var scale = Int(String(format[byte = comma + 1 : format.byte_length()]))
+        var precision = Int(String(parts[0]))
+        var scale = Int(String(parts[1]))
+        var width = Int(String(parts[2])) if len(parts) == 3 else 128
+        var dtype = DataType.decimal(precision, scale, width)
+        if width == 64:
+            return Series(
+                name,
+                Column[Int64](
+                    values=_import_fixed[Int64](array, length, offset),
+                    bits=bits^,
+                ),
+            ).with_dtype(dtype)
+        if width == 32:
+            return Series(
+                name,
+                Column[Int32](
+                    values=_import_fixed[Int32](array, length, offset),
+                    bits=bits^,
+                ),
+            ).with_dtype(dtype)
         return Series(
             name,
             Column[Int128](
                 values=_import_fixed[Int128](array, length, offset), bits=bits^
             ),
-        ).with_dtype(DataType.decimal(precision, scale))
+        ).with_dtype(dtype)
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if format == _numeric_format(D):

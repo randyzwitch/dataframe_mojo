@@ -2,7 +2,7 @@
 from .dtype import DataType, NUMERIC_DTYPES
 from std.utils import Variant
 from .bool_column import BoolColumn
-from .column import Column, SCALAR_DTYPES, gather_scalars
+from .column import Column, SCALAR_DTYPES, _copy_validity, gather_scalars
 from .nested_column import ListColumn, StructColumn
 from .string_column import StringColumn
 from .string_view import StringViewStorage
@@ -297,6 +297,52 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         var start = 0 if lo == 0 else self._chunked.value()[].ends[lo - 1]
         return (part^, row - start)
 
+    def _decimal_raw(self, index: Int) -> Int128:
+        """The scaled integer of a contiguous decimal column's row, at any
+        storage width (decimal32, decimal64 or decimal128)."""
+        if self._data.isa[Column[Int64]]():
+            return Int128(self._data[Column[Int64]]._get(index))
+        if self._data.isa[Column[Int32]]():
+            return Int128(self._data[Column[Int32]]._get(index))
+        return self._data[Column[Int128]]._get(index)
+
+    def _decimal_valid(self, index: Int) -> Bool:
+        if self._data.isa[Column[Int64]]():
+            return self._data[Column[Int64]]._valid(index)
+        if self._data.isa[Column[Int32]]():
+            return self._data[Column[Int32]]._valid(index)
+        return self._data[Column[Int128]]._valid(index)
+
+    def _decimal128(self) raises -> Self:
+        """A decimal32 or decimal64 column widened to decimal128 with the
+        same precision, scale and nulls; anything else as it is. Decimal
+        kernels and states work at 128 bits, so a narrow column is widened
+        where one reads it; the stored column keeps the width its source
+        declared."""
+        var dtype = self.dtype()
+        if not dtype.is_decimal() or dtype.decimal_width() == 128:
+            return self.copy()
+        var whole = self.rechunk() if self.is_chunked() else self.copy()
+        var n = len(whole)
+        var values = List[Int128](unsafe_uninit_length=n)
+        var out = values.unsafe_ptr()
+        var bits: List[UInt8]
+        if whole._data.isa[Column[Int64]]():
+            ref column = whole._data[Column[Int64]]
+            var source = column._ptr()
+            for i in range(n):
+                out[unsafe_offset=i] = Int128(source[unsafe_offset=i])
+            bits = _copy_validity(column._bits[], column._offset, n)
+        else:
+            ref column = whole._data[Column[Int32]]
+            var source = column._ptr()
+            for i in range(n):
+                out[unsafe_offset=i] = Int128(source[unsafe_offset=i])
+            bits = _copy_validity(column._bits[], column._offset, n)
+        return Self(
+            whole._name, Column[Int128](values=values^, bits=bits^)
+        ).with_dtype(DataType.decimal(dtype.precision(), dtype.scale()))
+
     def _storage_dtype(self) -> DataType:
         """The physical DataType of the stored column."""
         comptime for i in range(len(NUMERIC_DTYPES)):
@@ -405,10 +451,9 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 return AnyValue.null(self._dtype)
             return AnyValue(self._dtype, True, column._get(index), 0, False, "")
         if self._dtype.is_decimal():
-            ref column = self._data[Column[Int128]]
-            if column.is_null(index):
+            if not self._decimal_valid(index):
                 return AnyValue.null(self._dtype)
-            return AnyValue.decimal(self._dtype, column._get(index))
+            return AnyValue.decimal(self._dtype, self._decimal_raw(index))
         if self._dtype.is_categorical() and self._dtype.has_dictionary():
             # A categorical cell reads as its value, a string.
             ref codes = self._data[Column[UInt32]]
@@ -1288,6 +1333,15 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 dtype
             )
         if dtype.is_decimal():
+            var width = dtype.decimal_width()
+            if width == 64:
+                return Self(name^, Column[Int64]._nulls(length, 0)).with_dtype(
+                    dtype
+                )
+            if width == 32:
+                return Self(name^, Column[Int32]._nulls(length, 0)).with_dtype(
+                    dtype
+                )
             return Self(name^, Column[Int128]._nulls(length, 0)).with_dtype(
                 dtype
             )

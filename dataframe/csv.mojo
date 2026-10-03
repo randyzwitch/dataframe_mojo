@@ -193,9 +193,7 @@ def _cell_text(series: Series, row: Int, zone: TimeZone) raises -> String:
         var part = series._chunk_at(row)
         return _cell_text(part[0], part[1], zone)
     if series.dtype().is_decimal():
-        return format_decimal(
-            series._data[Column[Int128]]._get(row), series.dtype().scale()
-        )
+        return format_decimal(series._decimal_raw(row), series.dtype().scale())
     if series.dtype().is_temporal():
         return format_in(
             series._data[Column[Int64]]._get(row), series.dtype(), "", zone
@@ -224,7 +222,7 @@ def _cell_valid(series: Series, row: Int) raises -> Bool:
         if series._data.isa[Column[Scalar[D]]]():
             return series._data[Column[Scalar[D]]]._valid(row)
     if series._data.isa[Column[Int128]]():
-        return series._data[Column[Int128]]._valid(row)
+        return series._decimal_valid(row)
     if series._data.isa[BoolColumn]():
         return series._data[BoolColumn]._valid(row)
     return series._data[StringColumn]._valid(row)
