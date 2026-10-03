@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A numeric comparison of columns without validity bitmaps returns its
+  values with an empty (all-valid) bitmap, instead of filling an all-ones
+  bitmap, applying it to every output byte, and handing it to every later
+  AND. ClickBench filter queries q1, q7 and q36-q42 4-13% faster.
 - A lazy plan over a large in-memory input that streams through joins
   uses batches up to four times the default, as long as every worker still
   gets one: each batch probes every join, and fewer, larger batches cost
