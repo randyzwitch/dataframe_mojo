@@ -87,6 +87,17 @@ breaking changes can happen in any release and are listed under **Breaking**.
   among workers; the order is `rank`'s own, so ties keep the earlier row
   and NaN ranks as it does there. H2O q8 (10M rows) 414 → 237 ms at k=100,
   500 → 275 ms at k=10 and 604 → 431 ms at k=2.
+- Decimals keep the width their source declares: Arrow `decimal32` and
+  `decimal64` (`d:p,s,32` and `d:p,s,64`) import and export at that width,
+  stored in Int32 and Int64, alongside `decimal128`. Parquet decimals
+  stored as INT32 or INT64 read as `decimal32` or `decimal64` (Arrow's
+  smallest-decimal reader option). `DataType.decimal(precision, scale,
+  width=128)` names them `decimal32[p,s]` and `decimal64[p,s]`. Filters,
+  sorts, grouping and joins keep the width; arithmetic computes at 128 bits
+  and returns `decimal128`, and a narrow decimal's sum widens to
+  `decimal(38, s)`, so a result never overflows its storage. Comparisons
+  and no-null arithmetic read 64-bit decimals at their width. PDS-H decimal
+  q6 36 → 11 ms, q11 33 → 27 ms and q3 93 → 79 ms at scale 1.
 - Grouping by one Int64 key without nulls into a moderate number of groups
   (about 200K or fewer, from a 65,536-row sample) aggregates in place: each
   worker numbers its row range with its own hash table and reduces its
