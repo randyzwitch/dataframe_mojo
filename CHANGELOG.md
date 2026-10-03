@@ -80,6 +80,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A filter on `rank("ordinal").over(keys) <= k` (or `< k + 1`), the "top
+  N per group" idiom, keeps each partition's first k rows by scanning the
+  rows once with a small sorted list per partition, instead of ranking
+  every row. Partitions are numbered as `over()` numbers them and split
+  among workers; the order is `rank`'s own, so ties keep the earlier row
+  and NaN ranks as it does there. H2O q8 (10M rows) 414 → 237 ms at k=100,
+  500 → 275 ms at k=10 and 604 → 431 ms at k=2.
 - Decimals keep the width their source declares: Arrow `decimal32` and
   `decimal64` (`d:p,s,32` and `d:p,s,64`) import and export at that width,
   stored in Int32 and Int64, alongside `decimal128`. Parquet decimals
