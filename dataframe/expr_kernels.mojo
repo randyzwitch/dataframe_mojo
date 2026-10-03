@@ -1082,10 +1082,15 @@ def _compare_bits[
     bitmaps. Null rows have a zero value bit, as before."""
     var n = _length(len(left), len(right))
     var count = (n + 7) // 8
-    var valid = _window_bytes(
+    # Neither side has a validity bitmap: the result is all valid, kept as
+    # an empty bitmap (as the logical kernels expect) rather than a full one
+    # every later AND would read again. A filter's comparisons spent as long
+    # filling and applying all-ones bytes as comparing.
+    var all_valid = len(left._bits[]) == 0 and len(right._bits[]) == 0
+    var valid = List[UInt8]() if all_valid else _window_bytes(
         left._bits[], left._offset, len(left), n, UInt8(255)
     )
-    if len(right._bits[]) > 0:
+    if not all_valid and len(right._bits[]) > 0:
         var other = _window_bytes(
             right._bits[], right._offset, len(right), n, UInt8(255)
         )
@@ -1102,11 +1107,19 @@ def _compare_bits[
     var xs = left._ptr()
     var ys = right._ptr()
     var full = n // 8
-    for k in range(full):
-        var x = x_splat if left_one else xs.unsafe_load[width=8](8 * k)
-        var y = y_splat if right_one else ys.unsafe_load[width=8](8 * k)
-        var hits = _compare_lanes[op, D, 8](x, y).cast[DType.uint8]()
-        values[k] = (hits * weights).reduce_add() & valid[k]
+    var out = values.unsafe_ptr()
+    if all_valid:
+        for k in range(full):
+            var x = x_splat if left_one else xs.unsafe_load[width=8](8 * k)
+            var y = y_splat if right_one else ys.unsafe_load[width=8](8 * k)
+            var hits = _compare_lanes[op, D, 8](x, y).cast[DType.uint8]()
+            out[unsafe_offset=k] = (hits * weights).reduce_add()
+    else:
+        for k in range(full):
+            var x = x_splat if left_one else xs.unsafe_load[width=8](8 * k)
+            var y = y_splat if right_one else ys.unsafe_load[width=8](8 * k)
+            var hits = _compare_lanes[op, D, 8](x, y).cast[DType.uint8]()
+            out[unsafe_offset=k] = (hits * weights).reduce_add() & valid[k]
     if full < count:
         var byte = UInt8(0)
         for i in range(8 * full, n):
@@ -1114,7 +1127,7 @@ def _compare_bits[
             var y = right._get(0 if right_one else i)
             if _compare_lanes[op, D, 1](x, y)[0]:
                 byte |= UInt8(1) << UInt8(i - 8 * full)
-        values[full] = byte & valid[full]
+        values[full] = byte if all_valid else byte & valid[full]
     return Series("", BoolColumn(values=values^, bits=valid^, length=n))
 
 

@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A numeric comparison of columns without validity bitmaps returns its
+  values with an empty (all-valid) bitmap, instead of filling an all-ones
+  bitmap, applying it to every output byte, and handing it to every later
+  AND. ClickBench filter queries q1, q7 and q36-q42 4-13% faster.
 - A semi or anti join whose right side is at least 512K rows and four
   times the left hashes the left keys and scans the right, marking the left
   rows it matches, instead of hashing the right. A lazy plan decides this
