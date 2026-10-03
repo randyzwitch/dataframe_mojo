@@ -957,6 +957,17 @@ struct LazyFrame(Copyable):
         var bits = 0
         var rows_seen = 0
         var split_groups = _stream_split_groups()
+        # Batches of a large in-memory input that streams through joins grow
+        # up to four times the default: each batch probes every join, and
+        # fewer, larger batches cost less per row (PDS-H q21's two joins of
+        # 3.8M rows against 1.5M-row builds: 186 -> 148 ms). They grow only
+        # while every worker still gets a batch: a 150K-row customer table
+        # in one batch ran on one worker (q10, q13 and q22 were 7-23% slower).
+        var rows_per_batch = batch_size
+        if len(shared_joins[]) > 0 and input.height() > 0:
+            rows_per_batch = max(
+                batch_size, min(4 * batch_size, input.height() // workers)
+            )
         while not ended:
             var jobs = List[_StreamJob]()
             for _ in range(workers):
@@ -978,7 +989,7 @@ struct LazyFrame(Copyable):
                     if emitted and offset >= input.height():
                         ended = True
                         break
-                    frame = input.slice(offset, batch_size)
+                    frame = input.slice(offset, rows_per_batch)
                     offset += frame.height()
                     emitted = True
                 var job = _StreamJob(

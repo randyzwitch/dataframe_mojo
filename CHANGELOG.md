@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A lazy plan over a large in-memory input that streams through joins
+  uses batches up to four times the default, as long as every worker still
+  gets one: each batch probes every join, and fewer, larger batches cost
+  less per row. PDS-H q14 43 → 18 ms, q19 102 → 45 ms and q21 477 → 386 ms
+  at scale 1.
 - A filter whose mask keeps every row (`is_not_null()` on a column
   without nulls) returns the frame's columns instead of copying them, and a
   rank over many small partitions sorts every row once by (partition, key)
