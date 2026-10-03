@@ -745,6 +745,10 @@ struct DataFrame(Copyable, Sized, Writable):
         """
         if len(mask) != self._height:
             raise Error("Filter mask must match dataframe height")
+        if _keeps_every_row(mask):
+            # Nothing to drop (`is_not_null()` on a column without nulls):
+            # the frame's columns are shared, not copied.
+            return self.copy()
         var filtered = filter_columns(self._columns, mask)
         ref others = filtered[1]
         var count = filtered[2]
@@ -5017,6 +5021,34 @@ struct GroupBy(Copyable):
         )
         columns.append(Series(name, Column[Int64](counts^)))
         return _pack_struct_keys(DataFrame(columns^, height=groups.count()))
+
+
+def _keeps_every_row(mask: BoolColumn) -> Bool:
+    """Whether every row of a byte-aligned mask is a valid true, checked a
+    byte (eight rows) at a time. Other masks answer False."""
+    if mask._offset % 8 != 0:
+        return False
+    var n = mask._length
+    var first = mask._offset // 8
+    var values = mask._data[].unsafe_ptr().unsafe_offset(first)
+    var has_bits = len(mask._bits[]) > 0
+    var bits = mask._bits[].unsafe_ptr().unsafe_offset(first if has_bits else 0)
+    var full = n // 8
+    for k in range(full):
+        var byte = values[unsafe_offset=k]
+        if has_bits:
+            byte &= bits[unsafe_offset=k]
+        if byte != 255:
+            return False
+    var tail = n - 8 * full
+    if tail > 0:
+        var want = UInt8((1 << tail) - 1)
+        var byte = values[unsafe_offset=full]
+        if has_bits:
+            byte &= bits[unsafe_offset=full]
+        if byte & want != want:
+            return False
+    return True
 
 
 def _is_untyped(value: Expr) -> Bool:
