@@ -102,12 +102,11 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
         if not column._valid(row):
             return "null"
         return "true" if column._get(row) else "false"
-    if series._data.isa[Column[Int128]]():
-        # Decimal128: unscaled integers, formatted at the column's scale.
-        ref column = series._data[Column[Int128]]
-        if not column._valid(row):
+    if series.dtype().is_decimal():
+        # Unscaled integers of any width, formatted at the column's scale.
+        if not series._decimal_valid(row):
             return "null"
-        return format_decimal(column._get(row), series.dtype().scale())
+        return format_decimal(series._decimal_raw(row), series.dtype().scale())
     if series.dtype().is_nested():
         try:
             return _truncate(String(series.get(row)), max(max_string_length, 8))

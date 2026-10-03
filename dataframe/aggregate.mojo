@@ -797,6 +797,17 @@ struct Reducer(Movable):
         self.dtype = self.logical if self.logical.is_decimal() else _state_type(
             input_dtype
         )
+        if self.dtype.is_decimal() and self.dtype.decimal_width() != 128:
+            # Decimal states are 128-bit. A narrow decimal's sum widens to
+            # precision 38 (`sum_type`); its min, max, first and last keep
+            # its precision and narrow back to its width when finished.
+            try:
+                self.dtype = DataType.decimal(
+                    38 if op == SUM else self.dtype.precision(),
+                    self.dtype.scale(),
+                )
+            except:
+                pass
         self.group_count = group_count
         self.min_count = min_count
         self.integer = integer
@@ -914,6 +925,10 @@ struct Reducer(Movable):
             for part in chunk.chunks():
                 self.update(part, part_offset, grouped, groups)
                 part_offset += len(part)
+            return
+        if chunk.dtype().is_decimal() and chunk.dtype().decimal_width() != 128:
+            # Decimal states are 128-bit: widen a narrow decimal input.
+            self.update(chunk._decimal128(), offset, grouped, groups)
             return
         if self.op == SKEW or self.op == KURTOSIS:
             var floats = _float_values(chunk)
@@ -2102,6 +2117,21 @@ struct Reducer(Movable):
             for g in range(n):
                 valid[g] = self.seen[g] and (not picked or self.picked_valid[g])
             if self.dtype.is_decimal():
+                var width = self.logical.decimal_width()
+                if width == 64:
+                    var narrow = List[Int64](capacity=n)
+                    for v in self.decimals:
+                        narrow.append(Int64(v))
+                    return Series("", Column[Int64](narrow^, valid)).with_dtype(
+                        self.logical
+                    )
+                if width == 32:
+                    var narrow = List[Int32](capacity=n)
+                    for v in self.decimals:
+                        narrow.append(Int32(v))
+                    return Series("", Column[Int32](narrow^, valid)).with_dtype(
+                        self.logical
+                    )
                 return Series(
                     "", Column[Int128](self.decimals.copy(), valid)
                 ).with_dtype(self.dtype)

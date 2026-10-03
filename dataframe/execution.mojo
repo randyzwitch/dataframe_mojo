@@ -1055,6 +1055,10 @@ def _direct_numeric_part(
     end: Int,
 ) -> Bool:
     """Dispatch an interval inside one physical numeric array."""
+    if part.dtype().is_decimal():
+        # A decimal32 or decimal64 array is stored in Int32 or Int64, but
+        # its states are decimal ones: the reducer widens and sums it.
+        return False
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if part._data.isa[Column[Scalar[D]]]():
@@ -1534,6 +1538,7 @@ def evaluate[
             var source = bound.sources[i]
             if prepared_columns[source].dtype().is_categorical():
                 prepared_columns[source] = decode(prepared_columns[source])
+
     var has_fused = False
     for i in range(count):
         if bound.fusible[i] and bound.expr._nodes[i].left >= 0:

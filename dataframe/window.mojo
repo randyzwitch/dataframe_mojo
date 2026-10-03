@@ -258,7 +258,8 @@ def _as_float(input: Series) raises -> Series:
         return input.copy()
     var valid = validity(input)
     if input.dtype().is_decimal():
-        ref column = input._data[Column[Int128]]
+        var wide = input._decimal128()
+        ref column = wide._data[Column[Int128]]
         var values = List[Float64](capacity=len(column))
         var divisor = pow10(input.dtype().scale()).cast[DType.float64]()
         for i in range(len(column)):

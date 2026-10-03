@@ -8,7 +8,7 @@ infinities, and out-of-range values.
 from std.math import isinf, isnan, trunc
 from std.sys import size_of
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _copy_validity
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
 from .parse import parse_bool, parse_float64, parse_integer
@@ -31,9 +31,7 @@ def _dtype(series: Series) -> DataType:
 
 def _text(series: Series, row: Int) -> String:
     if series.dtype().is_decimal():
-        return format_decimal(
-            series._data[Column[Int128]]._get(row), series.dtype().scale()
-        )
+        return format_decimal(series._decimal_raw(row), series.dtype().scale())
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
@@ -45,7 +43,7 @@ def _text(series: Series, row: Int) -> String:
 
 def _valid(series: Series, row: Int) -> Bool:
     if series.dtype().is_decimal():
-        return series._data[Column[Int128]]._valid(row)
+        return series._decimal_valid(row)
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
@@ -101,7 +99,7 @@ def _read_source(
 ) raises:
     """Row i of input into the intermediate, parsing strings for target."""
     if source.is_decimal():
-        var raw = input._data[Column[Int128]]._get(i)
+        var raw = input._decimal_raw(i)
         if target.is_float():
             values.floats[i] = Float64(raw) / Float64(pow10(source.scale()))
         else:
@@ -353,6 +351,35 @@ def _parse_strings[
     return Series(input.name(), Column[Scalar[D]](values^, valid))
 
 
+def _decimal_to_float(input: Series) raises -> Series:
+    """A decimal column of any width as Float64, through a pointer at its
+    width: the same value / 10^scale the row path computes."""
+    var n = len(input)
+    var divisor = Float64(pow10(input.dtype().scale()))
+    var values = List[Float64](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var bits: List[UInt8]
+    if input._data.isa[Column[Int64]]():
+        ref column = input._data[Column[Int64]]
+        var source = column._ptr()
+        for i in range(n):
+            out[unsafe_offset=i] = Float64(source[unsafe_offset=i]) / divisor
+        bits = _copy_validity(column._bits[], column._offset, n)
+    elif input._data.isa[Column[Int32]]():
+        ref column = input._data[Column[Int32]]
+        var source = column._ptr()
+        for i in range(n):
+            out[unsafe_offset=i] = Float64(source[unsafe_offset=i]) / divisor
+        bits = _copy_validity(column._bits[], column._offset, n)
+    else:
+        ref column = input._data[Column[Int128]]
+        var source = column._ptr()
+        for i in range(n):
+            out[unsafe_offset=i] = Float64(source[unsafe_offset=i]) / divisor
+        bits = _copy_validity(column._bits[], column._offset, n)
+    return Series(input.name(), Column[Float64](values=values^, bits=bits^))
+
+
 def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
@@ -368,6 +395,8 @@ def cast_series(
             + ": list and struct casts are not supported yet"
         )
     var source = _dtype(input)
+    if source.is_decimal() and target == DataType.FLOAT64 and len(mask) == 0:
+        return _decimal_to_float(input)
     if source.is_categorical() or target.is_categorical():
         # Categoricals convert through their values (#106): decode, cast
         # the strings, and encode when the target is categorical.
@@ -413,7 +442,7 @@ def cast_series(
                         input._data[StringColumn]._get(i), target
                     )
                 elif source.is_decimal():
-                    var raw = input._data[Column[Int128]]._get(i)
+                    var raw = input._decimal_raw(i)
                     if source.scale() <= target.scale():
                         raw *= pow10(target.scale() - source.scale())
                     else:
@@ -444,6 +473,22 @@ def cast_series(
                         + "\x27: "
                         + String(e)
                     )
+        var width = target.decimal_width()
+        if width == 64 or width == 32:
+            # Precision 18 (or 9) fits the declared width; store it there.
+            if width == 64:
+                var narrow = List[Int64](capacity=n)
+                for v in decimal_values:
+                    narrow.append(Int64(v))
+                return Series(
+                    input.name(), Column[Int64](narrow^, valid)
+                ).with_dtype(target)
+            var narrow = List[Int32](capacity=n)
+            for v in decimal_values:
+                narrow.append(Int32(v))
+            return Series(
+                input.name(), Column[Int32](narrow^, valid)
+            ).with_dtype(target)
         return Series(
             input.name(), Column[Int128](decimal_values^, valid)
         ).with_dtype(target)

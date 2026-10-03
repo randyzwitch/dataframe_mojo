@@ -111,6 +111,37 @@ def test_decimal128_round_trip() raises:
     assert_true(back.equals(source))
 
 
+def test_decimal32_and_decimal64_keep_their_width() raises:
+    # Arrow's decimal32 and decimal64 ("d:p,s,32" and "d:p,s,64") import at
+    # the width they declare and export the same buffer back.
+    var wide = DataType.decimal(15, 2, 64)
+    assert_equal(wide.name(), "decimal64[15,2]")
+    assert_true(DataType.parse(wide.name()) == wide)
+    var source = Series(
+        "price",
+        Column[Int64]([Int64(-123456), 0, 999999999], [True, False, True]),
+    ).with_dtype(wide)
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow_series(source, array, schema)
+    assert_equal(_read_c_string(schema.format), "d:15,2,64")
+    var back = import_arrow_series(array, schema)
+    assert_true(back.dtype() == wide)
+    assert_true(back.equals(source))
+    var narrow = DataType.decimal(9, 3, 32)
+    assert_equal(narrow.name(), "decimal32[9,3]")
+    var small = Series(
+        "rate", Column[Int32]([Int32(-4567), 12], [True, True])
+    ).with_dtype(narrow)
+    var array32 = ArrowArray()
+    var schema32 = ArrowSchema()
+    export_arrow_series(small, array32, schema32)
+    assert_equal(_read_c_string(schema32.format), "d:9,3,32")
+    var back32 = import_arrow_series(array32, schema32)
+    assert_true(back32.dtype() == narrow)
+    assert_true(back32.equals(small))
+
+
 def test_sliced_and_empty_frames() raises:
     var frame = sample()
     for start in [0, 1, 3, 7, 8, 13]:
