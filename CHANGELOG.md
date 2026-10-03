@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- The partitioned group-by confirms a string key's hash match eight bytes
+  at a time instead of one. ClickBench q33 and q34 (group by URL, 10M rows)
+  413 → 376 ms.
 - A numeric comparison of columns without validity bitmaps returns its
   values with an empty (all-valid) bitmap, instead of filling an all-ones
   bitmap, applying it to every output byte, and handing it to every later
