@@ -826,7 +826,51 @@ struct LazyFrame(Copyable):
                         break
                 var operation = node.copy()
                 operation.offset = len(joins)
-                joins.append(self._execute(node.right, False, True, batch_size))
+                var built = self._execute(node.right, False, True, batch_size)
+                if (
+                    (node.how == JOIN_SEMI or node.how == JOIN_ANTI)
+                    and built.height() >= 524288
+                    and self._known_height(node.left) < 0
+                ):
+                    # A semi or anti join whose built right side turned out
+                    # large: run the left too, and decide from both real
+                    # sizes, as DuckDB does. A left at most a quarter of the
+                    # right is joined eagerly, hashing the left (PDS-H q4:
+                    # about 57K orders against 3.8M late lineitem rows);
+                    # otherwise the stream continues from the left's rows.
+                    # Either way both results replace their nodes in a copy
+                    # of the plan, so neither side runs twice.
+                    var left_frame = self._execute(
+                        node.left, False, True, batch_size
+                    )
+                    var plan = self.copy()
+                    if 4 * left_frame.height() <= built.height():
+                        var joined = left_frame.join(
+                            built,
+                            left_on=node.names,
+                            right_on=node.right_keys,
+                            how="semi" if node.how == JOIN_SEMI else "anti",
+                        )
+                        plan._frames.append(joined^)
+                        plan._schemas.append(Optional[CsvSchema]())
+                        plan._nodes[cursor] = _plan_node(
+                            SCAN_FRAME, offset=len(plan._frames) - 1
+                        )
+                    else:
+                        plan._frames.append(left_frame^)
+                        plan._schemas.append(Optional[CsvSchema]())
+                        plan._nodes.append(
+                            _plan_node(SCAN_FRAME, offset=len(plan._frames) - 1)
+                        )
+                        plan._nodes[cursor].left = len(plan._nodes) - 1
+                        plan._frames.append(built^)
+                        plan._schemas.append(Optional[CsvSchema]())
+                        plan._nodes.append(
+                            _plan_node(SCAN_FRAME, offset=len(plan._frames) - 1)
+                        )
+                        plan._nodes[cursor].right = len(plan._nodes) - 1
+                    return plan._execute(index, False, True, batch_size)
+                joins.append(built^)
                 if not prepared and node.how != JOIN_CROSS and len(node.names):
                     ref build = joins[len(joins) - 1]
                     var sources = List[Series]()

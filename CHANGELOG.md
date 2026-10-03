@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A semi or anti join whose right side is at least 512K rows and four
+  times the left hashes the left keys and scans the right, marking the left
+  rows it matches, instead of hashing the right. A lazy plan decides this
+  from both real sizes once its right side has run, and runs neither side
+  twice. PDS-H q4 59 → 48 ms and q22 45 → 35 ms at scale 1.
 - A lazy plan over a large in-memory input that streams through joins
   uses batches up to four times the default, as long as every worker still
   gets one: each batch probes every join, and fewer, larger batches cost
