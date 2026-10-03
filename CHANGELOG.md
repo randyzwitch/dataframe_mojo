@@ -80,6 +80,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A lazy plan over a large in-memory input that streams through joins
+  uses batches up to four times the default, as long as every worker still
+  gets one: each batch probes every join, and fewer, larger batches cost
+  less per row. PDS-H q14 43 → 18 ms, q19 102 → 45 ms and q21 477 → 386 ms
+  at scale 1.
 - Grouping or partitioning by one numeric key without nulls numbers each
   hash bucket by hash alone: the key's hash is a bijection on its 64 bits,
   so equal hashes are equal keys and rows need no comparison, which read
