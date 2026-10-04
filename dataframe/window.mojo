@@ -35,6 +35,7 @@ from .decimal import pow10
 from .reductions import WideInt
 from .series import Series, sort_indices
 from .rank import rank_numeric
+from .packed_sort import packed_arg_sort
 from std.math import isnan, floor
 
 
@@ -516,6 +517,12 @@ def _rolling_sum(
 def _rank(
     input: Series, groups: List[List[Int]], method: String, descending: Bool
 ) raises -> Series:
+    if input._data.isa[StringColumn]():
+        var fast = _rank_strings(
+            input._data[StringColumn], groups, method, descending
+        )
+        if fast:
+            return fast.take()
     var n = len(input)
     var average = method == "average"
     var ints = List[Int64](length=0 if average else n, fill=0)
@@ -551,3 +558,75 @@ def _rank(
     if average:
         return Series("", Column[Float64](floats^, out_valid))
     return Series("", Column[Int64](ints^, out_valid))
+
+
+def _rank_strings(
+    column: StringColumn,
+    groups: List[List[Int]],
+    method: String,
+    descending: Bool,
+) raises -> Optional[Series]:
+    """Reuse the packed sort's stable partition/string order when supported."""
+    var ids = List[Int64](length=len(column), fill=0)
+    var count = 0
+    for group in range(len(groups)):
+        for row in groups[group]:
+            ids[row] = Int64(group)
+            count += 1
+    if count != len(column):
+        return None
+    var partitions = Column[Int64](ids^)
+    var order = packed_arg_sort(
+        [Series("", partitions.copy()), Series("", column.copy())],
+        [False, descending],
+        [True, True],
+    )
+    if not order:
+        return None
+    return _rank_string_order(column, partitions, order.take(), method)
+
+
+def _rank_string_order(
+    column: StringColumn, ids: Column[Int64], order: List[Int], method: String
+) raises -> Series:
+    """Assign ranks from a stable order by (partition, string, source row)."""
+    var average = method == "average"
+    var ints = List[Int64](length=0 if average else len(column), fill=0)
+    var floats = List[Float64](length=len(column) if average else 0, fill=0)
+    var valid = List[Bool](length=len(column), fill=False)
+    var start = 0
+    while start < len(order):
+        var base = start
+        var end_group = start + 1
+        while end_group < len(order) and ids._get(order[end_group]) == ids._get(
+            order[base]
+        ):
+            end_group += 1
+        var dense = 0
+        while start < end_group and column._valid(order[start]):
+            var end = start + 1
+            while (
+                end < end_group
+                and column._valid(order[end])
+                and column._get(order[end]) == column._get(order[start])
+            ):
+                end += 1
+            dense += 1
+            for position in range(start, end):
+                var row = order[position]
+                valid[row] = True
+                if average:
+                    floats[row] = Float64(start + 1 + end - 2 * base) / 2
+                elif method == "min":
+                    ints[row] = Int64(start - base + 1)
+                elif method == "max":
+                    ints[row] = Int64(end - base)
+                elif method == "dense":
+                    ints[row] = Int64(dense)
+                else:
+                    ints[row] = Int64(position - base + 1)
+            start = end
+        start = end_group
+    if average:
+        return Series("", Column[Float64](floats^, valid))
+    return Series("", Column[Int64](ints^, valid))
