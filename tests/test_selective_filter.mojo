@@ -5,7 +5,7 @@ reading strings run last, and an unselective part ends the narrowing.
 """
 from std.testing import TestSuite, assert_equal, assert_true
 
-from dataframe import Column, DataFrame, Expr, Series, col, lit
+from dataframe import Column, DataFrame, DataType, Expr, Series, col, lit
 
 comptime ROWS = 30_000
 
@@ -85,6 +85,23 @@ def test_chunked_and_small_frames() raises:
     check(pieces, (col("a") == 7) & (col("b") > 10) & col("s").ne(""))
     # Below the row threshold the predicate runs whole.
     check(data.slice(0, 1000), (col("a") == 7) & col("s").ne(""))
+
+
+def test_decimal_parts_and_odd_offsets() raises:
+    """Decimal comparisons under an AND's mask, and a frame whose rows start
+    mid-byte."""
+    var data = frame()
+    var cents = List[Int128](capacity=ROWS)
+    for i in range(ROWS):
+        cents.append(Int128((i * 37) % 10_000))
+    var priced = data.with_column(
+        Series("d", Column[Int128](cents^)).with_dtype(DataType.decimal(15, 2))
+    )
+    var low = lit("10.00").cast(DataType.decimal(15, 2))
+    var high = lit("40.00").cast(DataType.decimal(15, 2))
+    check(priced, (col("b") >= 0) & col("d").is_between(low, high))
+    check(priced, (col("a") == 7) & col("d").is_between(low, high))
+    check(data.slice(3, ROWS - 10), (col("b") >= 0) & (col("a") < 50))
 
 
 def main() raises:

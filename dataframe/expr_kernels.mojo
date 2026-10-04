@@ -807,6 +807,13 @@ def _decimal_side(
 def _decimal_binary[
     op: Int
 ](left: Series, right: Series, mask: List[Bool]) raises -> Series:
+    comptime if is_comparison(op):
+        # A comparison cannot fail on an inactive row, and its results
+        # there go unread: compare every row on the unmasked paths. The
+        # masked per-row path made PDS-H decimal q6 4.5 times slower once
+        # filter parts ran under an AND's mask.
+        if len(mask) > 0:
+            return _decimal_binary[op](left, right, List[Bool]())
     var result_dtype = _decimal_result(op, left.dtype(), right.dtype())
     var narrow = (
         left._data.isa[Column[Int64]]() or right._data.isa[Column[Int64]]()

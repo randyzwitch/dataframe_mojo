@@ -294,6 +294,19 @@ def _bits64(bits: List[UInt8], bit: Int, length: Int) -> UInt64:
 
 def true_count(mask: BoolColumn) -> Int:
     """Valid true entries, 64 rows at a time."""
+    if mask._offset % 8 == 0 and len(mask._bits[]) == 0:
+        # Byte-aligned values and no nulls: count whole bytes, then the
+        # tail's bits.
+        var data = mask._data[].unsafe_ptr().unsafe_offset(mask._offset // 8)
+        var full = mask._length // 8
+        var count = 0
+        for i in range(full):
+            count += Int(pop_count(data[unsafe_offset=i]))
+        var rest = mask._length - 8 * full
+        if rest > 0:
+            var last = data[unsafe_offset=full] & UInt8((1 << rest) - 1)
+            count += Int(pop_count(last))
+        return count
     ref values = mask._data[]
     ref bits = mask._bits[]
     var end = mask._offset + mask._length
@@ -311,7 +324,25 @@ def both_true(a: BoolColumn, b: BoolColumn) -> BoolColumn:
     """Rows valid and true in both masks of one length, as a mask with no
     nulls."""
     var n = a._length
-    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var nbytes = (n + 7) // 8
+    if a._offset % 8 == 0 and b._offset % 8 == 0:
+        # Byte-aligned: AND whole bytes. Bits past n are ignored by readers.
+        var out = List[UInt8](unsafe_uninit_length=nbytes)
+        var o = out.unsafe_ptr()
+        var av = a._data[].unsafe_ptr().unsafe_offset(a._offset // 8)
+        var bv = b._data[].unsafe_ptr().unsafe_offset(b._offset // 8)
+        for i in range(nbytes):
+            o[unsafe_offset=i] = av[unsafe_offset=i] & bv[unsafe_offset=i]
+        if len(a._bits[]) > 0:
+            var ab = a._bits[].unsafe_ptr().unsafe_offset(a._offset // 8)
+            for i in range(nbytes):
+                o[unsafe_offset=i] &= ab[unsafe_offset=i]
+        if len(b._bits[]) > 0:
+            var bb = b._bits[].unsafe_ptr().unsafe_offset(b._offset // 8)
+            for i in range(nbytes):
+                o[unsafe_offset=i] &= bb[unsafe_offset=i]
+        return BoolColumn(values=out^, bits=List[UInt8](), length=n)
+    var values = List[UInt8](length=nbytes, fill=0)
     var a_end = a._offset + n
     var b_end = b._offset + n
     var row = 0
