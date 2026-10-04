@@ -3,17 +3,15 @@
 import hashlib
 import json
 
-POLICY_VERSION = 1
-DEVELOPMENT_NOTE = (
-    "Development benchmark results: all bundled suites have influenced engine "
-    "optimization. External origin and new data seeds do not make these "
-    "independent validation workloads. No independent validation is claimed."
+POLICY_VERSION = 2
+POLICY_NOTE = (
+    "Tune on H2O and mechanism benchmarks; use PDS-H and ClickBench as "
+    "held-out validation. Some prior optimization work used holdout results; "
+    "the development/holdout boundary is enforced going forward."
 )
 LEGACY_NOTE = (
-    "Legacy result: this file has no recorded workload-exposure metadata. "
-    "The bundled suites have been used for development; previous held-out "
-    "labels do not establish independence. Raw measurements are unchanged. "
-    "No independent validation is claimed."
+    "Legacy result: workload hashes and exposure metadata were not recorded. "
+    "Raw measurements are unchanged. "
 )
 
 # A documented lower bound on exposure, not a claim about the first exposure.
@@ -44,11 +42,16 @@ def record(root, selected, suites):
     }
     return {
         "policy_version": POLICY_VERSION,
-        "independent_validation": False,
+        "policy": "development_tuning_holdout_validation",
+        "policy_effective": "2026-10-04",
         "suites": {
             name: {
-                "role": "development",
-                "exposure": "used_for_development",
+                "role": "development" if suites[name]["role"]
+                == "dev" else "heldout",
+                "intended_use": "tuning" if suites[name]["role"]
+                == "dev" else "validation_only",
+                "prior_exposure": "used_for_development" if suites[name]["role"]
+                == "dev" else "some_prior_optimization_use",
                 "evidence": EXPOSURE_EVIDENCE[name],
                 "source": suites[name]["source"],
                 "upstream_revision": None,
@@ -69,8 +72,8 @@ def record(root, selected, suites):
 
 def report_note(result):
     if not result.get("provenance", {}).get("evaluation"):
-        return LEGACY_NOTE
-    return DEVELOPMENT_NOTE
+        return LEGACY_NOTE + POLICY_NOTE
+    return POLICY_NOTE
 
 
 def distinct_queries(cases):

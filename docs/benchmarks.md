@@ -5,15 +5,14 @@ work other people chose, not on inputs we shaped. Two audits (#274, and the
 follow-ups #304 and #306–#308) found fast paths whose only trigger was one of
 our own benchmark queries or key layouts. The fix is structural: measure on
 external suites, keep the measuring code apart from the code being measured,
-and make benchmark-shaped paths visible. External origin alone does not make a
-suite independent: every bundled suite has now influenced engine work.
+and make benchmark-shaped paths visible. Keep development and holdout roles
+useful going forward, while acknowledging prior exposure.
 
 ## Rules
 
 1. **Headline numbers come from external suites.** Their queries and data
    generators are defined upstream, so a path that only helps a shape we
-   invented shows no gain there. These are measurements on named development
-   workloads, not evidence about unseen workloads. The in-repo micro-benchmarks
+   invented shows no gain there. The in-repo micro-benchmarks
    (`benchmarks/bench_*.mojo`) remain development tools for one mechanism at
    a time; they are not evidence of general performance.
 2. **Benchmarks and engine changes go in separate PRs.** A PR that changes
@@ -23,13 +22,13 @@ suite independent: every bundled suite has now influenced engine work.
    `scripts/check_benchmark_separation.sh` enforces this in CI; a PR that
    genuinely needs both (for example, this one, which adds tracing hooks and
    the suites together) says why in a `Benchmark-Change:` commit trailer.
-3. **Record exposure honestly.** H2O, PDS-H and ClickBench are all
-   development suites. PDS-H join-order policies and ClickBench aggregation
-   policies already cite their per-query results in the engine. Their former
-   "held-out" label was incorrect. New seeds, scales and variants of these
-   queries are robustness checks, not independent validation. No bundled
-   suite currently supplies independent validation; use the protocol below
-   before making such a claim.
+3. **Development and held-out suites.** Tune on H2O and mechanism benchmarks.
+   Keep PDS-H and ClickBench as held-out validation of completed changes.
+   Do not use their per-query timings to choose optimization targets, tune
+   thresholds, or add query-specific exceptions. Some earlier optimization
+   work used holdout results; record that caveat and enforce the boundary
+   going forward. Correctness bugs can be investigated and fixed generally;
+   retain the failing result and the rerun rather than hiding failures.
 4. **Every measurement includes perturbed data.** The data variants below
    always run, and the report puts each query's worst variant beside its base
    result. A fast path that fires only on sorted keys, or only without nulls,
@@ -53,8 +52,8 @@ follow on every change; the full tier is what a report cites.
 |---|---|---|---:|---|
 | `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | cardinality parameter k=100, 10 and 2; 5% nulls; sorted |
 | `h2o_join` | development | db-benchmark join | 5 | none; 5% nulls |
-| `pdsh` | development | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
-| `clickbench` | development | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
+| `pdsh` | held out | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
+| `clickbench` | held out | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
 
 The H2O data follows db-benchmark's R generators with seeded Polars sampling,
 so distributions match but values do not. TPC-H tables come from DuckDB's
@@ -111,11 +110,11 @@ repetitions and reference query-source hash, because their code does not
 change when this library does.
 Narrow a run with `--suites h2o_join` or `--queries q1,q2`.
 
-**Full** runs all four development suites at 10M rows (TPC-H scale factor 1,
+**Full** runs both development and held-out suites at 10M rows (TPC-H scale factor 1,
 10M ClickBench rows), three rounds, measures every engine afresh and records
 fast-path coverage. `--all-suites` also selects all four with the quick tier;
-`--suites` can explicitly narrow either tier. The deprecated `--heldout`
-option still adds PDS-H and ClickBench, with a warning about their exposure.
+`--suites` can explicitly narrow either tier. The `--heldout`
+option adds PDS-H and ClickBench to a run.
 
 Both tiers give each (suite, variant, engine, round) its own process, which
 loads the tables once, untimed, then warms up and times each query. The
@@ -131,7 +130,7 @@ historical upstream commits were not recorded and remain explicitly unknown.
 DuckDB's recorded version identifies its `tpch_queries` and `dbgen` implementation.
 
 Re-rendering older raw JSON preserves its samples and displays a legacy
-exposure warning; it does not retroactively create an independence record.
+metadata note; it does not invent missing historical provenance.
 The coverage table separates distinct suite/query pairs from query/variant
 cases: five variants of one query are still one query when evaluating how
 widely a specialized path is exercised. Instrumentation includes all literal
@@ -148,32 +147,20 @@ single cells, and confirm a single-query change on the full tier.
 `--scale` overrides the tier's size: `smoke` (seconds; CI checks answers at
 this size), `dev` (1M rows), `default` (10M) or `large` (100M).
 
-## Independent validation protocol
+## Keeping holdouts useful
 
-There is no independent-validation result in the bundled reports. To obtain
-one, arrange a separate evaluation before exposing its workloads:
+The practical boundary is tuning versus validation. Use development workloads
+and general data properties to design the engine change, then check the
+completed change on the holdouts and publish the whole selected result set,
+including regressions, failures and unsupported queries. Do not reshape a
+query, hide an unfavorable case, or add a query-specific branch to improve
+a reported score. A path exercised by only one query needs a general reason
+and coverage beyond that query.
 
-1. A reviewer outside the optimization work selects workloads that have not
-   been inspected or used for tuning by the engine authors. Record who held
-   the selection, its source/generator revisions, query and input hashes,
-   selection rules, and any prior exposure. New random data for an exposed
-   query template does not qualify as a new unseen workload.
-2. Freeze the engine commit, compiler/dependency versions, worker counts,
-   resource limits, comparison engines, answer checks, query coverage and
-   analysis plan before revealing queries or per-query outcomes. Retain the
-   frozen manifest and the time it was committed for review.
-3. Run that fixed evaluation once under the same conditions for every
-   engine. Publish all preselected cases, failures, raw samples and aggregate
-   results, with the selection and exposure record. Do not omit unfavorable
-   cases or retune thresholds during this evaluation.
-4. Once results are opened, mark the workloads exposed. Any fixes or tuning
-   informed by them belong to development; a new claim of independent
-   generalization requires a fresh, separately held evaluation.
-
-These records support an auditable claim; a CLI flag or a source hash cannot
-prove that people have not seen a workload. `bench_suites.py` therefore always
-records the bundled suites as development and never promotes them to
-independent validation.
+Prior exposure is a limitation of the historical results, not a reason to
+retire PDS-H or ClickBench. New reports record their continuing held-out role
+and that caveat. Source hashes, benchmark/engine separation and fast-path
+coverage make changes reviewable; they do not certify anybody's tuning process.
 
 ## Answer checks
 

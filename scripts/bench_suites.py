@@ -8,7 +8,7 @@ build-dfparquet):
     # against main, Polars/DuckDB from the reference cache.
     pixi run -e oracle python3 scripts/bench_suites.py --baseline main
 
-    # A report: 10M rows, three rounds, fast-path coverage, all development suites.
+    # A report: 10M rows, three rounds, fast-path coverage, development and held-out suites.
     pixi run -e oracle python3 scripts/bench_suites.py --tier full --all-suites
 
 One worker process per (suite, variant, engine, round) loads the tables once
@@ -45,8 +45,8 @@ from bench_host import compiler_processes  # noqa: E402
 
 ENGINES = ("mojo", "polars", "duckdb")
 
-# Every bundled suite has been used to guide engine work. External origin
-# does not establish independence; preserve exposure in each saved result.
+# Keep tuning and validation separate; record prior exposure without
+# discarding the continuing held-out role of PDS-H and ClickBench.
 SUITES = {
     "h2o_groupby": {
         "role": "dev",
@@ -61,13 +61,13 @@ SUITES = {
         "source": "H2O.ai db-benchmark (duckdblabs/db-benchmark) join",
     },
     "pdsh": {
-        "role": "dev",
+        "role": "heldout",
         "runner": "pdsh",
         "queries": [f"q{i}" for i in range(1, 23)],
         "source": "PDS-H (pola-rs/polars-benchmark), TPC-H derived",
     },
     "clickbench": {
-        "role": "dev",
+        "role": "heldout",
         "runner": "clickbench",
         "queries": [f"q{i}" for i in range(0, 43)],
         "source": "ClickBench (ClickHouse/ClickBench) hits",
@@ -233,7 +233,9 @@ def build_baseline(ref, names):
     checkout's suite sources change. Returns (label, binaries).
     """
     sha = subprocess.check_output(
-        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"], cwd=ROOT, text=True
+        ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+        cwd=ROOT,
+        text=True,
     ).strip()
     tree = ROOT / "build" / "suites" / "baseline" / sha
     if not (tree / "dataframe").exists():
@@ -283,12 +285,20 @@ def parse(output, queries):
         if kind == "time":
             entry.setdefault("times", []).append(int(fields[2]))
         elif kind == "summary":
-            values = [float(v) for v in fields[3].split(",")] if fields[3] else []
-            names = fields[4].split(",") if len(fields) > 4 and fields[4] else []
+            values = [float(v) for v in fields[3].split(",")] if fields[
+                3
+            ] else []
+            names = (
+                fields[4].split(",") if len(fields) > 4 and fields[4] else []
+            )
             entry.update(
                 status="ok",
                 reason="",
-                summary={"height": int(fields[2]), "values": values, "names": names},
+                summary={
+                    "height": int(fields[2]),
+                    "values": values,
+                    "names": names,
+                },
             )
         elif kind in ("unsupported", "failed"):
             entry.update(status=kind, reason=fields[2])
@@ -340,12 +350,17 @@ def run_worker(cmd, env, timeout, allow_busy, queries):
                 out = out.decode(errors="replace")
             found = parse(out, queries)
             for entry in found.values():
-                if entry["status"] == "failed" and entry["reason"] == "no output":
+                if (
+                    entry["status"] == "failed"
+                    and entry["reason"] == "no output"
+                ):
                     entry.update(status="timeout", reason="")
             return found, ""
         if allow_busy or not compiler_processes():
             break
-        print("compiler activity overlapped a run; repeating it", file=sys.stderr)
+        print(
+            "compiler activity overlapped a run; repeating it", file=sys.stderr
+        )
     else:
         raise RuntimeError("compiler activity kept overlapping timed runs")
     found = parse(proc.stdout, queries)
@@ -394,7 +409,9 @@ def same_answer(suite, query, got, want):
             len(got["values"]), len(want["values"])
         ):
             return False
-        pairs = [(got["values"][i], want["values"][j]) for i, j in zip(mine, theirs)]
+        pairs = [
+            (got["values"][i], want["values"][j]) for i, j in zip(mine, theirs)
+        ]
     return all(_close(a, b) for a, b in pairs)
 
 
@@ -458,7 +475,13 @@ def provenance(args):
 
 
 def _cache_file(suite, variant, engine):
-    return datagen.data_root() / "reference-cache" / suite / variant / f"{engine}.json"
+    return (
+        datagen.data_root()
+        / "reference-cache"
+        / suite
+        / variant
+        / f"{engine}.json"
+    )
 
 
 def _cache_key(engine, paths, args):
@@ -750,19 +773,28 @@ def report(result):
             "an earlier day, so compare their ratios with care).",
             "",
         ]
-    suites = []
-    for suite in SUITES:
-        if any(key[0] == suite for key in cells):
-            suites.append(suite)
-    if suites:
-        lines += [
-            "## Development suites",
-            "",
-            "Use these results to diagnose and tune the engine; they do not measure unseen-workload generalization.",
-            "",
+    for role, heading, guidance in (
+        (
+            "dev",
+            "Development suites",
+            "Use these results to diagnose and tune the engine.",
+        ),
+        (
+            "heldout",
+            "Held-out suites",
+            "Report-only validation of the completed change. Do not use per-query timings to choose optimizations or tune thresholds.",
+        ),
+    ):
+        suites = [
+            suite
+            for suite in SUITES
+            if SUITES[suite]["role"] == role
+            and any(key[0] == suite for key in cells)
         ]
-        for suite in suites:
-            lines += _suite_table(suite, cells, engines)
+        if suites:
+            lines += ["## " + heading, "", guidance, ""]
+            for suite in suites:
+                lines += _suite_table(suite, cells, engines)
     if result.get("trace"):
         lines += _coverage(result["trace"])
     return "\n".join(lines) + "\n"
@@ -803,20 +835,28 @@ def _changes(baseline, cells):
         "other, by more than 3%, are listed."
     )
     lines.append("")
-    lines.append(f"- **Slower ({len(slower)}):** " + ("; ".join(slower) or "none"))
-    lines.append(f"- **Faster ({len(faster)}):** " + ("; ".join(faster) or "none"))
+    lines.append(
+        f"- **Slower ({len(slower)}):** " + ("; ".join(slower) or "none")
+    )
+    lines.append(
+        f"- **Faster ({len(faster)}):** " + ("; ".join(faster) or "none")
+    )
     lines.append("")
     return lines
 
 
 def _suite_table(suite, cells, all_engines):
-    variants = [v for v in VARIANTS[suite] if any(
-        k[0] == suite and k[1] == v for k in cells
-    )]
+    variants = [
+        v
+        for v in VARIANTS[suite]
+        if any(k[0] == suite and k[1] == v for k in cells)
+    ]
     base = variants[0]
-    engines = [e for e in all_engines if any(
-        k[0] == suite and k[3] == e for k in cells
-    )]
+    engines = [
+        e
+        for e in all_engines
+        if any(k[0] == suite and k[3] == e for k in cells)
+    ]
     others = [e for e in engines if e != "mojo"]
     lines = [f"### {suite} — {SUITES[suite]['source']}", ""]
     header = "| Query | " + " | ".join(f"{e} ms" for e in engines)
@@ -959,12 +999,12 @@ def main():
     parser.add_argument(
         "--all-suites",
         action="store_true",
-        help="run every bundled development suite (default for full tier)",
+        help="run every development and held-out suite (default for full tier)",
     )
     parser.add_argument(
         "--heldout",
         action="store_true",
-        help="deprecated alias: also run pdsh and clickbench, both development suites",
+        help="also run the PDS-H and ClickBench held-out suites",
     )
     parser.add_argument("--engines", default="mojo,polars,duckdb")
     parser.add_argument("--queries", default="", help="comma-separated subset")
@@ -1015,10 +1055,6 @@ def main():
     if args.all_suites:
         args.suites = ",".join(SUITES)
     if args.heldout:
-        print(
-            "--heldout is deprecated: PDS-H and ClickBench are exposed development suites; use --all-suites.",
-            file=sys.stderr,
-        )
         args.suites += ",pdsh,clickbench"
     args.suites = ",".join(dict.fromkeys(args.suites.split(",")))
     if args.report_from:

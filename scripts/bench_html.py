@@ -368,9 +368,9 @@ def render(result, cells, suites, variants_of, instrumented):
         "<h2>Summary</h2>",
         '<div class="scroll"><table><thead><tr>' + head + "</tr></thead><tbody>"
         + "".join(body) + "</tbody></table></div>",
-        '<p class="muted">These suites are development workloads. Independent '
-        "validation requires workloads kept unseen until the engine and analysis "
-        "plan are frozen (docs/benchmarks.md).</p>",
+        '<p class="muted">Tune on the development suites. Use held-out results '
+        'to validate the completed change; do not use their per-query timings '
+        'to choose optimizations or tune thresholds (docs/benchmarks.md).</p>',
         "</section>",
     ]
     for suite in present:

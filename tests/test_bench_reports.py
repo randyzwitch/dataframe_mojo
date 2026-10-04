@@ -59,18 +59,33 @@ def fixture():
 
 
 class BenchmarkReports(unittest.TestCase):
-    def test_catalog_and_full_tier_do_not_claim_independence(self):
+    def test_catalog_preserves_holdouts_and_records_prior_exposure(self):
         self.assertEqual(
             set(bench.TIERS["full"]["suites"].split(",")), set(bench.SUITES)
         )
         self.assertEqual(
             sum(len(s["queries"]) for s in bench.SUITES.values()), 80
         )
-        self.assertTrue(all(s["role"] == "dev" for s in bench.SUITES.values()))
+        self.assertEqual(
+            {
+                name
+                for name, spec in bench.SUITES.items()
+                if spec["role"] == "heldout"
+            },
+            {"pdsh", "clickbench"},
+        )
         info = bench_policy.record(ROOT, bench.SUITES, bench.SUITES)
-        self.assertFalse(info["independent_validation"])
+        self.assertEqual(
+            info["policy"], "development_tuning_holdout_validation"
+        )
+        self.assertEqual(
+            info["suites"]["pdsh"]["intended_use"], "validation_only"
+        )
+        self.assertEqual(
+            info["suites"]["pdsh"]["prior_exposure"],
+            "some_prior_optimization_use",
+        )
         for suite in info["suites"].values():
-            self.assertEqual(suite["exposure"], "used_for_development")
             self.assertIsNone(suite["upstream_revision"])
         self.assertTrue(
             all(len(v) == 64 for v in info["source_sha256"].values())
@@ -99,7 +114,8 @@ class BenchmarkReports(unittest.TestCase):
                 spec["queries"],
             )
         self.assertEqual(len(re.findall(r'<td class="q">q\d+</td>', page)), 80)
-        self.assertIn("No independent validation is claimed", page)
+        self.assertIn("held-out validation", page)
+        self.assertIn("some prior", page.lower())
         self.assertIn('<th class="num">Distinct queries</th>', page)
         self.assertIn('<th class="num">Query/variant cases</th>', page)
         self.assertRegex(
@@ -139,7 +155,7 @@ class BenchmarkReports(unittest.TestCase):
                 report = raw.with_suffix(suffix).read_text()
                 self.assertIn("Legacy result", report)
                 self.assertIn("Raw measurements are unchanged", report)
-                self.assertNotIn("Report-only", report)
+                self.assertIn("held", report.lower())
 
     def test_instrumentation_includes_nested_and_other_operator_names(self):
         paths = bench.instrumented_paths()
@@ -163,7 +179,7 @@ class BenchmarkReports(unittest.TestCase):
                 new = bench._cache_key("duckdb", {"x": data}, args)
             self.assertNotEqual(old, new)
 
-    def test_old_cli_flag_warns_without_duplicating_suites(self):
+    def test_heldout_flag_remains_supported_without_duplicate_suites(self):
         captured = {}
 
         def measure(args):
@@ -178,7 +194,7 @@ class BenchmarkReports(unittest.TestCase):
                 ["bench", "--tier", "full", "--heldout", "--output", output],
             ), patch("sys.stdout"), patch("sys.stderr") as stderr:
                 bench.main()
-                self.assertTrue(
+                self.assertFalse(
                     any(
                         "deprecated" in str(call)
                         for call in stderr.write.call_args_list
