@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Composite categorical keys reuse the bounded dictionary lookup for
+  first-occurrence codes, avoiding numeric hashing for each key column.
+  The new lookup checks valid codes before indexing the dictionary domain.
+
 - Grouped sums and means of plain Int64/Float64 columns feed the existing
   reducer kernels by source interval, avoiding per-batch expression setup.
 
