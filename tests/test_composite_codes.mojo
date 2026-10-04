@@ -1,6 +1,8 @@
 """Composite numbering preserves exact equality and first-occurrence ids."""
-from std.testing import TestSuite, assert_equal
-from dataframe import Column, Series, StringColumn
+from std.testing import TestSuite, assert_equal, assert_raises
+from dataframe import Column, DataType, Series, StringColumn
+from dataframe.dtype import CategoricalDictionary
+from dataframe.series import Storage
 from dataframe.hashing import encode_rows, column_codes
 
 
@@ -140,6 +142,112 @@ def test_unsigned_first_key_keeps_full_width_and_order() raises:
     )
     assert_equal(composite.ids, single.ids)
     assert_equal(composite.representatives, single.representatives)
+
+
+def categorical_codes(
+    var values: List[UInt32], var valid: List[Bool], domain: Int
+) raises -> Series:
+    var dictionary = CategoricalDictionary()
+    for i in range(domain):
+        dictionary.append(String(i))
+    return Series(
+        "category",
+        Storage(Column[UInt32](values^, valid^)),
+        DataType.categorical(dictionary^),
+    )
+
+
+def test_composite_categorical_keys_match_strings_and_float_equality() raises:
+    var a = Series(
+        "a",
+        StringColumn(
+            ["b", "a", "b", "\x00", "", "a"],
+            [True, False, True, True, True, True],
+        ),
+    )
+    var b = Series("b", StringColumn(["é", "x", "é", "x", "", "x"]))
+    var ac = a.cast(DataType.CATEGORICAL)
+    var bc = b.cast(DataType.CATEGORICAL)
+    ac = Series._from_chunks([ac.slice(0, 2), ac.slice(2, 4)])
+    bc = Series._from_chunks([bc.slice(0, 4), bc.slice(4, 2)])
+    var f = Series(
+        "f",
+        Column[Float64](
+            [
+                Float64(0) / Float64(0),
+                0.0,
+                Float64(0) / Float64(0),
+                -0.0,
+                1.5,
+                0.0,
+            ]
+        ),
+    )
+    for reverse in [False, True]:
+        for nulls_equal in [False, True]:
+            var raw: List[Series] = [
+                b.copy(),
+                a.copy(),
+                f.copy(),
+            ] if reverse else [a.copy(), b.copy(), f.copy()]
+            var encoded: List[Series] = [
+                bc.copy(),
+                ac.copy(),
+                f.copy(),
+            ] if reverse else [ac.copy(), bc.copy(), f.copy()]
+            var expected = encode_rows(raw, nulls_equal)
+            var actual = encode_rows(encoded, nulls_equal)
+            assert_equal(actual.ids, expected.ids)
+            assert_equal(actual.representatives, expected.representatives)
+
+
+def test_categorical_column_codes_cover_chunks_views_and_unused_dictionary() raises:
+    var source = categorical_codes(
+        [0, 2, 1, 2, 3, 1, 0], [True, True, False, True, True, True, True], 4
+    ).slice(1, 5)
+    var chunked = Series._from_chunks([source.slice(0, 2), source.slice(2, 3)])
+    for input in [source.copy(), chunked.copy()]:
+        var codes = List[Int](length=19, fill=99)
+        var nulls = List[Bool](length=5, fill=False)
+        assert_equal(column_codes(input, codes, nulls), 3)
+        assert_equal(codes, [0, -1, 0, 1, 2])
+        assert_equal(nulls, [False, True, False, False, False])
+    var codes = List[Int]()
+    var nulls = List[Bool]()
+    assert_equal(column_codes(source.slice(0, 0), codes, nulls), 0)
+    assert_equal(len(codes), 0)
+    var all_null = categorical_codes(
+        [UInt32.MAX, UInt32.MAX], [False, False], 0
+    )
+    nulls = [False, False]
+    assert_equal(column_codes(all_null, codes, nulls), 0)
+    assert_equal(codes, [-1, -1])
+    assert_equal(nulls, [True, True])
+
+
+def test_categorical_lookup_domain_limit_preserves_generic_codes() raises:
+    for domain in [4096, 4097]:
+        var key = categorical_codes(
+            [UInt32(domain - 1), 0, UInt32(domain - 1)],
+            [True, True, True],
+            domain,
+        )
+        var codes = List[Int]()
+        var nulls = List[Bool]()
+        assert_equal(column_codes(key, codes, nulls), 2)
+        assert_equal(codes, [0, 1, 0])
+
+
+def test_composite_categorical_lookup_checks_valid_codes() raises:
+    var key = categorical_codes([0, UInt32.MAX], [True, True], 2)
+    var codes = List[Int]()
+    var nulls = List[Bool]()
+    with assert_raises():
+        _ = column_codes(key, codes, nulls)
+    key = categorical_codes([0, UInt32.MAX], [True, False], 2)
+    nulls = [False, False]
+    assert_equal(column_codes(key, codes, nulls), 1)
+    assert_equal(codes, [0, -1])
 
 
 def main() raises:

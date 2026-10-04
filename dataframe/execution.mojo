@@ -584,6 +584,17 @@ struct _ReduceJob[width: Int](Job):
             self.groups[],
         ):
             return
+        if _direct_grouped_sum(
+            self.reducer,
+            self.bound,
+            self.columns,
+            self.node,
+            self.start,
+            self.end,
+            self.grouped,
+            self.groups[],
+        ):
+            return
         if _direct_numeric_reduction(
             self.reducer,
             self.bound,
@@ -727,6 +738,35 @@ def _direct_grouped_count(
         chunk_start = chunk_end
         if chunk_start >= end:
             break
+    return True
+
+
+def _direct_grouped_sum(
+    mut reducer: Reducer,
+    bound: BoundExpr,
+    columns: List[Series],
+    node: Node,
+    start: Int,
+    end: Int,
+    grouped: Bool,
+    groups: List[Int],
+) raises -> Bool:
+    """Feed native grouped sums/means once per physical source interval.
+
+    The existing state kernels keep row order, exact wide integer totals,
+    and null counts. Int64/Float64 storage needs no canonical value copy;
+    computed inputs and other storage retain bounded batch evaluation.
+    """
+    if (
+        not grouped
+        or (node.op != SUM and node.op != MEAN)
+        or bound.expr._nodes[node.left].op != COL
+    ):
+        return False
+    ref source = columns[bound.sources[node.left]]
+    if source.dtype() != DataType.INT64 and source.dtype() != DataType.FLOAT64:
+        return False
+    reducer.update(source.slice(start, end - start), start, True, groups)
     return True
 
 
