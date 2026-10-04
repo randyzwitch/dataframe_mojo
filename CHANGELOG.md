@@ -531,6 +531,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- A filter with decimal comparisons inside an AND no longer runs them row by
+  row under the AND's mask: a comparison is safe on rows the mask skips, so
+  it takes its whole-column path. The selective AND filter had made PDS-H
+  decimal q6 13 -> 58 ms and q19 38 -> 86 ms; now 15 and 32 ms. Masks that
+  start on a byte boundary also combine and count whole bytes at a time.
 - Lazy filters holding a date literal (`str().to_date()`) or another
   operator with a text argument again move below joins: the argument was
   read as a column name, which no input has.
