@@ -9,6 +9,7 @@ from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 from dataframe import Column, Series, StringColumn
 from dataframe.hashing import encode_rows
 from dataframe.partition import encode_bucket
+from dataframe.string_view import StringViewBuilder
 
 
 def keys_with_duplicates() raises -> List[Series]:
@@ -93,6 +94,77 @@ def test_take_from_chunks_without_rechunking() raises:
     assert_equal(len(chunked.take(List[Int]())), 0)
     with assert_raises(contains="out of bounds"):
         _ = chunked.take([400])
+
+
+def test_composite_string_collisions_offsets_and_null_fallback() raises:
+    var words: List[String] = [
+        "",
+        "a",
+        "abcdefg",
+        "abcdefgh",
+        "abcdefghi",
+        "abcdefghijklmno",
+        "abcdefghijklmnop",
+        "abcdefghijklmnopq",
+        "a\x00b",
+        "é雪",
+        "same-long-prefix-first",
+        "same-long-prefix-second",
+    ]
+    var columns = List[Series]()
+    for k in range(3):
+        var texts = List[String]()
+        for i in range(317):
+            texts.append(words[(i // (k + 1)) % len(words)])
+        columns.append(Series("s" + String(k), StringColumn(texts)))
+    var sliced = List[Series]()
+    for column in columns:
+        sliced.append(column.slice(7, 300))
+    check(sliced, "composite strings with slice offsets")
+    check([sliced[2].copy(), sliced[0].copy()], "reordered string keys")
+    # Changing any component must reject even a deliberately equal hash.
+    # A null-containing component routes the whole comparison to the generic
+    # implementation and preserves equality of nulls.
+    var texts = List[String]()
+    var valid = List[Bool]()
+    for i in range(300):
+        texts.append(words[i % len(words)])
+        valid.append(i % 11 != 0)
+    sliced[1] = Series("nullable", StringColumn(texts, valid))
+    check(sliced, "composite strings with nulls")
+
+
+def test_composite_strings_grow_table_and_follow_selected_row_order() raises:
+    var left = List[String]()
+    var right = List[String]()
+    for i in range(2200):
+        left.append("constant")
+        right.append("long-common-prefix-" + String(i % 1100))
+    var keys: List[Series] = [
+        Series("a", StringColumn(left)),
+        Series("b", StringColumn(right)),
+    ]
+    check(keys, "composite string collisions through table growth")
+    var rows: List[Int] = [2199, 0, 1099, 1100, 43, 1143, 2199]
+    var hashes = List[UInt64](length=len(rows), fill=0)
+    var ids = List[Int]()
+    var firsts = List[Int]()
+    encode_bucket(keys, Span(hashes), Span(rows), ids, firsts)
+    assert_equal(ids, [0, 1, 0, 1, 2, 2, 0])
+    assert_equal(firsts, [2199, 0, 43])
+
+
+def test_composite_view_string_fallback_with_collisions() raises:
+    var texts = List[String]()
+    var builder = StringViewBuilder()
+    for i in range(137):
+        var text = "a-long-common-prefix-" + String(i % 13)
+        texts.append(text)
+        builder.append(StringSlice(text))
+    var offsets = Series("offsets", StringColumn(texts))
+    var views = Series("views", StringColumn(builder^.finish()))
+    check([offsets.slice(3, 130), views.slice(3, 130)], "mixed view storage")
+    check([views.slice(3, 130), offsets.slice(3, 130)], "reversed view storage")
 
 
 def main() raises:
