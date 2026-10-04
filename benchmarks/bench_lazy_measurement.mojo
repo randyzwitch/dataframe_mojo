@@ -1,3 +1,11 @@
+"""Focused development benchmark for measured-input reuse.
+
+Build with mojo build -O3 -I . benchmarks/bench_lazy_measurement.mojo.
+Run with DATAFRAME_THREADS=8 and PLANNER_STREAMING=0 or 1.
+The workload is identical for the baseline and changed engine; correctness
+is checked against unoptimized collection outside the timed interval.
+This supplements the existing suites without changing their workloads.
+"""
 from dataframe import Column, DataFrame, Series, col
 from std.os import getenv
 from std.time import monotonic
