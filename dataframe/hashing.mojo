@@ -9,7 +9,7 @@ from std.collections import Dict
 from std.memory import Pointer, bitcast, unsafe_memcpy
 from .aggregate import float_key
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _validity_at
 from .dtype import DataType, NUMERIC_DTYPES
 from .string_column import StringColumn, StringBuilder
 from .series import Series
@@ -478,6 +478,8 @@ def _encode_dense_int64(
     var n = len(column)
     var values = column._ptr()
     var nulls = column.null_count() > 0
+    var bits = column._bits[].unsafe_ptr()
+    var bit_offset = column._offset
     var first = True
     var low = Int64(0)
     var high = Int64(0)
@@ -491,7 +493,7 @@ def _encode_dense_int64(
             high = max(high, value)
     else:
         for i in range(n):
-            if not column._valid(i):
+            if not _validity_at(bits, bit_offset + i):
                 continue
             var value = values[unsafe_offset=i]
             if first:
@@ -521,7 +523,7 @@ def _encode_dense_int64(
         return RowKeys(ids^, representatives^)
     var null_id = -1
     for i in range(n):
-        if not column._valid(i):
+        if not _validity_at(bits, bit_offset + i):
             if nulls_equal:
                 if null_id < 0:
                     null_id = len(representatives)
@@ -550,6 +552,8 @@ def _encode_categorical[
     var n = len(column)
     var codes = column._ptr()
     var nulls = column.null_count() > 0
+    var bits = column._bits[].unsafe_ptr()
+    var bit_offset = column._offset
     var slots = List[Int](length=max(domain, 1), fill=-1)
     var table = slots.unsafe_ptr()
     var ids = List[Int](unsafe_uninit_length=n)
@@ -557,7 +561,7 @@ def _encode_categorical[
     var representatives = List[Int]()
     var null_id = -1
     for i in range(n):
-        if nulls and not column._valid(i):
+        if nulls and not _validity_at(bits, bit_offset + i):
             if nulls_equal:
                 if null_id < 0:
                     null_id = len(representatives)

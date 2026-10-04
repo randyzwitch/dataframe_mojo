@@ -10,7 +10,7 @@ from std.collections import Dict, Optional
 from std.math import ceil, floor, isnan, sqrt
 from std.memory import bitcast
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _validity_at
 from .string_column import StringColumn, StringBuilder
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import (
@@ -104,11 +104,13 @@ def _sum_ints(
     var n = len(column)
     var values = column._ptr()
     var nulls = column.null_count() > 0
+    var bits = column._bits[].unsafe_ptr()
+    var bit_offset = column._offset
     if not grouped:
         var total = Int128(0)
         var count = 0
         for i in range(n):
-            if not nulls or column._valid(i):
+            if not nulls or _validity_at(bits, bit_offset + i):
                 total += values.unsafe_offset(i)[].cast[DType.int128]()
                 count += 1
         sums[0].total += total
@@ -117,7 +119,7 @@ def _sum_ints(
     var g = groups.unsafe_ptr().unsafe_offset(offset)
     var s = sums.unsafe_ptr()
     for i in range(n):
-        if nulls and not column._valid(i):
+        if nulls and not _validity_at(bits, bit_offset + i):
             continue
         ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
         state.total += values.unsafe_offset(i)[].cast[DType.int128]()
@@ -135,11 +137,13 @@ def _sum_floats(
     var n = len(column)
     var values = column._ptr()
     var nulls = column.null_count() > 0
+    var bits = column._bits[].unsafe_ptr()
+    var bit_offset = column._offset
     if not grouped:
         var total = Float64(0)
         var count = 0
         for i in range(n):
-            if not nulls or column._valid(i):
+            if not nulls or _validity_at(bits, bit_offset + i):
                 total += values.unsafe_offset(i)[]
                 count += 1
         sums[0].total += total
@@ -148,7 +152,7 @@ def _sum_floats(
     var g = groups.unsafe_ptr().unsafe_offset(offset)
     var s = sums.unsafe_ptr()
     for i in range(n):
-        if nulls and not column._valid(i):
+        if nulls and not _validity_at(bits, bit_offset + i):
             continue
         ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
         state.total += values.unsafe_offset(i)[]
