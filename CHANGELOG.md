@@ -80,6 +80,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Hash aggregation samples a mixed position within each input stratum,
+  avoiding cardinality underestimates from periodic keys. The sample
+  budget and 85% cutoff stay the same; exact bounds stop sampling early
+  when the full-sample decision is already determined.
 - Hash buckets with multiple non-null offsets-backed string keys cache
   buffer access for exact row comparisons, avoiding per-key storage
   dispatch on each hash match.

@@ -47,8 +47,8 @@ def _supported(bound: BoundExpr, columns: List[Series]) -> Bool:
 
 def _moderate_groups(key: Series) raises -> Bool:
     """Whether the key's groups are few enough for per-range tables to
-    shrink the data: under 85% of 65,536 evenly spaced rows distinct, about
-    200K groups or fewer. With millions of groups a range holds nearly as
+    shrink the data: under 85% of 65,536 stratified sample rows distinct.
+    With millions of groups a range holds nearly as
     many groups as rows, the merge re-inserts almost every row, and hash
     partitioning first is faster (H2O q5 at 1M groups: 292 against 168 ms).
     """
@@ -62,19 +62,41 @@ def _moderate_groups(key: Series) raises -> Bool:
     var capacity = 1 << 17
     var table = List[UInt64](length=capacity, fill=0)
     var used = List[Bool](length=capacity, fill=False)
+    var cells = table.unsafe_ptr()
+    var occupied = used.unsafe_ptr()
     var distinct = 0
+    var first = 0
+    var cutoff = 85 * sample
     for k in range(sample):
-        var hash = _mix(
-            bitcast[DType.uint64](values[unsafe_offset=k * n // sample])
+        # One row from every stratum, with a reproducible mixed offset.
+        # A fixed offset aliases periodic keys (including two repeated
+        # half-frames), understating the number of groups. Multiply-high
+        # maps the mixed index into [0, last - first) without a division.
+        var last = (k + 1) * n // sample
+        var offset = Int(
+            (UInt128(_mix(UInt64(k))) * UInt128(last - first)) >> UInt128(64)
         )
+        var hash = _mix(
+            bitcast[DType.uint64](values[unsafe_offset=first + offset])
+        )
+        first = last
         var slot = Int(hash) & (capacity - 1)
-        while used[slot] and table[slot] != hash:
+        while (
+            occupied[unsafe_offset=slot] and cells[unsafe_offset=slot] != hash
+        ):
             slot = (slot + 1) & (capacity - 1)
-        if not used[slot]:
-            used[slot] = True
-            table[slot] = hash
+        if not occupied[unsafe_offset=slot]:
+            occupied[unsafe_offset=slot] = True
+            cells[unsafe_offset=slot] = hash
             distinct += 1
-    return 100 * distinct < 85 * sample
+        # Both bounds prove the result of the complete bounded sample:
+        # distinct never decreases, and every remaining row adds at most
+        # one group. Low-cardinality controls need not scan all 65K rows.
+        if 100 * distinct >= cutoff:
+            return False
+        if 100 * (distinct + sample - k - 1) < cutoff:
+            return True
+    return 100 * distinct < cutoff
 
 
 def hash_agg_eligible(
