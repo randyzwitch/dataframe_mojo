@@ -171,7 +171,11 @@ def test_mixed_partitioned_matches_whole_and_keeps_order() raises:
     assert_equal(preparation[2][0].name(), "y")
     assert_equal(preparation[0], List[Bool]([True, True, True, False, True]))
     var expected = grouped._agg_whole(bound, 127)
-    var actual = grouped._agg_partitioned(expressions, bound, 127, 8)
+    # Force the partitioned route so this exercises mixed indexed/gathered
+    # reductions independently of the cardinality estimate.
+    var actual = grouped._agg_partitioned(
+        expressions, bound, 127, 8, whole=False
+    )
     assert_true(actual.equals(expected))
 
 
@@ -220,9 +224,9 @@ def test_categorical_fallback_does_not_gather_numeric_sources() raises:
     assert_equal(len(preparation[2]), 1)
     assert_equal(preparation[2][0].name(), "s")
     assert_true(
-        grouped._agg_partitioned(expressions, bound, 127, 8).equals(
-            grouped._agg_whole(bound, 127)
-        )
+        grouped._agg_partitioned(
+            expressions, bound, 127, 8, whole=False
+        ).equals(grouped._agg_whole(bound, 127))
     )
 
 
