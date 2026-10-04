@@ -499,6 +499,42 @@ def _encode_dense_int64(
     return RowKeys(ids^, representatives^)
 
 
+def _encode_categorical(
+    column: Column[UInt32], domain: Int, nulls_equal: Bool
+) -> RowKeys:
+    """Ids by direct lookup on a categorical's codes, which already lie in
+    [0, dictionary size): no hash and no range scan, as `_encode_dense_int64`
+    does for small Int64 domains. Sorted H2O q1 grouped its coded string key
+    through the general path 27% slower than the strings."""
+    var n = len(column)
+    var codes = column._ptr()
+    var nulls = column.null_count() > 0
+    var slots = List[Int](length=max(domain, 1), fill=-1)
+    var table = slots.unsafe_ptr()
+    var ids = List[Int](unsafe_uninit_length=n)
+    var out = ids.unsafe_ptr()
+    var representatives = List[Int]()
+    var null_id = -1
+    for i in range(n):
+        if nulls and not column._valid(i):
+            if nulls_equal:
+                if null_id < 0:
+                    null_id = len(representatives)
+                    representatives.append(i)
+                out[unsafe_offset=i] = null_id
+            else:
+                out[unsafe_offset=i] = -1
+            continue
+        var slot = Int(codes[unsafe_offset=i])
+        var id = table[unsafe_offset=slot]
+        if id < 0:
+            id = len(representatives)
+            table[unsafe_offset=slot] = id
+            representatives.append(i)
+        out[unsafe_offset=i] = id
+    return RowKeys(ids^, representatives^)
+
+
 def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     """Assign dense ids to distinct key rows, in first-occurrence order.
 
@@ -526,6 +562,17 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
             raise Error("Key columns must have equal lengths")
     if n >= 2147483647:
         raise Error("Row key encoding supports fewer than 2**31 rows")
+    if (
+        len(keys) == 1
+        and keys[0].dtype().is_categorical()
+        and keys[0].dtype().has_dictionary()
+        and len(keys[0].dtype().dictionary()[]) <= max(n, 4096)
+    ):
+        return _encode_categorical(
+            keys[0]._data[Column[UInt32]],
+            len(keys[0].dtype().dictionary()[]),
+            nulls_equal,
+        )
     if len(keys) == 1 and keys[0]._data.isa[Column[Int64]]():
         var dense = _encode_dense_int64(
             keys[0]._data[Column[Int64]], nulls_equal
