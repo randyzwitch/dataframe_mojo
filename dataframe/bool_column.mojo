@@ -258,3 +258,72 @@ struct BoolColumn(Copyable, Sized):
             ),
             length=length,
         )
+
+
+comptime _FULL = UInt64(0xFFFFFFFFFFFFFFFF)
+
+
+@always_inline
+def _bits64(bits: List[UInt8], bit: Int, length: Int) -> UInt64:
+    """64 bits of an LSB-first bitmap starting at bit `bit`; bits past
+    `length` (the bitmap's last valid bit, exclusive) read as 0. An empty
+    bitmap is all ones (Arrow's absent validity)."""
+    if len(bits) == 0:
+        var left = length - bit
+        return _FULL if left >= 64 else (UInt64(1) << UInt64(max(left, 0))) - 1
+    var byte = bit >> 3
+    var shift = UInt64(bit & 7)
+    var word = UInt64(0)
+    var last = min(byte + 9, len(bits))
+    var k = 0
+    var value = UInt64(0)
+    for b in range(byte, last):
+        if k < 8:
+            word |= UInt64(bits[b]) << UInt64(8 * k)
+        else:
+            value = UInt64(bits[b])
+        k += 1
+    word >>= shift
+    if shift > 0 and k == 9:
+        word |= value << (64 - shift)
+    var left = length - bit
+    if left < 64:
+        word &= (UInt64(1) << UInt64(max(left, 0))) - 1
+    return word
+
+
+def true_count(mask: BoolColumn) -> Int:
+    """Valid true entries, 64 rows at a time."""
+    ref values = mask._data[]
+    ref bits = mask._bits[]
+    var end = mask._offset + mask._length
+    var count = 0
+    var bit = mask._offset
+    while bit < end:
+        count += Int(
+            pop_count(_bits64(values, bit, end) & _bits64(bits, bit, end))
+        )
+        bit += 64
+    return count
+
+
+def both_true(a: BoolColumn, b: BoolColumn) -> BoolColumn:
+    """Rows valid and true in both masks of one length, as a mask with no
+    nulls."""
+    var n = a._length
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var a_end = a._offset + n
+    var b_end = b._offset + n
+    var row = 0
+    while row < n:
+        var word = (
+            _bits64(a._data[], a._offset + row, a_end)
+            & _bits64(a._bits[], a._offset + row, a_end)
+            & _bits64(b._data[], b._offset + row, b_end)
+            & _bits64(b._bits[], b._offset + row, b_end)
+        )
+        var byte = row >> 3
+        for k in range(min(8, len(values) - byte)):
+            values[byte + k] = UInt8((word >> UInt64(8 * k)) & 0xFF)
+        row += 64
+    return BoolColumn(values=values^, bits=List[UInt8](), length=n)

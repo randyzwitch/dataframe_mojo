@@ -15,8 +15,9 @@ Inputs are shared read-only (reference-counted buffers); outputs are only
 published after every worker succeeds, so a failure never exposes a
 partially built column.
 """
+from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer
-from .bool_column import BoolColumn
+from .bool_column import BoolColumn, _bits64
 from .column import Column, _bit, _validity_bit
 from .dtype import DataType, NUMERIC_DTYPES
 
@@ -63,14 +64,21 @@ struct _MaskJob(Job):
         self.rows = List[Int]()
 
     def run(mut self) raises:
+        # Values and validity are both LSB-first bitmaps: read 64 rows at a
+        # time and walk the set bits.
         ref values = self.mask._data[]
         ref bits = self.mask._bits[]
         var base = self.mask._offset
-        for i in range(self.start, self.end):
-            var row = base + i
-            # Values and validity are both LSB-first bitmaps.
-            if _bit(values, row) and _validity_bit(bits, row):
-                self.rows.append(i)
+        var end = base + self.end
+        var i = self.start
+        while i < self.end:
+            var word = _bits64(values, base + i, end) & _bits64(
+                bits, base + i, end
+            )
+            while word != 0:
+                self.rows.append(i + Int(count_trailing_zeros(word)))
+                word &= word - 1
+            i += 64
 
     def into_rows(deinit self) -> List[Int]:
         return self.rows^
