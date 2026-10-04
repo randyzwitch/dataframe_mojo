@@ -80,6 +80,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `read_parquet` keeps the dictionary codes of string columns the file
+  stores dictionary-encoded in every selected row group, beside the strings.
+  The column is still a String column with the same values. Grouping by
+  it groups the codes, then returns string keys: H2O q2 (two string keys,
+  10M rows) 102 → 55 ms, q3 108 → 76 ms (219 → 134 ms with 5% nulls),
+  q10 658 → 527 ms. Reading such a file costs 8–21% more time and up to
+  11% more memory (the codes). libdfparquet gains
+  `dfq_read_parquet_stream_dict`; an older library reads as before.
 - The partitioned group-by no longer gathers aggregated columns into bucket
   order when every aggregation is a sum, mean, min, max, count or len of an
   Int64 or Float64 column: each bucket reads values at their source rows

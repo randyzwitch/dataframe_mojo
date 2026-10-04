@@ -158,6 +158,37 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         self._dtype = dtype
         self._chunked = None
 
+    def _dictionary_codes(self) raises -> Optional[Series]:
+        """This String column as a categorical over the dictionary its
+        source stored (`StringCodes`), sharing the codes; None unless every
+        chunk carries codes into one dictionary."""
+        if self.dtype() != DataType.STRING:
+            return None
+        if self.is_chunked():
+            var parts = List[Series]()
+            var dtype = Optional[DataType]()
+            for chunk in self.chunks():
+                var coded = chunk._dictionary_codes()
+                if not coded:
+                    return None
+                if dtype and not (coded.value().dtype() == dtype.value()):
+                    return None
+                dtype = coded.value().dtype()
+                parts.append(coded.take())
+            return Series._from_chunks(parts)
+        if not self._data.isa[StringColumn]():
+            return None
+        ref strings = self._data[StringColumn]
+        if not strings._codes:
+            return None
+        ref codes = strings._codes.value()[]
+        var column = Column[UInt32](List[UInt32]())
+        column._data = codes.codes
+        column._bits = strings._bits
+        column._offset = strings._offset
+        column._length = strings._length
+        return Series(self.name(), column^).with_dtype(codes.dtype)
+
     def is_chunked(self) -> Bool:
         return True if self._chunked else False
 

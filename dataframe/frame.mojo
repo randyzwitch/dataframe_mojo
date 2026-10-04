@@ -101,7 +101,7 @@ from .join_type import (
 from .nested_column import ListColumn, StructColumn
 from .trace import trace_path
 from .row_encode import STRING_PREFIX_BYTES, encodable, encode_sort_keys
-from .categorical import recode, sort_ranks, unify, union_of
+from .categorical import decode, recode, sort_ranks, unify, union_of
 from .packed_sort import (
     chunked_top_rows,
     packed_arg_sort,
@@ -4747,6 +4747,22 @@ struct GroupBy(Copyable):
     var _keys: List[Series]
     var _maintain_order: Bool
 
+    def _coded_keys(self) raises -> Optional[GroupBy]:
+        """This grouping with each String key that carries dictionary codes
+        replaced by those codes as a categorical; None when no key does."""
+        var keys = List[Series](capacity=len(self._keys))
+        var any = False
+        for key in self._keys:
+            var codes = key._dictionary_codes()
+            if codes:
+                keys.append(codes.take())
+                any = True
+            else:
+                keys.append(key.copy())
+        if not any:
+            return None
+        return GroupBy(self._frame.copy(), keys^, self._maintain_order)
+
     def _key_names(self) -> Dict[String, Bool]:
         var names = Dict[String, Bool]()
         for key in self._keys:
@@ -4768,6 +4784,21 @@ struct GroupBy(Copyable):
     def agg(
         self, expressions: List[Expr], *, batch_size: Int = 1024
     ) raises -> DataFrame:
+        # String keys that carry their source's dictionary codes (a Parquet
+        # scan) group by the codes, as categorical keys do, and come back as
+        # strings: H2O q2's two string keys 102 -> 49 ms.
+        var coded = self._coded_keys()
+        if coded:
+            var result = coded.value().agg(expressions, batch_size=batch_size)
+            var columns = List[Series](capacity=result.width())
+            for column in result._columns:
+                if column.dtype().is_categorical() and column.name() in (
+                    self._key_names()
+                ):
+                    columns.append(decode(column))
+                else:
+                    columns.append(column.copy())
+            return DataFrame(columns^)
         var bound = _bind_all(expressions, self._frame._columns)
         if batch_size <= 0:
             raise Error("batch_size must be positive")

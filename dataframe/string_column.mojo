@@ -17,6 +17,7 @@ from .string_view import (
     StringViewStorage,
     STRING_VIEW_INLINE_BYTES,
 )
+from .dtype import DataType
 from .column import (
     Column,
     _append_bits,
@@ -32,6 +33,18 @@ from .column import (
 )
 
 
+@fieldwise_init
+struct StringCodes(Copyable):
+    """Dictionary codes beside a string column whose source stored it
+    dictionary-encoded (a Parquet column chunk with a dictionary page): row
+    i's value is entry `codes[i]` of the categorical `dtype`'s dictionary.
+    Indexed like the column's own buffers, so a slice keeps it in step;
+    every other operation builds a new column without it."""
+
+    var codes: ArcPointer[List[UInt32]]
+    var dtype: DataType
+
+
 struct StringColumn(Copyable, Sized):
     """A window onto shared UTF-8 bytes, Int64 offsets, and validity."""
 
@@ -42,6 +55,10 @@ struct StringColumn(Copyable, Sized):
     var _length: Int
     # `None` is Arrow large_utf8; native CSV views retain descriptors/blocks.
     var _view_storage: Optional[StringViewStorage]
+    # Codes into the source's dictionary, when it had one (`StringCodes`),
+    # behind one pointer: a wider column made every copy slower (ClickBench
+    # q27 111 -> 141 ms with the codes held inline).
+    var _codes: Optional[ArcPointer[StringCodes]]
 
     def __init__(out self, values: List[String]):
         var builder = StringBuilder(len(values))
@@ -106,6 +123,7 @@ struct StringColumn(Copyable, Sized):
         self._offset = 0
         self._length = length
         self._view_storage = None
+        self._codes = None
 
     def __init__(out self, var storage: StringViewStorage):
         """Adopt finished Arrow Utf8View descriptors and their Arc blocks."""
@@ -115,6 +133,7 @@ struct StringColumn(Copyable, Sized):
         self._offset = 0
         self._length = len(storage)
         self._view_storage = storage^
+        self._codes = None
 
     def __len__(self) -> Int:
         return self._length
