@@ -9,6 +9,7 @@ from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_true
 
 from dataframe import Column, DataFrame, Series, col, lit
+from dataframe.parallel import worker_count
 
 
 def set_threads(n: Int):
@@ -21,7 +22,7 @@ def set_threads(n: Int):
     _ = value^
 
 
-comptime ROWS = 40_000
+comptime ROWS = 196_608
 
 
 def frame() raises -> DataFrame:
@@ -116,6 +117,7 @@ def check(data: DataFrame, keys: List[String], k: Int, descending: Bool) raises:
 def test_top_k_matches_ordinal_rank() raises:
     set_threads(8)
     var data = frame()
+    assert_true(worker_count(data.height()) > 1)
     for k in [0, 1, 2, 40]:
         check(data, ["k"], k, True)
     check(data, ["k"], 2, False)
@@ -126,6 +128,77 @@ def test_one_worker() raises:
     set_threads(1)
     check(frame().slice(0, 10_000), ["k"], 2, True)
     set_threads(8)
+
+
+def test_large_k_singletons_and_extreme_limits() raises:
+    set_threads(8)
+    var rows = 131_072
+    var ids = List[Int64](capacity=rows)
+    var values = List[Float64](capacity=rows)
+    var valid = List[Bool](capacity=rows)
+    for i in range(rows):
+        ids.append(Int64(i))
+        values.append(Float64(i % 29))
+        valid.append(i % 19 != 0)
+    var data = DataFrame(
+        [
+            Series("k", Column[Int64](ids^)),
+            Series("v", Column[Float64](values^, valid^)),
+        ]
+    )
+    assert_true(worker_count(rows) > 1)
+    var ranked = col("v").rank("ordinal").over("k")
+    var expected = data.filter(col("v").is_not_null())
+    for k in [Int64(1000), Int64.MAX]:
+        assert_true(data.filter(ranked.copy() <= lit(k)).equals(expected))
+        assert_true(data.filter(ranked.copy() < lit(k)).equals(expected))
+    for k in [Int64.MIN, Int64(-1), Int64(0)]:
+        assert_equal(data.filter(ranked.copy() <= lit(k)).height(), 0)
+        assert_equal(data.filter(ranked.copy() < lit(k)).height(), 0)
+
+
+def test_heap_matches_full_ranking_on_skewed_groups() raises:
+    set_threads(8)
+    var rows = 131_073
+    var keys = List[Int64](capacity=rows)
+    var values = List[Float64](capacity=rows)
+    var valid = List[Bool](capacity=rows)
+    var ids = List[Int64](capacity=rows)
+    for i in range(rows):
+        keys.append(Int64(0 if i % 3 != 0 else i % 17))
+        var v = Float64((rows - i) % 997)
+        if i % 97 == 0:
+            v = Float64(0) / Float64(0)
+        elif i % 101 == 0:
+            v = -Float64(0)
+        elif i % 103 == 0:
+            v = Float64(0) / Float64(1)
+        values.append(v)
+        valid.append(i % 13 != 0 and i % 17 != 16)
+        ids.append(Int64(i))
+    var value = Series("v", Column[Float64](values^, valid^))
+    var data = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series._from_chunks(
+                [value.slice(0, 65535), value.slice(65535, rows - 65535)]
+            ),
+            Series("row", Column[Int64](ids^)),
+        ]
+    )
+    assert_true(worker_count(rows) > 1)
+    for descending in [False, True]:
+        var ranked = col("v").rank("ordinal", descending=descending).over("k")
+        # Materializing rank prevents the top-k pattern from matching.
+        var ordinary = data.with_columns(ranked.copy().alias("r"))
+        for k in [1, 2, 31, 1000, 70_000, rows]:
+            var want = ordinary.filter(col("r") <= lit(Int64(k))).column("row")
+            var got = data.filter(ranked.copy() <= lit(Int64(k))).column("row")
+            assert_true(got.equals(want))
+            var strict = data.filter(ranked.copy() < lit(Int64(k + 1))).column(
+                "row"
+            )
+            assert_true(strict.equals(want))
 
 
 def main() raises:

@@ -538,6 +538,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- Grouped ordinal top-k filters bound scratch space by input rows and
+  group counts, including huge k and singleton groups. Bounded heaps
+  replace O(Nk) insertion lists, workers visit disjoint rows or groups,
+  and `< Int64.MIN` returns no rows instead of overflowing (#435).
 - Fused Float64 expressions that reference a column repeatedly now work on
   chunked inputs, including nonzero batch offsets and misaligned chunks.
   Each source window is sliced once instead of once per expression leaf
