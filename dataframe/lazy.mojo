@@ -127,6 +127,14 @@ struct PlanNode(Copyable):
     # and whether key columns coalesce into the left names.
     var right_keys: List[String]
     var coalesce: Bool
+    # Optional internal source-execution counter, shared across plan copies.
+    # No counter storage is allocated unless profiling/tests attach one.
+    var _executions: Optional[ArcPointer[Int]]
+
+    def _record_execution(self):
+        if self._executions:
+            var counter = self._executions.value()
+            counter[] += 1
 
 
 def _plan_node(
@@ -160,6 +168,7 @@ def _plan_node(
         how,
         right_keys.copy(),
         coalesce,
+        Optional[ArcPointer[Int]](),
     )
 
 
@@ -1067,6 +1076,7 @@ struct LazyFrame(Copyable):
                 _ParquetBatches(source.text, source.names, groups, batch_size)
             )
         elif source.kind == SCAN_FRAME:
+            source._record_execution()
             input = self._frames[source.offset].copy()
             if len(source.names):
                 input = input.select(source.names)
@@ -1231,6 +1241,8 @@ struct LazyFrame(Copyable):
                 return streamed.take()
         ref node = self._nodes[index]
         if node.kind == SCAN_FRAME:
+            if not empty:
+                node._record_execution()
             var frame = self._frames[node.offset].copy()
             if len(node.names) > 0:
                 frame = frame.select(node.names)
@@ -1482,6 +1494,8 @@ struct LazyFrame(Copyable):
         """
         var parents = self._parents()
         var changed = False
+        var original_frames = len(self._frames)
+        var root = len(self._nodes) - 1
         for top in range(len(parents)):
             if not _chain_member(self._nodes[top]):
                 continue
@@ -1494,8 +1508,10 @@ struct LazyFrame(Copyable):
                 continue
             if self._order_chain(top, streaming, batch_size):
                 changed = True
+        if changed or len(self._frames) != original_frames:
+            self._reorder(root)
+            self._compact_scan_slots()
         if changed:
-            self._reorder()
             self._push_projections()
 
     def _spine_rows(self, index: Int) -> Int:
@@ -1551,8 +1567,8 @@ struct LazyFrame(Copyable):
         mut self, top: Int, streaming: Bool, batch_size: Int
     ) raises -> Bool:
         """Reorder the chain whose last node is `top`; see `_order_joins`.
-        False, leaving it unchanged, when nothing would move or column
-        names could resolve differently in another order."""
+        False when join topology stays unchanged. Measured inputs remain
+        cached even when no step moves or a candidate is rejected."""
         var spine = List[Int]()
         var cursor = top
         while cursor >= 0 and _chain_member(self._nodes[cursor]):
@@ -1612,8 +1628,8 @@ struct LazyFrame(Copyable):
         var selectivity = List[Float64](length=len(steps), fill=1.0)
         var measured = List[Bool](length=len(steps), fill=False)
         var pushed = False
-        # Measuring runs inputs, and an input with a known size changes
-        # how the stream executes joins; an unchanged chain is restored.
+        # Keep tentative topology changes separate from input results.
+        # Restoring a chain must preserve scans produced by measurement.
         var saved = self._nodes.copy()
         for reverse in range(len(steps)):
             var p = len(steps) - 1 - reverse
@@ -1728,7 +1744,7 @@ struct LazyFrame(Copyable):
                 order.append(best)
                 progress = True
             if not progress:
-                self._nodes = saved^
+                self._restore_measured_chain(saved^)
                 return False
         var moved = pushed
         var expected = 0
@@ -1739,7 +1755,7 @@ struct LazyFrame(Copyable):
                 moved = True
             expected += 1
         if not moved:
-            self._nodes = saved^
+            self._restore_measured_chain(saved^)
             return False
         var current = base
         for p in order:
@@ -1753,6 +1769,38 @@ struct LazyFrame(Copyable):
         self._nodes[top] = _plan_node(SELECT, current, exprs=keep)
         trace_path("lazy.join_order")
         return True
+
+    def _restore_measured_chain(mut self, var saved: List[PlanNode]):
+        """Discard speculative topology, retaining executed original inputs.
+
+        Only original nodes can be restored as cached scans. Results of
+        newly appended speculative joins have no equivalent original node;
+        scan-slot compaction drops those once unreachable.
+        """
+        for i in range(len(saved)):
+            if (
+                self._nodes[i].kind == SCAN_FRAME
+                and saved[i].kind != SCAN_FRAME
+            ):
+                saved[i] = self._nodes[i].copy()
+        self._nodes = saved^
+
+    def _compact_scan_slots(mut self):
+        """Release scan inputs/materializations no reachable node owns."""
+        var slots = List[Int](length=len(self._frames), fill=-1)
+        var frames = List[DataFrame]()
+        var schemas = List[Optional[CsvSchema]]()
+        for i in range(len(self._nodes)):
+            if not _is_scan(self._nodes[i].kind):
+                continue
+            var old = self._nodes[i].offset
+            if slots[old] < 0:
+                slots[old] = len(frames)
+                frames.append(self._frames[old].copy())
+                schemas.append(self._schemas[old].copy())
+            self._nodes[i].offset = slots[old]
+        self._frames = frames^
+        self._schemas = schemas^
 
     def _available(
         self,
@@ -1853,17 +1901,18 @@ struct LazyFrame(Copyable):
                 self._nodes[parent].right = child
         self._reorder()
 
-    def _reorder(mut self):
+    def _reorder(mut self, root: Int = -1):
         """Restore children-before-parents order after rewiring."""
-        var root = -1
-        var parents = self._parents()
-        for i in range(len(self._nodes)):
-            if parents[i] < 0:
-                root = i
+        var selected = root
+        if selected < 0:
+            var parents = self._parents()
+            for i in range(len(self._nodes)):
+                if parents[i] < 0:
+                    selected = i
         var order = List[Int]()
         var stack = List[Int]()
         var visited = List[Bool](length=len(self._nodes), fill=False)
-        stack.append(root)
+        stack.append(selected)
         while len(stack) > 0:
             var top = stack[len(stack) - 1]
             var pending = False

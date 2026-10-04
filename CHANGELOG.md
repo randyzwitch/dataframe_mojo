@@ -538,6 +538,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- Join planning reuses inputs executed to measure selectivity even when
+  the original join order is kept or a candidate is rejected. Unreachable
+  input and materialization slots are released after planning (#436).
 - Grouped ordinal top-k filters bound scratch space by input rows and
   group counts, including huge k and singleton groups. Bounded heaps
   replace O(Nk) insertion lists, workers visit disjoint rows or groups,

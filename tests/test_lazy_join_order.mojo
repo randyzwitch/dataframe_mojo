@@ -4,6 +4,8 @@ most selective joins first. Results must equal the eager plan as written,
 row for row once sorted.
 """
 from std.testing import TestSuite, assert_equal, assert_true
+from std.memory import ArcPointer
+from dataframe.lazy import SCAN_FRAME, JOIN
 
 from dataframe import Column, DataFrame, LazyFrame, Series, col, lit
 
@@ -272,6 +274,178 @@ def test_date_literal_filters_move_below_joins() raises:
     var join_at = plan.find("JOIN")
     assert_true(join_at >= 0 and plan.find("FILTER") > join_at, plan)
     same(query)
+
+
+def attach_source_counters(mut plan: LazyFrame) -> List[ArcPointer[Int]]:
+    var counters = List[ArcPointer[Int]]()
+    for i in range(len(plan._nodes)):
+        if plan._nodes[i].kind == SCAN_FRAME:
+            var counter = ArcPointer(Int(0))
+            plan._nodes[i]._executions = counter.copy()
+            counters.append(counter^)
+    return counters^
+
+
+def measured_star(reorder: Bool) raises -> LazyFrame:
+    var base = DataFrame(
+        [
+            Series("a", Column[Int64]([1, 2, 3])),
+            Series("b", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    var a = DataFrame(
+        [
+            Series("a", Column[Int64]([1, 2, 3])),
+            Series("v1", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    var b = DataFrame(
+        [
+            Series("b", Column[Int64]([1, 2, 3])),
+            Series("v2", Column[Int64]([1, 2, 3])),
+        ]
+    )
+    return (
+        base.lazy()
+        .join(a.lazy().filter(col("v1") < lit(Int64(3 if reorder else 2))), "a")
+        .join(b.lazy().filter(col("v2") < lit(Int64(2 if reorder else 3))), "b")
+    )
+
+
+def test_measured_inputs_execute_once_with_or_without_reordering() raises:
+    for reorder in [False, True]:
+        for streaming in [False, True]:
+            var query = measured_star(reorder)
+            var expected = query.collect(optimize=False, streaming=False)
+            var counters = attach_source_counters(query)
+            var plan = query._optimized()
+            plan._order_joins(streaming, 2)
+            # Each filtered dimension was measured; the base is still lazy.
+            assert_equal(counters[0][], 0)
+            assert_equal(counters[1][], 1)
+            assert_equal(counters[2][], 1)
+            # Only the base and the two cached results remain retained.
+            assert_equal(len(plan._frames), 3)
+            assert_equal(len(plan._schemas), 3)
+            var joins = List[String]()
+            for node in plan._nodes:
+                if node.kind == JOIN:
+                    joins.append(node.names[0])
+            assert_equal(joins[0], "b" if reorder else "a")
+            var actual = plan._execute(
+                len(plan._nodes) - 1, False, streaming, 2
+            )
+            assert_true(actual.equals(expected))
+            for counter in counters:
+                assert_equal(counter[], 1)
+            # A second planning pass neither remeasures nor retains copies.
+            plan._order_joins(streaming, 2)
+            assert_equal(len(plan._frames), 3)
+            for counter in counters:
+                assert_equal(counter[], 1)
+
+
+def test_rejected_push_candidate_reuses_measured_input() raises:
+    var a = List[Int64]()
+    var b = List[Int64]()
+    for i in range(100):
+        a.append(Int64(i))
+        b.append(Int64(i % 10))
+    var base = DataFrame([Series("a", Column[Int64](a.copy()))])
+    var host = DataFrame(
+        [
+            Series("a", Column[Int64](a^)),
+            Series("b", Column[Int64](b^)),
+        ]
+    )
+    var small = DataFrame(
+        [
+            Series("b", Column[Int64]([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
+            Series("v", Column[Int64]([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
+        ]
+    )
+    for streaming in [False, True]:
+        # Eligible by table sizes, but measuring 70% selectivity rejects the
+        # candidate. Its keys require the host, so greedy ordering stays put.
+        var query = (
+            base.lazy()
+            .join(host.lazy(), "a")
+            .join(small.lazy().filter(col("v") < lit(Int64(7))), "b")
+        )
+        var expected = query.collect(optimize=False, streaming=False)
+        var counters = attach_source_counters(query)
+        var plan = query._optimized()
+        plan._order_joins(streaming, 16)
+        assert_equal(counters[0][], 0)
+        assert_equal(counters[1][], 0)
+        assert_equal(counters[2][], 1)
+        assert_equal(len(plan._frames), 3)
+        var actual = plan._execute(len(plan._nodes) - 1, False, streaming, 16)
+        assert_true(actual.sort("a").equals(expected.sort("a")))
+        for counter in counters:
+            assert_equal(counter[], 1)
+
+
+def test_nested_measured_candidates_do_not_become_the_plan_root() raises:
+    # Two pushed joins are measured in turn. The older speculative node is
+    # then unreachable but has a higher index than the original plan root.
+    var a = List[Int64]()
+    var b = List[Int64]()
+    for i in range(10_000):
+        a.append(Int64(i))
+        b.append(Int64(i % 1000))
+    var base = DataFrame(
+        [
+            Series("a", Column[Int64](a.copy())),
+            Series("z", Column[Int64](b.copy())),
+        ]
+    )
+    var first = DataFrame(
+        [
+            Series("a", Column[Int64](a^)),
+            Series("b", Column[Int64](b^)),
+        ]
+    )
+    var bs = List[Int64]()
+    var cs = List[Int64]()
+    for i in range(1000):
+        bs.append(Int64(i))
+        cs.append(Int64(i % 100))
+    var second = DataFrame(
+        [
+            Series("b", Column[Int64](bs.copy())),
+            Series("c", Column[Int64](cs^)),
+        ]
+    )
+    var independent = DataFrame(
+        [
+            Series("z", Column[Int64](bs.copy())),
+            Series("tag", Column[Int64](bs^)),
+        ]
+    )
+    var cs2 = List[Int64]()
+    for i in range(100):
+        cs2.append(Int64(i))
+    var third = DataFrame([Series("c", Column[Int64](cs2^))])
+    for streaming in [False, True]:
+        var query = (
+            base.lazy()
+            .join(first.lazy(), "a")
+            .join(second.lazy(), "b")
+            .join(third.lazy().filter(col("c") < lit(Int64(10))), "c")
+            .join(independent.lazy().filter(col("tag") < lit(Int64(200))), "z")
+        )
+        var expected = query.collect(optimize=False, streaming=False)
+        assert_equal(expected.height(), 200)
+        var counters = attach_source_counters(query)
+        var plan = query._optimized()
+        plan._order_joins(streaming, 256)
+        var actual = plan._execute(len(plan._nodes) - 1, False, streaming, 256)
+        assert_true(actual.sort("a").equals(expected.sort("a")))
+        for counter in counters:
+            assert_equal(counter[], 1)
+        # Only the base and the final two dimension results remain live.
+        assert_equal(len(plan._frames), 3)
 
 
 def main() raises:
