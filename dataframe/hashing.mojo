@@ -115,6 +115,27 @@ def column_codes(
         codes = keys.ids^
         keys.ids = List[Int]()
         return count
+    if (
+        series.dtype().is_categorical()
+        and series.dtype().has_dictionary()
+        and len(series.dtype().dictionary()[]) <= max(len(series), 4096)
+    ):
+        # Composite keys can use the same bounded dictionary lookup as a
+        # single categorical key. Number the full source, including chunks,
+        # and validate codes before directly indexing the dictionary domain.
+        var source = series.rechunk() if series.is_chunked() else series.copy()
+        var keys = _encode_categorical[checked=True](
+            source._data[Column[UInt32]],
+            len(source.dtype().dictionary()[]),
+            False,
+        )
+        var count = keys.count()
+        if source.null_count() > 0:
+            for i in range(len(keys.ids)):
+                nulls[i] = keys.ids[i] < 0
+        codes = keys.ids^
+        keys.ids = List[Int]()
+        return count
     if dense_int64 and series._data.isa[Column[Int64]]():
         var dense = _encode_dense_int64(series._data[Column[Int64]], False)
         if dense:
@@ -519,9 +540,9 @@ def _encode_dense_int64(
     return RowKeys(ids^, representatives^)
 
 
-def _encode_categorical(
-    column: Column[UInt32], domain: Int, nulls_equal: Bool
-) -> RowKeys:
+def _encode_categorical[
+    checked: Bool = False
+](column: Column[UInt32], domain: Int, nulls_equal: Bool) raises -> RowKeys:
     """Ids by direct lookup on a categorical's codes, which already lie in
     [0, dictionary size): no hash and no range scan, as `_encode_dense_int64`
     does for small Int64 domains. Sorted H2O q1 grouped its coded string key
@@ -546,6 +567,9 @@ def _encode_categorical(
                 out[unsafe_offset=i] = -1
             continue
         var slot = Int(codes[unsafe_offset=i])
+        comptime if checked:
+            if slot >= domain:
+                raise Error("Categorical code exceeds its dictionary")
         var id = table[unsafe_offset=slot]
         if id < 0:
             id = len(representatives)
