@@ -679,6 +679,35 @@ def _numeric_key(key: Series) -> Bool:
     return False
 
 
+@always_inline
+def _same_offset_strings(
+    offsets: Pointer[Int64, _], bytes: Pointer[UInt8, _], a: Int, b: Int
+) -> Bool:
+    var first = Int(offsets.unsafe_offset(a)[])
+    var last = Int(offsets.unsafe_offset(a + 1)[])
+    var other = Int(offsets.unsafe_offset(b)[])
+    var length = last - first
+    if length != Int(offsets.unsafe_offset(b + 1)[]) - other:
+        return False
+    var i = 0
+    while i + 8 <= length:
+        if (
+            bytes.unsafe_offset(first + i)
+            .unsafe_bitcast[UInt64]()
+            .unsafe_load()
+            != bytes.unsafe_offset(other + i)
+            .unsafe_bitcast[UInt64]()
+            .unsafe_load()
+        ):
+            return False
+        i += 8
+    while i < length:
+        if bytes.unsafe_offset(first + i)[] != bytes.unsafe_offset(other + i)[]:
+            return False
+        i += 1
+    return True
+
+
 def encode_bucket(
     keys: List[Series],
     hashes: Span[UInt64, _],
@@ -701,7 +730,8 @@ def encode_bucket(
     var table = List[Int32](length=capacity, fill=-1)
     var out = ids.unsafe_ptr()
     # One offsets-backed string key without nulls, the common case, is
-    # compared directly; everything else through _same_key.
+    # compared directly. Composite strings cache their buffers below;
+    # other storage keeps the generic _same_key comparison.
     var direct = (
         len(keys) == 1
         and keys[0]._data.isa[StringColumn]()
@@ -738,6 +768,14 @@ def encode_bucket(
                     Int(strings._offsets[].unsafe_ptr()) + 8 * strings._offset
                 )
                 fetch_bytes.append(Int(strings._bytes[].unsafe_ptr()))
+    # Hoist storage dispatch for composite offsets-backed string keys.
+    # These buffers stay alive through keys, and offsets include slice origins.
+    var direct_composite = len(keys) > 1 and len(fetch_offsets) == len(keys)
+    if direct_composite:
+        for key in keys:
+            if key.null_count() > 0:
+                direct_composite = False
+                break
     for p in range(m):
         var row = rows[p]
         var hash = hashes[p]
@@ -800,6 +838,22 @@ def encode_bucket(
                             == bytes.unsafe_offset(b + i)[]
                         )
                         i += 1
+                elif direct_composite:
+                    same = True
+                    var other = first_rows[unsafe_offset=g]
+                    for k in range(len(fetch_offsets)):
+                        if not _same_offset_strings(
+                            Pointer[Int64, MutAnyOrigin](
+                                unsafe_from_address=fetch_offsets[k]
+                            ),
+                            Pointer[UInt8, MutAnyOrigin](
+                                unsafe_from_address=fetch_bytes[k]
+                            ),
+                            row,
+                            other,
+                        ):
+                            same = False
+                            break
                 else:
                     same = _same_key(keys, first_rows[unsafe_offset=g], row)
                 if same:
