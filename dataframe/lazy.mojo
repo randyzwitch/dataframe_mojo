@@ -4,6 +4,10 @@ A LazyFrame records operations as a flat list of plan nodes (children always
 precede parents). Nothing reads data until `collect`. Optimization rewrites
 the plan before execution:
 
+- filter splitting: a filter on `a & b` moves as two filters, and one on an
+  OR of ANDs also gets the filters it implies on each input's columns
+  (`(a1 & b1) | (a2 & b2)` implies `a1 | a2`); filters that end up
+  together merge back into one;
 - predicate pushdown: filters move below with_columns/select that do not
   produce the columns they read, below a sort when they are row-local, and
   into the side of an inner join (or the left side of a left/semi/anti join)
@@ -13,6 +17,9 @@ the plan before execution:
   (CSV and Parquet scans decode only those fields); a join passes each input
   only its keys and the columns read above it from that side;
 - slice pushdown: a head/slice directly over a CSV scan becomes `n_rows`;
+- join order, when the plan runs: in a chain of inner joins, inputs that
+  filters narrow run first, a selective join moves into the input holding
+  its keys, and the most selective joins run first (`_order_joins`);
 - row-group pruning: a row-local filter directly above a Parquet scan reads
   the footer statistics first and decodes only the row groups that can
   hold a match (see `parquet._pruned_row_groups`).
@@ -48,7 +55,10 @@ from .frame import concat
 from .csv import CsvSchema, read_csv
 from .csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import (
+    AND,
     COL,
+    Node,
+    OR,
     OVER,
     SELECTOR,
     Expr,
@@ -65,6 +75,7 @@ from .parquet import (
 )
 from .series import Series
 from .hashing import encode_rows
+from .trace import trace_path
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -160,8 +171,9 @@ def _references(expr: Expr) -> Optional[List[String]]:
             return None
         if node.op == COL:
             names.append(node.text)
-        if node.text2.byte_length() > 0 and node.op >= 120:
-            # over() partitions read their key columns.
+        if node.op == OVER and node.text2.byte_length() > 0:
+            # over() partitions read their key columns. Other operators
+            # keep other text there (a strptime dtype, cut labels).
             for part in node.text2.split("\x1f"):
                 names.append(String(part))
     return names^
@@ -172,6 +184,83 @@ def _output_names(exprs: List[Expr]) -> List[String]:
     for e in exprs:
         names.append(e._name)
     return names^
+
+
+def _boolean_parts(expr: Expr, op: Int) -> List[Expr]:
+    """The operands of a chain of `op` (AND or OR) at the root of expr, left
+    to right; expr alone when its root is another operator."""
+    var parts = List[Expr]()
+    _collect_parts(expr, len(expr._nodes) - 1, op, parts)
+    return parts^
+
+
+def _collect_parts(expr: Expr, index: Int, op: Int, mut parts: List[Expr]):
+    ref node = expr._nodes[index]
+    if node.op == op and node.left >= 0 and node.right >= 0:
+        _collect_parts(expr, node.left, op, parts)
+        _collect_parts(expr, node.right, op, parts)
+    else:
+        parts.append(subtree(expr, index))
+
+
+def _implied_filters(predicate: Expr) -> List[Expr]:
+    """Filters that an OR of ANDs implies on fewer columns.
+
+    `(a1 & b1) | (a2 & b2)` keeps a row only if some branch holds, and so
+    only if `a1 | a2` holds, where a1 and a2 read one set of columns: that
+    filter can move into the join input owning those columns, as DuckDB
+    derives it. A branch with no part on those columns implies nothing.
+    Under SQL's three-valued logic a true branch has every part true, so
+    the derived filter keeps every row the predicate keeps.
+    """
+    var out = List[Expr]()
+    var branches = _boolean_parts(predicate, OR)
+    if len(branches) < 2:
+        return out^
+    var atoms = List[List[Expr]]()
+    var reads = List[List[List[String]]]()
+    for branch in branches:
+        var parts = _boolean_parts(branch, AND)
+        var part_reads = List[List[String]]()
+        for part in parts:
+            var r = _references(part)
+            if not r:
+                return out^
+            part_reads.append(r.value().copy())
+        atoms.append(parts^)
+        reads.append(part_reads^)
+    var tried = List[List[String]]()
+    for a in range(len(atoms[0])):
+        ref columns = reads[0][a]
+        if len(columns) == 0:
+            continue
+        var seen = False
+        for t in tried:
+            seen = seen or (_covers(t, columns) and _covers(columns, t))
+        if seen:
+            continue
+        tried.append(columns.copy())
+        var implied = Expr(List[Node](), "")
+        var found = True
+        var partial = False
+        for b in range(len(atoms)):
+            var kept = Expr(List[Node](), "")
+            for j in range(len(atoms[b])):
+                if len(reads[b][j]) > 0 and _covers(columns, reads[b][j]):
+                    kept = (
+                        atoms[b][j].copy() if len(kept._nodes)
+                        == 0 else kept & atoms[b][j]
+                    )
+                else:
+                    partial = True
+            if len(kept._nodes) == 0:
+                found = False
+                break
+            implied = kept^ if len(implied._nodes) == 0 else implied | kept
+        # A derived filter equal to the predicate adds nothing.
+        if found and partial:
+            out.append(implied^)
+    return out^
 
 
 def _stream_rows(node: PlanNode) -> Bool:
@@ -584,6 +673,8 @@ struct LazyFrame(Copyable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         var plan = self._optimized() if optimize else self.copy()
+        if optimize:
+            plan._order_joins(streaming, batch_size)
         return plan._execute(len(plan._nodes) - 1, False, streaming, batch_size)
 
     def fetch(self, n: Int = 5) raises -> DataFrame:
@@ -1284,7 +1375,9 @@ struct LazyFrame(Copyable):
 
     def _optimized(self) raises -> Self:
         var plan = self.copy()
+        plan._split_filters()
         plan._push_predicates()
+        plan._merge_filters()
         plan._push_slices()
         plan._fuse_top_k()
         plan._push_projections()
@@ -1301,6 +1394,379 @@ struct LazyFrame(Copyable):
 
     def _columns_of(self, index: Int) raises -> List[String]:
         return self._execute(index, True).columns()
+
+    def _split_filters(mut self):
+        """A row-local filter on `a & b` becomes a filter on b over one on
+        a, so predicate pushdown moves each part as far as it can go; a
+        filter on an OR of ANDs also gets the single-input filters it
+        implies (`_implied_filters`). `_merge_filters` rejoins the parts
+        that end up together."""
+        var count = len(self._nodes)
+        var added = False
+        for i in range(count):
+            if self._nodes[i].kind != FILTER:
+                continue
+            if not _row_local(self._nodes[i].exprs):
+                continue
+            var parts = _boolean_parts(self._nodes[i].exprs[0], AND)
+            var extra = List[Expr]()
+            for part in parts:
+                for implied in _implied_filters(part):
+                    extra.append(implied.copy())
+            if len(parts) + len(extra) < 2:
+                continue
+            var below = self._nodes[i].left
+            for implied in extra:
+                self._nodes.append(
+                    _plan_node(FILTER, below, exprs=[implied.copy()])
+                )
+                below = len(self._nodes) - 1
+            for k in range(len(parts) - 1, 0, -1):
+                self._nodes.append(
+                    _plan_node(FILTER, below, exprs=[parts[k].copy()])
+                )
+                below = len(self._nodes) - 1
+            self._nodes[i].left = below
+            self._nodes[i].exprs = [parts[0].copy()]
+            added = True
+        if added:
+            self._reorder()
+
+    def _merge_filters(mut self):
+        """Join a row-local filter directly over another into one filter
+        on both predicates, lower first, so a scan below sees them all (CSV
+        range filters, Parquet row-group pruning)."""
+        var changed = True
+        while changed:
+            changed = False
+            for i in range(len(self._nodes)):
+                ref node = self._nodes[i]
+                if node.kind != FILTER or node.left < 0:
+                    continue
+                ref below = self._nodes[node.left]
+                if below.kind != FILTER:
+                    continue
+                if not (_row_local(node.exprs) and _row_local(below.exprs)):
+                    continue
+                var merged = below.exprs[0] & node.exprs[0]
+                var child = below.left
+                self._nodes[i].exprs = [merged^]
+                self._nodes[i].left = child
+                self._reorder()
+                changed = True
+                break
+
+    def _order_joins(mut self, streaming: Bool, batch_size: Int) raises:
+        """Order each chain of inner joins by how much their inputs narrow.
+
+        A chain is a run of inner joins, filters and plain column selections
+        along left inputs, over one base input. Run when the plan executes,
+        not in `explain`: a join's right input is executed first when it
+        is a known table narrowed by filters or joins, and how many of the
+        table's rows it kept is its selectivity, as DuckDB's join order
+        optimizer estimates it from statistics. Then:
+
+        - A join whose keys come from one earlier join's right input, that
+          keeps under half its table and holds at most a quarter as many
+          rows as that input's table, joins that input instead (a bushy
+          plan): PDS-H q7 joins customer to the two nations its
+          filter allows, and orders to those customers, before any
+          lineitem row is probed.
+        - The remaining joins run most selective first, each once its keys
+          are available, with every filter as soon as its columns are.
+
+        Inputs run here replace their subtrees with their results, so
+        nothing runs twice. Projection pushdown runs again afterwards, as
+        the chain's column selections are dropped and the chain ends with
+        one selecting its original output.
+        """
+        var parents = self._parents()
+        var changed = False
+        for top in range(len(parents)):
+            if not _chain_member(self._nodes[top]):
+                continue
+            var parent = parents[top]
+            if (
+                parent >= 0
+                and self._nodes[parent].left == top
+                and _chain_member(self._nodes[parent])
+            ):
+                continue
+            if self._order_chain(top, streaming, batch_size):
+                changed = True
+        if changed:
+            self._reorder()
+            self._push_projections()
+
+    def _spine_rows(self, index: Int) -> Int:
+        """Rows of the table under `index` along steps that keep, drop or
+        join rows (a filter, a projection, an inner join's left input);
+        -1 through anything else (an aggregation) or a file scan."""
+        var cursor = index
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == SCAN_FRAME:
+                return self._frames[node.offset].height()
+            if (
+                node.kind == FILTER
+                or node.kind == DROP
+                or (node.kind == JOIN and node.how == JOIN_INNER)
+                or (
+                    (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                    and _stream_rows(node)
+                )
+            ):
+                cursor = node.left
+                continue
+            return -1
+        return -1
+
+    def _measurable(self, index: Int) -> Bool:
+        """Whether `_selectivity` would run node `index`: a known table,
+        narrowed by steps above it."""
+        return (
+            self._nodes[index].kind != SCAN_FRAME
+            and self._spine_rows(index) > 0
+        )
+
+    def _selectivity(
+        mut self, index: Int, streaming: Bool, batch_size: Int
+    ) raises -> Float64:
+        """The share of its table's rows that node `index` keeps, executing
+        it and replacing it with its result; 1 when it is a plain table or
+        no table is known."""
+        var table = self._spine_rows(index)
+        if table <= 0 or self._nodes[index].kind == SCAN_FRAME:
+            return 1.0
+        var frame = self._execute(index, False, streaming, batch_size)
+        var rows = frame.height()
+        self._frames.append(frame^)
+        self._schemas.append(Optional[CsvSchema]())
+        self._nodes[index] = _plan_node(
+            SCAN_FRAME, offset=len(self._frames) - 1
+        )
+        return Float64(rows) / Float64(table)
+
+    def _order_chain(
+        mut self, top: Int, streaming: Bool, batch_size: Int
+    ) raises -> Bool:
+        """Reorder the chain whose last node is `top`; see `_order_joins`.
+        False, leaving it unchanged, when nothing would move or column
+        names could resolve differently in another order."""
+        var spine = List[Int]()
+        var cursor = top
+        while cursor >= 0 and _chain_member(self._nodes[cursor]):
+            spine.append(cursor)
+            cursor = self._nodes[cursor].left
+        var base = cursor
+        if base < 0:
+            return False
+        # Steps bottom to top, without the column selections.
+        var steps = List[Int]()
+        var join_count = 0
+        for k in range(len(spine)):
+            var i = spine[len(spine) - 1 - k]
+            if self._nodes[i].kind == SELECT:
+                continue
+            steps.append(i)
+            if self._nodes[i].kind == JOIN:
+                join_count += 1
+        if join_count < 2:
+            return False
+        var top_columns = self._columns_of(top)
+        # Which step supplies each column (-1 the base). Every name must be
+        # unique across the chain, so no join renames a column in any order.
+        var provider = Dict[String, Int]()
+        for c in self._columns_of(base):
+            provider[c] = -1
+        var outputs = List[List[String]]()
+        for p in range(len(steps)):
+            ref node = self._nodes[steps[p]]
+            var produced = List[String]()
+            if node.kind == JOIN:
+                for c in self._columns_of(node.right):
+                    if c in node.right_keys:
+                        continue
+                    if c in provider:
+                        return False
+                    provider[c] = p
+                    produced.append(c)
+            outputs.append(produced^)
+        var needs = List[List[String]]()
+        for p in range(len(steps)):
+            ref node = self._nodes[steps[p]]
+            if node.kind == JOIN:
+                needs.append(node.names.copy())
+            else:
+                var reads = _references(node.exprs[0])
+                if not reads:
+                    return False
+                needs.append(reads.value().copy())
+            for name in needs[p]:
+                if name not in provider:
+                    return False
+        # owner[p]: the step whose output now carries step p's columns.
+        var owner = List[Int](capacity=len(steps))
+        for p in range(len(steps)):
+            owner.append(p)
+        var selectivity = List[Float64](length=len(steps), fill=1.0)
+        var measured = List[Bool](length=len(steps), fill=False)
+        var pushed = False
+        # Measuring runs inputs, and an input with a known size changes
+        # how the stream executes joins; an unchanged chain is restored.
+        var saved = self._nodes.copy()
+        for reverse in range(len(steps)):
+            var p = len(steps) - 1 - reverse
+            if self._nodes[steps[p]].kind != JOIN:
+                continue
+            var keys = self._nodes[steps[p]].names.copy()
+            var host = -2
+            for name in keys:
+                var from_step = provider[name]
+                var o = owner[from_step] if from_step >= 0 else -1
+                if host == -2:
+                    host = o
+                elif host != o:
+                    host = -1
+            if host < 0:
+                continue
+            # The host's right input must not hold a name this join adds.
+            var host_columns = self._columns_of(self._nodes[steps[host]].right)
+            var clash = False
+            for c in outputs[p]:
+                clash = clash or c in host_columns
+            if clash:
+                continue
+            # The pushed input must be small next to the host's table, as a
+            # dimension of it: joining 1.5M lineitem rows into 57K orders
+            # first made PDS-H q10 12% slower. Its table bounds its rows
+            # before it runs, and its rows bound them after.
+            var host_rows = self._spine_rows(self._nodes[steps[host]].right)
+            var table = self._spine_rows(self._nodes[steps[p]].right)
+            if host_rows < 0 or table < 0 or 4 * table > host_rows:
+                continue
+            var share = self._selectivity(
+                self._nodes[steps[p]].right, streaming, batch_size
+            )
+            selectivity[p] = share
+            measured[p] = True
+            if share >= 0.5:
+                continue
+            var rows = self._known_height(self._nodes[steps[p]].right)
+            if rows < 0 or 4 * rows > host_rows:
+                continue
+            var inner = self._nodes[steps[p]].copy()
+            inner.left = self._nodes[steps[host]].right
+            self._nodes.append(inner^)
+            self._nodes[steps[host]].right = len(self._nodes) - 1
+            for q in range(len(steps)):
+                if owner[q] == p:
+                    owner[q] = host
+            pushed = True
+        # Selectivity of the joins that stay in the chain, measured only
+        # where it can change the order: a narrowed input whose join could
+        # run before one that precedes it, and that one. A plain table keeps
+        # all its rows and never moves ahead.
+        var need = List[Bool](length=len(steps), fill=False)
+        var done = List[Bool](length=len(steps), fill=False)
+        for p in range(len(steps)):
+            if owner[p] != p:
+                done[p] = True
+        for p in range(len(steps)):
+            if owner[p] != p:
+                continue
+            if self._nodes[steps[p]].kind == JOIN:
+                for q in range(p + 1, len(steps)):
+                    if (
+                        owner[q] != q
+                        or self._nodes[steps[q]].kind != JOIN
+                        or not self._available(needs[q], provider, owner, done)
+                    ):
+                        continue
+                    if self._measurable(self._nodes[steps[q]].right):
+                        need[q] = True
+                        need[p] = need[p] or self._measurable(
+                            self._nodes[steps[p]].right
+                        )
+            done[p] = True
+        for p in range(len(steps)):
+            if not need[p] or measured[p]:
+                continue
+            selectivity[p] = self._selectivity(
+                self._nodes[steps[p]].right, streaming, batch_size
+            )
+        # Greedy order: filters as soon as their columns are available, then
+        # the most selective available join (ties keep the original order).
+        var placed = List[Bool](length=len(steps), fill=False)
+        for p in range(len(steps)):
+            if owner[p] != p:
+                placed[p] = True
+        var order = List[Int]()
+        var remaining = 0
+        for p in range(len(steps)):
+            if not placed[p]:
+                remaining += 1
+        while len(order) < remaining:
+            var progress = False
+            for p in range(len(steps)):
+                if placed[p] or self._nodes[steps[p]].kind != FILTER:
+                    continue
+                if self._available(needs[p], provider, owner, placed):
+                    placed[p] = True
+                    order.append(p)
+                    progress = True
+            var best = -1
+            for p in range(len(steps)):
+                if placed[p] or self._nodes[steps[p]].kind != JOIN:
+                    continue
+                if not self._available(needs[p], provider, owner, placed):
+                    continue
+                if best < 0 or selectivity[p] < selectivity[best]:
+                    best = p
+            if best >= 0:
+                placed[best] = True
+                order.append(best)
+                progress = True
+            if not progress:
+                self._nodes = saved^
+                return False
+        var moved = pushed
+        var expected = 0
+        for p in range(len(steps)):
+            if owner[p] != p:
+                continue
+            if order[expected] != p:
+                moved = True
+            expected += 1
+        if not moved:
+            self._nodes = saved^
+            return False
+        var current = base
+        for p in order:
+            var node = self._nodes[steps[p]].copy()
+            node.left = current
+            self._nodes.append(node^)
+            current = len(self._nodes) - 1
+        var keep = List[Expr]()
+        for name in top_columns:
+            keep.append(col(name))
+        self._nodes[top] = _plan_node(SELECT, current, exprs=keep)
+        trace_path("lazy.join_order")
+        return True
+
+    def _available(
+        self,
+        names: List[String],
+        provider: Dict[String, Int],
+        owner: List[Int],
+        placed: List[Bool],
+    ) raises -> Bool:
+        """Whether every name comes from the base or a placed step."""
+        for name in names:
+            var p = provider[name]
+            if p >= 0 and not placed[owner[p]]:
+                return False
+        return True
 
     def _push_predicates(mut self) raises:
         """Swap each filter below operators that cannot change its result."""
@@ -1753,6 +2219,23 @@ def _counts_distinct(expressions: List[Expr]) -> Bool:
         for node in expression._nodes:
             if node.op == N_UNIQUE:
                 return True
+    return False
+
+
+def _chain_member(node: PlanNode) -> Bool:
+    """A step `_order_chain` can move: an inner join with coalesced keys, a
+    row-local filter, or a selection of plain columns."""
+    if node.kind == JOIN:
+        return node.how == JOIN_INNER and node.coalesce and len(node.names) > 0
+    if node.kind == FILTER:
+        return _row_local(node.exprs)
+    if node.kind == SELECT:
+        for e in node.exprs:
+            if len(e._nodes) != 1 or e._nodes[0].op != COL:
+                return False
+            if e._nodes[0].text != e._name:
+                return False
+        return True
     return False
 
 

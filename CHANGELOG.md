@@ -80,6 +80,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Lazy plans order chains of inner joins by how much each input narrows
+  its table, measured by running the input when the plan executes: a
+  selective join moves into the input that holds its keys (customers
+  joined to the nations a filter allows, then orders to those customers),
+  and the most selective joins run first. A filter on an OR of ANDs also
+  filters each input by what it implies, and a filter on `a & b` moves as
+  two. PDS-H q7 101 → 50 ms, q21 344 → 279 ms, q19 37 → 34 ms.
 - The partitioned group-by no longer gathers aggregated columns into bucket
   order when every aggregation is a sum, mean, min, max, count or len of an
   Int64 or Float64 column: each bucket reads values at their source rows
@@ -506,6 +513,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- Lazy filters holding a date literal (`str().to_date()`) or another
+  operator with a text argument again move below joins: the argument was
+  read as a column name, which no input has.
 - `write_csv` writes a float NaN as `NaN`, as Polars does, instead of
   `nan`, which both `read_csv` and Polars read back as a string, so a
   Float64 column with NaN now round-trips as Float64 (#368).
