@@ -531,6 +531,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- Fused Float64 expressions that reference a column repeatedly now work on
+  chunked inputs, including nonzero batch offsets and misaligned chunks.
+  Each source window is sliced once instead of once per expression leaf
+  (#434).
 - A filter with decimal comparisons inside an AND no longer runs them row by
   row under the AND's mask: a comparison is safe on rows the mask skips, so
   it takes its whole-column path. The selective AND filter had made PDS-H
