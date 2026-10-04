@@ -531,6 +531,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- Join planning reuses inputs executed to measure selectivity even when
+  the original join order is kept or a candidate is rejected. Unreachable
+  input and materialization slots are released after planning (#436).
 - A filter with decimal comparisons inside an AND no longer runs them row by
   row under the AND's mask: a comparison is safe on rows the mask skips, so
   it takes its whole-column path. The selective AND filter had made PDS-H
