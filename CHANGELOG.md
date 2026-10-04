@@ -88,6 +88,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
   q10 658 → 527 ms. Reading such a file costs 8–21% more time and up to
   11% more memory (the codes). libdfparquet gains
   `dfq_read_parquet_stream_dict`; an older library reads as before.
+- A filter on `a & b & ...` over 4,096 rows or more evaluates its parts
+  one at a time, each only on the rows the earlier ones kept, with parts
+  reading strings last. It narrows while a part keeps at most an eighth
+  of its rows (half when a string part is still to come); otherwise the
+  remaining parts run together and the masks combine. ClickBench q22
+  97 → 45 ms, q37 63 → 49 ms, q40 27 → 16 ms, q41 22 → 14 ms, q38 26 →
+  16 ms. Turning a mask into row numbers now reads 64 rows at a time.
 - Lazy plans order chains of inner joins by how much each input narrows
   its table, measured by running the input when the plan executes: a
   selective join moves into the input that holds its keys (customers
