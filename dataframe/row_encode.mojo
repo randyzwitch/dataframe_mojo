@@ -128,6 +128,11 @@ def encode_sort_keys(
     columns: List[Series],
     descending: List[Bool],
     nulls_last: List[Bool],
+    *,
+    prefix_only: Bool = False,
+    offset: Int = 0,
+    length: Int = -1,
+    known_nulls: List[Bool] = List[Bool](),
 ) raises -> List[List[Int]]:
     """Order-preserving words for `columns`, lexicographic across the list.
 
@@ -141,33 +146,62 @@ def encode_sort_keys(
             var contiguous = List[Series](capacity=len(columns))
             for item in columns:
                 contiguous.append(item.rechunk())
-            return encode_sort_keys(contiguous^, descending, nulls_last)
-    var rows = len(columns[0])
+            return encode_sort_keys(
+                contiguous^,
+                descending,
+                nulls_last,
+                prefix_only=prefix_only,
+                offset=offset,
+                length=length,
+                known_nulls=known_nulls,
+            )
+    var rows = length if length >= 0 else len(columns[0]) - offset
     var words = List[List[Int]]()
     for k in range(len(columns)):
         ref column = columns[k]
         var flip = descending[k]
-        var nulls = column.null_count() > 0
+        var nulls = (
+            known_nulls[k] if len(known_nulls) > 0 else column.null_count() > 0
+        )
         var floating = column.dtype().physical() in (
             DataType.FLOAT64,
             DataType.FLOAT32,
         )
         var null_rank = 2 if nulls_last[k] else -1
-        var ranked = List[Int](length=rows, fill=0)
+        var ranked = List[Int](length=rows if nulls or floating else 0, fill=0)
         var values = List[Int](length=rows, fill=0)
         # Strings fill these with their prefix; other dtypes leave it empty.
         var chunks = List[List[Int]]()
 
         var filled = False
+        if column.dtype().is_decimal():
+            var high = List[Int](length=rows, fill=0)
+            for i in range(rows):
+                if nulls and not column._decimal_valid(offset + i):
+                    ranked[i] = null_rank
+                    continue
+                var value = column._decimal_raw(offset + i)
+                var hi = Int(value >> 64)
+                var lo = Int(
+                    bitcast[DType.int64](
+                        value.cast[DType.uint64]()
+                        ^ UInt64(0x8000_0000_0000_0000)
+                    )
+                )
+                high[i] = ~hi if flip else hi
+                values[i] = ~lo if flip else lo
+            chunks.append(high^)
+            filled = True
+
         comptime for t in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[t]
-            if column._data.isa[Column[Scalar[D]]]():
+            if not filled and column._data.isa[Column[Scalar[D]]]():
                 ref typed = column._data[Column[Scalar[D]]]
                 for i in range(rows):
-                    if nulls and not typed._valid(i):
+                    if nulls and not typed._valid(offset + i):
                         ranked[i] = null_rank
                         continue
-                    var value = typed._get(i)
+                    var value = typed._get(offset + i)
                     comptime if D.is_floating_point():
                         if value != value:
                             ranked[i] = 1
@@ -178,10 +212,10 @@ def encode_sort_keys(
         if not filled and column._data.isa[BoolColumn]():
             ref typed = column._data[BoolColumn]
             for i in range(rows):
-                if nulls and not typed._valid(i):
+                if nulls and not typed._valid(offset + i):
                     ranked[i] = null_rank
                     continue
-                var order = Int(typed._get(i))
+                var order = Int(typed._get(offset + i))
                 values[i] = ~order if flip else order
             filled = True
 
@@ -200,20 +234,32 @@ def encode_sort_keys(
             for _ in range(prefix_words):
                 chunks.append(List[Int](length=rows, fill=0))
             for i in range(rows):
-                if nulls and not typed._valid(i):
+                if nulls and not typed._valid(offset + i):
                     ranked[i] = null_rank
                     continue
-                var text = typed._get(i)
+                var text = typed._get(offset + i)
                 var bytes = text.as_bytes()
                 var length = len(bytes)
-                for w in range(prefix_words):
+                comptime for w in range(prefix_words):
                     var packed = UInt64(0)
-                    for b in range(8):
-                        var at = w * 8 + b
-                        var byte = UInt64(bytes[at]) if at < length else UInt64(
-                            0
+                    if (w + 1) * 8 <= length:
+                        # Every wide load is contained in the string span.
+                        # The lane expression gives big-endian byte order on
+                        # either host endian and lowers to a word load/swap.
+                        var block = (
+                            bytes.unsafe_ptr()
+                            .unsafe_offset(w * 8)
+                            .unsafe_load[width=8]()
                         )
-                        packed = (packed << 8) | byte
+                        comptime for b in range(8):
+                            packed |= UInt64(block[b]) << UInt64(56 - 8 * b)
+                    else:
+                        comptime for b in range(8):
+                            var at = w * 8 + b
+                            var byte = UInt64(
+                                bytes[at]
+                            ) if at < length else UInt64(0)
+                            packed = (packed << 8) | byte
                     # Toggle the top bit so unsigned byte order survives the
                     # signed comparison sort_indices does.
                     var order = Int(
@@ -222,7 +268,10 @@ def encode_sort_keys(
                         )
                     )
                     chunks[w][i] = ~order if flip else order
-                values[i] = ~length if flip else length
+                var ordered_length = min(
+                    length, STRING_PREFIX_BYTES + 1
+                ) if prefix_only else length
+                values[i] = ~ordered_length if flip else ordered_length
 
         if nulls or floating:
             words.append(ranked^)
