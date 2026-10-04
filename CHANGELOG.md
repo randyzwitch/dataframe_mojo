@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Group-by reuses its bounded cardinality preference across strategy
+  selection, avoiding repeated sample gathers and hashes within one call.
+
 - Cardinality sampling hashes the same bounded row sample in one pass per
   key, reducing repeated storage dispatch for contiguous and chunked keys.
 - Partitioned grouping selects indexed or gathered evaluation per aggregate.
