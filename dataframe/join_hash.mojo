@@ -13,7 +13,7 @@ from .bool_column import BoolColumn
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .parallel import Job, partitions, run_jobs, worker_count
-from .partition import Partitioner
+from .partition import Partitioner, _mix
 from .series import Series
 from .string_column import StringColumn
 from .trace import trace_path
@@ -318,11 +318,24 @@ struct _HashProbeJob(Job):
             capacity=0 if membership >= 0 else end - start
         )
 
+    @always_inline
+    def _probe_hash(self, row: Int) -> UInt64:
+        if (
+            len(self.left_keys) == 1
+            and self.left_keys[0]._data.isa[Column[Int64]]()
+        ):
+            return _mix(
+                bitcast[DType.uint64](
+                    self.left_keys[0]._data[Column[Int64]]._get(row)
+                )
+            )
+        return self.left_hashes[][row]
+
     def _matches(self, i: Int) -> Bool:
         """Whether probe row i has at least one exact match in the index.
         A null key never matches: `_key_equal` requires both sides valid,
         and the Int64 path checks validity itself."""
-        var hash = self.left_hashes[][i]
+        var hash = self._probe_hash(i)
         var bucket = Int(hash >> 56) >> self.fold
         ref index = self.buckets[][bucket]
         var position = Int(hash & UInt64(index.mask()))
@@ -361,7 +374,7 @@ struct _HashProbeJob(Job):
             for i in range(self.start, self.end):
                 var matched = False
                 if all_valid or probe._valid(i):
-                    var hash = self.left_hashes[][i]
+                    var hash = _mix(bitcast[DType.uint64](probe._get(i)))
                     var bucket = Int(hash >> 56) >> self.fold
                     matched = (
                         _int64_probe_slot(
@@ -409,9 +422,8 @@ struct _HashProbeJob(Job):
         ):
             ref left = self.left_keys[0]._data[Column[Int64]]
             var left_all_valid = len(left._bits[]) == 0
-            # Hashes, keys and buckets through pointers: no reference-count
+            # Keys and buckets through pointers: no reference-count
             # or bounds check per row (#378).
-            var hashes = self.left_hashes[].unsafe_ptr()
             var keys = left._ptr()
             var buckets = self.buckets[].unsafe_ptr()
             for i in range(self.start, self.end):
@@ -420,14 +432,14 @@ struct _HashProbeJob(Job):
                         self.left_rows.append(i)
                         self.right_rows.append(-1)
                     continue
-                var hash = hashes.unsafe_offset(i)[]
+                var key = bitcast[DType.uint64](keys.unsafe_offset(i)[])
+                var hash = _mix(key)
                 var bucket = Int(hash >> 56) >> self.fold
                 ref index = buckets.unsafe_offset(bucket)[]
                 var slots = index.slots.unsafe_ptr()
                 var mask = len(index.slots) - 1
                 var position = Int(hash & UInt64(mask))
                 var matched = False
-                var key = bitcast[DType.uint64](keys.unsafe_offset(i)[])
                 while slots.unsafe_offset(position)[].row >= 0:
                     ref slot = slots.unsafe_offset(position)[]
                     if key == slot.key:
@@ -609,7 +621,7 @@ struct _HashProbeJob(Job):
 
 @fieldwise_init
 struct _HashIndex(Movable):
-    """A built right-row index plus the probe-side hashes it was keyed with."""
+    """A built right-row index; single Int64 probes hash directly from keys."""
 
     var left: List[Series]
     var right: List[Series]
@@ -648,6 +660,17 @@ struct PreparedHashIndex(Copyable):
         for key in left_keys:
             left.append(key.rechunk() if key.is_chunked() else key.copy())
         var workers = worker_count(len(left[0]))
+        if len(left) == 1 and left[0]._data.isa[Column[Int64]]():
+            # Hash fixed-width probe keys as they are read by the workers.
+            # No row-sized hash buffer or separate hashing/histogram pass.
+            return _HashIndex(
+                left^,
+                self.right.copy(),
+                ArcPointer(List[UInt64]()),
+                self.indexes.copy(),
+                self.fold,
+                workers,
+            )
         var hashes = Partitioner(left, workers)
         return _HashIndex(
             left^,
