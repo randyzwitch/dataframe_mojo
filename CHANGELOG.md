@@ -80,6 +80,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Cardinality sampling hashes the same bounded row sample in one pass per
+  key, reducing repeated storage dispatch for contiguous and chunked keys.
 - Partitioned grouping selects indexed or gathered evaluation per aggregate.
   Numeric first/last, standard deviation, variance and distinct counts can
   read source rows directly; decimal and computed reductions use bounded
