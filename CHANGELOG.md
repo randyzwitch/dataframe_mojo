@@ -82,6 +82,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 - Cardinality sampling hashes the same bounded row sample in one pass per
   key, reducing repeated storage dispatch for contiguous and chunked keys.
+- Partitioned grouping selects indexed or gathered evaluation per aggregate.
+  Numeric first/last, standard deviation, variance and distinct counts can
+  read source rows directly; decimal and computed reductions use bounded
+  batches. A median/quantile or categorical expression gathers only its
+  own referenced columns, while all expressions share group IDs.
+- General sorting compares normalized row keys and resolves long-string
+  prefix ties before later keys, avoiding a dense-rank sort for each input
+  column. Packed sorts retain their existing path; rank-based consumers
+  now encode supported keys even when another key needs dense ranking.
 
 - A frame whose columns are all chunked at the same rows (Parquet row
   groups, a partitioned group-by's output) filters chunk by chunk in
