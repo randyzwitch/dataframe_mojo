@@ -540,3 +540,45 @@ def test_shared_null_extension_bits_keep_source_nulls() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_aligned_chunks_filter_any_row_local_predicate() raises:
+    """Frames chunked at the same rows filter chunk by chunk
+    (`DataFrame._filter_chunks`) for any row-local predicate; one that
+    reads the whole column (a mean) still sees every row."""
+    var xs = List[Series]()
+    var ns = List[Series]()
+    var ss = List[Series]()
+    for chunk in range(4):
+        var x = List[Float64](capacity=20_000)
+        var x_valid = List[Bool](capacity=20_000)
+        var n = List[Int64](capacity=20_000)
+        var s = List[String](capacity=20_000)
+        for i in range(20_000):
+            var row = chunk * 20_000 + i
+            x.append(Float64(row % 997) / 10)
+            x_valid.append(row % 13 != 4)
+            n.append(Int64((row * 7919) % 1000))
+            s.append("" if row % 5 == 0 else "v" + String(row % 7))
+        xs.append(Series("x", Column[Float64](x^, x_valid^)))
+        ns.append(Series("n", Column[Int64](n^)))
+        ss.append(Series("s", Column[String](s^)))
+    var frame = DataFrame(
+        [
+            Series._from_chunks(xs^),
+            Series._from_chunks(ns^),
+            Series._from_chunks(ss^),
+        ]
+    )
+    var predicates: List[Expr] = [
+        col("x") > lit(Float64(50)),
+        col("n") < 10,
+        col("s") == "v3",
+        (col("n") < 10) & col("s").ne("") & (col("x") > lit(Float64(1))),
+        (col("n") == 3) | col("x").is_null(),
+        col("x") > col("x").mean(),
+        col("n") > 5000,
+    ]
+    for predicate in predicates:
+        var mask = frame.select(predicate.alias("mask")).column("mask").bool()
+        assert_same(frame.filter(predicate), frame.filter(mask), "aligned")

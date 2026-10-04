@@ -138,6 +138,14 @@ def fused[
             chunked = True
             break
     if chunked and length > 0:
+        # Expression nodes may refer to a source more than once. Prepare each
+        # source window once: slicing it again would apply its offset twice.
+        var sources = List[Int]()
+        var seen = List[Bool](length=len(columns), fill=False)
+        for step in steps:
+            if step.op == COL and not seen[step.source]:
+                sources.append(step.source)
+                seen[step.source] = True
         var output = Series("", BoolColumn(List[Bool]())) if bound.dtypes[
             root
         ] == DataType.BOOL else Series("", Column[Float64]([]))
@@ -147,10 +155,7 @@ def fused[
             var local_columns = columns.copy()
             var local_offsets = List[Int](length=len(columns), fill=cursor)
             var segment_end = end
-            for step in steps:
-                if step.op != COL:
-                    continue
-                var source = step.source
+            for source in sources:
                 if columns[source].is_chunked():
                     var part = columns[source]._chunk_at(cursor)
                     segment_end = min(
@@ -159,12 +164,10 @@ def fused[
                     local_columns[source] = part[0].copy()
                     local_offsets[source] = part[1]
             var segment_length = segment_end - cursor
-            for step in steps:
-                if step.op == COL:
-                    var source = step.source
-                    local_columns[source] = local_columns[source].slice(
-                        local_offsets[source], segment_length
-                    )
+            for source in sources:
+                local_columns[source] = local_columns[source].slice(
+                    local_offsets[source], segment_length
+                )
             var piece = fused[width](
                 bound, local_columns^, root, 0, segment_length
             )
