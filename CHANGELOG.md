@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Hash buckets with multiple non-null offsets-backed string keys cache
+  buffer access for exact row comparisons, avoiding per-key storage
+  dispatch on each hash match.
 - Native sums/means and dense integer/categorical key encoding cache
   validity bitmap pointers and slice offsets outside their row loops,
   reducing repeated metadata reads for nullable inputs.
