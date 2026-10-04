@@ -44,12 +44,12 @@ bump the loader's reference count.
 """
 from std.collections import Optional
 from std.ffi import external_call
-from std.memory import Pointer
+from std.memory import ArcPointer, Pointer
 from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
 
-from .parallel import Pool
+from .parallel import Job, Pool, run_jobs
 from .arrow import (
     ArrowArray,
     ArrowSchema,
@@ -78,6 +78,11 @@ from .expr import (
     col,
 )
 from .frame import DataFrame, concat
+from .categorical import decode_contiguous
+from .column import Column
+from .dtype import DataType
+from .series import Series
+from .string_column import StringCodes, StringColumn
 
 comptime PARQUET_LIBRARY_ENV = "DATAFRAME_PARQUET_LIBRARY"
 
@@ -89,6 +94,11 @@ comptime _RTLD_NOW = Int32(2)
 comptime _ReadFn = def(Int, Int32, Int, Int32, Int, Int32, Int, Int) thin abi(
     "C"
 ) -> Int32
+# int dfq_read_parquet_dict(path, threads, columns, n_columns, row_groups,
+#     n_row_groups, out_array, out_schema, error_out)
+comptime _ReadDictFn = def(
+    Int, Int32, Int, Int32, Int, Int32, Int, Int, Int
+) thin abi("C") -> Int32
 comptime _StreamGet = def(Int, Int) thin abi("C") -> Int32
 comptime _StreamError = def(Int) thin abi("C") -> Int
 comptime _StreamRelease = def(Int) thin abi("C") -> None
@@ -221,7 +231,10 @@ def read_parquet(
     integer and float widths are kept, `date32` becomes Date, timestamps
     keep their unit and time zone, and
     strings, booleans and nulls carry over. Dictionary columns arrive as
-    plain strings and float16 as float32. Lists and structs map recursively;
+    plain strings and float16 as float32. A string column the file stores
+    dictionary-encoded in every selected row group is still a String
+    column, but keeps the dictionary codes beside the strings, and grouping
+    by it compares the codes instead of the strings. Lists and structs map recursively;
     decimals and binary map to their own types.
 
     Selected row groups are decoded one at a time and kept as column chunks.
@@ -415,6 +428,8 @@ struct _Library(Copyable, Movable):
 
     var handle: Int
     var read: Int
+    # dfq_read_parquet_stream_dict, or 0 in a library built before it.
+    var read_dict: Int
     var statistics: Int
     var free: Int
     var version: Int
@@ -433,6 +448,10 @@ struct _Library(Copyable, Movable):
             )
         self.handle = handle
         self.read = Self._symbol(handle, "dfq_read_parquet_stream")
+        var c_name = _c_string("dfq_read_parquet_stream_dict")
+        self.read_dict = external_call["dlsym", Int](
+            handle, c_name.unsafe_ptr()
+        )
         self.statistics = Self._symbol(handle, "dfq_row_group_statistics")
         self.free = Self._symbol(handle, "dfq_free")
         self.version = Self._symbol(handle, "dfq_arrow_version")
@@ -483,6 +502,16 @@ def _read_with_dfparquet(
     Foreign memory is released after each import. The eager result still
     owns the entire output, but Arrow decoding buffers are row-group bounded.
     """
+    var library = _load_library()
+    if library.read_dict != 0:
+        # String columns dictionary-encoded in the file keep their codes
+        # beside the strings (`StringCodes`), so grouping by them groups
+        # the codes. The strings are what the file declares.
+        var coded = _open_parquet_stream(
+            path, columns, row_groups, group_count, use_threads, True
+        )
+        if coded.release != 0:
+            return _collect_stream(coded, True)
     var stream = _open_parquet_stream(
         path, columns, row_groups, group_count, use_threads
     )
@@ -495,6 +524,7 @@ def _open_parquet_stream(
     row_groups: List[Int32],
     group_count: Int,
     use_threads: Bool,
+    dictionaries: Bool = False,
 ) raises -> _ArrowArrayStream:
     """Consume one row group at a time and retain imported buffers as chunks.
 
@@ -521,7 +551,12 @@ def _open_parquet_stream(
         use_threads,
         stream,
         error,
+        dictionaries,
     )
+    if dictionaries and status == 2:
+        # No selected column is dictionary encoded: nothing was opened, and
+        # the stream's release stays 0.
+        return stream^
     if status != 0:
         _release_stream(stream)
         _raise_backend_error(library, error, "read_parquet")
@@ -546,8 +581,12 @@ def _stream_schema(
     )
 
 
-def _collect_stream(mut stream: _ArrowArrayStream) raises -> DataFrame:
-    """Import arrays and release the stream on EOF and every error path."""
+def _collect_stream(
+    mut stream: _ArrowArrayStream, codes: Bool = False
+) raises -> DataFrame:
+    """Import arrays and release the stream on EOF and every error path.
+    With `codes`, categorical batches (dfq_read_parquet_stream_dict) become
+    strings that keep their codes (`_strings_with_codes`)."""
     var frames = List[DataFrame]()
     var pool = Pool(1)
     var initialized = False
@@ -577,6 +616,8 @@ def _collect_stream(mut stream: _ArrowArrayStream) raises -> DataFrame:
             except e:
                 _release_imported(array, schema)
                 raise e^
+        if codes:
+            frames = _strings_with_codes(frames^)
         # The backend emits a schema-bearing empty batch for empty inputs.
         var result = concat(frames)
         _release_stream(stream)
@@ -584,6 +625,62 @@ def _collect_stream(mut stream: _ArrowArrayStream) raises -> DataFrame:
     except e:
         _release_stream(stream)
         raise e^
+
+
+struct _CodedStringsJob(Job):
+    """Decode one chunk of a dictionary column into strings carrying its
+    codes, under the column's final dictionary."""
+
+    var chunk: Series
+    var final: DataType
+    var result: Series
+
+    def __init__(out self, var chunk: Series, final: DataType):
+        self.chunk = chunk^
+        self.final = final
+        self.result = Series("", Column[UInt32](List[UInt32]()))
+
+    def run(mut self) raises:
+        var chunk = self.chunk.rechunk() if self.chunk.is_chunked() else (
+            self.chunk.copy()
+        )
+        ref coded = chunk._data[Column[UInt32]]
+        var shared = coded._data
+        if coded._offset != 0 or len(coded._data[]) != len(coded):
+            var copied = List[UInt32](capacity=len(coded))
+            for i in range(len(coded)):
+                copied.append(coded._get(i))
+            shared = ArcPointer(copied^)
+        var strings = decode_contiguous(chunk.with_dtype(self.final))
+        if strings.is_chunked():
+            strings = strings.rechunk()
+        strings._data[StringColumn]._codes = ArcPointer(
+            StringCodes(shared, self.final)
+        )
+        self.result = strings^
+
+
+def _strings_with_codes(var frames: List[DataFrame]) raises -> List[DataFrame]:
+    """Each categorical column of a dictionary stream as strings carrying
+    their codes, chunks decoded in parallel. A column's codes index one
+    running dictionary that only grows, so the last batch's dictionary
+    holds every earlier code's value and is the one all batches share."""
+    if len(frames) == 0:
+        return frames^
+    var last = len(frames) - 1
+    var jobs = List[_CodedStringsJob]()
+    var places = List[Tuple[Int, Int]]()
+    for c in range(frames[last].width()):
+        var final = frames[last]._columns[c].dtype()
+        if not final.is_categorical():
+            continue
+        for f in range(len(frames)):
+            jobs.append(_CodedStringsJob(frames[f]._columns[c].copy(), final))
+            places.append((f, c))
+    run_jobs(jobs)
+    for k in range(len(jobs)):
+        frames[places[k][0]]._columns[places[k][1]] = jobs[k].result.copy()
+    return frames^
 
 
 def _statistics_with_dfparquet(path: String) raises -> DataFrame:
@@ -614,6 +711,7 @@ def _call_reader(
     use_threads: Bool,
     mut stream: _ArrowArrayStream,
     mut error: Int,
+    dictionaries: Bool = False,
 ) raises -> Int32:
     if len(c_columns) != len(column_pointers):
         raise Error("read_parquet: column pointer table is inconsistent")
@@ -623,7 +721,8 @@ def _call_reader(
     var groups_address = (
         Int(row_groups.unsafe_ptr()) if len(row_groups) > 0 else 0
     )
-    return Pointer(to=library.read).unsafe_bitcast[_ReadFn]()[](
+    var entry = library.read_dict if dictionaries else library.read
+    return Pointer(to=entry).unsafe_bitcast[_ReadFn]()[](
         Int(c_path.unsafe_ptr()),
         Int32(1) if use_threads else Int32(0),
         columns_address,

@@ -16,6 +16,7 @@ them onto the union of both (`unify`), in which the first dictionary's codes
 are unchanged.
 """
 from std.collections import Dict
+from std.memory import ArcPointer
 
 from .bool_column import BoolColumn
 from .column import Column
@@ -25,6 +26,14 @@ from .hashing import encode_string_rows_parallel
 from .parallel import Job, run_jobs, worker_count
 from .series import Series
 from .string_column import StringBuilder, StringColumn
+from .string_view import (
+    STRING_VIEW_INLINE_BYTES,
+    StringView,
+    StringViewStorage,
+    _external_view,
+    _inline_view,
+)
+from .column import _copy_validity
 
 
 def encode(values: Series) raises -> Series:
@@ -55,19 +64,115 @@ def encode(values: Series) raises -> Series:
 
 
 def decode(values: Series) raises -> Series:
-    """A categorical column's values as a String column."""
+    """A categorical column's values as a String column of Arrow string
+    views into one copy of the dictionary's bytes: each row's 16-byte view
+    is its code's, so no string is copied per row. A dictionary past what
+    a view can address is decoded by copying instead."""
     if not values.dtype().is_categorical():
         return values.copy()
     var codes = values.rechunk() if values.is_chunked() else values.copy()
     ref column = codes._data[Column[UInt32]]
     var dictionary = values.dtype().dictionary()
-    var out = StringBuilder(len(column))
-    for i in range(len(column)):
-        if column._valid(i):
-            out.append(dictionary[].get(Int(column._get(i))))
+    if len(dictionary[].bytes) >= Int(UInt32.MAX):
+        return _decode_copying(values.name(), column, dictionary)
+    var buffer = ArcPointer(dictionary[].bytes.copy())
+    var entries = len(dictionary[])
+    var table = List[StringView](capacity=entries)
+    for code in range(entries):
+        var start = Int(dictionary[].offsets[code])
+        var end = Int(dictionary[].offsets[code + 1])
+        var text = Span[UInt8, ImmutAnyOrigin](
+            unsafe_ptr=buffer[]
+            .unsafe_ptr()
+            .unsafe_offset(start)
+            .unsafe_mut_cast[False]()
+            .unsafe_origin_cast[ImmutAnyOrigin](),
+            length=end - start,
+        )
+        if end - start <= STRING_VIEW_INLINE_BYTES:
+            table.append(_inline_view(text))
         else:
-            out.append_null()
-    return Series(values.name(), out^.finish())
+            table.append(_external_view(text, 0, UInt32(start)))
+    var n = len(column)
+    var views = List[StringView](capacity=n)
+    var data = column._ptr()
+    var nulls = column.null_count() > 0
+    var total = 0
+    for i in range(n):
+        if nulls and not column._valid(i):
+            views.append(StringView(0, 0, 0, 0))
+            continue
+        ref view = table[Int(data[unsafe_offset=i])]
+        total += Int(view.length)
+        views.append(view.copy())
+    var size = len(buffer[])
+    var storage = StringViewStorage(
+        views^,
+        [buffer^],
+        (
+            _copy_validity(
+                column._bits[], column._offset, n
+            ) if nulls else List[UInt8]()
+        ),
+        n,
+        total,
+        size,
+    )
+    return Series(values.name(), StringColumn(storage^))
+
+
+def decode_contiguous(values: Series) raises -> Series:
+    """A categorical column's values as a String column with its bytes laid
+    out row after row, which string kernels read faster than views."""
+    var codes = values.rechunk() if values.is_chunked() else values.copy()
+    return _decode_copying(
+        values.name(),
+        codes._data[Column[UInt32]],
+        values.dtype().dictionary(),
+    )
+
+
+def _decode_copying(
+    name: String,
+    column: Column[UInt32],
+    dictionary: ArcPointer[CategoricalDictionary],
+) raises -> Series:
+    var n = len(column)
+    var data = column._ptr()
+    var nulls = column.null_count() > 0
+    var size = 0
+    for i in range(n):
+        if not nulls or column._valid(i):
+            var code = Int(data[unsafe_offset=i])
+            size += Int(
+                dictionary[].offsets[code + 1] - dictionary[].offsets[code]
+            )
+    var bytes = List[UInt8](capacity=size)
+    var offsets = List[Int64](capacity=n + 1)
+    offsets.append(0)
+    var source = dictionary[].bytes.unsafe_ptr()
+    for i in range(n):
+        if not nulls or column._valid(i):
+            var code = Int(data[unsafe_offset=i])
+            var start = Int(dictionary[].offsets[code])
+            var end = Int(dictionary[].offsets[code + 1])
+            bytes.extend(
+                Span(unsafe_ptr=source.unsafe_offset(start), length=end - start)
+            )
+        offsets.append(Int64(len(bytes)))
+    return Series(
+        name,
+        StringColumn(
+            bytes=bytes^,
+            offsets=offsets^,
+            bits=(
+                _copy_validity(
+                    column._bits[], column._offset, n
+                ) if nulls else List[UInt8]()
+            ),
+            length=n,
+        ),
+    )
 
 
 def union_of(

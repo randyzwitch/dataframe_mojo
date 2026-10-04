@@ -80,6 +80,17 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- `read_parquet` keeps the dictionary codes of string columns the file
+  stores dictionary-encoded in every selected row group, beside the strings.
+  The column is still a String column with the same values. Grouping by
+  it groups the codes, then returns string keys: H2O q2 (two string keys,
+  10M rows) 102 → 55 ms, q3 108 → 76 ms (219 → 134 ms with 5% nulls),
+  q10 658 → 527 ms. Reading such a file costs 8–21% more time and up to
+  11% more memory (the codes). libdfparquet gains
+  `dfq_read_parquet_stream_dict`; an older library reads as before.
+- Grouping by one categorical key numbers its rows by direct lookup on the
+  codes instead of the general encoder: H2O q1 (one coded string key) 30 →
+  17 ms, and 23 → 16 ms on sorted data.
 - A filter on `a & b & ...` over 4,096 rows or more evaluates its parts
   one at a time, each only on the rows the earlier ones kept, with parts
   reading strings last. It narrows while a part keeps at most an eighth

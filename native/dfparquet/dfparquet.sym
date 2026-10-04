@@ -4,3 +4,4 @@ _dfq_free
 _dfq_arrow_version
 _dfq_read_parquet_stream
 _dfq_write_parquet
+_dfq_read_parquet_stream_dict
