@@ -5,13 +5,15 @@ work other people chose, not on inputs we shaped. Two audits (#274, and the
 follow-ups #304 and #306–#308) found fast paths whose only trigger was one of
 our own benchmark queries or key layouts. The fix is structural: measure on
 external suites, keep the measuring code apart from the code being measured,
-and make benchmark-shaped paths visible.
+and make benchmark-shaped paths visible. External origin alone does not make a
+suite independent: every bundled suite has now influenced engine work.
 
 ## Rules
 
 1. **Headline numbers come from external suites.** Their queries and data
    generators are defined upstream, so a path that only helps a shape we
-   invented shows no gain there. The in-repo micro-benchmarks
+   invented shows no gain there. These are measurements on named development
+   workloads, not evidence about unseen workloads. The in-repo micro-benchmarks
    (`benchmarks/bench_*.mojo`) remain development tools for one mechanism at
    a time; they are not evidence of general performance.
 2. **Benchmarks and engine changes go in separate PRs.** A PR that changes
@@ -21,10 +23,13 @@ and make benchmark-shaped paths visible.
    `scripts/check_benchmark_separation.sh` enforces this in CI; a PR that
    genuinely needs both (for example, this one, which adds tracing hooks and
    the suites together) says why in a `Benchmark-Change:` commit trailer.
-3. **Development and held-out suites.** Tune against the development suites.
-   Report from the held-out suites and do not read their per-query results to
-   decide what to optimize. A change that helps the development suites but
-   not the held-out ones probably does not generalize.
+3. **Record exposure honestly.** H2O, PDS-H and ClickBench are all
+   development suites. PDS-H join-order policies and ClickBench aggregation
+   policies already cite their per-query results in the engine. Their former
+   "held-out" label was incorrect. New seeds, scales and variants of these
+   queries are robustness checks, not independent validation. No bundled
+   suite currently supplies independent validation; use the protocol below
+   before making such a claim.
 4. **Every measurement includes perturbed data.** The data variants below
    always run, and the report puts each query's worst variant beside its base
    result. A fast path that fires only on sorted keys, or only without nulls,
@@ -46,10 +51,10 @@ follow on every change; the full tier is what a report cites.
 
 | Suite | Role | Source | Queries | Variants |
 |---|---|---|---:|---|
-| `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | 100, 10 and 2 groups per key; 5% nulls; sorted |
+| `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | cardinality parameter k=100, 10 and 2; 5% nulls; sorted |
 | `h2o_join` | development | db-benchmark join | 5 | none; 5% nulls |
-| `pdsh` | held-out | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
-| `clickbench` | held-out | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
+| `pdsh` | development | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
+| `clickbench` | development | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
 
 The H2O data follows db-benchmark's R generators with seeded Polars sampling,
 so distributions match but values do not. TPC-H tables come from DuckDB's
@@ -67,17 +72,16 @@ Queries live in `benchmarks/suites/`:
 - `engines.py`: DuckDB runs the upstream SQL (db-benchmark's queries,
   `tpch_queries()`, ClickBench's `queries.sql`); Polars runs idiomatic lazy
   translations.
-- `h2o.mojo`, `pdsh.mojo`: this library's eager API, filtering each input
-  before joining, because the lazy join cannot yet join on differently named
-  keys, which every TPC-H join needs. In the `decimal` variant, `pdsh.mojo`
+- `h2o.mojo`: this library's eager API; `pdsh.mojo`: lazy query plans,
+  including joins with differently named keys. In the `decimal` variant, `pdsh.mojo`
   writes money literals as decimals and converts to Float64 where a query
   divides or compares with an average, as DuckDB's DOUBLE division does;
   this library does not mix decimal and float operands implicitly.
 - `clickbench.mojo`: the lazy API, whose projection pushdown reads only the
   columns each query uses from the 105-column table.
 
-A query this library cannot express is reported as unsupported with the
-missing feature: ClickBench q28 (regular expressions, #219).
+A query an engine cannot express is reported as unsupported with its reason;
+failed and unsupported queries remain visible in the report.
 
 ## Running
 
@@ -92,10 +96,10 @@ pixi run -e native build-dfparquet                                   # once
 pixi run -e oracle python3 scripts/bench_suites.py --baseline main
 
 # For a report: hours; run it occasionally, not per change.
-pixi run -e oracle python3 scripts/bench_suites.py --tier full --heldout
+pixi run -e oracle python3 scripts/bench_suites.py --tier full --all-suites
 ```
 
-**Quick** (the default) runs the development suites at 1M rows with every
+**Quick** (the default) runs the two H2O development suites at 1M rows with every
 data variant, three rounds of three timed runs, and times only this library.
 `--baseline REF` builds the suite runners against the library at `REF`
 (checked out once as a git worktree under `build/suites/baseline/`, cached by
@@ -103,12 +107,15 @@ commit) and alternates the two builds. The report opens with **Changes vs
 baseline**: only the cells where every round of one build beat every round
 of the other by more than 3%. Polars and DuckDB outcomes come from a
 reference cache keyed by data file, engine version, thread count and
-repetitions, because their code does not change when this library does.
+repetitions and reference query-source hash, because their code does not
+change when this library does.
 Narrow a run with `--suites h2o_join` or `--queries q1,q2`.
 
-**Full** runs at 10M rows (TPC-H scale factor 1, 10M ClickBench rows with
-`--heldout`), three rounds, measures every engine afresh and records
-fast-path coverage.
+**Full** runs all four development suites at 10M rows (TPC-H scale factor 1,
+10M ClickBench rows), three rounds, measures every engine afresh and records
+fast-path coverage. `--all-suites` also selects all four with the quick tier;
+`--suites` can explicitly narrow either tier. The deprecated `--heldout`
+option still adds PDS-H and ClickBench, with a warning about their exposure.
 
 Both tiers give each (suite, variant, engine, round) its own process, which
 loads the tables once, untimed, then warms up and times each query. The
@@ -117,7 +124,19 @@ worker and flags a busy host in the report. It writes raw samples with
 provenance to `build/suites/results.json` and the report beside it, as
 Markdown (`results.md`) and as a self-contained HTML page (`results.html`,
 from `scripts/bench_html.py`) that opens in any browser; `--report-from`
-re-renders both from a saved file.
+re-renders both from a saved file. Provenance includes engine and benchmark
+working-tree status, local query/generator/runner SHA-256 hashes and an
+exposure record for each selected suite. These identify the local workload;
+historical upstream commits were not recorded and remain explicitly unknown.
+DuckDB's recorded version identifies its `tpch_queries` and `dbgen` implementation.
+
+Re-rendering older raw JSON preserves its samples and displays a legacy
+exposure warning; it does not retroactively create an independence record.
+The coverage table separates distinct suite/query pairs from query/variant
+cases: five variants of one query are still one query when evaluating how
+widely a specialized path is exercised. Instrumentation includes all literal
+`trace_path` names, including nested paths and lazy/rank paths. Paths without
+instrumentation are outside this report's coverage.
 
 Two limits apply when reading a comparison. Timings on a shared machine move
 with its load: prefer a quiet host, and rerun before acting on a small
@@ -128,6 +147,33 @@ single cells, and confirm a single-query change on the full tier.
 
 `--scale` overrides the tier's size: `smoke` (seconds; CI checks answers at
 this size), `dev` (1M rows), `default` (10M) or `large` (100M).
+
+## Independent validation protocol
+
+There is no independent-validation result in the bundled reports. To obtain
+one, arrange a separate evaluation before exposing its workloads:
+
+1. A reviewer outside the optimization work selects workloads that have not
+   been inspected or used for tuning by the engine authors. Record who held
+   the selection, its source/generator revisions, query and input hashes,
+   selection rules, and any prior exposure. New random data for an exposed
+   query template does not qualify as a new unseen workload.
+2. Freeze the engine commit, compiler/dependency versions, worker counts,
+   resource limits, comparison engines, answer checks, query coverage and
+   analysis plan before revealing queries or per-query outcomes. Retain the
+   frozen manifest and the time it was committed for review.
+3. Run that fixed evaluation once under the same conditions for every
+   engine. Publish all preselected cases, failures, raw samples and aggregate
+   results, with the selection and exposure record. Do not omit unfavorable
+   cases or retune thresholds during this evaluation.
+4. Once results are opened, mark the workloads exposed. Any fixes or tuning
+   informed by them belong to development; a new claim of independent
+   generalization requires a fresh, separately held evaluation.
+
+These records support an auditable claim; a CLI flag or a source hash cannot
+prove that people have not seen a workload. `bench_suites.py` therefore always
+records the bundled suites as development and never promotes them to
+independent validation.
 
 ## Answer checks
 

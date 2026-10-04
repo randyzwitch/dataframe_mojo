@@ -8,8 +8,8 @@ build-dfparquet):
     # against main, Polars/DuckDB from the reference cache.
     pixi run -e oracle python3 scripts/bench_suites.py --baseline main
 
-    # A report: 10M rows, three rounds, fast-path coverage, held-out suites.
-    pixi run -e oracle python3 scripts/bench_suites.py --tier full --heldout
+    # A report: 10M rows, three rounds, fast-path coverage, all development suites.
+    pixi run -e oracle python3 scripts/bench_suites.py --tier full --all-suites
 
 One worker process per (suite, variant, engine, round) loads the tables once
 (untimed), then warms up and times --reps runs of each query; the per-round
@@ -39,14 +39,14 @@ sys.path.insert(0, str(SUITES_DIR))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import bench_html  # noqa: E402
+import bench_policy  # noqa: E402
 import datagen  # noqa: E402
 from bench_host import compiler_processes  # noqa: E402
 
 ENGINES = ("mojo", "polars", "duckdb")
 
-# Development suites may be used to find and tune optimizations. Held-out
-# suites are only for reporting: nobody reads their per-query results to
-# decide what to optimize (docs/benchmarks.md).
+# Every bundled suite has been used to guide engine work. External origin
+# does not establish independence; preserve exposure in each saved result.
 SUITES = {
     "h2o_groupby": {
         "role": "dev",
@@ -61,13 +61,13 @@ SUITES = {
         "source": "H2O.ai db-benchmark (duckdblabs/db-benchmark) join",
     },
     "pdsh": {
-        "role": "heldout",
+        "role": "dev",
         "runner": "pdsh",
         "queries": [f"q{i}" for i in range(1, 23)],
         "source": "PDS-H (pola-rs/polars-benchmark), TPC-H derived",
     },
     "clickbench": {
-        "role": "heldout",
+        "role": "dev",
         "runner": "clickbench",
         "queries": [f"q{i}" for i in range(0, 43)],
         "source": "ClickBench (ClickHouse/ClickBench) hits",
@@ -105,7 +105,7 @@ TIERS = {
         "trace": False,
     },
     "full": {
-        "suites": "h2o_groupby,h2o_join",
+        "suites": ",".join(SUITES),
         "scale": "default",
         "rounds": 3,
         "reps": 3,
@@ -437,6 +437,20 @@ def provenance(args):
         "rounds": args.rounds,
         "reps": args.reps,
         "data_root": str(datagen.data_root()),
+        "benchmark_dirty": bool(
+            run(
+                [
+                    "git",
+                    "status",
+                    "--porcelain",
+                    "benchmarks/suites",
+                    "scripts/bench_suites.py",
+                    "scripts/bench_html.py",
+                    "scripts/bench_policy.py",
+                ]
+            )
+        ),
+        "evaluation": bench_policy.record(ROOT, args.suites.split(","), SUITES),
     }
 
 
@@ -456,7 +470,16 @@ def _cache_key(engine, paths, args):
         f"{Path(p).name}:{Path(p).stat().st_size}:{int(Path(p).stat().st_mtime)}"
         for p in paths.values()
     )
-    return f"{engine} {version} threads={args.threads} reps={args.reps} " + " ".join(files)
+    # Cached reference answers/timings must match the query implementation.
+    import hashlib
+
+    implementation = hashlib.sha256(
+        (SUITES_DIR / "engines.py").read_bytes()
+    ).hexdigest()
+    return (
+        f"{engine} {version} source={implementation} threads={args.threads} reps={args.reps} "
+        + " ".join(files)
+    )
 
 
 def load_reference(suite, variant, engine, paths, args):
@@ -520,7 +543,14 @@ def measure(args):
         if args.queries:
             queries = [q for q in queries if q in args.queries.split(",")]
         for variant in variants:
-            plan.append((suite, variant, queries, tables(suite, variant, args.scale)))
+            plan.append(
+                (suite, variant, queries, tables(suite, variant, args.scale))
+            )
+
+    result["query_plan"] = [
+        {"suite": suite, "variant": variant, "queries": queries}
+        for suite, variant, queries, _ in plan
+    ]
 
     def save():
         if args.output:
@@ -566,7 +596,10 @@ def measure(args):
                 )
                 runs += record(outcomes, suite, variant, engine, round_number)
             save_reference(suite, variant, engine, paths, args, runs)
-            print(f"{suite}/{variant} {engine}: measured and cached", file=sys.stderr)
+            print(
+                f"{suite}/{variant} {engine}: measured and cached",
+                file=sys.stderr,
+            )
     save()
 
     # Engines under test, alternating order so no build always runs first.
@@ -679,10 +712,21 @@ def report(result):
         "correctly.",
         "",
     ]
+    lines += ["**" + bench_policy.report_note(result) + "**", ""]
+    evaluation = info.get("evaluation")
+    if evaluation:
+        lines += [
+            "Local benchmark manifest: `"
+            + evaluation["manifest_sha256"]
+            + "`.",
+            "",
+        ]
     if result.get("baseline"):
         lines += [
             f"`{result['baseline']}` is this library built at the baseline "
-            "revision; `vs " + result["baseline"] + "` above 1 means the change "
+            "revision; `vs "
+            + result["baseline"]
+            + "` above 1 means the change "
             "is slower there.",
             "",
         ]
@@ -710,25 +754,14 @@ def report(result):
     for suite in SUITES:
         if any(key[0] == suite for key in cells):
             suites.append(suite)
-    for role, title, note in [
-        (
-            "dev",
-            "Development suites",
-            "Use these to find and tune optimizations.",
-        ),
-        (
-            "heldout",
-            "Held-out suites",
-            "Report-only. Do not use per-query results here to choose what "
-            "to optimize; a change that helps the development suites but not "
-            "these probably does not generalize (docs/benchmarks.md).",
-        ),
-    ]:
-        chosen = [s for s in suites if SUITES[s]["role"] == role]
-        if not chosen:
-            continue
-        lines += [f"## {title}", "", note, ""]
-        for suite in chosen:
+    if suites:
+        lines += [
+            "## Development suites",
+            "",
+            "Use these results to diagnose and tune the engine; they do not measure unseen-workload generalization.",
+            "",
+        ]
+        for suite in suites:
             lines += _suite_table(suite, cells, engines)
     if result.get("trace"):
         lines += _coverage(result["trace"])
@@ -867,7 +900,7 @@ def _suite_table(suite, cells, all_engines):
 def instrumented_paths():
     found = set()
     for path in (ROOT / "dataframe").glob("*.mojo"):
-        found.update(re.findall(r'"((?:join|group_by|filter|sort)\.[a-z_]+)"', path.read_text()))
+        found.update(re.findall(r'trace_path\(\s*"([^"]+)"', path.read_text()))
     return sorted(found)
 
 
@@ -884,13 +917,16 @@ def _coverage(trace):
         "fast path; check that its trigger is a data property with real "
         "examples (docs/benchmarks.md, rule 5).",
         "",
-        "| Path | Queries | Examples |",
-        "|---|---:|---|",
+        "| Path | Distinct queries | Query/variant cases | Examples |",
+        "|---|---:|---:|---|",
     ]
     for path in sorted(hits, key=lambda p: (len(hits[p]), p)):
-        flag = " **(one query)**" if len(hits[path]) == 1 else ""
+        distinct = len(bench_policy.distinct_queries(hits[path]))
+        flag = " **(one query)**" if distinct == 1 else ""
         examples = ", ".join(sorted(hits[path])[:4])
-        lines.append(f"| `{path}`{flag} | {len(hits[path])} | {examples} |")
+        lines.append(
+            f"| `{path}`{flag} | {distinct} | {len(hits[path])} | {examples} |"
+        )
     never = [p for p in instrumented_paths() if p not in hits]
     lines.append("")
     if never:
@@ -905,7 +941,8 @@ def _coverage(trace):
 
 def main():
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--tier",
@@ -920,9 +957,14 @@ def main():
     )
     parser.add_argument("--suites", default=None)
     parser.add_argument(
+        "--all-suites",
+        action="store_true",
+        help="run every bundled development suite (default for full tier)",
+    )
+    parser.add_argument(
         "--heldout",
         action="store_true",
-        help="also run the held-out suites (pdsh, clickbench)",
+        help="deprecated alias: also run pdsh and clickbench, both development suites",
     )
     parser.add_argument("--engines", default="mojo,polars,duckdb")
     parser.add_argument("--queries", default="", help="comma-separated subset")
@@ -970,16 +1012,21 @@ def main():
     for name, value in TIERS[args.tier].items():
         if getattr(args, name) is None:
             setattr(args, name, value)
+    if args.all_suites:
+        args.suites = ",".join(SUITES)
     if args.heldout:
+        print(
+            "--heldout is deprecated: PDS-H and ClickBench are exposed development suites; use --all-suites.",
+            file=sys.stderr,
+        )
         args.suites += ",pdsh,clickbench"
+    args.suites = ",".join(dict.fromkeys(args.suites.split(",")))
     if args.report_from:
         result = json.loads(args.report_from.read_text())
     else:
         start = time.monotonic()
         result = measure(args)
-        print(
-            f"measured in {time.monotonic() - start:.0f} s", file=sys.stderr
-        )
+        print(f"measured in {time.monotonic() - start:.0f} s", file=sys.stderr)
     text = report(result)
     print(text)
     page = bench_html.render(
@@ -989,6 +1036,7 @@ def main():
         args.output.with_suffix(".md").write_text(text)
         args.output.with_suffix(".html").write_text(page)
     elif args.report_from:
+        args.report_from.with_suffix(".md").write_text(text)
         args.report_from.with_suffix(".html").write_text(page)
         print(f"wrote {args.report_from.with_suffix('.html')}", file=sys.stderr)
     if args.check:
