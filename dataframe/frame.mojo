@@ -120,7 +120,12 @@ from .hashing import (
 from .groups import GroupIndices
 from .top_k import top_k_mask
 from .hash_agg import hash_agg_eligible, hash_aggregate
-from .indexed_reduce import indexed_reductions, reduce_indexed
+from .row_sort import row_arg_sort
+from .indexed_reduce import (
+    indexed_reductions,
+    reduce_indexed,
+    reduce_indexed_batches,
+)
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
 from .lazy import LazyFrame
@@ -984,7 +989,19 @@ struct DataFrame(Copyable, Sized, Writable):
             if packed:
                 trace_path("sort.packed")
                 return packed.take()
-        return sort_indices(self._sort_ranks(by, descending, nulls_last))
+        var keys = List[Series]()
+        var fixed = (
+            len(by) > 0
+            and len(descending) == len(by)
+            and len(nulls_last) == len(by)
+        )
+        for name in by:
+            keys.append(self.column(name))
+            fixed = fixed and encodable(keys[len(keys) - 1])
+        if fixed:
+            return sort_indices(encode_sort_keys(keys, descending, nulls_last))
+        trace_path("sort.row_prefix")
+        return row_arg_sort(keys, descending, nulls_last)
 
     def top_k(self, k: Int, by: List[String]) raises -> Self:
         """The k rows that sort(by, descending=True) would put first.
@@ -1120,36 +1137,32 @@ struct DataFrame(Copyable, Sized, Writable):
         if fixed:
             return encode_sort_keys(keys, descending, nulls_last)
 
-        # Ranking a column is serial and is the largest part of a sort, so
-        # several key columns are ranked at once. One column per job, not
-        # one row range per job: ranking sorts the values, which a row range
-        # cannot do independently. This is also why it is one `run_jobs`
-        # call -- each costs about 1.3 ms in thread creation at 32 threads,
-        # there being no pool yet (#103), which is enough to swallow the
-        # gain if it is paid per round.
-        if len(by) > 1 and worker_count(self.height()) > 1:
-            var jobs = List[_RankJob](capacity=len(by))
-            for i in range(len(by)):
-                jobs.append(
-                    _RankJob(
-                        self._columns[self._index(by[i])].copy(),
-                        descending[i],
-                        nulls_last[i],
-                    )
-                )
-            run_jobs(jobs)
-            var ranked = List[List[Int]](capacity=len(by))
-            for i in range(len(jobs)):
-                ranked.append(jobs[i].ranks.copy())
-            return ranked^
-
-        var ranks = List[List[Int]](capacity=len(by))
+        # Small top-k and window consumers still need rank-compatible
+        # words. Only unsupported keys require a value sort: retain direct
+        # encoding for every other key when one long string/decimal is here.
+        var jobs = List[_RankJob]()
+        var positions = List[Int](length=len(by), fill=-1)
         for i in range(len(by)):
-            ranks.append(
-                self._columns[self._index(by[i])]._sort_ranks(
-                    descending[i], nulls_last[i]
+            if not encodable(keys[i]):
+                positions[i] = len(jobs)
+                jobs.append(
+                    _RankJob(keys[i].copy(), descending[i], nulls_last[i])
                 )
-            )
+        if worker_count(self.height()) > 1:
+            run_jobs(jobs)
+        else:
+            for j in range(len(jobs)):
+                jobs[j].run()
+        var ranks = List[List[Int]]()
+        for i in range(len(by)):
+            if positions[i] >= 0:
+                ranks.append(jobs[positions[i]].ranks.copy())
+            else:
+                var words = encode_sort_keys(
+                    [keys[i].copy()], [descending[i]], [nulls_last[i]]
+                )
+                while len(words) > 0:
+                    ranks.append(words.pop(0))
         return ranks^
 
     def join(
@@ -4780,9 +4793,8 @@ struct _HashedBucketJob(Job):
     var columns: List[Series]
     var expressions: List[Expr]
     var batch_size: Int
-    # Whether `columns` are the whole source columns, read through `order`
-    # (`indexed_reduce.mojo`), rather than this bucket's gathered slices.
-    var indexed: Bool
+    var sources: List[Series]
+    var indexed: List[Bool]
     var result: List[Series]
     var firsts: List[Int]
 
@@ -4796,7 +4808,8 @@ struct _HashedBucketJob(Job):
         var columns: List[Series],
         expressions: List[Expr],
         batch_size: Int,
-        indexed: Bool = False,
+        sources: List[Series],
+        indexed: List[Bool],
     ):
         self.keys = keys.copy()
         self.hashes = hashes
@@ -4806,7 +4819,8 @@ struct _HashedBucketJob(Job):
         self.columns = columns^
         self.expressions = expressions.copy()
         self.batch_size = batch_size
-        self.indexed = indexed
+        self.sources = sources.copy()
+        self.indexed = indexed.copy()
         self.result = List[Series]()
         self.firsts = List[Int]()
 
@@ -4829,39 +4843,38 @@ struct _HashedBucketJob(Job):
         )
         for key in self.keys:
             self.result.append(key.take(firsts))
-        var bound = _bind_all(self.expressions, self.columns)
-        if self.indexed:
-            var rows = order.unsafe_ptr().unsafe_offset(self.lo)
-            for expression in bound:
+        var rows = order.unsafe_ptr().unsafe_offset(self.lo)
+        for i in range(len(self.expressions)):
+            if self.indexed[i]:
+                var expression = bind(self.expressions[i], self.sources)
+                var result: Series
+                if indexed_reductions([expression.copy()], self.sources):
+                    result = reduce_indexed(
+                        expression, self.sources, rows, ids, len(firsts)
+                    )
+                else:
+                    result = reduce_indexed_batches(
+                        expression,
+                        self.sources,
+                        rows,
+                        ids,
+                        len(firsts),
+                        self.batch_size,
+                    )
+                self.result.append(result.renamed(self.expressions[i]._name))
+            else:
+                var expression = bind(self.expressions[i], self.columns)
                 self.result.append(
-                    reduce_indexed(
-                        expression, self.columns, rows, ids, len(firsts)
-                    ).renamed(expression.expr._name)
+                    evaluate(
+                        expression,
+                        self.columns,
+                        self.hi - self.lo,
+                        batch_size=self.batch_size,
+                        grouped=True,
+                        groups=ids,
+                        group_count=len(firsts),
+                    )
                 )
-            self.firsts = firsts^
-            return
-        if self.indexed:
-            var rows = order.unsafe_ptr().unsafe_offset(self.lo)
-            for expression in bound:
-                self.result.append(
-                    reduce_indexed(
-                        expression, self.columns, rows, ids, len(firsts)
-                    ).renamed(expression.expr._name)
-                )
-            self.firsts = firsts^
-            return
-        for expression in bound:
-            self.result.append(
-                evaluate(
-                    expression,
-                    self.columns,
-                    self.hi - self.lo,
-                    batch_size=self.batch_size,
-                    grouped=True,
-                    groups=ids,
-                    group_count=len(firsts),
-                )
-            )
         self.firsts = firsts^
 
 
@@ -5089,6 +5102,43 @@ struct GroupBy(Copyable):
                 columns.append(column.copy())
         return columns^
 
+    def _partitioned_references(
+        self, bound: List[BoundExpr]
+    ) -> Tuple[List[Bool], List[Series], List[Series]]:
+        """Per-expression capabilities and distinct indexed/gathered sources.
+
+        A column shared by both routes intentionally appears in both lists;
+        a supported-only source never enters the full-column gather.
+        """
+        var indexed = List[Bool]()
+        var fallback = List[BoundExpr]()
+        var direct = List[BoundExpr]()
+        for expression in bound:
+            var capable = _stream_reductions([expression.expr.copy()])
+            # Categorical evaluation decodes/re-encodes dictionary values;
+            # nested expressions have their own preparation requirements.
+            # Keep those on the ordinary evaluator, independently of other
+            # aggregates in the same request.
+            for dtype in expression.dtypes:
+                if dtype.is_categorical() or dtype.is_nested():
+                    capable = False
+            for i in range(len(expression.expr._nodes)):
+                if (
+                    expression.expr._nodes[i].op == COL
+                    and expression.sources[i] >= 0
+                ):
+                    var dtype = self._frame._columns[
+                        expression.sources[i]
+                    ].dtype()
+                    if dtype.is_categorical() or dtype.is_nested():
+                        capable = False
+            indexed.append(capable)
+            if capable:
+                direct.append(expression.copy())
+            else:
+                fallback.append(expression.copy())
+        return (indexed^, self._referenced(direct), self._referenced(fallback))
+
     def _agg_partitioned(
         self,
         expressions: List[Expr],
@@ -5131,17 +5181,25 @@ struct GroupBy(Copyable):
             # Encode each bucket from the key hashes. Plain reductions read
             # values at their source rows; others gather values into bucket
             # order first.
-            var indexed = indexed_reductions(bound, self._frame._columns)
-            var values: List[Series]
-            if indexed:
+            var preparation = self._partitioned_references(bound)
+            var indexed = preparation[0].copy()
+            var sources = preparation[1].copy()
+            var gathered_sources = preparation[2].copy()
+            var any_indexed = False
+            var any_fallback = False
+            for capable in indexed:
+                any_indexed = any_indexed or capable
+                any_fallback = any_fallback or not capable
+            for i in range(len(sources)):
+                if sources[i].is_chunked():
+                    sources[i] = sources[i].rechunk()
+            if any_indexed:
                 trace_path("group_by.partitioned.indexed")
-                values = List[Series](capacity=len(referenced))
-                for column in referenced:
-                    values.append(
-                        column.rechunk() if column.is_chunked() else column.copy()
-                    )
-            else:
-                values = take_parallel(referenced, parts.order.copy(), workers)
+            if any_indexed and any_fallback:
+                trace_path("group_by.partitioned.mixed")
+            var values = take_parallel(
+                gathered_sources, parts.order.copy(), workers
+            )
             var jobs = List[_HashedBucketJob]()
             for b in range(buckets):
                 var lo = parts.bounds[b]
@@ -5150,9 +5208,7 @@ struct GroupBy(Copyable):
                     continue
                 var bucket_columns = List[Series](capacity=len(values))
                 for column in values:
-                    bucket_columns.append(
-                        column.copy() if indexed else column.slice(lo, hi - lo)
-                    )
+                    bucket_columns.append(column.slice(lo, hi - lo))
                 jobs.append(
                     _HashedBucketJob(
                         partitioner.keys,
@@ -5163,6 +5219,7 @@ struct GroupBy(Copyable):
                         bucket_columns^,
                         expressions,
                         batch_size,
+                        sources,
                         indexed,
                     )
                 )
