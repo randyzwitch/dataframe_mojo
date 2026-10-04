@@ -418,6 +418,12 @@ def _append_bits(
         bits[last + source_bytes] = tail >> right_shift
 
 
+@always_inline
+def _validity_at(bits: Pointer[UInt8, _], index: Int) -> Bool:
+    """Read a known in-bounds bit from a cached nonempty bitmap."""
+    return (bits.unsafe_offset(index // 8)[] >> UInt8(index % 8)) & 1 == 1
+
+
 # Arrow/Polars validity is absent until the first null. An empty validity
 # list represents that absence; payload bitmaps always use the raw helpers.
 def _validity_bit(bits: List[UInt8], index: Int) -> Bool:
