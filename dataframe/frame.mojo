@@ -3,7 +3,7 @@ from .dtype import DataType
 from std.collections import Dict, Optional
 from std.sys import num_physical_cores
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
-from .bool_column import BoolColumn
+from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _append_validity, _pack_bits
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
@@ -20,6 +20,7 @@ from .expr import (
     is_reduction,
     is_window,
     subtree,
+    conjuncts,
     OVER,
     MIN,
     MAX,
@@ -2061,12 +2062,88 @@ struct DataFrame(Copyable, Sized, Writable):
                         bound.expr._nodes[node.right].floating,
                     )
                 )
+        var parts = conjuncts(predicates[0])
+        if (
+            len(parts) > 1
+            and self._height >= SELECTIVE_FILTER_ROWS
+            and _row_local(parts)
+        ):
+            trace_path("filter.selective_and")
+            return self._filter_selective(parts, batch_size)
+        return self.filter(self._predicate_mask(bound, batch_size))
+
+    def _predicate_mask(
+        self, bound: BoundExpr, batch_size: Int
+    ) raises -> BoolColumn:
         var result = evaluate(
             bound, self._columns, self._height, batch_size=batch_size
         )
         if bound.shape() != ROWS:
             result = result._broadcast(self._height)
-        return self.filter(result.bool())
+        return result.bool()
+
+    def _filter_selective(
+        self, parts: List[Expr], batch_size: Int
+    ) raises -> Self:
+        """Filter by the AND of row-local `parts`, each evaluated only on
+        the rows the earlier ones kept, as DuckDB's conjunction filters
+        narrow a selection vector: ClickBench q37 compared all 10M titles
+        with "" although its counter and date parts keep few rows.
+
+        Parts reading only numbers run before parts reading strings, and
+        otherwise in written order. Narrowing gathers the columns later
+        parts read, which pays when a part keeps at most an eighth of its
+        rows, or half when a string comparison is still to come. Past that
+        the remaining parts run together on the same rows and the masks
+        combine: PDS-H q6's year of lineitem dates keeps a seventh, and its
+        cheap numeric parts were 36% slower on gathered rows.
+        """
+        var order = List[Int]()
+        for late in [False, True]:
+            for k in range(len(parts)):
+                if _reads_strings(parts[k], self) == late:
+                    order.append(k)
+        var current = self.copy()
+        var rows = List[Int]()
+        var whole = True
+        var k = 0
+        while k < len(order):
+            var mask = current._predicate_mask(
+                bind(parts[order[k]], current._columns), batch_size
+            )
+            k += 1
+            if k < len(order):
+                var strings = _reads_strings(parts[order[len(order) - 1]], self)
+                var limit = current._height // (2 if strings else 8)
+                if true_count(mask) > limit:
+                    var rest = parts[order[k]].copy()
+                    for j in range(k + 1, len(order)):
+                        rest = rest & parts[order[j]]
+                    var other = current._predicate_mask(
+                        bind(rest, current._columns), batch_size
+                    )
+                    var both = both_true(mask, other)
+                    if whole:
+                        return self.filter(both)
+                    mask = both^
+                    k = len(order)
+            var kept = true_rows(mask)
+            if not whole:
+                for i in range(len(kept)):
+                    kept[i] = rows[kept[i]]
+            if k < len(order):
+                # Only the columns later parts read are carried forward.
+                var names = List[String]()
+                for j in range(k, len(order)):
+                    for name in _column_names(parts[order[j]]):
+                        if name not in names:
+                            names.append(name)
+                if len(names) == 0:
+                    names.append(self._columns[0].name())
+                current = self.select(names)._filter_rows(kept.copy())
+            rows = kept^
+            whole = False
+        return self._filter_rows(rows^)
 
     def unpivot(
         self,
@@ -5172,6 +5249,25 @@ def _is_untyped(value: Expr) -> Bool:
         if node.op == LIT_BOOL or node.op == LIT_STRING or node.op == LIT_NULL:
             return False
     return True
+
+
+comptime SELECTIVE_FILTER_ROWS = 4096
+"""Frames shorter than this evaluate an AND filter whole."""
+
+
+def _column_names(expr: Expr) -> List[String]:
+    var names = List[String]()
+    for node in expr._nodes:
+        if node.op == COL and node.text not in names:
+            names.append(node.text)
+    return names^
+
+
+def _reads_strings(expr: Expr, frame: DataFrame) raises -> Bool:
+    for name in _column_names(expr):
+        if frame.column(name).dtype().physical() == DataType.STRING:
+            return True
+    return False
 
 
 def _row_local(exprs: List[Expr]) -> Bool:
