@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Grouped sums and means of plain Int64/Float64 columns feed the existing
+  reducer kernels by source interval, avoiding per-batch expression setup.
+
 - Hash joins with one Int64 probe key hash it as each worker reads it,
   removing the probe hash/histogram pass and an eight-byte-per-row buffer.
 
