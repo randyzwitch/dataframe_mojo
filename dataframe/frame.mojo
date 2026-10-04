@@ -118,7 +118,9 @@ from .hashing import (
     encode_string_rows_parallel,
 )
 from .groups import GroupIndices
+from .top_k import top_k_mask
 from .hash_agg import hash_agg_eligible, hash_aggregate
+from .indexed_reduce import indexed_reductions, reduce_indexed
 from .expr_kernels import choose, validity
 from .selectors import expand, expand_all
 from .lazy import LazyFrame
@@ -2020,6 +2022,11 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error("Filter expression must return Boolean values")
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        # Each partition's first k rows by ordinal rank: no rank computed.
+        var top = top_k_mask(bound, self._columns, self._height)
+        if top:
+            trace_path("filter.top_k_per_partition")
+            return self.filter(top.value())
         if len(bound.expr._nodes) == 3:
             ref node = bound.expr._nodes[2]
             if (
@@ -4644,6 +4651,9 @@ struct _HashedBucketJob(Job):
     var columns: List[Series]
     var expressions: List[Expr]
     var batch_size: Int
+    # Whether `columns` are the whole source columns, read through `order`
+    # (`indexed_reduce.mojo`), rather than this bucket's gathered slices.
+    var indexed: Bool
     var result: List[Series]
     var firsts: List[Int]
 
@@ -4657,6 +4667,7 @@ struct _HashedBucketJob(Job):
         var columns: List[Series],
         expressions: List[Expr],
         batch_size: Int,
+        indexed: Bool = False,
     ):
         self.keys = keys.copy()
         self.hashes = hashes
@@ -4666,6 +4677,7 @@ struct _HashedBucketJob(Job):
         self.columns = columns^
         self.expressions = expressions.copy()
         self.batch_size = batch_size
+        self.indexed = indexed
         self.result = List[Series]()
         self.firsts = List[Int]()
 
@@ -4689,6 +4701,26 @@ struct _HashedBucketJob(Job):
         for key in self.keys:
             self.result.append(key.take(firsts))
         var bound = _bind_all(self.expressions, self.columns)
+        if self.indexed:
+            var rows = order.unsafe_ptr().unsafe_offset(self.lo)
+            for expression in bound:
+                self.result.append(
+                    reduce_indexed(
+                        expression, self.columns, rows, ids, len(firsts)
+                    ).renamed(expression.expr._name)
+                )
+            self.firsts = firsts^
+            return
+        if self.indexed:
+            var rows = order.unsafe_ptr().unsafe_offset(self.lo)
+            for expression in bound:
+                self.result.append(
+                    reduce_indexed(
+                        expression, self.columns, rows, ids, len(firsts)
+                    ).renamed(expression.expr._name)
+                )
+            self.firsts = firsts^
+            return
         for expression in bound:
             self.result.append(
                 evaluate(
@@ -4936,8 +4968,20 @@ struct GroupBy(Copyable):
             if parts.bounds[b + 1] - parts.bounds[b] > heavy_rows:
                 any_heavy = True
         if not any_heavy:
-            # Encode each bucket from the key hashes; gather only values.
-            var values = take_parallel(referenced, parts.order.copy(), workers)
+            # Encode each bucket from the key hashes. Plain reductions read
+            # values at their source rows; others gather values into bucket
+            # order first.
+            var indexed = indexed_reductions(bound, self._frame._columns)
+            var values: List[Series]
+            if indexed:
+                trace_path("group_by.partitioned.indexed")
+                values = List[Series](capacity=len(referenced))
+                for column in referenced:
+                    values.append(
+                        column.rechunk() if column.is_chunked() else column.copy()
+                    )
+            else:
+                values = take_parallel(referenced, parts.order.copy(), workers)
             var jobs = List[_HashedBucketJob]()
             for b in range(buckets):
                 var lo = parts.bounds[b]
@@ -4946,7 +4990,9 @@ struct GroupBy(Copyable):
                     continue
                 var bucket_columns = List[Series](capacity=len(values))
                 for column in values:
-                    bucket_columns.append(column.slice(lo, hi - lo))
+                    bucket_columns.append(
+                        column.copy() if indexed else column.slice(lo, hi - lo)
+                    )
                 jobs.append(
                     _HashedBucketJob(
                         partitioner.keys,
@@ -4957,6 +5003,7 @@ struct GroupBy(Copyable):
                         bucket_columns^,
                         expressions,
                         batch_size,
+                        indexed,
                     )
                 )
             run_jobs(jobs)
