@@ -34,6 +34,10 @@ jobs:
         if: runner.os == 'Linux' && github.event_name == 'pull_request'
         run: bash scripts/check_benchmark_separation.sh origin/${{ github.base_ref }}
 
+      - name: Check benchmark report provenance and coverage
+        if: runner.os == 'Linux'
+        run: pixi run -e oracle python3 tests/test_bench_reports.py
+
       - name: Check dtype literals
         if: runner.os == 'Linux'
         run: bash scripts/check_dtype_literals.sh

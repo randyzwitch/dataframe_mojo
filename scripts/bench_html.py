@@ -13,6 +13,8 @@ import html
 import math
 import statistics
 
+import bench_policy
+
 # Ratio bands for the shaded cells: this library's time over the other
 # engine's. Below 0.95 is a win; 0.95-1.25 is parity within noise.
 BANDS = [
@@ -294,6 +296,19 @@ def render(result, cells, suites, variants_of, instrumented):
         + "</div>",
         "</header>",
     ]
+    parts.append(
+        '<div class="note">'
+        + html.escape(bench_policy.report_note(result))
+        + '</div>'
+    )
+    evaluation = info.get("evaluation")
+    if evaluation:
+        parts.append(
+            '<p class="foot">Local benchmark manifest: <code>'
+            + html.escape(evaluation["manifest_sha256"])
+            + '</code>. Source hashes and exposure evidence are recorded '
+            'in the raw JSON.</p>'
+        )
     load = result.get("load") or []
     threads = info.get("threads") or 0
     if load and max(load) > threads + 4:
@@ -353,9 +368,9 @@ def render(result, cells, suites, variants_of, instrumented):
         "<h2>Summary</h2>",
         '<div class="scroll"><table><thead><tr>' + head + "</tr></thead><tbody>"
         + "".join(body) + "</tbody></table></div>",
-        '<p class="muted">Develop against the development suites. The held-out '
-        "suites are for reporting: choosing optimizations from their per-query "
-        "results defeats their purpose (docs/benchmarks.md).</p>",
+        '<p class="muted">Tune on the development suites. Use held-out results '
+        'to validate the completed change; do not use their per-query timings '
+        'to choose optimizations or tune thresholds (docs/benchmarks.md).</p>',
         "</section>",
     ]
     for suite in present:
@@ -380,9 +395,11 @@ def render(result, cells, suites, variants_of, instrumented):
                 hits.setdefault(path, []).append(query)
         body = []
         for path in sorted(hits, key=lambda p: (len(hits[p]), p)):
-            flag = ' <span class="chip s2">one query</span>' if len(hits[path]) == 1 else ""
+            distinct = len(bench_policy.distinct_queries(hits[path]))
+            flag = ' <span class="chip s2">one query</span>' if distinct == 1 else ""
             body.append(
                 f"<tr><td><code>{html.escape(path)}</code>{flag}</td>"
+                f'<td class="num">{distinct}</td>'
                 f'<td class="num">{len(hits[path])}</td>'
                 f'<td class="status">{html.escape(", ".join(sorted(hits[path])[:4]))}</td></tr>'
             )
@@ -394,7 +411,7 @@ def render(result, cells, suites, variants_of, instrumented):
             "query reaches may be shaped to that query; check that its trigger "
             "is a data property with real examples.</p>",
             '<div class="scroll"><table><thead><tr><th>Path</th>'
-            '<th class="num">Queries</th><th>Examples</th></tr></thead><tbody>'
+            '<th class="num">Distinct queries</th><th class="num">Query/variant cases</th><th>Examples</th></tr></thead><tbody>'
             + "".join(body) + "</tbody></table></div>",
         ]
         if never:
