@@ -3003,7 +3003,7 @@
     "timed_samples_per_case": 8,
     "ordering": "Three fresh process rounds; rotate before/after/Polars order",
     "compiler": "mojo build -O3",
-    "checks": "Each fixture checks group count, total COUNT and SUM conservation",
+    "checks": "Each fixture checks group count and SUM conservation",
     "shape_codes": {
       "0": "Int64",
       "1": "String",
