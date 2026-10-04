@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- String window ranking orders borrowed source rows by partition and value
+  with the packed sort, then assigns ranks without dense-rank preprocessing.
+
 - Group-by reuses its bounded cardinality preference across strategy
   selection, avoiding repeated sample gathers and hashes within one call.
 
