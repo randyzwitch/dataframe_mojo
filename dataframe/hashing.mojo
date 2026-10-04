@@ -95,9 +95,38 @@ struct _U64Codes(Movable):
 
 
 def column_codes(
-    series: Series, mut codes: List[Int], mut nulls: List[Bool]
-) -> Int:
-    """Fill per-row dense codes and null flags; return the distinct count."""
+    series: Series,
+    mut codes: List[Int],
+    mut nulls: List[Bool],
+    *,
+    dense_int64: Bool = True,
+) raises -> Int:
+    """Replace codes with owned per-row codes and fill null flags.
+
+    Value encoders number valid values by first occurrence. BoolColumn
+    retains its fixed 0/1 codes. Return the valid-value code-domain size.
+    """
+    if series._data.isa[StringColumn]():
+        var keys = _encode_string_rows(series, False)
+        var count = keys.count()
+        if series.null_count() > 0:
+            for i in range(len(keys.ids)):
+                nulls[i] = keys.ids[i] < 0
+        codes = keys.ids^
+        keys.ids = List[Int]()
+        return count
+    if dense_int64 and series._data.isa[Column[Int64]]():
+        var dense = _encode_dense_int64(series._data[Column[Int64]], False)
+        if dense:
+            var keys = dense.take()
+            var count = keys.count()
+            if series.null_count() > 0:
+                for i in range(len(keys.ids)):
+                    nulls[i] = keys.ids[i] < 0
+            codes = keys.ids^
+            keys.ids = List[Int]()
+            return count
+    codes = List[Int](unsafe_uninit_length=len(series))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
@@ -131,16 +160,7 @@ def column_codes(
             else:
                 codes[i] = Int(column._get(i))
         return 2
-    # Strings take the single-key path, which keys values of up to 12
-    # bytes as 128-bit integers in its own table (#380).
-    var keys = _encode_string_rows(series, False)
-    for i in range(len(keys.ids)):
-        var id = keys.ids[i]
-        if id < 0:
-            nulls[i] = True
-        else:
-            codes[i] = id
-    return keys.count()
+    raise Error("unsupported key column storage")
 
 
 struct _InlineStringCodes(Movable):
@@ -580,7 +600,7 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         if dense:
             return dense.take()
     # Every row gets an id (or -1) below before any is read (#388).
-    var ids = List[Int](unsafe_uninit_length=n)
+    var ids = List[Int]()
     # Null flags are kept only for columns that have nulls, and exclusion
     # only when nulls drop rows, so a null-free key fills nothing (#388).
     var any_nulls = False
@@ -591,25 +611,21 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     var representatives = List[Int]()
 
     if len(keys) == 1:
-        # One key column needs no hash map to combine columns, because
-        # there is nothing to combine. `column_codes` has already numbered
-        # the distinct values; all that remains is to renumber them in the
-        # order the rows meet them, which an array indexed by code does.
-        # The general path below uses a Dict for this, which on a
-        # high-cardinality key is a lookup per row over as many entries as
-        # there are distinct keys.
-        #
-        # The renumbering is not skippable even though most dtypes already
-        # code in first-occurrence order: a null takes an id in row order
-        # too, so one null early in the column shifts every id after it.
-        # Booleans code by value rather than by order, and this renumbers
-        # them correctly as well.
-        # column_codes writes every valid row; null rows are given their
-        # code below before it is read, so nothing is filled first (#388).
-        var codes = List[Int](unsafe_uninit_length=n)
+        # Value encoders already assign first-occurrence codes. A null-free
+        # non-Boolean key can return those ids directly; otherwise inserting
+        # the null group or renumbering fixed Boolean codes requires the
+        # ordinary mapping below. The dense Int64 route was tried above, so
+        # avoid repeating its range scan here.
+        var codes = List[Int]()
         var has_nulls = keys[0].null_count() > 0
         var nulls = List[Bool](length=n if has_nulls else 0, fill=False)
-        var distinct = column_codes(keys[0], codes, nulls)
+        var distinct = column_codes(keys[0], codes, nulls, dense_int64=False)
+        if not has_nulls and not keys[0]._data.isa[BoolColumn]():
+            for i in range(n):
+                if codes[i] == len(representatives):
+                    representatives.append(i)
+            return RowKeys(codes^, representatives^)
+        ids = List[Int](unsafe_uninit_length=n)
         var renumber = List[Int](length=distinct + 1, fill=-1)
         var next_id = 0
         for i in range(n):
@@ -629,10 +645,21 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     for j in range(len(keys)):
         # column_codes writes every valid row; null rows are given their
         # code below before it is read, so nothing is filled first (#388).
-        var codes = List[Int](unsafe_uninit_length=n)
+        var codes = List[Int]()
         var has_nulls = keys[j].null_count() > 0
         var nulls = List[Bool](length=n if has_nulls else 0, fill=False)
         var distinct = column_codes(keys[j], codes, nulls)
+        # Value encoders assign first-occurrence ids already. Without nulls
+        # there is no null id to insert; BoolColumn alone uses fixed 0/1
+        # codes and still needs the ordinary renumbering below.
+        if j == 0:
+            if not has_nulls and not keys[j]._data.isa[BoolColumn]():
+                for i in range(n):
+                    if codes[i] == len(representatives):
+                        representatives.append(i)
+                ids = codes^
+                continue
+            ids = List[Int](unsafe_uninit_length=n)
         # Reserve code `distinct` for null so it is one ordinary value.
         var radix = distinct + 1
         # Combined codes index a direct array when there are few enough of

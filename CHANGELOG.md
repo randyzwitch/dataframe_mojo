@@ -538,6 +538,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- Composite key numbering reuses dense integer lookups and owned code
+  arrays, avoiding redundant first-key renumbering while retaining null
+  insertion, Boolean ordering, and exact key equality (#380).
 - Join planning reuses inputs executed to measure selectivity even when
   the original join order is kept or a candidate is rejected. Unreachable
   input and materialization slots are released after planning (#436).
