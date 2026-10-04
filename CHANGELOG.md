@@ -531,6 +531,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- Grouped ordinal top-k filters bound scratch space by input rows and
+  group counts, including huge k and singleton groups. Bounded heaps
+  replace O(Nk) insertion lists, workers visit disjoint rows or groups,
+  and `< Int64.MIN` returns no rows instead of overflowing (#435).
 - A filter with decimal comparisons inside an AND no longer runs them row by
   row under the AND's mask: a comparison is safe on rows the mask skips, so
   it takes its whole-column path. The selective AND filter had made PDS-H
