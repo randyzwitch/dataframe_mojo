@@ -5,12 +5,12 @@ from std.testing import TestSuite, assert_equal, assert_true
 from dataframe import Column, DataFrame, Series
 from dataframe.parallel import MIN_ROWS_PER_WORKER, worker_count
 from dataframe.series import (
-    _merge_runs,
-    _merge_slice,
-    _sort_range,
+    _RankOrder,
     sort_indices,
     _low_card_first_sort,
 )
+
+from dataframe.comparison_sort import _merge_runs, _merge_slice, _sort_range
 
 comptime ROWS = 200_000
 
@@ -172,15 +172,15 @@ def test_merge_slices_reproduce_the_whole_merge() raises:
 
         # Each run must already be sorted for a merge to be defined.
         var source = List[Int](length=total, fill=0)
-        var left_rows = _sort_range(ranks, 0, left_len)
-        var right_rows = _sort_range(ranks, left_len, total)
+        var left_rows = _sort_range(_RankOrder(ranks.copy()), 0, left_len)
+        var right_rows = _sort_range(_RankOrder(ranks.copy()), left_len, total)
         for i in range(len(left_rows)):
             source[i] = left_rows[i]
         for i in range(len(right_rows)):
             source[left_len + i] = right_rows[i]
 
         var whole = List[Int](length=total, fill=-1)
-        _merge_runs(ranks, source, whole, 0, left_len, total)
+        _merge_runs(_RankOrder(ranks.copy()), source, whole, 0, left_len, total)
 
         for cuts in range(1, total + 2):
             var sliced = List[Int](length=total, fill=-1)
@@ -190,7 +190,14 @@ def test_merge_slices_reproduce_the_whole_merge() raises:
                 var last = (total * (s + 1)) // cuts
                 if last > first:
                     _merge_slice(
-                        ranks, source, sliced, 0, left_len, total, first, last
+                        _RankOrder(ranks.copy()),
+                        source,
+                        sliced,
+                        0,
+                        left_len,
+                        total,
+                        first,
+                        last,
                     )
                 s += 1
             for i in range(total):
@@ -227,7 +234,7 @@ def test_bucket_boundaries_and_skew_preserve_exact_stable_order() raises:
                                 value = -128
                         values.append(value)
                     ranks.append(values^)
-                var expected = _sort_range(ranks, 0, n)
+                var expected = _sort_range(_RankOrder(ranks.copy()), 0, n)
                 assert_equal(sort_indices(ranks), expected)
                 if not skew and distinct <= 256:
                     assert_equal(_low_card_first_sort(ranks, True), expected)
