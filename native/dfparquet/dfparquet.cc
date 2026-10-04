@@ -11,9 +11,15 @@
 // Column types the caller cannot hold are coerced on the way out:
 // dictionary columns are decoded to their value type, float16 widens to
 // float32, and string/binary views become plain string/binary. Timestamps
-// keep their time zone.
+// keep their time zone. dfq_read_parquet_stream_dict is the stream except
+// that a top-level string column with a dictionary page in every selected
+// row group stays dictionary-encoded: each batch's codes index one running
+// dictionary per column, which only grows, so the caller can keep the codes
+// beside the strings.
 #include <arrow/array.h>
+#include <arrow/array/array_dict.h>
 #include <arrow/array/builder_base.h>
+#include <arrow/array/builder_binary.h>
 #include <arrow/array/builder_primitive.h>
 #include <arrow/c/bridge.h>
 #include <arrow/compute/cast.h>
@@ -38,6 +44,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -47,6 +54,12 @@ int fail(const arrow::Status& status, char** error_out) {
   *error_out = static_cast<char*>(std::malloc(text.size() + 1));
   std::memcpy(*error_out, text.c_str(), text.size() + 1);
   return 1;
+}
+
+bool StringDictionary(const arrow::DataType& type) {
+  if (type.id() != arrow::Type::DICTIONARY) return false;
+  auto value = static_cast<const arrow::DictionaryType&>(type).value_type()->id();
+  return value == arrow::Type::STRING || value == arrow::Type::LARGE_STRING;
 }
 
 std::shared_ptr<arrow::DataType> CoercedType(
@@ -112,6 +125,52 @@ arrow::Status Open(const char* path, bool use_threads,
   return builder.Build(reader);
 }
 
+// Open for dfq_read_parquet_dict: string leaves dictionary-encoded in every
+// selected row group read as dictionary arrays.
+arrow::Status OpenDictionary(const char* path, bool use_threads,
+                             const std::vector<int>& groups,
+                             const char** columns, int n_columns, int* chosen,
+                             std::unique_ptr<parquet::arrow::FileReader>* reader) {
+  *chosen = 0;
+  ARROW_ASSIGN_OR_RAISE(auto file, arrow::io::ReadableFile::Open(path));
+  parquet::arrow::FileReaderBuilder builder;
+  ARROW_RETURN_NOT_OK(builder.Open(file));
+  parquet::ArrowReaderProperties properties;
+  properties.set_use_threads(use_threads);
+  properties.set_pre_buffer(true);
+  auto metadata = builder.raw_reader()->metadata();
+  const auto* schema = metadata->schema();
+  for (int c = 0; c < schema->num_columns(); ++c) {
+    const auto* column = schema->Column(c);
+    if (column->physical_type() != parquet::Type::BYTE_ARRAY) continue;
+    if (column->max_repetition_level() != 0) continue;
+    if (column->path()->ToDotVector().size() != 1) continue;
+    const auto& logical = column->logical_type();
+    bool text = (logical && logical->is_string()) ||
+                column->converted_type() == parquet::ConvertedType::UTF8;
+    if (!text || groups.empty()) continue;
+    if (n_columns > 0) {
+      bool selected = false;
+      for (int i = 0; i < n_columns; ++i) {
+        selected = selected || column->path()->ToDotVector()[0] == columns[i];
+      }
+      if (!selected) continue;
+    }
+    bool dictionary = true;
+    for (int g : groups) {
+      dictionary = dictionary &&
+                   metadata->RowGroup(g)->ColumnChunk(c)->has_dictionary_page();
+    }
+    if (dictionary) {
+      properties.set_read_dictionary(c, true);
+      ++*chosen;
+    }
+  }
+  builder.properties(properties);
+  return builder.Build(reader);
+}
+
+
 void CollectLeaves(const parquet::arrow::SchemaField& field, std::vector<int>* out) {
   if (field.is_leaf()) {
     out->push_back(field.column_index);
@@ -142,10 +201,11 @@ class RowGroupReader final : public arrow::RecordBatchReader {
  public:
   RowGroupReader(std::unique_ptr<parquet::arrow::FileReader> reader,
                  std::vector<int> groups, std::vector<int> leaves,
-                 bool projected, std::shared_ptr<arrow::Schema> schema)
+                 bool projected, std::shared_ptr<arrow::Schema> schema,
+                 bool keep_dictionaries = false)
       : reader_(std::move(reader)), groups_(std::move(groups)),
         leaves_(std::move(leaves)), projected_(projected),
-        schema_(std::move(schema)) {}
+        schema_(std::move(schema)), keep_dictionaries_(keep_dictionaries) {}
 
   std::shared_ptr<arrow::Schema> schema() const override { return schema_; }
 
@@ -162,10 +222,117 @@ class RowGroupReader final : public arrow::RecordBatchReader {
     ARROW_ASSIGN_OR_RAISE(auto table, projected_
         ? reader_->ReadRowGroups(group, leaves_) : reader_->ReadRowGroups(group));
     ARROW_ASSIGN_OR_RAISE(auto batch, table->CombineChunksToBatch());
-    ARROW_ASSIGN_OR_RAISE(*out, CoerceBatch(batch));
+    if (keep_dictionaries_) {
+      ARROW_ASSIGN_OR_RAISE(*out, Recode(batch));
+    } else {
+      ARROW_ASSIGN_OR_RAISE(*out, CoerceBatch(batch));
+    }
     ++next_;
     return arrow::Status::OK();
   }
+
+ private:
+  // Hash and compare std::string keys by std::string_view, so a lookup
+  // allocates nothing.
+  struct ViewHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view text) const {
+      return std::hash<std::string_view>{}(text);
+    }
+  };
+
+  // One column's running dictionary: every value seen so far, in first-seen
+  // order, so a code once given never changes. `built` is the dictionary
+  // array as of `built_size` values, rebuilt only when it grows.
+  struct Running {
+    std::unordered_map<std::string, int32_t, ViewHash, std::equal_to<>> codes;
+    std::vector<std::string> values;
+    std::shared_ptr<arrow::Array> built;
+    size_t built_size = 0;
+  };
+
+  template <typename Values>
+  static void Remember(const Values& values, Running& running,
+                       std::vector<int32_t>& remap) {
+    for (int64_t k = 0; k < values.length(); ++k) {
+      std::string_view text = values.GetView(k);
+      auto found = running.codes.find(text);
+      if (found == running.codes.end()) {
+        int32_t code = static_cast<int32_t>(running.values.size());
+        running.values.emplace_back(text);
+        running.codes.emplace(running.values.back(), code);
+        remap[k] = code;
+      } else {
+        remap[k] = found->second;
+      }
+    }
+  }
+
+  // Coerce as CoerceBatch does, except string dictionary columns: their
+  // indices move onto the column's running dictionary, which the batch
+  // carries whole.
+  arrow::Result<std::shared_ptr<arrow::RecordBatch>> Recode(
+      const std::shared_ptr<arrow::RecordBatch>& batch) {
+    std::vector<std::shared_ptr<arrow::Array>> columns;
+    for (int i = 0; i < batch->num_columns(); ++i) {
+      auto column = batch->column(i);
+      if (!StringDictionary(*column->type())) {
+        ARROW_ASSIGN_OR_RAISE(column, Coerce(column));
+        columns.push_back(column);
+        continue;
+      }
+      auto& running = running_[i];
+      const auto& dictionary = static_cast<const arrow::DictionaryArray&>(*column);
+      auto values = dictionary.dictionary();
+      std::vector<int32_t> remap(values->length());
+      if (values->type_id() == arrow::Type::LARGE_STRING) {
+        Remember(static_cast<const arrow::LargeStringArray&>(*values), running, remap);
+      } else {
+        Remember(static_cast<const arrow::StringArray&>(*values), running, remap);
+      }
+      // New index values over the old validity bitmap.
+      auto widened = dictionary.indices();
+      if (widened->type_id() != arrow::Type::INT32) {
+        ARROW_ASSIGN_OR_RAISE(auto cast, arrow::compute::Cast(
+            arrow::Datum(widened), arrow::int32()));
+        widened = cast.make_array();
+      }
+      const auto& old_indices = static_cast<const arrow::Int32Array&>(*widened);
+      int64_t n = old_indices.length();
+      ARROW_ASSIGN_OR_RAISE(auto data, arrow::AllocateBuffer(n * sizeof(int32_t)));
+      auto* out = reinterpret_cast<int32_t*>(data->mutable_data());
+      const int32_t* in = old_indices.raw_values();
+      bool nulls = old_indices.null_count() > 0;
+      for (int64_t r = 0; r < n; ++r) {
+        out[r] = (nulls && old_indices.IsNull(r)) ? 0 : remap[in[r]];
+      }
+      auto index_array = std::make_shared<arrow::Int32Array>(
+          n, std::move(data), old_indices.null_bitmap(), old_indices.null_count(),
+          old_indices.offset());
+      if (!running.built || running.built_size != running.values.size()) {
+        arrow::StringBuilder text;
+        for (const auto& value : running.values) {
+          ARROW_RETURN_NOT_OK(text.Append(value));
+        }
+        ARROW_RETURN_NOT_OK(text.Finish(&running.built));
+        running.built_size = running.values.size();
+      }
+      ARROW_ASSIGN_OR_RAISE(
+          auto recoded,
+          arrow::DictionaryArray::FromArrays(
+              arrow::dictionary(arrow::int32(), arrow::utf8()), index_array,
+              running.built));
+      columns.push_back(recoded);
+    }
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    for (int i = 0; i < batch->num_columns(); ++i) {
+      const auto& field = batch->schema()->field(i);
+      fields.push_back(arrow::field(field->name(), columns[i]->type(), field->nullable()));
+    }
+    return arrow::RecordBatch::Make(arrow::schema(fields), batch->num_rows(), columns);
+  }
+
+ public:
 
  private:
   std::unique_ptr<parquet::arrow::FileReader> reader_;
@@ -174,6 +341,8 @@ class RowGroupReader final : public arrow::RecordBatchReader {
   bool projected_;
   std::shared_ptr<arrow::Schema> schema_;
   size_t next_ = 0;
+  bool keep_dictionaries_;
+  std::unordered_map<int, Running> running_;
 };
 
 bool IsBinaryLike(const arrow::DataType& type) {
@@ -279,6 +448,75 @@ int dfq_read_parquet_stream(const char* path, int use_threads,
   }
   auto stream = std::make_shared<RowGroupReader>(std::move(reader),
       std::move(groups), std::move(leaves), n_columns > 0, arrow::schema(fields));
+  status = arrow::ExportRecordBatchReader(std::move(stream), out);
+  return status.ok() ? 0 : fail(status, error_out);
+}
+
+// As dfq_read_parquet_stream, with string columns that have a dictionary
+// page in every selected row group streamed as dictionary<int32, utf8>
+// whose dictionary is the column's running one (see RowGroupReader). Returns
+// 2, opening no stream, when no selected column is such a column.
+int dfq_read_parquet_stream_dict(const char* path, int use_threads,
+                                 const char** columns, int n_columns,
+                                 const int* row_groups, int n_row_groups,
+                                 struct ArrowArrayStream* out, char** error_out) {
+  *error_out = nullptr;
+  out->release = nullptr;
+  std::vector<int> groups;
+  {
+    std::unique_ptr<parquet::ParquetFileReader> probe;
+    try {
+      probe = parquet::ParquetFileReader::OpenFile(path, false);
+    } catch (const std::exception& e) {
+      return fail(arrow::Status::IOError(e.what()), error_out);
+    }
+    int count = probe->metadata()->num_row_groups();
+    if (n_row_groups < 0) {
+      for (int g = 0; g < count; ++g) groups.push_back(g);
+    } else {
+      for (int i = 0; i < n_row_groups; ++i) {
+        if (row_groups[i] < 0 || row_groups[i] >= count) {
+          return fail(arrow::Status::IndexError("row group ", row_groups[i],
+                                                " is out of range"),
+                      error_out);
+        }
+        groups.push_back(row_groups[i]);
+      }
+    }
+  }
+  std::unique_ptr<parquet::arrow::FileReader> reader;
+  int chosen = 0;
+  auto status = OpenDictionary(path, use_threads != 0, groups, columns, n_columns,
+                               &chosen, &reader);
+  if (!status.ok()) return fail(status, error_out);
+  if (chosen == 0) return 2;
+  std::shared_ptr<arrow::Schema> source;
+  status = reader->GetSchema(&source);
+  if (!status.ok()) return fail(status, error_out);
+  auto out_type = [](const std::shared_ptr<arrow::DataType>& type) {
+    return StringDictionary(*type) ? arrow::dictionary(arrow::int32(), arrow::utf8())
+                                   : CoercedType(type);
+  };
+  std::vector<int> leaves;
+  std::vector<std::shared_ptr<arrow::Field>> fields;
+  if (n_columns > 0) {
+    auto indices = LeafIndices(*reader, columns, n_columns);
+    if (!indices.ok()) return fail(indices.status(), error_out);
+    leaves = *indices;
+    for (int i = 0; i < n_columns; ++i) {
+      auto field = source->GetFieldByName(columns[i]);
+      fields.push_back(arrow::field(field->name(), out_type(field->type()),
+                                    field->nullable()));
+    }
+  } else {
+    for (const auto& field : source->fields()) {
+      fields.push_back(arrow::field(field->name(), out_type(field->type()),
+                                    field->nullable()));
+    }
+  }
+  auto stream = std::make_shared<RowGroupReader>(
+      std::move(reader), std::move(groups), std::move(leaves), n_columns > 0,
+      arrow::schema(fields), true);
   status = arrow::ExportRecordBatchReader(std::move(stream), out);
   return status.ok() ? 0 : fail(status, error_out);
 }

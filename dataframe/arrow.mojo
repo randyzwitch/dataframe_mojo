@@ -35,6 +35,7 @@ from .column import Column, _copy_bits, _copy_validity
 from std.collections import Dict
 from .categorical import encode
 from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
+from .hashing import encode_string_rows_parallel
 from .frame import DataFrame
 from .parallel import Job, Pool, worker_count
 from std.sys import CompilationTarget
@@ -658,6 +659,18 @@ def _int64_column(
     return Column[Int64](values=values^, bits=bits^)
 
 
+comptime _INDEX_DTYPES: List[DType] = [
+    DType.int8,
+    DType.int16,
+    DType.int32,
+    DType.int64,
+    DType.uint8,
+    DType.uint16,
+    DType.uint32,
+    DType.uint64,
+]
+
+
 def _import_dictionary(
     array: ArrowArray, schema: ArrowSchema, name: String
 ) raises -> Series:
@@ -690,31 +703,44 @@ def _import_dictionary(
             + " are not supported"
         )
     var count = len(values)
-    var wide = indices.cast(DataType.INT64).rechunk()
-    ref index_column = wide._data[Column[Int64]]
+    var flat_indices = indices.rechunk() if indices.is_chunked() else (
+        indices.copy()
+    )
     var codes = List[UInt32](capacity=len(indices))
     var valid = List[Bool](capacity=len(indices))
     var in_range = True
-    for i in range(len(index_column)):
-        if not index_column._valid(i):
-            codes.append(0)
-            valid.append(False)
-            continue
-        var index = index_column._get(i)
-        if index < 0 or index >= Int64(count):
-            in_range = False
-            break
-        codes.append(UInt32(index))
-        valid.append(True)
+    # Indices are read at their own integer type: a cast to Int64 first was
+    # most of a dictionary column's import.
+    var typed = False
+    comptime for t in range(len(_INDEX_DTYPES)):
+        comptime D = _INDEX_DTYPES[t]
+        if flat_indices._data.isa[Column[Scalar[D]]]():
+            typed = True
+            ref index_column = flat_indices._data[Column[Scalar[D]]]
+            var data = index_column._ptr()
+            var nulls = index_column.null_count() > 0
+            for i in range(len(index_column)):
+                if nulls and not index_column._valid(i):
+                    codes.append(0)
+                    valid.append(False)
+                    continue
+                var index = Int(data[unsafe_offset=i])
+                if index < 0 or index >= count:
+                    in_range = False
+                    break
+                codes.append(UInt32(index))
+                valid.append(True)
+    if not typed:
+        raise Error("Arrow dictionary indices must be integers")
     var distinct = in_range and values.null_count() == 0
-    if distinct:
-        var seen = Dict[String, Bool]()
-        for i in range(count):
-            var text = values.get(i).string()
-            if text in seen:
-                distinct = False
-                break
-            seen[text] = True
+    if distinct and count > 1:
+        var flat_values = values.rechunk() if values.is_chunked() else (
+            values.copy()
+        )
+        var keys = encode_string_rows_parallel(
+            flat_values, True, worker_count(count)
+        )
+        distinct = keys.count() == count
     if not in_range:
         raise Error("Arrow dictionary index out of range")
     if not distinct:
@@ -730,9 +756,14 @@ def _import_dictionary(
     ref column = flat._data[StringColumn]
     for i in range(count):
         dictionary.append(column._get(i))
-    return Series(name, Column[UInt32](codes^, valid)).with_dtype(
-        DataType.categorical(dictionary^)
+    var any_null = False
+    for v in valid:
+        any_null = any_null or not v
+    # No validity bitmap when nothing is null, as other imports leave it.
+    var coded = Column[UInt32](codes^, valid) if any_null else Column[UInt32](
+        codes^
     )
+    return Series(name, coded^).with_dtype(DataType.categorical(dictionary^))
 
 
 def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
