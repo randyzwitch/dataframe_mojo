@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Native sums/means and dense integer/categorical key encoding cache
+  validity bitmap pointers and slice offsets outside their row loops,
+  reducing repeated metadata reads for nullable inputs.
 - Composite categorical keys reuse the bounded dictionary lookup for
   first-occurrence codes, avoiding numeric hashing for each key column.
   The new lookup checks valid codes before indexing the dictionary domain.
