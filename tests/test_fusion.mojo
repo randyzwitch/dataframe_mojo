@@ -13,6 +13,7 @@ from dataframe import (
 from dataframe.binding import bind
 from dataframe.execution import evaluate
 from dataframe.fusion import fused
+from dataframe.execution import FUSED_CONTIGUOUS_ROWS
 
 
 def nan() -> Float64:
@@ -170,6 +171,102 @@ def test_fused_direct_chunk_windows_match_unfused_misaligned_inputs() raises:
         )
         var expected = run[4](df, expr, False, 7).slice(2, 20)
         assert_true(bitwise_equal(actual, expected))
+
+
+def test_repeated_sources_in_chunk_windows() raises:
+    # Sliced buffers have nonzero data and validity offsets. The repeated y
+    # source also exercises a contiguous column beside a chunked source.
+    var whole = frame(40)
+    var x = whole.column("x").slice(3, 29)
+    var y = whole.column("y").slice(2, 29)
+    for chunk_y in [False, True]:
+        var df = DataFrame(
+            [
+                Series._from_chunks(
+                    [x.slice(0, 7), x.slice(7, 11), x.slice(18, 11)]
+                ),
+                Series._from_chunks(
+                    [y.slice(0, 9), y.slice(9, 13), y.slice(22, 7)]
+                ) if chunk_y else y.copy(),
+            ]
+        )
+        for expr in [
+            col("x") + col("x"),
+            col("x") * col("x") - col("y") * col("y"),
+            (col("y") + col("y")) > col("x"),
+        ]:
+            var bound = bind(expr, df._columns)
+            var reference = run[4](df, expr, False, 7)
+            for offset in [0, 2, 8]:
+                var length = 21
+                var expected = reference.slice(offset, length)
+                assert_true(
+                    bitwise_equal(
+                        fused[1](
+                            bound,
+                            df._columns,
+                            len(bound.expr._nodes) - 1,
+                            offset,
+                            length,
+                        ),
+                        expected,
+                    )
+                )
+                assert_true(
+                    bitwise_equal(
+                        fused[4](
+                            bound,
+                            df._columns,
+                            len(bound.expr._nodes) - 1,
+                            offset,
+                            length,
+                        ),
+                        expected,
+                    )
+                )
+                assert_true(
+                    bitwise_equal(
+                        fused[8](
+                            bound,
+                            df._columns,
+                            len(bound.expr._nodes) - 1,
+                            offset,
+                            length,
+                        ),
+                        expected,
+                    )
+                )
+
+
+def test_repeated_chunk_sources_above_rechunk_threshold() raises:
+    for rows in [FUSED_CONTIGUOUS_ROWS - 1, FUSED_CONTIGUOUS_ROWS + 1]:
+        var whole = frame(rows)
+        var x = whole.column("x")
+        var y = whole.column("y")
+        var split = rows // 2
+        var df = DataFrame(
+            [
+                Series._from_chunks(
+                    [x.slice(0, split), x.slice(split, rows - split)]
+                ),
+                Series._from_chunks(
+                    [
+                        y.slice(0, split + 7),
+                        y.slice(split + 7, rows - split - 7),
+                    ]
+                ),
+            ]
+        )
+        for expr in [
+            col("x") + col("x"),
+            (col("x") * col("x")) > (col("y") + col("y")),
+        ]:
+            var expected = run[4](whole, expr, False, 1024)
+            for batch in [1024, 65536]:
+                var actual = df.with_columns(
+                    expr.alias("out"), batch_size=batch
+                ).column("out")
+                assert_true(bitwise_equal(actual, expected))
 
 
 def test_fused_packed_validity_handles_bit_offsets_and_all_valid_sources() raises:

@@ -80,6 +80,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A frame whose columns are all chunked at the same rows (Parquet row
+  groups, a partitioned group-by's output) filters chunk by chunk in
+  parallel for any row-local predicate, each chunk taking whichever filter
+  path suits it, with no merge first. This replaces a path that served only
+  a comparison of a Float64 column with a float literal on 50,000 rows or
+  more; it now runs for 25 ClickBench and 3 PDS-H queries instead of one,
+  at the same speed. No row-count threshold gates either path.
 - `read_parquet` keeps the dictionary codes of string columns the file
   stores dictionary-encoded in every selected row group, beside the strings.
   The column is still a String column with the same values. Grouping by
@@ -534,6 +541,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - Join planning reuses inputs executed to measure selectivity even when
   the original join order is kept or a candidate is rejected. Unreachable
   input and materialization slots are released after planning (#436).
+- Fused Float64 expressions that reference a column repeatedly now work on
+  chunked inputs, including nonzero batch offsets and misaligned chunks.
+  Each source window is sliced once instead of once per expression leaf
+  (#434).
 - A filter with decimal comparisons inside an AND no longer runs them row by
   row under the AND's mask: a comparison is safe on rows the mask skips, so
   it takes its whole-column path. The selective AND filter had made PDS-H
