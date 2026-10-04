@@ -4957,10 +4957,13 @@ struct GroupBy(Copyable):
                 )
         var workers = worker_count(self._frame.height())
         var result: DataFrame
+        # Keys are unchanged throughout this aggregation. Reuse the sampled
+        # preference across hash, range and partitioned strategy selection.
+        var whole = low_cardinality(self._keys) if workers > 1 else False
         if (
             workers > 1
             and len(self._keys) == 1
-            and not low_cardinality(self._keys)
+            and not whole
             and hash_agg_eligible(self._keys[0], bound, self._frame._columns)
         ):
             return _pack_struct_keys(self._agg_hash(bound, workers))
@@ -4970,12 +4973,12 @@ struct GroupBy(Copyable):
             and _stream_reductions(expressions)
             and not self._many_distinct(expressions)
         ):
-            ranged = self._agg_ranges(expressions, key_names, workers)
+            ranged = self._agg_ranges(expressions, key_names, workers, whole)
         if ranged:
             result = ranged.take()
         elif workers > 1:
             result = self._agg_partitioned(
-                expressions, bound, batch_size, workers
+                expressions, bound, batch_size, workers, whole
             )
         else:
             result = self._agg_whole(bound, batch_size)
@@ -5043,6 +5046,7 @@ struct GroupBy(Copyable):
         expressions: List[Expr],
         key_names: Dict[String, Bool],
         workers: Int,
+        whole: Bool,
     ) raises -> Optional[DataFrame]:
         """Reduce each worker's row range to per-group state, then merge.
 
@@ -5059,7 +5063,7 @@ struct GroupBy(Copyable):
         # The same sampled estimate that picks whole-frame encoding over
         # hash partitioning: every range of a high-cardinality key would
         # hold most groups, and merging those states serially loses.
-        if not (low_cardinality(self._keys) or small_key_product(self._keys)):
+        if not (whole or small_key_product(self._keys)):
             return None
         var bounds = partitions(height, workers, 64)
         var jobs = List[_RangeAggJob](capacity=workers)
@@ -5145,6 +5149,7 @@ struct GroupBy(Copyable):
         bound: List[BoundExpr],
         batch_size: Int,
         workers: Int,
+        whole: Bool,
     ) raises -> DataFrame:
         """Group by hash bucket in parallel; see dataframe/partition.mojo.
 
@@ -5161,7 +5166,6 @@ struct GroupBy(Copyable):
         var height = self._frame.height()
         # A sampled estimate decides whether scattering is worth its gather;
         # on a low-cardinality key the serial encode it replaces is cheap.
-        var whole = low_cardinality(self._keys)
         if whole:
             return self._agg_whole(bound, batch_size)
         trace_path("group_by.partitioned")
