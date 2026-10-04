@@ -66,7 +66,6 @@ from .gather import (
     true_rows,
     float_compare_rows,
     can_filter_aligned_chunks,
-    filter_float_chunks,
     filter_range_int64_chunks,
 )
 from .parallel import Job, Pool, partitions, run_jobs, worker_count
@@ -2044,24 +2043,25 @@ struct DataFrame(Copyable, Sized, Writable):
                 and self._columns[bound.sources[node.left]].dtype()
                 == DataType.FLOAT64
             ):
-                if (
-                    self._height >= ALIGNED_FILTER_ROWS
-                    and can_filter_aligned_chunks(self._columns)
-                ):
-                    var filtered = filter_float_chunks(
-                        self._columns,
-                        bound.sources[node.left],
-                        node.op,
-                        bound.expr._nodes[node.right].floating,
+                # Aligned chunks take the per-chunk path below instead.
+                if not can_filter_aligned_chunks(self._columns):
+                    return self._filter_rows(
+                        float_compare_rows(
+                            self._columns[bound.sources[node.left]],
+                            node.op,
+                            bound.expr._nodes[node.right].floating,
+                        )
                     )
-                    return Self(filtered^)
-                return self._filter_rows(
-                    float_compare_rows(
-                        self._columns[bound.sources[node.left]],
-                        node.op,
-                        bound.expr._nodes[node.right].floating,
-                    )
-                )
+        # Columns chunked at the same rows (Parquet row groups, a
+        # partitioned group-by's buckets) filter chunk by chunk in parallel,
+        # each chunk taking whichever path suits it, with no merge first.
+        if (
+            bound.shape() == ROWS
+            and _row_local(predicates)
+            and can_filter_aligned_chunks(self._columns)
+        ):
+            trace_path("filter.aligned_chunks")
+            return self._filter_chunks(predicates[0], batch_size)
         var parts = conjuncts(predicates[0])
         if (
             len(parts) > 1
@@ -2071,6 +2071,38 @@ struct DataFrame(Copyable, Sized, Writable):
             trace_path("filter.selective_and")
             return self._filter_selective(parts, batch_size)
         return self.filter(self._predicate_mask(bound, batch_size))
+
+    def _filter_chunks(self, predicate: Expr, batch_size: Int) raises -> Self:
+        """Filter each aligned chunk on its own, in parallel, and keep the
+        surviving pieces as the output's chunks. The predicate must be
+        row-local: a chunk sees only its own rows."""
+        var chunks = self._columns[0].n_chunks()
+        var jobs = List[_ChunkFilterJob](capacity=chunks)
+        for i in range(chunks):
+            var parts = List[Series](capacity=len(self._columns))
+            for column in self._columns:
+                parts.append(
+                    Series(
+                        column.name(),
+                        column._chunked.value()[].arrays[i].copy(),
+                        column.dtype(),
+                    )
+                )
+            jobs.append(_ChunkFilterJob(Self(parts^), predicate, batch_size))
+        run_jobs(jobs)
+        var output = List[Series](capacity=len(self._columns))
+        for c in range(len(self._columns)):
+            var pieces = List[Series]()
+            for i in range(len(jobs)):
+                if jobs[i].result.height() > 0:
+                    pieces.append(jobs[i].result._columns[c].copy())
+            if len(pieces) == 0:
+                output.append(self._columns[c].slice(0, 0))
+            elif len(pieces) == 1:
+                output.append(pieces[0].copy())
+            else:
+                output.append(Series._from_chunks(pieces^))
+        return Self(output^)
 
     def _predicate_mask(
         self, bound: BoundExpr, batch_size: Int
@@ -2962,7 +2994,27 @@ def _group_rows(ids: List[Int], starts: List[Int]) -> List[Int]:
 # path won at 5k and 20k rows (0.18 vs 0.25 ms, 0.70 vs 0.73 ms) and the
 # aligned path won from 100k up (2.1 vs 3.8 ms; 4.7 vs 7.9 ms at 1M). The
 # old 2,000,000 was chosen without a sweep and cost 1M-row filters 1.7x.
-comptime ALIGNED_FILTER_ROWS = 50_000
+struct _ChunkFilterJob(Job):
+    """Filter one aligned chunk's frame (`DataFrame._filter_chunks`)."""
+
+    var frame: DataFrame
+    var predicate: Expr
+    var batch_size: Int
+    var result: DataFrame
+
+    def __init__(
+        out self, var frame: DataFrame, predicate: Expr, batch_size: Int
+    ) raises:
+        self.frame = frame^
+        self.predicate = predicate.copy()
+        self.batch_size = batch_size
+        self.result = DataFrame(List[Series]())
+
+    def run(mut self) raises:
+        self.result = self.frame.filter(
+            self.predicate, batch_size=self.batch_size
+        )
+
 
 # Measured on a Threadripper 3970X (32 cores, 16 MiB L3 per cache domain),
 # Mojo 1.2, at 32 workers with an 8-worker cross-check; see
