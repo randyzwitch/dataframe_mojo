@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Hash joins with one Int64 probe key hash it as each worker reads it,
+  removing the probe hash/histogram pass and an eight-byte-per-row buffer.
+
 - String window ranking orders borrowed source rows by partition and value
   with the packed sort, then assigns ranks without dense-rank preprocessing.
 

@@ -12,6 +12,42 @@ from dataframe.partition import Partitioner
 from dataframe.parallel import worker_count
 
 
+def test_int64_probe_hashes_on_read_with_extremes_and_nulls() raises:
+    var left = Series(
+        "k",
+        Column[Int64](
+            [-9, Int64.MAX, Int64.MIN, 5, 5, 0],
+            [True, True, True, True, True, False],
+        ),
+    )
+    var right = Series(
+        "k",
+        Column[Int64](
+            [5, Int64.MIN, 5, Int64.MAX, -9, 0],
+            [True, True, True, True, True, False],
+        ),
+    )
+    var prepared = prepare_hash_index([right.copy()], allow_progression=False)
+    var chunked = Series._from_chunks([left.slice(0, 2), left.slice(2, 4)])
+    for input in [left.copy(), chunked.copy()]:
+        # The resource contract: fixed-width probes own no row-sized hashes.
+        var index = prepared.probe([input.copy()])
+        assert_equal(len(index.left_hashes[]), 0)
+        var inner = prepared_hash_join_rows([input.copy()], prepared, False)
+        assert_equal(inner[0], [0, 1, 2, 3, 3, 4, 4])
+        assert_equal(inner[1], [4, 3, 1, 0, 2, 0, 2])
+        var outer = prepared_hash_join_rows([input.copy()], prepared, True)
+        assert_equal(outer[0], [0, 1, 2, 3, 3, 4, 4, 5])
+        assert_equal(outer[1], [4, 3, 1, 0, 2, 0, 2, -1])
+        assert_equal(
+            prepared_hash_semi_anti_rows([input.copy()], prepared, True),
+            [0, 1, 2, 3, 4],
+        )
+        assert_equal(
+            prepared_hash_semi_anti_rows([input.copy()], prepared, False), [5]
+        )
+
+
 def test_bounded_int64_rows_keep_duplicates_nulls_and_extremes() raises:
     var low = Int64.MIN
     var left = Series(
