@@ -326,34 +326,33 @@ def low_cardinality(keys: List[Series]) raises -> Bool:
     exact sampled hash cardinality checks whether the remaining domain is
     small enough to avoid the partition scatter and gather.
     """
-    for key in keys:
-        if key.is_chunked():
-            return _low_cardinality_chunked(keys)
     var rows = len(keys[0])
     if rows == 0:
         return True
     var sample = min(rows, _SAMPLE_ROWS)
     var stride = max(1, rows // sample)
-    var hash = List[UInt64](length=1, fill=0)
-    var address = Int(hash.unsafe_ptr())
+    var picked = List[Int](capacity=sample)
+    var i = 0
+    while i < rows and len(picked) < sample:
+        picked.append(i)
+        var taken = len(picked)
+        i = taken * stride + (taken * 7919) % stride
+    var hashes = List[UInt64](length=len(picked), fill=0)
+    for j in range(len(keys)):
+        # Gather only the bounded sample, including from source chunks.
+        # Resolve storage and dtype once per key rather than once per row.
+        var values = keys[j].take(picked)
+        _hash_column(values, 0, len(picked), Int(hashes.unsafe_ptr()), j == 0)
     var seen = List[Bool](length=_SLOTS, fill=False)
     var counts = List[Int](length=_SLOTS, fill=0)
-    var hashes = List[UInt64](capacity=sample)
     var occupied = 0
-    var taken = 0
-    var i = 0
-    while i < rows and taken < sample:
-        for j in range(len(keys)):
-            _hash_column(keys[j], i, i + 1, address, j == 0, output_offset=i)
-        var slot = Int(hash[0] >> UInt64(_SLOT_SHIFT))
+    for hash in hashes:
+        var slot = Int(hash >> UInt64(_SLOT_SHIFT))
         counts[slot] += 1
-        hashes.append(hash[0])
         if not seen[slot]:
             seen[slot] = True
             occupied += 1
-        taken += 1
-        i = taken * stride + (taken * 7919) % stride
-    return _prefer_whole_sample(occupied, taken, counts, hashes)
+    return _prefer_whole_sample(occupied, len(picked), counts, hashes)
 
 
 def small_key_product(keys: List[Series]) raises -> Bool:
@@ -392,54 +391,6 @@ def small_key_product(keys: List[Series]) raises -> Bool:
         if product > _SMALL_KEY_PRODUCT:
             return False
     return True
-
-
-def _low_cardinality_chunked(keys: List[Series]) raises -> Bool:
-    """Sample source chunks without materializing whole key columns."""
-    var rows = len(keys[0])
-    if rows == 0:
-        return True
-    var sample = min(rows, _SAMPLE_ROWS)
-    var stride = max(1, rows // sample)
-    var parts = List[List[Series]](capacity=len(keys))
-    var indexes = List[Int](length=len(keys), fill=0)
-    var ends = List[Int](capacity=len(keys))
-    for key in keys:
-        var chunks = key.chunks()
-        ends.append(len(chunks[0]))
-        parts.append(chunks^)
-    var hash = List[UInt64](length=1, fill=0)
-    var address = Int(hash.unsafe_ptr())
-    var seen = List[Bool](length=_SLOTS, fill=False)
-    var counts = List[Int](length=_SLOTS, fill=0)
-    var hashes = List[UInt64](capacity=sample)
-    var occupied = 0
-    var taken = 0
-    var i = 0
-    while i < rows and taken < sample:
-        for j in range(len(keys)):
-            while i >= ends[j]:
-                indexes[j] += 1
-                ends[j] += len(parts[j][indexes[j]])
-            var part = parts[j][indexes[j]].copy()
-            var local = i - (ends[j] - len(part))
-            _hash_column(
-                part,
-                local,
-                local + 1,
-                address,
-                j == 0,
-                output_offset=local,
-            )
-        var slot = Int(hash[0] >> UInt64(_SLOT_SHIFT))
-        counts[slot] += 1
-        hashes.append(hash[0])
-        if not seen[slot]:
-            seen[slot] = True
-            occupied += 1
-        taken += 1
-        i = taken * stride + (taken * 7919) % stride
-    return _prefer_whole_sample(occupied, taken, counts, hashes)
 
 
 struct Partitioner(Movable):

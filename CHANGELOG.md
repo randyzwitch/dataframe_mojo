@@ -80,6 +80,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Cardinality sampling hashes the same bounded row sample in one pass per
+  key, reducing repeated storage dispatch for contiguous and chunked keys.
+
 - A frame whose columns are all chunked at the same rows (Parquet row
   groups, a partitioned group-by's output) filters chunk by chunk in
   parallel for any row-local predicate, each chunk taking whichever filter

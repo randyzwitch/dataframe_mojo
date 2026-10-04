@@ -17,6 +17,7 @@ from dataframe.parallel import MIN_ROWS_PER_WORKER, worker_count
 from dataframe.partition import (
     _hash_bytes,
     _hash_column,
+    _prefer_whole_sample,
     low_cardinality,
     small_key_product,
 )
@@ -518,6 +519,73 @@ def test_exact_hash_keys_group_like_their_values() raises:
     for row in range(by_int.height()):
         var k = Int(by_int.item(row, "i").int32())
         assert_equal(Int(by_int.item(row, "c").int64()), counts[k])
+
+
+def _row_sample_decision(keys: List[Series]) raises -> Bool:
+    # Reference the previous sampler: hash one original row at a time.
+    var rows = len(keys[0])
+    if rows == 0:
+        return True
+    var sample = min(rows, 4096)
+    var stride = max(1, rows // sample)
+    var hashes = List[UInt64](capacity=sample)
+    var one = List[UInt64](length=1, fill=0)
+    var seen = List[Bool](length=256, fill=False)
+    var counts = List[Int](length=256, fill=0)
+    var occupied = 0
+    var i = 0
+    while i < rows and len(hashes) < sample:
+        for j in range(len(keys)):
+            _hash_column(
+                keys[j],
+                i,
+                i + 1,
+                Int(one.unsafe_ptr()),
+                j == 0,
+                output_offset=i,
+            )
+        hashes.append(one[0])
+        var slot = Int(one[0] >> UInt64(56))
+        counts[slot] += 1
+        if not seen[slot]:
+            seen[slot] = True
+            occupied += 1
+        var taken = len(hashes)
+        i = taken * stride + (taken * 7919) % stride
+    return _prefer_whole_sample(occupied, len(hashes), counts, hashes)
+
+
+def test_batched_cardinality_preserves_sample_decisions() raises:
+    for rows in [0, 1, 127, 128, 4095, 4096, 8193, 100_003]:
+        for cardinality in [16, 1000]:
+            var df = frame(rows + 7, cardinality).slice(7, rows)
+            var combinations: List[List[String]] = [
+                ["i64"],
+                ["s"],
+                ["i32", "s"],
+                ["b", "f64", "u8"],
+            ]
+            for names in combinations:
+                var keys = List[Series]()
+                var chunked = List[Series]()
+                for name in names:
+                    var key = df.column(name)
+                    keys.append(key.copy())
+                    if rows > 1:
+                        var split = rows // 3 + 1
+                        chunked.append(
+                            Series._from_chunks(
+                                [
+                                    key.slice(0, split),
+                                    key.slice(split, rows - split),
+                                ]
+                            )
+                        )
+                    else:
+                        chunked.append(key.copy())
+                var expected = _row_sample_decision(keys)
+                assert_equal(low_cardinality(keys), expected)
+                assert_equal(low_cardinality(chunked), expected)
 
 
 def test_chunked_cardinality_sample_matches_rechunked() raises:
