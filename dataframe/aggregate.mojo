@@ -104,13 +104,19 @@ def _sum_ints(
     var n = len(column)
     var values = column._ptr()
     var nulls = column.null_count() > 0
-    var bits = column._bits[].unsafe_ptr()
-    var bit_offset = column._offset
     if not grouped:
         var total = Int128(0)
         var count = 0
-        for i in range(n):
-            if not nulls or _validity_at(bits, bit_offset + i):
+        if nulls:
+            var bits = column._bits[].unsafe_ptr()
+            var bit_offset = column._offset
+            for i in range(n):
+                if not _validity_at(bits, bit_offset + i):
+                    continue
+                total += values.unsafe_offset(i)[].cast[DType.int128]()
+                count += 1
+        else:
+            for i in range(n):
                 total += values.unsafe_offset(i)[].cast[DType.int128]()
                 count += 1
         sums[0].total += total
@@ -118,12 +124,20 @@ def _sum_ints(
         return
     var g = groups.unsafe_ptr().unsafe_offset(offset)
     var s = sums.unsafe_ptr()
-    for i in range(n):
-        if nulls and not _validity_at(bits, bit_offset + i):
-            continue
-        ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
-        state.total += values.unsafe_offset(i)[].cast[DType.int128]()
-        state.count += 1
+    if nulls:
+        var bits = column._bits[].unsafe_ptr()
+        var bit_offset = column._offset
+        for i in range(n):
+            if not _validity_at(bits, bit_offset + i):
+                continue
+            ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
+            state.total += values.unsafe_offset(i)[].cast[DType.int128]()
+            state.count += 1
+    else:
+        for i in range(n):
+            ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
+            state.total += values.unsafe_offset(i)[].cast[DType.int128]()
+            state.count += 1
 
 
 def _sum_floats(
@@ -137,13 +151,19 @@ def _sum_floats(
     var n = len(column)
     var values = column._ptr()
     var nulls = column.null_count() > 0
-    var bits = column._bits[].unsafe_ptr()
-    var bit_offset = column._offset
     if not grouped:
         var total = Float64(0)
         var count = 0
-        for i in range(n):
-            if not nulls or _validity_at(bits, bit_offset + i):
+        if nulls:
+            var bits = column._bits[].unsafe_ptr()
+            var bit_offset = column._offset
+            for i in range(n):
+                if not _validity_at(bits, bit_offset + i):
+                    continue
+                total += values.unsafe_offset(i)[]
+                count += 1
+        else:
+            for i in range(n):
                 total += values.unsafe_offset(i)[]
                 count += 1
         sums[0].total += total
@@ -151,12 +171,20 @@ def _sum_floats(
         return
     var g = groups.unsafe_ptr().unsafe_offset(offset)
     var s = sums.unsafe_ptr()
-    for i in range(n):
-        if nulls and not _validity_at(bits, bit_offset + i):
-            continue
-        ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
-        state.total += values.unsafe_offset(i)[]
-        state.count += 1
+    if nulls:
+        var bits = column._bits[].unsafe_ptr()
+        var bit_offset = column._offset
+        for i in range(n):
+            if not _validity_at(bits, bit_offset + i):
+                continue
+            ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
+            state.total += values.unsafe_offset(i)[]
+            state.count += 1
+    else:
+        for i in range(n):
+            ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
+            state.total += values.unsafe_offset(i)[]
+            state.count += 1
 
 
 def _extreme[
