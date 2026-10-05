@@ -753,9 +753,10 @@ def _direct_grouped_sum(
 ) raises -> Bool:
     """Feed native grouped sums/means once per physical source interval.
 
-    The existing state kernels keep row order, exact wide integer totals,
-    and null counts. Int64/Float64 storage needs no canonical value copy;
-    computed inputs and other storage retain bounded batch evaluation.
+    The state kernels keep row order, exact wide integer totals and null
+    counts, and read every numeric width at its own type, so no interval
+    is copied. Computed inputs and logical types (decimals, dates) keep
+    bounded batch evaluation.
     """
     if (
         not grouped
@@ -764,10 +765,14 @@ def _direct_grouped_sum(
     ):
         return False
     ref source = columns[bound.sources[node.left]]
-    if source.dtype() != DataType.INT64 and source.dtype() != DataType.FLOAT64:
-        return False
-    reducer.update(source.slice(start, end - start), start, True, groups)
-    return True
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if source.dtype() == DataType.of(D):
+            reducer.update(
+                source.slice(start, end - start), start, True, groups
+            )
+            return True
+    return False
 
 
 def _direct_float_column_sum(

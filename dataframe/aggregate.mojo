@@ -92,15 +92,19 @@ def _count_valid[
             counts[_group(grouped, groups, offset + i)] += 1
 
 
-def _sum_ints(
-    column: Column[Int64],
+def _sum_ints[
+    D: DType
+](
+    column: Column[Scalar[D]],
     offset: Int,
     grouped: Bool,
     groups: List[Int],
     mut sums: List[IntSumState],
 ):
-    """Int64 sums: separate grouped and ungrouped loops, a no-nulls loop
-    without validity reads, and an ungrouped total kept in a local (#382)."""
+    """Integer sums of any width, read at the column's own type and added
+    in 128 bits, so a narrow or unsigned column needs no Int64 copy first.
+    Separate grouped and ungrouped loops, a no-nulls loop without validity
+    reads, and an ungrouped total kept in a local (#382)."""
     var n = len(column)
     var values = column._ptr()
     var nulls = column.null_count() > 0
@@ -140,14 +144,16 @@ def _sum_ints(
             state.count += 1
 
 
-def _sum_floats(
-    column: Column[Float64],
+def _sum_floats[
+    D: DType
+](
+    column: Column[Scalar[D]],
     offset: Int,
     grouped: Bool,
     groups: List[Int],
     mut sums: List[FloatSumState],
 ):
-    """Float64 sums, as `_sum_ints` (#382)."""
+    """Float sums of either width, added as Float64, as `_sum_ints` (#382)."""
     var n = len(column)
     var values = column._ptr()
     var nulls = column.null_count() > 0
@@ -160,11 +166,11 @@ def _sum_floats(
             for i in range(n):
                 if not _validity_at(bits, bit_offset + i):
                     continue
-                total += values.unsafe_offset(i)[]
+                total += values.unsafe_offset(i)[].cast[DType.float64]()
                 count += 1
         else:
             for i in range(n):
-                total += values.unsafe_offset(i)[]
+                total += values.unsafe_offset(i)[].cast[DType.float64]()
                 count += 1
         sums[0].total += total
         sums[0].count += Int64(count)
@@ -178,12 +184,12 @@ def _sum_floats(
             if not _validity_at(bits, bit_offset + i):
                 continue
             ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
-            state.total += values.unsafe_offset(i)[]
+            state.total += values.unsafe_offset(i)[].cast[DType.float64]()
             state.count += 1
     else:
         for i in range(n):
             ref state = s.unsafe_offset(g.unsafe_offset(i)[])[]
-            state.total += values.unsafe_offset(i)[]
+            state.total += values.unsafe_offset(i)[].cast[DType.float64]()
             state.count += 1
 
 
@@ -976,16 +982,30 @@ struct Reducer(Movable):
         if self.input == self.dtype:
             self._update(chunk, offset, grouped, groups)
             return
-        if self.input == DataType.UINT64 and (
-            self.op == SUM or self.op == MEAN
-        ):
-            ref column = chunk._data[Column[UInt64]]
-            for i in range(len(column)):
-                if column._valid(i):
-                    self.int_sums[_group(grouped, groups, offset + i)].add_wide(
-                        column._get(i).cast[DType.int128]()
-                    )
-            return
+        if self.op == SUM or self.op == MEAN:
+            # A narrow, unsigned or Float32 column sums at its own type:
+            # no widened copy of the rows, so a caller may pass an interval
+            # of any length.
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                if chunk._data.isa[Column[Scalar[D]]]():
+                    comptime if D.is_floating_point():
+                        _sum_floats[D](
+                            chunk._data[Column[Scalar[D]]],
+                            offset,
+                            grouped,
+                            groups,
+                            self.float_sums,
+                        )
+                    else:
+                        _sum_ints[D](
+                            chunk._data[Column[Scalar[D]]],
+                            offset,
+                            grouped,
+                            groups,
+                            self.int_sums,
+                        )
+                    return
         self._update(_canonical(chunk), offset, grouped, groups)
 
     def update_pair(
@@ -1120,7 +1140,7 @@ struct Reducer(Movable):
                         )
                         counts[unsafe_offset=g] += 1
         elif (op == SUM or op == MEAN) and self.dtype == DataType.INT64:
-            _sum_ints(
+            _sum_ints[DType.int64](
                 chunk._data[Column[Int64]],
                 offset,
                 grouped,
@@ -1128,7 +1148,7 @@ struct Reducer(Movable):
                 self.int_sums,
             )
         elif op == SUM or op == MEAN:
-            _sum_floats(
+            _sum_floats[DType.float64](
                 chunk._data[Column[Float64]],
                 offset,
                 grouped,
