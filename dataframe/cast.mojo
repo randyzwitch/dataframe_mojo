@@ -380,6 +380,125 @@ def _decimal_to_float(input: Series) raises -> Series:
     return Series(input.name(), Column[Float64](values=values^, bits=bits^))
 
 
+def _cast_exact(input: Series, target: DataType) raises -> Optional[Series]:
+    """Numeric casts in one typed loop. Those that cannot fail: Bool to any
+    number, an integer to a type that holds its whole range, any integer to
+    a float, and Float32 to Float64. And an integer to a narrower or
+    differently signed integer type when every value turns out to fit.
+
+    The general path reads each row into a 128-bit intermediate inside a
+    try block, about 30 times the cost per row; it remains for casts from
+    floats to integers and for columns with a value that does not fit.
+    None means the general path must run. Null rows hold zero, as there."""
+    var n = len(input)
+    if input._data.isa[BoolColumn]():
+        ref bools = input._data[BoolColumn]
+        var nulls = bools.null_count() > 0
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime T = NUMERIC_DTYPES[k]
+            if target == DataType.of(T):
+                var out = List[Scalar[T]](unsafe_uninit_length=n)
+                var to = out.unsafe_ptr()
+                for i in range(n):
+                    to[unsafe_offset=i] = Scalar[T](
+                        1 if bools._get(i)
+                        and (not nulls or bools._valid(i)) else 0
+                    )
+                return Series(
+                    input.name(),
+                    Column[Scalar[T]](
+                        values=out^,
+                        bits=_copy_validity(bools._bits[], bools._offset, n),
+                    ),
+                )
+        return None
+    comptime for j in range(len(NUMERIC_DTYPES)):
+        comptime S = NUMERIC_DTYPES[j]
+        if input._data.isa[Column[Scalar[S]]]():
+            ref column = input._data[Column[Scalar[S]]]
+            var nulls = column.null_count() > 0
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime T = NUMERIC_DTYPES[k]
+                comptime wider = size_of[Scalar[T]]() >= size_of[Scalar[S]]()
+                comptime if S != T and (
+                    (
+                        T.is_floating_point()
+                        and (not S.is_floating_point() or wider)
+                    )
+                    or (
+                        not T.is_floating_point()
+                        and not S.is_floating_point()
+                        and (
+                            (S.is_signed() == T.is_signed() and wider)
+                            or (
+                                not S.is_signed()
+                                and T.is_signed()
+                                and size_of[Scalar[T]]() > size_of[Scalar[S]]()
+                            )
+                        )
+                    )
+                ):
+                    if target == DataType.of(T):
+                        var out = List[Scalar[T]](unsafe_uninit_length=n)
+                        var to = out.unsafe_ptr()
+                        var source = column._ptr()
+                        for i in range(n):
+                            to[unsafe_offset=i] = source[unsafe_offset=i].cast[
+                                T
+                            ]()
+                        if nulls:
+                            for i in range(n):
+                                if not column._valid(i):
+                                    to[unsafe_offset=i] = 0
+                        return Series(
+                            input.name(),
+                            Column[Scalar[T]](
+                                values=out^,
+                                bits=_copy_validity(
+                                    column._bits[], column._offset, n
+                                ),
+                            ),
+                        )
+            # An integer to a type that may not hold it: the same loop,
+            # which also checks every valid value fits. If one does not,
+            # the general path below reports it or nulls it.
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime T = NUMERIC_DTYPES[k]
+                comptime if (
+                    S != T
+                    and not S.is_floating_point()
+                    and not T.is_floating_point()
+                ):
+                    if target == DataType.of(T):
+                        var low = Scalar[T].MIN.cast[DType.int128]()
+                        var high = Scalar[T].MAX.cast[DType.int128]()
+                        var out = List[Scalar[T]](unsafe_uninit_length=n)
+                        var to = out.unsafe_ptr()
+                        var source = column._ptr()
+                        var fits = True
+                        for i in range(n):
+                            var value = source[unsafe_offset=i]
+                            if nulls and not column._valid(i):
+                                to[unsafe_offset=i] = 0
+                                continue
+                            var wide = value.cast[DType.int128]()
+                            fits = fits and wide >= low and wide <= high
+                            to[unsafe_offset=i] = value.cast[T]()
+                        if not fits:
+                            return None
+                        return Series(
+                            input.name(),
+                            Column[Scalar[T]](
+                                values=out^,
+                                bits=_copy_validity(
+                                    column._bits[], column._offset, n
+                                ),
+                            ),
+                        )
+            return None
+    return None
+
+
 def cast_series(
     input: Series, target: DataType, strict: Bool, offset: Int, mask: List[Bool]
 ) raises -> Series:
@@ -429,6 +548,12 @@ def cast_series(
                 return _parse_strings[D](
                     input, source, target, strict, offset, mask
                 )
+    # Plain numeric types only: a logical type (a decimal, a categorical)
+    # over the same storage means something else.
+    if len(mask) == 0 and source == input.dtype().physical():
+        var exact = _cast_exact(input, target)
+        if exact:
+            return exact.take()
     var n = len(input)
     var valid = List[Bool](length=n, fill=False)
     if target.is_decimal():
