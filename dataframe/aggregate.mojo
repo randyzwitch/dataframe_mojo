@@ -428,6 +428,36 @@ def _state_type(dtype: DataType) -> DataType:
     return dtype
 
 
+def _decimal_keys(chunk: Series) raises -> Series:
+    """A decimal column's scaled integers as Int64, for counting distinct
+    values: two decimals of one type are equal exactly when their scaled
+    integers are. Decimals stored at 32 or 64 bits always fit. A 128-bit
+    one whose value needs more than 64 bits is an error for now; none can
+    arise from a column declared at precision 18 or less."""
+    if chunk._data.isa[Column[Int64]]():
+        return Series("", chunk._data[Column[Int64]].copy())
+    var n = len(chunk)
+    var values = List[Int64](unsafe_uninit_length=n)
+    var valid = List[Bool](capacity=n)
+    if chunk._data.isa[Column[Int32]]():
+        ref narrow = chunk._data[Column[Int32]]
+        for i in range(n):
+            values[i] = Int64(narrow._get(i))
+            valid.append(narrow._valid(i))
+        return Series("", Column[Int64](values^, valid))
+    ref wide = chunk._data[Column[Int128]]
+    for i in range(n):
+        var ok = wide._valid(i)
+        var value = wide._get(i) if ok else Int128(0)
+        if value > Int128(Int64.MAX) or value < Int128(Int64.MIN):
+            raise Error(
+                "n_unique of a decimal value beyond 64 bits is not supported"
+            )
+        values[i] = Int64(value)
+        valid.append(ok)
+    return Series("", Column[Int64](values^, valid))
+
+
 def _canonical(chunk: Series) raises -> Series:
     """Narrow integers as Int64 (UInt64 biased to keep order), Float32 as
     Float64; exact in every case."""
@@ -841,11 +871,16 @@ struct Reducer(Movable):
             # its precision and narrow back to its width when finished.
             try:
                 self.dtype = DataType.decimal(
-                    38 if op == SUM else self.dtype.precision(),
+                    # A mean adds up the same total as a sum does.
+                    38 if op == SUM or op == MEAN else self.dtype.precision(),
                     self.dtype.scale(),
                 )
             except:
                 pass
+        if op == N_UNIQUE and self.logical.is_decimal():
+            # Distinct decimals of one type are distinct scaled integers:
+            # counted as Int64 (`_decimal_keys`).
+            self.dtype = DataType.INT64
         self.group_count = group_count
         self.min_count = min_count
         self.integer = integer
@@ -963,6 +998,9 @@ struct Reducer(Movable):
             for part in chunk.chunks():
                 self.update(part, part_offset, grouped, groups)
                 part_offset += len(part)
+            return
+        if self.op == N_UNIQUE and chunk.dtype().is_decimal():
+            self._update(_decimal_keys(chunk), offset, grouped, groups)
             return
         if chunk.dtype().is_decimal() and chunk.dtype().decimal_width() != 128:
             # Decimal states are 128-bit: widen a narrow decimal input.

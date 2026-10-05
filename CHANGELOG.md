@@ -615,6 +615,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- The ungrouped mean of a decimal column stored at 32 or 64 bits no longer
+  raises once its running total passes the column's precision; the total
+  is kept at precision 38, as a sum's is.
+- `n_unique` of a decimal column no longer crashes the process. Decimals
+  are counted by their scaled integers; a value needing more than 64 bits
+  is reported as unsupported.
 - `when().then()` on a decimal column no longer crashes the process when
   the column is stored at 128 bits or the conditional has no `otherwise`.
   Branches of different decimal types now widen to decimal(38) at their
