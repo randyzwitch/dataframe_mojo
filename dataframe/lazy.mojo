@@ -50,6 +50,10 @@ from .expr import (
     ALL,
     NULL_COUNT,
     N_UNIQUE,
+    MEDIAN,
+    QUANTILE,
+    CORR,
+    COV,
 )
 from .frame import concat
 from .csv import CsvSchema, read_csv
@@ -74,6 +78,7 @@ from .parquet import (
     read_parquet,
 )
 from .series import Series
+from .dtype import DataType
 from .hashing import encode_rows
 from .trace import trace_path
 from .join_type import (
@@ -86,6 +91,7 @@ from .join_type import (
 )
 from .join_hash import (
     PreparedHashIndex,
+    int64_progression,
     prepare_hash_index,
     prepare_progression_index,
     prefer_left_build,
@@ -1492,11 +1498,17 @@ struct LazyFrame(Copyable):
         the chain's column selections are dropped and the chain ends with
         one selecting its original output.
         """
-        var parents = self._parents()
-        var changed = False
         var original_frames = len(self._frames)
         var root = len(self._nodes) - 1
+        # First choose each chain's first input, then order what joins it.
+        var changed = self._probe_largest_inputs(root, streaming, batch_size)
+        # The chains' top nodes, found before any is reordered: reordering
+        # one appends nodes and leaves others unreachable.
+        var parents = self._live_parents(root)
+        var tops = List[Int]()
         for top in range(len(parents)):
+            if parents[top] == -2:
+                continue
             if not _chain_member(self._nodes[top]):
                 continue
             var parent = parents[top]
@@ -1506,6 +1518,8 @@ struct LazyFrame(Copyable):
                 and _chain_member(self._nodes[parent])
             ):
                 continue
+            tops.append(top)
+        for top in tops:
             if self._order_chain(top, streaming, batch_size):
                 changed = True
         if changed or len(self._frames) != original_frames:
@@ -1513,6 +1527,349 @@ struct LazyFrame(Copyable):
             self._compact_scan_slots()
         if changed:
             self._push_projections()
+
+    def _live_parents(self, root: Int) -> List[Int]:
+        """Each node's parent in the plan under `root`: -1 for the root and
+        -2 for a node no longer reachable (an earlier rewrite's leftovers)."""
+        var parents = List[Int](length=len(self._nodes), fill=-2)
+        parents[root] = -1
+        var stack: List[Int] = [root]
+        while len(stack) > 0:
+            var i = stack.pop()
+            for child in [self._nodes[i].left, self._nodes[i].right]:
+                if child >= 0 and parents[child] == -2:
+                    parents[child] = i
+                    stack.append(child)
+        return parents^
+
+    def _order_free_above(self, top: Int, parents: List[Int]) -> Bool:
+        """Whether the plan above `top` gives the same result whatever
+        order `top`'s rows arrive in: row-local steps up to an aggregation
+        that reads no row position."""
+        var cursor = parents[top]
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == AGG:
+                return not node.maintain_order and _order_insensitive(
+                    node.exprs
+                )
+            if node.kind == SELECT and not _row_local(node.exprs):
+                return _stream_reductions(node.exprs) and _order_insensitive(
+                    node.exprs
+                )
+            if (
+                node.kind == FILTER
+                or node.kind == SELECT
+                or node.kind == WITH_COLUMNS
+            ):
+                if not _row_local(node.exprs):
+                    return False
+            elif node.kind != DROP:
+                return False
+            cursor = parents[cursor]
+        return False
+
+    def _estimated_rows(self, index: Int) raises -> Int:
+        """Rows node `index` yields, without running it: exact for a table,
+        estimated for one row-local filter over a table by applying the
+        filter to 64 evenly spaced runs of 1,024 rows (every row of a table
+        that small). -1 for anything else. Evenly spaced runs, not a
+        prefix: tables are often stored in date or key order, which a
+        prefix would misjudge."""
+        ref node = self._nodes[index]
+        if node.kind == SCAN_FRAME:
+            return self._frames[node.offset].height()
+        if node.kind == DROP or (
+            (node.kind == SELECT or node.kind == WITH_COLUMNS)
+            and _stream_rows(node)
+        ):
+            return self._estimated_rows(node.left)
+        if node.kind != FILTER or not _row_local(node.exprs):
+            return -1
+        ref source = self._nodes[node.left]
+        if source.kind != SCAN_FRAME:
+            return -1
+        var height = self._frames[source.offset].height()
+        var runs = 64
+        var run = 1024
+        # Only the columns the filter reads.
+        var reads = _references(node.exprs[0])
+        if not reads:
+            return -1
+        var names = List[String]()
+        for name in reads.value():
+            if name not in names:
+                names.append(name)
+        var sample = self._frames[source.offset].select(names)
+        if height > runs * run:
+            var picked = List[Int](capacity=runs * run)
+            for k in range(runs):
+                var first = k * (height // runs)
+                for i in range(run):
+                    picked.append(first + i)
+            # Gathered within each stored chunk, so no column is merged first.
+            sample = sample._filter_rows(picked^)
+        var kept = sample.filter(node.exprs[0]).height()
+        if height <= runs * run:
+            return kept
+        return Int(Float64(kept) / Float64(runs * run) * Float64(height))
+
+    def _progression_key(self, index: Int, keys: List[String]) raises -> Bool:
+        """Whether a join building on node `index` with these keys needs no
+        hash table: one integer key of a whole table whose values are an
+        arithmetic progression, which is looked up by position."""
+        if len(keys) != 1:
+            return False
+        var cursor = index
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == SCAN_FRAME:
+                var key = self._frames[node.offset][keys[0]]
+                if key.dtype().physical() != DataType.INT64:
+                    return False
+                return int64_progression(key)[0]
+            if node.kind != DROP and not (
+                (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and _chain_member(node)
+            ):
+                return False
+            cursor = node.left
+        return False
+
+    def _probe_largest_inputs(
+        mut self, root: Int, streaming: Bool, batch_size: Int
+    ) raises -> Bool:
+        """Start each chain of inner joins from its largest input.
+
+        A chain runs by streaming its first input through hash tables built
+        on every other input, so the first input is the only one never
+        hashed. Written as `small.join(large)`, a plan hashes the large
+        table. Polars and DuckDB choose the build side of each join by
+        size; here the chain is re-rooted at its largest input, and the
+        other inputs join outward from it along the same key pairs.
+
+        Only where the rows' order cannot show (`_order_free_above`): an
+        inner join's rows follow its left input, so a new first input
+        changes their order.
+        """
+        var parents = self._live_parents(root)
+        var changed = False
+        for top in range(len(parents)):
+            if parents[top] == -2:
+                continue
+            ref node = self._nodes[top]
+            if node.kind != JOIN or not _chain_member(node):
+                continue
+            var parent = parents[top]
+            if (
+                parent >= 0
+                and self._nodes[parent].left == top
+                and (
+                    self._nodes[parent].kind == SELECT
+                    or self._nodes[parent].kind == JOIN
+                )
+                and _chain_member(self._nodes[parent])
+            ):
+                continue
+            if not self._order_free_above(top, parents):
+                continue
+            if self._probe_largest_input(top, streaming, batch_size):
+                changed = True
+        return changed
+
+    def _probe_largest_input(
+        mut self, top: Int, streaming: Bool, batch_size: Int
+    ) raises -> Bool:
+        """Re-root the join chain ending at `top`; see
+        `_probe_largest_inputs`. False when the chain stays as it is."""
+        var joins = List[Int]()
+        var cursor = top
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == JOIN and _chain_member(node):
+                joins.append(cursor)
+            elif not (node.kind == SELECT and _chain_member(node)):
+                break
+            cursor = node.left
+        if cursor < 0 or len(joins) == 0:
+            return False
+        # The first input is the lowest join's whole left input, with any
+        # column selection on it, so it keeps supplying only those columns.
+        var base = self._nodes[joins[len(joins) - 1]].left
+        joins.reverse()
+        var n = len(joins)
+        # Table 0 is the chain's first input; table p + 1 is join p's right.
+        var tables: List[Int] = [base]
+        for p in range(n):
+            tables.append(self._nodes[joins[p]].right)
+        # Which table supplies each column. A name two tables share is
+        # allowed only as a join's key pair of one name; anything else
+        # would be renamed by a suffix in one order and not in another.
+        var provider = Dict[String, Int]()
+        var shared = List[Tuple[String, Int, Int]]()
+        for t in range(n + 1):
+            for c in self._columns_of(tables[t]):
+                if c in provider:
+                    shared.append((c, provider[c], t))
+                else:
+                    provider[c] = t
+        # Join p links table p + 1 to the one table holding its left keys.
+        var linked = List[Int]()
+        for p in range(n):
+            ref node = self._nodes[joins[p]]
+            if len(node.names) != len(node.right_keys):
+                return False
+            var from_table = -1
+            for name in node.names:
+                if name not in provider:
+                    return False
+                if from_table == -1:
+                    from_table = provider[name]
+                elif from_table != provider[name]:
+                    return False
+            if from_table > p:
+                return False
+            linked.append(from_table)
+        for item in shared:
+            var allowed = False
+            for p in range(n):
+                ref node = self._nodes[joins[p]]
+                if not (
+                    (linked[p] == item[1] and p + 1 == item[2])
+                    or (linked[p] == item[2] and p + 1 == item[1])
+                ):
+                    continue
+                for i in range(len(node.names)):
+                    if (
+                        node.names[i] == item[0]
+                        and node.right_keys[i] == item[0]
+                    ):
+                        allowed = True
+            if not allowed:
+                return False
+        # The first input streams through the chain as slices, so the
+        # columns it supplies cost nothing to carry; as a right input each
+        # would be gathered for every joined row. Move it only when it
+        # supplies nothing but its join keys.
+        var top_columns = self._columns_of(top)
+        for name in top_columns:
+            if provider[name] != 0:
+                continue
+            var key = False
+            for p in range(n):
+                if linked[p] == 0 and name in self._nodes[joins[p]].names:
+                    key = True
+            if not key:
+                return False
+        var rows = List[Int]()
+        for t in range(n + 1):
+            rows.append(self._estimated_rows(tables[t]))
+        if rows[0] < 0:
+            return False
+        # Candidates by size. For each, compare the rows hashed along the
+        # path between it and the first input, the only joins whose build
+        # side changes: now each table on the path but the first is built;
+        # re-rooted, each but the candidate is.
+        var largest = 0
+        var saved = 0
+        for candidate in range(1, n + 1):
+            if rows[candidate] <= rows[0]:
+                continue
+            var path = List[Int]()
+            var t = candidate
+            var known = True
+            while t != 0:
+                known = known and rows[t] >= 0
+                path.append(t)
+                t = linked[t - 1]
+            if not known:
+                continue
+            var before = 0
+            var after = 0
+            for k in range(len(path)):
+                var table = path[k]
+                ref edge = self._nodes[joins[table - 1]]
+                # Built now, keyed by the join's right keys.
+                if not self._progression_key(tables[table], edge.right_keys):
+                    before += rows[table]
+                # Built after re-rooting: the table on the other end,
+                # keyed by the join's left keys.
+                var other = linked[table - 1]
+                if not self._progression_key(tables[other], edge.names):
+                    after += rows[other]
+            if before - after > saved:
+                saved = before - after
+                largest = candidate
+        if largest == 0:
+            return False
+        # Join outward from the largest table. A join met from its right
+        # table's side swaps its key lists; the keys it then drops are the
+        # other table's, whose values the surviving keys hold, so later
+        # uses of those names read the surviving ones (`renamed`).
+        var visited = List[Bool](length=n + 1, fill=False)
+        visited[largest] = True
+        var placed = List[Bool](length=n, fill=False)
+        var renamed = Dict[String, String]()
+        var added = List[PlanNode]()
+        var current = tables[largest]
+        # The columns the chain holds so far. Each join must find its left
+        # keys there and add no name already present.
+        var have = Dict[String, Bool]()
+        for c in self._columns_of(tables[largest]):
+            have[c] = True
+        for _ in range(n):
+            var pick = -1
+            for p in range(n):
+                if not placed[p] and visited[linked[p]] != visited[p + 1]:
+                    pick = p
+                    break
+            if pick < 0:
+                return False
+            var node = self._nodes[joins[pick]].copy()
+            node.left = current
+            var forward = visited[linked[pick]]
+            var left_keys = (
+                node.names.copy() if forward else node.right_keys.copy()
+            )
+            for i in range(len(left_keys)):
+                while left_keys[i] in renamed:
+                    left_keys[i] = renamed[left_keys[i]]
+            if forward:
+                visited[pick + 1] = True
+            else:
+                var dropped = node.names.copy()
+                node.right = tables[linked[pick]]
+                node.right_keys = dropped.copy()
+                for i in range(len(dropped)):
+                    if dropped[i] != left_keys[i]:
+                        renamed[dropped[i]] = left_keys[i]
+                visited[linked[pick]] = True
+            for key in left_keys:
+                if key not in have:
+                    return False
+            for c in self._columns_of(node.right):
+                if c in node.right_keys:
+                    continue
+                if c in have:
+                    return False
+                have[c] = True
+            node.names = left_keys^
+            placed[pick] = True
+            current = len(self._nodes) + len(added)
+            added.append(node^)
+        for node in added:
+            self._nodes.append(node.copy())
+        var keep = List[Expr]()
+        for name in top_columns:
+            var source = name
+            while source in renamed:
+                source = renamed[source]
+            keep.append(
+                col(source) if source == name else col(source).alias(name)
+            )
+        self._nodes[top] = _plan_node(SELECT, current, exprs=keep)
+        trace_path("lazy.probe_largest")
+        return True
 
     def _spine_rows(self, index: Int) -> Int:
         """Rows of the table under `index` along steps that keep, drop or
@@ -2269,6 +2626,36 @@ def _counts_distinct(expressions: List[Expr]) -> Bool:
             if node.op == N_UNIQUE:
                 return True
     return False
+
+
+def _order_insensitive(exprs: List[Expr]) -> Bool:
+    """Whether aggregates give the same values whatever order their input
+    rows arrive in: no window, and only reductions that read no position
+    (so not first, last, arg_min, arg_max or a list of the rows)."""
+    for e in exprs:
+        for node in e._nodes:
+            if is_window(node.op) or node.op == OVER:
+                return False
+            if is_reduction(node.op) and node.op not in [
+                SUM,
+                COUNT,
+                MIN,
+                MAX,
+                MEAN,
+                STD,
+                VAR,
+                LEN,
+                ANY,
+                ALL,
+                NULL_COUNT,
+                N_UNIQUE,
+                MEDIAN,
+                QUANTILE,
+                CORR,
+                COV,
+            ]:
+                return False
+    return True
 
 
 def _chain_member(node: PlanNode) -> Bool:
