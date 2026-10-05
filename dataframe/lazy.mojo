@@ -1761,9 +1761,11 @@ struct LazyFrame(Copyable):
                     key = True
             if not key:
                 return False
-        var rows = List[Int]()
-        for t in range(n + 1):
-            rows.append(self._estimated_rows(tables[t]))
+        # Rows per table, estimated only when needed (-2: not yet). A
+        # table that cannot hold more rows than the first input is never
+        # a candidate, so most chains estimate nothing beyond the first.
+        var rows = List[Int](length=n + 1, fill=-2)
+        rows[0] = self._estimated_rows(tables[0])
         if rows[0] < 0:
             return False
         # Candidates by size. For each, compare the rows hashed along the
@@ -1773,12 +1775,18 @@ struct LazyFrame(Copyable):
         var largest = 0
         var saved = 0
         for candidate in range(1, n + 1):
+            var bound = self._height_bound(tables[candidate])
+            if bound < 0 or bound <= rows[0]:
+                continue
+            rows[candidate] = self._estimated_rows(tables[candidate])
             if rows[candidate] <= rows[0]:
                 continue
             var path = List[Int]()
             var t = candidate
             var known = True
             while t != 0:
+                if rows[t] == -2:
+                    rows[t] = self._estimated_rows(tables[t])
                 known = known and rows[t] >= 0
                 path.append(t)
                 t = linked[t - 1]
