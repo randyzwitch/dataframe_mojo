@@ -94,14 +94,11 @@ jobs:
           --suites h2o_groupby,h2o_join,pdsh --scale smoke --rounds 1 --reps 1
           --engines mojo,duckdb --threads 4 --allow-busy --check
 
-      # The decimal variant joins this check when the two engine failures it
-      # found are fixed: a crash on a decimal when/then without otherwise
-      # (#464) and decimal fill_null (#465).
       - name: TPC-DS answers (smoke scale)
         if: runner.os == 'Linux'
         run: >-
           pixi run -e oracle python3 scripts/bench_suites.py
-          --suites tpcds --variants base --scale smoke --rounds 1 --reps 1
+          --suites tpcds --scale smoke --rounds 1 --reps 1
           --engines mojo,duckdb --threads 4 --allow-busy --check
 
       - name: Package smoke test
