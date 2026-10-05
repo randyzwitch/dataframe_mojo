@@ -12,8 +12,10 @@ the lines documented in suite_common.mojo, each tagged with its query, so
 the driver checks every engine's answer the same way.
 
 DuckDB runs the reference SQL for each suite: db-benchmark's queries,
-`tpch_queries()` for PDS-H, and ClickBench's `queries.sql`. The Polars
-versions are idiomatic translations of the same queries.
+`tpch_queries()` for PDS-H, `tpcds_queries()` for TPC-DS, and ClickBench's
+`queries.sql`. The Polars versions are idiomatic translations of the same
+queries. A TPC-DS query without a translation yet is reported as
+unsupported, not dropped.
 """
 
 from datetime import date
@@ -963,6 +965,831 @@ def clickbench_polars(t, q):
     return out.collect()
 
 
+# --- TPC-DS ---------------------------------------------------------------
+
+
+def tpcds_polars(t, q):
+    """The 23 single-block TPC-DS queries, as tpcds.mojo has them. Any other
+    query is reported as not translated."""
+    import polars as pl
+
+    c = {name: frame.lazy() for name, frame in t.items()}
+    col = pl.col
+    d = date
+
+    def dates(keep, key):
+        return c["date_dim"].filter(keep).select(col("d_date_sk").alias(key))
+
+    def brand_sales(days, items):
+        return (
+            c["date_dim"]
+            .filter(days)
+            .join(c["store_sales"], left_on="d_date_sk", right_on="ss_sold_date_sk")
+            .join(c["item"].filter(items), left_on="ss_item_sk", right_on="i_item_sk")
+        )
+
+    def promoted_averages(sales, prefix, demographics):
+        buyers = c["customer_demographics"].filter(
+            (col("cd_gender") == "M")
+            & (col("cd_marital_status") == "S")
+            & (col("cd_education_status") == "College")
+        )
+        promotions = c["promotion"].filter(
+            (col("p_channel_email") == "N") | (col("p_channel_event") == "N")
+        )
+        return (
+            c[sales]
+            .join(buyers, left_on=demographics, right_on="cd_demo_sk")
+            .join(
+                dates(col("d_year") == 2000, "d_date_sk"),
+                left_on=prefix + "_sold_date_sk",
+                right_on="d_date_sk",
+            )
+            .join(c["item"], left_on=prefix + "_item_sk", right_on="i_item_sk")
+            .join(promotions, left_on=prefix + "_promo_sk", right_on="p_promo_sk")
+            .group_by("i_item_id")
+            .agg(
+                col(prefix + "_quantity").mean().alias("agg1"),
+                col(prefix + "_list_price").mean().alias("agg2"),
+                col(prefix + "_coupon_amt").mean().alias("agg3"),
+                col(prefix + "_sales_price").mean().alias("agg4"),
+            )
+            .sort("i_item_id", nulls_last=True)
+            .head(100)
+        )
+
+    def returned_then_bought(sold, returned, bought):
+        return (
+            c["store_sales"]
+            .join(dates(sold, "d1_sk"), left_on="ss_sold_date_sk", right_on="d1_sk")
+            .join(c["item"], left_on="ss_item_sk", right_on="i_item_sk")
+            .join(c["store"], left_on="ss_store_sk", right_on="s_store_sk")
+            .join(
+                c["store_returns"].join(
+                    dates(returned, "d2_sk"),
+                    left_on="sr_returned_date_sk",
+                    right_on="d2_sk",
+                ),
+                left_on=["ss_customer_sk", "ss_item_sk", "ss_ticket_number"],
+                right_on=["sr_customer_sk", "sr_item_sk", "sr_ticket_number"],
+            )
+            .join(
+                c["catalog_sales"].join(
+                    dates(bought, "d3_sk"),
+                    left_on="cs_sold_date_sk",
+                    right_on="d3_sk",
+                ),
+                left_on=["ss_customer_sk", "ss_item_sk"],
+                right_on=["cs_bill_customer_sk", "cs_item_sk"],
+            )
+        )
+
+    def stocked_items(low, high, makers, first_day, last_day, sales, key):
+        in_stock = (
+            c["inventory"]
+            .filter(col("inv_quantity_on_hand").is_between(100, 500))
+            .join(
+                dates(col("d_date").is_between(first_day, last_day), "d_date_sk"),
+                left_on="inv_date_sk",
+                right_on="d_date_sk",
+            )
+        )
+        return (
+            c["item"]
+            .filter(
+                col("i_current_price").is_between(low, high)
+                & col("i_manufact_id").is_in(makers)
+            )
+            .join(in_stock, left_on="i_item_sk", right_on="inv_item_sk")
+            .join(c[sales], left_on="i_item_sk", right_on=key, how="semi")
+            .select("i_item_id", "i_item_desc", "i_current_price")
+            .unique()
+            .sort("i_item_id", nulls_last=True)
+            .head(100)
+        )
+
+    def one_if(condition):
+        return pl.when(condition).then(1).otherwise(0)
+
+    if q == "q3":
+        out = (
+            brand_sales(col("d_moy") == 11, col("i_manufact_id") == 128)
+            .group_by("d_year", "i_brand", "i_brand_id")
+            .agg(col("ss_ext_sales_price").sum().alias("sum_agg"))
+            .select(
+                "d_year",
+                col("i_brand_id").alias("brand_id"),
+                col("i_brand").alias("brand"),
+                "sum_agg",
+            )
+            .sort(
+                ["d_year", "sum_agg", "brand_id"],
+                descending=[False, True, False],
+                nulls_last=True,
+            )
+            .head(100)
+        )
+    elif q == "q7":
+        out = promoted_averages("store_sales", "ss", "ss_cdemo_sk")
+    elif q in ("q13", "q48"):
+        joined = (
+            c["store_sales"]
+            .join(
+                c["store"].select("s_store_sk"),
+                left_on="ss_store_sk",
+                right_on="s_store_sk",
+            )
+            .join(
+                dates(col("d_year") == (2001 if q == "q13" else 2000), "d_sk"),
+                left_on="ss_sold_date_sk",
+                right_on="d_sk",
+            )
+            .join(
+                c["customer_demographics"],
+                left_on="ss_cdemo_sk",
+                right_on="cd_demo_sk",
+            )
+            .join(
+                c["customer_address"].filter(col("ca_country") == "United States"),
+                left_on="ss_addr_sk",
+                right_on="ca_address_sk",
+            )
+        )
+        price = col("ss_sales_price")
+        profit = col("ss_net_profit")
+        married = col("cd_marital_status")
+        schooling = col("cd_education_status")
+        if q == "q13":
+            out = (
+                joined.join(
+                    c["household_demographics"],
+                    left_on="ss_hdemo_sk",
+                    right_on="hd_demo_sk",
+                )
+                .filter(
+                    (
+                        (married == "M")
+                        & (schooling == "Advanced Degree")
+                        & price.is_between(100, 150)
+                        & (col("hd_dep_count") == 3)
+                    )
+                    | (
+                        (married == "S")
+                        & (schooling == "College")
+                        & price.is_between(50, 100)
+                        & (col("hd_dep_count") == 1)
+                    )
+                    | (
+                        (married == "W")
+                        & (schooling == "2 yr Degree")
+                        & price.is_between(150, 200)
+                        & (col("hd_dep_count") == 1)
+                    )
+                )
+                .filter(
+                    (col("ca_state").is_in(["TX", "OH"]) & profit.is_between(100, 200))
+                    | (
+                        col("ca_state").is_in(["OR", "NM", "KY"])
+                        & profit.is_between(150, 300)
+                    )
+                    | (
+                        col("ca_state").is_in(["VA", "TX", "MS"])
+                        & profit.is_between(50, 250)
+                    )
+                )
+                .select(
+                    col("ss_quantity").mean().alias("avg1"),
+                    col("ss_ext_sales_price").mean().alias("avg2"),
+                    col("ss_ext_wholesale_cost").mean().alias("avg3"),
+                    col("ss_ext_wholesale_cost").sum().alias("sum4"),
+                )
+            )
+        else:
+            out = (
+                joined.filter(
+                    (
+                        (married == "M")
+                        & (schooling == "4 yr Degree")
+                        & price.is_between(100, 150)
+                    )
+                    | (
+                        (married == "D")
+                        & (schooling == "2 yr Degree")
+                        & price.is_between(50, 100)
+                    )
+                    | (
+                        (married == "S")
+                        & (schooling == "College")
+                        & price.is_between(150, 200)
+                    )
+                )
+                .filter(
+                    (
+                        col("ca_state").is_in(["CO", "OH", "TX"])
+                        & profit.is_between(0, 2000)
+                    )
+                    | (
+                        col("ca_state").is_in(["OR", "MN", "KY"])
+                        & profit.is_between(150, 3000)
+                    )
+                    | (
+                        col("ca_state").is_in(["VA", "CA", "MS"])
+                        & profit.is_between(50, 25000)
+                    )
+                )
+                .select(col("ss_quantity").sum().alias("total"))
+            )
+    elif q == "q15":
+        zips = [
+            "85669", "86197", "88274", "83405", "86475",
+            "85392", "85460", "80348", "81792",
+        ]  # fmt: skip
+        out = (
+            c["catalog_sales"]
+            .join(
+                dates((col("d_qoy") == 2) & (col("d_year") == 2001), "d_sk"),
+                left_on="cs_sold_date_sk",
+                right_on="d_sk",
+            )
+            .join(
+                c["customer"],
+                left_on="cs_bill_customer_sk",
+                right_on="c_customer_sk",
+            )
+            .join(
+                c["customer_address"],
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .filter(
+                col("ca_zip").str.slice(0, 5).is_in(zips)
+                | col("ca_state").is_in(["CA", "WA", "GA"])
+                | (col("cs_sales_price") > 500)
+            )
+            .group_by("ca_zip")
+            .agg(col("cs_sales_price").sum().alias("total"))
+            .sort("ca_zip", nulls_last=False)
+            .head(100)
+        )
+    elif q == "q17":
+        later = ["2001Q1", "2001Q2", "2001Q3"]
+        aggregates = []
+        for measure, label in (
+            ("ss_quantity", "store_sales"),
+            ("sr_return_quantity", "store_returns"),
+            ("cs_quantity", "catalog_sales"),
+        ):
+            value = col(measure)
+            label += "_quantity"
+            aggregates += [
+                value.count().alias(label + "count"),
+                value.mean().alias(label + "ave"),
+                value.std().alias(label + "stdev"),
+                (value.std() / value.mean()).alias(label + "cov"),
+            ]
+        keys = ["i_item_id", "i_item_desc", "s_state"]
+        out = (
+            returned_then_bought(
+                col("d_quarter_name") == "2001Q1",
+                col("d_quarter_name").is_in(later),
+                col("d_quarter_name").is_in(later),
+            )
+            .group_by(keys)
+            .agg(aggregates)
+            .sort(keys, nulls_last=False)
+            .head(100)
+        )
+    elif q == "q19":
+        out = (
+            brand_sales(
+                (col("d_moy") == 11) & (col("d_year") == 1998),
+                col("i_manager_id") == 8,
+            )
+            .join(c["customer"], left_on="ss_customer_sk", right_on="c_customer_sk")
+            .join(
+                c["customer_address"],
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .join(c["store"], left_on="ss_store_sk", right_on="s_store_sk")
+            .filter(col("ca_zip").str.slice(0, 5) != col("s_zip").str.slice(0, 5))
+            .group_by("i_brand", "i_brand_id", "i_manufact_id", "i_manufact")
+            .agg(col("ss_ext_sales_price").sum().alias("ext_price"))
+            .select(
+                col("i_brand_id").alias("brand_id"),
+                col("i_brand").alias("brand"),
+                "i_manufact_id",
+                "i_manufact",
+                "ext_price",
+            )
+            .sort(
+                ["ext_price", "brand", "brand_id", "i_manufact_id", "i_manufact"],
+                descending=[True, False, False, False, False],
+                nulls_last=True,
+            )
+            .head(100)
+        )
+    elif q in ("q25", "q29"):
+        keys = ["i_item_id", "i_item_desc", "s_store_id", "s_store_name"]
+        if q == "q25":
+            months = col("d_moy").is_between(4, 10) & (col("d_year") == 2001)
+            linked = returned_then_bought(
+                (col("d_moy") == 4) & (col("d_year") == 2001), months, months
+            )
+            aggregates = [
+                col("ss_net_profit").sum().alias("store_sales_profit"),
+                col("sr_net_loss").sum().alias("store_returns_loss"),
+                col("cs_net_profit").sum().alias("catalog_sales_profit"),
+            ]
+        else:
+            linked = returned_then_bought(
+                (col("d_moy") == 9) & (col("d_year") == 1999),
+                col("d_moy").is_between(9, 12) & (col("d_year") == 1999),
+                col("d_year").is_in([1999, 2000, 2001]),
+            )
+            aggregates = [
+                col("ss_quantity").sum().alias("store_sales_quantity"),
+                col("sr_return_quantity").sum().alias("store_returns_quantity"),
+                col("cs_quantity").sum().alias("catalog_sales_quantity"),
+            ]
+        out = (
+            linked.group_by(keys)
+            .agg(aggregates)
+            .sort(keys, nulls_last=True)
+            .head(100)
+        )
+    elif q == "q26":
+        out = promoted_averages("catalog_sales", "cs", "cs_bill_cdemo_sk")
+    elif q == "q37":
+        out = stocked_items(
+            68, 98, [677, 940, 694, 808], d(2000, 2, 1), d(2000, 4, 1),
+            "catalog_sales", "cs_item_sk",
+        )  # fmt: skip
+    elif q == "q40":
+        net = col("cs_sales_price") - col("cr_refunded_cash").fill_null(0)
+        day = d(2000, 3, 11)
+        out = (
+            c["catalog_sales"]
+            .join(
+                c["catalog_returns"],
+                left_on=["cs_order_number", "cs_item_sk"],
+                right_on=["cr_order_number", "cr_item_sk"],
+                how="left",
+            )
+            .join(
+                c["warehouse"],
+                left_on="cs_warehouse_sk",
+                right_on="w_warehouse_sk",
+            )
+            .join(
+                c["item"].filter(col("i_current_price").is_between(0.99, 1.49)),
+                left_on="cs_item_sk",
+                right_on="i_item_sk",
+            )
+            .join(
+                c["date_dim"].filter(
+                    col("d_date").is_between(d(2000, 2, 10), d(2000, 4, 10))
+                ),
+                left_on="cs_sold_date_sk",
+                right_on="d_date_sk",
+            )
+            .group_by("w_state", "i_item_id")
+            .agg(
+                pl.when(col("d_date") < day)
+                .then(net)
+                .otherwise(0)
+                .sum()
+                .alias("sales_before"),
+                pl.when(col("d_date") >= day)
+                .then(net)
+                .otherwise(0)
+                .sum()
+                .alias("sales_after"),
+            )
+            .sort(["w_state", "i_item_id"], nulls_last=True)
+            .head(100)
+        )
+    elif q == "q42":
+        out = (
+            brand_sales(
+                (col("d_moy") == 11) & (col("d_year") == 2000),
+                col("i_manager_id") == 1,
+            )
+            .group_by("d_year", "i_category_id", "i_category")
+            .agg(col("ss_ext_sales_price").sum().alias("total"))
+            .sort(
+                ["total", "d_year", "i_category_id", "i_category"],
+                descending=[True, False, False, False],
+                nulls_last=True,
+            )
+            .head(100)
+        )
+    elif q == "q43":
+        days = [
+            "Sunday", "Monday", "Tuesday", "Wednesday",
+            "Thursday", "Friday", "Saturday",
+        ]  # fmt: skip
+        sums = [
+            pl.when(col("d_day_name") == day)
+            .then(col("ss_sales_price"))
+            .sum()
+            .alias(day[:3].lower() + "_sales")
+            for day in days
+        ]
+        out = (
+            c["date_dim"]
+            .filter(col("d_year") == 2000)
+            .join(c["store_sales"], left_on="d_date_sk", right_on="ss_sold_date_sk")
+            .join(
+                c["store"].filter(col("s_gmt_offset") == -5),
+                left_on="ss_store_sk",
+                right_on="s_store_sk",
+            )
+            .group_by("s_store_name", "s_store_id")
+            .agg(sums)
+            .sort(
+                ["s_store_name", "s_store_id"]
+                + [day[:3].lower() + "_sales" for day in days],
+                nulls_last=True,
+            )
+            .head(100)
+        )
+    elif q == "q50":
+        keys = [
+            "s_store_name", "s_company_id", "s_street_number", "s_street_name",
+            "s_street_type", "s_suite_number", "s_city", "s_county", "s_state",
+            "s_zip",
+        ]  # fmt: skip
+        lag = col("sr_returned_date_sk") - col("ss_sold_date_sk")
+        out = (
+            c["store_sales"]
+            .join(
+                c["store_returns"].join(
+                    dates((col("d_year") == 2001) & (col("d_moy") == 8), "d2_sk"),
+                    left_on="sr_returned_date_sk",
+                    right_on="d2_sk",
+                ),
+                left_on=["ss_ticket_number", "ss_item_sk", "ss_customer_sk"],
+                right_on=["sr_ticket_number", "sr_item_sk", "sr_customer_sk"],
+            )
+            .join(
+                dates(col("d_date_sk").is_not_null(), "d1_sk"),
+                left_on="ss_sold_date_sk",
+                right_on="d1_sk",
+            )
+            .join(c["store"], left_on="ss_store_sk", right_on="s_store_sk")
+            .group_by(keys)
+            .agg(
+                one_if(lag <= 30).sum().alias("30 days"),
+                one_if((lag > 30) & (lag <= 60)).sum().alias("31-60 days"),
+                one_if((lag > 60) & (lag <= 90)).sum().alias("61-90 days"),
+                one_if((lag > 90) & (lag <= 120)).sum().alias("91-120 days"),
+                one_if(lag > 120).sum().alias(">120 days"),
+            )
+            .sort(keys, nulls_last=True)
+            .head(100)
+        )
+    elif q == "q52":
+        out = (
+            brand_sales(
+                (col("d_moy") == 11) & (col("d_year") == 2000),
+                col("i_manager_id") == 1,
+            )
+            .group_by("d_year", "i_brand", "i_brand_id")
+            .agg(col("ss_ext_sales_price").sum().alias("ext_price"))
+            .select(
+                "d_year",
+                col("i_brand_id").alias("brand_id"),
+                col("i_brand").alias("brand"),
+                "ext_price",
+            )
+            .sort(
+                ["d_year", "ext_price", "brand_id"],
+                descending=[False, True, False],
+                nulls_last=True,
+            )
+            .head(100)
+        )
+    elif q == "q55":
+        out = (
+            brand_sales(
+                (col("d_moy") == 11) & (col("d_year") == 1999),
+                col("i_manager_id") == 28,
+            )
+            .group_by("i_brand", "i_brand_id")
+            .agg(col("ss_ext_sales_price").sum().alias("ext_price"))
+            .select(
+                col("i_brand_id").alias("brand_id"),
+                col("i_brand").alias("brand"),
+                "ext_price",
+            )
+            .sort(
+                ["ext_price", "brand_id"], descending=[True, False], nulls_last=True
+            )
+            .head(100)
+        )
+    elif q == "q72":
+        sold = (
+            c["catalog_sales"]
+            .join(
+                c["date_dim"]
+                .filter(col("d_year") == 1999)
+                .select(
+                    col("d_date_sk").alias("d1_sk"),
+                    col("d_date").alias("sold_date"),
+                    "d_week_seq",
+                ),
+                left_on="cs_sold_date_sk",
+                right_on="d1_sk",
+            )
+            .join(
+                c["customer_demographics"].filter(col("cd_marital_status") == "D"),
+                left_on="cs_bill_cdemo_sk",
+                right_on="cd_demo_sk",
+            )
+            .join(
+                c["household_demographics"].filter(
+                    col("hd_buy_potential") == ">10000"
+                ),
+                left_on="cs_bill_hdemo_sk",
+                right_on="hd_demo_sk",
+            )
+            .join(
+                c["date_dim"].select(
+                    col("d_date_sk").alias("d3_sk"),
+                    col("d_date").alias("ship_date"),
+                ),
+                left_on="cs_ship_date_sk",
+                right_on="d3_sk",
+            )
+            .filter(col("ship_date") > col("sold_date") + pl.duration(days=5))
+        )
+        stock = c["inventory"].join(
+            c["date_dim"].select(
+                col("d_date_sk").alias("d2_sk"),
+                col("d_week_seq").alias("inv_week_seq"),
+            ),
+            left_on="inv_date_sk",
+            right_on="d2_sk",
+        )
+        out = (
+            sold.join(
+                stock,
+                left_on=["cs_item_sk", "d_week_seq"],
+                right_on=["inv_item_sk", "inv_week_seq"],
+            )
+            .filter(col("inv_quantity_on_hand") < col("cs_quantity"))
+            .join(
+                c["warehouse"],
+                left_on="inv_warehouse_sk",
+                right_on="w_warehouse_sk",
+            )
+            .join(c["item"], left_on="cs_item_sk", right_on="i_item_sk")
+            .join(
+                c["promotion"].select("p_promo_sk"),
+                left_on="cs_promo_sk",
+                right_on="p_promo_sk",
+                how="left",
+                coalesce=False,
+            )
+            .join(
+                c["catalog_returns"].select("cr_item_sk", "cr_order_number"),
+                left_on=["cs_item_sk", "cs_order_number"],
+                right_on=["cr_item_sk", "cr_order_number"],
+                how="left",
+            )
+            .group_by("i_item_desc", "w_warehouse_name", "d_week_seq")
+            .agg(
+                one_if(col("p_promo_sk").is_null()).sum().alias("no_promo"),
+                one_if(col("p_promo_sk").is_not_null()).sum().alias("promo"),
+                pl.len().alias("total_cnt"),
+            )
+            .sort(
+                ["total_cnt", "i_item_desc", "w_warehouse_name", "d_week_seq"],
+                descending=[True, False, False, False],
+                nulls_last=False,
+            )
+            .head(100)
+        )
+    elif q == "q82":
+        out = stocked_items(
+            62, 92, [129, 270, 821, 423], d(2000, 5, 25), d(2000, 7, 24),
+            "store_sales", "ss_item_sk",
+        )  # fmt: skip
+    elif q == "q84":
+        out = (
+            c["customer"]
+            .join(
+                c["customer_address"].filter(col("ca_city") == "Edgewood"),
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .join(
+                c["household_demographics"].join(
+                    c["income_band"].filter(
+                        (col("ib_lower_bound") >= 38128)
+                        & (col("ib_upper_bound") <= 88128)
+                    ),
+                    left_on="hd_income_band_sk",
+                    right_on="ib_income_band_sk",
+                ),
+                left_on="c_current_hdemo_sk",
+                right_on="hd_demo_sk",
+            )
+            .join(
+                c["customer_demographics"].select("cd_demo_sk"),
+                left_on="c_current_cdemo_sk",
+                right_on="cd_demo_sk",
+            )
+            .join(
+                c["store_returns"].select("sr_cdemo_sk"),
+                left_on="c_current_cdemo_sk",
+                right_on="sr_cdemo_sk",
+            )
+            .select(
+                col("c_customer_id").alias("customer_id"),
+                pl.concat_str(
+                    col("c_last_name").fill_null(""),
+                    pl.lit(", "),
+                    col("c_first_name").fill_null(""),
+                ).alias("customername"),
+            )
+            .sort("customer_id", nulls_last=False)
+            .head(100)
+        )
+    elif q == "q85":
+        people = c["customer_demographics"]
+        refunded = people.select(
+            col("cd_demo_sk").alias("cd1_sk"),
+            col("cd_marital_status").alias("marital"),
+            col("cd_education_status").alias("education"),
+        )
+        returning = people.select(
+            col("cd_demo_sk").alias("cd2_sk"),
+            col("cd_marital_status").alias("marital2"),
+            col("cd_education_status").alias("education2"),
+        )
+        price = col("ws_sales_price")
+        profit = col("ws_net_profit")
+        out = (
+            c["web_sales"]
+            .join(
+                c["web_returns"],
+                left_on=["ws_item_sk", "ws_order_number"],
+                right_on=["wr_item_sk", "wr_order_number"],
+            )
+            .join(
+                c["web_page"].select("wp_web_page_sk"),
+                left_on="ws_web_page_sk",
+                right_on="wp_web_page_sk",
+            )
+            .join(
+                dates(col("d_year") == 2000, "d_sk"),
+                left_on="ws_sold_date_sk",
+                right_on="d_sk",
+            )
+            .join(refunded, left_on="wr_refunded_cdemo_sk", right_on="cd1_sk")
+            .join(
+                returning,
+                left_on=["wr_returning_cdemo_sk", "marital", "education"],
+                right_on=["cd2_sk", "marital2", "education2"],
+            )
+            .join(
+                c["customer_address"].filter(col("ca_country") == "United States"),
+                left_on="wr_refunded_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .join(c["reason"], left_on="wr_reason_sk", right_on="r_reason_sk")
+            .filter(
+                (
+                    (col("marital") == "M")
+                    & (col("education") == "Advanced Degree")
+                    & price.is_between(100, 150)
+                )
+                | (
+                    (col("marital") == "S")
+                    & (col("education") == "College")
+                    & price.is_between(50, 100)
+                )
+                | (
+                    (col("marital") == "W")
+                    & (col("education") == "2 yr Degree")
+                    & price.is_between(150, 200)
+                )
+            )
+            .filter(
+                (col("ca_state").is_in(["IN", "OH", "NJ"]) & profit.is_between(100, 200))
+                | (
+                    col("ca_state").is_in(["WI", "CT", "KY"])
+                    & profit.is_between(150, 300)
+                )
+                | (
+                    col("ca_state").is_in(["LA", "IA", "AR"])
+                    & profit.is_between(50, 250)
+                )
+            )
+            .group_by("r_reason_desc")
+            .agg(
+                col("ws_quantity").mean().alias("avg1"),
+                col("wr_refunded_cash").mean().alias("avg2"),
+                col("wr_fee").mean().alias("avg3"),
+            )
+            .select(
+                col("r_reason_desc").str.slice(0, 20).alias("reason"),
+                "avg1",
+                "avg2",
+                "avg3",
+            )
+            .sort(["reason", "avg1", "avg2", "avg3"], nulls_last=True)
+            .head(100)
+        )
+    elif q == "q91":
+        buyers = (
+            c["customer"]
+            .join(
+                c["customer_demographics"].filter(
+                    (
+                        (col("cd_marital_status") == "M")
+                        & (col("cd_education_status") == "Unknown")
+                    )
+                    | (
+                        (col("cd_marital_status") == "W")
+                        & (col("cd_education_status") == "Advanced Degree")
+                    )
+                ),
+                left_on="c_current_cdemo_sk",
+                right_on="cd_demo_sk",
+            )
+            .join(
+                c["household_demographics"].filter(
+                    col("hd_buy_potential").str.starts_with("Unknown")
+                ),
+                left_on="c_current_hdemo_sk",
+                right_on="hd_demo_sk",
+            )
+            .join(
+                c["customer_address"].filter(col("ca_gmt_offset") == -7),
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+        )
+        out = (
+            c["call_center"]
+            .join(
+                c["catalog_returns"],
+                left_on="cc_call_center_sk",
+                right_on="cr_call_center_sk",
+            )
+            .join(
+                dates((col("d_year") == 1998) & (col("d_moy") == 11), "d_sk"),
+                left_on="cr_returned_date_sk",
+                right_on="d_sk",
+            )
+            .join(
+                buyers,
+                left_on="cr_returning_customer_sk",
+                right_on="c_customer_sk",
+            )
+            .group_by(
+                "cc_call_center_id", "cc_name", "cc_manager",
+                "cd_marital_status", "cd_education_status",
+            )  # fmt: skip
+            .agg(col("cr_net_loss").sum().alias("Returns_Loss"))
+            .select(
+                col("cc_call_center_id").alias("Call_Center"),
+                col("cc_name").alias("Call_Center_Name"),
+                col("cc_manager").alias("Manager"),
+                "Returns_Loss",
+            )
+            .sort("Returns_Loss", descending=True)
+        )
+    elif q == "q96":
+        out = (
+            c["store_sales"]
+            .join(
+                c["household_demographics"].filter(col("hd_dep_count") == 7),
+                left_on="ss_hdemo_sk",
+                right_on="hd_demo_sk",
+            )
+            .join(
+                c["time_dim"].filter(
+                    (col("t_hour") == 20) & (col("t_minute") >= 30)
+                ),
+                left_on="ss_sold_time_sk",
+                right_on="t_time_sk",
+            )
+            .join(
+                c["store"].filter(col("s_store_name") == "ese"),
+                left_on="ss_store_sk",
+                right_on="s_store_sk",
+            )
+            .select(pl.len().alias("count"))
+        )
+    else:
+        raise NotImplementedError("unsupported: not translated")
+    return out.collect()
+
+
 # --- workers ---------------------------------------------------------------
 
 
@@ -976,6 +1803,11 @@ def duckdb_sql(suite: str, query: str, con) -> str:
         return con.execute(
             "SELECT query FROM tpch_queries() WHERE query_nr = ?", [number]
         ).fetchone()[0]
+    if suite == "tpcds":
+        number = int(query[1:])
+        return con.execute(
+            "SELECT query FROM tpcds_queries() WHERE query_nr = ?", [number]
+        ).fetchone()[0].rstrip().rstrip(";")
     return CLICKBENCH_SQL[int(query[1:])]
 
 
@@ -983,6 +1815,7 @@ POLARS = {
     "h2o_groupby": h2o_groupby_polars,
     "h2o_join": h2o_join_polars,
     "pdsh": pdsh_polars,
+    "tpcds": tpcds_polars,
     "clickbench": clickbench_polars,
 }
 
@@ -1027,6 +1860,8 @@ def main():
             con.execute(f"SET threads = {int(threads)}")
         if suite == "pdsh":
             con.execute("LOAD tpch")
+        if suite == "tpcds":
+            con.execute("LOAD tpcds")
         for name, path in tables.items():
             con.execute(
                 f"CREATE TABLE {name} AS SELECT * FROM read_parquet('{path}')"
@@ -1049,7 +1884,10 @@ def main():
             times, result = execute(query)
         except Exception as error:  # report and continue with the next query
             message = " ".join(str(error).split())
-            print(f"failed\t{query}\t{message}")
+            if message.startswith("unsupported:"):
+                print(f"unsupported\t{query}\t{message[13:]}")
+            else:
+                print(f"failed\t{query}\t{message}")
             continue
         _report(query, times, result)
         sys.stdout.flush()

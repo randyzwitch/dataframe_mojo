@@ -3,12 +3,21 @@
 import hashlib
 import json
 
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 POLICY_NOTE = (
-    "Tune on H2O and mechanism benchmarks; use PDS-H and ClickBench as "
-    "held-out validation. Some prior optimization work used holdout results; "
-    "the development/holdout boundary is enforced going forward."
+    "Tune on H2O, PDS-H and mechanism benchmarks; use TPC-DS and ClickBench "
+    "as held-out validation. PDS-H was held out until 2026-10-05, when "
+    "TPC-DS replaced it. Some earlier optimization work used ClickBench "
+    "results; no TPC-DS result has been used to choose an optimization."
 )
+# Reports recorded under an earlier policy keep the note they were made under.
+EARLIER_NOTES = {
+    2: (
+        "Tune on H2O and mechanism benchmarks; use PDS-H and ClickBench as "
+        "held-out validation. Some prior optimization work used holdout results; "
+        "the development/holdout boundary is enforced going forward."
+    ),
+}
 LEGACY_NOTE = (
     "Legacy result: workload hashes and exposure metadata were not recorded. "
     "Raw measurements are unchanged. "
@@ -18,8 +27,16 @@ LEGACY_NOTE = (
 EXPOSURE_EVIDENCE = {
     "h2o_groupby": "docs/benchmarks.md already designates H2O as development",
     "h2o_join": "docs/benchmarks.md already designates H2O as development",
-    "pdsh": "dataframe/lazy.mojo join ordering and streaming policy cite PDS-H queries",
+    "pdsh": "dataframe/lazy.mojo join ordering and streaming policy cite PDS-H queries; development since 2026-10-05",
+    "tpcds": "added 2026-10-05 as the held-out replacement for PDS-H; no engine change cites it",
     "clickbench": "dataframe/lazy.mojo group-by policy cites ClickBench per-query timings",
+}
+
+
+# What a held-out suite's results have been used for before now.
+PRIOR_EXPOSURE = {
+    "clickbench": "some_prior_optimization_use",
+    "tpcds": "none_recorded",
 }
 
 
@@ -43,7 +60,7 @@ def record(root, selected, suites):
     return {
         "policy_version": POLICY_VERSION,
         "policy": "development_tuning_holdout_validation",
-        "policy_effective": "2026-10-04",
+        "policy_effective": "2026-10-05",
         "suites": {
             name: {
                 "role": "development" if suites[name]["role"]
@@ -51,7 +68,7 @@ def record(root, selected, suites):
                 "intended_use": "tuning" if suites[name]["role"]
                 == "dev" else "validation_only",
                 "prior_exposure": "used_for_development" if suites[name]["role"]
-                == "dev" else "some_prior_optimization_use",
+                == "dev" else PRIOR_EXPOSURE[name],
                 "evidence": EXPOSURE_EVIDENCE[name],
                 "source": suites[name]["source"],
                 "upstream_revision": None,
@@ -65,15 +82,17 @@ def record(root, selected, suites):
         "upstream_note": (
             "Hashes identify the local query translations, generators and runner. "
             "Historical upstream revisions were not recorded; local hashes are "
-            "not upstream commit pins. DuckDB's version identifies tpch_queries/dbgen."
+            "not upstream commit pins. DuckDB's version identifies tpch_queries/dbgen "
+            "and tpcds_queries/dsdgen."
         ),
     }
 
 
 def report_note(result):
-    if not result.get("provenance", {}).get("evaluation"):
-        return LEGACY_NOTE + POLICY_NOTE
-    return POLICY_NOTE
+    evaluation = result.get("provenance", {}).get("evaluation")
+    if not evaluation:
+        return LEGACY_NOTE + EARLIER_NOTES[2]
+    return EARLIER_NOTES.get(evaluation.get("policy_version"), POLICY_NOTE)
 
 
 def distinct_queries(cases):

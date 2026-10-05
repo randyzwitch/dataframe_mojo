@@ -17,6 +17,9 @@ Suites and their provenance:
   `base` stores the DECIMAL(15,2) money columns as DOUBLE, as the suite did
   before this library had decimals (#229), and `decimal` keeps them as
   DECIMAL(15,2). Every engine reads the same files in each variant.
+- tpcds: TPC-DS tables from DuckDB's `dsdgen`, in the same two variants as
+  pdsh: `base` stores the DECIMAL money columns as DOUBLE and `decimal`
+  keeps them as declared. INTEGER columns are widened to BIGINT.
 - clickbench: the `hits` table from https://github.com/ClickHouse/ClickBench,
   downloaded in 1M-row partitions. Its Parquet files store text as untyped
   byte arrays and times as integers; like ClickBench's own Polars and DuckDB
@@ -256,6 +259,69 @@ def pdsh(scale: float, decimal: bool = False) -> Path:
     return root
 
 
+TPCDS_TABLES = [
+    "call_center",
+    "catalog_page",
+    "catalog_returns",
+    "catalog_sales",
+    "customer",
+    "customer_address",
+    "customer_demographics",
+    "date_dim",
+    "household_demographics",
+    "income_band",
+    "inventory",
+    "item",
+    "promotion",
+    "reason",
+    "ship_mode",
+    "store",
+    "store_returns",
+    "store_sales",
+    "time_dim",
+    "warehouse",
+    "web_page",
+    "web_returns",
+    "web_sales",
+    "web_site",
+]
+
+
+def tpcds(scale: float, decimal: bool = False) -> Path:
+    """TPC-DS tables from DuckDB dsdgen, with DECIMAL columns as DOUBLE, or
+    kept as declared when `decimal`."""
+    import duckdb
+
+    root = data_root() / "tpcds" / (
+        f"sf{scale:g}_decimal" if decimal else f"sf{scale:g}"
+    )
+    if all((root / f"{t}.parquet").exists() for t in TPCDS_TABLES):
+        return root
+    root.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute("INSTALL tpcds; LOAD tpcds;")
+    con.execute(f"CALL dsdgen(sf={scale})")
+    for table in TPCDS_TABLES:
+        columns = con.execute(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_name = ? ORDER BY ordinal_position",
+            [table],
+        ).fetchall()
+        select = ", ".join(
+            f"CAST({name} AS DOUBLE) AS {name}"
+            if kind.startswith("DECIMAL") and not decimal
+            else f"CAST({name} AS BIGINT) AS {name}"
+            if kind == "INTEGER"
+            else name
+            for name, kind in columns
+        )
+        con.execute(
+            f"COPY (SELECT {select} FROM {table}) TO '{root / table}.parquet' "
+            "(FORMAT parquet, ROW_GROUP_SIZE 1048576)"
+        )
+    return root
+
+
 def clickbench(partitions: int) -> Path:
     """The first `partitions` 1M-row slices of ClickBench's hits table."""
     import duckdb
@@ -303,7 +369,9 @@ def clickbench(partitions: int) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("suite", choices=["h2o", "pdsh", "clickbench"])
+    parser.add_argument(
+        "suite", choices=["h2o", "pdsh", "tpcds", "clickbench"]
+    )
     parser.add_argument("--rows", type=int, default=10_000_000)
     parser.add_argument("--k", type=int, default=100)
     parser.add_argument("--nas", type=int, default=0)
@@ -316,6 +384,8 @@ def main():
         print(h2o_join(args.rows, args.nas))
     elif args.suite == "pdsh":
         print(pdsh(args.scale))
+    elif args.suite == "tpcds":
+        print(tpcds(args.scale))
     else:
         print(clickbench(args.partitions))
 

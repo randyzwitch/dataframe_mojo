@@ -22,13 +22,14 @@ useful going forward, while acknowledging prior exposure.
    `scripts/check_benchmark_separation.sh` enforces this in CI; a PR that
    genuinely needs both (for example, this one, which adds tracing hooks and
    the suites together) says why in a `Benchmark-Change:` commit trailer.
-3. **Development and held-out suites.** Tune on H2O and mechanism benchmarks.
-   Keep PDS-H and ClickBench as held-out validation of completed changes.
-   Do not use their per-query timings to choose optimization targets, tune
-   thresholds, or add query-specific exceptions. Some earlier optimization
-   work used holdout results; record that caveat and enforce the boundary
-   going forward. Correctness bugs can be investigated and fixed generally;
-   retain the failing result and the rerun rather than hiding failures.
+3. **Development and held-out suites.** Tune on H2O, PDS-H and mechanism
+   benchmarks. Keep TPC-DS and ClickBench as held-out validation of
+   completed changes. Do not use their per-query timings to choose
+   optimization targets, tune thresholds, or add query-specific exceptions.
+   Some earlier optimization work used ClickBench results; record that
+   caveat and enforce the boundary going forward. Correctness bugs can be
+   investigated and fixed generally; retain the failing result and the
+   rerun rather than hiding failures.
 4. **Every measurement includes perturbed data.** The data variants below
    always run, and the report puts each query's worst variant beside its base
    result. A fast path that fires only on sorted keys, or only without nulls,
@@ -52,7 +53,8 @@ follow on every change; the full tier is what a report cites.
 |---|---|---|---:|---|
 | `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | cardinality parameter k=100, 10 and 2; 5% nulls; sorted |
 | `h2o_join` | development | db-benchmark join | 5 | none; 5% nulls |
-| `pdsh` | held out | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
+| `pdsh` | development (held out until 2026-10-05) | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
+| `tpcds` | held out | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 23 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
 | `clickbench` | held out | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
 
 The H2O data follows db-benchmark's R generators with seeded Polars sampling,
@@ -69,13 +71,15 @@ do at load time. All engines read the same files.
 Queries live in `benchmarks/suites/`:
 
 - `engines.py`: DuckDB runs the upstream SQL (db-benchmark's queries,
-  `tpch_queries()`, ClickBench's `queries.sql`); Polars runs idiomatic lazy
-  translations.
+  `tpch_queries()`, `tpcds_queries()`, ClickBench's `queries.sql`); Polars
+  runs idiomatic lazy translations.
 - `h2o.mojo`: this library's eager API; `pdsh.mojo`: lazy query plans,
   including joins with differently named keys. In the `decimal` variant, `pdsh.mojo`
   writes money literals as decimals and converts to Float64 where a query
   divides or compares with an average, as DuckDB's DOUBLE division does;
   this library does not mix decimal and float operands implicitly.
+- `tpcds.mojo`: lazy query plans over the 24 TPC-DS tables, with the same
+  decimal handling as `pdsh.mojo`. See "TPC-DS coverage" below.
 - `clickbench.mojo`: the lazy API, whose projection pushdown reads only the
   columns each query uses from the 105-column table.
 
@@ -98,8 +102,8 @@ pixi run -e oracle python3 scripts/bench_suites.py --baseline main
 pixi run -e oracle python3 scripts/bench_suites.py --tier full --all-suites
 ```
 
-**Quick** (the default) runs the two H2O development suites at 1M rows with every
-data variant, three rounds of three timed runs, and times only this library.
+**Quick** (the default) runs the development suites (H2O at 1M rows, PDS-H at
+scale factor 0.1) with every data variant, three rounds of three timed runs, and times only this library.
 `--baseline REF` builds the suite runners against the library at `REF`
 (checked out once as a git worktree under `build/suites/baseline/`, cached by
 commit) and alternates the two builds. The report opens with **Changes vs
@@ -110,11 +114,11 @@ repetitions and reference query-source hash, because their code does not
 change when this library does.
 Narrow a run with `--suites h2o_join` or `--queries q1,q2`.
 
-**Full** runs both development and held-out suites at 10M rows (TPC-H scale factor 1,
-10M ClickBench rows), three rounds, measures every engine afresh and records
-fast-path coverage. `--all-suites` also selects all four with the quick tier;
-`--suites` can explicitly narrow either tier. The `--heldout`
-option adds PDS-H and ClickBench to a run.
+**Full** runs both development and held-out suites at 10M rows (TPC-H and
+TPC-DS scale factor 1, 10M ClickBench rows), three rounds, measures every
+engine afresh and records fast-path coverage. `--all-suites` also selects
+all five with the quick tier; `--suites` can explicitly narrow either tier.
+The `--heldout` option adds TPC-DS and ClickBench to a run.
 
 Both tiers give each (suite, variant, engine, round) its own process, which
 loads the tables once, untimed, then warms up and times each query. The
@@ -127,7 +131,8 @@ re-renders both from a saved file. Provenance includes engine and benchmark
 working-tree status, local query/generator/runner SHA-256 hashes and an
 exposure record for each selected suite. These identify the local workload;
 historical upstream commits were not recorded and remain explicitly unknown.
-DuckDB's recorded version identifies its `tpch_queries` and `dbgen` implementation.
+DuckDB's recorded version identifies its `tpch_queries`, `dbgen`,
+`tpcds_queries` and `dsdgen` implementations.
 
 Re-rendering older raw JSON preserves its samples and displays a legacy
 metadata note; it does not invent missing historical provenance.
@@ -157,10 +162,41 @@ query, hide an unfavorable case, or add a query-specific branch to improve
 a reported score. A path exercised by only one query needs a general reason
 and coverage beyond that query.
 
-Prior exposure is a limitation of the historical results, not a reason to
-retire PDS-H or ClickBench. New reports record their continuing held-out role
-and that caveat. Source hashes, benchmark/engine separation and fast-path
-coverage make changes reviewable; they do not certify anybody's tuning process.
+Prior exposure is a limitation of the historical results. ClickBench stays
+held out with that caveat recorded. Source hashes, benchmark/engine
+separation and fast-path coverage make changes reviewable; they do not
+certify anybody's tuning process.
+
+### PDS-H became a development suite on 2026-10-05
+
+Held-out suites only help if the development suites cover the same kinds
+of work. They did not: H2O has ten group-by queries and five single joins,
+and nothing with a multi-join plan, while PDS-H, the one suite behind
+Polars, is made of them. Under the rule above its results could not be used
+to choose work, so effort went to group-by, where the library already led.
+
+PDS-H is therefore a development suite from that date, and the quick tier
+runs it. TPC-DS takes its place as the held-out suite for join plans.
+Reports made before the change keep the note they were made under
+(`bench_policy.EARLIER_NOTES`); their PDS-H numbers were held-out numbers.
+
+### TPC-DS coverage
+
+DuckDB runs all 99 queries. Polars and this library run the queries that
+have been translated, and report the others as `unsupported: not
+translated`, so every report counts them. Geometric means use only queries
+every engine answered.
+
+The first 23 translations are the single-block queries: one SELECT, with
+no window function, rollup or set operation (q3, q7, q13, q15, q17, q19,
+q25, q26, q29, q37, q40, q42, q43, q48, q50, q52, q55, q72, q82, q84, q85,
+q91, q96). They were chosen by that rule from the SQL text, before any was
+timed. Add further translations by a rule of the same kind, never by which
+queries run well. A translation uses the API as a user would; where the
+library cannot express or run a query, the cell stays failed or unsupported
+with its reason until the library changes. On the `decimal` variant two of
+the 23 fail today: q43 crashes (#464) and q40 needs decimal `fill_null`
+(#465).
 
 ## Answer checks
 

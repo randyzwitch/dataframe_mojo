@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -64,7 +65,7 @@ class BenchmarkReports(unittest.TestCase):
             set(bench.TIERS["full"]["suites"].split(",")), set(bench.SUITES)
         )
         self.assertEqual(
-            sum(len(s["queries"]) for s in bench.SUITES.values()), 80
+            sum(len(s["queries"]) for s in bench.SUITES.values()), 179
         )
         self.assertEqual(
             {
@@ -72,17 +73,26 @@ class BenchmarkReports(unittest.TestCase):
                 for name, spec in bench.SUITES.items()
                 if spec["role"] == "heldout"
             },
-            {"pdsh", "clickbench"},
+            {"tpcds", "clickbench"},
         )
+        # PDS-H is development since 2026-10-05, and the quick tier runs it.
+        self.assertEqual(bench.SUITES["pdsh"]["role"], "dev")
+        self.assertIn("pdsh", bench.TIERS["quick"]["suites"].split(","))
+        self.assertNotIn("tpcds", bench.TIERS["quick"]["suites"].split(","))
         info = bench_policy.record(ROOT, bench.SUITES, bench.SUITES)
         self.assertEqual(
             info["policy"], "development_tuning_holdout_validation"
         )
+        self.assertEqual(info["policy_version"], 3)
+        self.assertEqual(info["suites"]["pdsh"]["intended_use"], "tuning")
         self.assertEqual(
-            info["suites"]["pdsh"]["intended_use"], "validation_only"
+            info["suites"]["tpcds"]["intended_use"], "validation_only"
         )
         self.assertEqual(
-            info["suites"]["pdsh"]["prior_exposure"],
+            info["suites"]["tpcds"]["prior_exposure"], "none_recorded"
+        )
+        self.assertEqual(
+            info["suites"]["clickbench"]["prior_exposure"],
             "some_prior_optimization_use",
         )
         for suite in info["suites"].values():
@@ -113,9 +123,11 @@ class BenchmarkReports(unittest.TestCase):
                 re.findall(r'<td class="q">(q\d+)</td>', section),
                 spec["queries"],
             )
-        self.assertEqual(len(re.findall(r'<td class="q">q\d+</td>', page)), 80)
+        self.assertEqual(
+            len(re.findall(r'<td class="q">q\d+</td>', page)), 179
+        )
         self.assertIn("held-out validation", page)
-        self.assertIn("some prior", page.lower())
+        self.assertIn("TPC-DS replaced it", page)
         self.assertIn('<th class="num">Distinct queries</th>', page)
         self.assertIn('<th class="num">Query/variant cases</th>', page)
         self.assertRegex(
@@ -178,6 +190,43 @@ class BenchmarkReports(unittest.TestCase):
                 source.write_text("query version 2")
                 new = bench._cache_key("duckdb", {"x": data}, args)
             self.assertNotEqual(old, new)
+
+    def test_reports_made_under_the_earlier_policy_keep_its_note(self):
+        result = fixture()
+        result["provenance"]["evaluation"] = bench_policy.record(
+            ROOT, bench.SUITES, bench.SUITES
+        )
+        self.assertIn("TPC-DS and ClickBench", bench_policy.report_note(result))
+        result["provenance"]["evaluation"]["policy_version"] = 2
+        earlier = bench_policy.report_note(result)
+        self.assertIn("PDS-H and ClickBench as held-out", earlier)
+        self.assertNotIn("TPC-DS", earlier)
+
+    def test_a_crashed_worker_fails_one_query_and_the_rest_still_run(self):
+        worker = (
+            "import os, sys\n"
+            "for q in sys.argv[1].split(','):\n"
+            "    if q == 'q2':\n"
+            "        sys.stderr.write('boom\\n')\n"
+            "        os._exit(3)\n"
+            "    print(f'time\\t{q}\\t1000')\n"
+            "    print(f'summary\\t{q}\\t1\\t1.0\\tx')\n"
+            "    sys.stdout.flush()\n"
+        )
+        queries = ["q1", "q2", "q3", "q4"]
+        found, _ = bench.run_worker(
+            [sys.executable, "-c", worker, ",".join(queries)],
+            dict(os.environ),
+            60,
+            True,
+            queries,
+        )
+        self.assertEqual(
+            [found[q]["status"] for q in queries],
+            ["ok", "failed", "ok", "ok"],
+        )
+        self.assertIn("worker exited 3", found["q2"]["reason"])
+        self.assertIn("boom", found["q2"]["reason"])
 
     def test_heldout_flag_remains_supported_without_duplicate_suites(self):
         captured = {}

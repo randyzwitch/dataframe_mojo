@@ -8,7 +8,8 @@ build-dfparquet):
     # against main, Polars/DuckDB from the reference cache.
     pixi run -e oracle python3 scripts/bench_suites.py --baseline main
 
-    # A report: 10M rows, three rounds, fast-path coverage, development and held-out suites.
+    # A report: 10M rows, three rounds, fast-path coverage, development and
+    # held-out suites (TPC-DS and ClickBench).
     pixi run -e oracle python3 scripts/bench_suites.py --tier full --all-suites
 
 One worker process per (suite, variant, engine, round) loads the tables once
@@ -45,8 +46,9 @@ from bench_host import compiler_processes  # noqa: E402
 
 ENGINES = ("mojo", "polars", "duckdb")
 
-# Keep tuning and validation separate; record prior exposure without
-# discarding the continuing held-out role of PDS-H and ClickBench.
+# Keep tuning and validation separate. PDS-H was held out until 2026-10-05,
+# when it became a development suite and TPC-DS took its place: nothing in
+# development covered multi-join plans, the one area behind Polars.
 SUITES = {
     "h2o_groupby": {
         "role": "dev",
@@ -61,10 +63,16 @@ SUITES = {
         "source": "H2O.ai db-benchmark (duckdblabs/db-benchmark) join",
     },
     "pdsh": {
-        "role": "heldout",
+        "role": "dev",
         "runner": "pdsh",
         "queries": [f"q{i}" for i in range(1, 23)],
         "source": "PDS-H (pola-rs/polars-benchmark), TPC-H derived",
+    },
+    "tpcds": {
+        "role": "heldout",
+        "runner": "tpcds",
+        "queries": [f"q{i}" for i in range(1, 100)],
+        "source": "TPC-DS (DuckDB tpcds extension: dsdgen, tpcds_queries)",
     },
     "clickbench": {
         "role": "heldout",
@@ -77,16 +85,28 @@ SUITES = {
 # Data sizes. "smoke" checks answers in CI; "dev" is the quick tier's size
 # for the edit-measure loop; "default" is for reports.
 SCALES = {
-    "smoke": {"h2o_rows": 100_000, "pdsh_sf": 0.01, "clickbench_partitions": 1},
-    "dev": {"h2o_rows": 1_000_000, "pdsh_sf": 0.1, "clickbench_partitions": 1},
+    "smoke": {
+        "h2o_rows": 100_000,
+        "pdsh_sf": 0.01,
+        "tpcds_sf": 0.01,
+        "clickbench_partitions": 1,
+    },
+    "dev": {
+        "h2o_rows": 1_000_000,
+        "pdsh_sf": 0.1,
+        "tpcds_sf": 0.1,
+        "clickbench_partitions": 1,
+    },
     "default": {
         "h2o_rows": 10_000_000,
         "pdsh_sf": 1,
+        "tpcds_sf": 1,
         "clickbench_partitions": 10,
     },
     "large": {
         "h2o_rows": 100_000_000,
         "pdsh_sf": 10,
+        "tpcds_sf": 10,
         "clickbench_partitions": 100,
     },
 }
@@ -97,7 +117,7 @@ SCALES = {
 # does not change when this library does. `full` is for reports.
 TIERS = {
     "quick": {
-        "suites": "h2o_groupby,h2o_join",
+        "suites": "h2o_groupby,h2o_join,pdsh",
         "scale": "dev",
         "rounds": 3,
         "reps": 3,
@@ -127,6 +147,7 @@ VARIANTS = {
     },
     "h2o_join": {"na0": {"nas": 0}, "na5": {"nas": 5}},
     "pdsh": {"base": {}, "decimal": {"decimal": True}},
+    "tpcds": {"base": {}, "decimal": {"decimal": True}},
     "clickbench": {"base": {}},
 }
 
@@ -180,6 +201,9 @@ def tables(suite, variant, scale):
     if suite == "pdsh":
         root = datagen.pdsh(size["pdsh_sf"], spec.get("decimal", False))
         return {name: root / f"{name}.parquet" for name in datagen.PDSH_TABLES}
+    if suite == "tpcds":
+        root = datagen.tpcds(size["tpcds_sf"], spec.get("decimal", False))
+        return {name: root / f"{name}.parquet" for name in datagen.TPCDS_TABLES}
     return {"hits": datagen.clickbench(size["clickbench_partitions"])}
 
 
@@ -364,12 +388,31 @@ def run_worker(cmd, env, timeout, allow_busy, queries):
     else:
         raise RuntimeError("compiler activity kept overlapping timed runs")
     found = parse(proc.stdout, queries)
+    stderr = proc.stderr
     if proc.returncode != 0:
         tail = " | ".join((proc.stderr or "").strip().splitlines()[-2:])
-        for entry in found.values():
-            if entry["status"] == "failed" and entry["reason"] == "no output":
-                entry["reason"] = f"worker exited {proc.returncode}: {tail}"
-    return found, proc.stderr
+        silent = [
+            query
+            for query in queries
+            if found[query]["status"] == "failed"
+            and found[query]["reason"] == "no output"
+        ]
+        # The worker died in the first query it reported nothing for. That
+        # query alone failed: the ones after it never ran, so run them in a
+        # new worker instead of counting one crash as many failures.
+        if silent:
+            found[silent[0]]["reason"] = (
+                f"worker exited {proc.returncode}: {tail}"
+            )
+        rest = silent[1:]
+        joined = ",".join(queries)
+        if rest and joined in cmd:
+            again = list(cmd)
+            again[again.index(joined)] = ",".join(rest)
+            later, more = run_worker(again, env, timeout, allow_busy, rest)
+            found.update(later)
+            stderr = (stderr or "") + (more or "")
+    return found, stderr
 
 
 # --- answer checks ----------------------------------------------------------
@@ -1004,7 +1047,7 @@ def main():
     parser.add_argument(
         "--heldout",
         action="store_true",
-        help="also run the PDS-H and ClickBench held-out suites",
+        help="also run the TPC-DS and ClickBench held-out suites",
     )
     parser.add_argument("--engines", default="mojo,polars,duckdb")
     parser.add_argument("--queries", default="", help="comma-separated subset")
@@ -1055,7 +1098,7 @@ def main():
     if args.all_suites:
         args.suites = ",".join(SUITES)
     if args.heldout:
-        args.suites += ",pdsh,clickbench"
+        args.suites += ",tpcds,clickbench"
     args.suites = ",".join(dict.fromkeys(args.suites.split(",")))
     if args.report_from:
         result = json.loads(args.report_from.read_text())
