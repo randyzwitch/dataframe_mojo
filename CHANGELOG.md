@@ -459,6 +459,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
   target code is gone: `bench_vs_polars` (`bench-polars`), the upstream join
   ports, `bench_progression`, `bench_aggregate_fusion` and `bench_agg_shapes`.
   docs/benchmarks.md lists what remains and why.
+- PDS-H is a development benchmark suite from 2026-10-05, and the quick
+  tier runs it: no development suite covered multi-join plans, the one area
+  behind Polars. TPC-DS replaces it as the held-out suite, from DuckDB's
+  `dsdgen` and `tpcds_queries()`. DuckDB runs all 99 queries; the 23
+  single-block queries are translated for this library and Polars, and the
+  rest are reported as not translated. The suite runner now counts a worker
+  crash as one failed query and runs the remaining queries in a new worker.
 - Lazy projection pushdown reaches through joins: each join input reads only
   its keys and the columns the plan above uses, for frame, CSV and Parquet
   scans and through filters. The inner-join count shortcut, which answered
