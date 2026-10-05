@@ -204,6 +204,38 @@ with its reason until the library changes. The first run found two such
 failures on the `decimal` variant, since fixed: q43 crashed (#464) and q40
 needed decimal `fill_null` (#465).
 
+## Query diagrams
+
+Open [the query explorer](query-diagrams.html) in a browser to choose a
+suite and query. It includes all 179 query IDs, including untranslated
+TPC-DS queries, with Mermaid diagrams, query source, zoom controls, and
+Mermaid/SVG downloads. The renderer is bundled in `docs/vendor`, so the explorer works offline.
+Keep the HTML file and its `vendor` folder together when copying it.
+
+For lazy suites, compare `explain(optimize=False)` with `explain()`.
+These are logical plans with streaming capability annotations, not runtime
+traces: `collect()` additionally orders eligible joins. The H2O diagrams
+describe the eager operator sequences in their source. PDS-H q11 and q22
+collect scalar subqueries before constructing their final plans; the plan
+view shows the final plan, and the overview identifies that prerequisite.
+
+Regenerate from the current checkout and existing smoke/base benchmark
+data (requires the oracle environment and built Parquet library):
+
+```bash
+pixi run -e oracle python scripts/query_diagrams.py
+```
+
+The command reads existing data under the usual benchmark data root;
+`--data-root PATH` overrides it. It does not generate data or time queries.
+It records the source fingerprint and saves the captured catalog in
+`build/query-plans/plans.json`. To rerender that snapshot without compiling
+Mojo or loading benchmark data:
+
+```bash
+python3 scripts/query_diagrams.py --from-json build/query-plans/plans.json
+```
+
 ## Answer checks
 
 Every engine prints the same order-insensitive summary of its result: the row
@@ -244,4 +276,3 @@ historical record in `docs/`.
 | `bench_progression.mojo`, `scripts/bench_progression.py` | Written with the equal-run progression path it measured (#308); only its rejection cases remained meaningful, and the join matrix's `shuffled` layout covers them |
 | `bench_aggregate_fusion.mojo` | Measured the fused Float64 group-by path removed in #319 |
 | `bench_agg_shapes.mojo`, `scripts/bench_agg_shapes_polars.py` | One-off comparison for #319; the H2O group-by suite and its variants cover it |
-
