@@ -68,3 +68,10 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 The hash seed is credited upstream to robin-hood-hashing:
 Copyright (c) 2018-2021 Martin Ankerl, under the same MIT license above.
+
+## Mermaid (documentation viewer only)
+
+`docs/vendor/mermaid-11.12.0.min.js` is the unmodified browser bundle from
+Mermaid 11.12.0 (`mermaid` on npm). Its MIT license is included in
+`docs/vendor/mermaid-LICENSE`; bundled dependency notices are retained in
+the JavaScript file. It renders the benchmark query explorer locally.

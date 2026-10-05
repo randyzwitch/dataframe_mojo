@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How a benchmark query runs · dataframe_mojo</title>
+<style>
+:root { color-scheme:light; font-family:system-ui,sans-serif; color:#203144; background:#f3f6fa; }
+* { box-sizing:border-box; } body { margin:0; } main { max-width:1440px; margin:auto; padding:36px 28px; }
+h1 { font-size:clamp(1.5rem,3vw,2.4rem); letter-spacing:-.04em; margin:6px 0 12px; }
+h2 { font-size:1.05rem; margin:0; } p { max-width:95ch; line-height:1.6; } a { color:#245a9b; }
+.kicker { text-transform:uppercase; letter-spacing:.13em; font-size:.75rem; font-weight:700; color:#426589; }
+.controls { display:flex; align-items:end; flex-wrap:wrap; gap:16px; padding:20px; background:white; border:1px solid #d8e1ed; border-radius:12px; margin:24px 0 16px; }
+label { display:grid; gap:6px; font-size:.8rem; font-weight:600; } select,button { font:inherit; border:1px solid #bdcadb; background:white; color:inherit; padding:9px 12px; border-radius:6px; }
+select { min-width:170px; } button { cursor:pointer; } button:hover { background:#eef4fc; } button:disabled { opacity:.5; cursor:default; }
+:focus-visible { outline:3px solid #528ada; outline-offset:3px; } .toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:14px; }
+.toolbar h2 { margin-right:auto; } .note { background:#eaf1fa; border-left:3px solid #5686b8; padding:12px 16px; font-size:.88rem; line-height:1.6; margin:16px 0; }
+#status { color:#596d84; font-size:.85rem; min-height:1.4em; } .panel { background:white; border:1px solid #d8e1ed; border-radius:12px; padding:20px; }
+#diagram { overflow:auto; max-height:78vh; min-height:220px; text-align:center; padding:16px; }
+#diagram svg { display:block; margin:auto; max-width:none !important; }
+.legend { display:flex; flex-wrap:wrap; gap:18px; font-size:.78rem; color:#596d84; margin:14px 0; }.dot { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; }
+details { margin-top:16px; } summary { cursor:pointer; font-weight:600; padding:10px 0; } pre { font:13px/1.6 ui-monospace,monospace; overflow:auto; max-height:500px; background:#f4f7fb; padding:18px; border-radius:6px; white-space:pre; }
+footer { margin-top:22px; font-size:.78rem; color:#60728a; overflow-wrap:anywhere; line-height:1.7; }
+@media(max-width:600px) { main { padding:22px 12px; } select { min-width:0; width:100%; } label { flex:1 1 100%; } .panel { padding:12px; } }
+</style>
+<main>
+<header><div class="kicker">dataframe_mojo / execution explorer</div>
+<h1>How a benchmark query runs</h1>
+<p>Choose a suite and query, then follow its path from in-memory tables to a result.
+Compare the plan as written with the optimizer’s output, or start with the processing overview.</p></header>
+<div class="controls">
+<label>Benchmark suite<select id="suite"></select></label>
+<label>Query<select id="query"></select></label>
+<label>Diagram<select id="view"><option value="optimized">Optimized logical plan</option><option value="original">Plan as written</option><option value="lifecycle">Processing overview</option></select></label>
+</div>
+<div id="note" class="note"></div>
+<section class="panel" aria-label="Query diagram">
+<div class="toolbar"><h2 id="title"></h2><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="fit">Fit</button><button id="download">Download Mermaid</button><button id="svg" disabled>Download SVG</button></div>
+<div id="status" role="status" aria-live="polite"></div>
+<div id="diagram" aria-label="Mermaid flowchart"></div>
+<div class="legend"><span><i class="dot" style="background:#3266a1"></i>Input</span><span><i class="dot" style="background:#388467"></i>Streaming capability</span><span><i class="dot" style="background:#b77c29"></i>Materialization involved</span><span><i class="dot" style="background:#7a61aa"></i>Result</span></div>
+<details><summary>Mermaid source</summary><pre id="mermaid-source"></pre></details>
+<details><summary>Plan text from the engine</summary><pre id="plan-source"></pre></details>
+<details><summary>Benchmark query implementation</summary><p><a id="source-link">Full source, including shared expressions and helper functions</a></p><pre id="query-source"></pre></details>
+</section>
+<footer id="provenance"></footer>
+<noscript>This explorer requires JavaScript. Query sources are in benchmarks/suites.</noscript>
+</main>
+<script id="data" type="application/json">__PLAN_DATA__</script>
+<script src="vendor/mermaid-11.12.0.min.js"></script>
+<script>
+const payload = JSON.parse(document.getElementById('data').textContent);
+const catalog = payload.catalog;
+const $ = id => document.getElementById(id);
+const names = {h2o_groupby:'H2O · group-by', h2o_join:'H2O · joins', pdsh:'PDS-H', tpcds:'TPC-DS', clickbench:'ClickBench'};
+let mermaid = globalThis.mermaid, serial = 0, currentSource = '', zoom = 1, svgText = '';
+const renderer = Promise.resolve().then(() => {
+  if (mermaid) mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'base',themeVariables:{fontFamily:'system-ui, sans-serif',fontSize:'14px'},flowchart:{htmlLabels:false,useMaxWidth:false}});
+}).catch(() => { mermaid = null; });
+for (const suite of Object.keys(catalog)) $('suite').add(new Option(names[suite],suite));
+const hash = new URLSearchParams(location.hash.slice(1));
+$('suite').value = catalog[hash.get('suite')] ? hash.get('suite') : 'pdsh';
+function populate(preferred) {
+  $('query').replaceChildren();
+  for (const [q,r] of Object.entries(catalog[$('suite').value])) {
+    const suffix = r.error ? (r.error.startsWith('unsupported:') ? ' · unsupported' : ' · error') : '';
+    $('query').add(new Option(q+suffix,q));
+  }
+  if (catalog[$('suite').value][preferred]) $('query').value = preferred;
+  const eager = $('suite').value.startsWith('h2o');
+  $('view').options[0].disabled = eager;
+  $('view').options[1].textContent = eager ? 'Eager operator sequence' : 'Plan as written';
+  if (eager && $('view').value === 'optimized') $('view').value='original';
+}
+populate(hash.get('query') || 'q3');
+if (['original','optimized','lifecycle'].includes(hash.get('view'))) $('view').value=hash.get('view');
+if ($('suite').value.startsWith('h2o') && $('view').value==='optimized') $('view').value='original';
+function overview(r, scalar) {
+  const lines = ['flowchart TD','load["Read Parquet tables once · outside timing"] --> warm["Warm up query once"]','warm --> timed["Start timer · each repetition"]'];
+  if (r.error) {
+    lines.push('timed --> unsupported["Query construction reports unsupported or error"]');
+  } else if (r.eager) {
+    lines.push('timed --> eager["Call eager DataFrame operations in source order"]','eager --> bind["Bind expressions to schemas and validate types"]','bind --> kernels["Run operator kernels and materialize intermediate results"]','kernels --> result["Result DataFrame"]');
+  } else {
+    lines.push('timed --> build["Construct LazyFrame plan and expressions"]');
+    if (scalar) lines.push('build --> scalar["Collect scalar subquery first · use value in final plan"]','scalar --> collect["collect()"]');
+    else lines.push('build --> collect["collect()"]');
+    lines.push('collect --> optimize["Push predicates, projections and slices · recognize top-k"]','optimize --> joins["Apply runtime join ordering where eligible"]','joins --> execute["Execute operators · bind expressions against input schemas"]','execute --> streams["Stream eligible batches · retain aggregate or top-k state"]','execute --> boundaries["Materialize required boundaries · resume downstream pipelines"]','streams --> result["Result DataFrame"]','boundaries --> result');
+  }
+  if (!r.error) lines.push('result --> stop["Stop timer · record elapsed time"]','stop --> summary["After repetitions: summarize final result outside timing"]','summary --> check["Benchmark driver checks summary against DuckDB"]');
+  return lines.join('\n');
+}
+function resize() {
+  const svg = $('diagram').querySelector('svg');
+  if (!svg) return;
+  const vb=svg.viewBox.baseVal;
+  const fit=Math.min(1,($('diagram').clientWidth-32)/vb.width,(innerHeight*.78-32)/vb.height);
+  svg.style.width=(vb.width*fit*zoom)+'px'; svg.style.height=(vb.height*fit*zoom)+'px';
+}
+async function render() {
+  const ticket=++serial, suite=$('suite').value, query=$('query').value, view=$('view').value;
+  const r=catalog[suite][query], scalar=suite==='pdsh' && ['q11','q22'].includes(query);
+  // Some local-file and embedded browser contexts prohibit URL history changes.
+  // Saving the selection must never prevent the controls from working.
+  try { history.replaceState(null,'','#'+new URLSearchParams({suite,query,view})); } catch {}
+  $('title').textContent=names[suite]+' / '+query;
+  let note=r.eager ? 'H2O executes eagerly. This diagram is a source-based operator sequence; it is not LazyFrame.explain() output.' : 'Captured from LazyFrame.explain() using existing smoke/base tables. Arrows carry rows from inputs to the result; join branches are labeled left and right. Markers describe operator capability, not a measured execution trace. collect() additionally orders eligible joins at runtime, which explain() does not show.';
+  if (scalar) note+=' This query first executes a scalar subquery while constructing its final plan. The plan view shows the final plan; see the overview and source for that prerequisite.';
+  if (r.error) note='No plan available: '+r.error;
+  $('note').textContent=note;
+  $('query-source').textContent=r.source;
+  $('source-link').href='../benchmarks/suites/'+(suite.startsWith('h2o')?'h2o':suite)+'.mojo';
+  $('plan-source').textContent=r.error || r[view==='original'?'original':'optimized'];
+  currentSource=view==='lifecycle' ? overview(r,scalar) : r[view+'_mermaid'] || 'flowchart TD\n  unavailable["No plan available · see query status above"]';
+  $('mermaid-source').textContent=currentSource;
+  svgText=''; $('svg').disabled=true; zoom=1;
+  $('diagram').replaceChildren(); $('status').textContent='Rendering diagram…';
+  await renderer;
+  if(ticket!==serial) return;
+  if(!mermaid) { $('status').textContent='The local Mermaid renderer could not load. Keep the vendor folder beside this HTML file. The plan text and Mermaid download remain available.'; return; }
+  try {
+    const {svg}=await mermaid.render('plan-'+ticket,currentSource);
+    if(ticket!==serial) return;
+    svgText=svg; $('diagram').innerHTML=svg; $('svg').disabled=false;
+    $('status').textContent=r.error ? 'Plan unavailable.' : 'Use + to enlarge; scroll to explore large plans.';
+    resize();
+  } catch(error) { if(ticket===serial) $('status').textContent='Could not render this diagram: '+error.message; }
+}
+function download(text,type,ext) {
+  const url=URL.createObjectURL(new Blob([text],{type}));
+  const a=document.createElement('a');a.href=url;a.download=[$('suite').value,$('query').value,$('view').value].join('-')+ext;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$('suite').onchange=()=>{populate('q1');render();}; $('query').onchange=render; $('view').onchange=render;
+$('zoom-in').onclick=()=>{zoom=Math.min(8,zoom*1.3);resize();}; $('zoom-out').onclick=()=>{zoom=Math.max(.2,zoom/1.3);resize();}; $('fit').onclick=()=>{zoom=1;resize();};
+$('download').onclick=()=>download(currentSource,'text/plain','.mmd'); $('svg').onclick=()=>download(svgText,'image/svg+xml','.svg');
+window.addEventListener('resize',resize);
+$('provenance').textContent='Plan snapshot · revision '+payload.revision.slice(0,12)+(payload.dirty?' · working tree had changes':'')+' · smoke/base inputs · source SHA-256 '+payload.fingerprint+'. No timed benchmark measurements are run to create this page. Regenerate with: pixi run -e oracle python scripts/query_diagrams.py';
+render();
+</script>
+</html>
