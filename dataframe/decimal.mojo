@@ -2,6 +2,27 @@
 from .dtype import DataType
 
 
+def common_decimal(
+    left: DataType, right: DataType, what: String
+) raises -> DataType:
+    """The type of a value taken from either of two decimal inputs, as a
+    conditional's branches or `fill_null`'s operands are: their own type
+    when they share one, else decimal(38) at their scale. Scales must match,
+    since choosing a value must not round it."""
+    if left == right:
+        return left
+    if left.scale() != right.scale():
+        raise Error(
+            what
+            + " requires decimals of one scale, found "
+            + left.name()
+            + " and "
+            + right.name()
+            + "; cast one side"
+        )
+    return DataType.decimal(38, left.scale())
+
+
 @always_inline
 def pow10(scale: Int) -> Int128:
     """10**scale (1 for scale <= 0). Built from 10**18 steps and a short

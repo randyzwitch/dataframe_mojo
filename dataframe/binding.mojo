@@ -136,6 +136,7 @@ from .expr import (
 )
 from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
+from .decimal import common_decimal
 from .temporal import (
     ambiguous_code,
     non_existent_code,
@@ -368,6 +369,8 @@ def _binary_dtype(op: Int, left: DataType, right: DataType) raises -> DataType:
             return DataType.BOOL
         if op == ADD or op == SUB or op == MUL or op == DIV:
             return DataType.decimal(38, max(left.scale(), right.scale()))
+        if op == FILL_NULL:
+            return common_decimal(left, right, "fill_null")
         raise Error(op_name(op) + " is not supported for decimal operands")
     if left != right:
         raise Error(
@@ -898,11 +901,21 @@ def bind(
                     + types[node.left].name()
                 )
             dtype = types[node.right]
+            if (
+                node.extra >= 0
+                and dtype.is_decimal()
+                and types[node.extra].is_decimal()
+            ):
+                dtype = common_decimal(
+                    dtype, types[node.extra], "when/then/otherwise"
+                )
             var children = List[Int]()
             children.append(node.left)
             children.append(node.right)
             if node.extra >= 0:
-                if types[node.extra] != dtype:
+                if types[node.extra] != dtype and not (
+                    dtype.is_decimal() and types[node.extra].is_decimal()
+                ):
                     raise Error(
                         "when/then/otherwise branches require matching dtypes,"
                         " found "

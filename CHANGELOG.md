@@ -603,6 +603,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- `when().then()` on a decimal column no longer crashes the process when
+  the column is stored at 128 bits or the conditional has no `otherwise`.
+  Branches of different decimal types now widen to decimal(38) at their
+  shared scale instead of being rejected; branches of different scales
+  are an error (#464).
+- `fill_null` and `coalesce` accept decimal operands, with the same type
+  rule (#465).
 - Composite key numbering reuses dense integer lookups and owned code
   arrays, avoiding redundant first-key renumbering while retaining null
   insertion, Boolean ordering, and exact key equality (#380).

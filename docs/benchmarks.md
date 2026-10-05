@@ -194,9 +194,9 @@ q91, q96). They were chosen by that rule from the SQL text, before any was
 timed. Add further translations by a rule of the same kind, never by which
 queries run well. A translation uses the API as a user would; where the
 library cannot express or run a query, the cell stays failed or unsupported
-with its reason until the library changes. On the `decimal` variant two of
-the 23 fail today: q43 crashes (#464) and q40 needs decimal `fill_null`
-(#465).
+with its reason until the library changes. The first run found two such
+failures on the `decimal` variant, since fixed: q43 crashed (#464) and q40
+needed decimal `fill_null` (#465).
 
 ## Answer checks
 

@@ -5,6 +5,7 @@ from .bool_column import BoolColumn
 from .column import Column, _bit, _pack_bits
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import (
+    common_decimal,
     check_limit,
     check_precision,
     precision_limit,
@@ -1409,6 +1410,28 @@ def binary[
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
         return binary[op, width](left.rechunk(), right.rechunk(), mask)
+    comptime if op == FILL_NULL:
+        if left.dtype().is_decimal() and right.dtype().is_decimal():
+            # Left where valid, else right, at the operands' common type
+            # and storage width.
+            var pair = _decimal_pair(left, right, "fill_null")
+            ref a = pair[0]
+            ref b = pair[1]
+            if a._data.isa[Column[Int128]]():
+                return Series(
+                    "",
+                    _fill_null(
+                        a._data[Column[Int128]], b._data[Column[Int128]]
+                    ),
+                ).with_dtype(a.dtype())
+            if a._data.isa[Column[Int64]]():
+                return Series(
+                    "",
+                    _fill_null(a._data[Column[Int64]], b._data[Column[Int64]]),
+                ).with_dtype(a.dtype())
+            return Series(
+                "", _fill_null(a._data[Column[Int32]], b._data[Column[Int32]])
+            ).with_dtype(a.dtype())
     # decimal64 operands go to the decimal kernels at their width, which
     # widen what they do not cover; decimal32 operands are widened here.
     if (left.dtype().is_decimal() and left.dtype().decimal_width() == 32) or (
@@ -1548,10 +1571,48 @@ def _choose[
     return Column[T](values^, valid)
 
 
+def _decimal_pair(
+    left: Series, right: Series, what: String
+) raises -> Tuple[Series, Series]:
+    """Two decimal inputs at their common type (`common_decimal`), so one
+    typed loop can take a value from either."""
+    var target = common_decimal(left.dtype(), right.dtype(), what)
+    if left.dtype() == right.dtype():
+        return (left.copy(), right.copy())
+    return (
+        left._decimal128().with_dtype(target),
+        right._decimal128().with_dtype(target),
+    )
+
+
 def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     """Row-wise pick between branch results, broadcasting scalar branches."""
     if then.is_chunked() or other.is_chunked():
         return choose(selected, then.rechunk(), other.rechunk())
+    if then.dtype().is_decimal() and other.dtype().is_decimal():
+        # Decimals are stored as Int32, Int64 or Int128 by declared width.
+        # Pick at the branches' common type and keep its tag.
+        var pair = _decimal_pair(then, other, "when/then/otherwise")
+        ref a = pair[0]
+        ref b = pair[1]
+        if a._data.isa[Column[Int128]]():
+            return Series(
+                "",
+                _choose(
+                    selected, a._data[Column[Int128]], b._data[Column[Int128]]
+                ),
+            ).with_dtype(a.dtype())
+        if a._data.isa[Column[Int64]]():
+            return Series(
+                "",
+                _choose(
+                    selected, a._data[Column[Int64]], b._data[Column[Int64]]
+                ),
+            ).with_dtype(a.dtype())
+        return Series(
+            "",
+            _choose(selected, a._data[Column[Int32]], b._data[Column[Int32]]),
+        ).with_dtype(a.dtype())
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if then._data.isa[Column[Scalar[D]]]():
