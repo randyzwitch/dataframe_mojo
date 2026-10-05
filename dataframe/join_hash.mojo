@@ -72,6 +72,41 @@ def _row_equal(left: List[Series], right: List[Series], i: Int, j: Int) -> Bool:
     return True
 
 
+@always_inline
+def _int_word[D: DType](value: Scalar[D]) -> UInt64:
+    """An integer key as the 64-bit word `_hash_column` mixes: unsigned
+    values zero-extended, signed values sign-extended. Equal values of one
+    type give equal words and unequal values unequal words, so the word is
+    both the hash input and the exact key."""
+    comptime if D.is_unsigned():
+        return UInt64(value)
+    else:
+        return bitcast[DType.uint64](Int64(value))
+
+
+def _is_int_key(key: Series) -> Bool:
+    """Whether a key is stored as fixed-width integers of any width: the
+    integer types, the Int64-backed dates, times, datetimes and durations,
+    narrow decimals and categorical codes."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if key._data.isa[Column[Scalar[D]]]():
+                return True
+    return False
+
+
+def _int_key_at(key: Series, row: Int) -> Tuple[Bool, UInt64]:
+    """Whether an integer key's row is valid, and its word."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if key._data.isa[Column[Scalar[D]]]():
+                ref values = key._data[Column[Scalar[D]]]
+                return (values._valid(row), _int_word[D](values._get(row)))
+    return (False, UInt64(0))
+
+
 @fieldwise_init
 struct _HashSlot(Copyable):
     var row: Int32
@@ -198,10 +233,10 @@ struct _HashBuildJob(Job):
             var hash = self.hashes[][row]
             var key = hash
             if self.typed_int:
-                ref values = self.right_keys[0]._data[Column[Int64]]
-                if not values._valid(row):
+                var word = _int_key_at(self.right_keys[0], row)
+                if not word[0]:
                     continue
-                key = bitcast[DType.uint64](values._get(row))
+                key = word[1]
             var slot = Int(hash & UInt64(size - 1))
             while slots[slot].row >= 0:
                 var same = slots[slot].key == key
@@ -318,40 +353,14 @@ struct _HashProbeJob(Job):
             capacity=0 if membership >= 0 else end - start
         )
 
-    @always_inline
-    def _probe_hash(self, row: Int) -> UInt64:
-        if (
-            len(self.left_keys) == 1
-            and self.left_keys[0]._data.isa[Column[Int64]]()
-        ):
-            return _mix(
-                bitcast[DType.uint64](
-                    self.left_keys[0]._data[Column[Int64]]._get(row)
-                )
-            )
-        return self.left_hashes[][row]
-
     def _matches(self, i: Int) -> Bool:
         """Whether probe row i has at least one exact match in the index.
-        A null key never matches: `_key_equal` requires both sides valid,
-        and the Int64 path checks validity itself."""
-        var hash = self._probe_hash(i)
+        A null key never matches: `_key_equal` requires both sides valid.
+        Single integer keys never reach this; they have no stored hashes."""
+        var hash = self.left_hashes[][i]
         var bucket = Int(hash >> 56) >> self.fold
         ref index = self.buckets[][bucket]
         var position = Int(hash & UInt64(index.mask()))
-        if (
-            len(self.left_keys) == 1
-            and self.left_keys[0]._data.isa[Column[Int64]]()
-        ):
-            ref left = self.left_keys[0]._data[Column[Int64]]
-            if not left._valid(i):
-                return False
-            var key = bitcast[DType.uint64](left._get(i))
-            while index.slots[position].row >= 0:
-                if key == index.slots[position].key:
-                    return True
-                position = (position + 1) & index.mask()
-            return False
         while index.slots[position].row >= 0:
             ref slot = index.slots[position]
             if hash == slot.key and _row_equal(
@@ -365,28 +374,28 @@ struct _HashProbeJob(Job):
         """Semi (membership == 1) or anti (0): each left row at most once,
         in row order; duplicate right keys do not repeat it."""
         var keep = self.membership == 1
-        if (
-            len(self.left_keys) == 1
-            and self.left_keys[0]._data.isa[Column[Int64]]()
-        ):
-            ref probe = self.left_keys[0]._data[Column[Int64]]
-            var all_valid = len(probe._bits[]) == 0
-            for i in range(self.start, self.end):
-                var matched = False
-                if all_valid or probe._valid(i):
-                    var hash = _mix(bitcast[DType.uint64](probe._get(i)))
-                    var bucket = Int(hash >> 56) >> self.fold
-                    matched = (
-                        _int64_probe_slot(
-                            self.buckets[][bucket],
-                            hash,
-                            bitcast[DType.uint64](probe._get(i)),
-                        )
-                        >= 0
-                    )
-                if matched == keep:
-                    self.left_rows.append(i)
-            return
+        if len(self.left_keys) == 1:
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                comptime if not D.is_floating_point():
+                    if self.left_keys[0]._data.isa[Column[Scalar[D]]]():
+                        ref probe = self.left_keys[0]._data[Column[Scalar[D]]]
+                        var all_valid = len(probe._bits[]) == 0
+                        for i in range(self.start, self.end):
+                            var matched = False
+                            if all_valid or probe._valid(i):
+                                var key = _int_word[D](probe._get(i))
+                                var hash = _mix(key)
+                                var bucket = Int(hash >> 56) >> self.fold
+                                matched = (
+                                    _int64_probe_slot(
+                                        self.buckets[][bucket], hash, key
+                                    )
+                                    >= 0
+                                )
+                            if matched == keep:
+                                self.left_rows.append(i)
+                        return
         if (
             len(self.left_keys) == 1
             and self.left_keys[0]._data.isa[StringColumn]()
@@ -416,49 +425,50 @@ struct _HashProbeJob(Job):
         if self.membership >= 0:
             self.run_membership()
             return
-        if (
-            len(self.left_keys) == 1
-            and self.left_keys[0]._data.isa[Column[Int64]]()
-        ):
-            ref left = self.left_keys[0]._data[Column[Int64]]
-            var left_all_valid = len(left._bits[]) == 0
-            # Keys and buckets through pointers: no reference-count
-            # or bounds check per row (#378).
-            var keys = left._ptr()
-            var buckets = self.buckets[].unsafe_ptr()
-            for i in range(self.start, self.end):
-                if not (left_all_valid or left._valid(i)):
-                    if self.include_unmatched:
-                        self.left_rows.append(i)
-                        self.right_rows.append(-1)
-                    continue
-                var key = bitcast[DType.uint64](keys.unsafe_offset(i)[])
-                var hash = _mix(key)
-                var bucket = Int(hash >> 56) >> self.fold
-                ref index = buckets.unsafe_offset(bucket)[]
-                var slots = index.slots.unsafe_ptr()
-                var mask = len(index.slots) - 1
-                var position = Int(hash & UInt64(mask))
-                var matched = False
-                while slots.unsafe_offset(position)[].row >= 0:
-                    ref slot = slots.unsafe_offset(position)[]
-                    if key == slot.key:
-                        self.left_rows.append(i)
-                        self.right_rows.append(Int(slot.row))
-                        _append_duplicate_rows(
-                            index,
-                            Int(slot.next_position),
-                            i,
-                            self.left_rows,
-                            self.right_rows,
-                        )
-                        matched = True
-                        break
-                    position = (position + 1) & mask
-                if not matched and self.include_unmatched:
-                    self.left_rows.append(i)
-                    self.right_rows.append(-1)
-            return
+        if len(self.left_keys) == 1:
+            comptime for k in range(len(NUMERIC_DTYPES)):
+                comptime D = NUMERIC_DTYPES[k]
+                comptime if not D.is_floating_point():
+                    if self.left_keys[0]._data.isa[Column[Scalar[D]]]():
+                        ref left = self.left_keys[0]._data[Column[Scalar[D]]]
+                        var left_all_valid = len(left._bits[]) == 0
+                        # Keys and buckets through pointers: no reference-count
+                        # or bounds check per row (#378).
+                        var keys = left._ptr()
+                        var buckets = self.buckets[].unsafe_ptr()
+                        for i in range(self.start, self.end):
+                            if not (left_all_valid or left._valid(i)):
+                                if self.include_unmatched:
+                                    self.left_rows.append(i)
+                                    self.right_rows.append(-1)
+                                continue
+                            var key = _int_word[D](keys.unsafe_offset(i)[])
+                            var hash = _mix(key)
+                            var bucket = Int(hash >> 56) >> self.fold
+                            ref index = buckets.unsafe_offset(bucket)[]
+                            var slots = index.slots.unsafe_ptr()
+                            var mask = len(index.slots) - 1
+                            var position = Int(hash & UInt64(mask))
+                            var matched = False
+                            while slots.unsafe_offset(position)[].row >= 0:
+                                ref slot = slots.unsafe_offset(position)[]
+                                if key == slot.key:
+                                    self.left_rows.append(i)
+                                    self.right_rows.append(Int(slot.row))
+                                    _append_duplicate_rows(
+                                        index,
+                                        Int(slot.next_position),
+                                        i,
+                                        self.left_rows,
+                                        self.right_rows,
+                                    )
+                                    matched = True
+                                    break
+                                position = (position + 1) & mask
+                            if not matched and self.include_unmatched:
+                                self.left_rows.append(i)
+                                self.right_rows.append(-1)
+                        return
         if (
             len(self.left_keys) == 1
             and self.left_keys[0]._data.isa[StringColumn]()
@@ -621,7 +631,7 @@ struct _HashProbeJob(Job):
 
 @fieldwise_init
 struct _HashIndex(Movable):
-    """A built right-row index; single Int64 probes hash directly from keys."""
+    """A built right-row index; single integer probes hash from their keys."""
 
     var left: List[Series]
     var right: List[Series]
@@ -660,7 +670,7 @@ struct PreparedHashIndex(Copyable):
         for key in left_keys:
             left.append(key.rechunk() if key.is_chunked() else key.copy())
         var workers = worker_count(len(left[0]))
-        if len(left) == 1 and left[0]._data.isa[Column[Int64]]():
+        if len(left) == 1 and _is_int_key(left[0]):
             # Hash fixed-width probe keys as they are read by the workers.
             # No row-sized hash buffer or separate hashing/histogram pass.
             return _HashIndex(
@@ -780,7 +790,7 @@ def prepare_hash_index(
     swap(order, right_parts.order)
     var shared_right_hashes = ArcPointer(right_hashes^.into_hashes())
     var shared_order = ArcPointer(order^)
-    var typed_int = len(right) == 1 and right[0]._data.isa[Column[Int64]]()
+    var typed_int = len(right) == 1 and _is_int_key(right[0])
     var skip_nulls = False
     for key in right:
         skip_nulls = skip_nulls or key.null_count() > 0

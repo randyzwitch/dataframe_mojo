@@ -1,6 +1,7 @@
 """Exact row-hash join matches across nulls, duplicates, and key dtypes."""
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
-from dataframe import Column, DataFrame, Series
+from dataframe import Column, DataFrame, DataType, Series
+from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.join_hash import (
     direct_hash_join_rows,
     prepare_hash_index,
@@ -550,6 +551,125 @@ def test_prepared_null_build_rows_are_never_indexed() raises:
         else:
             assert_equal(rows[0], [0, 0, 1])
             assert_equal(rows[1], [31, 127, -1])
+
+
+def test_every_integer_width_probes_on_read() raises:
+    """The same contract as Int64 for each narrower and unsigned width: no
+    row-sized probe hashes, exact matches at the type's extremes, nulls
+    never matching, duplicates kept in build order."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            var lo = Scalar[D].MIN
+            var hi = Scalar[D].MAX
+            var left = Series(
+                "k",
+                Column[Scalar[D]](
+                    [9, hi, lo, 5, 5, 0, 77],
+                    [True, True, True, True, True, False, True],
+                ),
+            )
+            var right = Series(
+                "k",
+                Column[Scalar[D]](
+                    [5, lo, 5, hi, 9, 0],
+                    [True, True, True, True, True, False],
+                ),
+            )
+            var prepared = prepare_hash_index(
+                [right.copy()], allow_progression=False
+            )
+            var chunked = Series._from_chunks(
+                [left.slice(0, 2), left.slice(2, 5)]
+            )
+            for input in [left.copy(), chunked.copy()]:
+                var index = prepared.probe([input.copy()])
+                assert_equal(len(index.left_hashes[]), 0)
+                var inner = prepared_hash_join_rows(
+                    [input.copy()], prepared, False
+                )
+                assert_equal(inner[0], [0, 1, 2, 3, 3, 4, 4])
+                assert_equal(inner[1], [4, 3, 1, 0, 2, 0, 2])
+                var outer = prepared_hash_join_rows(
+                    [input.copy()], prepared, True
+                )
+                assert_equal(outer[0], [0, 1, 2, 3, 3, 4, 4, 5, 6])
+                assert_equal(outer[1], [4, 3, 1, 0, 2, 0, 2, -1, -1])
+                assert_equal(
+                    prepared_hash_semi_anti_rows(
+                        [input.copy()], prepared, True
+                    ),
+                    [0, 1, 2, 3, 4],
+                )
+                assert_equal(
+                    prepared_hash_semi_anti_rows(
+                        [input.copy()], prepared, False
+                    ),
+                    [5, 6],
+                )
+
+
+def test_date_and_narrow_keys_join_like_int64_in_frame() raises:
+    """Public joins on narrow and date keys give the rows the same keys give
+    as plain Int64, for every join kind that probes the hash index."""
+    var n = 5000
+    var left_keys = List[Int64](capacity=n)
+    var left_valid = List[Bool](capacity=n)
+    var payload = List[Int64](capacity=n)
+    for i in range(n):
+        left_keys.append(Int64((i * 7919) % 3001) - 1500)
+        left_valid.append(i % 13 != 0)
+        payload.append(Int64(i))
+    var right_keys = List[Int64]()
+    var right_payload = List[Int64]()
+    for i in range(2200):
+        right_keys.append(Int64((i * 104729) % 2503) - 1500)
+        right_payload.append(Int64(i))
+    var wide_left = Series("k", Column[Int64](left_keys^, left_valid^))
+    var wide_right = Series("k", Column[Int64](right_keys^))
+    for how in ["inner", "left", "semi", "anti"]:
+        var expected = DataFrame(
+            [wide_left.copy(), Series("a", Column[Int64](payload.copy()))]
+        ).join(
+            DataFrame(
+                [
+                    wide_right.copy(),
+                    Series("b", Column[Int64](right_payload.copy())),
+                ]
+            ),
+            on="k",
+            how=how,
+        )
+        var lefts = [
+            wide_left.cast(DataType.INT32),
+            wide_left.cast(DataType.INT16),
+            wide_left.with_dtype(DataType.DATE),
+        ]
+        var rights = [
+            wide_right.cast(DataType.INT32),
+            wide_right.cast(DataType.INT16),
+            wide_right.with_dtype(DataType.DATE),
+        ]
+        for t in range(len(lefts)):
+            var actual = DataFrame(
+                [
+                    lefts[t].copy(),
+                    Series("a", Column[Int64](payload.copy())),
+                ]
+            ).join(
+                DataFrame(
+                    [
+                        rights[t].copy(),
+                        Series("b", Column[Int64](right_payload.copy())),
+                    ]
+                ),
+                on="k",
+                how=how,
+            )
+            assert_equal(actual.height(), expected.height())
+            assert_true(actual.column("a").equals(expected.column("a")))
+            if how == "inner" or how == "left":
+                assert_true(actual.column("b").equals(expected.column("b")))
 
 
 def main() raises:

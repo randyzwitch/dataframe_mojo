@@ -101,8 +101,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
   every batch to Int64 or Float64 first: three such aggregates over 10M
   rows and 100 groups take 13 ms instead of 56 ms, level with Int64.
 
-- Hash joins with one Int64 probe key hash it as each worker reads it,
-  removing the probe hash/histogram pass and an eight-byte-per-row buffer.
+- Hash joins with one integer probe key of any width hash it as each
+  worker reads it, removing the probe hash/histogram pass and an
+  eight-byte-per-row buffer, and compare keys as stored words instead of
+  through the general row comparison. This was Int64 only; Int8 to Int32,
+  the unsigned types, narrow decimals and categorical codes now probe the
+  same way: 1M Int32 probes against 1M build rows take 11 ms instead of
+  20 ms, level with Int64.
 
 - String window ranking orders borrowed source rows by partition and value
   with the packed sort, then assigns ranks without dense-rank preprocessing.
