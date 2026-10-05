@@ -90,6 +90,17 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - Native sums/means and dense integer/categorical key encoding cache
   validity bitmap pointers and slice offsets outside their row loops,
   reducing repeated metadata reads for nullable inputs.
+- A lazy chain of inner joins starts from the input that saves the most
+  hashing. The chain streams its first input through hash tables built on
+  the others, so `small.join(large)` hashed the large table. When the
+  first input supplies only its join keys, the result is aggregated, and
+  another input is larger, the chain is re-rooted there and the remaining
+  joins follow outward along the same key pairs. Input sizes are
+  estimated by applying each filter to 64 evenly spaced runs of 1,024
+  rows; a right input keyed by an arithmetic progression counts as free,
+  since it is looked up by position. PDS-H q3 80 → 40 ms, q11 25 → 10 ms
+  and q8 46 → 39 ms at scale factor 1.
+
 - Composite categorical keys reuse the bounded dictionary lookup for
   first-occurrence codes, avoiding numeric hashing for each key column.
   The new lookup checks valid codes before indexing the dictionary domain.
