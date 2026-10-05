@@ -33,16 +33,47 @@ from .column import (
 )
 
 
-@fieldwise_init
 struct StringCodes(Copyable):
     """Dictionary codes beside a string column whose source stored it
-    dictionary-encoded (a Parquet column chunk with a dictionary page): row
-    i's value is entry `codes[i]` of the categorical `dtype`'s dictionary.
-    Indexed like the column's own buffers, so a slice keeps it in step;
-    every other operation builds a new column without it."""
+    dictionary-encoded (a Parquet column chunk with a dictionary page): each
+    row's value is one entry of the categorical `dtype`'s dictionary.
+
+    Read directly, `codes` is indexed like the column's own buffers, so a
+    slice keeps it in step. A gather (a filter, a take, a join's output)
+    does not copy codes: its result keeps the source's `codes` and the
+    gather's row list, and row i's code is `codes[rows[first + i] + shift]`.
+    The codes are gathered only if something groups by them
+    (`StringColumn._write_codes`). Operations that compute new strings
+    build a column without codes."""
 
     var codes: ArcPointer[List[UInt32]]
     var dtype: DataType
+    # The gather's row list, shared with every column it gathered; a row of
+    # -1 is a missing row (null). None when `codes` is read directly.
+    var rows: Optional[ArcPointer[List[Int]]]
+    var first: Int
+    var shift: Int
+
+    def __init__(out self, codes: ArcPointer[List[UInt32]], dtype: DataType):
+        self.codes = codes
+        self.dtype = dtype
+        self.rows = None
+        self.first = 0
+        self.shift = 0
+
+    def __init__(
+        out self,
+        codes: ArcPointer[List[UInt32]],
+        dtype: DataType,
+        rows: ArcPointer[List[Int]],
+        first: Int,
+        shift: Int,
+    ):
+        self.codes = codes
+        self.dtype = dtype
+        self.rows = Optional(rows)
+        self.first = first
+        self.shift = shift
 
 
 struct StringColumn(Copyable, Sized):
@@ -316,6 +347,90 @@ struct StringColumn(Copyable, Sized):
             return 0
         return self._end(self._length - 1) - self._start(0)
 
+    def _write_codes(self, address: Int):
+        """This column's dictionary codes, one per row, into the UInt32
+        buffer at `address`. The column must carry codes. A null row's
+        code is unspecified."""
+        var dest = Pointer[UInt32, MutAnyOrigin](unsafe_from_address=address)
+        ref held = self._codes.value()[]
+        var source = held.codes[].unsafe_ptr()
+        if not held.rows:
+            unsafe_memcpy(
+                dest=dest,
+                src=source.unsafe_offset(self._offset),
+                count=self._length,
+            )
+            return
+        var rows = (
+            held.rows.value()[]
+            .unsafe_ptr()
+            .unsafe_offset(held.first + self._offset)
+        )
+        for i in range(self._length):
+            var row = rows.unsafe_offset(i)[]
+            dest.unsafe_offset(i)[] = source.unsafe_offset(
+                row + held.shift
+            )[] if row != -1 else UInt32(0)
+
+    def _carry_codes(
+        self,
+        mut result: Self,
+        indices: List[Int],
+        first: Int,
+        last: Int,
+        base: Int,
+        shared: Optional[ArcPointer[List[Int]]],
+    ):
+        """Give `result`, this column's rows indices[first:last] minus
+        `base`, those rows' dictionary codes. The gather has checked every
+        index; a missing row (-1) is null in `result`.
+
+        When the caller owns `indices` behind `shared` and this column
+        reads its codes directly, nothing is copied: `result` keeps the
+        codes and the row list (`StringCodes`). Otherwise -- a gather of a
+        gather, or a borrowed index list -- the codes are gathered now."""
+        if not self._codes:
+            return
+        ref held = self._codes.value()[]
+        if shared and not held.rows:
+            result._codes = ArcPointer(
+                StringCodes(
+                    held.codes,
+                    held.dtype,
+                    shared.value(),
+                    first,
+                    self._offset - base,
+                )
+            )
+            return
+        var n = last - first
+        var rows = indices.unsafe_ptr().unsafe_offset(first)
+        var source = held.codes[].unsafe_ptr()
+        var codes = List[UInt32](unsafe_uninit_length=n)
+        var out = codes.unsafe_ptr()
+        if not held.rows:
+            var direct = source.unsafe_offset(self._offset - base)
+            for k in range(n):
+                var row = rows.unsafe_offset(k)[]
+                out.unsafe_offset(k)[] = direct.unsafe_offset(
+                    row
+                )[] if row != -1 else UInt32(0)
+        else:
+            var inner = (
+                held.rows.value()[]
+                .unsafe_ptr()
+                .unsafe_offset(held.first + self._offset - base)
+            )
+            for k in range(n):
+                var row = rows.unsafe_offset(k)[]
+                var code = UInt32(0)
+                if row != -1:
+                    var from_row = inner.unsafe_offset(row)[]
+                    if from_row != -1:
+                        code = source.unsafe_offset(from_row + held.shift)[]
+                out.unsafe_offset(k)[] = code
+        result._codes = ArcPointer(StringCodes(ArcPointer(codes^), held.dtype))
+
     def take(self, indices: List[Int]) raises -> Self:
         if self._is_view_storage():
             for i in indices:
@@ -323,7 +438,9 @@ struct StringColumn(Copyable, Sized):
             var gathered = self._view_storage.value()._gather(
                 indices, self._offset
             )
-            return Self(gathered^)
+            var result = Self(gathered^)
+            self._carry_codes(result, indices, 0, len(indices), 0, None)
+            return result^
         return self._gather_views(indices, 0, len(indices), False)
 
     def take_or_null(self, indices: List[Int], fill: String) raises -> Self:
@@ -335,7 +452,9 @@ struct StringColumn(Copyable, Sized):
             var gathered = self._view_storage.value()._gather(
                 indices, self._offset, allow_missing=True
             )
-            return Self(gathered^)
+            var result = Self(gathered^)
+            self._carry_codes(result, indices, 0, len(indices), 0, None)
+            return result^
         return self._gather_views(indices, 0, len(indices), True)
 
     def _gather_offsets(
@@ -345,6 +464,7 @@ struct StringColumn(Copyable, Sized):
         last: Int,
         allow_missing: Bool,
         base: Int = 0,
+        shared: Optional[ArcPointer[List[Int]]] = None,
     ) raises -> Self:
         """Rows indices[first:last] of offset storage, in bulk (#328).
 
@@ -428,7 +548,9 @@ struct StringColumn(Copyable, Sized):
                     source_bits, self._offset + row - base
                 ):
                     bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
-        return Self(bytes=bytes^, offsets=offsets^, bits=bits^, length=n)
+        var result = Self(bytes=bytes^, offsets=offsets^, bits=bits^, length=n)
+        self._carry_codes(result, indices, first, last, base, shared)
+        return result^
 
     def _gather_views(
         self,
@@ -437,6 +559,7 @@ struct StringColumn(Copyable, Sized):
         last: Int,
         allow_missing: Bool,
         base: Int = 0,
+        shared: Optional[ArcPointer[List[Int]]] = None,
     ) raises -> Self:
         """Rows indices[first:last] of offset storage as views (#375).
 
@@ -450,7 +573,7 @@ struct StringColumn(Copyable, Sized):
         """
         if len(self._bytes[]) > 4_294_967_295:
             return self._gather_offsets(
-                indices, first, last, allow_missing, base
+                indices, first, last, allow_missing, base, shared
             )
         var n = last - first
         var rows = indices.unsafe_ptr().unsafe_offset(first)
@@ -509,11 +632,13 @@ struct StringColumn(Copyable, Sized):
                     bits[at >> 3] |= UInt8(1) << UInt8(at & 7)
         var buffers = List[ArcPointer[List[UInt8]]]()
         buffers.append(self._bytes.copy())
-        return Self(
+        var result = Self(
             StringViewStorage(
                 views^, buffers^, bits^, n, total, len(self._bytes[])
             )
         )
+        self._carry_codes(result, indices, first, last, base, shared)
+        return result^
 
     def _take_range(
         self,
@@ -521,14 +646,20 @@ struct StringColumn(Copyable, Sized):
         first: Int,
         last: Int,
         allow_missing: Bool,
+        shared: Optional[ArcPointer[List[Int]]] = None,
     ) raises -> Self:
-        """Gather a validated output range without copying its row indices."""
+        """Gather a validated output range without copying its row indices.
+        `shared`, when given, is the owner of `indices`."""
         if self._is_view_storage():
             var gathered = self._view_storage.value()._gather_range(
                 indices, first, last, self._offset, allow_missing
             )
-            return Self(gathered^)
-        return self._gather_views(indices, first, last, allow_missing)
+            var result = Self(gathered^)
+            self._carry_codes(result, indices, first, last, 0, shared)
+            return result^
+        return self._gather_views(
+            indices, first, last, allow_missing, 0, shared
+        )
 
     def slice(self, offset: Int, length: Int) raises -> Self:
         """A zero-copy window sharing this column's buffers."""
@@ -595,6 +726,8 @@ struct StringColumn(Copyable, Sized):
 
     def _append_column(mut self, other: Self):
         """Append rows in bulk, retaining native view payload blocks when possible."""
+        # Codes cover the rows before the append only.
+        self._codes = None
         if self._is_view_storage():
             if other._is_view_storage():
                 var combined = self._view_storage.value()._concat(

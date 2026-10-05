@@ -123,6 +123,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
   q10 658 → 527 ms. Reading such a file costs 8–21% more time and up to
   11% more memory (the codes). libdfparquet gains
   `dfq_read_parquet_stream_dict`; an older library reads as before.
+- Those codes now survive a filter, take, sort or join. The gathered column
+  keeps the source's codes and the gather's row list rather than copying
+  codes, so a filter costs nothing extra, and the codes are gathered only
+  when something groups by the column. Before, any gather dropped them
+  and the group-by hashed strings again. On the 10M-row H2O file, a filter
+  keeping 60% of rows followed by a group-by on `id3` (100,000 strings)
+  takes 70 ms instead of 185 ms for the group-by; two keys after a 33%
+  filter take 19 ms instead of 27 ms.
 - Grouping by one categorical key numbers its rows by direct lookup on the
   codes instead of the general encoder: H2O q1 (one coded string key) 30 →
   17 ms, and 23 → 16 ms on sorted data.

@@ -423,7 +423,9 @@ struct _SortedChunkTakeJob(Job):
                 else:
                     high = middle
             if low > next_row:
-                var gathered = chunk._take_range(rows, next_row, low, offset)
+                var gathered = chunk._take_range(
+                    rows, next_row, low, offset, Optional(self.indices)
+                )
                 if gathered:
                     selected.append(gathered.take())
                 else:
@@ -498,17 +500,34 @@ struct _SortedChunkPartJob(Job):
                 next_row += size
                 chunk_start = end
                 continue
-            var local = List[Int]()
-            while next_row < len(rows) and rows[next_row] < end:
-                local.append(rows[next_row] - chunk_start)
-                next_row += 1
-            if len(local) > 0:
+            # The indices are sorted: this chunk's share ends at the first
+            # row past it. Gather in place where the storage allows, so the
+            # rows are neither copied out nor rebased.
+            var low = next_row
+            var high = len(rows)
+            while low < high:
+                var middle = (low + high) // 2
+                if rows[middle] < end:
+                    low = middle + 1
+                else:
+                    high = middle
+            if low > next_row:
                 var part = Series(
                     self.source.name(),
                     chunks.arrays[i].copy(),
                     self.source.dtype(),
                 )
-                selected.append(part.take(local))
+                var gathered = part._take_range(
+                    rows, next_row, low, chunk_start, Optional(self.indices)
+                )
+                if gathered:
+                    selected.append(gathered.take())
+                else:
+                    var local = List[Int](capacity=low - next_row)
+                    for at in range(next_row, low):
+                        local.append(rows[at] - chunk_start)
+                    selected.append(part.take(local))
+            next_row = low
             chunk_start = end
         if len(selected) == 0:
             self.result = self.source.slice(0, 0)
@@ -663,7 +682,11 @@ struct _GatherJob(Job):
             self.piece = Series(
                 self.source.name(),
                 self.source._data[StringColumn]._take_range(
-                    rows, self.start, self.end, self.or_null
+                    rows,
+                    self.start,
+                    self.end,
+                    self.or_null,
+                    Optional(self.indices),
                 ),
             )
             # Keep the logical type: binary shares the string layout.

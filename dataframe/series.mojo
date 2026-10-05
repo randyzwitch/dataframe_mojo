@@ -4,7 +4,7 @@ from std.utils import Variant
 from .bool_column import BoolColumn
 from .column import Column, SCALAR_DTYPES, _copy_validity, gather_scalars
 from .nested_column import ListColumn, StructColumn
-from .string_column import StringColumn
+from .string_column import StringCodes, StringColumn
 from .string_view import StringViewStorage
 from .value import AnyValue
 from .display import render_series
@@ -14,6 +14,7 @@ from .parallel import (
     configured_workers,
     partitions,
     run_jobs,
+    worker_count,
 )
 from std.atomic import Atomic
 from std.memory import ArcPointer
@@ -91,6 +92,23 @@ struct _SeriesChunks(Copyable, Deinitable, Movable):
         self.cache = ArcPointer(_MergedCache())
 
 
+struct _ChunkCodesJob(Job):
+    """One string chunk's dictionary codes as a categorical chunk; a
+    gathered chunk gathers its codes here. The caller has checked that the
+    chunk carries codes."""
+
+    var chunk: Series
+    var result: Series
+
+    def __init__(out self, chunk: Series):
+        self.chunk = chunk.copy()
+        self.result = chunk.copy()
+
+    def run(mut self) raises:
+        var coded = self.chunk._dictionary_codes()
+        self.result = coded.take()
+
+
 struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     """A named column of one supported dtype, plus expression-backed methods."""
 
@@ -166,16 +184,29 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         if self.dtype() != DataType.STRING:
             return None
         if self.is_chunked():
-            var parts = List[Series]()
+            # Every chunk must carry codes into one dictionary. Checked
+            # before any chunk's codes are gathered.
+            var jobs = List[_ChunkCodesJob]()
             var dtype = Optional[DataType]()
             for chunk in self.chunks():
-                var coded = chunk._dictionary_codes()
-                if not coded:
+                if not chunk._data.isa[StringColumn]():
                     return None
-                if dtype and not (coded.value().dtype() == dtype.value()):
+                ref strings = chunk._data[StringColumn]
+                if not strings._codes:
                     return None
-                dtype = coded.value().dtype()
-                parts.append(coded.take())
+                ref held = strings._codes.value()[]
+                if dtype and not (held.dtype == dtype.value()):
+                    return None
+                dtype = held.dtype
+                jobs.append(_ChunkCodesJob(chunk))
+            if len(jobs) > 1 and worker_count(len(self)) > 1:
+                run_jobs(jobs)
+            else:
+                for j in range(len(jobs)):
+                    jobs[j].run()
+            var parts = List[Series](capacity=len(jobs))
+            for j in range(len(jobs)):
+                parts.append(jobs[j].result.copy())
             return Series._from_chunks(parts)
         if not self._data.isa[StringColumn]():
             return None
@@ -184,9 +215,19 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return None
         ref codes = strings._codes.value()[]
         var column = Column[UInt32](List[UInt32]())
-        column._data = codes.codes
-        column._bits = strings._bits
-        column._offset = strings._offset
+        if codes.rows:
+            # A gathered column gathers its codes here, on first use.
+            var own = List[UInt32](unsafe_uninit_length=len(strings))
+            strings._write_codes(Int(own.unsafe_ptr()))
+            column._data = ArcPointer(own^)
+            column._bits = ArcPointer(
+                _copy_validity(strings._bits[], strings._offset, len(strings))
+            )
+            column._offset = 0
+        else:
+            column._data = codes.codes
+            column._bits = strings._bits
+            column._offset = strings._offset
         column._length = strings._length
         return Series(self.name(), column^).with_dtype(codes.dtype)
 
@@ -280,6 +321,38 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
 
     def _merge_chunks(self) raises -> Self:
         var parts = self.chunks()
+        var merged = self._merge_storage(parts)
+        # String chunks that all carry codes into one dictionary (a Parquet
+        # scan, or gathers of one) merge their codes too, so the contiguous
+        # column still groups by them.
+        if not merged._data.isa[StringColumn]():
+            return merged^
+        var total = 0
+        for part in parts:
+            ref column = part._data[StringColumn]
+            if not column._codes:
+                return merged^
+            if not (
+                column._codes.value()[].dtype
+                == parts[0]._data[StringColumn]._codes.value()[].dtype
+            ):
+                return merged^
+            total += len(column)
+        var codes = List[UInt32](unsafe_uninit_length=total)
+        var at = 0
+        for part in parts:
+            ref column = part._data[StringColumn]
+            column._write_codes(Int(codes.unsafe_ptr().unsafe_offset(at)))
+            at += len(column)
+        merged._data[StringColumn]._codes = ArcPointer(
+            StringCodes(
+                ArcPointer(codes^),
+                parts[0]._data[StringColumn]._codes.value()[].dtype,
+            )
+        )
+        return merged^
+
+    def _merge_storage(self, parts: List[Self]) raises -> Self:
         var result = parts[0].copy()
         # Utf8View chunks concatenate descriptors and Arc byte blocks. Calling
         # the legacy reserve path would materialize their payloads first.
@@ -1022,7 +1095,12 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return gathered.take(order)
 
     def _take_range(
-        self, indices: List[Int], first: Int, last: Int, base: Int
+        self,
+        indices: List[Int],
+        first: Int,
+        last: Int,
+        base: Int,
+        shared: Optional[ArcPointer[List[Int]]] = None,
     ) raises -> Optional[Self]:
         """Rows indices[first:last] minus `base`, through the bulk gathers
         (#328), or None for storage without one. A physical chunk of a
@@ -1049,7 +1127,9 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             if not strings._is_view_storage():
                 var result = Self(
                     self._name,
-                    strings._gather_views(indices, first, last, False, base),
+                    strings._gather_views(
+                        indices, first, last, False, base, shared
+                    ),
                 )
                 result._dtype = self._dtype
                 return result^
