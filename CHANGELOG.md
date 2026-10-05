@@ -94,8 +94,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
   first-occurrence codes, avoiding numeric hashing for each key column.
   The new lookup checks valid codes before indexing the dictionary domain.
 
-- Grouped sums and means of plain Int64/Float64 columns feed the existing
+- Grouped sums and means of a plain numeric column of any width feed the
   reducer kernels by source interval, avoiding per-batch expression setup.
+  The kernels read each width at its own type and add in 128 bits or as
+  Float64, so Int8 to Int32, the unsigned types and Float32 no longer copy
+  every batch to Int64 or Float64 first: three such aggregates over 10M
+  rows and 100 groups take 13 ms instead of 56 ms, level with Int64.
 
 - Hash joins with one Int64 probe key hash it as each worker reads it,
   removing the probe hash/histogram pass and an eight-byte-per-row buffer.
