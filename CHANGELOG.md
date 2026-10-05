@@ -576,6 +576,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
   group counts, including huge k and singleton groups. Bounded heaps
   replace O(Nk) insertion lists, workers visit disjoint rows or groups,
   and `< Int64.MIN` returns no rows instead of overflowing (#435).
+- Grouped top-k filters with many small groups no longer route rows to
+  their owning worker through a serial pass over every row; each worker
+  scans the group ids and keeps its own groups' rows. That pass had made
+  H2O q8 20–27% slower on the two high-cardinality variants: at 10M rows
+  the filter now takes 262 ms instead of 341 ms (k=10) and 362 ms instead
+  of 424 ms (k=2), and uses 8 bytes a row less scratch.
 - Fused Float64 expressions that reference a column repeatedly now work on
   chunked inputs, including nonzero batch offsets and misaligned chunks.
   Each source window is sliced once instead of once per expression leaf

@@ -9,7 +9,7 @@ has a null rank and is not kept, as the comparison would have it.
 
 Partitions are numbered as `over()` numbers them. When groups * k fits
 within N candidates, workers use row-local heaps if all replicas still fit
-that bound, or route rows to group owners otherwise. Larger requested state
+that bound, or each own a range of groups and scan all rows otherwise. Larger requested state
 uses bucketed groups and one reusable heap per worker. Both strategies use
 O(N + groups) scratch independent of groups * k, and visit each input row
 once per pass. The order is `rank`'s own key (`rank._key`), so NaN and -0.0 rank
@@ -64,12 +64,16 @@ def _keep_best(
 
 @fieldwise_init
 struct _LocalTopKJob[D: DType](Job):
-    """Scan a disjoint row range into private, bounded per-group heaps."""
+    """Scan a row range into private, bounded per-group heaps.
+
+    With `owned` > 0 the job keeps only rows of the `owned` groups from
+    `group_offset` and skips the rest: every worker then scans all rows,
+    reading group ids in order, and no row list is built to route them."""
 
     var values: Int
     var nulls: Bool
     var ids: Int
-    var members: Int
+    var owned: Int
     var group_offset: Int
     var first: Int
     var last: Int
@@ -88,14 +92,15 @@ struct _LocalTopKJob[D: DType](Job):
         )
         var counts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.counts)
         var data = column._ptr()
-        var members = Pointer[Int, MutAnyOrigin](
-            unsafe_from_address=self.members
-        )
-        for p in range(self.first, self.last):
-            var row = p if self.members == 0 else members[unsafe_offset=p]
+        # One unsigned comparison tests 0 <= g < owned; without ownership
+        # every group id passes.
+        var limit = UInt(self.owned) if self.owned > 0 else UInt.MAX
+        for row in range(self.first, self.last):
+            var g = ids[unsafe_offset=row] - self.group_offset
+            if UInt(g) >= limit:
+                continue
             if self.nulls and not column._valid(row):
                 continue
-            var g = ids[unsafe_offset=row] - self.group_offset
             var item = _pack(
                 _key[Self.D](data[unsafe_offset=row], self.descending), row
             )
@@ -278,51 +283,44 @@ def top_k_mask(
             var nulls = data.null_count() > 0
             # At most one candidate slot per input row. Replicate group
             # heaps for row-sharded workers only if all copies still fit;
-            # otherwise route rows to group owners with O(workers) counters.
+            # otherwise each worker owns a range of groups and scans every
+            # row for them, which needs no routing scratch at all.
             # Division checks the bound before any groups*k multiplication.
             if count > 0 and k <= height // count:
                 var copies = workers if k <= height // count // workers else 1
                 var slots = count * copies
                 var candidates = slots * k
-                # Local heaps + counts + merge heaps need <= 40*N bytes.
-                # Ownership routing needs <= 32*N + 16*(workers+1), itself
-                # bounded by 48*N+16. Check before allocating these arrays.
+                # Local heaps + counts + merge heaps need <= 40*N bytes,
+                # with or without ownership. Check before allocating.
                 if height > (Int.MAX - 16) // 48:
                     raise Error("grouped top-k scratch size overflow")
                 var heaps = List[UInt128](length=candidates, fill=0)
                 var counts = List[Int](length=slots, fill=0)
                 var shares = min(workers, count)
                 var width = count // shares + Int(count % shares != 0)
-                var members = List[Int]()
-                var starts = List[Int]()
-                if copies == 1 and workers > 1:
-                    starts = List[Int](length=shares + 1, fill=0)
-                    for g in partitions.ids:
-                        starts[g // width + 1] += 1
-                    for w in range(shares):
-                        starts[w + 1] += starts[w]
-                    var next = starts.copy()
-                    members = List[Int](length=height, fill=0)
-                    for row in range(height):
-                        var owner = partitions.ids[row] // width
-                        members[next[owner]] = row
-                        next[owner] += 1
+                var owning = copies == 1 and workers > 1
                 var local = List[_LocalTopKJob[D]](capacity=workers)
                 var jobs = workers if copies > 1 else shares
                 for w in range(jobs):
-                    var indirect = len(members) > 0
-                    var group_offset = min(count, w * width) if indirect else 0
+                    # An owner scans every row and keeps its own groups'
+                    # rows; a replica scans its row range and keeps all.
+                    var group_offset = min(count, w * width) if owning else 0
+                    var owned = min(
+                        width, count - group_offset
+                    ) if owning else 0
+                    if owning and owned <= 0:
+                        continue
                     var slot = w * count if copies > 1 else group_offset
-                    var first = starts[w] if indirect else height // jobs * w
-                    var last = starts[w + 1] if indirect else (
-                        height if w == jobs - 1 else height // jobs * (w + 1)
+                    var first = 0 if owning else height // jobs * w
+                    var last = height if owning or w == jobs - 1 else (
+                        height // jobs * (w + 1)
                     )
                     local.append(
                         _LocalTopKJob[D](
                             Int(Pointer(to=data)),
                             nulls,
                             Int(partitions.ids.unsafe_ptr()),
-                            Int(members.unsafe_ptr()) if indirect else 0,
+                            owned,
                             group_offset,
                             first,
                             last,
@@ -333,8 +331,6 @@ def top_k_mask(
                         )
                     )
                 run_jobs(local)
-                _ = members^
-                _ = starts^
                 var merge = List[_MergeTopKJob](capacity=shares)
                 for w in range(shares):
                     merge.append(
