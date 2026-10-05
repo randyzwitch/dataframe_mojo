@@ -5201,9 +5201,14 @@ struct GroupBy(Copyable):
                 trace_path("group_by.partitioned.indexed")
             if any_indexed and any_fallback:
                 trace_path("group_by.partitioned.mixed")
-            var values = take_parallel(
-                gathered_sources, parts.order.copy(), workers
-            )
+            # Only aggregates the indexed readers cannot serve need their
+            # sources in bucket order. With none, there is nothing to
+            # gather and no reason to copy the row order for it.
+            var values = List[Series]()
+            if len(gathered_sources) > 0:
+                values = take_parallel(
+                    gathered_sources, parts.order.copy(), workers
+                )
             var jobs = List[_HashedBucketJob]()
             for b in range(buckets):
                 var lo = parts.bounds[b]

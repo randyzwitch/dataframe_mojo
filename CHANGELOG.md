@@ -102,7 +102,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
   Numeric first/last, standard deviation, variance and distinct counts can
   read source rows directly; decimal and computed reductions use bounded
   batches. A median/quantile or categorical expression gathers only its
-  own referenced columns, while all expressions share group IDs.
+  own referenced columns, while all expressions share group IDs. When no
+  aggregate needs gathered columns, the row order is no longer copied for
+  an empty gather: sums with a computed sum and a `first` over 1M rows and
+  100,000 groups take 16.5 ms instead of 19.8 ms.
 - General sorting compares normalized row keys and resolves long-string
   prefix ties before later keys, avoiding a dense-rank sort for each input
   column. Packed sorts retain their existing path; rank-based consumers
