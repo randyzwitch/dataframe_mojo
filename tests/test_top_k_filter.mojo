@@ -201,5 +201,39 @@ def test_heap_matches_full_ranking_on_skewed_groups() raises:
             assert_true(strict.equals(want))
 
 
+def test_many_small_groups_owned_by_group_range() raises:
+    """About four rows a group and k of 2 or 3: per-group heaps fit the
+    input but a copy per worker does not, so each worker owns a range of
+    groups. The group count is not a multiple of the worker count, groups
+    are numbered out of row order, and some values are null."""
+    set_threads(8)
+    var rows = 131_077
+    var groups = 32_771
+    var keys = List[Int64](capacity=rows)
+    var values = List[Float64](capacity=rows)
+    var valid = List[Bool](capacity=rows)
+    var ids = List[Int64](capacity=rows)
+    for i in range(rows):
+        keys.append(Int64((i * 7919) % groups))
+        values.append(Float64((i * 104_729) % 1009))
+        valid.append(i % 29 != 0)
+        ids.append(Int64(i))
+    var data = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("v", Column[Float64](values^, valid^)),
+            Series("row", Column[Int64](ids^)),
+        ]
+    )
+    assert_true(worker_count(rows) > 1)
+    for descending in [False, True]:
+        var ranked = col("v").rank("ordinal", descending=descending).over("k")
+        var ordinary = data.with_columns(ranked.copy().alias("r"))
+        for k in [2, 3]:
+            var want = ordinary.filter(col("r") <= lit(Int64(k))).column("row")
+            var got = data.filter(ranked.copy() <= lit(Int64(k))).column("row")
+            assert_true(got.equals(want))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
