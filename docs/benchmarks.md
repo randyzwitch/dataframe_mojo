@@ -54,7 +54,7 @@ follow on every change; the full tier is what a report cites.
 | `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | cardinality parameter k=100, 10 and 2; 5% nulls; sorted |
 | `h2o_join` | development | db-benchmark join | 5 | none; 5% nulls |
 | `pdsh` | development (held out until 2026-10-05) | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
-| `tpcds` | held out | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 23 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
+| `tpcds` | held out | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 36 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
 | `clickbench` | held out | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
 
 The H2O data follows db-benchmark's R generators with seeded Polars sampling,
@@ -187,12 +187,18 @@ have been translated, and report the others as `unsupported: not
 translated`, so every report counts them. Geometric means use only queries
 every engine answered.
 
-The first 23 translations are the single-block queries: one SELECT, with
-no window function, rollup or set operation (q3, q7, q13, q15, q17, q19,
-q25, q26, q29, q37, q40, q42, q43, q48, q50, q52, q55, q72, q82, q84, q85,
-q91, q96). They were chosen by that rule from the SQL text, before any was
-timed. Add further translations by a rule of the same kind, never by which
-queries run well. A translation uses the API as a user would; where the
+Translations are added in batches, each chosen by a rule applied to the
+SQL text before any query in it is timed:
+
+1. The 23 single-block queries: one SELECT, with no window function,
+   rollup or set operation (q3, q7, q13, q15, q17, q19, q25, q26, q29, q37,
+   q40, q42, q43, q48, q50, q52, q55, q72, q82, q84, q85, q91, q96).
+2. The 13 with exactly one more SELECT, a derived table or a subquery,
+   and still no window function, rollup, set operation, EXISTS or WITH
+   (q21, q32, q34, q41, q45, q46, q62, q68, q73, q79, q92, q93, q99).
+
+Add further batches by a rule of the same kind, never by which queries run
+well. A translation uses the API as a user would; where the
 library cannot express or run a query, the cell stays failed or unsupported
 with its reason until the library changes. The first run found two such
 failures on the `decimal` variant, since fixed: q43 crashed (#464) and q40

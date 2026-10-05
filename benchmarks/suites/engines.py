@@ -969,7 +969,7 @@ def clickbench_polars(t, q):
 
 
 def tpcds_polars(t, q):
-    """The 23 single-block TPC-DS queries, as tpcds.mojo has them. Any other
+    """The translated TPC-DS queries, as tpcds.mojo has them. Any other
     query is reported as not translated."""
     import polars as pl
 
@@ -1070,6 +1070,97 @@ def tpcds_polars(t, q):
 
     def one_if(condition):
         return pl.when(condition).then(1).otherwise(0)
+
+    def sql_sum(value):
+        """SQL's sum: null, not zero, when no value is valid."""
+        return pl.when(value.count() > 0).then(value.sum())
+
+    def day_buckets(shipped, sold):
+        lag = col(shipped) - col(sold)
+        return [
+            one_if(lag <= 30).sum().alias("30 days"),
+            one_if((lag > 30) & (lag <= 60)).sum().alias("31-60 days"),
+            one_if((lag > 60) & (lag <= 90)).sum().alias("61-90 days"),
+            one_if((lag > 90) & (lag <= 120)).sum().alias("91-120 days"),
+            one_if(lag > 120).sum().alias(">120 days"),
+        ]
+
+    def shipping_delays(
+        sales, prefix, channel, sales_key, channel_key, channel_name
+    ):
+        return (
+            c[sales]
+            .join(
+                dates(col("d_month_seq").is_between(1200, 1211), "d_sk"),
+                left_on=prefix + "_ship_date_sk",
+                right_on="d_sk",
+            )
+            .join(
+                c["warehouse"].select(
+                    "w_warehouse_sk",
+                    col("w_warehouse_name").str.slice(0, 20).alias("w_substr"),
+                ),
+                left_on=prefix + "_warehouse_sk",
+                right_on="w_warehouse_sk",
+            )
+            .join(
+                c["ship_mode"],
+                left_on=prefix + "_ship_mode_sk",
+                right_on="sm_ship_mode_sk",
+            )
+            .join(c[channel], left_on=sales_key, right_on=channel_key)
+            .group_by("w_substr", "sm_type", channel_name)
+            .agg(day_buckets(prefix + "_ship_date_sk", prefix + "_sold_date_sk"))
+        )
+
+    def tickets(days, stores, households, keys, sums, bought_city=False):
+        sold = (
+            c["store_sales"]
+            .join(dates(days, "d_sk"), left_on="ss_sold_date_sk", right_on="d_sk")
+            .join(
+                c["store"].filter(stores),
+                left_on="ss_store_sk",
+                right_on="s_store_sk",
+            )
+            .join(
+                c["household_demographics"].filter(households),
+                left_on="ss_hdemo_sk",
+                right_on="hd_demo_sk",
+            )
+        )
+        if bought_city:
+            sold = sold.join(
+                c["customer_address"].select(
+                    col("ca_address_sk").alias("bought_sk"),
+                    col("ca_city").alias("bought_city"),
+                ),
+                left_on="ss_addr_sk",
+                right_on="bought_sk",
+            )
+        return sold.group_by(keys).agg(sums)
+
+    three_years = col("d_year").is_in([1999, 2000, 2001])
+
+    def excess_discount(sales, prefix, maker):
+        amount = prefix + "_ext_discount_amt"
+        in_range = c[sales].join(
+            dates(col("d_date").is_between(d(2000, 1, 27), d(2000, 4, 26)), "d_sk"),
+            left_on=prefix + "_sold_date_sk",
+            right_on="d_sk",
+        )
+        typical = in_range.group_by(prefix + "_item_sk").agg(
+            col(amount).cast(pl.Float64).mean().alias("typical")
+        ).select(col(prefix + "_item_sk").alias("typical_item"), "typical")
+        return (
+            in_range.join(
+                c["item"].filter(col("i_manufact_id") == maker),
+                left_on=prefix + "_item_sk",
+                right_on="i_item_sk",
+            )
+            .join(typical, left_on=prefix + "_item_sk", right_on="typical_item")
+            .filter(col(amount).cast(pl.Float64) > 1.3 * col("typical"))
+            .select(col(amount).sum().alias("excess"))
+        )
 
     if q == "q3":
         out = (
@@ -1420,7 +1511,6 @@ def tpcds_polars(t, q):
             "s_street_type", "s_suite_number", "s_city", "s_county", "s_state",
             "s_zip",
         ]  # fmt: skip
-        lag = col("sr_returned_date_sk") - col("ss_sold_date_sk")
         out = (
             c["store_sales"]
             .join(
@@ -1439,13 +1529,7 @@ def tpcds_polars(t, q):
             )
             .join(c["store"], left_on="ss_store_sk", right_on="s_store_sk")
             .group_by(keys)
-            .agg(
-                one_if(lag <= 30).sum().alias("30 days"),
-                one_if((lag > 30) & (lag <= 60)).sum().alias("31-60 days"),
-                one_if((lag > 60) & (lag <= 90)).sum().alias("61-90 days"),
-                one_if((lag > 90) & (lag <= 120)).sum().alias("91-120 days"),
-                one_if(lag > 120).sum().alias(">120 days"),
-            )
+            .agg(day_buckets("sr_returned_date_sk", "ss_sold_date_sk"))
             .sort(keys, nulls_last=True)
             .head(100)
         )
@@ -1784,6 +1868,295 @@ def tpcds_polars(t, q):
                 right_on="s_store_sk",
             )
             .select(pl.len().alias("count"))
+        )
+    elif q == "q21":
+        day = d(2000, 3, 11)
+        out = (
+            c["inventory"]
+            .join(
+                c["warehouse"],
+                left_on="inv_warehouse_sk",
+                right_on="w_warehouse_sk",
+            )
+            .join(
+                c["item"].filter(col("i_current_price").is_between(0.99, 1.49)),
+                left_on="inv_item_sk",
+                right_on="i_item_sk",
+            )
+            .join(
+                c["date_dim"].filter(
+                    col("d_date").is_between(d(2000, 2, 10), d(2000, 4, 10))
+                ),
+                left_on="inv_date_sk",
+                right_on="d_date_sk",
+            )
+            .group_by("w_warehouse_name", "i_item_id")
+            .agg(
+                pl.when(col("d_date") < day)
+                .then(col("inv_quantity_on_hand"))
+                .otherwise(0)
+                .sum()
+                .alias("inv_before"),
+                pl.when(col("d_date") >= day)
+                .then(col("inv_quantity_on_hand"))
+                .otherwise(0)
+                .sum()
+                .alias("inv_after"),
+            )
+            .filter(
+                (col("inv_before") > 0)
+                & (col("inv_after") / col("inv_before")).is_between(2 / 3, 1.5)
+            )
+            .sort(["w_warehouse_name", "i_item_id"], nulls_last=False)
+            .head(100)
+        )
+    elif q == "q32":
+        out = excess_discount("catalog_sales", "cs", 977)
+    elif q in ("q34", "q73"):
+        per_car = col("hd_dep_count") / col("hd_vehicle_count")
+        potential = col("hd_buy_potential").is_in([">10000", "Unknown"])
+        if q == "q34":
+            days = (
+                col("d_dom").is_between(1, 3) | col("d_dom").is_between(25, 28)
+            ) & three_years
+            stores = col("s_county") == "Williamson County"
+            low, high, ratio = 15, 20, 1.2
+        else:
+            days = col("d_dom").is_between(1, 2) & three_years
+            stores = col("s_county").is_in(
+                [
+                    "Orange County", "Bronx County", "Franklin Parish",
+                    "Williamson County",
+                ]  # fmt: skip
+            )
+            low, high, ratio = 1, 5, 1.0
+        found = (
+            tickets(
+                days,
+                stores,
+                potential & (col("hd_vehicle_count") > 0) & (per_car > ratio),
+                ["ss_ticket_number", "ss_customer_sk"],
+                [pl.len().alias("cnt")],
+            )
+            .filter(col("cnt").is_between(low, high))
+            .join(c["customer"], left_on="ss_customer_sk", right_on="c_customer_sk")
+            .select(
+                "c_last_name", "c_first_name", "c_salutation",
+                "c_preferred_cust_flag", "ss_ticket_number", "cnt",
+            )  # fmt: skip
+        )
+        if q == "q73":
+            out = found.sort(["cnt", "c_last_name"], descending=[True, False])
+        else:
+            out = found.sort(
+                [
+                    "c_last_name", "c_first_name", "c_salutation",
+                    "c_preferred_cust_flag", "ss_ticket_number",
+                ],  # fmt: skip
+                descending=[False, False, False, True, False],
+                nulls_last=False,
+            )
+    elif q == "q41":
+        shapes = [
+            ("Women", ["powder", "khaki"], ["Ounce", "Oz"], ["medium", "extra large"]),
+            ("Women", ["brown", "honeydew"], ["Bunch", "Ton"], ["N/A", "small"]),
+            ("Men", ["floral", "deep"], ["N/A", "Dozen"], ["petite"]),
+            ("Men", ["light", "cornflower"], ["Box", "Pound"], ["medium", "extra large"]),
+            ("Women", ["midnight", "snow"], ["Pallet", "Gross"], ["medium", "extra large"]),
+            ("Women", ["cyan", "papaya"], ["Cup", "Dram"], ["N/A", "small"]),
+            ("Men", ["orange", "frosted"], ["Each", "Tbl"], ["petite"]),
+            ("Men", ["forest", "ghost"], ["Lb", "Bundle"], ["medium", "extra large"]),
+        ]  # fmt: skip
+        described = pl.any_horizontal(
+            (col("i_category") == category)
+            & col("i_color").is_in(colors)
+            & col("i_units").is_in(units)
+            & col("i_size").is_in(sizes)
+            for category, colors, units, sizes in shapes
+        )
+        makers = (
+            c["item"]
+            .filter(described)
+            .select(col("i_manufact").alias("maker"))
+            .unique()
+        )
+        out = (
+            c["item"]
+            .filter(col("i_manufact_id").is_between(738, 778))
+            .join(makers, left_on="i_manufact", right_on="maker", how="semi")
+            .select("i_product_name")
+            .unique()
+            .sort("i_product_name", nulls_last=True)
+            .head(100)
+        )
+    elif q == "q45":
+        zips = [
+            "85669", "86197", "88274", "83405", "86475",
+            "85392", "85460", "80348", "81792",
+        ]  # fmt: skip
+        listed = (
+            c["item"]
+            .filter(col("i_item_sk").is_in([2, 3, 5, 7, 11, 13, 17, 19, 23, 29]))
+            .select(
+                col("i_item_id").alias("listed_id"),
+                col("i_item_id").alias("listed"),
+            )
+            .unique()
+        )
+        out = (
+            c["web_sales"]
+            .join(
+                dates((col("d_qoy") == 2) & (col("d_year") == 2001), "d_sk"),
+                left_on="ws_sold_date_sk",
+                right_on="d_sk",
+            )
+            .join(
+                c["customer"],
+                left_on="ws_bill_customer_sk",
+                right_on="c_customer_sk",
+            )
+            .join(
+                c["customer_address"],
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .join(c["item"], left_on="ws_item_sk", right_on="i_item_sk")
+            .join(listed, left_on="i_item_id", right_on="listed_id", how="left")
+            .filter(
+                col("ca_zip").str.slice(0, 5).is_in(zips)
+                | col("listed").is_not_null()
+            )
+            .group_by("ca_zip", "ca_city")
+            .agg(col("ws_sales_price").sum().alias("total"))
+            .sort(["ca_zip", "ca_city"], nulls_last=True)
+            .head(100)
+        )
+    elif q in ("q46", "q68"):
+        keys = ["ss_ticket_number", "ss_customer_sk", "ss_addr_sk", "bought_city"]
+        if q == "q46":
+            days = col("d_dow").is_in([6, 0]) & three_years
+            sums = [
+                col("ss_coupon_amt").sum().alias("amt"),
+                col("ss_net_profit").sum().alias("profit"),
+            ]
+            shown = [
+                "c_last_name", "c_first_name", "ca_city", "bought_city",
+                "ss_ticket_number", "amt", "profit",
+            ]  # fmt: skip
+            order = [
+                "c_last_name", "c_first_name", "ca_city", "bought_city",
+                "ss_ticket_number",
+            ]  # fmt: skip
+        else:
+            days = col("d_dom").is_between(1, 2) & three_years
+            sums = [
+                col("ss_ext_sales_price").sum().alias("extended_price"),
+                col("ss_ext_list_price").sum().alias("list_price"),
+                col("ss_ext_tax").sum().alias("extended_tax"),
+            ]
+            shown = [
+                "c_last_name", "c_first_name", "ca_city", "bought_city",
+                "ss_ticket_number", "extended_price", "extended_tax", "list_price",
+            ]  # fmt: skip
+            order = ["c_last_name", "ss_ticket_number"]
+        out = (
+            tickets(
+                days,
+                col("s_city").is_in(["Fairview", "Midway"]),
+                (col("hd_dep_count") == 4) | (col("hd_vehicle_count") == 3),
+                keys,
+                sums,
+                bought_city=True,
+            )
+            .join(c["customer"], left_on="ss_customer_sk", right_on="c_customer_sk")
+            .join(
+                c["customer_address"],
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .filter(col("ca_city") != col("bought_city"))
+            .select(shown)
+            .sort(order, nulls_last=False)
+            .head(100)
+        )
+    elif q == "q62":
+        out = (
+            shipping_delays(
+                "web_sales", "ws", "web_site",
+                "ws_web_site_sk", "web_site_sk", "web_name",
+            )  # fmt: skip
+            .sort(["w_substr", "sm_type", "web_name"], nulls_last=False)
+            .head(100)
+        )
+    elif q == "q79":
+        out = (
+            tickets(
+                (col("d_dow") == 1) & three_years,
+                col("s_number_employees").is_between(200, 295),
+                (col("hd_dep_count") == 6) | (col("hd_vehicle_count") > 2),
+                ["ss_ticket_number", "ss_customer_sk", "ss_addr_sk", "s_city"],
+                [
+                    sql_sum(col("ss_coupon_amt")).alias("amt"),
+                    sql_sum(col("ss_net_profit")).alias("profit"),
+                ],
+            )
+            .join(c["customer"], left_on="ss_customer_sk", right_on="c_customer_sk")
+            .select(
+                "c_last_name",
+                "c_first_name",
+                col("s_city").str.slice(0, 30).alias("city"),
+                "ss_ticket_number",
+                "amt",
+                "profit",
+            )
+            .sort(
+                ["c_last_name", "c_first_name", "city", "profit", "ss_ticket_number"],
+                nulls_last=[False, False, False, False, True],
+            )
+            .head(100)
+        )
+    elif q == "q92":
+        out = excess_discount("web_sales", "ws", 350)
+    elif q == "q93":
+        kept = col("ss_quantity") - col("sr_return_quantity")
+        out = (
+            c["store_sales"]
+            .join(
+                c["store_returns"].join(
+                    c["reason"].filter(col("r_reason_desc") == "reason 28"),
+                    left_on="sr_reason_sk",
+                    right_on="r_reason_sk",
+                ),
+                left_on=["ss_item_sk", "ss_ticket_number"],
+                right_on=["sr_item_sk", "sr_ticket_number"],
+            )
+            .with_columns(
+                (
+                    pl.when(col("sr_return_quantity").is_not_null())
+                    .then(kept)
+                    .otherwise(col("ss_quantity"))
+                    * col("ss_sales_price")
+                ).alias("act_sales")
+            )
+            .group_by("ss_customer_sk")
+            .agg(sql_sum(col("act_sales")).alias("sumsales"))
+            .sort(["sumsales", "ss_customer_sk"], nulls_last=False)
+            .head(100)
+        )
+    elif q == "q99":
+        out = (
+            shipping_delays(
+                "catalog_sales", "cs", "call_center",
+                "cs_call_center_sk", "cc_call_center_sk", "cc_name",
+            )  # fmt: skip
+            .select(
+                "w_substr",
+                "sm_type",
+                col("cc_name").str.to_lowercase().alias("cc_name_lower"),
+                "30 days", "31-60 days", "61-90 days", "91-120 days", ">120 days",
+            )  # fmt: skip
+            .sort(["w_substr", "sm_type", "cc_name_lower"], nulls_last=False)
+            .head(100)
         )
     else:
         raise NotImplementedError("unsupported: not translated")
