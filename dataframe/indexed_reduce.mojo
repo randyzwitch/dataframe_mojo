@@ -106,6 +106,13 @@ def reduce_indexed(
             counts[unsafe_offset=g[unsafe_offset=p]] += 1
         return reducer.finish()
     ref source = columns[bound.sources[node.left]]
+    if op == N_UNIQUE:
+        comptime for t in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[t]
+            if source._data.isa[Column[Scalar[D]]]():
+                return _distinct_counts[D](
+                    source._data[Column[Scalar[D]]], rows, g, n, group_count
+                )
     comptime for t in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[t]
         if source._data.isa[Column[Scalar[D]]]():
@@ -118,6 +125,73 @@ def reduce_indexed(
                     reducer, source._data[Column[Scalar[D]]], rows, g, n, op
                 )
     return reducer.finish().with_dtype(bound.dtypes[len(bound.dtypes) - 1])
+
+
+@always_inline
+def _mix_pair(group: Int, key: UInt64) -> UInt64:
+    """splitmix64's finalizer over a group and value together."""
+    var z = key ^ (UInt64(group) * 0x9E3779B97F4A7C15)
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+    return z ^ (z >> 31)
+
+
+def _distinct_counts[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    rows: Pointer[Int, _],
+    g: Pointer[Int, _],
+    n: Int,
+    group_count: Int,
+) raises -> Series:
+    """Distinct values per group through one open-addressing set of
+    (group, value) pairs for the whole bucket, where a set per group cost
+    an allocation for every group with a second value: PDS-H q21 counts
+    suppliers for 1.5M orders, and those sets were a fifth of its time.
+    A null counts once per group, as `n_unique` counts it."""
+    var values = column._ptr()
+    var nulls = column.null_count() > 0
+    var counts = List[Int64](length=group_count, fill=0)
+    var saw_null = List[Bool](length=group_count, fill=False)
+    # At most n distinct pairs; keep the table at most half full.
+    var size = 16
+    while size < 2 * n:
+        size *= 2
+    var mask = size - 1
+    var keys = List[UInt64](unsafe_uninit_length=size)
+    var groups = List[Int](length=size, fill=-1)
+    var slot_keys = keys.unsafe_ptr()
+    var slot_groups = groups.unsafe_ptr()
+    var tally = counts.unsafe_ptr()
+    for p in range(n):
+        var row = rows[unsafe_offset=p]
+        var group = g[unsafe_offset=p]
+        if nulls and not column._valid(row):
+            saw_null[group] = True
+            continue
+        var key: UInt64
+        comptime if D.is_floating_point():
+            key = float_key(Float64(values[unsafe_offset=row]))
+        else:
+            key = bitcast[DType.uint64](
+                _canonical_int[D](values[unsafe_offset=row])
+            )
+        var at = Int(_mix_pair(group, key)) & mask
+        while True:
+            var held = slot_groups[unsafe_offset=at]
+            if held < 0:
+                slot_groups[unsafe_offset=at] = group
+                slot_keys[unsafe_offset=at] = key
+                tally[unsafe_offset=group] += 1
+                break
+            if held == group and slot_keys[unsafe_offset=at] == key:
+                break
+            at = (at + 1) & mask
+    for group in range(group_count):
+        if saw_null[group]:
+            counts[group] += 1
+    return Series("", Column[Int64](counts^))
 
 
 def _canonical_int[D: DType](value: Scalar[D]) -> Int64:

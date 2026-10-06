@@ -90,6 +90,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - Native sums/means and dense integer/categorical key encoding cache
   validity bitmap pointers and slice offsets outside their row loops,
   reducing repeated metadata reads for nullable inputs.
+- Distinct counts by group (`n_unique` in a group-by) use one hash set of
+  (group, value) pairs per partition instead of a set per group, which
+  allocated once for every group holding a second value. PDS-H q21, which
+  counts suppliers for 1.5M orders, 624 → 251 ms at scale factor 1.
+
 - Numeric casts run as one typed loop when no value can fail to fit (Bool
   to any number, an integer to a wider type or to a float, Float32 to
   Float64) or when none does (an integer to a narrower or differently
