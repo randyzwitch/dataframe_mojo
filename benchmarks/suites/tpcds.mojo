@@ -6,7 +6,8 @@ runs the SQL text.
 Translated so far, each batch chosen by a rule on the SQL text and not by
 timings: the 23 single-block queries (one SELECT, no window, rollup or set
 operation), then the 13 with exactly one more SELECT (a derived table or
-a subquery) and still no window, rollup, set operation, EXISTS or WITH.
+a subquery) and still no window, rollup, set operation, EXISTS or WITH,
+then the 7 with several such subqueries under the same exclusions.
 Any other query reports `unsupported: not translated`, so it is counted in
 every report instead of dropped. The same queries run on both data variants
 (bench_suites.py): money columns as Float64, or as declared decimals, where
@@ -1806,6 +1807,372 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
         return ascending(
             grouped, ["w_substr", "sm_type", "cc_name_lower"], nulls_first=True
         ).head(100)
+    if q == "q6":
+        # The month of January 2001, read first, as a user would.
+        var month = (
+            t["date_dim"]
+            .lazy()
+            .filter((col("d_year") == 2001) & (col("d_moy") == 1))
+            .select(["d_month_seq"])
+            .unique()
+            .collect()
+            .item()
+            .int64()
+        )
+        # Items priced over 1.2 times their category's average. An item
+        # without a category has no average to compare with in the SQL.
+        var price = col("i_current_price").cast(DataType.FLOAT64)
+        var costly = (
+            t["item"]
+            .lazy()
+            .filter(col("i_category").is_not_null())
+            .filter(price > lit(1.2) * price.mean().over("i_category"))
+            .select(["i_item_sk"])
+        )
+        var grouped = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                dates(t, col("d_month_seq") == lit(month), "d_sk"),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(costly, left_on=["ss_item_sk"], right_on=["i_item_sk"])
+            .join(
+                t["customer"].lazy(),
+                left_on=["ss_customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .join(
+                t["customer_address"].lazy(),
+                left_on=["c_current_addr_sk"],
+                right_on=["ca_address_sk"],
+            )
+            .group_by(["ca_state"])
+            .agg([col("ca_state").len().alias("cnt")])
+            .filter(col("cnt").cast(DataType.INT64) >= 10)
+            .select_exprs([col("ca_state").alias("state"), col("cnt")])
+        )
+        return ascending(grouped, ["cnt", "state"], nulls_first=True).head(100)
+    if q == "q9":
+        # Five quantity bands; each reports the average discount when the
+        # band has more sales than a given count, else the average paid.
+        var lows: List[Int] = [1, 21, 41, 61, 81]
+        var counts: List[Int] = [74129, 122840, 56580, 10097, 165306]
+        var buckets = List[Expr]()
+        for i in range(5):
+            var band = col("ss_quantity").is_between(
+                lit(Int64(lows[i])), lit(Int64(lows[i] + 19))
+            )
+            buckets.append(
+                when(one_if(band).sum() > lit(Int64(counts[i])))
+                .then(
+                    when(band)
+                    .then(col("ss_ext_discount_amt").cast(DataType.FLOAT64))
+                    .end()
+                    .mean()
+                )
+                .otherwise(
+                    when(band)
+                    .then(col("ss_net_paid").cast(DataType.FLOAT64))
+                    .end()
+                    .mean()
+                )
+                .alias("bucket" + String(i + 1))
+            )
+        return t["store_sales"].lazy().select_exprs(buckets)
+    if q == "q28":
+        # Six quantity bands, each a filter of its own with three
+        # statistics of the list price, side by side in one row.
+        ref sales = t["store_sales"]
+        var lows: List[Int] = [0, 6, 11, 16, 21, 26]
+        var highs: List[Int] = [5, 10, 15, 20, 25, 30]
+        var prices: List[Int] = [8, 90, 142, 135, 122, 154]
+        var coupons: List[Int] = [459, 2323, 12214, 6071, 836, 7326]
+        var costs: List[Int] = [57, 31, 79, 38, 17, 7]
+        # LazyFrame has no cross join yet, so each band is collected and
+        # the one-row results are joined eagerly.
+        var row = Optional[DataFrame]()
+        for i in range(6):
+            var tag = "B" + String(i + 1)
+            var band = (
+                sales.lazy()
+                .filter(
+                    col("ss_quantity").is_between(
+                        lit(Int64(lows[i])), lit(Int64(highs[i]))
+                    )
+                    & (
+                        between(
+                            sales,
+                            "ss_list_price",
+                            String(prices[i]),
+                            String(prices[i] + 10),
+                        )
+                        | between(
+                            sales,
+                            "ss_coupon_amt",
+                            String(coupons[i]),
+                            String(coupons[i] + 1000),
+                        )
+                        | between(
+                            sales,
+                            "ss_wholesale_cost",
+                            String(costs[i]),
+                            String(costs[i] + 20),
+                        )
+                    )
+                    # count(DISTINCT) leaves nulls out; the average and the
+                    # count of the column do too.
+                    & col("ss_list_price").is_not_null()
+                )
+                .select_exprs(
+                    [
+                        col("ss_list_price").mean().alias(tag + "_LP"),
+                        col("ss_list_price").count().alias(tag + "_CNT"),
+                        col("ss_list_price").n_unique().alias(tag + "_CNTD"),
+                    ]
+                )
+            )
+            var one = band.collect()
+            row = Optional(
+                row.value().join(one, how="cross") if row else one.copy()
+            )
+        return row.value().lazy()
+    if q == "q61":
+        # November 1998 jewelry sales in one time zone, and the part of
+        # them sold on a mail, email or TV promotion.
+        var promoted = (
+            t["promotion"]
+            .lazy()
+            .filter(
+                (col("p_channel_dmail") == "Y")
+                | (col("p_channel_email") == "Y")
+                | (col("p_channel_tv") == "Y")
+            )
+            .select_exprs(
+                [col("p_promo_sk"), col("p_promo_sk").alias("promoted")]
+            )
+        )
+        var offset = like(t["store"], "s_gmt_offset", "-5")
+        var both = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                dates(
+                    t, (col("d_year") == 1998) & (col("d_moy") == 11), "d_sk"
+                ),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["store"].lazy().filter(col("s_gmt_offset") == offset),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                t["item"].lazy().filter(col("i_category") == "Jewelry"),
+                left_on=["ss_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .join(
+                t["customer"].lazy(),
+                left_on=["ss_customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .join(
+                t["customer_address"]
+                .lazy()
+                .filter(
+                    col("ca_gmt_offset")
+                    == like(t["customer_address"], "ca_gmt_offset", "-5")
+                ),
+                left_on=["c_current_addr_sk"],
+                right_on=["ca_address_sk"],
+            )
+            .join(
+                promoted,
+                left_on=["ss_promo_sk"],
+                right_on=["p_promo_sk"],
+                how="left",
+            )
+            .select_exprs(
+                [
+                    when(col("promoted").is_not_null())
+                    .then(col("ss_ext_sales_price"))
+                    .end()
+                    .sum(min_count=1)
+                    .alias("promotions"),
+                    col("ss_ext_sales_price").sum(min_count=1).alias("total"),
+                ]
+            )
+        )
+        return both.with_columns(
+            [
+                (
+                    col("promotions").cast(DataType.FLOAT64)
+                    / col("total").cast(DataType.FLOAT64)
+                    * lit(100.0)
+                ).alias("share")
+            ]
+        )
+    if q == "q65":
+        var revenue = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                dates(
+                    t,
+                    col("d_month_seq").is_between(
+                        lit(Int64(1176)), lit(Int64(1187))
+                    ),
+                    "d_sk",
+                ),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .group_by(["ss_store_sk", "ss_item_sk"])
+            .agg([col("ss_sales_price").sum(min_count=1).alias("revenue")])
+        )
+        var typical = (
+            revenue.group_by(["ss_store_sk"])
+            .agg([col("revenue").cast(DataType.FLOAT64).mean().alias("ave")])
+            .select_exprs([col("ss_store_sk").alias("ave_store"), col("ave")])
+        )
+        var low = (
+            revenue.join(
+                typical, left_on=["ss_store_sk"], right_on=["ave_store"]
+            )
+            .filter(
+                col("revenue").cast(DataType.FLOAT64) <= lit(0.1) * col("ave")
+            )
+            .join(
+                t["store"].lazy(),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                t["item"].lazy(), left_on=["ss_item_sk"], right_on=["i_item_sk"]
+            )
+            .select(
+                [
+                    "s_store_name",
+                    "i_item_desc",
+                    "revenue",
+                    "i_current_price",
+                    "i_wholesale_cost",
+                    "i_brand",
+                ]
+            )
+        )
+        return ascending(
+            low, ["s_store_name", "i_item_desc"], nulls_first=True
+        ).head(100)
+    if q == "q88":
+        # Sales at one store to three kinds of household, counted by half
+        # hour from 8:30 to 12:30.
+        var households = (
+            ((col("hd_dep_count") == 4) & (col("hd_vehicle_count") <= 6))
+            | ((col("hd_dep_count") == 2) & (col("hd_vehicle_count") <= 4))
+            | ((col("hd_dep_count") == 0) & (col("hd_vehicle_count") <= 2))
+        )
+        var names: List[String] = [
+            "h8_30_to_9",
+            "h9_to_9_30",
+            "h9_30_to_10",
+            "h10_to_10_30",
+            "h10_30_to_11",
+            "h11_to_11_30",
+            "h11_30_to_12",
+            "h12_to_12_30",
+        ]
+        var counts = List[Expr]()
+        for i in range(8):
+            var hour = 8 + (i + 1) // 2
+            var half = (col("t_minute") >= 30) if i % 2 == 0 else (
+                col("t_minute") < 30
+            )
+            counts.append(
+                one_if((col("t_hour") == lit(Int64(hour))) & half)
+                .sum()
+                .alias(names[i])
+            )
+        return (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["household_demographics"].lazy().filter(households),
+                left_on=["ss_hdemo_sk"],
+                right_on=["hd_demo_sk"],
+            )
+            .join(
+                t["store"].lazy().filter(col("s_store_name") == "ese"),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                t["time_dim"]
+                .lazy()
+                .filter(
+                    col("t_hour").is_between(lit(Int64(8)), lit(Int64(12)))
+                ),
+                left_on=["ss_sold_time_sk"],
+                right_on=["t_time_sk"],
+            )
+            .select_exprs(counts)
+        )
+    if q == "q90":
+        var counted = (
+            t["web_sales"]
+            .lazy()
+            .join(
+                t["household_demographics"]
+                .lazy()
+                .filter(col("hd_dep_count") == 6),
+                left_on=["ws_ship_hdemo_sk"],
+                right_on=["hd_demo_sk"],
+            )
+            .join(
+                t["web_page"]
+                .lazy()
+                .filter(
+                    col("wp_char_count").is_between(
+                        lit(Int64(5000)), lit(Int64(5200))
+                    )
+                ),
+                left_on=["ws_web_page_sk"],
+                right_on=["wp_web_page_sk"],
+            )
+            .join(
+                t["time_dim"].lazy(),
+                left_on=["ws_sold_time_sk"],
+                right_on=["t_time_sk"],
+            )
+            .select_exprs(
+                [
+                    one_if(
+                        col("t_hour").is_between(lit(Int64(8)), lit(Int64(9)))
+                    )
+                    .sum()
+                    .alias("amc"),
+                    one_if(
+                        col("t_hour").is_between(lit(Int64(19)), lit(Int64(20)))
+                    )
+                    .sum()
+                    .alias("pmc"),
+                ]
+            )
+        )
+        return counted.select_exprs(
+            [
+                when(col("pmc") != 0)
+                .then(
+                    col("amc").cast(DataType.FLOAT64)
+                    / col("pmc").cast(DataType.FLOAT64)
+                )
+                .end()
+                .alias("am_pm_ratio")
+            ]
+        )
     raise unsupported("not translated")
 
 

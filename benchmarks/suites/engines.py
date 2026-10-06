@@ -2158,6 +2158,219 @@ def tpcds_polars(t, q):
             .sort(["w_substr", "sm_type", "cc_name_lower"], nulls_last=False)
             .head(100)
         )
+    elif q == "q6":
+        month = (
+            c["date_dim"]
+            .filter((col("d_year") == 2001) & (col("d_moy") == 1))
+            .select("d_month_seq")
+            .unique()
+            .collect()
+            .item()
+        )
+        price = col("i_current_price").cast(pl.Float64)
+        # An item without a category has no average to compare with.
+        costly = (
+            c["item"]
+            .filter(col("i_category").is_not_null())
+            .filter(price > 1.2 * price.mean().over("i_category"))
+            .select("i_item_sk")
+        )
+        out = (
+            c["store_sales"]
+            .join(
+                dates(col("d_month_seq") == month, "d_sk"),
+                left_on="ss_sold_date_sk",
+                right_on="d_sk",
+            )
+            .join(costly, left_on="ss_item_sk", right_on="i_item_sk")
+            .join(c["customer"], left_on="ss_customer_sk", right_on="c_customer_sk")
+            .join(
+                c["customer_address"],
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .group_by("ca_state")
+            .agg(pl.len().alias("cnt"))
+            .filter(col("cnt") >= 10)
+            .select(col("ca_state").alias("state"), "cnt")
+            .sort(["cnt", "state"], nulls_last=False)
+            .head(100)
+        )
+    elif q == "q9":
+        buckets = []
+        for i, (low, count) in enumerate(
+            zip([1, 21, 41, 61, 81], [74129, 122840, 56580, 10097, 165306])
+        ):
+            band = col("ss_quantity").is_between(low, low + 19)
+            buckets.append(
+                pl.when(band.sum() > count)
+                .then(
+                    col("ss_ext_discount_amt").cast(pl.Float64).filter(band).mean()
+                )
+                .otherwise(col("ss_net_paid").cast(pl.Float64).filter(band).mean())
+                .alias(f"bucket{i + 1}")
+            )
+        out = c["store_sales"].select(buckets)
+    elif q == "q28":
+        bands = []
+        for i, (low, high, price, coupon, cost) in enumerate(
+            zip(
+                [0, 6, 11, 16, 21, 26],
+                [5, 10, 15, 20, 25, 30],
+                [8, 90, 142, 135, 122, 154],
+                [459, 2323, 12214, 6071, 836, 7326],
+                [57, 31, 79, 38, 17, 7],
+            )
+        ):
+            tag = f"B{i + 1}"
+            bands.append(
+                c["store_sales"]
+                .filter(
+                    col("ss_quantity").is_between(low, high)
+                    & (
+                        col("ss_list_price").is_between(price, price + 10)
+                        | col("ss_coupon_amt").is_between(coupon, coupon + 1000)
+                        | col("ss_wholesale_cost").is_between(cost, cost + 20)
+                    )
+                    & col("ss_list_price").is_not_null()
+                )
+                .select(
+                    col("ss_list_price").mean().alias(tag + "_LP"),
+                    col("ss_list_price").count().alias(tag + "_CNT"),
+                    col("ss_list_price").n_unique().alias(tag + "_CNTD"),
+                )
+            )
+        out = pl.concat(bands, how="horizontal")
+    elif q == "q61":
+        promoted = c["promotion"].filter(
+            (col("p_channel_dmail") == "Y")
+            | (col("p_channel_email") == "Y")
+            | (col("p_channel_tv") == "Y")
+        ).select("p_promo_sk", col("p_promo_sk").alias("promoted"))
+        out = (
+            c["store_sales"]
+            .join(
+                dates((col("d_year") == 1998) & (col("d_moy") == 11), "d_sk"),
+                left_on="ss_sold_date_sk",
+                right_on="d_sk",
+            )
+            .join(
+                c["store"].filter(col("s_gmt_offset") == -5),
+                left_on="ss_store_sk",
+                right_on="s_store_sk",
+            )
+            .join(
+                c["item"].filter(col("i_category") == "Jewelry"),
+                left_on="ss_item_sk",
+                right_on="i_item_sk",
+            )
+            .join(c["customer"], left_on="ss_customer_sk", right_on="c_customer_sk")
+            .join(
+                c["customer_address"].filter(col("ca_gmt_offset") == -5),
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .join(promoted, left_on="ss_promo_sk", right_on="p_promo_sk", how="left")
+            .select(
+                sql_sum(
+                    pl.when(col("promoted").is_not_null()).then(
+                        col("ss_ext_sales_price")
+                    )
+                ).alias("promotions"),
+                sql_sum(col("ss_ext_sales_price")).alias("total"),
+            )
+            .with_columns(
+                (
+                    col("promotions").cast(pl.Float64)
+                    / col("total").cast(pl.Float64)
+                    * 100
+                ).alias("share")
+            )
+        )
+    elif q == "q65":
+        revenue = (
+            c["store_sales"]
+            .join(
+                dates(col("d_month_seq").is_between(1176, 1187), "d_sk"),
+                left_on="ss_sold_date_sk",
+                right_on="d_sk",
+            )
+            .group_by("ss_store_sk", "ss_item_sk")
+            .agg(sql_sum(col("ss_sales_price")).alias("revenue"))
+        )
+        typical = revenue.group_by("ss_store_sk").agg(
+            col("revenue").cast(pl.Float64).mean().alias("ave")
+        ).select(col("ss_store_sk").alias("ave_store"), "ave")
+        out = (
+            revenue.join(typical, left_on="ss_store_sk", right_on="ave_store")
+            .filter(col("revenue").cast(pl.Float64) <= 0.1 * col("ave"))
+            .join(c["store"], left_on="ss_store_sk", right_on="s_store_sk")
+            .join(c["item"], left_on="ss_item_sk", right_on="i_item_sk")
+            .select(
+                "s_store_name", "i_item_desc", "revenue",
+                "i_current_price", "i_wholesale_cost", "i_brand",
+            )  # fmt: skip
+            .sort(["s_store_name", "i_item_desc"], nulls_last=False)
+            .head(100)
+        )
+    elif q == "q88":
+        households = (
+            ((col("hd_dep_count") == 4) & (col("hd_vehicle_count") <= 6))
+            | ((col("hd_dep_count") == 2) & (col("hd_vehicle_count") <= 4))
+            | ((col("hd_dep_count") == 0) & (col("hd_vehicle_count") <= 2))
+        )
+        names = [
+            "h8_30_to_9", "h9_to_9_30", "h9_30_to_10", "h10_to_10_30",
+            "h10_30_to_11", "h11_to_11_30", "h11_30_to_12", "h12_to_12_30",
+        ]  # fmt: skip
+        counts = []
+        for i, name in enumerate(names):
+            hour = 8 + (i + 1) // 2
+            half = col("t_minute") >= 30 if i % 2 == 0 else col("t_minute") < 30
+            counts.append(one_if((col("t_hour") == hour) & half).sum().alias(name))
+        out = (
+            c["store_sales"]
+            .join(
+                c["household_demographics"].filter(households),
+                left_on="ss_hdemo_sk",
+                right_on="hd_demo_sk",
+            )
+            .join(
+                c["store"].filter(col("s_store_name") == "ese"),
+                left_on="ss_store_sk",
+                right_on="s_store_sk",
+            )
+            .join(
+                c["time_dim"].filter(col("t_hour").is_between(8, 12)),
+                left_on="ss_sold_time_sk",
+                right_on="t_time_sk",
+            )
+            .select(counts)
+        )
+    elif q == "q90":
+        out = (
+            c["web_sales"]
+            .join(
+                c["household_demographics"].filter(col("hd_dep_count") == 6),
+                left_on="ws_ship_hdemo_sk",
+                right_on="hd_demo_sk",
+            )
+            .join(
+                c["web_page"].filter(col("wp_char_count").is_between(5000, 5200)),
+                left_on="ws_web_page_sk",
+                right_on="wp_web_page_sk",
+            )
+            .join(c["time_dim"], left_on="ws_sold_time_sk", right_on="t_time_sk")
+            .select(
+                one_if(col("t_hour").is_between(8, 9)).sum().alias("amc"),
+                one_if(col("t_hour").is_between(19, 20)).sum().alias("pmc"),
+            )
+            .select(
+                pl.when(col("pmc") != 0)
+                .then(col("amc") / col("pmc"))
+                .alias("am_pm_ratio")
+            )
+        )
     else:
         raise NotImplementedError("unsupported: not translated")
     return out.collect()
