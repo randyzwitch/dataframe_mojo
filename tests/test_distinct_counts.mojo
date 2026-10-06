@@ -16,6 +16,7 @@ from dataframe import (
     Column,
     DataFrame,
     DataType,
+    Expr,
     Series,
     StringColumn,
     col,
@@ -240,6 +241,54 @@ def test_expression_inputs_and_chunked_numbers() raises:
         stacked.select((col("v") % lit(Int64(1000))).n_unique()).item().int64(),
         shifted.select(col("v").n_unique()).item().int64(),
     )
+
+
+def test_many_groups_with_few_rows_each() raises:
+    """The partitioned path's shared set of (group, value) pairs: about
+    four rows a group over hundreds of thousands of groups, most groups
+    with a second value, nulls in some, floats with NaN and -0.0, and the
+    same counts eager and lazy."""
+    var rows = 400_000
+    var groups = 100_003
+    var rng = Lcg(99)
+    var keys = List[Int64](capacity=rows)
+    var ints = List[Int64](capacity=rows)
+    var floats = List[Float64](capacity=rows)
+    var valid = List[Bool](capacity=rows)
+    for i in range(rows):
+        keys.append(Int64((i * 7919) % groups))
+        ints.append(Int64(rng.next(5)) + Int64(i % 3) * 1_000_000_007)
+        var pick = rng.next(6)
+        floats.append(
+            Float64(0) / Float64(0) if pick
+            == 0 else (-0.0 if pick == 1 else Float64(pick) / 8)
+        )
+        valid.append(rng.next(11) != 0)
+    var frame = DataFrame(
+        [
+            Series("g", Column[Int64](keys^)),
+            Series("i", Column[Int64](ints^, valid.copy())),
+            Series("f", Column[Float64](floats^, valid^)),
+        ]
+    )
+    var want_i = expected_counts(frame.column("g"), frame.column("i"))
+    var want_f = expected_counts(frame.column("g"), frame.column("f"))
+    var aggs: List[Expr] = [
+        col("i").n_unique().alias("ui"),
+        col("f").n_unique().alias("uf"),
+    ]
+    var eager = frame.group_by("g").agg(aggs)
+    var lazy = frame.lazy().group_by(["g"]).agg(aggs.copy()).collect()
+    for result in [eager.copy(), lazy.copy()]:
+        assert_equal(result.height(), groups)
+        for row in range(result.height()):
+            var key = String(result.column("g").get(row))
+            assert_equal(
+                result.column("ui").get(row).int64(), Int64(want_i[key])
+            )
+            assert_equal(
+                result.column("uf").get(row).int64(), Int64(want_f[key])
+            )
 
 
 def test_lazy_streaming_matches_eager() raises:
