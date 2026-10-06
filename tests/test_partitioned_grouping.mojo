@@ -465,6 +465,70 @@ def test_few_values_per_key_group_by_ranges() raises:
         assert_equal(result.item(row, "s").int64(), totals[pair])
 
 
+def test_indexed_quantiles_match_serial() raises:
+    """Medians and quantiles on the partitioned path lay each bucket's
+    values out in group order and select within each group's segment
+    (`_quantiles`): nulls skipped, NaN sorted above every number, every
+    interpolation, Int64 and Float64 inputs, one split into chunks, and
+    groups of one row."""
+    var df = frame(ROWS, ROWS // 10)
+    var n_values = df.column("n").int64().to_list()
+    var n_valid = List[Bool](capacity=ROWS)
+    var w = List[Float64](capacity=ROWS)
+    var w_valid = List[Bool](capacity=ROWS)
+    for i in range(ROWS):
+        n_valid.append(i % 5 != 2)
+        w.append(Float64(0) / Float64(0) if i % 9 == 4 else Float64(i % 31))
+        w_valid.append(i % 7 != 3)
+    df = df.with_column(Series("n", Column[Int64](n_values^, n_valid^)))
+    df = df.with_column(Series("w", Column[Float64](w^, w_valid^)))
+    var source = df.column("n")
+    df = df.with_column(
+        Series._from_chunks(
+            [source.slice(0, 37_001), source.slice(37_001, ROWS - 37_001)]
+        )
+    )
+    var expressions: List[Expr] = [
+        col("n").median().alias("nmed"),
+        col("w").median().alias("wmed"),
+        col("n").quantile(0.1, "lower").alias("nlow"),
+        col("w").quantile(0.9, "higher").alias("whigh"),
+        col("n").quantile(0.37, "nearest").alias("nnear"),
+        col("w").quantile(0.5, "midpoint").alias("wmid"),
+        col("w").quantile(0.25).alias("wlin"),
+        col("w").std().alias("wstd"),
+    ]
+    var key_sets: List[List[String]] = [["s"], ["s", "i32"], ["i64", "f64"]]
+    for keys in key_sets:
+        set_threads(1)
+        var serial = df.group_by(keys, maintain_order=True).agg(expressions)
+        set_threads(32)
+        var parallel = df.group_by(keys, maintain_order=True).agg(expressions)
+        assert_true(serial.equals(parallel), "indexed quantiles differ")
+        assert_equal(parallel.height(), serial.height())
+    # Every row its own group, and a column whose groups are all null.
+    var lonely = DataFrame(
+        [
+            Series("k", Column[Int64](List[Int64](length=ROWS, fill=0))),
+            Series("v", Column[Float64](List[Float64](length=ROWS, fill=1.5))),
+        ]
+    )
+    var ks = List[Int64](capacity=ROWS)
+    for i in range(ROWS):
+        ks.append(Int64(i))
+    lonely = lonely.with_column(Series("k", Column[Int64](ks^)))
+    set_threads(32)
+    var one_each = lonely.group_by("k", maintain_order=True).agg(
+        [col("v").median().alias("m")]
+    )
+    set_threads(1)
+    var one_each_serial = lonely.group_by("k", maintain_order=True).agg(
+        [col("v").median().alias("m")]
+    )
+    assert_true(one_each.equals(one_each_serial))
+    assert_equal(one_each.item(ROWS - 1, "m").float64(), 1.5)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 

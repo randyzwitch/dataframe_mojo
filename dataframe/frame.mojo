@@ -5118,7 +5118,9 @@ struct GroupBy(Copyable):
         var fallback = List[BoundExpr]()
         var direct = List[BoundExpr]()
         for expression in bound:
-            var capable = _stream_reductions([expression.expr.copy()])
+            var capable = _stream_reductions(
+                [expression.expr.copy()]
+            ) or indexed_reductions([expression.copy()], self._frame._columns)
             # Categorical evaluation decodes/re-encodes dictionary values;
             # nested expressions have their own preparation requirements.
             # Keep those on the ordinary evaluator, independently of other
