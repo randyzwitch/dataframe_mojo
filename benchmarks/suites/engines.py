@@ -1162,6 +1162,96 @@ def tpcds_polars(t, q):
             .select(col(amount).sum().alias("excess"))
         )
 
+    def buyers(sales, date_key, customer_key, days, marker):
+        return (
+            c[sales]
+            .join(dates(days, "d_sk"), left_on=date_key, right_on="d_sk")
+            .select(
+                col(customer_key).alias(marker + "_sk"),
+                col(customer_key).alias(marker),
+            )
+            .unique()
+        )
+
+    def active_customers(days, places, also_elsewhere):
+        found = (
+            c["customer"]
+            .join(
+                c["customer_address"].filter(places),
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .join(
+                c["customer_demographics"],
+                left_on="c_current_cdemo_sk",
+                right_on="cd_demo_sk",
+            )
+            .join(
+                buyers("store_sales", "ss_sold_date_sk", "ss_customer_sk", days, "st"),
+                left_on="c_customer_sk",
+                right_on="st_sk",
+                how="semi",
+            )
+            .join(
+                buyers(
+                    "web_sales", "ws_sold_date_sk", "ws_bill_customer_sk", days, "web"
+                ),
+                left_on="c_customer_sk",
+                right_on="web_sk",
+                how="left",
+            )
+            .join(
+                buyers(
+                    "catalog_sales", "cs_sold_date_sk", "cs_ship_customer_sk",
+                    days, "cat",
+                ),  # fmt: skip
+                left_on="c_customer_sk",
+                right_on="cat_sk",
+                how="left",
+            )
+        )
+        if also_elsewhere:
+            return found.filter(col("web").is_not_null() | col("cat").is_not_null())
+        return found.filter(col("web").is_null() & col("cat").is_null())
+
+    def split_shipments(
+        sales, prefix, returns, returned_order, first_day, last_day, state,
+        channel, sales_key, channel_key,
+    ):  # fmt: skip
+        order = prefix + "_order_number"
+        warehouse = prefix + "_warehouse_sk"
+        split = (
+            c[sales]
+            .group_by(order)
+            .agg(
+                col(warehouse).min().alias("first_warehouse"),
+                col(warehouse).max().alias("last_warehouse"),
+            )
+            .filter(col("first_warehouse") != col("last_warehouse"))
+            .select(col(order).alias("split_order"))
+        )
+        return (
+            c[sales]
+            .join(
+                dates(col("d_date").is_between(first_day, last_day), "d_sk"),
+                left_on=prefix + "_ship_date_sk",
+                right_on="d_sk",
+            )
+            .join(
+                c["customer_address"].filter(col("ca_state") == state),
+                left_on=prefix + "_ship_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .join(channel, left_on=sales_key, right_on=channel_key)
+            .join(split, left_on=order, right_on="split_order", how="semi")
+            .join(c[returns], left_on=order, right_on=returned_order, how="anti")
+            .select(
+                col(order).n_unique().alias("order count"),
+                sql_sum(col(prefix + "_ext_ship_cost")).alias("total shipping cost"),
+                sql_sum(col(prefix + "_net_profit")).alias("total net profit"),
+            )
+        )
+
     if q == "q3":
         out = (
             brand_sales(col("d_moy") == 11, col("i_manufact_id") == 128)
@@ -2371,6 +2461,87 @@ def tpcds_polars(t, q):
                 .alias("am_pm_ratio")
             )
         )
+    elif q in ("q10", "q69"):
+        keys = [
+            "cd_gender", "cd_marital_status", "cd_education_status",
+            "cd_purchase_estimate", "cd_credit_rating",
+        ]  # fmt: skip
+        if q == "q10":
+            keys += ["cd_dep_count", "cd_dep_employed_count", "cd_dep_college_count"]
+            customers = active_customers(
+                (col("d_year") == 2002) & col("d_moy").is_between(1, 4),
+                col("ca_county").is_in(
+                    [
+                        "Rush County", "Toole County", "Jefferson County",
+                        "Dona Ana County", "La Porte County",
+                    ]  # fmt: skip
+                ),
+                True,
+            )
+        else:
+            customers = active_customers(
+                (col("d_year") == 2001) & col("d_moy").is_between(4, 6),
+                col("ca_state").is_in(["KY", "GA", "NM"]),
+                False,
+            )
+        shown = []
+        for i, key in enumerate(keys):
+            shown.append(col(key))
+            if i >= 2:
+                shown.append(col("cnt").alias(f"cnt{i - 1}"))
+        out = (
+            customers.group_by(keys)
+            .agg(pl.len().alias("cnt"))
+            .select(shown)
+            .sort(keys, nulls_last=True)
+            .head(100)
+        )
+    elif q == "q35":
+        keys = [
+            "ca_state", "cd_gender", "cd_marital_status", "cd_dep_count",
+            "cd_dep_employed_count", "cd_dep_college_count",
+        ]  # fmt: skip
+        aggregates = [pl.len().alias("cnt")]
+        shown = []
+        for i, key in enumerate(keys):
+            shown.append(col(key))
+            if i >= 3:
+                n = str(i - 2)
+                aggregates += [
+                    col(key).min().alias("min" + n),
+                    col(key).max().alias("max" + n),
+                    col(key).mean().alias("avg" + n),
+                ]
+                shown += [
+                    col("cnt").alias("cnt" + n),
+                    col("min" + n), col("max" + n), col("avg" + n),
+                ]  # fmt: skip
+        out = (
+            active_customers(
+                (col("d_year") == 2002) & (col("d_qoy") < 4),
+                col("ca_address_sk").is_not_null(),
+                True,
+            )
+            .group_by(keys)
+            .agg(aggregates)
+            .select(shown)
+            .sort(keys, nulls_last=False)
+            .head(100)
+        )
+    elif q == "q16":
+        out = split_shipments(
+            "catalog_sales", "cs", "catalog_returns", "cr_order_number",
+            d(2002, 2, 1), d(2002, 4, 2), "GA",
+            c["call_center"].filter(col("cc_county") == "Williamson County"),
+            "cs_call_center_sk", "cc_call_center_sk",
+        )  # fmt: skip
+    elif q == "q94":
+        out = split_shipments(
+            "web_sales", "ws", "web_returns", "wr_order_number",
+            d(1999, 2, 1), d(1999, 4, 2), "IL",
+            c["web_site"].filter(col("web_company_name") == "pri"),
+            "ws_web_site_sk", "web_site_sk",
+        )  # fmt: skip
     else:
         raise NotImplementedError("unsupported: not translated")
     return out.collect()

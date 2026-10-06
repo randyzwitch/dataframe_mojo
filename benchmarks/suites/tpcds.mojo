@@ -7,7 +7,8 @@ Translated so far, each batch chosen by a rule on the SQL text and not by
 timings: the 23 single-block queries (one SELECT, no window, rollup or set
 operation), then the 13 with exactly one more SELECT (a derived table or
 a subquery) and still no window, rollup, set operation, EXISTS or WITH,
-then the 7 with several such subqueries under the same exclusions.
+then the 7 with several such subqueries under the same exclusions, then
+the 5 that add only EXISTS or NOT EXISTS.
 Any other query reports `unsupported: not translated`, so it is counted in
 every report instead of dropped. The same queries run on both data variants
 (bench_suites.py): money columns as Float64, or as declared decimals, where
@@ -415,6 +416,169 @@ def excess_discount(
         .join(typical, left_on=[prefix + "_item_sk"], right_on=["typical_item"])
         .filter(col(amount).cast(DataType.FLOAT64) > lit(1.3) * col("typical"))
         .select_exprs([col(amount).sum().alias("excess")])
+    )
+
+
+def buyers(
+    t: Dict[String, DataFrame],
+    sales: String,
+    date_key: String,
+    customer_key: String,
+    days: Expr,
+    marker: String,
+) raises -> LazyFrame:
+    """The customers with a sale through one channel on the chosen days,
+    once each, as `<marker>_sk` and a second copy named `marker`: the
+    first is a join key, the second says after a left join whether the
+    customer was found (q10, q35, q69)."""
+    return (
+        t[sales]
+        .lazy()
+        .join(dates(t, days, "d_sk"), left_on=[date_key], right_on=["d_sk"])
+        .select_exprs(
+            [
+                col(customer_key).alias(marker + "_sk"),
+                col(customer_key).alias(marker),
+            ]
+        )
+        .unique()
+    )
+
+
+def active_customers(
+    t: Dict[String, DataFrame], days: Expr, places: Expr, also_elsewhere: Bool
+) raises -> LazyFrame:
+    """Customers at the chosen addresses who bought in a store on the
+    chosen days and, on the same days, either also bought on the web or by
+    catalog (`also_elsewhere`) or did neither, with their demographics."""
+    var found = (
+        t["customer"]
+        .lazy()
+        .join(
+            t["customer_address"].lazy().filter(places),
+            left_on=["c_current_addr_sk"],
+            right_on=["ca_address_sk"],
+        )
+        .join(
+            t["customer_demographics"].lazy(),
+            left_on=["c_current_cdemo_sk"],
+            right_on=["cd_demo_sk"],
+        )
+        .join(
+            buyers(
+                t,
+                "store_sales",
+                "ss_sold_date_sk",
+                "ss_customer_sk",
+                days,
+                "st",
+            ),
+            left_on=["c_customer_sk"],
+            right_on=["st_sk"],
+            how="semi",
+        )
+        .join(
+            buyers(
+                t,
+                "web_sales",
+                "ws_sold_date_sk",
+                "ws_bill_customer_sk",
+                days,
+                "web",
+            ),
+            left_on=["c_customer_sk"],
+            right_on=["web_sk"],
+            how="left",
+        )
+        .join(
+            buyers(
+                t,
+                "catalog_sales",
+                "cs_sold_date_sk",
+                "cs_ship_customer_sk",
+                days,
+                "cat",
+            ),
+            left_on=["c_customer_sk"],
+            right_on=["cat_sk"],
+            how="left",
+        )
+    )
+    if also_elsewhere:
+        return found.filter(col("web").is_not_null() | col("cat").is_not_null())
+    return found.filter(col("web").is_null() & col("cat").is_null())
+
+
+def split_shipments(
+    t: Dict[String, DataFrame],
+    sales: String,
+    prefix: String,
+    returns: String,
+    returned_order: String,
+    first_day: String,
+    last_day: String,
+    state: String,
+    channel: LazyFrame,
+    sales_key: String,
+    channel_key: String,
+) raises -> LazyFrame:
+    """Orders shipped in a date range to one state through chosen outlets
+    that left from more than one warehouse and were never returned: how
+    many, and their shipping cost and profit (q16, q94)."""
+    var order = prefix + "_order_number"
+    var warehouse = prefix + "_warehouse_sk"
+    # Orders with two different warehouses among their rows.
+    var split = (
+        t[sales]
+        .lazy()
+        .group_by([order])
+        .agg(
+            [
+                col(warehouse).min().alias("first_warehouse"),
+                col(warehouse).max().alias("last_warehouse"),
+            ]
+        )
+        .filter(col("first_warehouse") != col("last_warehouse"))
+        .select_exprs([col(order).alias("split_order")])
+    )
+    return (
+        t[sales]
+        .lazy()
+        .join(
+            dates(
+                t,
+                col("d_date").is_between(
+                    date_lit(first_day), date_lit(last_day)
+                ),
+                "d_sk",
+            ),
+            left_on=[prefix + "_ship_date_sk"],
+            right_on=["d_sk"],
+        )
+        .join(
+            t["customer_address"].lazy().filter(col("ca_state") == state),
+            left_on=[prefix + "_ship_addr_sk"],
+            right_on=["ca_address_sk"],
+        )
+        .join(channel, left_on=[sales_key], right_on=[channel_key])
+        .join(split, left_on=[order], right_on=["split_order"], how="semi")
+        .join(
+            t[returns].lazy(),
+            left_on=[order],
+            right_on=[returned_order],
+            how="anti",
+        )
+        .select_exprs(
+            [
+                col(order).n_unique().alias("order count"),
+                col(prefix + "_ext_ship_cost")
+                .sum(min_count=1)
+                .alias("total shipping cost"),
+                col(prefix + "_net_profit")
+                .sum(min_count=1)
+                .alias("total net profit"),
+            ]
+        )
     )
 
 
@@ -2172,6 +2336,119 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
                 .end()
                 .alias("am_pm_ratio")
             ]
+        )
+    if q == "q10" or q == "q69":
+        var keys: List[String] = [
+            "cd_gender",
+            "cd_marital_status",
+            "cd_education_status",
+            "cd_purchase_estimate",
+            "cd_credit_rating",
+        ]
+        var shown = List[Expr]()
+        var customers: LazyFrame
+        if q == "q10":
+            var counties: List[String] = [
+                "Rush County",
+                "Toole County",
+                "Jefferson County",
+                "Dona Ana County",
+                "La Porte County",
+            ]
+            keys.append("cd_dep_count")
+            keys.append("cd_dep_employed_count")
+            keys.append("cd_dep_college_count")
+            customers = active_customers(
+                t,
+                (col("d_year") == 2002)
+                & col("d_moy").is_between(lit(Int64(1)), lit(Int64(4))),
+                col("ca_county").is_in(counties),
+                True,
+            )
+        else:
+            var states: List[String] = ["KY", "GA", "NM"]
+            customers = active_customers(
+                t,
+                (col("d_year") == 2001)
+                & col("d_moy").is_between(lit(Int64(4)), lit(Int64(6))),
+                col("ca_state").is_in(states),
+                False,
+            )
+        # The SQL lists the count once after each key from the third on.
+        for i in range(len(keys)):
+            shown.append(col(keys[i]))
+            if i >= 2:
+                shown.append(col("cnt").alias("cnt" + String(i - 1)))
+        var grouped = (
+            customers.group_by(keys)
+            .agg([col("cd_gender").len().alias("cnt")])
+            .select_exprs(shown)
+        )
+        return ascending(grouped, keys).head(100)
+    if q == "q35":
+        var keys: List[String] = [
+            "ca_state",
+            "cd_gender",
+            "cd_marital_status",
+            "cd_dep_count",
+            "cd_dep_employed_count",
+            "cd_dep_college_count",
+        ]
+        var aggregates: List[Expr] = [col("ca_state").len().alias("cnt")]
+        var shown = List[Expr]()
+        for i in range(6):
+            shown.append(col(keys[i]))
+            if i >= 3:
+                var n = String(i - 2)
+                var value = col(keys[i])
+                aggregates.append(value.min().alias("min" + n))
+                aggregates.append(value.max().alias("max" + n))
+                aggregates.append(value.mean().alias("avg" + n))
+                shown.append(col("cnt").alias("cnt" + n))
+                shown.append(col("min" + n))
+                shown.append(col("max" + n))
+                shown.append(col("avg" + n))
+        var grouped = (
+            active_customers(
+                t,
+                (col("d_year") == 2002) & (col("d_qoy") < 4),
+                col("ca_address_sk").is_not_null(),
+                True,
+            )
+            .group_by(keys)
+            .agg(aggregates)
+            .select_exprs(shown)
+        )
+        return ascending(grouped, keys, nulls_first=True).head(100)
+    if q == "q16":
+        return split_shipments(
+            t,
+            "catalog_sales",
+            "cs",
+            "catalog_returns",
+            "cr_order_number",
+            "2002-02-01",
+            "2002-04-02",
+            "GA",
+            t["call_center"]
+            .lazy()
+            .filter(col("cc_county") == "Williamson County"),
+            "cs_call_center_sk",
+            "cc_call_center_sk",
+        )
+    if q == "q94":
+        return split_shipments(
+            t,
+            "web_sales",
+            "ws",
+            "web_returns",
+            "wr_order_number",
+            "1999-02-01",
+            "1999-04-02",
+            "IL",
+            t["web_site"].lazy().filter(col("web_company_name") == "pri"),
+            "ws_web_site_sk",
+            "web_site_sk",
         )
     raise unsupported("not translated")
 
