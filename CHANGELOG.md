@@ -482,9 +482,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - PDS-H is a development benchmark suite from 2026-10-05, and the quick
   tier runs it: no development suite covered multi-join plans, the one area
   behind Polars. TPC-DS replaces it as the held-out suite, from DuckDB's
-  `dsdgen` and `tpcds_queries()`. DuckDB runs all 99 queries; 43 are
+  `dsdgen` and `tpcds_queries()`. DuckDB runs all 99 queries; 48 are
   translated for this library and Polars (the 23 single-block queries and
-  the 20 with derived tables or subqueries but no CTE or EXISTS), and the rest are reported
+  25 with derived tables, subqueries or EXISTS but no CTE), and the rest are reported
   as not translated. The suite runner now counts a worker
   crash as one failed query and runs the remaining queries in a new worker.
 - Lazy projection pushdown reaches through joins: each join input reads only
