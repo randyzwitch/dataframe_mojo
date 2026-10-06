@@ -68,13 +68,17 @@ jobs:
       - name: Verify Parquet exports and loader search paths
         run: pixi run bash scripts/check_parquet_library.sh
 
-      # The Linux runner has 16 GB. With the default 10 driver programs,
-      # four of them compiling at once peaked at 18 GB and the runner was
-      # killed (exit 143, no test output). 24 smaller programs peak at
-      # 13 GB. macOS runs three at a time and stays under its limit.
+      # The Linux runner has 16 GB and four cores. Compiling a driver
+      # program costs about 170 s and 4 GB whatever it holds (the library's
+      # instantiation), so fewer programs finish sooner, and one at a time
+      # keeps the peak down. Measured on four cores: 24 programs four at a
+      # time 1971 s at 12.9 GB peak; two programs one at a time 1187 s at
+      # 11.8 GB; one program 995 s at 15.4 GB, too close to the limit.
+      # macOS keeps 10 programs, three at a time.
       - name: Run tests
         env:
-          TEST_GROUPS: ${{ runner.os == 'Linux' && '24' || '10' }}
+          TEST_GROUPS: ${{ runner.os == 'Linux' && '2' || '10' }}
+          TEST_JOBS: ${{ runner.os == 'Linux' && '1' || '' }}
         run: pixi run test
 
       - name: Build examples
