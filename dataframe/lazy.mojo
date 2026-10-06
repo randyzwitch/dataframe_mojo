@@ -308,6 +308,50 @@ def _stream_split_groups() -> Int:
     return 4096
 
 
+def _stream_collect_bytes() -> Int:
+    """Bytes of collected batches a many-group streaming aggregation holds
+    before reducing them into a mergeable state and continuing, so its
+    memory stays bounded whatever the input's length. Default 4 GiB;
+    DATAFRAME_STREAM_COLLECT_BYTES overrides it, so tests can exercise the
+    bound on small inputs."""
+    var setting = getenv("DATAFRAME_STREAM_COLLECT_BYTES")
+    if setting.byte_length() > 0:
+        try:
+            return max(1, Int(setting))
+        except:
+            pass
+    return 4 << 30
+
+
+def _frame_bytes(frame: DataFrame) -> Int:
+    """Approximate bytes a frame's columns hold: fixed widths by dtype,
+    strings at 16 bytes a row plus their descriptors (an estimate; the
+    exact text length of a view-backed window costs a pass over it)."""
+    var total = 0
+    for column in frame._columns:
+        var bits = column.dtype().bit_width()
+        if bits > 0:
+            total += (frame.height() * bits + 7) // 8
+        else:
+            total += 32 * frame.height()
+    return total
+
+
+def _key_text_bytes(frame: DataFrame, keys: List[String]) raises -> Int:
+    """Bytes of string text among a batch's key columns. Composite keys
+    with long strings keep the batch states: the eager bucket encode
+    confirms such keys row by row through scattered reads (#486), and
+    PDS-H q10 (seven keys, c_comment among them, about 140 text bytes a
+    row) was 22% slower collected, where TPC-DS q39 (one short name
+    beside three integers) gains 40%."""
+    var total = 0
+    for name in keys:
+        var column = frame.column(name)
+        if column.dtype().bit_width() == 0:
+            total += column._text_bytes()
+    return total
+
+
 def _stream_split_bits(workers: Int) -> Int:
     """Hash parts for a split state: a power of two, at least the workers
     (so every worker has a part to merge) and at least 2."""
@@ -389,6 +433,14 @@ struct _StreamJob(Job):
     # plan's execution report.
     var counting: Bool
     var counts: List[Int]
+    # A grouped reduction keeps its batch (projected to the columns the
+    # reduction reads) beside its state during the first round, so the
+    # stream can switch to collecting batches for one eager group-by when
+    # the first batch shows many groups; `collect_only` then skips the
+    # reduction altogether.
+    var keep_frame: Bool
+    var collect_only: Bool
+    var projection: List[String]
 
     def __init__(
         out self,
@@ -411,6 +463,9 @@ struct _StreamJob(Job):
         self.rows = 0
         self.counting = False
         self.counts = List[Int]()
+        self.keep_frame = False
+        self.collect_only = False
+        self.projection = List[String]()
 
     def take_reduced(mut self) -> List[_StreamReduction]:
         var out = self.reduced^
@@ -431,6 +486,11 @@ struct _StreamJob(Job):
             )
             if self.counting:
                 self.counts[2 * k + 1] = self.frame.height()
+        if self.collect_only:
+            self.rows = self.frame.height()
+            if len(self.projection):
+                self.frame = self.frame.select(self.projection)
+            return
         if len(self.expressions):
             var reduction = _StreamReduction(
                 self.frame, self.expressions, self.keys
@@ -440,7 +500,8 @@ struct _StreamJob(Job):
                 self.reduced = reduction.split(self.bits)
             else:
                 self.reduced.append(reduction^)
-            self.frame = self.frame.clear()
+            if not self.keep_frame:
+                self.frame = self.frame.clear()
 
 
 def _apply_operation(
@@ -1271,6 +1332,38 @@ struct LazyFrame(Copyable):
         var bits = 0
         var rows_seen = 0
         var split_groups = _stream_split_groups()
+        # A grouped reduction whose first batch shows many groups collects
+        # the batches (the columns it reads) and runs one eager group-by
+        # at the end, where the hash-partitioned reduce encodes every key
+        # once and never merges: a state per batch merged through a key
+        # index cost TPC-DS q39 (1M groups) 761 ms against DuckDB's 32.
+        var collecting = False
+        var collected = List[DataFrame]()
+        var collected_bytes = 0
+        var collected_rows = 0
+        var collect_budget = _stream_collect_bytes()
+        # The decision waits for a batch with enough rows to judge: an
+        # input sorted by date yields empty batches first where a filter
+        # keeps a later year. Until then the batches' frames are kept
+        # beside their states, to be collected or dropped.
+        var undecided = len(expressions) > 0 and len(keys) > 0
+        var held = List[DataFrame]()
+        var projection = List[String]()
+        if len(expressions) and len(keys):
+            var wanted = List[String]()
+            var any = True
+            for name in keys:
+                wanted.append(name)
+            for expression in expressions:
+                var reads = _references(expression)
+                if not reads:
+                    any = False
+                    break
+                for name in reads.value():
+                    if name not in wanted:
+                        wanted.append(name)
+            if any:
+                projection = wanted^
         # Batches of a large in-memory input that streams through joins grow
         # up to four times the default: each batch probes every join, and
         # fewer, larger batches cost less per row (PDS-H q21's two joins of
@@ -1317,6 +1410,9 @@ struct LazyFrame(Copyable):
                 job.decode = decode^
                 job.bits = bits
                 job.counting = counting
+                job.collect_only = collecting
+                job.keep_frame = undecided
+                job.projection = projection.copy()
                 jobs.append(job^)
             if len(jobs) == 0:
                 break
@@ -1338,11 +1434,63 @@ struct LazyFrame(Copyable):
             # Pool returns jobs in submission order, independently of worker
             # completion order. Merge states and assemble rows in that order.
             for i in range(len(jobs)):
-                if len(expressions):
+                if collecting:
+                    collected_bytes += _frame_bytes(jobs[i].frame)
+                    collected_rows += jobs[i].rows
+                    collected.append(jobs[i].frame.copy())
+                elif len(expressions):
                     var pieces = jobs[i].take_reduced()
                     for k in range(len(pieces)):
                         pieces[k].shift_firsts(rows_seen)
                     rows_seen += jobs[i].rows
+                    if undecided:
+                        held.append(jobs[i].frame.copy())
+                        if pieces[0].grouped and jobs[i].rows >= 1024:
+                            undecided = False
+                            # Many groups, at least one row in eight
+                            # starting one: then most rows would go
+                            # through the index on merge. TPC-DS q39
+                            # (three rows a group) and q65 gain 35-40%,
+                            # PDS-H q16 (one in four) 35%; PDS-H q13 (one
+                            # in ten) pays 7% either way.
+                            if (
+                                pieces[0].group_count() >= split_groups
+                                and 8 * pieces[0].group_count() >= jobs[i].rows
+                                and _key_text_bytes(
+                                    jobs[i].frame.slice(0, 1024), keys
+                                )
+                                <= 64 * 1024
+                            ):
+                                # Many groups: collect every batch held so
+                                # far and from here on; the states built
+                                # for them are dropped.
+                                collecting = True
+                                rows_seen -= jobs[i].rows
+                                for frame in held:
+                                    var kept = frame.select(projection) if len(
+                                        projection
+                                    ) else frame.copy()
+                                    collected_bytes += _frame_bytes(kept)
+                                    collected_rows += kept.height()
+                                    collected.append(kept^)
+                                held = List[DataFrame]()
+                                states = List[_StreamReduction]()
+                                pending = List[List[_StreamReduction]]()
+                                pending_groups = List[Int]()
+                                rows_seen = collected_rows
+                                for j in range(i + 1, len(jobs)):
+                                    var kept = (
+                                        jobs[j]
+                                        .frame.select(projection) if len(
+                                            projection
+                                        ) else jobs[j]
+                                        .frame.copy()
+                                    )
+                                    collected_bytes += _frame_bytes(kept)
+                                    collected_rows += jobs[j].rows
+                                    collected.append(kept^)
+                                break
+                            held = List[DataFrame]()
                     if (
                         len(states) == 0
                         and pieces[0].grouped
@@ -1374,6 +1522,25 @@ struct LazyFrame(Copyable):
                     if limit >= 0:
                         limit -= part.height()
                     outputs.append(part^)
+            if collecting and collected_bytes >= collect_budget:
+                # The budget is reached: reduce what is collected into one
+                # state (every key encoded once) and keep collecting. The
+                # states merge at the end as batch states do.
+                var part = _StreamReduction(
+                    concat(collected), expressions, keys
+                )
+                part.shift_firsts(rows_seen)
+                rows_seen += collected_rows
+                collected = List[DataFrame]()
+                collected_bytes = 0
+                collected_rows = 0
+                if len(states) == 0:
+                    pending.append(List[_StreamReduction]())
+                    pending_groups.append(0)
+                    states.append(part^)
+                else:
+                    pending_groups[0] += part.group_count()
+                    pending[0].append(part^)
             if len(states):
                 _merge_parts(states, pending, pending_groups, workers, False)
             if top >= 0 and len(candidates) > 1 and candidate_rows > 4 * top:
@@ -1391,7 +1558,23 @@ struct LazyFrame(Copyable):
                 ended = True
         pool.release()
         var result = Optional[DataFrame]()
-        if len(states):
+        if collecting and len(states) == 0:
+            trace_path("lazy.collect_group_by")
+            var whole = concat(collected)
+            result = whole.group_by(keys, maintain_order=True).agg(expressions)
+        elif collecting:
+            # Spilled at least once: the rest joins the states.
+            trace_path("lazy.collect_group_by_bounded")
+            if len(collected):
+                var part = _StreamReduction(
+                    concat(collected), expressions, keys
+                )
+                part.shift_firsts(rows_seen)
+                pending_groups[0] += part.group_count()
+                pending[0].append(part^)
+            _merge_parts(states, pending, pending_groups, workers, True)
+            result = states[0].finish()
+        elif len(states):
             _merge_parts(states, pending, pending_groups, workers, True)
             if len(states) == 1:
                 result = states[0].finish()

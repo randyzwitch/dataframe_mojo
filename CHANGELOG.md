@@ -95,6 +95,21 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A streamed group-by whose first full batch shows many groups collects
+  its batches, projected to the columns the aggregation reads, and runs
+  one eager group-by at the end, where the hash-partitioned reduce
+  encodes every key once and never merges; batch states merged through a
+  key index cost roughly the input's rows in lookups. The decision waits
+  for a batch of at least 1,024 rows (a date-sorted input filtered to one
+  year yields empty batches first) and takes the collect route when that
+  batch holds 4,096 or more groups, at least one row in eight starts a
+  group, and its string keys hold at most 64 bytes of text a row (long
+  composite string keys still encode faster as batch states, PDS-H q10).
+  Collected batches beyond a byte budget (4 GiB;
+  `DATAFRAME_STREAM_COLLECT_BYTES`) are reduced into one mergeable state
+  and collection continues, so memory stays bounded. TPC-DS q39 takes
+  459 ms against 765 ms, q65 62 ms against 93 ms and PDS-H q16 44 ms
+  against 66 ms; answers are unchanged (#485).
 - Every eager inner and left join takes the direct hash route. It used
   to need a left input of more than 65,536 rows (one worker's share),
   which sent a left of 65K to 131K rows to the dictionary route: on a
