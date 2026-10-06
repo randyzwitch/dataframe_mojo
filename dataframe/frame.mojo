@@ -1563,10 +1563,12 @@ struct DataFrame(Copyable, Sized, Writable):
         # Dense ids over both inputs materialize and re-encode every key.
         # For high-cardinality right keys, a row index probes the original
         # columns directly and preserves exact equality across collisions.
+        # Every inner and left join takes the direct route. It used to need
+        # a left of more than one worker's rows (65,536), which sent a left
+        # of 65K to 131K rows to the dictionary route below: on a 2M-row
+        # right, 125K left rows took 114 ms there against 44 ms here.
         var build_left = prefer_left_build(self.height(), right.height())
-        if (how == JOIN_INNER or how == JOIN_LEFT) and (
-            build_left or worker_count(self.height()) > 1
-        ):
+        if how == JOIN_INNER or how == JOIN_LEFT:
             var left_sources = List[Series](capacity=len(left_keys))
             var right_sources = List[Series](capacity=len(right_keys))
             for k in range(len(left_keys)):

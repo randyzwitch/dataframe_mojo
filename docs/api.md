@@ -865,6 +865,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Cross join: every row of this plan paired with every row of `other`, left-major; see DataFrame.join(right, how="cross").
 - `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`
   Optimize (unless disabled) and execute the plan.
+- `def profile(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> Tuple[DataFrame, DataFrame]`
+  Collect, and report what each plan node did (#439).
 - `def fetch(self, n: Int = Int(5)) -> DataFrame`
   Collect only the first n rows of the result.
 - `def collect_schema(self) -> List[String]`

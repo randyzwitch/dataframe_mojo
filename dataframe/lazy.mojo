@@ -28,6 +28,7 @@ Filters never move past a slice, unique, group_by, or right/full join,
 because that would change which rows those operators see.
 """
 from std.os import getenv
+from std.io import FileDescriptor
 from std.collections import Dict, Optional
 from std.memory import ArcPointer
 from .csv_reader import _CsvBatches, _DecodeJob
@@ -81,6 +82,7 @@ from .series import Series
 from .dtype import DataType
 from .hashing import encode_rows
 from .trace import trace_path
+from .execution_report import ExecutionReport
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -382,6 +384,11 @@ struct _StreamJob(Job):
     # the rows it was reduced from.
     var bits: Int
     var rows: Int
+    # With `counting`, the rows each operation read and wrote in this
+    # batch (two entries per operation), summed by the caller into the
+    # plan's execution report.
+    var counting: Bool
+    var counts: List[Int]
 
     def __init__(
         out self,
@@ -402,6 +409,8 @@ struct _StreamJob(Job):
         self.reduced = List[_StreamReduction]()
         self.bits = 0
         self.rows = 0
+        self.counting = False
+        self.counts = List[Int]()
 
     def take_reduced(mut self) -> List[_StreamReduction]:
         var out = self.reduced^
@@ -412,57 +421,16 @@ struct _StreamJob(Job):
         if len(self.decode):
             self.decode[0].run()
             self.frame = self.decode.pop().into_frame()
-        for node in self.operations:
-            if node.kind == JOIN and self.indexes[][node.offset]:
-                self.frame = self.frame._join_impl(
-                    self.joins[][node.offset],
-                    left_on=node.names,
-                    right_on=node.right_keys,
-                    how=node.how,
-                    suffix=node.names2[0],
-                    coalesce=node.coalesce,
-                    prepared=self.indexes[][node.offset],
-                )
-            elif node.kind == JOIN and node.how == JOIN_CROSS:
-                self.frame = self.frame.join(
-                    self.joins[][node.offset],
-                    how=node.text,
-                    suffix=node.names2[0],
-                )
-            elif node.kind == JOIN:
-                self.frame = self.frame.join(
-                    self.joins[][node.offset],
-                    left_on=node.names,
-                    right_on=node.right_keys,
-                    how=node.text,
-                    suffix=node.names2[0],
-                    coalesce=node.coalesce,
-                )
-            elif node.kind == FILTER:
-                self.frame = self.frame.filter(node.exprs[0])
-            elif node.kind == SELECT:
-                self.frame = self.frame.select_exprs(node.exprs)
-            elif node.kind == WITH_COLUMNS:
-                self.frame = self.frame.with_columns(node.exprs)
-            elif node.kind == DROP:
-                self.frame = self.frame.drop(node.names)
-            elif node.kind == EXPLODE:
-                self.frame = self.frame.explode(node.names)
-            elif node.kind == UNNEST:
-                self.frame = self.frame.unnest(node.text)
-            elif node.kind == SORT:
-                # A sort limited to its first rows (#332): this batch's own
-                # first rows, selected on this worker alone.
-                var n = len(node.names)
-                self.frame = self.frame.take(
-                    self.frame._arg_sort_head(
-                        node.names,
-                        List[Bool](node.flags[:n]),
-                        List[Bool](node.flags[n:]),
-                        node.length,
-                        threads=1,
-                    )
-                )
+        if self.counting:
+            self.counts = List[Int](length=2 * len(self.operations), fill=0)
+        for k in range(len(self.operations)):
+            if self.counting:
+                self.counts[2 * k] = self.frame.height()
+            _apply_operation(
+                self.operations[k], self.frame, self.joins, self.indexes
+            )
+            if self.counting:
+                self.counts[2 * k + 1] = self.frame.height()
         if len(self.expressions):
             var reduction = _StreamReduction(
                 self.frame, self.expressions, self.keys
@@ -475,17 +443,80 @@ struct _StreamJob(Job):
             self.frame = self.frame.clear()
 
 
+def _apply_operation(
+    node: PlanNode,
+    mut frame: DataFrame,
+    joins: ArcPointer[List[DataFrame]],
+    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+) raises:
+    """Apply one row-local operation or join to a batch."""
+    if node.kind == JOIN and indexes[][node.offset]:
+        frame = frame._join_impl(
+            joins[][node.offset],
+            left_on=node.names,
+            right_on=node.right_keys,
+            how=node.how,
+            suffix=node.names2[0],
+            coalesce=node.coalesce,
+            prepared=indexes[][node.offset],
+        )
+    elif node.kind == JOIN and node.how == JOIN_CROSS:
+        frame = frame.join(
+            joins[][node.offset],
+            how=node.text,
+            suffix=node.names2[0],
+        )
+    elif node.kind == JOIN:
+        frame = frame.join(
+            joins[][node.offset],
+            left_on=node.names,
+            right_on=node.right_keys,
+            how=node.text,
+            suffix=node.names2[0],
+            coalesce=node.coalesce,
+        )
+    elif node.kind == FILTER:
+        frame = frame.filter(node.exprs[0])
+    elif node.kind == SELECT:
+        frame = frame.select_exprs(node.exprs)
+    elif node.kind == WITH_COLUMNS:
+        frame = frame.with_columns(node.exprs)
+    elif node.kind == DROP:
+        frame = frame.drop(node.names)
+    elif node.kind == EXPLODE:
+        frame = frame.explode(node.names)
+    elif node.kind == UNNEST:
+        frame = frame.unnest(node.text)
+    elif node.kind == SORT:
+        # A sort limited to its first rows (#332): this batch's own
+        # first rows, selected on this worker alone.
+        var n = len(node.names)
+        frame = frame.take(
+            frame._arg_sort_head(
+                node.names,
+                List[Bool](node.flags[:n]),
+                List[Bool](node.flags[n:]),
+                node.length,
+                threads=1,
+            )
+        )
+
+
 struct LazyFrame(Copyable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
     var _nodes: List[PlanNode]
     var _frames: List[DataFrame]
     var _schemas: List[Optional[CsvSchema]]
+    # Observed execution counters (#439), attached by `profile` and shared
+    # by every copy of the plan made while it runs; None otherwise.
+    var _report: Optional[ArcPointer[ExecutionReport]]
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
         self._schemas = [Optional[CsvSchema]()]
         self._nodes = [_plan_node(SCAN_FRAME, offset=0)]
+        self._report = None
 
     def __init__(
         out self,
@@ -496,6 +527,37 @@ struct LazyFrame(Copyable):
         self._nodes = nodes^
         self._frames = frames^
         self._schemas = schemas^
+        self._report = None
+
+    def _record(
+        self,
+        node: Int,
+        executor: String,
+        input_rows: Int,
+        output_rows: Int,
+        *,
+        executions: Int = 1,
+        build_rows: Int = 0,
+        builds: Int = 0,
+        algorithm: String = "",
+        build_side: String = "",
+    ):
+        """Add to the attached report, if any."""
+        if not self._report:
+            return
+        var report = self._report.value()
+        report[].record(
+            node,
+            self._label(node),
+            executor,
+            input_rows,
+            output_rows,
+            executions=executions,
+            build_rows=build_rows,
+            builds=builds,
+            algorithm=algorithm,
+            build_side=build_side,
+        )
 
     def _push(self, var node: PlanNode) -> Self:
         var result = self.copy()
@@ -708,10 +770,59 @@ struct LazyFrame(Copyable):
         """
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        if getenv("DATAFRAME_EXECUTION_REPORT"):
+            # One `dataframe-operator:` line per executed node on stderr,
+            # the columns of `profile`'s report, for benchmark traces.
+            var profiled = self.profile(
+                optimize=optimize, streaming=streaming, batch_size=batch_size
+            )
+            var report = profiled[1].copy()
+            for r in range(report.height()):
+                var parts = List[String]()
+                for name in report.columns():
+                    var cell = report.item(r, name)
+                    parts.append(
+                        String(cell.int64()) if cell.dtype()
+                        == DataType.INT64 else cell.string()
+                    )
+                print(
+                    "dataframe-operator:\t" + String("\t").join(parts),
+                    file=FileDescriptor(2),
+                )
+            return profiled[0].copy()
         var plan = self._optimized() if optimize else self.copy()
         if optimize:
             plan._order_joins(streaming, batch_size)
         return plan._execute(len(plan._nodes) - 1, False, streaming, batch_size)
+
+    def profile(
+        self,
+        *,
+        optimize: Bool = True,
+        streaming: Bool = True,
+        batch_size: Int = 65536,
+    ) raises -> Tuple[DataFrame, DataFrame]:
+        """Collect, and report what each plan node did (#439).
+
+        The result, then one row per executed node in node order: `node`,
+        `operator` (its `explain` label), `executor` ("streaming" or
+        "eager"), `algorithm` and `build_side` for joins, `input_rows`
+        (read from the left or probe input), `build_rows` (the right input
+        a join indexed), `output_rows`, `builds` (indexes built) and
+        `executions` (times the node ran). Counts are observed, never
+        estimated, and the result is the one `collect` returns.
+        """
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        var plan = self._optimized() if optimize else self.copy()
+        if optimize:
+            plan._order_joins(streaming, batch_size)
+        plan._report = Optional(ArcPointer(ExecutionReport()))
+        var result = plan._execute(
+            len(plan._nodes) - 1, False, streaming, batch_size
+        )
+        var report = plan._report.value()[].frame()
+        return (result^, report^)
 
     def fetch(self, n: Int = 5) raises -> DataFrame:
         """Collect only the first n rows of the result."""
@@ -869,12 +980,15 @@ struct LazyFrame(Copyable):
         var candidates = List[DataFrame]()
         var candidate_rows = 0
         var operations = List[PlanNode]()
+        # The plan node of each operation, for the execution report.
+        var operation_nodes = List[Int]()
         var joins = List[DataFrame]()
         var indexes = List[Optional[PreparedHashIndex]]()
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if _stream_rows(node):
                 operations.append(node.copy())
+                operation_nodes.append(cursor)
             elif node.kind == JOIN and node.how in [
                 JOIN_INNER,
                 JOIN_LEFT,
@@ -953,6 +1067,11 @@ struct LazyFrame(Copyable):
                         break
                 var operation = node.copy()
                 operation.offset = len(joins)
+                var algorithm = String(
+                    "progression" if prepared else (
+                        "cross" if node.how == JOIN_CROSS else "eager_hash"
+                    )
+                )
                 var built = self._execute(node.right, False, True, batch_size)
                 if (
                     (node.how == JOIN_SEMI or node.how == JOIN_ANTI)
@@ -1008,8 +1127,22 @@ struct LazyFrame(Copyable):
                         sources.append(key.copy())
                     if supported:
                         prepared = prepare_hash_index(sources)
+                        if prepared:
+                            algorithm = "hash_index"
+                self._record(
+                    cursor,
+                    "streaming",
+                    0,
+                    0,
+                    executions=0,
+                    build_rows=joins[len(joins) - 1].height(),
+                    builds=1,
+                    algorithm=algorithm,
+                    build_side="right",
+                )
                 indexes.append(prepared^)
                 operations.append(operation^)
+                operation_nodes.append(cursor)
             else:
                 break
             cursor = node.left
@@ -1020,6 +1153,7 @@ struct LazyFrame(Copyable):
         ):
             return None
         operations.reverse()
+        operation_nodes.reverse()
         # Grouped aggregations over an in-memory frame, filtered or
         # projected at most: whether the eager group-by is faster.
         var eager = False
@@ -1073,6 +1207,7 @@ struct LazyFrame(Copyable):
             if len(operations) == 0 and self._nodes[cursor].kind == SCAN_FRAME:
                 return None
             operations.append(self._nodes[top_node].copy())
+            operation_nodes.append(top_node)
         var shared_joins = ArcPointer(joins^)
         var shared_indexes = ArcPointer(indexes^)
         ref source = self._nodes[cursor]
@@ -1116,6 +1251,13 @@ struct LazyFrame(Copyable):
         var emitted = False
         var ended = False
         var outputs = List[DataFrame]()
+        # Execution report: rows fed from the source, and rows into and out
+        # of each operation, summed over batches.
+        var counting = Bool(self._report)
+        var fed_rows = 0
+        var operation_rows = List[Int](
+            length=2 * len(operations) if counting else 0, fill=0
+        )
         # Aggregate state (#326). Batch states wait in `pending` and are
         # merged together once their groups reach the accumulated count (or
         # 64 batches), so each merge covers at least as much new work as old
@@ -1174,6 +1316,7 @@ struct LazyFrame(Copyable):
                 )
                 job.decode = decode^
                 job.bits = bits
+                job.counting = counting
                 jobs.append(job^)
             if len(jobs) == 0:
                 break
@@ -1181,6 +1324,17 @@ struct LazyFrame(Copyable):
                 pool = Pool(len(jobs))
                 pool_ready = True
             pool.run(jobs, claim=True)
+            if counting:
+                for i in range(len(jobs)):
+                    ref counts = jobs[i].counts
+                    if len(counts) > 0:
+                        fed_rows += counts[0]
+                    elif len(expressions):
+                        fed_rows += jobs[i].rows
+                    else:
+                        fed_rows += jobs[i].frame.height()
+                    for k in range(len(counts)):
+                        operation_rows[k] += counts[k]
             # Pool returns jobs in submission order, independently of worker
             # completion order. Merge states and assemble rows in that order.
             for i in range(len(jobs)):
@@ -1236,24 +1390,44 @@ struct LazyFrame(Copyable):
             if limit == 0 and top < 0:
                 ended = True
         pool.release()
+        var result = Optional[DataFrame]()
         if len(states):
             _merge_parts(states, pending, pending_groups, workers, True)
             if len(states) == 1:
-                return states[0].finish()
-            return _finish_parts(states^)
-        if top >= 0:
-            if len(candidates) == 0:
-                return None
-            var merged = concat(candidates)
-            merged = merged.take(
-                merged._arg_sort_head(
-                    top_names, top_descending, top_nulls_last, top
+                result = states[0].finish()
+            else:
+                result = _finish_parts(states^)
+        elif top >= 0:
+            if len(candidates) > 0:
+                var merged = concat(candidates)
+                merged = merged.take(
+                    merged._arg_sort_head(
+                        top_names, top_descending, top_nulls_last, top
+                    )
                 )
-            )
-            return merged.slice(skip, limit)
-        if len(outputs):
-            return concat(outputs)
-        return None
+                result = merged.slice(skip, limit)
+        elif len(outputs):
+            result = concat(outputs)
+        if counting:
+            if _is_scan(source.kind):
+                self._record(cursor, "streaming", 0, fed_rows)
+            var into_terminal = fed_rows
+            for k in range(len(operations)):
+                self._record(
+                    operation_nodes[k],
+                    "streaming",
+                    operation_rows[2 * k],
+                    operation_rows[2 * k + 1],
+                )
+                into_terminal = operation_rows[2 * k + 1]
+            if index != cursor and (index not in operation_nodes):
+                self._record(
+                    index,
+                    "streaming",
+                    into_terminal,
+                    result.value().height() if result else 0,
+                )
+        return result^
 
     def _execute(
         self,
@@ -1266,6 +1440,49 @@ struct LazyFrame(Copyable):
             var streamed = self._stream_execute(index, batch_size)
             if streamed:
                 return streamed.take()
+        if not self._report or empty:
+            return self._execute_node(index, empty, streaming, batch_size)
+        # Record what the node did: its inputs record themselves as they
+        # run below it, so the input rows are read back from the report.
+        var result = self._execute_node(index, empty, streaming, batch_size)
+        ref node = self._nodes[index]
+        if _is_scan(node.kind):
+            self._record(index, "eager", 0, result.height())
+        elif node.kind == JOIN:
+            var left = self._report.value()[].find(node.left)
+            var right = self._report.value()[].find(node.right)
+            var left_rows = left.value().output_rows if left else -1
+            var right_rows = right.value().output_rows if right else -1
+            var build_left = (
+                node.how == JOIN_INNER or node.how == JOIN_LEFT
+            ) and prefer_left_build(left_rows, right_rows)
+            self._record(
+                index,
+                "eager",
+                left_rows,
+                result.height(),
+                build_rows=right_rows,
+                builds=1,
+                algorithm="cross" if node.how == JOIN_CROSS else "eager_hash",
+                build_side="left" if build_left else "right",
+            )
+        else:
+            var left = self._report.value()[].find(node.left)
+            self._record(
+                index,
+                "eager",
+                left.value().output_rows if left else -1,
+                result.height(),
+            )
+        return result^
+
+    def _execute_node(
+        self,
+        index: Int,
+        empty: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) raises -> DataFrame:
         ref node = self._nodes[index]
         if node.kind == SCAN_FRAME:
             if not empty:
@@ -2551,11 +2768,9 @@ struct LazyFrame(Copyable):
         if added:
             self._reorder()
 
-    def _describe(
-        self, index: Int, depth: Int, mut out: String, streaming: Bool = True
-    ):
+    def _label(self, index: Int) -> String:
+        """The operator name `explain` prints for a node."""
         ref node = self._nodes[index]
-        var pad = String("  ") * depth
         var label: String
         if node.kind == SCAN_FRAME:
             label = "SCAN frame"
@@ -2594,6 +2809,14 @@ struct LazyFrame(Copyable):
             label = "UNNEST " + node.text
         else:
             label = "DROP " + _joined(node.names)
+        return label^
+
+    def _describe(
+        self, index: Int, depth: Int, mut out: String, streaming: Bool = True
+    ):
+        ref node = self._nodes[index]
+        var pad = String("  ") * depth
+        var label = self._label(index)
         if _is_scan(node.kind):
             if len(node.names) > 0:
                 label += " [project " + _joined(node.names) + "]"
