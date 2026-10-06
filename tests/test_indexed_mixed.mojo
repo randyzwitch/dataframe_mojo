@@ -162,14 +162,19 @@ def test_mixed_partitioned_matches_whole_and_keeps_order() raises:
         (col("x") + 1).mean().alias("computed"),
         col("x").first().alias("first"),
         col("y").median().alias("median"),
+        col("y").mode().alias("mode"),
         col("y").n_unique().alias("unique"),
     ]
     var grouped = frame.group_by("key", maintain_order=True)
     var bound = _bind_all(expressions, frame._columns)
     var preparation = grouped._partitioned_references(bound)
+    # A median takes the indexed route; a mode still needs its source
+    # gathered into bucket order.
     assert_equal(len(preparation[2]), 1)
     assert_equal(preparation[2][0].name(), "y")
-    assert_equal(preparation[0], List[Bool]([True, True, True, False, True]))
+    assert_equal(
+        preparation[0], List[Bool]([True, True, True, True, False, True])
+    )
     var expected = grouped._agg_whole(bound, 127)
     # Force the partitioned route so this exercises mixed indexed/gathered
     # reductions independently of the cardinality estimate.

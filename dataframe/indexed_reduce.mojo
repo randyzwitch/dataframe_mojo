@@ -10,14 +10,15 @@ are handed. The states and `finish` are `Reducer`'s, so results are those
 of the gathered path.
 
 Plain numeric reductions update shared Reducer states directly, including
-first/last, moments and distinct counts. Decimal and computed inputs use
-bounded batches through the ordinary evaluator. Median/quantile retain
-the gathered route selected per expression by the partitioned caller.
+first/last, moments and distinct counts. A median or quantile lays the
+bucket's values out in group order in one buffer and selects within each
+group's segment. Decimal and computed inputs use bounded batches through
+the ordinary evaluator.
 """
 from std.math import isnan
 from std.memory import Pointer, bitcast
 
-from .aggregate import Reducer, float_key
+from .aggregate import Reducer, float_key, quantile_in
 from .binding import BoundExpr, bind
 from .column import Column
 from .execution import _new_reducer, _batch, evaluate
@@ -26,7 +27,9 @@ from .expr import (
     LEN,
     MAX,
     MEAN,
+    MEDIAN,
     MIN,
+    QUANTILE,
     SUM,
     COL,
     FIRST,
@@ -62,12 +65,19 @@ def _supported(bound: BoundExpr, columns: List[Series]) -> Bool:
         VAR,
         N_UNIQUE,
         NULL_COUNT,
+        MEDIAN,
+        QUANTILE,
     ]:
         return False
     if nodes[node.left].op != COL:
         return False
     ref source = columns[bound.sources[node.left]]
     if source.dtype().is_decimal() or source.dtype().is_categorical():
+        return False
+    if (
+        node.op == MEDIAN or node.op == QUANTILE
+    ) and source.dtype() == DataType.of(DType.uint64):
+        # The batch route re-encodes UInt64 before taking positions.
         return False
     comptime for t in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[t]
@@ -113,6 +123,19 @@ def reduce_indexed(
                 return _distinct_counts[D](
                     source._data[Column[Scalar[D]]], rows, g, n, group_count
                 )
+    if op == MEDIAN or op == QUANTILE:
+        comptime for t in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[t]
+            if source._data.isa[Column[Scalar[D]]]():
+                return _quantiles[D](
+                    source._data[Column[Scalar[D]]],
+                    rows,
+                    g,
+                    n,
+                    group_count,
+                    node.floating,
+                    node.text,
+                ).with_dtype(bound.dtypes[len(bound.dtypes) - 1])
     comptime for t in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[t]
         if source._data.isa[Column[Scalar[D]]]():
@@ -192,6 +215,59 @@ def _distinct_counts[
         if saw_null[group]:
             counts[group] += 1
     return Series("", Column[Int64](counts^))
+
+
+def _quantiles[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    rows: Pointer[Int, _],
+    g: Pointer[Int, _],
+    n: Int,
+    group_count: Int,
+    q: Float64,
+    method: String,
+) raises -> Series:
+    """Each group's quantile of its non-null values, as `quantile_in` takes
+    it. The values go into one buffer in group order (a count per group,
+    then a cursor per group), where a list per group grew by appends and
+    was copied again for selection: H2O q6 takes medians over 10,000
+    groups of 1,000 rows."""
+    var nulls = column.null_count() > 0
+    var values = column._ptr()
+    var starts = List[Int](length=group_count + 1, fill=0)
+    var cursor = starts.unsafe_ptr()
+    for p in range(n):
+        if nulls and not column._valid(rows[unsafe_offset=p]):
+            continue
+        cursor[unsafe_offset=g[unsafe_offset=p] + 1] += 1
+    for group in range(group_count):
+        cursor[unsafe_offset=group + 1] += cursor[unsafe_offset=group]
+    var total = cursor[unsafe_offset=group_count]
+    var buffer = List[Float64](unsafe_uninit_length=total)
+    var out = buffer.unsafe_ptr()
+    # Fill from each group's start; afterwards cursor[group] is the end of
+    # group `group`, the start of the next.
+    for p in range(n):
+        var row = rows[unsafe_offset=p]
+        if nulls and not column._valid(row):
+            continue
+        var group = g[unsafe_offset=p]
+        out[unsafe_offset=cursor[unsafe_offset=group]] = values[
+            unsafe_offset=row
+        ].cast[DType.float64]()
+        cursor[unsafe_offset=group] += 1
+    var output = List[Float64](length=group_count, fill=0)
+    var valid = List[Bool](length=group_count, fill=False)
+    var start = 0
+    for group in range(group_count):
+        var end = cursor[unsafe_offset=group]
+        var result = quantile_in(Span(buffer)[start:end], q, method)
+        if result:
+            output[group] = result.value()
+            valid[group] = True
+        start = end
+    return Series("", Column[Float64](output^, valid^))
 
 
 def _canonical_int[D: DType](value: Scalar[D]) -> Int64:
