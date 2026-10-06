@@ -861,6 +861,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def join(self, other: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
   Join with another lazy plan on paired keys: left_on[i] matches right_on[i], as in DataFrame.join. Projection and predicate pushdown see both key lists, so each input reads only its own keys and the columns used above the join.
 - `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
+- `def join(self, other: Self, *, how: String, suffix: String = "_right") -> Self`
+  Cross join: every row of this plan paired with every row of `other`, left-major; see DataFrame.join(right, how="cross").
 - `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`
   Optimize (unless disabled) and execute the plan.
 - `def fetch(self, n: Int = Int(5)) -> DataFrame`
