@@ -85,6 +85,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- The benchmark trace run collects each lazy query's execution report
+  (`DATAFRAME_EXECUTION_REPORT`), keeps it under `operators` in
+  `results.json`, and both report formats end with the joins that indexed
+  more rows than probed them, from observed counts.
 - A grouped median or quantile on the hash-partitioned group-by lays each
   bucket's values out in group order in one buffer (a count per group,
   then a cursor per group) and selects within each group's segment, where
