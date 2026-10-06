@@ -292,8 +292,10 @@ def environment(threads, trace=False):
     env["BENCH_THREADS"] = str(threads)
     if trace:
         env["DATAFRAME_TRACE_PATHS"] = "1"
+        env["DATAFRAME_EXECUTION_REPORT"] = "1"
     else:
         env.pop("DATAFRAME_TRACE_PATHS", None)
+        env.pop("DATAFRAME_EXECUTION_REPORT", None)
     return env
 
 
@@ -339,6 +341,34 @@ def trace_paths(stderr):
         elif line.startswith("dataframe-path: ") and current:
             paths[current].add(line.split(": ", 1)[1].strip())
     return {query: sorted(found) for query, found in paths.items()}
+
+
+OPERATOR_COLUMNS = (
+    "node operator executor algorithm build_side input_rows build_rows "
+    "output_rows builds executions"
+).split()
+
+
+def operator_reports(stderr):
+    """Map each query to the rows of its lazy execution report
+    (`LazyFrame.profile`, printed by DATAFRAME_EXECUTION_REPORT): one dict
+    per executed plan node, from the query's last run."""
+    reports, current = {}, None
+    for line in stderr.splitlines():
+        if line.startswith("dataframe-query: "):
+            current = line.split(": ", 1)[1].strip()
+            reports[current] = []
+        elif line.startswith("dataframe-operator:\t") and current:
+            cells = line.split("\t")[1:]
+            row = dict(zip(OPERATOR_COLUMNS, cells))
+            for name in OPERATOR_COLUMNS:
+                if name.endswith("rows") or name in ("node", "builds", "executions"):
+                    row[name] = int(row[name])
+            if reports[current] and row["node"] <= reports[current][-1]["node"]:
+                # Rows come in node order; a lower node starts a new run.
+                reports[current] = []
+            reports[current].append(row)
+    return reports
 
 
 def _wait_quiet(limit=3600):
@@ -599,6 +629,7 @@ def measure(args):
         "baseline": next((e for e in engines if e.startswith("base@")), None),
         "runs": [],
         "trace": {},
+        "operators": {},
     }
     plan = []
     for suite in suites:
@@ -701,6 +732,8 @@ def measure(args):
             )
             for query, paths_hit in trace_paths(stderr).items():
                 result["trace"][f"{suite}/{variant}/{query}"] = paths_hit
+            for query, rows in operator_reports(stderr).items():
+                result["operators"][f"{suite}/{variant}/{query}"] = rows
         save()
     return result
 
@@ -840,7 +873,41 @@ def report(result):
                 lines += _suite_table(suite, cells, engines)
     if result.get("trace"):
         lines += _coverage(result["trace"])
+    if result.get("operators"):
+        lines += _join_builds(result["operators"])
     return "\n".join(lines) + "\n"
+
+
+def _join_builds(operators):
+    """Joins that indexed more rows than probed them, from the lazy
+    execution reports (`LazyFrame.profile`): where the executor hashed the
+    larger side. Observed counts, so a cost model can be judged on them."""
+    joins, larger = 0, []
+    for query, rows in sorted(operators.items()):
+        for row in rows:
+            if not row["operator"].startswith("JOIN") or row["builds"] == 0:
+                continue
+            joins += 1
+            if row["build_rows"] > row["input_rows"] > 0:
+                larger.append((row["build_rows"] - row["input_rows"], query, row))
+    lines = [
+        "## Join builds larger than their probe",
+        "",
+        f"Of {joins} joins that built an index (DATAFRAME_EXECUTION_REPORT), "
+        f"{len(larger)} indexed more rows than probed them. Observed counts "
+        "from the lazy execution report; the largest first.",
+        "",
+        "| Query | Join | Executor | Index | Probe rows | Build rows | Output rows |",
+        "|---|---|---|---|---:|---:|---:|",
+    ]
+    for _, query, row in sorted(larger, key=lambda item: -item[0])[:20]:
+        lines.append(
+            f"| {query} | {row['operator'][:60]} | {row['executor']} | "
+            f"{row['algorithm']} | {row['input_rows']:,} | "
+            f"{row['build_rows']:,} | {row['output_rows']:,} |"
+        )
+    lines.append("")
+    return lines
 
 
 def _separated(mine, theirs):

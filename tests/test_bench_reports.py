@@ -139,6 +139,43 @@ class BenchmarkReports(unittest.TestCase):
         )
         self.assertEqual(result, original)
 
+    def test_operator_reports_are_parsed_and_rendered(self):
+        """`dataframe-operator:` lines map to one report per query, the last
+        run's rows win, and both report formats list the joins that indexed
+        more rows than probed them."""
+        columns = "\t".join
+        stderr = "\n".join(
+            [
+                "dataframe-query: q3",
+                "dataframe-operator:\t" + columns(["0", "SCAN frame", "streaming", "", "", "0", "0", "10", "0", "1"]),
+                "dataframe-operator:\t" + columns(["2", "JOIN inner on k = k", "streaming", "hash_index", "right", "10", "500", "7", "1", "1"]),
+                "dataframe-operator:\t" + columns(["0", "SCAN frame", "streaming", "", "", "0", "0", "10", "0", "1"]),
+                "dataframe-operator:\t" + columns(["2", "JOIN inner on k = k", "streaming", "hash_index", "right", "10", "600", "7", "1", "1"]),
+                "dataframe-operator:\t" + columns(["4", "JOIN inner on j = j", "eager", "eager_hash", "left", "900", "20", "9", "1", "1"]),
+                "dataframe-query: q5",
+                "dataframe-path: join.hash_index",
+            ]
+        )
+        reports = bench.operator_reports(stderr)
+        self.assertEqual(sorted(reports), ["q3", "q5"])
+        self.assertEqual([r["node"] for r in reports["q3"]], [0, 2, 4])
+        self.assertEqual(reports["q3"][1]["build_rows"], 600)
+        self.assertEqual(reports["q3"][1]["executor"], "streaming")
+        self.assertEqual(reports["q5"], [])
+        result = fixture()
+        result["operators"] = {"pdsh/base/q3": reports["q3"]}
+        markdown = bench.report(result)
+        self.assertIn("## Join builds larger than their probe", markdown)
+        self.assertIn("Of 2 joins that built an index", markdown)
+        self.assertIn("| pdsh/base/q3 | JOIN inner on k = k | streaming | hash_index | 10 | 600 | 7 |", markdown)
+        self.assertNotIn("JOIN inner on j = j", markdown)
+        page = bench_html.render(
+            result, bench.evaluate(result), bench.SUITES, bench.VARIANTS, bench.instrumented_paths()
+        )
+        self.assertIn('<section id="joins">', page)
+        self.assertIn('<a href="#joins">joins</a>', page)
+        self.assertIn("<td>JOIN inner on k = k</td>", page)
+
     def test_legacy_rerender_preserves_raw_samples_and_warns(self):
         result = fixture()
         # Include an actual timing cell so immutability covers timing samples.
