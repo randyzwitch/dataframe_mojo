@@ -72,8 +72,12 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         are undefined; pair this with `is_valid` or `null_count`.
         """
         var values = List[Self.T](capacity=self._length)
-        for i in range(self._length):
-            values.append(self._get(i).copy())
+        # One bulk copy: every rechunk and unowned append compacts through
+        # here, and an element-wise copy of a million-row window showed in
+        # group-by profiles.
+        values.extend(
+            Span(self._data[])[self._offset : self._offset + self._length]
+        )
         return values^
 
     def unsafe_values(self) -> Pointer[Self.T, MutAnyOrigin]:

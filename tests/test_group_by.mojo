@@ -123,6 +123,56 @@ def test_dense_int64_encoding_preserves_first_occurrence_and_nulls() raises:
     assert_equal(fallback.representatives, [0, 1])
 
 
+def test_dense_int64_encoding_reads_chunks_in_place() raises:
+    """A chunked key (a Parquet scan's row groups, or a worker's range
+    across two) encodes without being copied into one buffer, with the
+    same ids whatever the chunk boundaries, nulls included."""
+    var values = List[Int64]()
+    var valid = List[Bool]()
+    for i in range(3001):
+        values.append(Int64((i * 7919) % 97 - 48))
+        valid.append(i % 13 != 0)
+    var plain = Series("k", Column[Int64](values.copy()))
+    var nullable = Series("k", Column[Int64](values^, valid^))
+    for key in [plain^, nullable^]:
+        var whole_equal = encode_rows([key.copy()], nulls_equal=True)
+        var whole_strict = encode_rows([key.copy()], nulls_equal=False)
+        var layouts: List[List[Int]] = [[1, 2, 3000], [1000, 2000], [2999]]
+        for cuts in layouts:
+            var chunks = List[Series]()
+            var at = 0
+            for cut in cuts:
+                chunks.append(key.slice(at, cut - at))
+                at = cut
+            chunks.append(key.slice(at, 3001 - at))
+            var chunked = Series._from_chunks(chunks^)
+            assert_true(chunked.is_chunked())
+            var equal = encode_rows([chunked.copy()], nulls_equal=True)
+            assert_equal(equal.ids, whole_equal.ids)
+            assert_equal(equal.representatives, whole_equal.representatives)
+            var strict = encode_rows(
+                [chunked.slice(1, 2999)], nulls_equal=False
+            )
+            var reference = encode_rows([key.slice(1, 2999)], nulls_equal=False)
+            assert_equal(strict.ids, reference.ids)
+            assert_equal(strict.representatives, reference.representatives)
+        _ = whole_strict^
+    # A chunk without nulls holds no validity bitmap beside one that does.
+    var mixed = Series._from_chunks(
+        [
+            Series("k", Column[Int64]([5, 3, 5])),
+            Series("k", Column[Int64]([3, 9, 5], [True, False, True])),
+            Series("k", Column[Int64]([9, 9])),
+        ]
+    )
+    var equal = encode_rows([mixed.copy()], nulls_equal=True)
+    assert_equal(equal.ids, [0, 1, 0, 1, 2, 0, 3, 3])
+    assert_equal(equal.representatives, [0, 1, 4, 6])
+    var strict = encode_rows([mixed^], nulls_equal=False)
+    assert_equal(strict.ids, [0, 1, 0, 1, -1, 0, 2, 2])
+    assert_equal(strict.representatives, [0, 1, 6])
+
+
 def test_encode_rows_policies() raises:
     var keys: List[Series] = [
         Series(
