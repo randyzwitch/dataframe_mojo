@@ -5810,12 +5810,12 @@ struct _StreamReduction(Movable):
         if self.grouped:
             var groups = encode_rows(keys, nulls_equal=True)
             count = groups.count()
-            ids = groups.ids.copy()
             var columns = List[Series]()
             for key in keys:
                 columns.append(key.take(groups.representatives.copy()))
             self.keys = DataFrame(columns^, height=count)
             self.firsts = groups.representatives.copy()
+            ids = groups^.into_ids()
         else:
             self.keys = DataFrame(List[Series](), height=1)
             self.firsts = [0]

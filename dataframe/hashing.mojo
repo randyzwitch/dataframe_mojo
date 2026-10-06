@@ -30,6 +30,10 @@ struct RowKeys(Movable):
     def count(self) -> Int:
         return len(self.representatives)
 
+    def into_ids(deinit self) -> List[Int]:
+        """The ids, moved out rather than copied."""
+        return self.ids^
+
 
 def _codes_by_value[
     T: Copyable & Deinitable & Hashable & Equatable
@@ -471,74 +475,104 @@ def encode_rows_parallel(
 def _encode_dense_int64(
     column: Column[Int64], nulls_equal: Bool
 ) raises -> Optional[RowKeys]:
+    """`_encode_dense_int64_parts` for one contiguous column."""
+    var parts = List[Column[Int64]]()
+    parts.append(column.copy())
+    return _encode_dense_int64_parts(parts, nulls_equal)
+
+
+def _encode_dense_int64_parts(
+    parts: List[Column[Int64]], nulls_equal: Bool
+) raises -> Optional[RowKeys]:
     """Ids by direct lookup when the key's values span fewer than 4,096
     integers, avoiding a hash-table probe and a renumbering pass per row.
     Values and ids go through pointers, and a column without nulls reads no
-    validity: H2O's 100-value id4 spent most of a group-by here."""
-    var n = len(column)
-    var values = column._ptr()
-    var nulls = column.null_count() > 0
-    var bits = column._bits[].unsafe_ptr()
-    var bit_offset = column._offset
+    validity: H2O's 100-value id4 spent most of a group-by here. The key
+    may arrive as several chunks (a Parquet scan's row groups, or a worker's
+    range across two of them); they are read in place, where copying them
+    into one buffer first cost a group-by a quarter of its time."""
+    var n = 0
+    for part in parts:
+        n += len(part)
     var first = True
     var low = Int64(0)
     var high = Int64(0)
-    if not nulls and n > 0:
-        low = values[unsafe_offset=0]
-        high = low
-        first = False
-        for i in range(1, n):
-            var value = values[unsafe_offset=i]
-            low = min(low, value)
-            high = max(high, value)
-    else:
-        for i in range(n):
-            if not _validity_at(bits, bit_offset + i):
-                continue
-            var value = values[unsafe_offset=i]
+    # A chunk without nulls may hold no validity bitmap, so only chunks
+    # with nulls read one.
+    for part in parts:
+        var values = part._ptr()
+        var nulls = part.null_count() > 0
+        var bits = part._bits[].unsafe_ptr()
+        var bit_offset = part._offset
+        var length = len(part)
+        if not nulls and length > 0:
+            var start = 0
             if first:
-                low = value
-                high = value
+                low = values[unsafe_offset=0]
+                high = low
                 first = False
-            else:
+                start = 1
+            for i in range(start, length):
+                var value = values[unsafe_offset=i]
                 low = min(low, value)
                 high = max(high, value)
+        else:
+            for i in range(length):
+                if not _validity_at(bits, bit_offset + i):
+                    continue
+                var value = values[unsafe_offset=i]
+                if first:
+                    low = value
+                    high = value
+                    first = False
+                else:
+                    low = min(low, value)
+                    high = max(high, value)
     if not first and UInt64(high) - UInt64(low) >= 4096:
         return None
     var span = 1 if first else Int(UInt64(high) - UInt64(low)) + 1
     var slots = List[Int](length=span, fill=-1)
     var table = slots.unsafe_ptr()
     var ids = List[Int](unsafe_uninit_length=n)
-    var out = ids.unsafe_ptr()
     var representatives = List[Int]()
-    if not nulls:
-        for i in range(n):
+    var null_id = -1
+    var offset = 0
+    for part in parts:
+        var values = part._ptr()
+        var nulls = part.null_count() > 0
+        var bits = part._bits[].unsafe_ptr()
+        var bit_offset = part._offset
+        var length = len(part)
+        var out = ids.unsafe_ptr().unsafe_offset(offset)
+        if not nulls:
+            for i in range(length):
+                var slot = Int(UInt64(values[unsafe_offset=i]) - UInt64(low))
+                var id = table[unsafe_offset=slot]
+                if id < 0:
+                    id = len(representatives)
+                    table[unsafe_offset=slot] = id
+                    representatives.append(offset + i)
+                out[unsafe_offset=i] = id
+            offset += length
+            continue
+        for i in range(length):
+            if not _validity_at(bits, bit_offset + i):
+                if nulls_equal:
+                    if null_id < 0:
+                        null_id = len(representatives)
+                        representatives.append(offset + i)
+                    out[unsafe_offset=i] = null_id
+                else:
+                    out[unsafe_offset=i] = -1
+                continue
             var slot = Int(UInt64(values[unsafe_offset=i]) - UInt64(low))
             var id = table[unsafe_offset=slot]
             if id < 0:
                 id = len(representatives)
                 table[unsafe_offset=slot] = id
-                representatives.append(i)
+                representatives.append(offset + i)
             out[unsafe_offset=i] = id
-        return RowKeys(ids^, representatives^)
-    var null_id = -1
-    for i in range(n):
-        if not _validity_at(bits, bit_offset + i):
-            if nulls_equal:
-                if null_id < 0:
-                    null_id = len(representatives)
-                    representatives.append(i)
-                out[unsafe_offset=i] = null_id
-            else:
-                out[unsafe_offset=i] = -1
-            continue
-        var slot = Int(UInt64(values[unsafe_offset=i]) - UInt64(low))
-        var id = table[unsafe_offset=slot]
-        if id < 0:
-            id = len(representatives)
-            table[unsafe_offset=slot] = id
-            representatives.append(i)
-        out[unsafe_offset=i] = id
+        offset += length
     return RowKeys(ids^, representatives^)
 
 
@@ -600,6 +634,13 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         return _encode_string_rows(keys[0], nulls_equal)
     for key in keys:
         if key.is_chunked():
+            if len(keys) == 1 and keys[0]._data.isa[Column[Int64]]():
+                var parts = List[Column[Int64]]()
+                for chunk in keys[0].chunks():
+                    parts.append(chunk._data[Column[Int64]].copy())
+                var dense = _encode_dense_int64_parts(parts, nulls_equal)
+                if dense:
+                    return dense.take()
             var contiguous = List[Series](capacity=len(keys))
             for item in keys:
                 contiguous.append(item.rechunk())

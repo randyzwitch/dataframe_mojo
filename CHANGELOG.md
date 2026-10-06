@@ -80,6 +80,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A chunked Int64 key (a Parquet scan's row groups, or a worker's range
+  across two of them) is encoded in place by the small-domain lookup
+  instead of being copied into one buffer first, a column window compacts
+  in one bulk copy instead of element by element, and the group ids are
+  moved into the per-range reducer instead of copied. H2O group-by q4
+  (three means by a 100-value Int64 key, 10M rows) takes 13.7 ms against
+  22.0 ms, and q1 9.6 ms against 13.9 ms.
+
 - Hash aggregation samples a mixed position within each input stratum,
   avoiding cardinality underestimates from periodic keys. The sample
   budget and 85% cutoff stay the same; exact bounds stop sampling early
