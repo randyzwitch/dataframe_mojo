@@ -142,6 +142,15 @@ widely a specialized path is exercised. Instrumentation includes all literal
 `trace_path` names, including nested paths and lazy/rank paths. Paths without
 instrumentation are outside this report's coverage.
 
+The trace run also sets `DATAFRAME_EXECUTION_REPORT=1`, so every lazy query
+prints its execution report (`LazyFrame.profile`): one `dataframe-operator:`
+line per executed plan node with observed rows in and out, and for a join
+the rows it indexed, the index kind and the build side. The runner keeps
+them under `operators` in `results.json`, and both reports end with the
+joins that indexed more rows than probed them, the largest first. That
+table is the evidence for a join cost model: it says, from real counts,
+where the executor hashed the larger side.
+
 Two limits apply when reading a comparison. Timings on a shared machine move
 with its load: prefer a quiet host, and rerun before acting on a small
 change. And two builds can differ by up to about 10% on one query from code
