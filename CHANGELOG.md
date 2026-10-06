@@ -13,6 +13,16 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- `LazyFrame.profile()`: collect and report what each plan node did, as
+  Polars' `profile` does but with observed counts instead of timings. The
+  report frame has one row per executed node, in node order: its
+  `explain` label, the executor (streaming or eager), a join's index kind
+  and build side, rows read from the left or probe input, rows of the
+  right input a join indexed, rows written, indexes built and times run.
+  `DATAFRAME_EXECUTION_REPORT=1` makes `collect` print the same rows to
+  stderr as `dataframe-operator:` lines, for benchmark traces. Tests can
+  assert one build per streaming join and one execution per input without
+  timing (#439).
 - `LazyFrame.join(other, how="cross")`: a cross join in a lazy plan, as
   the eager `DataFrame.join(right, how="cross")`. Projection pushdown
   reads only the columns used above it. TPC-DS q28 places six one-row
@@ -85,6 +95,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Every eager inner and left join takes the direct hash route. It used
+  to need a left input of more than 65,536 rows (one worker's share),
+  which sent a left of 65K to 131K rows to the dictionary route: on a
+  2M-row right input, a 125K-row left took 114 ms there against 44 ms on
+  the direct route, while 62K and 250K rows took 12 and 39 ms. Found by
+  sweeping the build-side rule with the execution report's counters.
 - A grouped median or quantile on the hash-partitioned group-by lays each
   bucket's values out in group order in one buffer (a count per group,
   then a cursor per group) and selects within each group's segment, where
