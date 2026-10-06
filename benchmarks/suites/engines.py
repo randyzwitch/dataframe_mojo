@@ -1252,6 +1252,40 @@ def tpcds_polars(t, q):
             )
         )
 
+    def returners(returns, date_key, customer_key, address_key, amount, year):
+        totals = (
+            c[returns]
+            .join(dates(col("d_year") == year, "d_sk"), left_on=date_key, right_on="d_sk")
+            .join(
+                c["customer_address"].select(
+                    col("ca_address_sk").alias("return_address"),
+                    col("ca_state").alias("ctr_state"),
+                ),
+                left_on=address_key,
+                right_on="return_address",
+            )
+            .group_by(customer_key, "ctr_state")
+            .agg(sql_sum(col(amount)).alias("ctr_total_return"))
+            .select(
+                col(customer_key).alias("ctr_customer_sk"),
+                "ctr_state",
+                "ctr_total_return",
+            )
+        )
+        typical = totals.group_by("ctr_state").agg(
+            col("ctr_total_return").cast(pl.Float64).mean().alias("typical")
+        ).select(col("ctr_state").alias("typical_state"), "typical")
+        return (
+            totals.join(typical, left_on="ctr_state", right_on="typical_state")
+            .filter(col("ctr_total_return").cast(pl.Float64) > 1.2 * col("typical"))
+            .join(c["customer"], left_on="ctr_customer_sk", right_on="c_customer_sk")
+            .join(
+                c["customer_address"].filter(col("ca_state") == "GA"),
+                left_on="c_current_addr_sk",
+                right_on="ca_address_sk",
+            )
+        )
+
     if q == "q3":
         out = (
             brand_sales(col("d_moy") == 11, col("i_manufact_id") == 128)
@@ -2542,6 +2576,264 @@ def tpcds_polars(t, q):
             c["web_site"].filter(col("web_company_name") == "pri"),
             "ws_web_site_sk", "web_site_sk",
         )  # fmt: skip
+    elif q == "q1":
+        totals = (
+            c["store_returns"]
+            .join(
+                dates(col("d_year") == 2000, "d_sk"),
+                left_on="sr_returned_date_sk",
+                right_on="d_sk",
+            )
+            .group_by("sr_customer_sk", "sr_store_sk")
+            .agg(sql_sum(col("sr_return_amt")).alias("total"))
+        )
+        typical = totals.group_by("sr_store_sk").agg(
+            col("total").cast(pl.Float64).mean().alias("typical")
+        ).select(col("sr_store_sk").alias("typical_store"), "typical")
+        out = (
+            totals.join(typical, left_on="sr_store_sk", right_on="typical_store")
+            .filter(col("total").cast(pl.Float64) > 1.2 * col("typical"))
+            .join(
+                c["store"].filter(col("s_state") == "TN"),
+                left_on="sr_store_sk",
+                right_on="s_store_sk",
+            )
+            .join(c["customer"], left_on="sr_customer_sk", right_on="c_customer_sk")
+            .select("c_customer_id")
+            .sort("c_customer_id", nulls_last=True)
+            .head(100)
+        )
+    elif q == "q24":
+        keys = [
+            "c_last_name", "c_first_name", "s_store_name", "ca_state", "s_state",
+            "i_color", "i_current_price", "i_manager_id", "i_units", "i_size",
+        ]  # fmt: skip
+        ssales = (
+            c["store_sales"]
+            .join(
+                c["store_returns"].select("sr_ticket_number", "sr_item_sk"),
+                left_on=["ss_ticket_number", "ss_item_sk"],
+                right_on=["sr_ticket_number", "sr_item_sk"],
+            )
+            .join(
+                c["store"].filter(col("s_market_id") == 8),
+                left_on="ss_store_sk",
+                right_on="s_store_sk",
+            )
+            .join(c["item"], left_on="ss_item_sk", right_on="i_item_sk")
+            .join(c["customer"], left_on="ss_customer_sk", right_on="c_customer_sk")
+            .join(
+                c["customer_address"],
+                left_on=["c_current_addr_sk", "s_zip"],
+                right_on=["ca_address_sk", "ca_zip"],
+            )
+            .filter(col("c_birth_country") != col("ca_country").str.to_uppercase())
+            .group_by(keys)
+            .agg(sql_sum(col("ss_net_paid")).alias("netpaid"))
+            .collect()
+        )
+        # 5% of the mean over every row of ssales; with no rows the mean
+        # is null and the comparison keeps nothing.
+        average = ssales.select(col("netpaid").cast(pl.Float64).mean()).item()
+        above = pl.lit(False)
+        if average is not None:
+            above = col("paid").cast(pl.Float64) > average * 0.05
+        out = (
+            ssales.lazy()
+            .filter(col("i_color") == "peach")
+            .group_by("c_last_name", "c_first_name", "s_store_name")
+            .agg(sql_sum(col("netpaid")).alias("paid"))
+            .filter(above)
+            .sort(["c_last_name", "c_first_name", "s_store_name"], nulls_last=True)
+        )
+    elif q == "q30":
+        shown = [
+            "c_customer_id", "c_salutation", "c_first_name", "c_last_name",
+            "c_preferred_cust_flag", "c_birth_day", "c_birth_month",
+            "c_birth_year", "c_birth_country", "c_login", "c_email_address",
+            "c_last_review_date_sk", "ctr_total_return",
+        ]  # fmt: skip
+        out = (
+            returners(
+                "web_returns", "wr_returned_date_sk", "wr_returning_customer_sk",
+                "wr_returning_addr_sk", "wr_return_amt", 2002,
+            )  # fmt: skip
+            .select(shown)
+            .sort(shown, nulls_last=False)
+            .head(100)
+        )
+    elif q == "q39":
+        quantity = col("inv_quantity_on_hand").cast(pl.Float64)
+        stock = (
+            c["inventory"]
+            .join(c["item"].select("i_item_sk"), left_on="inv_item_sk", right_on="i_item_sk")
+            .join(
+                c["warehouse"].select("w_warehouse_sk", "w_warehouse_name"),
+                left_on="inv_warehouse_sk",
+                right_on="w_warehouse_sk",
+            )
+            .join(
+                c["date_dim"].filter(col("d_year") == 2001).select("d_date_sk", "d_moy"),
+                left_on="inv_date_sk",
+                right_on="d_date_sk",
+            )
+            .group_by("w_warehouse_name", "inv_warehouse_sk", "inv_item_sk", "d_moy")
+            .agg(quantity.std().alias("stdev"), quantity.mean().alias("mean"))
+            .filter((col("mean") != 0) & (col("stdev") / col("mean") > 1))
+            .with_columns((col("stdev") / col("mean")).alias("cov"))
+        )
+        january = stock.filter(col("d_moy") == 1).select(
+            col("inv_warehouse_sk").alias("wsk1"),
+            col("inv_item_sk").alias("isk1"),
+            col("d_moy").alias("dmoy1"),
+            col("mean").alias("mean1"),
+            col("cov").alias("cov1"),
+        )
+        february = stock.filter(col("d_moy") == 2).select(
+            col("inv_warehouse_sk").alias("wsk2"),
+            col("inv_item_sk").alias("isk2"),
+            col("d_moy").alias("dmoy2"),
+            col("mean").alias("mean2"),
+            col("cov").alias("cov2"),
+        )
+        out = (
+            january.join(february, left_on=["isk1", "wsk1"], right_on=["isk2", "wsk2"])
+            .select(
+                "wsk1", "isk1", "dmoy1", "mean1", "cov1",
+                col("wsk1").alias("wsk2"), col("isk1").alias("isk2"),
+                "dmoy2", "mean2", "cov2",
+            )  # fmt: skip
+            .sort(
+                ["wsk1", "isk1", "dmoy1", "mean1", "cov1", "dmoy2", "mean2", "cov2"],
+                nulls_last=False,
+            )
+        )
+    elif q == "q59":
+        days = [
+            "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+            "Saturday",
+        ]  # fmt: skip
+        short = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+        sums = [
+            sql_sum(pl.when(col("d_day_name") == day).then(col("ss_sales_price")))
+            .alias(name + "_sales")
+            for day, name in zip(days, short)
+        ]
+        weekly = (
+            c["store_sales"]
+            .join(
+                c["date_dim"].select("d_date_sk", "d_week_seq", "d_day_name"),
+                left_on="ss_sold_date_sk",
+                right_on="d_date_sk",
+            )
+            .group_by("d_week_seq", "ss_store_sk")
+            .agg(sums)
+            .join(
+                c["store"].select("s_store_sk", "s_store_name", "s_store_id"),
+                left_on="ss_store_sk",
+                right_on="s_store_sk",
+            )
+        )
+        weeks = c["date_dim"].select(col("d_week_seq").alias("week"), "d_month_seq")
+        first = weekly.join(
+            weeks.filter(col("d_month_seq").is_between(1212, 1223)),
+            left_on="d_week_seq",
+            right_on="week",
+        ).select(
+            col("s_store_name").alias("s_store_name1"),
+            col("d_week_seq").alias("d_week_seq1"),
+            col("s_store_id").alias("s_store_id1"),
+            (col("d_week_seq") + 52).alias("next_week"),
+            *[col(name + "_sales").alias(name + "_sales1") for name in short],
+        )
+        second = weekly.join(
+            weeks.filter(col("d_month_seq").is_between(1224, 1235)),
+            left_on="d_week_seq",
+            right_on="week",
+        ).select(
+            col("d_week_seq").alias("d_week_seq2"),
+            col("s_store_id").alias("s_store_id2"),
+            *[col(name + "_sales").alias(name + "_sales2") for name in short],
+        )
+        out = (
+            first.join(
+                second,
+                left_on=["s_store_id1", "next_week"],
+                right_on=["s_store_id2", "d_week_seq2"],
+            )
+            .select(
+                "s_store_name1",
+                "s_store_id1",
+                "d_week_seq1",
+                *[
+                    (
+                        col(name + "_sales1").cast(pl.Float64)
+                        / col(name + "_sales2").cast(pl.Float64)
+                    ).alias(name + "_sales_ratio")
+                    for name in short
+                ],
+            )
+            .sort(["s_store_name1", "s_store_id1", "d_week_seq1"], nulls_last=False)
+            .head(100)
+        )
+    elif q == "q81":
+        shown = [
+            "c_customer_id", "c_salutation", "c_first_name", "c_last_name",
+            "ca_street_number", "ca_street_name", "ca_street_type",
+            "ca_suite_number", "ca_city", "ca_county", "ca_state", "ca_zip",
+            "ca_country", "ca_gmt_offset", "ca_location_type", "ctr_total_return",
+        ]  # fmt: skip
+        out = (
+            returners(
+                "catalog_returns", "cr_returned_date_sk",
+                "cr_returning_customer_sk", "cr_returning_addr_sk",
+                "cr_return_amt_inc_tax", 2000,
+            )  # fmt: skip
+            .select(shown)
+            .sort(shown, nulls_last=True)
+            .head(100)
+        )
+    elif q == "q95":
+        split = (
+            c["web_sales"]
+            .group_by("ws_order_number")
+            .agg(
+                col("ws_warehouse_sk").min().alias("first_warehouse"),
+                col("ws_warehouse_sk").max().alias("last_warehouse"),
+            )
+            .filter(col("first_warehouse") != col("last_warehouse"))
+            .select(col("ws_order_number").alias("split_order"))
+        )
+        out = (
+            c["web_sales"]
+            .join(
+                dates(col("d_date").is_between(d(1999, 2, 1), d(1999, 4, 2)), "d_sk"),
+                left_on="ws_ship_date_sk",
+                right_on="d_sk",
+            )
+            .join(
+                c["customer_address"].filter(col("ca_state") == "IL"),
+                left_on="ws_ship_addr_sk",
+                right_on="ca_address_sk",
+            )
+            .join(
+                c["web_site"].filter(col("web_company_name") == "pri"),
+                left_on="ws_web_site_sk",
+                right_on="web_site_sk",
+            )
+            .join(split, left_on="ws_order_number", right_on="split_order", how="semi")
+            .join(
+                c["web_returns"].select("wr_order_number"),
+                left_on="ws_order_number",
+                right_on="wr_order_number",
+                how="semi",
+            )
+            .select(
+                col("ws_order_number").n_unique().alias("order count"),
+                sql_sum(col("ws_ext_ship_cost")).alias("total shipping cost"),
+                sql_sum(col("ws_net_profit")).alias("total net profit"),
+            )
+        )
     else:
         raise NotImplementedError("unsupported: not translated")
     return out.collect()

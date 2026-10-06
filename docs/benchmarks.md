@@ -54,7 +54,7 @@ follow on every change; the full tier is what a report cites.
 | `h2o_groupby` | development | [db-benchmark](https://github.com/duckdblabs/db-benchmark) group-by | 10 | cardinality parameter k=100, 10 and 2; 5% nulls; sorted |
 | `h2o_join` | development | db-benchmark join | 5 | none; 5% nulls |
 | `pdsh` | development (held out until 2026-10-05) | [PDS-H](https://github.com/pola-rs/polars-benchmark), TPC-H derived | 22 | money columns as DOUBLE (`base`) or DECIMAL(15,2) (`decimal`) |
-| `tpcds` | held out | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 48 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
+| `tpcds` | held out | TPC-DS, from DuckDB's `tpcds` extension (`dsdgen`, `tpcds_queries()`) | 99, of which 55 are translated | money columns as DOUBLE (`base`) or as declared decimals (`decimal`) |
 | `clickbench` | held out | [ClickBench](https://github.com/ClickHouse/ClickBench) `hits` | 43 | — |
 
 The H2O data follows db-benchmark's R generators with seeded Polars sampling,
@@ -199,6 +199,8 @@ SQL text before any query in it is timed:
 3. The 7 with several derived tables or subqueries under the same
    exclusions (q6, q9, q28, q61, q65, q88, q90).
 4. The 5 that add only EXISTS or NOT EXISTS (q10, q16, q35, q69, q94).
+5. The 7 whose WITH clause defines one table, under the same exclusions
+   (q1, q24, q30, q39, q59, q81, q95).
 
 Add further batches by a rule of the same kind, never by which queries run
 well. A translation uses the API as a user would; where the

@@ -8,7 +8,8 @@ timings: the 23 single-block queries (one SELECT, no window, rollup or set
 operation), then the 13 with exactly one more SELECT (a derived table or
 a subquery) and still no window, rollup, set operation, EXISTS or WITH,
 then the 7 with several such subqueries under the same exclusions, then
-the 5 that add only EXISTS or NOT EXISTS.
+the 5 that add only EXISTS or NOT EXISTS, then the 7 whose WITH clause
+defines one table, under the same exclusions.
 Any other query reports `unsupported: not translated`, so it is counted in
 every report instead of dropped. The same queries run on both data variants
 (bench_suites.py): money columns as Float64, or as declared decimals, where
@@ -578,6 +579,80 @@ def split_shipments(
                 .sum(min_count=1)
                 .alias("total net profit"),
             ]
+        )
+    )
+
+
+def returners(
+    t: Dict[String, DataFrame],
+    returns: String,
+    date_key: String,
+    customer_key: String,
+    address_key: String,
+    amount: String,
+    year: Int,
+) raises -> LazyFrame:
+    """Customers whose returns in a year, by their address's state, total
+    more than 1.2 times the average such total in that state (q30, q81).
+    The SQL compares each total with a correlated average; here the
+    averages by state are one group-by joined back."""
+    var totals = (
+        t[returns]
+        .lazy()
+        .join(
+            dates(t, col("d_year") == lit(Int64(year)), "d_sk"),
+            left_on=[date_key],
+            right_on=["d_sk"],
+        )
+        .join(
+            t["customer_address"]
+            .lazy()
+            .select_exprs(
+                [
+                    col("ca_address_sk").alias("return_address"),
+                    col("ca_state").alias("ctr_state"),
+                ]
+            ),
+            left_on=[address_key],
+            right_on=["return_address"],
+        )
+        .group_by([customer_key, "ctr_state"])
+        .agg([col(amount).sum(min_count=1).alias("ctr_total_return")])
+        .select_exprs(
+            [
+                col(customer_key).alias("ctr_customer_sk"),
+                col("ctr_state"),
+                col("ctr_total_return"),
+            ]
+        )
+    )
+    var typical = (
+        totals.group_by(["ctr_state"])
+        .agg(
+            [
+                col("ctr_total_return")
+                .cast(DataType.FLOAT64)
+                .mean()
+                .alias("typical")
+            ]
+        )
+        .select_exprs([col("ctr_state").alias("typical_state"), col("typical")])
+    )
+    return (
+        totals.join(typical, left_on=["ctr_state"], right_on=["typical_state"])
+        .filter(
+            col("ctr_total_return").cast(DataType.FLOAT64)
+            > lit(1.2) * col("typical")
+        )
+        .join(
+            t["customer"].lazy(),
+            left_on=["ctr_customer_sk"],
+            right_on=["c_customer_sk"],
+        )
+        .join(
+            t["customer_address"].lazy().filter(col("ca_state") == "GA"),
+            left_on=["c_current_addr_sk"],
+            right_on=["ca_address_sk"],
         )
     )
 
@@ -2054,9 +2129,8 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
         var prices: List[Int] = [8, 90, 142, 135, 122, 154]
         var coupons: List[Int] = [459, 2323, 12214, 6071, 836, 7326]
         var costs: List[Int] = [57, 31, 79, 38, 17, 7]
-        # LazyFrame has no cross join yet, so each band is collected and
-        # the one-row results are joined eagerly.
-        var row = Optional[DataFrame]()
+        # The six one-row results sit side by side through a cross join.
+        var row = Optional[LazyFrame]()
         for i in range(6):
             var tag = "B" + String(i + 1)
             var band = (
@@ -2097,11 +2171,10 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
                     ]
                 )
             )
-            var one = band.collect()
             row = Optional(
-                row.value().join(one, how="cross") if row else one.copy()
+                row.value().join(band, how="cross") if row else band^
             )
-        return row.value().lazy()
+        return row.take()
     if q == "q61":
         # November 1998 jewelry sales in one time zone, and the part of
         # them sold on a mail, email or TV promotion.
@@ -2449,6 +2522,438 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
             t["web_site"].lazy().filter(col("web_company_name") == "pri"),
             "ws_web_site_sk",
             "web_site_sk",
+        )
+    if q == "q1":
+        var totals = (
+            t["store_returns"]
+            .lazy()
+            .join(
+                dates(t, col("d_year") == 2000, "d_sk"),
+                left_on=["sr_returned_date_sk"],
+                right_on=["d_sk"],
+            )
+            .group_by(["sr_customer_sk", "sr_store_sk"])
+            .agg([col("sr_return_amt").sum(min_count=1).alias("total")])
+        )
+        var typical = (
+            totals.group_by(["sr_store_sk"])
+            .agg([col("total").cast(DataType.FLOAT64).mean().alias("typical")])
+            .select_exprs(
+                [col("sr_store_sk").alias("typical_store"), col("typical")]
+            )
+        )
+        var found = (
+            totals.join(
+                typical, left_on=["sr_store_sk"], right_on=["typical_store"]
+            )
+            .filter(
+                col("total").cast(DataType.FLOAT64) > lit(1.2) * col("typical")
+            )
+            .join(
+                t["store"].lazy().filter(col("s_state") == "TN"),
+                left_on=["sr_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                t["customer"].lazy(),
+                left_on=["sr_customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .select(["c_customer_id"])
+        )
+        return ascending(found, ["c_customer_id"]).head(100)
+    if q == "q24":
+        # Returned store sales by customer, store and item attributes, then
+        # peach items whose total passes 5% of the average over all. The
+        # grouped table is collected once and read twice.
+        var keys: List[String] = [
+            "c_last_name",
+            "c_first_name",
+            "s_store_name",
+            "ca_state",
+            "s_state",
+            "i_color",
+            "i_current_price",
+            "i_manager_id",
+            "i_units",
+            "i_size",
+        ]
+        var ssales = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["store_returns"]
+                .lazy()
+                .select(["sr_ticket_number", "sr_item_sk"]),
+                left_on=["ss_ticket_number", "ss_item_sk"],
+                right_on=["sr_ticket_number", "sr_item_sk"],
+            )
+            .join(
+                t["store"].lazy().filter(col("s_market_id") == 8),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                t["item"].lazy(), left_on=["ss_item_sk"], right_on=["i_item_sk"]
+            )
+            .join(
+                t["customer"].lazy(),
+                left_on=["ss_customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .join(
+                t["customer_address"].lazy(),
+                left_on=["c_current_addr_sk", "s_zip"],
+                right_on=["ca_address_sk", "ca_zip"],
+            )
+            .filter(
+                col("c_birth_country") != col("ca_country").str().to_uppercase()
+            )
+            .group_by(keys)
+            .agg([col("ss_net_paid").sum(min_count=1).alias("netpaid")])
+            .collect()
+        )
+        # The cutoff is 5% of the mean over every row of ssales; with no
+        # rows the mean is null and the comparison keeps nothing.
+        var average = ssales.select(
+            col("netpaid").cast(DataType.FLOAT64).mean()
+        ).item()
+        var above = lit(False)
+        if not average.is_null():
+            above = col("paid").cast(DataType.FLOAT64) > lit(
+                average.float64() * 0.05
+            )
+        return (
+            ssales.lazy()
+            .filter(col("i_color") == "peach")
+            .group_by(["c_last_name", "c_first_name", "s_store_name"])
+            .agg([col("netpaid").sum(min_count=1).alias("paid")])
+            .filter(above)
+            .sort(["c_last_name", "c_first_name", "s_store_name"])
+        )
+    if q == "q30":
+        var found = returners(
+            t,
+            "web_returns",
+            "wr_returned_date_sk",
+            "wr_returning_customer_sk",
+            "wr_returning_addr_sk",
+            "wr_return_amt",
+            2002,
+        )
+        var shown: List[String] = [
+            "c_customer_id",
+            "c_salutation",
+            "c_first_name",
+            "c_last_name",
+            "c_preferred_cust_flag",
+            "c_birth_day",
+            "c_birth_month",
+            "c_birth_year",
+            "c_birth_country",
+            "c_login",
+            "c_email_address",
+            "c_last_review_date_sk",
+            "ctr_total_return",
+        ]
+        return ascending(found.select(shown), shown, nulls_first=True).head(100)
+    if q == "q39":
+        # Warehouse-item months of 2001 whose stock varies more than its
+        # mean, January beside February.
+        var quantity = col("inv_quantity_on_hand").cast(DataType.FLOAT64)
+        var stock = (
+            t["inventory"]
+            .lazy()
+            .join(
+                t["item"].lazy().select(["i_item_sk"]),
+                left_on=["inv_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .join(
+                t["warehouse"]
+                .lazy()
+                .select(["w_warehouse_sk", "w_warehouse_name"]),
+                left_on=["inv_warehouse_sk"],
+                right_on=["w_warehouse_sk"],
+            )
+            .join(
+                t["date_dim"]
+                .lazy()
+                .filter(col("d_year") == 2001)
+                .select(["d_date_sk", "d_moy"]),
+                left_on=["inv_date_sk"],
+                right_on=["d_date_sk"],
+            )
+            .group_by(
+                ["w_warehouse_name", "inv_warehouse_sk", "inv_item_sk", "d_moy"]
+            )
+            .agg([quantity.std().alias("stdev"), quantity.mean().alias("mean")])
+            .filter(
+                (col("mean") != lit(0.0))
+                & (col("stdev") / col("mean") > lit(1.0))
+            )
+            .with_columns([(col("stdev") / col("mean")).alias("cov")])
+        )
+        var january = stock.filter(col("d_moy") == 1).select_exprs(
+            [
+                col("inv_warehouse_sk").alias("wsk1"),
+                col("inv_item_sk").alias("isk1"),
+                col("d_moy").alias("dmoy1"),
+                col("mean").alias("mean1"),
+                col("cov").alias("cov1"),
+            ]
+        )
+        var february = stock.filter(col("d_moy") == 2).select_exprs(
+            [
+                col("inv_warehouse_sk").alias("wsk2"),
+                col("inv_item_sk").alias("isk2"),
+                col("d_moy").alias("dmoy2"),
+                col("mean").alias("mean2"),
+                col("cov").alias("cov2"),
+            ]
+        )
+        var paired = january.join(
+            february, left_on=["isk1", "wsk1"], right_on=["isk2", "wsk2"]
+        ).select_exprs(
+            [
+                col("wsk1"),
+                col("isk1"),
+                col("dmoy1"),
+                col("mean1"),
+                col("cov1"),
+                col("wsk1").alias("wsk2"),
+                col("isk1").alias("isk2"),
+                col("dmoy2"),
+                col("mean2"),
+                col("cov2"),
+            ]
+        )
+        return ascending(
+            paired,
+            [
+                "wsk1",
+                "isk1",
+                "dmoy1",
+                "mean1",
+                "cov1",
+                "dmoy2",
+                "mean2",
+                "cov2",
+            ],
+            nulls_first=True,
+        )
+    if q == "q59":
+        var days: List[String] = [
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+        ]
+        var short: List[String] = [
+            "sun",
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri",
+            "sat",
+        ]
+        var sums = List[Expr]()
+        for i in range(7):
+            sums.append(
+                when(col("d_day_name") == days[i])
+                .then(col("ss_sales_price"))
+                .end()
+                .sum(min_count=1)
+                .alias(short[i] + "_sales")
+            )
+        var weekly = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["date_dim"]
+                .lazy()
+                .select(["d_date_sk", "d_week_seq", "d_day_name"]),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_date_sk"],
+            )
+            .group_by(["d_week_seq", "ss_store_sk"])
+            .agg(sums)
+            .join(
+                t["store"]
+                .lazy()
+                .select(["s_store_sk", "s_store_name", "s_store_id"]),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+        )
+        # As the SQL has it, each week's row joins every one of its days.
+        var weeks = (
+            t["date_dim"]
+            .lazy()
+            .select_exprs([col("d_week_seq").alias("week"), col("d_month_seq")])
+        )
+        var first = weekly.join(
+            weeks.filter(
+                col("d_month_seq").is_between(
+                    lit(Int64(1212)), lit(Int64(1223))
+                )
+            ),
+            left_on=["d_week_seq"],
+            right_on=["week"],
+        ).select_exprs(
+            [
+                col("s_store_name").alias("s_store_name1"),
+                col("d_week_seq").alias("d_week_seq1"),
+                col("s_store_id").alias("s_store_id1"),
+                (col("d_week_seq") + lit(Int64(52))).alias("next_week"),
+                col("sun_sales").alias("sun_sales1"),
+                col("mon_sales").alias("mon_sales1"),
+                col("tue_sales").alias("tue_sales1"),
+                col("wed_sales").alias("wed_sales1"),
+                col("thu_sales").alias("thu_sales1"),
+                col("fri_sales").alias("fri_sales1"),
+                col("sat_sales").alias("sat_sales1"),
+            ]
+        )
+        var second = weekly.join(
+            weeks.filter(
+                col("d_month_seq").is_between(
+                    lit(Int64(1224)), lit(Int64(1235))
+                )
+            ),
+            left_on=["d_week_seq"],
+            right_on=["week"],
+        ).select_exprs(
+            [
+                col("d_week_seq").alias("d_week_seq2"),
+                col("s_store_id").alias("s_store_id2"),
+                col("sun_sales").alias("sun_sales2"),
+                col("mon_sales").alias("mon_sales2"),
+                col("tue_sales").alias("tue_sales2"),
+                col("wed_sales").alias("wed_sales2"),
+                col("thu_sales").alias("thu_sales2"),
+                col("fri_sales").alias("fri_sales2"),
+                col("sat_sales").alias("sat_sales2"),
+            ]
+        )
+        var ratios = List[Expr]()
+        ratios.append(col("s_store_name1"))
+        ratios.append(col("s_store_id1"))
+        ratios.append(col("d_week_seq1"))
+        for i in range(7):
+            ratios.append(
+                (
+                    col(short[i] + "_sales1").cast(DataType.FLOAT64)
+                    / col(short[i] + "_sales2").cast(DataType.FLOAT64)
+                ).alias(short[i] + "_sales_ratio")
+            )
+        var paired = first.join(
+            second,
+            left_on=["s_store_id1", "next_week"],
+            right_on=["s_store_id2", "d_week_seq2"],
+        ).select_exprs(ratios)
+        return ascending(
+            paired,
+            ["s_store_name1", "s_store_id1", "d_week_seq1"],
+            nulls_first=True,
+        ).head(100)
+    if q == "q81":
+        var found = returners(
+            t,
+            "catalog_returns",
+            "cr_returned_date_sk",
+            "cr_returning_customer_sk",
+            "cr_returning_addr_sk",
+            "cr_return_amt_inc_tax",
+            2000,
+        )
+        var shown: List[String] = [
+            "c_customer_id",
+            "c_salutation",
+            "c_first_name",
+            "c_last_name",
+            "ca_street_number",
+            "ca_street_name",
+            "ca_street_type",
+            "ca_suite_number",
+            "ca_city",
+            "ca_county",
+            "ca_state",
+            "ca_zip",
+            "ca_country",
+            "ca_gmt_offset",
+            "ca_location_type",
+            "ctr_total_return",
+        ]
+        return ascending(found.select(shown), shown).head(100)
+    if q == "q95":
+        # Orders shipped from two warehouses that were also returned: the
+        # SQL's second IN joins returns to those orders, so it is the
+        # returned orders among the split ones.
+        var split = (
+            t["web_sales"]
+            .lazy()
+            .group_by(["ws_order_number"])
+            .agg(
+                [
+                    col("ws_warehouse_sk").min().alias("first_warehouse"),
+                    col("ws_warehouse_sk").max().alias("last_warehouse"),
+                ]
+            )
+            .filter(col("first_warehouse") != col("last_warehouse"))
+            .select_exprs([col("ws_order_number").alias("split_order")])
+        )
+        return (
+            t["web_sales"]
+            .lazy()
+            .join(
+                dates(
+                    t,
+                    col("d_date").is_between(
+                        date_lit("1999-02-01"), date_lit("1999-04-02")
+                    ),
+                    "d_sk",
+                ),
+                left_on=["ws_ship_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["customer_address"].lazy().filter(col("ca_state") == "IL"),
+                left_on=["ws_ship_addr_sk"],
+                right_on=["ca_address_sk"],
+            )
+            .join(
+                t["web_site"].lazy().filter(col("web_company_name") == "pri"),
+                left_on=["ws_web_site_sk"],
+                right_on=["web_site_sk"],
+            )
+            .join(
+                split,
+                left_on=["ws_order_number"],
+                right_on=["split_order"],
+                how="semi",
+            )
+            .join(
+                t["web_returns"].lazy().select(["wr_order_number"]),
+                left_on=["ws_order_number"],
+                right_on=["wr_order_number"],
+                how="semi",
+            )
+            .select_exprs(
+                [
+                    col("ws_order_number").n_unique().alias("order count"),
+                    col("ws_ext_ship_cost")
+                    .sum(min_count=1)
+                    .alias("total shipping cost"),
+                    col("ws_net_profit")
+                    .sum(min_count=1)
+                    .alias("total net profit"),
+                ]
+            )
         )
     raise unsupported("not translated")
 
