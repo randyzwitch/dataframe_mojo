@@ -423,6 +423,12 @@ struct _StreamJob(Job):
                     coalesce=node.coalesce,
                     prepared=self.indexes[][node.offset],
                 )
+            elif node.kind == JOIN and node.how == JOIN_CROSS:
+                self.frame = self.frame.join(
+                    self.joins[][node.offset],
+                    how=node.text,
+                    suffix=node.names2[0],
+                )
             elif node.kind == JOIN:
                 self.frame = self.frame.join(
                     self.joins[][node.offset],
@@ -671,6 +677,21 @@ struct LazyFrame(Copyable):
         coalesce: Bool = True,
     ) -> Self:
         return self.join(other, [on], how, suffix, coalesce)
+
+    def join(
+        self, other: Self, *, how: String, suffix: String = "_right"
+    ) raises -> Self:
+        """Cross join: every row of this plan paired with every row of
+        `other`, left-major; see DataFrame.join(right, how="cross")."""
+        if join_code(how) != JOIN_CROSS:
+            raise Error("Join how='" + how + "' requires key columns")
+        return self.join(
+            other,
+            left_on=List[String](),
+            right_on=List[String](),
+            how=how,
+            suffix=suffix,
+        )
 
     def collect(
         self,
@@ -1353,6 +1374,8 @@ struct LazyFrame(Copyable):
             ).agg(node.exprs)
         if node.kind == JOIN:
             var right = self._execute(node.right, empty, streaming, batch_size)
+            if node.how == JOIN_CROSS:
+                return input.join(right, how=node.text, suffix=node.names2[0])
             return input.join(
                 right,
                 left_on=node.names,

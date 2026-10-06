@@ -13,6 +13,11 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- `LazyFrame.join(other, how="cross")`: a cross join in a lazy plan, as
+  the eager `DataFrame.join(right, how="cross")`. Projection pushdown
+  reads only the columns used above it. TPC-DS q28 places six one-row
+  summaries side by side this way (#223).
+
 - Categorical columns (dictionary-encoded strings): `cast("categorical")`
   from String and back, stored as UInt32 codes with the dictionary of
   distinct values carried by the dtype, as Arrow's
