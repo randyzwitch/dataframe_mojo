@@ -90,6 +90,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - Native sums/means and dense integer/categorical key encoding cache
   validity bitmap pointers and slice offsets outside their row loops,
   reducing repeated metadata reads for nullable inputs.
+- Numeric casts run as one typed loop when no value can fail to fit (Bool
+  to any number, an integer to a wider type or to a float, Float32 to
+  Float64) or when none does (an integer to a narrower or differently
+  signed integer type). The general path, which reads each row into a
+  128-bit intermediate inside a try block, remains for floats to integers
+  and for columns holding a value that does not fit. Over 10M rows: Bool
+  to Int64 196 → 8 ms, Int32 to Int64 196 → 4.5 ms, Int64 to Float64 137
+  → 5 ms, Int32 to Int16 192 → 3 ms.
+
 - A lazy chain of inner joins starts from the input that saves the most
   hashing. The chain streams its first input through hash tables built on
   the others, so `small.join(large)` hashed the large table. When the
