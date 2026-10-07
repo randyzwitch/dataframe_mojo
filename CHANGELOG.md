@@ -95,6 +95,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A streamed top-k (`sort(...).head(k)` over a scan with row-local steps)
+  bounds its first sort key once it holds k rows, as DuckDB's Top-N
+  dynamic filter does: later batches drop rows that cannot beat the k-th
+  key before the first filter reads them, and the filter reads only its
+  own columns at the rows the bound keeps. Ties and nulls are always
+  kept. ClickBench q26 40 -> 7.5 ms, q24 19 -> 6 ms, q23 105 -> 73 ms.
 - CI no longer runs the micro-benchmark smoke step (`bench-smoke`, a
   compile-and-run of `benchmarks/bench_suite.mojo` on tiny inputs) or the
   package smoke test on every pull request: the suite answer checks cover
