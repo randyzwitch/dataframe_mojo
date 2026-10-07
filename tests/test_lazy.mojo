@@ -140,6 +140,63 @@ def test_predicate_pushdown_rules() raises:
     assert_true(
         sorted.collect().equals(df.sort(["w"]).filter(col("v") > lit(Int64(2))))
     )
+    # Below a group_by when it reads only the keys: every row of a group
+    # shares them, so the same groups survive with the same values and
+    # first-occurrence order. A filter on an aggregate stays above, as
+    # does a key filter that is not row-local.
+    var keyed = (
+        df.lazy()
+        .group_by(["k"], maintain_order=True)
+        .agg([col("v").sum().alias("s"), col("w").mean().alias("m")])
+        .filter(
+            (col("s") > lit(Int64(0)))
+            & (col("m") > lit(0.0))
+            & col("k").ne(lit(String("b")))
+        )
+    )
+    var keyed_plan = keyed.explain(streaming=False)
+    assert_true(keyed_plan.startswith("FILTER\n  GROUP_BY"), keyed_plan)
+    assert_true("GROUP_BY k AGG s, m\n    FILTER\n" in keyed_plan, keyed_plan)
+    same(
+        keyed,
+        df.group_by(["k"], maintain_order=True)
+        .agg([col("v").sum().alias("s"), col("w").mean().alias("m")])
+        .filter(
+            (col("s") > lit(Int64(0)))
+            & (col("m") > lit(0.0))
+            & col("k").ne(lit(String("b")))
+        ),
+    )
+    var nulls_first = (
+        df.lazy()
+        .group_by(["v"], maintain_order=True)
+        .agg([col("w").sum().alias("s")])
+        .filter(col("v").is_null() | (col("v") > lit(Int64(3))))
+    )
+    assert_true(
+        nulls_first.explain(streaming=False).startswith("GROUP_BY"),
+    )
+    same(
+        nulls_first,
+        df.group_by(["v"], maintain_order=True)
+        .agg([col("w").sum().alias("s")])
+        .filter(col("v").is_null() | (col("v") > lit(Int64(3)))),
+    )
+    var not_row_local = (
+        df.lazy()
+        .group_by(["v"], maintain_order=True)
+        .agg([col("w").sum().alias("s")])
+        .filter(col("v") >= col("v").max())
+    )
+    assert_true(
+        not_row_local.explain(streaming=False).startswith("FILTER\n  GROUP_BY")
+    )
+    same(
+        not_row_local,
+        df.group_by(["v"], maintain_order=True)
+        .agg([col("w").sum().alias("s")])
+        .filter(col("v") >= col("v").max()),
+    )
     var whole_column = df.lazy().sort(["w"]).filter(col("w") > col("w").mean())
     assert_true(
         whole_column.explain(streaming=False).startswith("FILTER\n  SORT")

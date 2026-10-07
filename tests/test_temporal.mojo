@@ -241,6 +241,39 @@ def test_dt_fields_and_transforms() raises:
     assert_equal(one(t, col("t").dt().date())[0], "2024-02-29")
     assert_equal(one(t, col("t").dt().time())[0], "01:30:15")
     assert_equal(one(t, col("t").dt().truncate("1h"))[2], "1970-01-01 01:00:00")
+    # Time-of-day fields are taken from the ticks within the day, before
+    # 1970 as well, in every unit and for a time column.
+    var before = DataFrame(
+        [
+            Series(
+                "t", Column[Int64]([Int64(-500), Int64(90_061_250)])
+            ).with_dtype(DataType.datetime("ms")),
+            Series(
+                "n", Column[Int64]([Int64(-1), Int64(3_723_000_000_007)])
+            ).with_dtype(DataType.datetime("ns")),
+        ]
+    )
+    assert_equal(one(before, col("t").dt().hour()), ["23", "1"])
+    assert_equal(one(before, col("t").dt().minute()), ["59", "1"])
+    assert_equal(one(before, col("t").dt().second()), ["59", "1"])
+    assert_equal(
+        one(before, col("t").dt().nanosecond()), ["500000000", "250000000"]
+    )
+    assert_equal(one(before, col("n").dt().hour()), ["23", "1"])
+    assert_equal(one(before, col("n").dt().minute()), ["59", "2"])
+    assert_equal(one(before, col("n").dt().second()), ["59", "3"])
+    assert_equal(one(before, col("n").dt().nanosecond()), ["999999999", "7"])
+    var clock = DataFrame(
+        [
+            Series("c", Column[Int64]([Int64(45_296_500_000_000)])).with_dtype(
+                DataType.TIME
+            )
+        ]
+    )
+    assert_equal(one(clock, col("c").dt().hour()), ["12"])
+    assert_equal(one(clock, col("c").dt().minute()), ["34"])
+    assert_equal(one(clock, col("c").dt().second()), ["56"])
+    assert_equal(one(clock, col("c").dt().nanosecond()), ["500000000"])
     with assert_raises(contains="date values have no time-of-day fields"):
         _ = df.select(col("d").dt().hour())
     with assert_raises(contains="finer than date"):

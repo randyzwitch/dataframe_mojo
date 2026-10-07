@@ -101,6 +101,23 @@ breaking changes can happen in any release and are listed under **Breaking**.
   the same kernels on the real queries, and the release workflow still
   precompiles the package and runs an example against it. About seven
   minutes off the Linux job.
+- Partitioned group-by over composite keys: each key column is compared
+  through a typed view resolved once per bucket (raw payload, string
+  offsets or binary views, and validity addresses) instead of a dtype
+  dispatch per key per row. ClickBench q16/q17 (UserID, SearchPhrase over
+  10M rows) 178 -> 116 ms, q13/q14 10% faster (#486).
+- A filter that reads only the keys of a `group_by` moves below it, and
+  a row-local filter trades places with filters stuck above it (an AND
+  split into parts) so it can move further. TPC-DS q39 filters on the
+  month key after grouping 2.3M rows; the filter now reaches the date
+  join, 450 -> 107 ms.
+- Time-of-day fields (`dt.hour`, `minute`, `second`, `nanosecond`) are
+  computed from the ticks within the day without a calendar split.
+- A lazy plan whose row-local steps keep every row of an in-memory frame
+  (`with_columns`, `select`, `drop` with no filter) under an eager step
+  runs them eagerly, sharing the untouched columns, instead of streaming
+  the frame into batches and copying the results back together.
+  ClickBench q18 417 -> 250 ms with the changes above.
 - Row-wise expressions over a String column read from Parquet as a
   dictionary (`d_day_name`, `cd_marital_status` and the like) now
   evaluate on the dictionary codes: the expression runs once per

@@ -137,6 +137,29 @@ def test_frame_scan_under_an_eager_step_is_not_streamed() raises:
     assert_true(sorted[0].equals(frame.sort("v")))
     for r in range(report.height()):
         assert_equal(report.item(r, "executor").string(), "eager")
+    # Row-local steps that keep every row (with_columns) under the eager
+    # step run eagerly too; a filter still streams, since it keeps few.
+    var widened = (
+        frame.lazy()
+        .with_columns([(col("v") * lit(Int64(2))).alias("w")])
+        .group_by(["k"])
+        .agg([col("w").sum().alias("s")])
+    )
+    report = widened.profile()[1].copy()
+    for r in range(report.height()):
+        assert_equal(report.item(r, "executor").string(), "eager")
+    assert_equal(rows_of(report, "WITH_COLUMNS")[2], 200_000)
+    var narrowed = (
+        frame.lazy()
+        .filter(col("v") == lit(Int64(3)))
+        .group_by(["k"])
+        .agg([col("v").sum().alias("s")])
+    )
+    report = narrowed.profile()[1].copy()
+    assert_equal(rows_of(report, "FILTER")[0], 200_000)
+    for r in range(report.height()):
+        if report.item(r, "operator").string().startswith("FILTER"):
+            assert_equal(report.item(r, "executor").string(), "streaming")
     # A streamed reduction over the frame still streams.
     var summed = frame.lazy().select_exprs([col("v").sum().alias("s")])
     report = summed.profile()[1].copy()
