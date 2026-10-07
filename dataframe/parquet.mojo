@@ -60,6 +60,7 @@ from .arrow import (
     _arrow_import_workers,
     export_arrow,
     _release_imported,
+    _set_metadata,
 )
 from .expr import (
     AND,
@@ -78,6 +79,7 @@ from .expr import (
     col,
 )
 from .frame import DataFrame, concat
+from .geospatial_metadata import geoparquet_metadata
 from .categorical import decode_contiguous
 from .column import Column
 from .dtype import DataType
@@ -161,6 +163,33 @@ def write_parquet(
     at most row_group_size rows. Arrow schema metadata preserves logical
     types, including duration units and nested fields. Requires libdfparquet.
     """
+    _write_parquet(frame, path, compression, row_group_size, "")
+
+
+def write_geoparquet(
+    frame: DataFrame,
+    path: String,
+    *,
+    primary_column: String = "",
+    compression: String = "zstd",
+    row_group_size: Int = 1_000_000,
+) raises:
+    """Write GeoParquet 1.1 WKB with CRS and edge metadata.
+
+    Defaults to the first geometry column as primary. CRS must be PROJJSON,
+    OGC:CRS84, or unknown. File bounds are omitted rather than made stale.
+    """
+    var metadata = geoparquet_metadata(frame, primary_column)
+    _write_parquet(frame, path, compression, row_group_size, metadata)
+
+
+def _write_parquet(
+    frame: DataFrame,
+    path: String,
+    compression: String,
+    row_group_size: Int,
+    geo: String,
+) raises:
     if (
         compression != "zstd"
         and compression != "snappy"
@@ -176,6 +205,8 @@ def write_parquet(
     var schema = ArrowSchema()
     export_arrow(frame, array, schema)
     try:
+        if geo != "":
+            _set_metadata(schema, ["geo"], [geo])
         var error = 0
         var status = _call_writer(
             writer, path, compression, row_group_size, array, schema, error

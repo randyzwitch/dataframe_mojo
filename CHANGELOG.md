@@ -13,6 +13,14 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- Geometry storage backed by ISO WKB, with CRS and edge metadata:
+  `DataType.geometry`, `from_wkb`, and `to_wkb`. GeoArrow WKB metadata
+  survives Arrow interchange and ordinary dataframe operations.
+- `read_geojson` / `from_geojson` for GeoJSON features and all seven basic
+  geometry families. `read_parquet` / `scan_parquet` recognize WKB
+  GeoParquet 1.0/1.1; `write_geoparquet` writes 1.1. Rebuild `libdfparquet`
+  to preserve field and file metadata through the native reader.
+
 - `LazyFrame.profile()`: collect and report what each plan node did, as
   Polars' `profile` does but with observed counts instead of timings. The
   report frame has one row per executed node, in node order: its

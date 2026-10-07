@@ -105,9 +105,9 @@ arrow::Result<std::shared_ptr<arrow::RecordBatch>> CoerceBatch(
     ARROW_ASSIGN_OR_RAISE(auto column, Coerce(batch->column(i)));
     columns.push_back(column);
     const auto& field = batch->schema()->field(i);
-    fields.push_back(arrow::field(field->name(), column->type(), field->nullable()));
+    fields.push_back(arrow::field(field->name(), column->type(), field->nullable(), field->metadata()));
   }
-  return arrow::RecordBatch::Make(arrow::schema(fields), batch->num_rows(), columns);
+  return arrow::RecordBatch::Make(arrow::schema(fields, batch->schema()->metadata()), batch->num_rows(), columns);
 }
 
 arrow::Status Open(const char* path, bool use_threads,
@@ -327,9 +327,9 @@ class RowGroupReader final : public arrow::RecordBatchReader {
     std::vector<std::shared_ptr<arrow::Field>> fields;
     for (int i = 0; i < batch->num_columns(); ++i) {
       const auto& field = batch->schema()->field(i);
-      fields.push_back(arrow::field(field->name(), columns[i]->type(), field->nullable()));
+      fields.push_back(arrow::field(field->name(), columns[i]->type(), field->nullable(), field->metadata()));
     }
-    return arrow::RecordBatch::Make(arrow::schema(fields), batch->num_rows(), columns);
+    return arrow::RecordBatch::Make(arrow::schema(fields, batch->schema()->metadata()), batch->num_rows(), columns);
   }
 
  public:
@@ -426,12 +426,12 @@ int dfq_read_parquet_stream(const char* path, int use_threads,
     for (int i = 0; i < n_columns; ++i) {
       auto field = source->GetFieldByName(columns[i]);
       fields.push_back(arrow::field(field->name(), CoercedType(field->type()),
-                                    field->nullable()));
+                                    field->nullable(), field->metadata()));
     }
   } else {
     for (const auto& field : source->fields()) {
       fields.push_back(arrow::field(field->name(), CoercedType(field->type()),
-                                    field->nullable()));
+                                    field->nullable(), field->metadata()));
     }
   }
   std::vector<int> groups;
@@ -447,7 +447,7 @@ int dfq_read_parquet_stream(const char* path, int use_threads,
     }
   }
   auto stream = std::make_shared<RowGroupReader>(std::move(reader),
-      std::move(groups), std::move(leaves), n_columns > 0, arrow::schema(fields));
+      std::move(groups), std::move(leaves), n_columns > 0, arrow::schema(fields, source->metadata()));
   status = arrow::ExportRecordBatchReader(std::move(stream), out);
   return status.ok() ? 0 : fail(status, error_out);
 }
@@ -506,17 +506,17 @@ int dfq_read_parquet_stream_dict(const char* path, int use_threads,
     for (int i = 0; i < n_columns; ++i) {
       auto field = source->GetFieldByName(columns[i]);
       fields.push_back(arrow::field(field->name(), out_type(field->type()),
-                                    field->nullable()));
+                                    field->nullable(), field->metadata()));
     }
   } else {
     for (const auto& field : source->fields()) {
       fields.push_back(arrow::field(field->name(), out_type(field->type()),
-                                    field->nullable()));
+                                    field->nullable(), field->metadata()));
     }
   }
   auto stream = std::make_shared<RowGroupReader>(
       std::move(reader), std::move(groups), std::move(leaves), n_columns > 0,
-      arrow::schema(fields), true);
+      arrow::schema(fields, source->metadata()), true);
   status = arrow::ExportRecordBatchReader(std::move(stream), out);
   return status.ok() ? 0 : fail(status, error_out);
 }

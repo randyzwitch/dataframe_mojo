@@ -409,6 +409,11 @@ struct(names, dtypes) holds one value of each named field per row.
   A struct's field types, in order (empty for other types).
 - `def field_index(self, name: String) -> Int`
 - `def field_dtype(self, index: Int) -> Self`
+- `def geometry(metadata: String = "{}") -> Self`
+  WKB geometry with GeoArrow JSON metadata (CRS, edges, etc.).
+- `def is_geometry(self) -> Bool`
+- `def geometry_metadata(self) -> String`
+  The GeoArrow JSON metadata; raises for non-geometry types.
 - `def categorical(var dictionary: CategoricalDictionary) -> Self`
   A categorical whose codes index `dictionary`.
 - `def is_categorical(self) -> Bool`
@@ -758,6 +763,22 @@ The first column in the schema.
 def first() -> Expr
 ```
 
+## `from_geojson`
+
+Read a GeoJSON FeatureCollection, Feature, or bare geometry.
+
+```mojo
+def from_geojson(text: String, *, geometry_name: String = "geometry", id_name: String = "feature_id") -> DataFrame
+```
+
+## `from_wkb`
+
+Validate binary WKB and attach GeoArrow metadata, sharing buffers.
+
+```mojo
+def from_wkb(binary: Series, metadata: String = "{}") -> Series
+```
+
 ## `GroupBy`
 
 An eager grouping request. No per-group dataframe materialization.
@@ -1048,6 +1069,14 @@ def read_csv(path: String, schema: List[Tuple[String, DataType]], *, has_header:
 
 ```mojo
 def read_csv(path: String, *, infer_schema_length: Int = Int(100), schema_overrides: Dict[String, String] = Dict(), try_parse_dates: Bool = False, has_header: Bool = True, separator: String = ",", quote_char: String = "\22", comment_prefix: String = "", skip_rows: Int = Int(0), n_rows: Int = Int(-1), columns: List[String] = List(), null_values: List[String] = List(), ignore_errors: Bool = False, truncate_ragged_lines: Bool = False, encoding: String = "utf8", buffer_size: Int = Int(65536)) -> DataFrame
+```
+
+## `read_geojson`
+
+Read a local UTF-8 GeoJSON file eagerly.
+
+```mojo
+def read_geojson(path: String, *, geometry_name: String = "geometry", id_name: String = "feature_id") -> DataFrame
 ```
 
 ## `read_parquet`
@@ -1353,6 +1382,14 @@ Render the whole frame as CSV text; use write_csv for large frames.
 def to_csv_string(frame: DataFrame, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n") -> String
 ```
 
+## `to_wkb`
+
+Expose a geometry column as binary WKB, sharing buffers.
+
+```mojo
+def to_wkb(geometry: Series) -> Series
+```
+
 ## `When`
 
 A pending condition; call `then` to supply its value.
@@ -1374,6 +1411,14 @@ Stream a frame to a UTF-8 CSV file that read_csv reads back exactly.
 
 ```mojo
 def write_csv(frame: DataFrame, path: String, *, has_header: Bool = True, separator: String = ",", quote_style: String = "necessary", null_value: String = "", line_terminator: String = "\n", buffer_size: Int = Int(65536))
+```
+
+## `write_geoparquet`
+
+Write GeoParquet 1.1 WKB with CRS and edge metadata.
+
+```mojo
+def write_geoparquet(frame: DataFrame, path: String, *, primary_column: String = "", compression: String = "zstd", row_group_size: Int = Int(1000000))
 ```
 
 ## `write_parquet`

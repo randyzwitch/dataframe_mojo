@@ -164,6 +164,28 @@ including nested fields and temporal units, round-trip through Arrow schema
 metadata. Rebuild `libdfparquet` to add the writer entry point. See the
 [Parquet guide](docs/parquet.md) for behavior and validation.
 
+## Geospatial storage and import
+
+`read_geojson(path)` reads GeoJSON features into attribute columns and a
+`geometry` column. `read_parquet` / `scan_parquet` recognize WKB GeoParquet
+1.0 and 1.1 metadata; `write_geoparquet` writes GeoParquet 1.1.
+Rebuild `libdfparquet` for geospatial metadata support.
+
+```mojo
+from dataframe import read_geojson, write_geoparquet, scan_parquet
+
+var places = read_geojson("places.geojson")
+write_geoparquet(places, "places.parquet")
+var restored = scan_parquet("places.parquet").collect()
+```
+
+Geometry columns use validated ISO WKB with CRS and edge metadata, and
+interchange through the `geoarrow.wkb` Arrow extension. `from_wkb` and
+`to_wkb` share the existing binary buffers. Null and empty geometries are
+distinct. Spatial analysis and coordinate transformations are not yet
+implemented. See the [geospatial guide](docs/geospatial.md) for supported
+encodings, attribute handling, and metadata rules.
+
 ## List and struct columns
 
 `DataType.list(inner)` holds a variable number of values per row and

@@ -713,7 +713,7 @@ struct DataFrame(Copyable, Sized, Writable):
                             "" if value.is_null() else (
                                 String(
                                     value
-                                ) if dtype.is_binary() else value.string()
+                                ) if dtype._is_bytes() else value.string()
                             )
                         )
                     else:
