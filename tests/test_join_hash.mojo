@@ -674,3 +674,67 @@ def test_date_and_narrow_keys_join_like_int64_in_frame() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_tagged_probe_matches_a_dictionary_reference() raises:
+    """The tag scan (#378) answers the same pairs as a dictionary of the
+    build side over keys that share tags, wrap past the table's end, and
+    repeat on both sides, with nulls on both sides; inner, left, semi
+    and anti."""
+    var build_rows = 20_011
+    var probe_rows = 200_003
+    var build_keys = List[Int64](capacity=build_rows)
+    var build_valid = List[Bool](capacity=build_rows)
+    var state = UInt64(17)
+    for i in range(build_rows):
+        state = state * 6364136223846793005 + 1442695040888963407
+        # Keys from a small range, so many repeat and tags collide.
+        build_keys.append(Int64((state >> 33) % 15_000))
+        build_valid.append(i % 97 != 5)
+    var probe_keys = List[Int64](capacity=probe_rows)
+    var probe_valid = List[Bool](capacity=probe_rows)
+    for i in range(probe_rows):
+        state = state * 6364136223846793005 + 1442695040888963407
+        probe_keys.append(Int64((state >> 33) % 30_000))
+        probe_valid.append(i % 89 != 7)
+    var build = Series(
+        "k", Column[Int64](build_keys.copy(), build_valid.copy())
+    )
+    var probe = Series(
+        "k", Column[Int64](probe_keys.copy(), probe_valid.copy())
+    )
+    # Reference: rows of the build side per key, in row order.
+    var rows_of = Dict[Int64, List[Int]]()
+    for j in range(build_rows):
+        if build_valid[j]:
+            var key = build_keys[j]
+            if key not in rows_of:
+                rows_of[key] = List[Int]()
+            rows_of[key].append(j)
+    var expected_inner = 0
+    var expected_semi = 0
+    var checksum = Int64(0)
+    for i in range(probe_rows):
+        if not probe_valid[i]:
+            continue
+        var key = probe_keys[i]
+        if key in rows_of:
+            expected_semi += 1
+            for j in rows_of[key]:
+                expected_inner += 1
+                checksum += Int64(i) * 31 + Int64(j)
+    var pairs = direct_hash_join_rows([probe.copy()], [build.copy()], False)
+    assert_equal(len(pairs[0]), expected_inner)
+    var got = Int64(0)
+    for p in range(len(pairs[0])):
+        got += Int64(pairs[0][p]) * 31 + Int64(pairs[1][p])
+    assert_equal(got, checksum)
+    var left_pairs = direct_hash_join_rows([probe.copy()], [build.copy()], True)
+    assert_equal(
+        len(left_pairs[0]), expected_inner + probe_rows - expected_semi
+    )
+    var prepared = prepare_hash_index([build.copy()])
+    var semi = prepared_hash_semi_anti_rows([probe.copy()], prepared, True)
+    var anti = prepared_hash_semi_anti_rows([probe.copy()], prepared, False)
+    assert_equal(len(semi), expected_semi)
+    assert_equal(len(anti), probe_rows - expected_semi)
