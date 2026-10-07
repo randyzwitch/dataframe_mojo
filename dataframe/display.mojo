@@ -6,6 +6,7 @@ from .column import Column
 from .decimal import format_decimal
 from .string_column import StringColumn, StringBuilder, escape_bytes
 from .series import Series
+from .wkb import _wkb_display
 
 comptime ELLIPSIS = "…"
 
@@ -115,6 +116,10 @@ def format_cell(series: Series, row: Int, max_string_length: Int) -> String:
     ref column = series._data[StringColumn]
     if not column._valid(row):
         return "null"
+    if series.dtype().is_geometry():
+        return _truncate(
+            _wkb_display(column._row_bytes(row)), max_string_length
+        )
     if series.dtype()._is_bytes():
         # b"..." with non-printable bytes escaped, as Polars shows binary.
         return _truncate(

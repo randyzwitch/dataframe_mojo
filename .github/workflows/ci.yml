@@ -90,6 +90,7 @@ jobs:
           pixi run -e oracle oracle --cases 150 --seed ${{ github.run_number }}
           pixi run -e oracle oracle --mutation-check --cases 20
           pixi run -e oracle oracle-arrow
+          pixi run -e oracle oracle-geometry
           pixi run -e oracle python3 scripts/check_parquet_write.py
           pixi run -e oracle python3 scripts/check_parquet_stream.py build/dfparquet/libdfparquet.so
 

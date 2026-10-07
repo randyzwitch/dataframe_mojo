@@ -1,4 +1,4 @@
-# Geospatial storage and import
+# Geospatial storage and coordinate accessors
 
 Geometry is a logical column type over the existing nullable binary storage.
 Values use ISO Well-Known Binary (WKB); the dtype carries GeoArrow JSON metadata,
@@ -81,6 +81,40 @@ slicing, chunking, concatenation, and join output. Different geometry metadata
 makes dtypes incompatible for concatenation. Equality, uniqueness, and any
 ordinary dataframe key comparison use WKB bytes, not topological equality.
 
+## Inspect geometry and bounds
+
+```mojo
+var geometry = places.column("geometry")
+print(geometry.geometry_type())  # Point, Polygon Z, …; nulls remain null
+print(geometry.crs())            # Canonical CRS JSON, or "null" if unknown
+print(geometry.bounding_box())   # xmin, ymin, xmax, ymax Float64 columns
+var extent = geometry.total_bounds()
+if extent:
+    print(extent.value())        # [xmin, ymin, xmax, ymax]
+```
+
+The same accessors are also exported as functions taking a Series.
+`geometry_type()` includes ` Z`, ` M`, or ` ZM` suffixes and reports the type
+of empty geometries. Geometry display shows a type and coordinate count, such
+as `Point (1 coordinate)` or `Polygon (0 coordinates)`, rather than raw bytes.
+`to_wkb` remains the buffer-sharing binary accessor.
+
+Bounds scan every coordinate, including polygon holes and collection children,
+in either WKB byte order. They use XY only, in the existing coordinate system;
+Z and M do not affect the result. Null and empty geometries produce four null
+bounds, while their original validity and geometry type remain distinct.
+`total_bounds()` returns `Optional[GeometryBounds]`, with `xmin`, `ymin`, `xmax`,
+and `ymax` fields; it is absent when there are no non-empty geometries.
+
+These are axis-aligned coordinate extrema, matching the planar interpretation
+of [GeoPandas bounds](https://geopandas.org/en/stable/docs/reference/api/geopandas.GeoSeries.bounds.html).
+A line from longitude 179 to -179 has xmin=-179 and xmax=179. Longitude is not
+wrapped, no shortest antimeridian interval is selected, and spherical arc
+extrema are not computed. Bounds reject non-finite XY coordinates except the
+pair of NaNs representing an empty point. Errors identify the global row,
+including for chunked columns. Type inspection still accepts structurally valid
+WKB with non-finite coordinates, and Z/M values do not affect XY bounds.
+
 ## Arrow and Parquet
 
 Arrow import/export uses `geoarrow.wkb`, with `ARROW:extension:name` and
@@ -108,9 +142,13 @@ row_group_size=1_000_000)` writes GeoParquet 1.1 with WKB columns, replacing an
 existing file. Compression options match `write_parquet`. The writer accepts
 PROJJSON CRS objects, OGC:CRS84, or unknown CRS. Other CRS strings require the
 caller to provide PROJJSON; no projection library or CRS database is bundled.
-It writes unknown geometry-type inventories and omits bounds, avoiding stale
-claims after dataframe operations. GeoParquet 1.x does not support M ordinates
-or nested geometry columns; those are rejected on GeoParquet writing.
+It scans the current rows to write unique observed geometry types, including
+` Z` suffixes, and fresh file bounds. Bounds contain six values when non-empty
+Z coordinates are present, otherwise four. Mixed XY/XYZ files use the available
+Z coordinates for the Z extent. The optional bbox is omitted for all-empty or
+all-null data, spherical edges, or non-finite Z values. No per-row bbox covering
+columns are added. GeoParquet 1.x does not support M ordinates or nested geometry
+columns; those are rejected on GeoParquet writing.
 
 `write_parquet` preserves GeoArrow geometry metadata, including arbitrary CRS
 strings, but does not add the GeoParquet file contract. Use `write_geoparquet`
@@ -130,3 +168,10 @@ reads/writes, CRS rules, projections, lazy execution, and empty files.
 Regenerate fixtures with `pixi run -e oracle python scripts/make_geospatial_fixtures.py`.
 Run the independent producer/consumer check with
 `pixi run -e oracle oracle-geospatial` after building `libdfparquet`.
+
+`tests/test_geometry_accessors.mojo` covers all seven WKB families, all four
+coordinate layouts, both byte orders (including mixed-order children), empty
+and null rows, chunked errors, display, and CRS-preserving operations.
+`pixi run -e oracle oracle-geometry` compares WKB, types, per-row and total bounds,
+and CRS with GeoPandas/GEOS, then checks GeoParquet output through GeoPandas.
+GeoPandas and Shapely are development-only dependencies in the oracle environment.

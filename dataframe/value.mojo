@@ -1,4 +1,5 @@
 """A runtime-tagged scalar for row access and single-cell results."""
+from .wkb import _wkb_display
 from std.collections import Optional
 from std.memory import ArcPointer
 
@@ -241,6 +242,8 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
     def write_to(self, mut writer: Some[Writer]):
         if not self._valid:
             writer.write("null")
+        elif self._dtype.is_geometry():
+            writer.write(_wkb_display(self._binary_span()))
         elif self._dtype._is_bytes():
             writer.write(escape_bytes(self._binary_span()))
         elif self._dtype.is_list():

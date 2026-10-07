@@ -3,6 +3,7 @@ from .json_value import JsonValue, json_quote
 from .frame import DataFrame
 from .series import Series
 from .dtype import DataType
+from .geometry import _geometry_summary
 from .geometry import from_wkb, _validate_geoparquet_wkb
 
 
@@ -106,14 +107,34 @@ def geoparquet_metadata(
             if _contains_geometry(dtype):
                 raise Error("GeoParquet geometry columns must be top-level")
             continue
-        _validate_geoparquet_wkb(frame.column(name))
+        var summary = _geometry_summary(frame.column(name), allow_m=False)
         if primary == "":
             primary = name
         found_primary = found_primary or primary == name
         var meta = JsonValue(dtype.geometry_metadata())
         _validate_column_metadata(meta)
         var crs = meta.get("crs")
-        var spec = String('{"encoding":"WKB","geometry_types":[]')
+        var spec = String('{"encoding":"WKB","geometry_types":[')
+        for i in range(len(summary.types)):
+            if i > 0:
+                spec += ","
+            spec += json_quote(summary.types[i])
+        spec += "]"
+        # Vertex extrema are conservative for planar edges. Spherical arcs
+        # require a geodesic engine, so omit their optional file bbox.
+        if (
+            summary.bounds._has_value()
+            and meta.get("edges").canonical() != '"spherical"'
+            and summary.finite_z
+        ):
+            ref box = summary.bounds
+            spec += ',"bbox":[' + String(box.xmin) + "," + String(box.ymin)
+            if summary.has_z:
+                spec += "," + String(summary.zmin)
+            spec += "," + String(box.xmax) + "," + String(box.ymax)
+            if summary.has_z:
+                spec += "," + String(summary.zmax)
+            spec += "]"
         if crs.kind() == 34:
             if crs.string() != "OGC:CRS84":
                 raise Error(
