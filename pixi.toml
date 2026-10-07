@@ -82,6 +82,7 @@ oracle-arrow-metadata = "mojo run -I . tests/oracle/arrow_metadata.mojo"
 oracle-geospatial = "python3 scripts/check_geospatial.py"
 oracle-geometry = "python3 scripts/check_geometry_accessors.py"
 oracle-duckdb-spatial = "python3 scripts/check_duckdb_spatial.py"
+oracle-geoparquet = "python3 scripts/check_geoparquet.py"
 bench-suites = "python3 scripts/bench_suites.py"
 
 [feature.oracle.pypi-dependencies]

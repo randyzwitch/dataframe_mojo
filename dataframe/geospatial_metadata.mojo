@@ -78,10 +78,14 @@ def apply_geoparquet_metadata(
                     DataType.geometry(json).geometry_metadata()
                 )
                 for key in ["crs", "edges", "orientation", "epoch"]:
-                    if (
-                        existing.get(key).canonical()
-                        != declared.get(key).canonical()
-                    ):
+                    var same = (
+                        _geoparquet_crs_equal(
+                            existing.get(key), declared.get(key)
+                        ) if key
+                        == "crs" else existing.get(key).canonical()
+                        == declared.get(key).canonical()
+                    )
+                    if not same:
                         raise Error(
                             "Conflicting GeoParquet/GeoArrow metadata: "
                             + name
@@ -93,6 +97,51 @@ def apply_geoparquet_metadata(
             _validate_geoparquet_wkb(series)
         columns.append(series^)
     return DataFrame(columns^, height=frame.height())
+
+
+def _geoparquet_crs_equal(
+    left: JsonValue, right: JsonValue, context: String = ""
+) raises -> Bool:
+    # GeoPandas removes optional datum-ensemble member IDs from its geo
+    # document for compatibility with older PROJ databases, but retains them
+    # in Arrow field metadata. Accept missing IDs only in that exact context.
+    # If both copies carry an ID it must agree; all other CRS content remains
+    # strict. This is not a general CRS equivalence test or authority lookup.
+    if left.kind() != right.kind():
+        return False
+    if left.kind() == 123:
+        for key in left.keys():
+            if not right.has(key):
+                if context == "member" and key == "id":
+                    continue
+                return False
+            var child_context = String()
+            if key == "datum_ensemble":
+                child_context = "ensemble"
+            elif context == "ensemble" and key == "members":
+                child_context = "members"
+            if not _geoparquet_crs_equal(
+                left.get(key), right.get(key), child_context
+            ):
+                return False
+        for key in right.keys():
+            if not left.has(key):
+                if context == "member" and key == "id":
+                    continue
+                return False
+        return True
+    if left.kind() == 91:
+        var lhs = left.items()
+        var rhs = right.items()
+        if len(lhs) != len(rhs):
+            return False
+        for i in range(len(lhs)):
+            if not _geoparquet_crs_equal(
+                lhs[i], rhs[i], "member" if context == "members" else ""
+            ):
+                return False
+        return True
+    return left.canonical() == right.canonical()
 
 
 def geoparquet_metadata(
