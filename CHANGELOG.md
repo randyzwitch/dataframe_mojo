@@ -95,6 +95,19 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Conditional expressions over large tables: a numeric `when/then/
+  otherwise` selects its values with one SIMD pass over the predicate
+  (validity only when a branch has nulls), the predicate's row masks are
+  built a byte at a time, and a reduction over `when(c).then(x)` with no
+  otherwise reads `x` under a validity that folds in the predicate
+  instead of building the chosen column; sums and means of such a Float64
+  branch take the eight-wide masked kernel. A streamed reduction also
+  evaluates its batch 16K rows at a time ungrouped and 4K grouped instead
+  of 1,024, so the evaluator's fixed cost per batch is paid a few times
+  per stream batch instead of 64. TPC-DS q9 (fifteen conditional sums
+  over store_sales) takes 25 ms against 176 ms, q59 150 ms against 253
+  ms, ClickBench q29 (ninety sums of `ResolutionWidth + k`) 86 ms against
+  461 ms, PDS-H q1 66 ms against 77 ms (#488).
 - Every eager inner and left join takes the direct hash route. It used
   to need a left input of more than 65,536 rows (one worker's share),
   which sent a left of 65K to 131K rows to the dictionary route: on a

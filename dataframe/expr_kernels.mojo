@@ -1571,6 +1571,72 @@ def _choose[
     return Column[T](values^, valid)
 
 
+def _choose_numeric[
+    D: DType
+](
+    selected: List[Bool], then: Column[Scalar[D]], other: Column[Scalar[D]]
+) raises -> Column[Scalar[D]]:
+    """`_choose` for a numeric type: a SIMD select over the selection
+    bytes, either branch broadcast when it holds one value, and a validity
+    bitmap only when a branch has nulls (TPC-DS q9 selects 44M values
+    this way; the element-wise version cost 4 ns each)."""
+    comptime width = 16
+    var n = len(selected)
+    var values = List[Scalar[D]](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var flags = selected.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var then_values = then._ptr()
+    var other_values = other._ptr()
+    var then_scalar = len(then) == 1
+    var other_scalar = len(other) == 1
+    var then_fill = SIMD[D, width](then_values[unsafe_offset=0]) if len(
+        then
+    ) > 0 else SIMD[D, width](0)
+    var other_fill = SIMD[D, width](other_values[unsafe_offset=0]) if len(
+        other
+    ) > 0 else SIMD[D, width](0)
+    var i = 0
+    while i + width <= n:
+        var take = (
+            flags.unsafe_offset(i)
+            .unsafe_load[width=width]()
+            .ne(SIMD[DType.uint8, width](0))
+        )
+        var a = then_fill if then_scalar else then_values.unsafe_offset(
+            i
+        ).unsafe_load[width=width]()
+        var b = other_fill if other_scalar else other_values.unsafe_offset(
+            i
+        ).unsafe_load[width=width]()
+        out.unsafe_offset(i).unsafe_store[width=width](take.select(a, b))
+        i += width
+    while i < n:
+        if flags[unsafe_offset=i] != 0:
+            out[unsafe_offset=i] = then_values[
+                unsafe_offset=0 if then_scalar else i
+            ]
+        else:
+            out[unsafe_offset=i] = other_values[
+                unsafe_offset=0 if other_scalar else i
+            ]
+        i += 1
+    var then_nulls = then.null_count() > 0
+    var other_nulls = other.null_count() > 0
+    if not then_nulls and not other_nulls:
+        return Column[Scalar[D]](values^)
+    var bits = List[UInt8](length=(n + 7) // 8, fill=0)
+    var packed = bits.unsafe_ptr()
+    for row in range(n):
+        var valid: Bool
+        if flags[unsafe_offset=row] != 0:
+            valid = not then_nulls or then._valid(0 if then_scalar else row)
+        else:
+            valid = not other_nulls or other._valid(0 if other_scalar else row)
+        if valid:
+            packed[unsafe_offset=row >> 3] |= UInt8(1) << UInt8(row & 7)
+    return Column[Scalar[D]](values=values^, bits=bits^)
+
+
 def _decimal_pair(
     left: Series, right: Series, what: String
 ) raises -> Tuple[Series, Series]:
@@ -1618,7 +1684,7 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
         if then._data.isa[Column[Scalar[D]]]():
             return Series(
                 "",
-                _choose(
+                _choose_numeric[D](
                     selected,
                     then._data[Column[Scalar[D]]],
                     other._data[Column[Scalar[D]]],
