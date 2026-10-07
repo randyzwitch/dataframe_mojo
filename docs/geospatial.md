@@ -175,3 +175,15 @@ and null rows, chunked errors, display, and CRS-preserving operations.
 `pixi run -e oracle oracle-geometry` compares WKB, types, per-row and total bounds,
 and CRS with GeoPandas/GEOS, then checks GeoParquet output through GeoPandas.
 GeoPandas and Shapely are development-only dependencies in the oracle environment.
+
+The same `oracle-geometry` CI task also runs the DuckDB Spatial Arrow C oracle.
+Run it alone with `pixi run -e oracle oracle-duckdb-spatial`. Its setup installs
+DuckDB's official Spatial extension over HTTPS into `build/duckdb_extensions`
+(the first run needs network access). Installation or loading failures fail the
+check rather than skipping it. DuckDB itself constructs and exports the WKB
+and GeoArrow metadata: seven geometry families, XY/XYZ/XYM/XYZM, nulls, empties,
+unknown CRS, EPSG:4326 and EPSG:3857, with binary and large_binary layouts.
+Mojo imports/exports through the C interface, then DuckDB consumes the result
+as GEOMETRY and checks WKB bytes, CRS, type, dimensions, emptiness and coordinate
+counts. Reordered rows and a Mojo-originated GeoJSON round trip are covered.
+Mutation checks ensure metadata loss, CRS changes and changed WKB are detected.
