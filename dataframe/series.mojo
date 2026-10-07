@@ -1,5 +1,5 @@
 """Runtime-tagged, named columns without per-element type erasure."""
-from .field_metadata import _equal_metadata
+from .field_metadata import _equal_metadata, _without_extensions
 from .dtype import DataType, NUMERIC_DTYPES
 from std.utils import Variant
 from .bool_column import BoolColumn
@@ -1567,11 +1567,19 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
 
     def _check_metadata(self, other: Self) raises:
         """Concatenation requires identical packed Arrow field metadata."""
-        if Bool(self._field_metadata) != Bool(other._field_metadata):
+        var a = self._field_metadata
+        var b = other._field_metadata
+        # Geometry already encodes its known extension contract in the dtype.
+        # Compare application metadata separately so native and imported columns
+        # with the same logical geometry type can be concatenated.
+        if self.dtype().is_geometry() and self.dtype() == other.dtype():
+            a = _without_extensions(a)
+            b = _without_extensions(b)
+        if Bool(a) != Bool(b):
             raise Error("Conflicting Arrow field metadata: " + self._name)
-        if self._field_metadata:
-            ref left = self._field_metadata.value()[]
-            ref right = other._field_metadata.value()[]
+        if a:
+            ref left = a.value()[]
+            ref right = b.value()[]
             if not _equal_metadata(left, right):
                 raise Error("Conflicting Arrow field metadata: " + self._name)
 

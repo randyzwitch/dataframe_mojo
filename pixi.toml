@@ -77,7 +77,7 @@ python = ">=3.11"
 
 [feature.oracle.tasks]
 oracle = "python3 scripts/oracle.py"
-oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo"
+oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo && mojo run -I . tests/oracle/arrow_metadata.mojo"
 oracle-arrow-metadata = "mojo run -I . tests/oracle/arrow_metadata.mojo"
 oracle-geospatial = "python3 scripts/check_geospatial.py"
 bench-suites = "python3 scripts/bench_suites.py"

@@ -35,6 +35,7 @@ from .column import Column, _copy_bits, _copy_validity
 from std.collections import Dict
 from .categorical import encode
 from .geometry import from_wkb
+from .field_metadata import _append_metadata, _has_extension_name
 from .geospatial_metadata import apply_geoparquet_metadata
 from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from .hashing import encode_string_rows_parallel
@@ -434,6 +435,14 @@ def _fill_schema(mut schema: ArrowSchema, series: Series) raises:
             state.children.append(child)
     if series._field_metadata:
         state.metadata = series._field_metadata.value()[].copy()
+        if dtype.is_geometry() and not _has_extension_name(state.metadata):
+            _append_metadata(
+                state.metadata,
+                _metadata_pack(
+                    ["ARROW:extension:name", "ARROW:extension:metadata"],
+                    ["geoarrow.wkb", dtype.geometry_metadata()],
+                ),
+            )
     schema.format = Int(state.format.unsafe_ptr())
     schema.name = Int(state.name.unsafe_ptr())
     schema.metadata = Int(state.metadata.unsafe_ptr()) if len(

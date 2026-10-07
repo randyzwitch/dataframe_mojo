@@ -42,6 +42,23 @@ def main() raises:
         assert_true(
             Bool(py=fixtures.check(back, registered, Python.list(2, 3, 0, 1)))
         )
+    var nested = fixtures.make_nested()
+    nested._export_to_c(a, s)
+    var nested_frame = import_arrow(a, s)
+    export_arrow(nested_frame, a, s)
+    var nested_back = pa.RecordBatch._import_from_c(a, s)
+    assert_true(
+        Bool(py=fixtures.check_nested(nested_back, Python.list(0, 1, 2)))
+    )
+    var gathered = DataFrame(
+        [
+            nested_frame.column("record").take([2, 0]),
+            nested_frame.column("list").take([2, 0]),
+        ]
+    )
+    export_arrow(gathered, a, s)
+    nested_back = pa.RecordBatch._import_from_c(a, s)
+    assert_true(Bool(py=fixtures.check_nested(nested_back, Python.list(2, 0))))
     _ = _reclaim[ArrowArray](a)
     _ = _reclaim[ArrowSchema](s)
     print("Arrow field metadata and registered extension PyArrow oracle passed")

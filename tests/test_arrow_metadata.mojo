@@ -8,6 +8,9 @@ from dataframe import (
     DataFrame,
     DataType,
     Series,
+    from_geojson,
+    from_wkb,
+    to_wkb,
     col,
     concat,
     export_arrow_series,
@@ -155,6 +158,29 @@ def test_boolean_string_and_parallel_metadata() raises:
             Series._from_chunks([source.copy(), source.copy()]).rechunk(),
             source,
         )
+
+
+def test_geometry_intrinsic_metadata_and_conversion() raises:
+    var native = from_geojson('{"type":"Point","coordinates":[1,2]}').column(
+        "geometry"
+    )
+    var array = ArrowArray()
+    var schema = ArrowSchema()
+    export_arrow_series(native, array, schema)
+    var imported = import_arrow_series(array, schema)
+    assert_equal(len(Series._from_chunks([native.copy(), imported.copy()])), 2)
+    assert_equal(len(Series._from_chunks([imported.copy(), native.copy()])), 2)
+    export_arrow_series(to_wkb(native), array, schema)
+    _set_metadata(schema, ["custom"], ["retained"])
+    var binary = import_arrow_series(array, schema)
+    var geo = from_wkb(binary, native.dtype().geometry_metadata())
+    export_arrow_series(geo, array, schema)
+    var restored = import_arrow_series(array, schema)
+    assert_true(restored.dtype().is_geometry())
+    check_metadata(to_wkb(restored), binary)
+    # The extension itself agrees, but different application metadata does not.
+    with assert_raises(contains="Conflicting Arrow field metadata"):
+        _ = Series._from_chunks([native.copy(), restored.copy()])
 
 
 def main() raises:

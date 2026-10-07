@@ -43,3 +43,21 @@ def check(batch, registered, rows):
     if registered:
         assert batch.column(0).type.payload == TaggedInt().payload
     return True
+
+
+def make_nested():
+    struct_type = pa.struct([pa.field("value", pa.int64(), metadata=CUSTOM)])
+    list_type = pa.large_list(pa.field("item", pa.int64(), metadata=CUSTOM))
+    return pa.RecordBatch.from_arrays(
+        [pa.array([{"value": 1}, None, {"value": None}], type=struct_type),
+         pa.array([[1, None], None, []], type=list_type)],
+        schema=pa.schema([pa.field("record", struct_type, metadata=CUSTOM),
+                          pa.field("list", list_type, metadata=CUSTOM)]),
+    )
+
+
+def check_nested(back, rows):
+    original = make_nested()
+    assert back.schema.equals(original.schema, check_metadata=True)
+    assert back.to_pydict() == original.take(pa.array(rows, type=pa.int64())).to_pydict()
+    return True

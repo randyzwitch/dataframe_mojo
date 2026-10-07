@@ -116,11 +116,15 @@ layouts.
 Projection, aliases, rename, filter, sort, take (including null extension),
 slice, chunk views, and rechunk preserve field metadata. Vertical concatenation
 requires identical key/value pairs, independent of their order; conflicting or
-missing metadata raises. Diagonal concatenation assigns the existing column's
+missing metadata raises. Known geometry extension declarations are compared
+through their normalized logical dtype, so freshly constructed and imported
+geometry columns can agree. Diagonal concatenation assigns the existing column's
 metadata to inserted null rows. Computed results and dtype-changing conversions
 have no general metadata-preservation guarantee; explicit logical retagging
 clears metadata when the dtype changes, avoiding stale extension declarations.
-Root schema application metadata is outside this field-metadata contract.
+`from_wkb` and `to_wkb` replace/remove extension declarations while retaining
+unrelated application metadata. Root schema application metadata is outside
+this field-metadata contract.
 
 Run the independent registered/unknown extension oracle with
 `pixi run -e oracle oracle-arrow-metadata`.
