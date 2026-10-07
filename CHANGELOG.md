@@ -103,6 +103,21 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Join key sets passed sideways, as DuckDB's join filter pushdown does:
+  an inner or semi join whose left input is a filtered table far smaller
+  than the right side's largest table, where the right side has a join
+  of its own, runs the left input first and filters the right key by its
+  keys (up to 50 as a list, more as their range) when a sample says that
+  keeps at most one row in eight. The filter moves down to the right
+  side's scan. TPC-DS q82 63 -> 16 ms, q37 49 -> 14.5 ms.
+- A filter now moves below a `select` of plain columns even when it
+  reads one of them.
+- `is_in` over typed integer literals is one single-pass kernel instead
+  of an equality, null fill and OR per value (11.7M rows, four values:
+  18 -> 5 ms).
+- A semi or anti join with a small left side hashes the left keys before
+  trying the bounded-domain path, which scanned every right row on one
+  thread. PDS-H q4 46 -> 26 ms, q22 30 -> 20 ms.
 - A streamed top-k (`sort(...).head(k)` over a scan with row-local steps)
   bounds its first sort key once it holds k rows, as DuckDB's Top-N
   dynamic filter does: later batches drop rows that cannot beat the k-th

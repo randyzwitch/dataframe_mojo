@@ -2,7 +2,7 @@
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
-from .column import Column, _bit, _pack_bits
+from .column import Column, _bit, _copy_validity, _pack_bits
 from .dtype import DataType, NUMERIC_DTYPES
 from .decimal import (
     common_decimal,
@@ -1706,3 +1706,55 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
         else:
             out._append_row(b, 0 if len(b) == 1 else i)
     return Series("", out^.finish())
+
+
+def integer_is_in(input: Series, text: String) raises -> Series:
+    """Whether each row of an integer column equals one of the values
+    `text` lists (decimal, comma separated); null rows stay null. One pass
+    over the rows, the values compared in registers."""
+    var column_input = input.rechunk() if input.is_chunked() else input.copy()
+    var parts = text.split(",")
+    var wanted = List[Int64](capacity=len(parts))
+    for part in parts:
+        wanted.append(Int64(atol(part)))
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        comptime if D.is_integral():
+            if column_input._data.isa[Column[Scalar[D]]]():
+                ref column = column_input._data[Column[Scalar[D]]]
+                var n = len(column)
+                var targets = List[Scalar[D]](capacity=len(wanted))
+                for w in wanted:
+                    targets.append(Scalar[D](w))
+                var count = len(targets)
+                var table = targets.unsafe_ptr()
+                var packed = List[UInt8](length=(n + 7) // 8, fill=0)
+                var out = packed.unsafe_ptr()
+                var xs = column._ptr()
+                var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+                var full = n // 8
+                for k in range(full):
+                    var x = xs.unsafe_load[width=8](8 * k)
+                    var hits = SIMD[DType.bool, 8](fill=False)
+                    for t in range(count):
+                        hits = hits | x.eq(SIMD[D, 8](table.unsafe_offset(t)[]))
+                    out[unsafe_offset=k] = (
+                        hits.cast[DType.uint8]() * weights
+                    ).reduce_add()
+                if full * 8 < n:
+                    var byte: UInt8 = 0
+                    for i in range(full * 8, n):
+                        var x = xs.unsafe_offset(i)[]
+                        for t in range(count):
+                            if x == table.unsafe_offset(t)[]:
+                                byte |= UInt8(1) << UInt8(i - full * 8)
+                                break
+                    out[unsafe_offset=full] = byte
+                var bits = List[UInt8]()
+                if column.null_count() > 0:
+                    bits = _copy_validity(column._bits[], column._offset, n)
+                return Series(
+                    input.name(),
+                    BoolColumn(values=packed^, bits=bits^, length=n),
+                )
+    raise Error("is_in over integers requires an integer column")

@@ -70,6 +70,7 @@ from .expr import (
     SELECTOR,
     Expr,
     col,
+    lit,
     is_reduction,
     is_window,
     subtree,
@@ -1015,6 +1016,7 @@ struct LazyFrame(Copyable):
             return profiled[0].copy()
         var plan = self._optimized() if optimize else self.copy()
         if optimize:
+            plan._push_join_key_sets(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         return plan._execute(len(plan._nodes) - 1, False, streaming, batch_size)
 
@@ -1039,6 +1041,7 @@ struct LazyFrame(Copyable):
             raise Error("batch_size must be positive")
         var plan = self._optimized() if optimize else self.copy()
         if optimize:
+            plan._push_join_key_sets(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         plan._report = Optional(ArcPointer(ExecutionReport()))
         var result = plan._execute(
@@ -2159,6 +2162,179 @@ struct LazyFrame(Copyable):
         if changed:
             self._push_projections()
 
+    def _push_join_key_sets(mut self, streaming: Bool, batch_size: Int) raises:
+        """Sideways information passing (DuckDB's join filter pushdown):
+        an inner or semi join on one key whose left input is a filtered
+        in-memory table runs that input first, and when it holds at most
+        one row for every eight the largest table on the right can, its
+        keys become a filter on the right key, which predicate pushdown
+        then moves toward the right side's scans. Rows whose key no left
+        row has join nothing, so the result is unchanged. Up to 50
+        distinct keys filter as a list (an equality per value per row);
+        more as their min-max range, as DuckDB does
+        (`dynamic_or_filter_threshold`). The left input is replaced by its
+        result, so it does not run twice. Only for a right side with a
+        join of its own, which the filter then reaches first. TPC-DS q37
+        and q82 join four items to an 11.7M-row inventory that is joined
+        to dates first.
+        """
+        var root = len(self._nodes) - 1
+        var added = False
+        var changed = True
+        while changed:
+            changed = False
+            var parents = self._live_parents(root)
+            for j in range(len(self._nodes)):
+                if parents[j] == -2:
+                    continue
+                ref node = self._nodes[j]
+                if node.kind != JOIN or not (
+                    node.how == JOIN_INNER or node.how == JOIN_SEMI
+                ):
+                    continue
+                if len(node.names) != 1 or len(node.right_keys) != 1:
+                    continue
+                if not self._filtered_table(node.left):
+                    continue
+                # Only a right side that does more than scan and filter
+                # before this join (a join of its own) gains: against a
+                # bare table the join already builds on its smaller side,
+                # and a filter there only copies rows (TPC-DS q43, 2x).
+                if not self._has_join(node.right):
+                    continue
+                var right_rows = self._largest_scan(node.right)
+                # The table under the left input, unfiltered, must be small
+                # next to the right side's largest table: then running the
+                # left input first costs little whatever it keeps.
+                var left_bound = self._height_bound(node.left)
+                if right_rows <= 0 or left_bound < 0:
+                    continue
+                if 8 * left_bound > right_rows:
+                    continue
+                var provider = self._provider_scan(
+                    node.right, node.right_keys[0]
+                )
+                if provider < 0:
+                    continue
+                var left = self._execute(
+                    node.left, False, streaming, batch_size
+                )
+                var left_name = node.names[0]
+                var right_name = node.right_keys[0]
+                self._frames.append(left.copy())
+                self._schemas.append(Optional[CsvSchema]())
+                self._nodes.append(
+                    _plan_node(SCAN_FRAME, offset=len(self._frames) - 1)
+                )
+                self._nodes[j].left = len(self._nodes) - 1
+                var keys = _key_set_filter(
+                    left.column(left_name),
+                    right_name,
+                    self._frames[self._nodes[provider].offset]
+                    .column(right_name)
+                    .dtype(),
+                )
+                if keys and self._selective_on(provider, keys.value()):
+                    self._nodes.append(
+                        _plan_node(
+                            FILTER, self._nodes[j].right, exprs=[keys.take()]
+                        )
+                    )
+                    self._nodes[j].right = len(self._nodes) - 1
+                    added = True
+                self._reorder()
+                root = len(self._nodes) - 1
+                changed = True
+                break
+        if added:
+            # Not split again: splitting a merged filter and merging it
+            # back reverses its parts, and the written order is the order
+            # they are evaluated in (ClickBench q21 then ran its string
+            # search before the cheap test).
+            self._push_predicates()
+            self._merge_filters()
+
+    def _filtered_table(self, index: Int) -> Bool:
+        """Whether node `index` is an in-memory table under row-local
+        steps, at least one of them a filter."""
+        var cursor = index
+        var filtered = False
+        while cursor >= 0:
+            ref node = self._nodes[cursor]
+            if node.kind == SCAN_FRAME:
+                return filtered
+            if node.kind == FILTER and _row_local(node.exprs):
+                filtered = True
+            elif not (
+                node.kind == DROP
+                or (
+                    (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                    and _stream_rows(node)
+                )
+            ):
+                return False
+            cursor = node.left
+        return False
+
+    def _provider_scan(self, index: Int, name: String) -> Int:
+        """The in-memory table node under node `index` holding column
+        `name`, or -1."""
+        var stack: List[Int] = [index]
+        while len(stack) > 0:
+            var i = stack.pop()
+            ref node = self._nodes[i]
+            if (
+                node.kind == SCAN_FRAME
+                and name in self._frames[node.offset].columns()
+            ):
+                return i
+            if node.left >= 0:
+                stack.append(node.left)
+            if node.right >= 0:
+                stack.append(node.right)
+        return -1
+
+    def _selective_on(mut self, scan: Int, keys: Expr) raises -> Bool:
+        """Whether `keys` keeps at most one row in eight of the table at
+        node `scan`, estimated on evenly spaced runs of it
+        (`_estimated_rows`). A key set spanning most of the right side's
+        keys filters nothing and only moves the join off its better
+        build side."""
+        var height = self._frames[self._nodes[scan].offset].height()
+        self._nodes.append(_plan_node(FILTER, scan, exprs=[keys.copy()]))
+        var estimated = self._estimated_rows(len(self._nodes) - 1)
+        _ = self._nodes.pop()
+        return estimated >= 0 and 8 * estimated <= height
+
+    def _has_join(self, index: Int) -> Bool:
+        """Whether a join sits anywhere under node `index`."""
+        var stack: List[Int] = [index]
+        while len(stack) > 0:
+            var i = stack.pop()
+            ref node = self._nodes[i]
+            if node.kind == JOIN:
+                return True
+            if node.left >= 0:
+                stack.append(node.left)
+            if node.right >= 0:
+                stack.append(node.right)
+        return False
+
+    def _largest_scan(self, index: Int) -> Int:
+        """The most rows any in-memory table under node `index` holds."""
+        var largest = 0
+        var stack: List[Int] = [index]
+        while len(stack) > 0:
+            var i = stack.pop()
+            ref node = self._nodes[i]
+            if node.kind == SCAN_FRAME:
+                largest = max(largest, self._frames[node.offset].height())
+            if node.left >= 0:
+                stack.append(node.left)
+            if node.right >= 0:
+                stack.append(node.right)
+        return largest
+
     def _live_parents(self, root: Int) -> List[Int]:
         """Each node's parent in the plan under `root`: -1 for the root and
         -2 for a node no longer reachable (an earlier rewrite's leftovers)."""
@@ -2859,12 +3035,15 @@ struct LazyFrame(Copyable):
             return -1
         ref below = self._nodes[child]
         if below.kind == WITH_COLUMNS or below.kind == SELECT:
-            # Safe when the filter reads only unchanged input columns.
-            var produced = _output_names(below.exprs)
-            for name in reads.value():
-                for p in produced:
-                    if p == name:
-                        return -1
+            # Safe when the filter reads only unchanged input columns: a
+            # select of plain columns changes none, so it checks only that
+            # (below); with_columns may replace what it names.
+            if below.kind == WITH_COLUMNS:
+                var produced = _output_names(below.exprs)
+                for name in reads.value():
+                    for p in produced:
+                        if p == name:
+                            return -1
             if below.kind == SELECT:
                 for e in below.exprs:
                     var r = _references(e)
@@ -3366,6 +3545,54 @@ def _joined(names: List[String]) -> String:
             out += ", "
         out += names[i]
     return out^
+
+
+def _key_set_filter(
+    keys: Series, name: String, dtype: DataType
+) raises -> Optional[Expr]:
+    """A filter keeping the rows whose `name` is among `keys`' non-null
+    values: the values themselves when there are at most 50, else their
+    min-max range. None when the dtypes differ or the key is neither an
+    integer (other than UInt64) nor a string."""
+    if keys.dtype() != dtype:
+        return None
+    var distinct = keys.unique()
+    if distinct.is_chunked():
+        distinct = distinct.rechunk()
+    if dtype == DataType.STRING:
+        var values = List[String]()
+        for i in range(len(distinct)):
+            var cell = distinct.get(i)
+            if not cell.is_null():
+                values.append(cell.string())
+        if len(values) > 50:
+            return None
+        if len(values) == 0:
+            return Optional(lit(False))
+        return Optional(col(name).is_in(values))
+    comptime for d in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[d]
+        comptime if D.is_integral() and D != DType.uint64:
+            if distinct._data.isa[Column[Scalar[D]]]():
+                ref column = distinct._data[Column[Scalar[D]]]
+                var literals = List[Expr]()
+                var low = Scalar[D].MAX
+                var high = Scalar[D].MIN
+                for i in range(len(column)):
+                    if not column._valid(i):
+                        continue
+                    var value = column._get(i)
+                    literals.append(lit(value))
+                    low = min(low, value)
+                    high = max(high, value)
+                if len(literals) == 0:
+                    return Optional(lit(False))
+                if len(literals) <= 50:
+                    return Optional(col(name).is_in(literals))
+                return Optional(
+                    (col(name) >= lit(low)) & (col(name) <= lit(high))
+                )
+    return None
 
 
 def _covers(columns: List[String], reads: List[String]) -> Bool:

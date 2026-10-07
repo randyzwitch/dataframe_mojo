@@ -5,6 +5,7 @@ The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
 from .dtype import DataType, NUMERIC_DTYPES
+from .expr import INT_IS_IN
 from .expr import (
     Node,
     COL,
@@ -81,6 +82,7 @@ from .expr import (
     struct_pack_names,
 )
 from .str_kernels import string_op, concat_strings
+from .expr_kernels import integer_is_in
 from .list_kernels import nested_op
 from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
@@ -321,6 +323,8 @@ def _eval[
             offset if len(left) == length else 0,
             observed.copy() if len(observed) == len(left) else List[Bool](),
         )
+    if node.op == INT_IS_IN:
+        return integer_is_in(left, node.text)
     if is_string_op(node.op):
         return string_op(node, left)
     if is_nested_op(node.op):
