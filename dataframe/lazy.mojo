@@ -1213,6 +1213,12 @@ struct LazyFrame(Copyable):
             and not _is_scan(self._nodes[cursor].kind)
         ):
             return None
+        if cursor == index and self._nodes[cursor].kind == SCAN_FRAME:
+            # The frame itself, with nothing to apply: batches would only
+            # copy it into chunks that the eager step above rechunks
+            # again (ClickBench q16 over 10M in-memory rows, 275 -> 181
+            # ms).
+            return None
         operations.reverse()
         operation_nodes.reverse()
         # Grouped aggregations over an in-memory frame, filtered or

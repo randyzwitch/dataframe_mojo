@@ -118,6 +118,33 @@ def test_eager_executor_records_each_input_once() raises:
     assert_equal(sorted[2], Int64(profiled[0].height()))
 
 
+def test_frame_scan_under_an_eager_step_is_not_streamed() raises:
+    """A plan whose terminal step runs eagerly over an in-memory frame
+    (a many-group aggregation, a full sort) reads the frame as it is: the
+    scan is not streamed into batches that would only be concatenated
+    and rechunked again (ClickBench q16, 275 -> 181 ms)."""
+    var frame = DataFrame([ints("k", 200_000, 150_000), ints("v", 200_000, 7)])
+    var grouped = frame.lazy().group_by(["k"]).agg([col("v").sum().alias("s")])
+    var profiled = grouped.profile()
+    var report = profiled[1].copy()
+    assert_true(profiled[0].equals(grouped.collect(streaming=False)))
+    for r in range(report.height()):
+        if report.item(r, "operator").string().startswith("SCAN frame"):
+            assert_equal(report.item(r, "executor").string(), "eager")
+            assert_equal(report.item(r, "output_rows").int64(), 200_000)
+    var sorted = frame.lazy().sort("v").profile()
+    report = sorted[1].copy()
+    assert_true(sorted[0].equals(frame.sort("v")))
+    for r in range(report.height()):
+        assert_equal(report.item(r, "executor").string(), "eager")
+    # A streamed reduction over the frame still streams.
+    var summed = frame.lazy().select_exprs([col("v").sum().alias("s")])
+    report = summed.profile()[1].copy()
+    assert_equal(rows_of(report, "SCAN frame")[2], 200_000)
+    for r in range(report.height()):
+        assert_equal(report.item(r, "executor").string(), "streaming")
+
+
 def test_collect_without_profile_records_nothing() raises:
     var frame = DataFrame([ints("k", 100, 10)])
     var plan = frame.lazy().filter(col("k") > lit(Int64(3)))
