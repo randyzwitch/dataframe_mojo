@@ -5843,6 +5843,16 @@ struct _StreamReduction(Movable):
             for i in range(len(expression._nodes)):
                 if not is_reduction(expression._nodes[i].op):
                     continue
+                # Evaluated 16K rows at a time ungrouped, 4K grouped: the
+                # evaluator's fixed cost per batch (a column slice and a
+                # validity window per node) is paid a few times per stream
+                # batch instead of 64. TPC-DS q9's fifteen conditional sums
+                # took 90 ms at 1,024 rows and 25 ms at 16K. A grouped
+                # reduction also touches its group states per batch, and
+                # ClickBench q27 (string lengths by CounterID) was 12%
+                # slower at 16K and level at 4K, where q59 keeps most of
+                # its gain (178 ms at 1,024, 150 at 4K, 137 at 8K).
+                var batch = 4096 if self.grouped else 16384
                 var job = _ReduceJob[8](
                     bound,
                     frame._columns,
@@ -5850,7 +5860,7 @@ struct _StreamReduction(Movable):
                     expression._nodes[i],
                     0,
                     frame.height(),
-                    1024,
+                    batch,
                     self.grouped,
                     shared,
                     count,

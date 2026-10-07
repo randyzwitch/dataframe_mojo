@@ -93,7 +93,7 @@ from .window import window_op, interpolate_by_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
 from .bool_column import BoolColumn
-from .column import Column, _count_valid
+from .column import Column, _count_valid, _validity_at
 from .string_column import StringColumn, StringBuilder
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
@@ -414,6 +414,222 @@ def _implode[
     return Series("", ListColumn(offsets^, input.take(order).renamed("item")))
 
 
+def _selection_masks(
+    flags: BoolColumn,
+    active: List[Bool],
+    mut selected: List[Bool],
+    mut then_mask: List[Bool],
+    mut other_mask: List[Bool],
+):
+    """Fill the three row masks of a conditional from the predicate's
+    bits: selected (true and valid), and the rows each branch may be
+    observed on. A byte of the bitmap at a time, eight rows per read:
+    three appends and three bit reads a row were most of a conditional's
+    cost."""
+    var size = len(selected)
+    var out_selected = selected.unsafe_ptr()
+    var out_then = then_mask.unsafe_ptr()
+    var out_other = other_mask.unsafe_ptr()
+    var observed = active.unsafe_ptr()
+    var any_active = len(active) == 0
+    if len(flags) == 1:
+        var take = flags._valid(0) and flags._get(0)
+        for i in range(size):
+            var seen = any_active or observed[unsafe_offset=i]
+            out_selected[unsafe_offset=i] = take
+            out_then[unsafe_offset=i] = seen and take
+            out_other[unsafe_offset=i] = seen and not take
+        return
+    var data = flags._data[].unsafe_ptr()
+    var valid = flags._bits[].unsafe_ptr()
+    var nulls = len(flags._bits[]) > 0
+    var bit = flags._offset
+    var i = 0
+    while i < size:
+        # The bits of this row's byte, aligned so this row is bit 0.
+        var at = bit + i
+        var byte = data[unsafe_offset=at >> 3]
+        if nulls:
+            byte &= valid[unsafe_offset=at >> 3]
+        var word = Int(byte) >> (at & 7)
+        var run = min(8 - (at & 7), size - i)
+        for r in range(run):
+            var take = (word >> r) & 1 == 1
+            var seen = any_active or observed[unsafe_offset=i + r]
+            out_selected[unsafe_offset=i + r] = take
+            out_then[unsafe_offset=i + r] = seen and take
+            out_other[unsafe_offset=i + r] = seen and not take
+        i += run
+
+
+def _null_otherwise(bound: BoundExpr, index: Int) -> Bool:
+    """Whether node `index` is a conditional whose unselected rows are
+    null: no otherwise, or a null literal."""
+    ref node = bound.expr._nodes[index]
+    if node.op != WHEN:
+        return False
+    if node.extra < 0:
+        return True
+    return bound.expr._nodes[node.extra].op == LIT_NULL
+
+
+def _cannot_raise(bound: BoundExpr, index: Int) -> Bool:
+    """Whether evaluating node `index` on any row is safe: a column, a
+    literal, or a cast between numeric types of one. Such a branch needs
+    no row mask, which saves building one per batch."""
+    ref node = bound.expr._nodes[index]
+    if node.op == COL or node.op == LIT_INT or node.op == LIT_FLOAT:
+        return True
+    if node.op == CAST and node.left >= 0:
+        ref source = bound.expr._nodes[node.left]
+        if source.op != COL or len(node.dtypes) == 0 or not node.dtypes[0]:
+            return False
+        var target = node.dtypes[0].value()
+        var source_type = bound.dtypes[node.left]
+        return (
+            target.is_numeric()
+            and not target.is_decimal()
+            and source_type.is_numeric()
+            and not source_type.is_decimal()
+            and node.integer != 1
+        )
+    return False
+
+
+def _masked_branch[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    aggregates: List[Series],
+    index: Int,
+    offset: Int,
+    length: Int,
+) raises -> Series:
+    """The `then` branch of a conditional with null unselected rows, as a
+    numeric batch whose validity is the branch's own and the predicate's
+    together, combined a byte at a time; `choose` for any other branch."""
+    ref node = bound.expr._nodes[index]
+    var predicate = _eval[width](
+        bound,
+        columns,
+        aggregates,
+        node.left,
+        offset,
+        length,
+        False,
+        List[Bool](),
+    )
+    var contiguous_predicate = (
+        predicate.rechunk() if predicate.is_chunked() else predicate.copy()
+    )
+    ref flags = contiguous_predicate._data[BoolColumn]
+    var size = length if bound.shapes[index] == ROWS else 1
+    var then: Series
+    var selected = List[Bool]()
+    if _cannot_raise(bound, node.right):
+        then = _eval[width](
+            bound,
+            columns,
+            aggregates,
+            node.right,
+            offset,
+            length,
+            False,
+            List[Bool](),
+        )
+    else:
+        selected = List[Bool](unsafe_uninit_length=size)
+        var then_mask = List[Bool](unsafe_uninit_length=size)
+        var other_mask = List[Bool](unsafe_uninit_length=size)
+        _selection_masks(flags, List[Bool](), selected, then_mask, other_mask)
+        then = _eval[width](
+            bound,
+            columns,
+            aggregates,
+            node.right,
+            offset,
+            length,
+            False,
+            then_mask,
+        )
+    var branch_numeric = (
+        not then.is_chunked()
+        and not then.dtype().is_decimal()
+        and len(then) == size
+        and len(flags) == size
+    )
+    if not branch_numeric:
+        if len(selected) == 0:
+            selected = List[Bool](unsafe_uninit_length=size)
+            var then_mask = List[Bool](unsafe_uninit_length=size)
+            var other_mask = List[Bool](unsafe_uninit_length=size)
+            _selection_masks(
+                flags, List[Bool](), selected, then_mask, other_mask
+            )
+        return choose(
+            selected, then, Series.full_null("", bound.dtypes[index], 1)
+        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if then._data.isa[Column[Scalar[D]]]():
+            var masked = then._data[Column[Scalar[D]]].copy()
+            masked._bits = ArcPointer(
+                _and_validity(flags, masked._bits[], masked._offset, size)
+            )
+            return Series("", masked^).with_dtype(then.dtype())
+    if len(selected) == 0:
+        selected = List[Bool](unsafe_uninit_length=size)
+        var then_mask = List[Bool](unsafe_uninit_length=size)
+        var other_mask = List[Bool](unsafe_uninit_length=size)
+        _selection_masks(flags, List[Bool](), selected, then_mask, other_mask)
+    return choose(selected, then, Series.full_null("", bound.dtypes[index], 1))
+
+
+def _and_validity(
+    flags: BoolColumn, bits: List[UInt8], base: Int, size: Int
+) -> List[UInt8]:
+    """A validity bitmap over rows [base, base + size) of a column: the
+    column's own validity (`bits`, empty for none) and the predicate's
+    true-and-valid bits together. Whole bytes when every bitmap starts on
+    a byte boundary, which batch offsets do; bit by bit otherwise."""
+    var out = List[UInt8](length=(base + size + 7) // 8, fill=0)
+    var packed = out.unsafe_ptr()
+    var data = flags._data[].unsafe_ptr()
+    var flag_bits = flags._bits[].unsafe_ptr()
+    var flag_nulls = len(flags._bits[]) > 0
+    var own = bits.unsafe_ptr()
+    var own_nulls = len(bits) > 0
+    var flag_offset = flags._offset
+    if flag_offset % 8 == 0 and base % 8 == 0:
+        var first = base // 8
+        var flag_first = flag_offset // 8
+        var whole = size // 8
+        for b in range(whole):
+            var byte = data[unsafe_offset=flag_first + b]
+            if flag_nulls:
+                byte &= flag_bits[unsafe_offset=flag_first + b]
+            if own_nulls:
+                byte &= own[unsafe_offset=first + b]
+            packed[unsafe_offset=first + b] = byte
+        for row in range(whole * 8, size):
+            var keep = flags._get(row) and flags._valid(row)
+            if own_nulls:
+                keep = keep and _validity_at(own, base + row)
+            if keep:
+                var at = base + row
+                packed[unsafe_offset=at >> 3] |= UInt8(1) << UInt8(at & 7)
+        return out^
+    for row in range(size):
+        var keep = flags._get(row) and flags._valid(row)
+        if own_nulls:
+            keep = keep and _validity_at(own, base + row)
+        if keep:
+            var at = base + row
+            packed[unsafe_offset=at >> 3] |= UInt8(1) << UInt8(at & 7)
+    return out^
+
+
 def _conditional[
     width: Int
 ](
@@ -439,16 +655,10 @@ def _conditional[
         predicate.rechunk() if predicate.is_chunked() else predicate.copy()
     )
     ref flags = contiguous_predicate._data[BoolColumn]
-    var selected = List[Bool](capacity=size)
-    var then_mask = List[Bool](capacity=size)
-    var other_mask = List[Bool](capacity=size)
-    for i in range(size):
-        var p = 0 if len(flags) == 1 else i
-        var take = flags._valid(p) and flags._get(p)
-        var observed = len(active) == 0 or active[i]
-        selected.append(take)
-        then_mask.append(observed and take)
-        other_mask.append(observed and not take)
+    var selected = List[Bool](unsafe_uninit_length=size)
+    var then_mask = List[Bool](unsafe_uninit_length=size)
+    var other_mask = List[Bool](unsafe_uninit_length=size)
+    _selection_masks(flags, active, selected, then_mask, other_mask)
     var then = _eval[width](
         bound,
         columns,
@@ -503,9 +713,18 @@ def _feed[
     groups: List[Int],
 ) raises:
     """Evaluate one batch of the reduction's input(s) and fold it in."""
-    var chunk = _batch[width](
-        bound, columns, states, node.left, offset, length, False
-    )
+    var chunk: Series
+    if _null_otherwise(bound, node.left):
+        # `sum(when(c).then(x))`: the rows the predicate drops are nulls
+        # to the reduction, so the branch's own values are reduced under a
+        # validity that adds the predicate; nothing is selected or copied.
+        chunk = _masked_branch[width](
+            bound, columns, states, node.left, offset, length
+        )
+    else:
+        chunk = _batch[width](
+            bound, columns, states, node.left, offset, length, False
+        )
     if is_pair_reduction(node.op):
         var other = _batch[width](
             bound, columns, states, node.right, offset, length, False
@@ -1048,6 +1267,17 @@ def _direct_numeric_column[
             return True
         if op == MIN:
             _direct_int_extreme[D, False](reducer, column, start, end)
+            return True
+    comptime if D == DType.float64:
+        if op == SUM or op == MEAN:
+            # The same eight-wide masked sum a plain column takes; a
+            # masked conditional branch arrives here with its validity.
+            _direct_float_column_sum(
+                reducer,
+                rebind[Column[Float64]](column),
+                start,
+                end,
+            )
             return True
     for i in range(start, end):
         if not column._valid(i):
