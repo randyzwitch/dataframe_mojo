@@ -643,6 +643,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
   join keys, compared field by field with a null struct distinct from a
   struct of nulls.
 
+### Fixed
+
+- A lazy plan whose terminal step runs eagerly over an in-memory frame
+  (a many-group `group_by`, a full `sort`, an eager join) no longer
+  streams the frame's scan first: the stream only copied the frame into
+  65,536-row chunks that the eager step concatenated and rechunked again.
+  ClickBench q15 109 -> 52 ms, q16/q17 260 -> 172 ms, q35 94 -> 42 ms,
+  q33/q34 340 -> 200 ms; TPC-DS q94/q95 27 -> 21 ms, q10 52 -> 42 ms.
+
 ### Breaking
 
 - Public read_csv now uses the single source-derived Polars CSV pipeline; the
