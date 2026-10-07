@@ -378,7 +378,7 @@ def write_csv(
 
 def _reject_nested(frame: DataFrame) raises:
     for field in frame.schema():
-        if field.dtype.is_binary():
+        if field.dtype._is_bytes():
             # As in Polars: CSV has no agreed encoding for raw bytes.
             raise Error(
                 "CSV cannot hold binary columns: "

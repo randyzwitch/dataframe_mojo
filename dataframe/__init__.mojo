@@ -56,4 +56,8 @@ from .parquet import (
     parquet_row_group_statistics,
     read_parquet,
     write_parquet,
+    write_geoparquet,
 )
+
+from .geometry import from_wkb, to_wkb
+from .geojson import read_geojson, from_geojson

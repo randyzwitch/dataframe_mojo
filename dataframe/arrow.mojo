@@ -34,6 +34,8 @@ from .bool_column import BoolColumn
 from .column import Column, _copy_bits, _copy_validity
 from std.collections import Dict
 from .categorical import encode
+from .geometry import from_wkb
+from .geospatial_metadata import apply_geoparquet_metadata
 from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from .hashing import encode_string_rows_parallel
 from .frame import DataFrame
@@ -159,15 +161,80 @@ struct _SchemaState(Movable):
     """Private data of an exported ArrowSchema: its strings and children."""
 
     var format: List[UInt8]
+    var metadata: List[UInt8]
     var name: List[UInt8]
     var children: List[Int]  # ArrowSchema* (heap), owned
     var dictionary: Int  # ArrowSchema* (heap), owned; 0 if none
 
     def __init__(out self, format: String, name: String):
         self.format = _c_string(format)
+        self.metadata = List[UInt8]()
         self.name = _c_string(name)
         self.children = List[Int]()
         self.dictionary = 0
+
+
+def _metadata_pack(keys: List[String], values: List[String]) -> List[UInt8]:
+    var result = List[UInt8]()
+    var count = len(keys)
+    for i in range(4):
+        result.append(UInt8((count >> (8 * i)) & 255))
+    for k in range(count):
+        for text in [keys[k], values[k]]:
+            for i in range(4):
+                result.append(UInt8((text.byte_length() >> (8 * i)) & 255))
+            result.extend(text.as_bytes())
+    return result^
+
+
+def _metadata_length(mut address: Int) raises -> Int:
+    # The C interface uses signed Int32 lengths, without alignment promises.
+    var length = 0
+    for i in range(4):
+        length |= Int(_read[UInt8](address, i)) << (8 * i)
+    address += 4
+    if length > Int(Int32.MAX):
+        raise Error("Negative Arrow metadata length")
+    return length
+
+
+def _metadata_value(schema: ArrowSchema, key: String) raises -> String:
+    if schema.metadata == 0:
+        return ""
+    var address = schema.metadata
+    var count = _metadata_length(address)
+    var result = String()
+    var found = False
+    for _ in range(count):
+        var key_length = _metadata_length(address)
+        var matches = key_length == key.byte_length()
+        if matches:
+            for i in range(key_length):
+                matches = (
+                    matches and _read[UInt8](address, i) == key.as_bytes()[i]
+                )
+        address += key_length
+        var length = _metadata_length(address)
+        if matches:
+            if found:
+                raise Error("Duplicate Arrow metadata key: " + key)
+            # Only the requested spatial metadata is textual. Unrelated
+            # application metadata may contain arbitrary binary bytes.
+            result = String(
+                StringSlice(from_utf8=_span[UInt8](address, 0, length))
+            )
+            found = True
+        address += length
+    return result
+
+
+def _set_metadata(
+    mut schema: ArrowSchema, keys: List[String], values: List[String]
+):
+    """Set metadata on a schema owned by this exporter."""
+    ref state = _at[_SchemaState](schema.private_data)[]
+    state.metadata = _metadata_pack(keys, values)
+    schema.metadata = Int(state.metadata.unsafe_ptr())
 
 
 struct _ArrayState(Movable):
@@ -307,7 +374,7 @@ def _format(dtype: DataType) raises -> String:
         return "b"
     if dtype == DataType.STRING:
         return "U"
-    if dtype.is_binary():
+    if dtype._is_bytes():
         return "Z"
     if dtype == DataType.DATE:
         return "tdD"
@@ -361,6 +428,12 @@ def _fill_schema(mut schema: ArrowSchema, series: Series) raises:
         schema.dictionary = values
     schema.private_data = _leak(state^)
     schema.release = _schema_release_address()
+    if dtype.is_geometry():
+        _set_metadata(
+            schema,
+            ["ARROW:extension:name", "ARROW:extension:metadata"],
+            ["geoarrow.wkb", dtype.geometry_metadata()],
+        )
 
 
 def _fill_array(
@@ -767,6 +840,19 @@ def _import_dictionary(
 
 
 def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
+    var extension = _metadata_value(schema, "ARROW:extension:name")
+    if extension.startswith("geoarrow."):
+        if extension != "geoarrow.wkb":
+            raise Error(
+                "Unsupported GeoArrow encoding: " + extension + "; import WKB"
+            )
+        var metadata = _metadata_value(schema, "ARROW:extension:metadata")
+        var storage = _import_storage(array, schema)
+        return from_wkb(storage, "{}" if metadata == "" else metadata)
+    return _import_storage(array, schema)
+
+
+def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     var format = _read_c_string(schema.format)
     var name = _read_c_string(schema.name)
     var length = Int(array.length)
@@ -1103,6 +1189,9 @@ def _import_arrow_with_pool(
         for i in range(len(jobs)):
             columns.append(jobs[i].result.pop())
         var result = DataFrame(columns^, height=Int(array.length))
+        var geo = _metadata_value(schema, "geo")
+        if geo != "":
+            result = apply_geoparquet_metadata(result, geo)
         _release_imported(array, schema)
         return result^
     except e:

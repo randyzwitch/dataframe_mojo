@@ -468,7 +468,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         """The same values tagged with another logical type that shares their
         storage (temporal types and INT64, string and binary). Binary cannot
         be retagged as string: cast it, so its bytes are checked as UTF-8."""
-        if self._dtype.is_binary() and dtype == DataType.STRING:
+        if self._dtype._is_bytes() and dtype == DataType.STRING:
             raise Error("binary cannot be tagged as string; cast it instead")
         if dtype.physical() != self._dtype.physical():
             raise Error(
@@ -592,7 +592,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             )
         if self._data[StringColumn].is_null(index):
             return AnyValue.null(self._dtype)
-        if self._dtype.is_binary():
+        if self._dtype._is_bytes():
             return AnyValue.binary(self.slice(index, 1))
         return AnyValue(String(self._data[StringColumn]._get(index)))
 
@@ -1468,8 +1468,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         if dtype.is_struct():
             return Self(name^, StructColumn._nulls(length, dtype))
         var strings = Self(name^, StringColumn._nulls(length))
-        if dtype.is_binary():
-            strings._dtype = DataType.BINARY
+        if dtype._is_bytes():
+            strings._dtype = dtype
         return strings^
 
     def append(self, other: Self) raises -> Self:

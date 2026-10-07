@@ -1903,7 +1903,7 @@ struct Reducer(Movable):
                     total = len(values)
                 offsets.append(Int64(total))
             child = Series("", StringColumn(values, valid))
-        if self.logical.is_temporal() or self.logical.is_binary():
+        if self.logical.is_temporal() or self.logical._is_bytes():
             child = child.with_dtype(self.logical)
         return Series("", ListColumn(offsets^, child.renamed("item")))
 
@@ -2029,7 +2029,7 @@ struct Reducer(Movable):
             )
         else:
             values = Series("", StringColumn(values_s, valid))
-        if self.logical.is_temporal() or self.logical.is_binary():
+        if self.logical.is_temporal() or self.logical._is_bytes():
             values = values.with_dtype(self.logical)
         var tally: Series
         if normalize:

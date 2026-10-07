@@ -16,6 +16,7 @@ from std.memory import ArcPointer
 from std.sys import size_of
 
 from .timezone import canonical_zone
+from .json_value import JsonValue, json_quote
 
 # Every numeric type shares one code; its DType tells them apart.
 comptime _NUMERIC = 0
@@ -31,6 +32,7 @@ comptime _BINARY = 9
 # Dictionary-encoded strings (Arrow dictionary<uint32, large_utf8>): UInt32
 # codes into a dictionary of distinct values carried by the DataType.
 comptime _CATEGORICAL = 10
+comptime _GEOMETRY = 11
 comptime _LIST = 16
 # Marks a type without numeric storage (bool, string, nested). Bool columns
 # are bit-packed, so DType.bool never names a numeric storage type.
@@ -298,6 +300,53 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     comptime CATEGORICAL = DataType(_CATEGORICAL, 0)
 
     @staticmethod
+    def geometry(metadata: String = "{}") raises -> DataType:
+        """WKB geometry with GeoArrow JSON metadata (CRS, edges, etc.).
+
+        Missing or null CRS means unknown. JSON keys and whitespace are
+        normalized; CRS definitions are not resolved or transformed.
+        """
+        var obj = JsonValue(metadata)
+        _ = obj.keys()
+        var crs = obj.get("crs")
+        if crs.text != "null" and crs.kind() != 123 and crs.kind() != 34:
+            raise Error("geometry CRS must be an object, string, or null")
+        if obj.has("edges"):
+            var edges = obj.get("edges").string()
+            if (
+                edges != "planar"
+                and edges != "spherical"
+                and edges != "vincenty"
+                and edges != "thomas"
+                and edges != "andoyer"
+                and edges != "karney"
+            ):
+                raise Error(
+                    "Unsupported geometry edge interpretation: " + edges
+                )
+        var normalized = String("{")
+        var separator = String()
+        for key in obj.keys():
+            var value = obj.get(key)
+            if key == "crs" and value.text == "null":
+                continue
+            if key == "edges" and value.string() == "planar":
+                continue
+            normalized += separator + json_quote(key) + ":" + value.canonical()
+            separator = ","
+        normalized += "}"
+        return DataType(_GEOMETRY, JsonValue(normalized).canonical())
+
+    def is_geometry(self) -> Bool:
+        return self._code == _GEOMETRY
+
+    def geometry_metadata(self) raises -> String:
+        """The GeoArrow JSON metadata; raises for non-geometry types."""
+        if not self.is_geometry():
+            raise Error("Expected geometry dtype")
+        return self._nested.value()[].text
+
+    @staticmethod
     def categorical(var dictionary: CategoricalDictionary) -> DataType:
         """A categorical whose codes index `dictionary`."""
         var dtype = DataType(_CATEGORICAL, 0)
@@ -428,6 +477,12 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return DataType.BOOL
         if name == "string":
             return DataType.STRING
+        if name.startswith("geometry[") and name.endswith("]"):
+            return DataType.geometry(
+                String(name[byte = 9 : name.byte_length() - 1])
+            )
+        if name == "geometry":
+            return DataType.geometry()
         if name == "binary":
             return DataType.BINARY
         if name == "categorical" or name == "cat":
@@ -530,6 +585,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return String(self._storage)
         if self._code == _BOOL:
             return "bool"
+        if self.is_geometry():
+            return "geometry[" + self._nested.value()[].text + "]"
         if self._code == _BINARY:
             return "binary"
         if self._code == _CATEGORICAL:
@@ -589,6 +646,8 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
             return letter + String(self.bit_width())
         if self._code == _BOOL:
             return "bool"
+        if self.is_geometry():
+            return "geometry"
         if self._code == _STRING:
             return "str"
         if self._code == _CATEGORICAL:
@@ -641,12 +700,16 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
     def is_binary(self) -> Bool:
         return self._code == _BINARY
 
+    def _is_bytes(self) -> Bool:
+        """Opaque byte storage: binary or WKB geometry."""
+        return self._code == _BINARY or self._code == _GEOMETRY
+
     def physical(self) -> DataType:
         """The storage type: INT64 for temporal types, STRING for binary
         (the same offsets-and-bytes layout), otherwise self."""
         if self.is_temporal():
             return DataType.INT64
-        if self._code == _BINARY:
+        if self._is_bytes():
             return DataType.STRING
         if self._code == _CATEGORICAL:
             return DataType.of(DType.uint32)

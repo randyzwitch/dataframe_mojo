@@ -91,7 +91,7 @@ struct CsvSchema(Copyable, Sized):
         for field in fields:
             if field.name in names:
                 raise Error("Duplicate CSV field name: " + field.name)
-            if field.dtype.is_binary():
+            if field.dtype._is_bytes():
                 # As in Polars: CSV text has no agreed encoding for bytes.
                 raise Error(
                     "CSV cannot read binary columns: "

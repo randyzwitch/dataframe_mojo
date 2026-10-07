@@ -78,13 +78,14 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
     def binary(var row: Series) -> Self:
         """A binary value, held as a one-row binary series so its bytes
         never pass through a String."""
-        var result = Self(DataType.BINARY, True, 0, 0, False, "")
+        var result = Self(row.dtype(), True, 0, 0, False, "")
         result._nested = ArcPointer(_Box[Series](row^))
         return result^
 
     def bytes(self) raises -> List[UInt8]:
         """A binary value's bytes."""
-        self._check(DataType.BINARY)
+        if not self._dtype._is_bytes() or not self._valid:
+            raise Error("Expected a non-null binary or geometry value")
         var out = List[UInt8]()
         out.extend(self._binary_span())
         return out^
@@ -218,7 +219,7 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
             return both_nan or self._float == other._float
         if self._dtype == DataType.BOOL:
             return self._bool == other._bool
-        if self._dtype.is_binary():
+        if self._dtype._is_bytes():
             var a = self._binary_span()
             var b = other._binary_span()
             if len(a) != len(b):
@@ -240,7 +241,7 @@ struct AnyValue(Copyable, Deinitable, Equatable, Movable, Writable):
     def write_to(self, mut writer: Some[Writer]):
         if not self._valid:
             writer.write("null")
-        elif self._dtype.is_binary():
+        elif self._dtype._is_bytes():
             writer.write(escape_bytes(self._binary_span()))
         elif self._dtype.is_list():
             writer.write("[")

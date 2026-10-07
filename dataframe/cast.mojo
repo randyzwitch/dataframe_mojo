@@ -514,6 +514,10 @@ def cast_series(
             + ": list and struct casts are not supported yet"
         )
     var source = _dtype(input)
+    if source.is_geometry() or target.is_geometry():
+        if source == target:
+            return input.copy()
+        raise Error("Geometry casts require explicit WKB import/export")
     if source.is_decimal() and target == DataType.FLOAT64 and len(mask) == 0:
         return _decimal_to_float(input)
     if source.is_categorical() or target.is_categorical():
