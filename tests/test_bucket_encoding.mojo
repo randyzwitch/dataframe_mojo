@@ -6,7 +6,7 @@ confirmed by comparing the rows' keys. Forcing every hash to one value
 makes each probe collide, so the ids must still equal `encode_rows`."""
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
 
-from dataframe import Column, Series, StringColumn
+from dataframe import BoolColumn, Column, Series, StringColumn
 from dataframe.hashing import encode_rows
 from dataframe.partition import encode_bucket
 from dataframe.string_view import StringViewBuilder
@@ -165,7 +165,93 @@ def test_composite_view_string_fallback_with_collisions() raises:
     var views = Series("views", StringColumn(builder^.finish()))
     check([offsets.slice(3, 130), views.slice(3, 130)], "mixed view storage")
     check([views.slice(3, 130), offsets.slice(3, 130)], "reversed view storage")
+    # Inline (through 12 bytes) and long values sharing the first four
+    # bytes, values that differ only after the prefix, nulls, and enough
+    # long bytes to span more than one buffer.
+    var words: List[String] = [
+        "",
+        "abcd",
+        "abcdefghijkl",
+        "abcdefghijklm",
+        "abcdefghijklmn",
+        "abcdXfghijklmn",
+        "abcd" + String("z") * 9000,
+        "abcd" + String("z") * 8999 + "y",
+    ]
+    var mixed = StringViewBuilder()
+    var plain = List[String]()
+    var valid = List[Bool]()
+    for i in range(400):
+        var word = words[(i * 7) % len(words)]
+        if i % 17 == 3:
+            mixed.append_null()
+            plain.append("")
+            valid.append(False)
+        else:
+            mixed.append(StringSlice(word))
+            plain.append(word)
+            valid.append(True)
+    var viewed = Series("viewed", StringColumn(mixed^.finish()))
+    var offsets_nulls = Series("plain", StringColumn(plain, valid))
+    check([viewed.copy()], "view strings with nulls")
+    check([viewed.slice(5, 390), offsets_nulls.slice(5, 390)], "view nulls")
 
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_every_key_dtype_compares_through_its_view() raises:
+    """Composite keys of every fixed width, floats of both widths,
+    decimals, bools and strings, each with nulls and taken from a slice
+    (#486): a row's key is compared through a typed view against the
+    group's key kept beside the bucket's table, and the ids equal
+    `encode_rows` under colliding hashes."""
+    var n = 400
+    var valid = List[Bool](capacity=n)
+    var bytes8 = List[UInt8](capacity=n)
+    var shorts = List[Int16](capacity=n)
+    var words = List[UInt32](capacity=n)
+    var longs = List[Int64](capacity=n)
+    var singles = List[Float32](capacity=n)
+    var doubles = List[Float64](capacity=n)
+    var wide = List[Int128](capacity=n)
+    var flags = List[Bool](capacity=n)
+    var texts = List[String](capacity=n)
+    for i in range(n):
+        valid.append(i % 23 != 4)
+        bytes8.append(UInt8(i % 3))
+        shorts.append(Int16(-(i % 4)))
+        words.append(UInt32(i % 2))
+        longs.append(Int64(1) << 40 if i % 5 == 0 else Int64(i % 2))
+        var f = Float32(i % 3)
+        if i % 9 == 0:
+            f = Float32(0) / Float32(0)
+        elif i % 6 == 0:
+            f = -0.0 if i % 12 == 0 else 0.0
+        singles.append(f)
+        doubles.append(Float64(i % 4) if i % 8 else Float64(0) / Float64(0))
+        wide.append(Int128(i % 3) << 70 if i % 2 == 0 else Int128(i % 3))
+        flags.append(i % 7 < 3)
+        texts.append("t" + String(i % 5))
+    var keys: List[Series] = [
+        Series("u8", Column[UInt8](bytes8^, valid.copy())),
+        Series("i16", Column[Int16](shorts^, valid.copy())),
+        Series("u32", Column[UInt32](words^, valid.copy())),
+        Series("i64", Column[Int64](longs^, valid.copy())),
+        Series("f32", Column[Float32](singles^, valid.copy())),
+        Series("f64", Column[Float64](doubles^, valid.copy())),
+        Series("i128", Column[Int128](wide^, valid.copy())),
+        Series("b", BoolColumn(flags^, valid.copy())),
+        Series("s", StringColumn(texts^, valid.copy())),
+    ]
+    for key in keys:
+        check([key.copy()], key.name())
+        check([key.slice(13, 350)], key.name() + " sliced")
+    check(keys, "all dtypes")
+    var sliced = List[Series]()
+    for key in keys:
+        sliced.append(key.slice(13, 350))
+    check(sliced, "all dtypes sliced")
+    check([keys[6].copy(), keys[3].copy()], "i128 then i64")
+    check([keys[8].slice(1, 398), keys[4].slice(1, 398)], "string then f32")

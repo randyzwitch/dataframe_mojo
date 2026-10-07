@@ -11,7 +11,8 @@ the plan before execution:
 - predicate pushdown: filters move below with_columns/select that do not
   produce the columns they read, below a sort when they are row-local, and
   into the side of an inner join (or the left side of a left/semi/anti join)
-  that owns every column they read;
+  that owns every column they read, and below a group_by when they read
+  only its keys;
   row-local filters directly above unrestricted CSV scans run per decode range;
 - projection pushdown: scans read only the columns the rest of the plan uses
   (CSV and Parquet scans decode only those fields); a join passes each input
@@ -24,8 +25,9 @@ the plan before execution:
   the footer statistics first and decodes only the row groups that can
   hold a match (see `parquet._pruned_row_groups`).
 
-Filters never move past a slice, unique, group_by, or right/full join,
-because that would change which rows those operators see.
+Filters never move past a slice, unique, right/full join, or a group_by
+whose aggregates they read, because that would change which rows those
+operators see.
 """
 from std.os import getenv
 from std.io import FileDescriptor
@@ -1218,6 +1220,22 @@ struct LazyFrame(Copyable):
             # copy it into chunks that the eager step above rechunks
             # again (ClickBench q16 over 10M in-memory rows, 275 -> 181
             # ms).
+            return None
+        if (
+            len(expressions) == 0
+            and top < 0
+            and limit < 0
+            and skip == 0
+            and len(joins) == 0
+            and self._nodes[cursor].kind == SCAN_FRAME
+            and not _filters(operations)
+        ):
+            # Row-local steps that keep every row of an in-memory frame
+            # (with_columns, select, drop) under an eager step: a stream
+            # applies them to batches and copies the results back
+            # together, while the eager steps share the columns they do
+            # not touch (ClickBench q18 adds a minute column to 10M rows
+            # before a 4.9M-group aggregation).
             return None
         operations.reverse()
         operation_nodes.reverse()
@@ -2618,63 +2636,98 @@ struct LazyFrame(Copyable):
             for i in range(len(self._nodes)):
                 if self._nodes[i].kind != FILTER:
                     continue
-                var reads = _references(self._nodes[i].exprs[0])
-                if not reads:
-                    continue
                 var child = self._nodes[i].left
-                ref below = self._nodes[child]
-                if below.kind == WITH_COLUMNS or below.kind == SELECT:
-                    # Safe when the filter reads only unchanged input columns.
-                    var produced = _output_names(below.exprs)
-                    var ok = True
-                    for name in reads.value():
-                        for p in produced:
-                            if p == name:
-                                ok = False
-                    if below.kind == SELECT:
-                        for e in below.exprs:
-                            var r = _references(e)
-                            if (
-                                not r
-                                or len(r.value()) != 1
-                                or r.value()[0] != e._name
-                                or len(e._nodes) != 1
-                            ):
-                                ok = False
-                    if ok:
-                        self._swap_down(i, child, False)
-                        changed = True
-                        break
-                elif below.kind == SORT and _row_local(self._nodes[i].exprs):
-                    # Stable sorting and a row-local filter commute: the
-                    # surviving rows retain the same relative sort order.
+                var side = self._passes(i, child)
+                if side >= 0:
+                    self._swap_down(i, child, side == 1)
+                    changed = True
+                    break
+                # Over another row-local filter that is stuck where this one
+                # could go further (a filter on an AND split into parts,
+                # one on the keys of a group_by, one on its aggregates):
+                # trade places, so this one moves on next time round.
+                if not _row_local(self._nodes[i].exprs):
+                    continue
+                # The operator under the run of row-local filters below.
+                var under = child
+                while (
+                    under >= 0
+                    and self._nodes[under].kind == FILTER
+                    and _row_local(self._nodes[under].exprs)
+                ):
+                    under = self._nodes[under].left
+                if (
+                    under != child
+                    and under >= 0
+                    and self._passes(child, under) < 0
+                    and self._passes(i, under) >= 0
+                ):
                     self._swap_down(i, child, False)
                     changed = True
                     break
-                elif below.kind == JOIN and (
-                    below.how == JOIN_INNER
-                    or below.how == JOIN_LEFT
-                    or below.how == JOIN_SEMI
-                    or below.how == JOIN_ANTI
-                ):
-                    var left_cols = self._columns_of(below.left)
-                    var right_cols = List[String]()
-                    for c in self._columns_of(below.right):
-                        # Coalesced right keys are not in the join output,
-                        # so no filter above can mean them.
-                        if not (below.coalesce and c in below.right_keys):
-                            right_cols.append(c)
-                    var side = -1
-                    if _covers(left_cols, reads.value()):
-                        side = 0
-                    elif below.how == JOIN_INNER and _covers_exclusive(
-                        right_cols, left_cols, reads.value()
+
+    def _passes(self, filter: Int, child: Int) raises -> Int:
+        """Whether the filter at `filter` can move below the node at
+        `child` without changing its result: -1 when not, else the side of
+        `child` it moves into (0 left or only input, 1 right)."""
+        var reads = _references(self._nodes[filter].exprs[0])
+        if not reads or child < 0:
+            return -1
+        ref below = self._nodes[child]
+        if below.kind == WITH_COLUMNS or below.kind == SELECT:
+            # Safe when the filter reads only unchanged input columns.
+            var produced = _output_names(below.exprs)
+            for name in reads.value():
+                for p in produced:
+                    if p == name:
+                        return -1
+            if below.kind == SELECT:
+                for e in below.exprs:
+                    var r = _references(e)
+                    if (
+                        not r
+                        or len(r.value()) != 1
+                        or r.value()[0] != e._name
+                        or len(e._nodes) != 1
                     ):
-                        side = 1
-                    if side >= 0:
-                        self._swap_down(i, child, side == 1)
-                        changed = True
-                        break
+                        return -1
+            return 0
+        if (
+            below.kind == AGG
+            and len(below.names) > 0
+            and _row_local(self._nodes[filter].exprs)
+            and _covers(below.names, reads.value())
+        ):
+            # A predicate on the grouping keys alone is the same for every
+            # row of a group, so filtering rows before the aggregation keeps
+            # exactly the groups it would keep after, with the same values
+            # and first-occurrence order (Polars and DuckDB push it down
+            # too; TPC-DS q39 filters d_moy after grouping 2.3M rows).
+            return 0
+        if below.kind == SORT and _row_local(self._nodes[filter].exprs):
+            # Stable sorting and a row-local filter commute: the surviving
+            # rows retain the same relative sort order.
+            return 0
+        if below.kind == JOIN and (
+            below.how == JOIN_INNER
+            or below.how == JOIN_LEFT
+            or below.how == JOIN_SEMI
+            or below.how == JOIN_ANTI
+        ):
+            var left_cols = self._columns_of(below.left)
+            var right_cols = List[String]()
+            for c in self._columns_of(below.right):
+                # Coalesced right keys are not in the join output, so no
+                # filter above can mean them.
+                if not (below.coalesce and c in below.right_keys):
+                    right_cols.append(c)
+            if _covers(left_cols, reads.value()):
+                return 0
+            if below.how == JOIN_INNER and _covers_exclusive(
+                right_cols, left_cols, reads.value()
+            ):
+                return 1
+        return -1
 
     def _swap_down(mut self, filter: Int, child: Int, right_side: Bool):
         """Move filter from above child to directly above child's input."""

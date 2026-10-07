@@ -290,22 +290,32 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
         elif op == DT_ORDINAL_DAY:
             var p = split(v, dtype)
             values[i] = _days(v, dtype) - days_from_civil(p.year, 1, 1) + 1
-        else:
+        elif op == DT_YEAR or op == DT_MONTH or op == DT_DAY:
             var p = split(v, dtype)
             if op == DT_YEAR:
                 values[i] = p.year
             elif op == DT_MONTH:
                 values[i] = p.month
-            elif op == DT_DAY:
-                values[i] = p.day
-            elif op == DT_HOUR:
-                values[i] = p.hour
-            elif op == DT_MINUTE:
-                values[i] = p.minute
-            elif op == DT_SECOND:
-                values[i] = p.second
             else:
-                values[i] = p.nanos
+                values[i] = p.day
+        elif dtype.is_date():
+            values[i] = 0
+        else:
+            # Time-of-day fields need no calendar: the ticks within the
+            # day (ClickBench q18 takes the minute of 10M timestamps).
+            var within = floor_mod(
+                v, NANOS_PER_DAY if dtype.is_time() else ticks_per_day(dtype)
+            )
+            var per_second = dtype.per_second()
+            var seconds = within // per_second
+            if op == DT_HOUR:
+                values[i] = seconds // 3600
+            elif op == DT_MINUTE:
+                values[i] = (seconds // 60) % 60
+            elif op == DT_SECOND:
+                values[i] = seconds % 60
+            else:
+                values[i] = (within % per_second) * (1000000000 // per_second)
     var result = Series("", Column[Int64](values^, valid))
     if op == DT_TRUNCATE or op == DT_OFFSET_BY:
         return result.with_dtype(dtype)

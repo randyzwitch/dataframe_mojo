@@ -23,12 +23,13 @@ values. The sample is a few thousand rows, so deciding costs far less than
 the hash pass it guards, and nothing is wasted when the answer is no.
 """
 from std.memory import ArcPointer, Pointer, bitcast
+from std.sys import size_of
 from std.sys.intrinsics import prefetch
 from std.collections import Dict
 
 from .aggregate import float_key
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _validity_at
 from .dtype import NUMERIC_DTYPES
 from .gather import take_parallel
 from .hashing import RowKeys, encode_rows
@@ -661,14 +662,6 @@ def _same_value(series: Series, a: Int, b: Int) -> Bool:
     return not present or strings._equal_at_valid(strings, a, b)
 
 
-@always_inline
-def _same_key(keys: List[Series], a: Int, b: Int) -> Bool:
-    for k in range(len(keys)):
-        if not _same_value(keys[k], a, b):
-            return False
-    return True
-
-
 def _numeric_key(key: Series) -> Bool:
     """A fixed-width number whose 64-bit hash key `_hash_column` writes
     without folding (every numeric dtype; not Int128 decimals)."""
@@ -679,30 +672,226 @@ def _numeric_key(key: Series) -> Bool:
     return False
 
 
+# How one key column is compared on a hash match, resolved once per
+# bucket instead of once per row through `_same_value`'s dtype dispatch.
+comptime _KEY_GENERIC = 0
+comptime _KEY_FIXED = 1
+comptime _KEY_FLOAT64 = 2
+comptime _KEY_FLOAT32 = 3
+comptime _KEY_STRING = 4
+comptime _KEY_VIEW = 5
+
+
+struct _KeyView(Copyable, Movable):
+    """One key column as raw addresses for comparing rows (#486).
+
+    `values` is row 0 of a fixed-width payload (`width` bytes an element)
+    or of a string column's offsets; `bytes` is a string column's bytes.
+    `bits` is the validity bitmap when the column has nulls, with
+    `bit_offset` the bit of row 0, and 0 otherwise. A view-backed string
+    keeps its long-value buffers' addresses. Resolved once per bucket, so
+    confirming a hash match is typed loads of the two rows' keys rather
+    than a dtype dispatch per key per row.
+    """
+
+    var kind: Int
+    var values: Int
+    var bytes: Int
+    var width: Int
+    var bits: Int
+    var bit_offset: Int
+    # A view-backed string's long-value buffers, by buffer index.
+    var buffers: List[Int]
+
+    def __init__(out self, key: Series):
+        self.kind = _KEY_GENERIC
+        self.values = 0
+        self.bytes = 0
+        self.width = 0
+        self.bits = 0
+        self.bit_offset = 0
+        self.buffers = List[Int]()
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            if key._data.isa[Column[Scalar[D]]]():
+                ref column = key._data[Column[Scalar[D]]]
+                comptime if D == DType.float64:
+                    self.kind = _KEY_FLOAT64
+                elif D == DType.float32:
+                    self.kind = _KEY_FLOAT32
+                else:
+                    self.kind = _KEY_FIXED
+                self.width = size_of[Scalar[D]]()
+                self.values = Int(column.unsafe_values())
+                if len(column._bits[]) != 0:
+                    self.bits = Int(column._bits[].unsafe_ptr())
+                    self.bit_offset = column._offset
+                return
+        if key._data.isa[Column[Int128]]():
+            ref column = key._data[Column[Int128]]
+            self.kind = _KEY_FIXED
+            self.width = 16
+            self.values = Int(column.unsafe_values())
+            if len(column._bits[]) != 0:
+                self.bits = Int(column._bits[].unsafe_ptr())
+                self.bit_offset = column._offset
+            return
+        if key._data.isa[StringColumn]():
+            ref strings = key._data[StringColumn]
+            if strings._is_view_storage():
+                # Arrow binary views: 16 bytes a row, the length and the
+                # first four bytes in the first word, and the rest of a
+                # value through 12 bytes (zero padded) or the buffer index
+                # and offset of a longer one in the second (TPC-DS q39's
+                # w_warehouse_name).
+                ref storage = strings._view_storage.value()
+                self.kind = _KEY_VIEW
+                self.values = Int(
+                    storage._views[].unsafe_ptr().unsafe_offset(strings._offset)
+                )
+                for buffer in storage._buffers[]:
+                    self.buffers.append(Int(buffer[].unsafe_ptr()))
+                if len(strings._bits[]) != 0:
+                    self.bits = Int(strings._bits[].unsafe_ptr())
+                    self.bit_offset = strings._offset
+                return
+            self.kind = _KEY_STRING
+            self.values = (
+                Int(strings._offsets[].unsafe_ptr()) + 8 * strings._offset
+            )
+            self.bytes = Int(strings._bytes[].unsafe_ptr())
+            if len(strings._bits[]) != 0:
+                self.bits = Int(strings._bits[].unsafe_ptr())
+                self.bit_offset = strings._offset
+
+    @always_inline
+    def _valid(self, row: Int) -> Bool:
+        return _validity_at(
+            Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.bits),
+            self.bit_offset + row,
+        )
+
+    @always_inline
+    def _word(self, row: Int) -> UInt64:
+        """A fixed-width row's payload as 64 bits (the low half of an
+        Int128; `_high` has the rest), or a float's equality key."""
+        var base = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.values)
+        if self.kind == _KEY_FLOAT64:
+            return float_key(
+                base.unsafe_offset(8 * row).unsafe_bitcast[Float64]()[]
+            )
+        if self.kind == _KEY_FLOAT32:
+            return float_key(
+                Float64(base.unsafe_offset(4 * row).unsafe_bitcast[Float32]()[])
+            )
+        if self.width == 8 or self.width == 16:
+            return base.unsafe_offset(self.width * row).unsafe_bitcast[
+                UInt64
+            ]()[]
+        if self.width == 4:
+            return UInt64(
+                base.unsafe_offset(4 * row).unsafe_bitcast[UInt32]()[]
+            )
+        if self.width == 2:
+            return UInt64(
+                base.unsafe_offset(2 * row).unsafe_bitcast[UInt16]()[]
+            )
+        return UInt64(base.unsafe_offset(row)[])
+
+    @always_inline
+    def _high(self, row: Int) -> UInt64:
+        var base = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.values)
+        return base.unsafe_offset(16 * row + 8).unsafe_bitcast[UInt64]()[]
+
+    @always_inline
+    def _view_words(self, row: Int) -> Tuple[UInt64, UInt64]:
+        var at = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.values
+        ).unsafe_offset(2 * row)
+        return (at[], at.unsafe_offset(1)[])
+
+    @always_inline
+    def _view_bytes(self, word: UInt64) -> Pointer[UInt8, MutAnyOrigin]:
+        """Where a long value's bytes start, from its view's second word
+        (buffer index in the low half, offset in the high half)."""
+        return Pointer[UInt8, MutAnyOrigin](
+            unsafe_from_address=self.buffers[Int(word & 0xFFFFFFFF)]
+        ).unsafe_offset(Int(word >> 32))
+
+    @always_inline
+    def _string_bounds(self, row: Int) -> Tuple[Int, Int]:
+        var offsets = Pointer[Int64, MutAnyOrigin](
+            unsafe_from_address=self.values
+        )
+        return (
+            Int(offsets.unsafe_offset(row)[]),
+            Int(offsets.unsafe_offset(row + 1)[]),
+        )
+
+    @always_inline
+    def same(self, first: Int, row: Int) -> Bool:
+        """Whether rows `first` and `row` hold equal keys (nulls equal each
+        other, every NaN one value, -0.0 equal to 0.0, strings by bytes)."""
+        if self.bits != 0:
+            var present = self._valid(row)
+            if present != self._valid(first):
+                return False
+            if not present:
+                return True
+        if self.kind == _KEY_VIEW:
+            var words = self._view_words(row)
+            var other = self._view_words(first)
+            if words[0] != other[0]:
+                return False
+            var length = Int(words[0] & 0xFFFFFFFF)
+            if length <= 12:
+                return words[1] == other[1]
+            # Equal lengths and first four bytes: compare the rest.
+            return _same_bytes(
+                self._view_bytes(words[1]),
+                self._view_bytes(other[1]),
+                4,
+                length,
+            )
+        if self.kind == _KEY_STRING:
+            var bounds = self._string_bounds(row)
+            var other = self._string_bounds(first)
+            var length = bounds[1] - bounds[0]
+            if length != other[1] - other[0]:
+                return False
+            var bytes = Pointer[UInt8, MutAnyOrigin](
+                unsafe_from_address=self.bytes
+            )
+            return _same_bytes(
+                bytes.unsafe_offset(bounds[0]),
+                bytes.unsafe_offset(other[0]),
+                0,
+                length,
+            )
+        if self._word(row) != self._word(first):
+            return False
+        return self.width != 16 or self._high(row) == self._high(first)
+
+
 @always_inline
-def _same_offset_strings(
-    offsets: Pointer[Int64, _], bytes: Pointer[UInt8, _], a: Int, b: Int
+def _same_bytes(
+    a: Pointer[UInt8, MutAnyOrigin],
+    b: Pointer[UInt8, MutAnyOrigin],
+    start: Int,
+    length: Int,
 ) -> Bool:
-    var first = Int(offsets.unsafe_offset(a)[])
-    var last = Int(offsets.unsafe_offset(a + 1)[])
-    var other = Int(offsets.unsafe_offset(b)[])
-    var length = last - first
-    if length != Int(offsets.unsafe_offset(b + 1)[]) - other:
-        return False
-    var i = 0
+    """Whether bytes [start, length) of `a` and `b` are equal, eight at a
+    time."""
+    var i = start
     while i + 8 <= length:
         if (
-            bytes.unsafe_offset(first + i)
-            .unsafe_bitcast[UInt64]()
-            .unsafe_load()
-            != bytes.unsafe_offset(other + i)
-            .unsafe_bitcast[UInt64]()
-            .unsafe_load()
+            a.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
+            != b.unsafe_offset(i).unsafe_bitcast[UInt64]().unsafe_load()
         ):
             return False
         i += 8
     while i < length:
-        if bytes.unsafe_offset(first + i)[] != bytes.unsafe_offset(other + i)[]:
+        if a.unsafe_offset(i)[] != b.unsafe_offset(i)[]:
             return False
         i += 1
     return True
@@ -730,8 +919,7 @@ def encode_bucket(
     var table = List[Int32](length=capacity, fill=-1)
     var out = ids.unsafe_ptr()
     # One offsets-backed string key without nulls, the common case, is
-    # compared directly. Composite strings cache their buffers below;
-    # other storage keeps the generic _same_key comparison.
+    # compared directly against the group's first row.
     var direct = (
         len(keys) == 1
         and keys[0]._data.isa[StringColumn]()
@@ -768,14 +956,13 @@ def encode_bucket(
                     Int(strings._offsets[].unsafe_ptr()) + 8 * strings._offset
                 )
                 fetch_bytes.append(Int(strings._bytes[].unsafe_ptr()))
-    # Hoist storage dispatch for composite offsets-backed string keys.
-    # These buffers stay alive through keys, and offsets include slice origins.
-    var direct_composite = len(keys) > 1 and len(fetch_offsets) == len(keys)
-    if direct_composite:
+    # Every other shape compares through a view of each key resolved once
+    # here: typed loads of the row's key against the group's key kept
+    # beside the table (#486), or `_same_value` for storage without one.
+    var views = List[_KeyView]()
+    if not direct and not exact:
         for key in keys:
-            if key.null_count() > 0:
-                direct_composite = False
-                break
+            views.append(_KeyView(key))
     for p in range(m):
         var row = rows[p]
         var hash = hashes[p]
@@ -838,24 +1025,19 @@ def encode_bucket(
                             == bytes.unsafe_offset(b + i)[]
                         )
                         i += 1
-                elif direct_composite:
-                    same = True
-                    var other = first_rows[unsafe_offset=g]
-                    for k in range(len(fetch_offsets)):
-                        if not _same_offset_strings(
-                            Pointer[Int64, MutAnyOrigin](
-                                unsafe_from_address=fetch_offsets[k]
-                            ),
-                            Pointer[UInt8, MutAnyOrigin](
-                                unsafe_from_address=fetch_bytes[k]
-                            ),
-                            row,
-                            other,
-                        ):
-                            same = False
-                            break
                 else:
-                    same = _same_key(keys, first_rows[unsafe_offset=g], row)
+                    same = True
+                    for k in range(len(views)):
+                        if views[k].kind == _KEY_GENERIC:
+                            same = _same_value(
+                                keys[k], first_rows[unsafe_offset=g], row
+                            )
+                        else:
+                            same = views[k].same(
+                                first_rows[unsafe_offset=g], row
+                            )
+                        if not same:
+                            break
                 if same:
                     out[unsafe_offset=p] = g
                     break
