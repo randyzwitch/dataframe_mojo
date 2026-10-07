@@ -95,6 +95,12 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- CI no longer runs the micro-benchmark smoke step (`bench-smoke`, a
+  compile-and-run of `benchmarks/bench_suite.mojo` on tiny inputs) or the
+  package smoke test on every pull request: the suite answer checks cover
+  the same kernels on the real queries, and the release workflow still
+  precompiles the package and runs an example against it. About seven
+  minutes off the Linux job.
 - Row-wise expressions over a String column read from Parquet as a
   dictionary (`d_day_name`, `cd_marital_status` and the like) now
   evaluate on the dictionary codes: the expression runs once per

@@ -8,7 +8,7 @@ then `REPETITIONS` timed runs report the best and mean.
 
 Environment:
   BENCH_LARGE=1   add 10,000,000-row inputs (opt-in; not run in CI)
-  BENCH_SMOKE=1   tiny inputs and one repetition, as a CI correctness check
+  BENCH_SMOKE=1   tiny inputs and one repetition, to check it still runs
 
 Peak memory is not measured in-process; run the task under
 `/usr/bin/time -v` (Linux) or `/usr/bin/time -l` (macOS).

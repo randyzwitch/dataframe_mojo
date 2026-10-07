@@ -84,10 +84,6 @@ jobs:
       - name: Build examples
         run: pixi run build
 
-      - name: Benchmark smoke test
-        if: runner.os == 'Linux'
-        run: pixi run bench-smoke
-
       - name: Differential tests against Polars
         if: runner.os == 'Linux'
         run: |
@@ -111,6 +107,3 @@ jobs:
           --suites tpcds --scale smoke --rounds 1 --reps 1
           --engines mojo,duckdb --threads 4 --allow-busy --check
 
-      - name: Package smoke test
-        if: runner.os == 'Linux'
-        run: pixi run package-smoke

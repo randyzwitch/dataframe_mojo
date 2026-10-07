@@ -274,7 +274,7 @@ develop and calibrate a change, then confirm it on the suites above.
 | `bench_join_cutoffs`, `bench_sort_cutoffs`, `bench_worker_sort`, `bench_join_build_ratio` | Sweeps behind named cutoff constants; see join-cutoffs.md, sort-cutoffs.md and worker-calibration.md |
 | `bench_join`, `bench_group_by`, `bench_sort`, `bench_late_sort`, `bench_concat` | Scaling of single operators over sizes, skew and key counts |
 | `bench_lazy_pipeline`, `bench_lazy_streaming` | Lazy CSV pipelines and the streaming executor |
-| `bench_suite` | Quick CPU workloads; `pixi run bench-smoke` runs it in CI |
+| `bench_suite` | Quick CPU workloads; `pixi run bench-smoke` runs it on tiny inputs |
 
 ## Retired benchmarks
 
