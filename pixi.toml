@@ -80,10 +80,14 @@ oracle = "python3 scripts/oracle.py"
 oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo && mojo run -I . tests/oracle/arrow_metadata.mojo"
 oracle-arrow-metadata = "mojo run -I . tests/oracle/arrow_metadata.mojo"
 oracle-geospatial = "python3 scripts/check_geospatial.py"
+oracle-geometry = "python3 scripts/check_geometry_accessors.py"
+oracle-duckdb-spatial = "python3 scripts/check_duckdb_spatial.py"
 bench-suites = "python3 scripts/bench_suites.py"
 
 [feature.oracle.pypi-dependencies]
 duckdb = ">=1.5.5, <2"
+geopandas = ">=1.1, <2"
+shapely = ">=2.1, <3"
 
 # Builds libdfparquet, the Parquet reader library read_parquet loads at run
 # time (see native/dfparquet). Needs a C++20 compiler on the host.

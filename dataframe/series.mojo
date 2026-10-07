@@ -1,5 +1,7 @@
 """Runtime-tagged, named columns without per-element type erasure."""
 from .field_metadata import _equal_metadata, _without_extensions
+from .wkb import GeometryBounds
+from .geometry import geometry_type, crs, bounding_box, total_bounds
 from .dtype import DataType, NUMERIC_DTYPES
 from std.utils import Variant
 from .bool_column import BoolColumn
@@ -519,6 +521,22 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     ) -> String:
         """Render at most max_rows values; negative means unlimited."""
         return render_series(self, max_rows, max_string_length)
+
+    def geometry_type(self) raises -> Self:
+        """WKB type per row, including Z/M/ZM suffixes; nulls remain null."""
+        return geometry_type(self)
+
+    def crs(self) raises -> String:
+        """Canonical CRS JSON (object/string), or `null` if unknown."""
+        return crs(self)
+
+    def bounding_box(self) raises -> DataFrame:
+        """Per-row XY xmin/ymin/xmax/ymax; null and empty geometries yield nulls."""
+        return bounding_box(self)
+
+    def total_bounds(self) raises -> Optional[GeometryBounds]:
+        """XY extent in the existing CRS; None when no row has coordinates."""
+        return total_bounds(self)
 
     def cast(self, dtype: DataType, strict: Bool = True) raises -> Self:
         """Convert to another dtype; see Expr.cast."""

@@ -113,6 +113,14 @@ A window onto shared, bit-packed values and validity.
 - `def slice(self, offset: Int, length: Int) -> Self`
   A zero-copy window sharing this column's buffers.
 
+## `bounding_box`
+
+Per-row XY bounds as nullable xmin, ymin, xmax, ymax Float64 columns.
+
+```mojo
+def bounding_box(series: Series) -> DataFrame
+```
+
 ## `by_dtype`
 
 Columns whose dtype is listed, in schema order.
@@ -202,6 +210,14 @@ Covariance of the pairs (a, b), Float64, named after a. Rows where either side i
 
 ```mojo
 def cov(a: Expr, b: Expr, ddof: Int = Int(1)) -> Expr
+```
+
+## `crs`
+
+Return canonical CRS JSON (object or string), or `null` if unknown.
+
+```mojo
+def crs(series: Series) -> String
 ```
 
 ## `CsvField`
@@ -779,6 +795,21 @@ Validate binary WKB and attach GeoArrow metadata, sharing buffers.
 def from_wkb(binary: Series, metadata: String = "{}") -> Series
 ```
 
+## `geometry_type`
+
+ISO WKB type per row, with Z/M/ZM suffixes and nulls preserved.
+
+```mojo
+def geometry_type(series: Series) -> Series
+```
+
+## `GeometryBounds`
+
+Axis-aligned XY coordinate extent, in the geometry's existing CRS.
+
+- `def __init__(out self)`
+- `def write_to(self, mut writer: T)`
+
 ## `GroupBy`
 
 An eager grouping request. No per-group dataframe materialization.
@@ -1166,6 +1197,14 @@ A named column of one supported dtype, plus expression-backed methods.
 - `def write_to(self, mut writer: T)`
 - `def to_string(self, *, max_rows: Int = Int(10), max_string_length: Int = Int(32)) -> String`
   Render at most max_rows values; negative means unlimited.
+- `def geometry_type(self) -> Self`
+  WKB type per row, including Z/M/ZM suffixes; nulls remain null.
+- `def crs(self) -> String`
+  Canonical CRS JSON (object/string), or `null` if unknown.
+- `def bounding_box(self) -> DataFrame`
+  Per-row XY xmin/ymin/xmax/ymax; null and empty geometries yield nulls.
+- `def total_bounds(self) -> Optional[GeometryBounds]`
+  XY extent in the existing CRS; None when no row has coordinates.
 - `def cast(self, dtype: DataType, strict: Bool = True) -> Self`
   Convert to another dtype; see Expr.cast.
 - `def cast(self, dtype: String, strict: Bool = True) -> Self`
@@ -1388,6 +1427,14 @@ Expose a geometry column as binary WKB, sharing buffers.
 
 ```mojo
 def to_wkb(geometry: Series) -> Series
+```
+
+## `total_bounds`
+
+XY bounds across all rows; None for an empty/all-null/all-empty column.
+
+```mojo
+def total_bounds(series: Series) -> Optional[GeometryBounds]
 ```
 
 ## `When`
