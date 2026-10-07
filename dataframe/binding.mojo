@@ -108,6 +108,7 @@ from .expr import (
     STR_ENDS_WITH,
     STR_CONTAINS,
     STR_IS_IN,
+    INT_IS_IN,
     STR_LIKE,
     STR_SLICE,
     STR_PAD,
@@ -1065,6 +1066,22 @@ def bind(
             if len(node.dtypes) == 0 or not node.dtypes[0]:
                 raise Error("Unknown cast dtype: " + node.text)
             dtype = node.dtypes[0].value()
+            shape = shapes[node.left]
+            has_aggregate = aggregated[node.left]
+        elif node.op == INT_IS_IN:
+            if node.left < 0 or node.left >= i:
+                raise Error("Invalid is_in input")
+            var wanted = node.dtypes[0].value()
+            if types[node.left] != wanted:
+                # The same rule and message as the `==` it stands for.
+                raise Error(
+                    "eq requires matching dtypes, found "
+                    + types[node.left].name()
+                    + " and "
+                    + wanted.name()
+                    + "; use typed literals"
+                )
+            dtype = DataType.BOOL
             shape = shapes[node.left]
             has_aggregate = aggregated[node.left]
         elif is_string_op(node.op):

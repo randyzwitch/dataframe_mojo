@@ -1492,30 +1492,13 @@ struct DataFrame(Copyable, Sized, Writable):
                 for k in range(len(right_output)):
                     columns.append(gathered[k].renamed(right_names[k]))
                 return Self(columns^, height=output_height)
-        if (how == JOIN_SEMI or how == JOIN_ANTI) and len(left_keys) == 1:
-            var aligned_chunks = can_filter_aligned_chunks(self._columns)
-            if aligned_chunks:
-                var chunk_membership = _range_int64_membership_chunks(
-                    self,
-                    left_keys[0],
-                    right._columns[right_keys[0]],
-                    how == JOIN_SEMI,
-                )
-                if chunk_membership[0]:
-                    var selected = chunk_membership[1].copy()
-                    return Self(selected^, height=len(selected[0]))
-            else:
-                var membership = _range_int64_membership_rows(
-                    self._columns[left_keys[0]],
-                    right._columns[right_keys[0]],
-                    how == JOIN_SEMI,
-                )
-                if membership[0]:
-                    return self._filter_rows(membership[1].copy())
         # A small left side against a large right one: hash the left keys
         # and scan the right rows, marking the left rows they match, as
         # DuckDB builds on the smaller side. PDS-H q4 hashed 3.8M late
-        # lineitem rows to test about 57K orders.
+        # lineitem rows to test about 57K orders. Checked before the
+        # bounded-domain path, which scans every right row on one thread
+        # to build its presence table (TPC-DS q82: 34 items against 2.9M
+        # store sales, 28 ms).
         if (
             (how == JOIN_SEMI or how == JOIN_ANTI)
             and right.height() >= 524288
@@ -1541,6 +1524,26 @@ struct DataFrame(Copyable, Sized, Writable):
                 if marked[i] == keep:
                     rows.append(i)
             return self._filter_rows(rows^)
+        if (how == JOIN_SEMI or how == JOIN_ANTI) and len(left_keys) == 1:
+            var aligned_chunks = can_filter_aligned_chunks(self._columns)
+            if aligned_chunks:
+                var chunk_membership = _range_int64_membership_chunks(
+                    self,
+                    left_keys[0],
+                    right._columns[right_keys[0]],
+                    how == JOIN_SEMI,
+                )
+                if chunk_membership[0]:
+                    var selected = chunk_membership[1].copy()
+                    return Self(selected^, height=len(selected[0]))
+            else:
+                var membership = _range_int64_membership_rows(
+                    self._columns[left_keys[0]],
+                    right._columns[right_keys[0]],
+                    how == JOIN_SEMI,
+                )
+                if membership[0]:
+                    return self._filter_rows(membership[1].copy())
         # Semi and anti joins on keys the bounded path declined: probe a
         # right-row hash index for membership only. The dictionary path
         # below would encode both inputs and group every right row first.
