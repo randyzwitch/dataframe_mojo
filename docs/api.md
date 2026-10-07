@@ -1120,7 +1120,7 @@ A named column of one supported dtype, plus expression-backed methods.
   Convert list-backed strings to the contiguous UTF-8 layout.
 - `def __init__(out self, var name: String, var column: ListColumn)`
 - `def __init__(out self, var name: String, var column: StructColumn)`
-- `def __init__(out self, var name: String, var storage: Variant[Column[Int64], Column[Float64], BoolColumn, StringColumn, Column[Int8], Column[Int16], Column[Int32], Column[UInt8], Column[UInt16], Column[UInt32], Column[UInt64], Column[Float32], Column[Int128], ListColumn, StructColumn], dtype: DataType)`
+- `def __init__(out self, var name: String, var storage: Variant[Column[Int64], Column[Float64], BoolColumn, StringColumn, Column[Int8], Column[Int16], Column[Int32], Column[UInt8], Column[UInt16], Column[UInt32], Column[UInt64], Column[Float32], Column[Int128], ListColumn, StructColumn], dtype: DataType, metadata: Optional[ArcPointer[List[UInt8]]] = None)`
 - `def __getitem__(self, index: Int) -> AnyValue`
   One cell; raises when out of bounds. Negative indices count from the end.
 - `def __neg__(self) -> Self`

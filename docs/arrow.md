@@ -98,3 +98,29 @@ oracle-arrow` (dev only) checks interop with pyarrow, in both directions:
 Large record batches can copy columns in parallel on Linux. Release remains
 owned by the caller after all jobs finish; Parquet reuses the pool between
 row groups. See [measurements and platform policy](arrow-import.md).
+
+## Field metadata and extensions
+
+Arrow field metadata is copied on import and owned independently of the producer.
+Keys and values remain arbitrary bytes, including embedded NULs and non-UTF-8
+bytes. Exported schemas own their metadata until their release callback runs.
+Metadata on supported nested list and struct fields follows their child Series.
+
+Unknown extension types use their supported storage dtype and retain both
+`ARROW:extension:name` and `ARROW:extension:metadata`. A consumer with the
+extension registered can reconstruct it. `geoarrow.wkb` additionally receives
+geometry validation; other extensions, including other GeoArrow encodings,
+remain opaque. This does not add support for otherwise unsupported storage
+layouts.
+
+Projection, aliases, rename, filter, sort, take (including null extension),
+slice, chunk views, and rechunk preserve field metadata. Vertical concatenation
+requires identical key/value pairs, independent of their order; conflicting or
+missing metadata raises. Diagonal concatenation assigns the existing column's
+metadata to inserted null rows. Computed results and dtype-changing conversions
+have no general metadata-preservation guarantee; explicit logical retagging
+clears metadata when the dtype changes, avoiding stale extension declarations.
+Root schema application metadata is outside this field-metadata contract.
+
+Run the independent registered/unknown extension oracle with
+`pixi run -e oracle oracle-arrow-metadata`.

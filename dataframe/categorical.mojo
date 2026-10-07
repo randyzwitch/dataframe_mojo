@@ -224,9 +224,12 @@ def recode(values: Series, target: DataType) raises -> Series:
             if column._valid(i):
                 codes[i] = UInt32(lookup[String(column._get(i))])
                 valid[i] = True
-    return Series(values.name(), Column[UInt32](codes^, valid)).with_dtype(
-        target
-    )
+    var result = Series(
+        values.name(), Column[UInt32](codes^, valid)
+    ).with_dtype(target)
+    if values.dtype().is_categorical():
+        result._field_metadata = values._field_metadata
+    return result^
 
 
 def _values_of(column: Series) raises -> CategoricalDictionary:

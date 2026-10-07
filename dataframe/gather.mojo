@@ -314,6 +314,7 @@ struct _RangeMembershipChunkFilterJob(Job):
                 column.name(),
                 column._chunked.value()[].arrays[self.chunk].copy(),
                 column.dtype(),
+                column._field_metadata,
             )
             if len(rows) > 0:
                 selected.append(part.take(rows.copy()))
@@ -495,6 +496,7 @@ struct _SortedChunkPartJob(Job):
                         self.source.name(),
                         chunks.arrays[i].copy(),
                         self.source.dtype(),
+                        self.source._field_metadata,
                     )
                 )
                 next_row += size
@@ -516,6 +518,7 @@ struct _SortedChunkPartJob(Job):
                     self.source.name(),
                     chunks.arrays[i].copy(),
                     self.source.dtype(),
+                    self.source._field_metadata,
                 )
                 var gathered = part._take_range(
                     rows, next_row, low, chunk_start, Optional(self.indices)
@@ -691,6 +694,7 @@ struct _GatherJob(Job):
             )
             # Keep the logical type: binary shares the string layout.
             self.piece._dtype = self.source.dtype()
+            self.piece._field_metadata = self.source._field_metadata
             return
         var out_bits = Pointer[UInt8, MutAnyOrigin](
             unsafe_from_address=self.bits
@@ -914,8 +918,11 @@ def _allocate(column: Series, m: Int) raises -> Series:
                 Column[Scalar[D]](List[Scalar[D]](unsafe_uninit_length=m)),
             )
             output._dtype = column.dtype()
+            output._field_metadata = column._field_metadata
             return output^
-    return Series.full_null(column.name(), column.dtype(), m)
+    var output = Series.full_null(column.name(), column.dtype(), m)
+    output._field_metadata = column._field_metadata
+    return output^
 
 
 def _payload_address(series: Series) -> Int:
