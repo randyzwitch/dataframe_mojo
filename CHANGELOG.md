@@ -95,6 +95,15 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Row-wise expressions over a String column read from Parquet as a
+  dictionary (`d_day_name`, `cd_marital_status` and the like) now
+  evaluate on the dictionary codes: the expression runs once per
+  dictionary value and each row takes its value's answer by code, when
+  the dictionary is at most half the row count. A comparison with a
+  string literal does the same inside the per-node evaluation of a
+  streamed batch, so a `when(col == "Sunday")` summed through a streamed
+  group-by no longer compares every row's bytes. TPC-DS q13, q48 and q85
+  8-10% faster, q59 8% (#489).
 - Hash join probes read a byte of hash tag per slot, sixteen at a time
   with one SIMD compare, and touch a slot's key only where its tag
   matches, as a Swiss table does. The old loop left each probe waiting on

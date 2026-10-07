@@ -93,11 +93,13 @@ from .window import window_op, interpolate_by_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
 from .bool_column import BoolColumn
-from .column import Column, _count_valid, _validity_at
+from .column import Column, _copy_validity, _count_valid, _validity_at
 from .string_column import StringColumn, StringBuilder
+from .string_predicates import _flip
 from .series import Series
 from .expr_kernels import binary, unary, choose, fit_mask
 from .aggregate import Reducer
+from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
 from std.memory import ArcPointer
@@ -270,6 +272,24 @@ def _eval[
         )
     if bound.fusible[index] and node.left >= 0:
         return fused[width](bound, columns, index, offset, length)
+    if (
+        (
+            node.op == EQ
+            or node.op == NE
+            or node.op == LT
+            or node.op == LE
+            or node.op == GT
+            or node.op == GE
+        )
+        and node.left >= 0
+        and node.right >= 0
+    ):
+        # A comparison of a dictionary-coded String column with a string
+        # literal, inside a batch (a streamed reduction's predicate):
+        # compared once per dictionary value, then spread by code.
+        var coded = _coded_compare[width](bound, columns, index, offset, length)
+        if coded:
+            return coded.take()
     var left = _eval[width](
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
@@ -1484,11 +1504,122 @@ def _dictionary_source(
     if source < 0:
         return -1
     var dtype = columns[source].dtype()
+    if dtype == DataType.STRING:
+        # A String column that carries its source's dictionary codes (a
+        # Parquet column chunk with a dictionary page, #430) evaluates as
+        # the categorical it could be cast to; the caller resolves it.
+        var size = _coded_dictionary_size(columns[source])
+        if size < 0 or (size + 1) * 2 > height:
+            return -1
+        return source
     if not dtype.is_categorical() or not dtype.has_dictionary():
         return -1
     if (len(dtype.dictionary()[]) + 1) * 2 > height:
         return -1
     return source
+
+
+def _coded_compare[
+    width: Int
+](
+    bound: BoundExpr,
+    columns: List[Series],
+    index: Int,
+    offset: Int,
+    length: Int,
+) raises -> Optional[Series]:
+    """`column <op> literal` (either order) for a String column carrying
+    dictionary codes: the literal is compared with every dictionary value
+    once and each row takes its value's answer by code, in one pass over
+    the window's codes. None when the node is not of that shape or the
+    dictionary is not small next to the rows (TPC-DS q59 compares
+    d_day_name with seven day names over 10M joined rows, in the 4K-row
+    batches of a streamed reduction, so the per-batch cost has to stay
+    near the cost of the row loop itself)."""
+    ref node = bound.expr._nodes[index]
+    ref left = bound.expr._nodes[node.left]
+    ref right = bound.expr._nodes[node.right]
+    var source = -1
+    var literal_left = False
+    if left.op == COL and right.op == LIT_STRING:
+        source = bound.sources[node.left]
+    elif right.op == COL and left.op == LIT_STRING:
+        source = bound.sources[node.right]
+        literal_left = True
+    if source < 0 or columns[source].dtype() != DataType.STRING:
+        return None
+    var window = columns[source].slice(offset, length)
+    var size = _coded_dictionary_size(window)
+    if size < 0 or (size + 1) * 2 > length:
+        return None
+    var as_codes = window._dictionary_codes()
+    if not as_codes:
+        return None
+    var codes = as_codes.take()
+    var flat = codes.rechunk() if codes.is_chunked() else codes^
+    ref column = flat._data[Column[UInt32]]
+    var dictionary = flat.dtype().dictionary()
+    ref literal = left.text if literal_left else right.text
+    var op = _flip(node.op) if literal_left else node.op
+    var lookup = List[UInt8](capacity=size)
+    for code in range(size):
+        var value = dictionary[].get(code)
+        var holds: Bool
+        if op == EQ:
+            holds = value == literal
+        elif op == NE:
+            holds = value != literal
+        elif op == LT:
+            holds = value < literal
+        elif op == LE:
+            holds = value <= literal
+        elif op == GT:
+            holds = value > literal
+        else:
+            holds = value >= literal
+        lookup.append(UInt8(1) if holds else UInt8(0))
+    var n = len(column)
+    var raw = column.unsafe_values()
+    var table = lookup.unsafe_ptr()
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var packed = values.unsafe_ptr()
+    var row = 0
+    while row < n:
+        var end = min(row + 8, n)
+        var byte: UInt8 = 0
+        for i in range(row, end):
+            var code = Int(raw.unsafe_offset(i)[])
+            # A null row's code is unused; keep the lookup in bounds.
+            if code < size:
+                byte |= table.unsafe_offset(code)[] << UInt8(i - row)
+        packed.unsafe_offset(row // 8)[] = byte
+        row = end
+    var bits = List[UInt8]()
+    if column.null_count() > 0:
+        bits = _copy_validity(column._bits[], column._offset, n)
+    trace_path("expr.string_codes")
+    return Optional(
+        Series(flat.name(), BoolColumn(values=values^, bits=bits^, length=n))
+    )
+
+
+def _coded_dictionary_size(column: Series) -> Int:
+    """The size of the one dictionary every chunk of a String column
+    carries codes into, or -1 when a chunk carries none or they differ."""
+    if column.is_chunked():
+        var size = -1
+        for chunk in column.chunks():
+            var part = _coded_dictionary_size(chunk)
+            if part < 0 or (size >= 0 and part != size):
+                return -1
+            size = part
+        return size
+    if not column._data.isa[StringColumn]():
+        return -1
+    ref strings = column._data[StringColumn]
+    if not strings._codes:
+        return -1
+    return len(strings._codes.value()[].dtype.dictionary()[])
 
 
 def _on_dictionary[
@@ -1501,13 +1632,18 @@ def _on_dictionary[
     batch_size: Int,
 ) raises -> Series:
     """A row-wise expression over a categorical, evaluated on each
-    dictionary value and on null, then gathered by every row's code."""
-    var codes = (
-        columns[source]
-        .rechunk() if columns[source]
-        .is_chunked() else columns[source]
-        .copy()
-    )
+    dictionary value and on null, then gathered by every row's code. A
+    String column with dictionary codes beside it is read as that
+    categorical (TPC-DS q59 compares d_day_name with seven day names over
+    10M joined rows; the bytes were compared per row)."""
+    var coded = columns[source].copy()
+    if coded.dtype() == DataType.STRING:
+        var as_codes = coded._dictionary_codes()
+        if not as_codes:
+            raise Error("no dictionary codes")
+        trace_path("expr.string_codes")
+        coded = as_codes.take()
+    var codes = coded.rechunk() if coded.is_chunked() else coded.copy()
     var dictionary = codes.dtype().dictionary()
     var count = len(dictionary[])
     var values = StringBuilder(count + 1)

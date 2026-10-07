@@ -12,7 +12,9 @@ from dataframe import (
     Expr,
     Series,
     col,
+    lit,
     read_parquet,
+    when,
     write_parquet,
 )
 
@@ -205,6 +207,103 @@ def test_new_strings_drop_codes_and_selection_reads_them() raises:
     # Selecting only the string column still finds it dictionary-encoded.
     var only = read_parquet(PATH, columns=["key"])
     assert_true(Bool(only.column("key")._dictionary_codes()))
+
+
+def test_row_wise_expressions_evaluate_on_the_codes() raises:
+    """A row-wise expression over a coded String column runs once per
+    dictionary value and is spread by code (#489), with the same answer
+    as over the plain strings: comparisons with literals, is_in, string
+    operations, conditionals, and casts, across row-group chunks, slices
+    and gathered rows with nulls."""
+    var plain = source()
+    write_parquet(plain, PATH, row_group_size=2_000)
+    var read = read_parquet(PATH)
+    assert_true(Bool(read.column("key")._dictionary_codes()))
+    var expressions = List[Expr]()
+    expressions.append((col("key") == lit(String("k7"))).alias("eq"))
+    expressions.append((col("key") != lit(String("k7"))).alias("ne"))
+    expressions.append((col("key") > lit(String("k3"))).alias("gt"))
+    var members: List[String] = ["k1", "k12", "k40", "missing"]
+    var member_literals = List[Expr]()
+    for member in members:
+        member_literals.append(lit(member))
+    expressions.append(col("key").is_in(member_literals).alias("member"))
+    expressions.append(col("key").str().len_chars().alias("length"))
+    expressions.append(col("key").str().to_uppercase().alias("upper"))
+    expressions.append(col("key").str().contains("1").alias("has1"))
+    expressions.append(col("key").is_null().alias("missing"))
+    expressions.append(
+        when(col("key") == lit(String("k2")))
+        .then(lit(String("two")))
+        .otherwise(col("key"))
+        .alias("picked")
+    )
+    # Two-column expressions reach the comparison node by itself, inside
+    # the per-node evaluation of a batch.
+    expressions.append(
+        (
+            (col("key") == lit(String("k7"))) | (col("other") == lit(Int64(2)))
+        ).alias("either")
+    )
+    expressions.append(
+        (
+            (lit(String("k3")) < col("key")) & (col("other") >= lit(Int64(0)))
+        ).alias("literal_first")
+    )
+    expressions.append(
+        when(col("key") <= lit(String("k1")))
+        .then(col("value"))
+        .otherwise(lit(Int64(-1)))
+        .alias("picked_value")
+    )
+    for frame in [
+        read.copy(),
+        read.slice(1_001, 7_777),
+        read.filter(col("other") == lit(Int64(1))),
+    ]:
+        # A new column from the strings carries no codes.
+        var stripped = frame.select_exprs(
+            [
+                col("key")
+                .str()
+                .to_uppercase()
+                .str()
+                .to_lowercase()
+                .alias("key"),
+                col("other"),
+                col("value"),
+            ]
+        )
+        # The stripped column has no codes: the strings themselves.
+        assert_true(not stripped.column("key")._dictionary_codes())
+        var got = frame.select_exprs(expressions)
+        var want = stripped.select_exprs(expressions)
+        assert_true(got.equals(want), "coded evaluation differs")
+        assert_true(got.height() == frame.height())
+        # The same comparison inside a streamed grouped sum (TPC-DS q59's
+        # shape: the condition is evaluated per batch of the stream).
+        var conditional = (
+            when(col("key") == lit(String("k7")))
+            .then(col("value"))
+            .otherwise(lit(Int64(0)))
+            .sum()
+            .alias("k7_sum")
+        )
+        var got_sum = (
+            frame.lazy()
+            .group_by(["other"])
+            .agg([conditional.copy()])
+            .sort("other")
+            .collect()
+        )
+        var want_sum = (
+            stripped.lazy()
+            .group_by(["other"])
+            .agg([conditional.copy()])
+            .sort("other")
+            .collect()
+        )
+        assert_true(got_sum.equals(want_sum), "coded grouped sum differs")
 
 
 def main() raises:
