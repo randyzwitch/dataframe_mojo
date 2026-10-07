@@ -95,6 +95,21 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Hash join probes read a byte of hash tag per slot, sixteen at a time
+  with one SIMD compare, and touch a slot's key only where its tag
+  matches, as a Swiss table does. The old loop left each probe waiting on
+  a data-dependent branch (empty slot or key match, about 35/65) that
+  flushed the loads of the probes behind it: 52 cycles and 0.75 branch
+  misses a probe on a cache-resident 2 MB table, against 2.2 cycles' worth
+  of arithmetic. Probing 6M rows against 46K now takes 5.9 ns a row
+  single-threaded against 13.2, and the PDS-H suite 0.96 of its time
+  (q17 0.85x, q11 0.87x, q3, q7 and q8 0.89x). Integer, two-integer and
+  generic keys go through the tags for buckets of up to 2 MB of slots;
+  past that every probe misses to memory for its slot already and the tag
+  line is a second miss (H2O join q5, 10M rows hashed), and string keys
+  keep the plain walk, whose slots hold the full hash (H2O join q4, every
+  probe matching its first slot, was 17% slower through the tags).
+  Answers are unchanged (#378).
 - Conditional expressions over large tables: a numeric `when/then/
   otherwise` selects its values with one SIMD pass over the predicate
   (validity only when a branch has nulls), the predicate's row masks are

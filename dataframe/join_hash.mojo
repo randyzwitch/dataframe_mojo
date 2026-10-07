@@ -7,6 +7,7 @@ Building in reverse row order and probing disjoint left ranges preserves the
 join's documented left-major, right-input match order.
 """
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
+from std.sys import size_of
 
 from .aggregate import float_key
 from .bool_column import BoolColumn
@@ -127,19 +128,156 @@ struct _HashBucket(Copyable):
     # Heavy duplication uses [count, row, row, ...] groups instead of
     # pointer chains. Slot.next_position addresses the group's count.
     var groups: List[Int32]
+    # One byte per slot: 0 for empty, otherwise a tag from the hash with
+    # its top bit set. The table's last _TAG_LANES - 1 entries are
+    # mirrored after the end, so a probe reads _TAG_LANES tags from any
+    # position with one load and compares them with one SIMD op, as a
+    # Swiss table does: a probe that finds no tag match walks no chain
+    # and compares no key, so the loads of consecutive probes overlap
+    # instead of each waiting on a data-dependent branch.
+    var tags: List[UInt8]
 
     def mask(self) -> Int:
         return len(self.slots) - 1
 
 
+comptime _TAG_LANES = 16
+# Slot bytes per bucket up to which tags are built. A bucket's slots within
+# a few MB stay in the last-level cache, where the tag line is cheap and
+# saves the chain's branches; past that every probe misses to memory for
+# its slot already, and the tag line is a second miss on every match (H2O
+# join q4, 10M rows hashed and every probe matching, was 17% slower with
+# tags).
+comptime _TAG_BUCKET_BYTES = 2 << 20
+
+
+@always_inline
+def _tag_of(hash: UInt64) -> UInt8:
+    """A slot tag: seven high bits of the hash below the bucket bits,
+    with the top bit set so an empty slot (0) never matches."""
+    return UInt8((hash >> 48) & 0x7F) | UInt8(0x80)
+
+
+@always_inline
+def _tagged_probe(index: _HashBucket, hash: UInt64, key: UInt64) -> Int:
+    """The slot holding `key`, or -1: sixteen tags at a time, the key
+    compared only where a tag matches, the search over once an empty
+    tag is seen."""
+    var mask = len(index.slots) - 1
+    var tags = index.tags.unsafe_ptr()
+    var slots = index.slots.unsafe_ptr()
+    var wanted = SIMD[DType.uint8, 16](_tag_of(hash))
+    var position = Int(hash & UInt64(mask))
+    if len(index.tags) == 0:
+        # A bucket past _TAG_BUCKET_BYTES: the plain slot walk.
+        while slots.unsafe_offset(position)[].row >= 0:
+            if key == slots.unsafe_offset(position)[].key:
+                return position
+            position = (position + 1) & mask
+        return -1
+    while True:
+        var group = tags.unsafe_offset(position).unsafe_load[width=16]()
+        var hits = group.eq(wanted)
+        var empties = group.eq(SIMD[DType.uint8, 16](0))
+        if hits.reduce_or():
+            for lane in range(_TAG_LANES):
+                if empties[lane]:
+                    return -1
+                if hits[lane]:
+                    var at = (position + lane) & mask
+                    if slots.unsafe_offset(at)[].key == key:
+                        return at
+            if empties.reduce_or():
+                return -1
+        elif empties.reduce_or():
+            return -1
+        position = (position + _TAG_LANES) & mask
+
+
+struct _TagCursor:
+    """Walks the slots whose tag matches a hash, in probe order, stopping
+    at the first empty slot: `next()` yields each candidate position or
+    -1 when the search is over. Sixteen tags are read per load."""
+
+    # The tag table's address, as an Int: a struct field cannot hold an
+    # unsafe-origin pointer. The bucket outlives every probe of it.
+    var tags: Int
+    var mask: Int
+    var position: Int
+    var lane: Int
+    var hits: SIMD[DType.bool, 16]
+    var empties: SIMD[DType.bool, 16]
+    var wanted: SIMD[DType.uint8, 16]
+    var done: Bool
+    # Without tags (a bucket past _TAG_BUCKET_BYTES) every occupied slot
+    # in probe order is a candidate.
+    var slots: Int
+    var plain: Bool
+
+    def __init__(out self, index: _HashBucket, hash: UInt64):
+        self.tags = Int(index.tags.unsafe_ptr())
+        self.slots = Int(index.slots.unsafe_ptr())
+        self.plain = len(index.tags) == 0
+        self.mask = len(index.slots) - 1
+        self.position = Int(hash & UInt64(self.mask))
+        self.lane = 0
+        self.wanted = SIMD[DType.uint8, 16](_tag_of(hash))
+        self.hits = SIMD[DType.bool, 16](fill=False)
+        self.empties = SIMD[DType.bool, 16](fill=False)
+        self.done = False
+        if not self.plain:
+            self._load()
+
+    def _load(mut self):
+        """Load groups until one holds a candidate or an empty slot."""
+        while True:
+            var group = (
+                Pointer[UInt8, MutAnyOrigin](unsafe_from_address=self.tags)
+                .unsafe_offset(self.position)
+                .unsafe_load[width=16]()
+            )
+            self.hits = group.eq(self.wanted)
+            self.empties = group.eq(SIMD[DType.uint8, 16](0))
+            self.lane = 0
+            if self.hits.reduce_or():
+                return
+            # No candidate but an empty slot: the search is over. No
+            # candidate and no empty slot: the next group.
+            if self.empties.reduce_or():
+                self.done = True
+                return
+            self.position = (self.position + _TAG_LANES) & self.mask
+
+    def next(mut self) -> Int:
+        if self.plain:
+            if self.done:
+                return -1
+            var slots = Pointer[_HashSlot, MutAnyOrigin](
+                unsafe_from_address=self.slots
+            )
+            if slots.unsafe_offset(self.position)[].row < 0:
+                self.done = True
+                return -1
+            var at = self.position
+            self.position = (self.position + 1) & self.mask
+            return at
+        while not self.done:
+            while self.lane < _TAG_LANES:
+                var lane = self.lane
+                self.lane += 1
+                if self.empties[lane]:
+                    self.done = True
+                    return -1
+                if self.hits[lane]:
+                    return (self.position + lane) & self.mask
+            self.position = (self.position + _TAG_LANES) & self.mask
+            self._load()
+        return -1
+
+
 @always_inline
 def _int64_probe_slot(index: _HashBucket, hash: UInt64, key: UInt64) -> Int:
-    var at = Int(hash & UInt64(index.mask()))
-    while index.slots[at].row >= 0:
-        if key == index.slots[at].key:
-            return at
-        at = (at + 1) & index.mask()
-    return -1
+    return _tagged_probe(index, hash, key)
 
 
 @always_inline
@@ -214,7 +352,10 @@ struct _HashBuildJob(Job):
         self.first = first
         self.last = last
         self.result = _HashBucket(
-            List[_HashSlot](), List[_DuplicateEntry](), List[Int32]()
+            List[_HashSlot](),
+            List[_DuplicateEntry](),
+            List[Int32](),
+            List[UInt8](),
         )
 
     def run(mut self) raises:
@@ -224,6 +365,10 @@ struct _HashBuildJob(Job):
         while size * 2 < 3 * (self.last - self.first):
             size *= 2
         var slots = List[_HashSlot](length=size, fill=_HashSlot(-1, -1, 0))
+        var tagged = size * size_of[_HashSlot]() <= _TAG_BUCKET_BYTES
+        var tags = List[UInt8](
+            length=size + _TAG_LANES if tagged else 0, fill=0
+        )
         var duplicates = List[_DuplicateEntry]()
         var unique = 0
         for position in range(self.last - 1, self.first - 1, -1):
@@ -259,6 +404,8 @@ struct _HashBuildJob(Job):
                 slot = (slot + 1) & (size - 1)
             if slots[slot].row < 0:
                 slots[slot] = _HashSlot(Int32(row), -1, key)
+                if tagged:
+                    tags[slot] = _tag_of(hash)
                 unique += 1
         var groups = List[Int32]()
         if len(duplicates) > 4 * unique:
@@ -270,6 +417,10 @@ struct _HashBuildJob(Job):
                 compact_size *= 2
             var compact = List[_HashSlot](
                 length=compact_size, fill=_HashSlot(-1, -1, 0)
+            )
+            tagged = compact_size * size_of[_HashSlot]() <= _TAG_BUCKET_BYTES
+            var compact_tags = List[UInt8](
+                length=compact_size + _TAG_LANES if tagged else 0, fill=0
             )
             groups = List[Int32](capacity=unique + len(duplicates))
             for old in slots:
@@ -292,9 +443,16 @@ struct _HashBuildJob(Job):
                 while compact[at].row >= 0:
                     at = (at + 1) & (compact_size - 1)
                 compact[at] = _HashSlot(old.row, Int32(first), old.key)
+                if tagged:
+                    compact_tags[at] = _tag_of(hash)
             slots = compact^
+            tags = compact_tags^
             duplicates = List[_DuplicateEntry]()
-        self.result = _HashBucket(slots^, duplicates^, groups^)
+        # Mirror the first lanes after the end for unaligned tag loads.
+        if tagged:
+            for at in range(_TAG_LANES):
+                tags[len(slots) + at] = tags[at]
+        self.result = _HashBucket(slots^, duplicates^, groups^, tags^)
 
     def into_result(deinit self) -> _HashBucket:
         return self.result^
@@ -360,14 +518,15 @@ struct _HashProbeJob(Job):
         var hash = self.left_hashes[][i]
         var bucket = Int(hash >> 56) >> self.fold
         ref index = self.buckets[][bucket]
-        var position = Int(hash & UInt64(index.mask()))
-        while index.slots[position].row >= 0:
+        var cursor = _TagCursor(index, hash)
+        var position = cursor.next()
+        while position >= 0:
             ref slot = index.slots[position]
             if hash == slot.key and _row_equal(
                 self.left_keys, self.right_keys, i, Int(slot.row)
             ):
                 return True
-            position = (position + 1) & index.mask()
+            position = cursor.next()
         return False
 
     def run_membership(mut self) raises:
@@ -446,26 +605,23 @@ struct _HashProbeJob(Job):
                             var hash = _mix(key)
                             var bucket = Int(hash >> 56) >> self.fold
                             ref index = buckets.unsafe_offset(bucket)[]
-                            var slots = index.slots.unsafe_ptr()
-                            var mask = len(index.slots) - 1
-                            var position = Int(hash & UInt64(mask))
-                            var matched = False
-                            while slots.unsafe_offset(position)[].row >= 0:
-                                ref slot = slots.unsafe_offset(position)[]
-                                if key == slot.key:
-                                    self.left_rows.append(i)
-                                    self.right_rows.append(Int(slot.row))
-                                    _append_duplicate_rows(
-                                        index,
-                                        Int(slot.next_position),
-                                        i,
-                                        self.left_rows,
-                                        self.right_rows,
-                                    )
-                                    matched = True
-                                    break
-                                position = (position + 1) & mask
-                            if not matched and self.include_unmatched:
+                            var hit = _tagged_probe(index, hash, key)
+                            if hit >= 0:
+                                ref slot = (
+                                    index.slots.unsafe_ptr().unsafe_offset(
+                                        hit
+                                    )[]
+                                )
+                                self.left_rows.append(i)
+                                self.right_rows.append(Int(slot.row))
+                                _append_duplicate_rows(
+                                    index,
+                                    Int(slot.next_position),
+                                    i,
+                                    self.left_rows,
+                                    self.right_rows,
+                                )
+                            elif self.include_unmatched:
                                 self.left_rows.append(i)
                                 self.right_rows.append(-1)
                         return
@@ -491,6 +647,11 @@ struct _HashProbeJob(Job):
                     var hash = self.left_hashes[][row]
                     var bucket = Int(hash >> 56) >> self.fold
                     ref index = self.buckets[][bucket]
+                    # Strings keep the plain walk: their slots hold the full
+                    # hash, so a collision is rejected without reading a
+                    # string, and H2O join q4 (10M probes, every one
+                    # matching its first slot) was 17% slower through the
+                    # tags' extra work per probe.
                     var position = Int(hash & UInt64(index.mask()))
                     var matched_row = -1
                     var duplicate = False
@@ -574,9 +735,10 @@ struct _HashProbeJob(Job):
                     var hash = self.left_hashes[][i]
                     var bucket = Int(hash >> 56) >> self.fold
                     ref index = self.buckets[][bucket]
-                    var position = Int(hash & UInt64(index.mask()))
+                    var cursor = _TagCursor(index, hash)
                     var matched = False
-                    while index.slots[position].row >= 0:
+                    var position = cursor.next()
+                    while position >= 0:
                         ref slot = index.slots[position]
                         var j = Int(slot.row)
                         if (
@@ -595,7 +757,7 @@ struct _HashProbeJob(Job):
                             )
                             matched = True
                             break
-                        position = (position + 1) & index.mask()
+                        position = cursor.next()
                     if not matched and self.include_unmatched:
                         self.left_rows.append(i)
                         self.right_rows.append(-1)
@@ -604,9 +766,10 @@ struct _HashProbeJob(Job):
             var hash = self.left_hashes[][i]
             var bucket = Int(hash >> 56) >> self.fold
             ref index = self.buckets[][bucket]
-            var position = Int(hash & UInt64(index.mask()))
+            var cursor = _TagCursor(index, hash)
             var matched = False
-            while index.slots[position].row >= 0:
+            var position = cursor.next()
+            while position >= 0:
                 ref slot = index.slots[position]
                 var j = Int(slot.row)
                 if hash == slot.key and _row_equal(
@@ -623,7 +786,7 @@ struct _HashProbeJob(Job):
                     )
                     matched = True
                     break
-                position = (position + 1) & index.mask()
+                position = cursor.next()
             if not matched and self.include_unmatched:
                 self.left_rows.append(i)
                 self.right_rows.append(-1)
