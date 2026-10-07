@@ -1,4 +1,5 @@
 """Runtime-tagged, named columns without per-element type erasure."""
+from .field_metadata import _equal_metadata, _without_extensions
 from .dtype import DataType, NUMERIC_DTYPES
 from std.utils import Variant
 from .bool_column import BoolColumn
@@ -113,6 +114,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
     """A named column of one supported dtype, plus expression-backed methods."""
 
     var _name: String
+    # Owned packed Arrow field metadata, shared by column views.
+    var _field_metadata: Optional[ArcPointer[List[UInt8]]]
     var _data: Storage
     # The logical type. Temporal types are stored in Column[Int64].
     var _dtype: DataType
@@ -126,12 +129,14 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         self._data = Storage(column^)
         self._dtype = DataType.of(D)
         self._chunked = None
+        self._field_metadata = None
 
     def __init__(out self, var name: String, var column: BoolColumn):
         self._name = name^
         self._data = Storage(column^)
         self._dtype = DataType.BOOL
         self._chunked = None
+        self._field_metadata = None
 
     def __init__(out self, var name: String, column: Column[Bool]) raises:
         """Pack a byte-per-value Boolean column into bits."""
@@ -142,6 +147,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         self._data = Storage(column^)
         self._dtype = DataType.STRING
         self._chunked = None
+        self._field_metadata = None
 
     def __init__(out self, var name: String, column: Column[String]):
         """Convert list-backed strings to the contiguous UTF-8 layout."""
@@ -152,12 +158,14 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         self._dtype = column.dtype()
         self._data = Storage(column^)
         self._chunked = None
+        self._field_metadata = None
 
     def __init__(out self, var name: String, var column: StructColumn):
         self._name = name^
         self._dtype = column.dtype()
         self._data = Storage(column^)
         self._chunked = None
+        self._field_metadata = None
 
     @staticmethod
     def _wrap[
@@ -170,12 +178,17 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         return result^
 
     def __init__(
-        out self, var name: String, var storage: Storage, dtype: DataType
+        out self,
+        var name: String,
+        var storage: Storage,
+        dtype: DataType,
+        metadata: Optional[ArcPointer[List[UInt8]]] = None,
     ):
         self._name = name^
         self._data = storage^
         self._dtype = dtype
         self._chunked = None
+        self._field_metadata = metadata
 
     def _dictionary_codes(self) raises -> Optional[Series]:
         """This String column as a categorical over the dictionary its
@@ -244,7 +257,9 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return [self.copy()]
         var result = List[Self](capacity=len(self._chunked.value()[].arrays))
         for storage in self._chunked.value()[].arrays:
-            var part = Self(self._name, storage.copy(), self._dtype)
+            var part = Self(
+                self._name, storage.copy(), self._dtype, self._field_metadata
+            )
             result.append(part^)
         return result^
 
@@ -259,6 +274,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         var ends = List[Int]()
         var height = 0
         for part in parts:
+            result._check_metadata(part)
             if part.dtype() != result.dtype():
                 raise Error("Chunked series arrays must have the same dtype")
             # CSV decode jobs produce one array each. Append that array
@@ -311,7 +327,12 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return self.copy()
         ref cache = self._chunked.value()[].cache[]
         if cache.state.load() == 2:
-            return Self(self._name, cache.merged.value().copy(), self._dtype)
+            return Self(
+                self._name,
+                cache.merged.value().copy(),
+                self._dtype,
+                self._field_metadata,
+            )
         var merged = self._merge_chunks()
         var empty = Int64(0)
         if cache.state.compare_exchange(empty, 1):
@@ -379,6 +400,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             )
             var merged_series = Self(self._name, StringColumn(merged^))
             merged_series._dtype = self._dtype
+            merged_series._field_metadata = self._field_metadata
             return merged_series^
         result._reserve_rows(len(self), self._text_bytes())
         for i in range(1, len(parts)):
@@ -397,7 +419,10 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             else:
                 lo = mid + 1
         var part = Self(
-            self._name, self._chunked.value()[].arrays[lo].copy(), self._dtype
+            self._name,
+            self._chunked.value()[].arrays[lo].copy(),
+            self._dtype,
+            self._field_metadata,
         )
         var start = 0 if lo == 0 else self._chunked.value()[].ends[lo - 1]
         return (part^, row - start)
@@ -478,6 +503,8 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 + dtype.name()
             )
         var result = self.copy()
+        if dtype != self._dtype:
+            result._field_metadata = None
         result._dtype = dtype
         return result^
 
@@ -1048,6 +1075,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return self.rechunk().take(indices)
         var result = self._take_storage(indices)
         result._dtype = self._dtype
+        result._field_metadata = self._field_metadata
         return result^
 
     def _take_from_chunks(self, indices: List[Int]) raises -> Self:
@@ -1080,7 +1108,12 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             offsets[c] = total
             if len(local[c]) == 0:
                 continue
-            var part = Self(self._name, chunks.arrays[c].copy(), self._dtype)
+            var part = Self(
+                self._name,
+                chunks.arrays[c].copy(),
+                self._dtype,
+                self._field_metadata,
+            )
             parts.append(part.take(local[c]))
             total += len(local[c])
         if len(parts) == 0:
@@ -1121,6 +1154,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                     ),
                 )
                 result._dtype = self._dtype
+                result._field_metadata = self._field_metadata
                 return result^
         if self._data.isa[StringColumn]():
             ref strings = self._data[StringColumn]
@@ -1132,6 +1166,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                     ),
                 )
                 result._dtype = self._dtype
+                result._field_metadata = self._field_metadata
                 return result^
         return None
 
@@ -1158,6 +1193,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return self.rechunk().take_or_null(indices)
         var result = self._take_or_null_storage(indices)
         result._dtype = self._dtype
+        result._field_metadata = self._field_metadata
         return result^
 
     def _take_or_null_storage(self, indices: List[Int]) raises -> Self:
@@ -1352,7 +1388,10 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             ref chunks = self._chunked.value()[]
             if length == 0:
                 var empty = Self(
-                    self._name, chunks.arrays[0].copy(), self._dtype
+                    self._name,
+                    chunks.arrays[0].copy(),
+                    self._dtype,
+                    self._field_metadata,
                 )
                 return empty.slice(0, 0)
             # Expression batches are usually within one chunk. Locate the
@@ -1369,7 +1408,12 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             var start = 0 if lo == 0 else chunks.ends[lo - 1]
             var stop = chunks.ends[lo]
             var end = offset + length
-            var first = Self(self._name, chunks.arrays[lo].copy(), self._dtype)
+            var first = Self(
+                self._name,
+                chunks.arrays[lo].copy(),
+                self._dtype,
+                self._field_metadata,
+            )
             if end <= stop:
                 return first.slice(offset - start, length)
             var parts = List[Self]()
@@ -1379,13 +1423,17 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
                 start = stop
                 stop = chunks.ends[lo]
                 var part = Self(
-                    self._name, chunks.arrays[lo].copy(), self._dtype
+                    self._name,
+                    chunks.arrays[lo].copy(),
+                    self._dtype,
+                    self._field_metadata,
                 )
                 parts.append(part.slice(0, min(end, stop) - start))
                 lo += 1
             return Self._from_chunks(parts)
         var result = self._slice_storage(offset, length)
         result._dtype = self._dtype
+        result._field_metadata = self._field_metadata
         return result^
 
     def _slice_storage(self, offset: Int, length: Int) raises -> Self:
@@ -1414,6 +1462,7 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return self.rechunk()._broadcast(length)
         var result = self._broadcast_storage(length)
         result._dtype = self._dtype
+        result._field_metadata = self._field_metadata
         return result^
 
     def _broadcast_storage(self, length: Int) raises -> Self:
@@ -1516,7 +1565,26 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
         if self._data.isa[StringColumn]():
             self._data[StringColumn]._reserve_rows(rows, text_bytes)
 
+    def _check_metadata(self, other: Self) raises:
+        """Concatenation requires identical packed Arrow field metadata."""
+        var a = self._field_metadata
+        var b = other._field_metadata
+        # Geometry already encodes its known extension contract in the dtype.
+        # Compare application metadata separately so native and imported columns
+        # with the same logical geometry type can be concatenated.
+        if self.dtype().is_geometry() and self.dtype() == other.dtype():
+            a = _without_extensions(a)
+            b = _without_extensions(b)
+        if Bool(a) != Bool(b):
+            raise Error("Conflicting Arrow field metadata: " + self._name)
+        if a:
+            ref left = a.value()[]
+            ref right = b.value()[]
+            if not _equal_metadata(left, right):
+                raise Error("Conflicting Arrow field metadata: " + self._name)
+
     def _append_series(mut self, other: Self) raises:
+        self._check_metadata(other)
         if self.is_chunked():
             self = self.rechunk()
         if other.is_chunked():

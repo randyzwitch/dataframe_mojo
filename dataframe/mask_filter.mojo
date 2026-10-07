@@ -342,6 +342,7 @@ def filter_columns(
                     ),
                 )
                 output._dtype = column.dtype()
+                output._field_metadata = column._field_metadata
                 typed.append(output^)
     # Addresses only once every list has stopped moving.
     for j in range(len(fixed_index)):
@@ -397,6 +398,7 @@ def filter_columns(
                 ),
             )
             result._dtype = column.dtype()
+            result._field_metadata = column._field_metadata
             outputs.append(result^)
             continue
         var result = typed[j].copy()

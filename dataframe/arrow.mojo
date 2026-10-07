@@ -35,6 +35,7 @@ from .column import Column, _copy_bits, _copy_validity
 from std.collections import Dict
 from .categorical import encode
 from .geometry import from_wkb
+from .field_metadata import _append_metadata, _has_extension_name
 from .geospatial_metadata import apply_geoparquet_metadata
 from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from .hashing import encode_string_rows_parallel
@@ -196,6 +197,26 @@ def _metadata_length(mut address: Int) raises -> Int:
     if length > Int(Int32.MAX):
         raise Error("Negative Arrow metadata length")
     return length
+
+
+def _copy_metadata(
+    schema: ArrowSchema,
+) raises -> Optional[ArcPointer[List[UInt8]]]:
+    if schema.metadata == 0:
+        return None
+    var address = schema.metadata
+    var count = _metadata_length(address)
+    if count == 0:
+        return None
+    for _ in range(count):
+        var length = _metadata_length(address)
+        address += length
+        length = _metadata_length(address)
+        address += length
+    var data = List[UInt8](capacity=address - schema.metadata)
+    for i in range(address - schema.metadata):
+        data.append(_read[UInt8](schema.metadata, i))
+    return ArcPointer(data^)
 
 
 def _metadata_value(schema: ArrowSchema, key: String) raises -> String:
@@ -412,9 +433,21 @@ def _fill_schema(mut schema: ArrowSchema, series: Series) raises:
             var child = _leak(ArrowSchema())
             _fill_schema(_at[ArrowSchema](child)[], column.field(i))
             state.children.append(child)
+    if series._field_metadata:
+        state.metadata = series._field_metadata.value()[].copy()
+        if dtype.is_geometry() and not _has_extension_name(state.metadata):
+            _append_metadata(
+                state.metadata,
+                _metadata_pack(
+                    ["ARROW:extension:name", "ARROW:extension:metadata"],
+                    ["geoarrow.wkb", dtype.geometry_metadata()],
+                ),
+            )
     schema.format = Int(state.format.unsafe_ptr())
     schema.name = Int(state.name.unsafe_ptr())
-    schema.metadata = 0
+    schema.metadata = Int(state.metadata.unsafe_ptr()) if len(
+        state.metadata
+    ) else 0
     schema.flags = ARROW_FLAG_NULLABLE
     schema.n_children = Int64(len(state.children))
     schema.children = (
@@ -428,7 +461,7 @@ def _fill_schema(mut schema: ArrowSchema, series: Series) raises:
         schema.dictionary = values
     schema.private_data = _leak(state^)
     schema.release = _schema_release_address()
-    if dtype.is_geometry():
+    if dtype.is_geometry() and not series._field_metadata:
         _set_metadata(
             schema,
             ["ARROW:extension:name", "ARROW:extension:metadata"],
@@ -841,15 +874,12 @@ def _import_dictionary(
 
 def _import_child(array: ArrowArray, schema: ArrowSchema) raises -> Series:
     var extension = _metadata_value(schema, "ARROW:extension:name")
-    if extension.startswith("geoarrow."):
-        if extension != "geoarrow.wkb":
-            raise Error(
-                "Unsupported GeoArrow encoding: " + extension + "; import WKB"
-            )
+    var result = _import_storage(array, schema)
+    if extension == "geoarrow.wkb":
         var metadata = _metadata_value(schema, "ARROW:extension:metadata")
-        var storage = _import_storage(array, schema)
-        return from_wkb(storage, "{}" if metadata == "" else metadata)
-    return _import_storage(array, schema)
+        result = from_wkb(result, "{}" if metadata == "" else metadata)
+    result._field_metadata = _copy_metadata(schema)
+    return result^
 
 
 def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:

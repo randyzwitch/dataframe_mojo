@@ -4550,9 +4550,17 @@ def concat(
                 if found >= 0:
                     columns.append(frame._columns[found].copy())
                 else:
-                    columns.append(
-                        Series.full_null(name, dtypes[name], frame.height())
+                    var missing = Series.full_null(
+                        name, dtypes[name], frame.height()
                     )
+                    for source in shared:
+                        if name in source.columns():
+                            missing._field_metadata = source.column(
+                                name
+                            )._field_metadata
+                            break
+                    columns.append(missing^)
+
             aligned.append(DataFrame(columns^, height=frame.height()))
         return concat(aligned, "vertical")
     if how == "horizontal":

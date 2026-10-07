@@ -85,8 +85,9 @@ ordinary dataframe key comparison use WKB bytes, not topological equality.
 
 Arrow import/export uses `geoarrow.wkb`, with `ARROW:extension:name` and
 `ARROW:extension:metadata` on each geometry field. Import accepts binary and
-large_binary storage; export uses large_binary. Unsupported GeoArrow geometry
-encodings raise rather than silently losing spatial semantics.
+large_binary storage; export uses large_binary. Other GeoArrow extensions retain
+their opaque field metadata on supported storage layouts, without geometry
+interpretation. See [field metadata and extensions](arrow.md#field-metadata-and-extensions).
 
 `read_parquet` and `scan_parquet` recognize WKB GeoParquet 1.0.0 and 1.1.0,
 including projected columns, empty inputs, row-group selection, and lazy

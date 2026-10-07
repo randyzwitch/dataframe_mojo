@@ -1,5 +1,6 @@
 """WKB geometry storage. No geometry analysis or coordinate transformation."""
 from .dtype import DataType
+from .field_metadata import _without_extensions
 from .series import Series
 from .string_column import StringColumn
 
@@ -117,14 +118,18 @@ def from_wkb(binary: Series, metadata: String = "{}") raises -> Series:
                         + ": "
                         + String(e)
                     )
-    return binary.with_dtype(dtype)
+    var result = binary.with_dtype(dtype)
+    result._field_metadata = _without_extensions(binary._field_metadata)
+    return result^
 
 
 def to_wkb(geometry: Series) raises -> Series:
     """Expose a geometry column as binary WKB, sharing buffers."""
     if not geometry.dtype().is_geometry():
         raise Error("to_wkb requires a geometry series")
-    return geometry.with_dtype(DataType.BINARY)
+    var result = geometry.with_dtype(DataType.BINARY)
+    result._field_metadata = _without_extensions(geometry._field_metadata)
+    return result^
 
 
 def _validate_geoparquet_wkb(series: Series) raises:

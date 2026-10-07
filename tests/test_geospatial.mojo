@@ -235,8 +235,8 @@ def test_arrow_roundtrip_and_metadata_validation() raises:
     for extension in ["geoarrow.point", "geoarrow.wkt"]:
         export_arrow_series(to_wkb(g), array, schema)
         _set_metadata(schema, ["ARROW:extension:name"], [extension])
-        with assert_raises(contains="Unsupported GeoArrow"):
-            _ = import_arrow_series(array, schema)
+        var unknown = import_arrow_series(array, schema)
+        assert_equal(unknown.dtype(), DataType.BINARY)
         assert_equal(array.release, 0)
         assert_equal(schema.release, 0)
 
