@@ -80,8 +80,9 @@ from .parquet import (
     parquet_row_group_statistics,
     read_parquet,
 )
+from .column import Column
 from .series import Series
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .trace import trace_path
 from .execution_report import ExecutionReport
@@ -417,6 +418,148 @@ def _merge_parts(
         pending.append(carried.pop(0))
 
 
+comptime _BOUND_NONE = 0
+comptime _BOUND_INT = 1
+comptime _BOUND_FLOAT = 2
+
+
+struct _TopBound(Copyable, Movable):
+    """The first sort key's value at a streamed top-k's k-th row so far.
+
+    A row whose key is worse than it (after it in the sort's direction)
+    cannot enter the top k, so a batch keeps only rows at or better than
+    the bound when at most one in eight are, ties included (later keys decide those) and nulls included
+    (wherever the sort puts them). Integer-backed keys (integers, dates,
+    datetimes, durations) compare as Int64, floats as Float64 with NaN
+    kept; other dtypes get no bound.
+    """
+
+    var kind: Int
+    var name: String
+    var descending: Bool
+    var integer: Int64
+    var floating: Float64
+
+    def __init__(out self):
+        self.kind = _BOUND_NONE
+        self.name = String()
+        self.descending = False
+        self.integer = 0
+        self.floating = 0.0
+
+    def __init__(
+        out self, candidates: DataFrame, name: String, descending: Bool, k: Int
+    ) raises:
+        """The bound from `candidates`, sorted best first, once it holds
+        `k` rows; none before then or when its k-th key is null."""
+        self = Self()
+        if candidates.height() < k or k <= 0:
+            return
+        var key = candidates.column(name)
+        if key.is_chunked():
+            key = key.rechunk()
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            if key._data.isa[Column[Scalar[D]]]():
+                ref column = key._data[Column[Scalar[D]]]
+                if not column._valid(k - 1):
+                    return
+                var value = column._get(k - 1)
+                comptime if D.is_floating_point():
+                    self.floating = Float64(value)
+                    if self.floating != self.floating:
+                        # NaN sorts past every number: no row is worse.
+                        return
+                    self.kind = _BOUND_FLOAT
+                elif D == DType.uint64:
+                    return
+                else:
+                    self.integer = Int64(value)
+                    self.kind = _BOUND_INT
+                self.name = name
+                self.descending = descending
+                return
+
+    def rows(self, frame: DataFrame) raises -> Optional[List[Int]]:
+        """The rows of `frame` that can still enter the top k, or None
+        when every row can (or the batch lacks the key)."""
+        if frame.height() == 0 or self.name not in frame.columns():
+            return None
+        var key = frame.column(self.name)
+        if key.is_chunked():
+            key = key.rechunk()
+        var rows = List[Int]()
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            if key._data.isa[Column[Scalar[D]]]():
+                ref column = key._data[Column[Scalar[D]]]
+                var values = column.unsafe_values()
+                var nulls = column.null_count() > 0
+                for i in range(len(column)):
+                    if nulls and not column._valid(i):
+                        rows.append(i)
+                        continue
+                    var value = values.unsafe_offset(i)[]
+                    var ok: Bool
+                    comptime if D.is_floating_point():
+                        var x = Float64(value)
+                        ok = x != x or (
+                            x
+                            >= self.floating if self.descending else x
+                            <= self.floating
+                        )
+                    elif D == DType.uint64:
+                        ok = True
+                    else:
+                        var x = Int64(value)
+                        ok = (
+                            x
+                            >= self.integer if self.descending else x
+                            <= self.integer
+                        )
+                    if ok:
+                        rows.append(i)
+                if len(rows) == frame.height():
+                    return None
+                return rows^
+        return None
+
+
+def _bounded_batch(
+    mut frame: DataFrame, rows: List[Int], first: PlanNode
+) raises -> Bool:
+    """Narrow `frame` to the bounded `rows` of a top-k; when the first
+    operation is a row-local filter, apply it too, reading only its own
+    columns at those rows, and return True (the filter is done). The full
+    rows are copied once, for the rows that pass both: a batch keeps every
+    column, and copying all of them for rows the filter then drops cost
+    more than the bound saved (ClickBench q23 reads ~100 columns)."""
+    if first.kind == FILTER and _row_local(first.exprs):
+        var reads = _references(first.exprs[0])
+        if reads:
+            var names = reads.value().copy()
+            var picked = frame.select(names).take(rows)
+            var positions = List[Int64](capacity=len(rows))
+            for r in rows:
+                positions.append(Int64(r))
+            var marker = String("\x00bounded_row")
+            picked = picked.with_column(
+                Series(marker, Column[Int64](positions^))
+            )
+            var kept = picked.filter(first.exprs[0]).column(marker)
+            if kept.is_chunked():
+                kept = kept.rechunk()
+            ref column = kept._data[Column[Int64]]
+            var final = List[Int](capacity=len(column))
+            for i in range(len(column)):
+                final.append(Int(column._get(i)))
+            frame = frame.take(final)
+            return True
+    if 8 * len(rows) <= frame.height():
+        frame = frame.take(rows)
+    return False
+
+
 struct _StreamJob(Job):
     var decode: List[_DecodeJob]
     var frame: DataFrame
@@ -443,6 +586,10 @@ struct _StreamJob(Job):
     var keep_frame: Bool
     var collect_only: Bool
     var projection: List[String]
+    # A streamed top-k's running bound on its first sort key (DuckDB's
+    # Top-N dynamic filter): rows that cannot beat it are dropped before
+    # any operation runs. See `_TopBound`.
+    var bound: _TopBound
 
     def __init__(
         out self,
@@ -468,6 +615,7 @@ struct _StreamJob(Job):
         self.keep_frame = False
         self.collect_only = False
         self.projection = List[String]()
+        self.bound = _TopBound()
 
     def take_reduced(mut self) -> List[_StreamReduction]:
         var out = self.reduced^
@@ -480,7 +628,19 @@ struct _StreamJob(Job):
             self.frame = self.decode.pop().into_frame()
         if self.counting:
             self.counts = List[Int](length=2 * len(self.operations), fill=0)
-        for k in range(len(self.operations)):
+        var start = 0
+        if self.bound.kind != _BOUND_NONE and len(self.operations) > 0:
+            var bounded = self.bound.rows(self.frame)
+            if bounded:
+                var height = self.frame.height()
+                if _bounded_batch(
+                    self.frame, bounded.value(), self.operations[0]
+                ):
+                    start = 1
+                    if self.counting:
+                        self.counts[0] = height
+                        self.counts[1] = self.frame.height()
+        for k in range(start, len(self.operations)):
             if self.counting:
                 self.counts[2 * k] = self.frame.height()
             _apply_operation(
@@ -1394,6 +1554,25 @@ struct LazyFrame(Copyable):
         # 3.8M rows against 1.5M-row builds: 186 -> 148 ms). They grow only
         # while every worker still gets a batch: a 150K-row customer table
         # in one batch ran on one worker (q10, q13 and q22 were 7-23% slower).
+        # A top-k bounds its first key once it holds k rows, when that key
+        # is read from the input as it is: no join, and no operation that
+        # writes a column of that name.
+        var bound = _TopBound()
+        var bounded = top > 0 and len(shared_joins[]) == 0
+        if bounded:
+            for operation in operations:
+                if operation.kind == WITH_COLUMNS or operation.kind == SELECT:
+                    for e in operation.exprs:
+                        if e._name != top_names[0]:
+                            continue
+                        var r = _references(e)
+                        if not (
+                            r
+                            and len(r.value()) == 1
+                            and r.value()[0] == e._name
+                            and len(e._nodes) == 1
+                        ):
+                            bounded = False
         var rows_per_batch = batch_size
         if len(shared_joins[]) > 0 and input.height() > 0:
             rows_per_batch = max(
@@ -1437,6 +1616,7 @@ struct LazyFrame(Copyable):
                 job.collect_only = collecting
                 job.keep_frame = undecided
                 job.projection = projection.copy()
+                job.bound = bound.copy()
                 jobs.append(job^)
             if len(jobs) == 0:
                 break
@@ -1575,6 +1755,10 @@ struct LazyFrame(Copyable):
                     )
                 )
                 candidate_rows = merged.height()
+                if bounded:
+                    bound = _TopBound(
+                        merged, top_names[0], top_descending[0], top
+                    )
                 candidates = [merged^]
             if len(csv):
                 csv[0].discard()

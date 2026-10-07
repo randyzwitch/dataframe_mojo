@@ -213,5 +213,83 @@ def test_large_inputs_select_per_chunk() raises:
                 )
 
 
+def test_streamed_top_k_bound_keeps_the_answer() raises:
+    """A streamed top-k over a filtered in-memory frame bounds its first
+    key once it holds k rows and drops rows that cannot beat it before the
+    filter runs (DuckDB's Top-N dynamic filter). Ties on the first key,
+    nulls in either position, NaN, descending order, a later key settling
+    ties, and a key replaced by with_columns must all give the eager
+    answer, at batch sizes that make many rounds."""
+    var n = 300_000
+    var ints = List[Int64](capacity=n)
+    var int_valid = List[Bool](capacity=n)
+    var floats = List[Float64](capacity=n)
+    var keep = List[Int64](capacity=n)
+    var second = List[Int64](capacity=n)
+    for i in range(n):
+        ints.append(Int64((i * 7919) % 5003))
+        int_valid.append(i % 97 != 11)
+        var f = Float64((i * 104729) % 4001) / 7.0
+        if i % 1009 == 0:
+            f = Float64(0) / Float64(0)
+        floats.append(f)
+        keep.append(Int64(i % 3))
+        second.append(Int64((i * 31) % 101))
+    var frame = DataFrame(
+        [
+            Series("a", Column[Int64](ints^, int_valid^)),
+            Series("f", Column[Float64](floats^)),
+            Series("keep", Column[Int64](keep^)),
+            Series("b", Column[Int64](second^)),
+        ]
+    )
+    for descending in [False, True]:
+        for nulls_last in [False, True]:
+            for by in [List[String](["a", "b"]), List[String](["f", "b"])]:
+                for k in [1, 10, 250]:
+                    var flags = List[Bool](length=len(by), fill=descending)
+                    var last = List[Bool](length=len(by), fill=nulls_last)
+                    var lazy = (
+                        frame.lazy()
+                        .filter(col("keep") != lit(Int64(1)))
+                        .sort(by, descending=flags, nulls_last=last)
+                        .head(k)
+                    )
+                    var want = (
+                        frame.filter(col("keep") != lit(Int64(1)))
+                        .sort(by, descending=flags, nulls_last=last)
+                        .head(k)
+                    )
+                    var got = lazy.collect(batch_size=4096)
+                    assert_true(
+                        got.equals(want),
+                        "by "
+                        + by[0]
+                        + " k "
+                        + String(k)
+                        + " desc "
+                        + String(descending)
+                        + " nulls_last "
+                        + String(nulls_last),
+                    )
+    # A key replaced before the sort is not bounded on its input values.
+    var replaced = (
+        frame.lazy()
+        .filter(col("keep") != lit(Int64(1)))
+        .with_columns([(lit(Int64(0)) - col("a")).alias("a")])
+        .sort(["a", "b"])
+        .head(25)
+        .collect(batch_size=4096)
+    )
+    assert_true(
+        replaced.equals(
+            frame.filter(col("keep") != lit(Int64(1)))
+            .with_columns([(lit(Int64(0)) - col("a")).alias("a")])
+            .sort(["a", "b"])
+            .head(25)
+        )
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
