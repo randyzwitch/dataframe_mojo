@@ -22,7 +22,12 @@ esac
 sed 's/^_//' native/dfparquet/dfparquet.sym | LC_ALL=C sort > "$WORK/expected"
 diff -u "$WORK/expected" "$WORK/exports"
 
-mojo build -I . tests/test_parquet.mojo -o "$WORK/test_parquet"
+# An explicit output lets the unit-test step reuse this exact build.
+BINARY="${1:-$WORK/test_parquet}"
+case "$BINARY" in /*) ;; *) BINARY="$ROOT/$BINARY" ;; esac
+mkdir -p "$(dirname "$BINARY")"
+python3 scripts/ci_time.py --label parquet-compile -- \
+  mojo build -I . tests/test_parquet.mojo -o "$BINARY"
 run_tests() {
   local log=$1
   shift
@@ -39,7 +44,7 @@ run_tests() {
 
 echo 'Testing build/dfparquet lookup'
 run_tests "$WORK/build.log" env -u DATAFRAME_PARQUET_LIBRARY -u CONDA_PREFIX \
-  "$WORK/test_parquet"
+  "$BINARY"
 
 # Keep the fixtures available, but no build/dfparquet directory: a successful
 # read here proves the prefix search path works without the fallback.
@@ -49,4 +54,4 @@ ln -s "$ROOT/tests" "$WORK/run/tests"
 cd "$WORK/run"
 echo 'Testing CONDA_PREFIX/lib lookup'
 run_tests "$WORK/prefix.log" env -u DATAFRAME_PARQUET_LIBRARY \
-  CONDA_PREFIX="$WORK/prefix" "$WORK/test_parquet"
+  CONDA_PREFIX="$WORK/prefix" "$BINARY"

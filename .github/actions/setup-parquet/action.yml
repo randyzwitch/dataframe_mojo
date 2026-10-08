@@ -1,0 +1,17 @@
+name: Set up Parquet library
+description: Restore or build the native library for this OS and architecture.
+runs:
+  using: composite
+  steps:
+    - name: Restore libdfparquet
+      id: dfparquet
+      uses: actions/cache@v6
+      with:
+        path: |
+          build/dfparquet/libdfparquet.so
+          build/dfparquet/libdfparquet.dylib
+        key: dfparquet-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/dfparquet/**') }}
+    - name: Build libdfparquet
+      if: steps.dfparquet.outputs.cache-hit != 'true'
+      shell: bash
+      run: python3 scripts/ci_time.py --label native-build -- pixi run -e native build-dfparquet

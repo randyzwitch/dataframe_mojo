@@ -471,8 +471,17 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--mutation-check", action="store_true")
     parser.add_argument("--kinds", default=",".join(KINDS), help="comma-separated operation kinds to generate")
+    parser.add_argument("--runner", type=Path, help="reuse an explicitly built runner from this checkout")
+    parser.add_argument("--build-only", action="store_true", help="build the runner without running cases")
     args = parser.parse_args()
-    runner = build_runner()
+    if args.build_only:
+        if args.runner:
+            parser.error("--build-only cannot be combined with --runner")
+        build_runner()
+        return 0
+    runner = args.runner.resolve() if args.runner else build_runner()
+    if not runner.is_file() or not os.access(runner, os.X_OK):
+        parser.error(f"runner is not executable: {runner}")
     env = dict(os.environ)
     if args.mutation_check:
         env["DATAFRAME_ORACLE_INJECT"] = "1"
