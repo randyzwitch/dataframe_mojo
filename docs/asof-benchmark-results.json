@@ -1,0 +1,181 @@
+{
+  "commit": "ead59c8abefade3a4c787aec91a0bab0ce9569d4",
+  "dirty": false,
+  "machine": "Linux-7.0.0-34-generic-x86_64-with-glibc2.39",
+  "cpu_count": 64,
+  "load_average": [
+    5.1357421875,
+    9.51416015625,
+    8.08349609375
+  ],
+  "left_rows": 10000000,
+  "right_rows": 1000000,
+  "threads": 4,
+  "seed": 224,
+  "warmups": 1,
+  "reps": 3,
+  "results": [
+    {
+      "variant": "base",
+      "strategy": "backward",
+      "check_sortedness": true,
+      "mojo_ns": [
+        343452304,
+        312021807,
+        308337879
+      ],
+      "polars_ns": [
+        136847743,
+        103355338,
+        103347118
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 3.0189229994100546,
+      "output_equal": true
+    },
+    {
+      "variant": "base",
+      "strategy": "forward",
+      "check_sortedness": true,
+      "mojo_ns": [
+        335733812,
+        313094230,
+        310137150
+      ],
+      "polars_ns": [
+        103733099,
+        71044139,
+        73608557
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 4.253503162682567,
+      "output_equal": true
+    },
+    {
+      "variant": "base",
+      "strategy": "nearest",
+      "check_sortedness": true,
+      "mojo_ns": [
+        469581966,
+        442192391,
+        437517872
+      ],
+      "polars_ns": [
+        126130912,
+        93932892,
+        96126868
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 4.600091526959975,
+      "output_equal": true
+    },
+    {
+      "variant": "nulls",
+      "strategy": "backward",
+      "check_sortedness": false,
+      "mojo_ns": [
+        331939186,
+        305120700,
+        301282997
+      ],
+      "polars_ns": [
+        162647344,
+        128733048,
+        121199418
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 2.3701815869379557,
+      "output_equal": true
+    },
+    {
+      "variant": "nulls",
+      "strategy": "forward",
+      "check_sortedness": false,
+      "mojo_ns": [
+        333893334,
+        306841960,
+        303384300
+      ],
+      "polars_ns": [
+        165396546,
+        118023600,
+        120003620
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 2.5569391990008303,
+      "output_equal": true
+    },
+    {
+      "variant": "nulls",
+      "strategy": "nearest",
+      "check_sortedness": false,
+      "mojo_ns": [
+        466008336,
+        433938713,
+        434930893
+      ],
+      "polars_ns": [
+        241317400,
+        198333597,
+        195835356
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 2.192925956967341,
+      "output_equal": true
+    },
+    {
+      "variant": "grouped",
+      "strategy": "backward",
+      "check_sortedness": true,
+      "mojo_ns": [
+        431102252,
+        397161128,
+        420516832
+      ],
+      "polars_ns": [
+        162049056,
+        122509945,
+        112227431
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 3.4325118013888587,
+      "output_equal": true
+    },
+    {
+      "variant": "grouped",
+      "strategy": "forward",
+      "check_sortedness": true,
+      "mojo_ns": [
+        424365049,
+        391563093,
+        416697620
+      ],
+      "polars_ns": [
+        138374006,
+        97329287,
+        97072131
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 4.281317914103285,
+      "output_equal": true
+    },
+    {
+      "variant": "grouped",
+      "strategy": "nearest",
+      "check_sortedness": true,
+      "mojo_ns": [
+        555550231,
+        528425821,
+        548495830
+      ],
+      "polars_ns": [
+        172130479,
+        138042870,
+        135630049
+      ],
+      "polars_version": "1.44.2",
+      "ratio": 3.9733731267685175,
+      "output_equal": true
+    }
+  ]
+}

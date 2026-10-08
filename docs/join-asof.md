@@ -83,3 +83,29 @@ the complete result. Every output cell is compared. The report includes raw
 timings, thread count, revisions, seed and machine details for duplicate-heavy,
 nullable and grouped variants. This is a mechanism benchmark, not an
 external-suite performance claim.
+
+### Recorded 10M / 1M run
+
+Engine revision `ead59c8abefade3a4c787aec91a0bab0ce9569d4`, Polars 1.44.2, four threads, seed 224,
+one warmup and three measured runs. All nine complete results matched Polars.
+Times below are medians in milliseconds; ratios are Mojo / Polars.
+
+| Variant | Strategy | Mojo ms | Polars ms | Ratio |
+| --- | --- | ---: | ---: | ---: |
+| base | backward | 312.0 | 103.4 | 3.02× |
+| base | forward | 313.1 | 73.6 | 4.25× |
+| base | nearest | 442.2 | 96.1 | 4.60× |
+| nulls | backward | 305.1 | 128.7 | 2.37× |
+| nulls | forward | 306.8 | 120.0 | 2.56× |
+| nulls | nearest | 434.9 | 198.3 | 2.19× |
+| grouped | backward | 420.5 | 122.5 | 3.43× |
+| grouped | forward | 416.7 | 97.3 | 4.28× |
+| grouped | nearest | 548.5 | 138.0 | 3.97× |
+
+[Raw measurements and machine information](asof-benchmark-results.json) include
+all repetitions. This was a development workstation run with other compilation
+work active, not an isolated performance baseline. The nullable variant checks
+non-null key ordering outside Polars' timer and disables its sortedness check,
+which otherwise rejects interspersed nulls. Mojo validates ordering during every
+join. Polars cannot validate grouped sortedness; Mojo does. These differences
+and auxiliary allocation are included in the measured operator times.
