@@ -114,6 +114,22 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A stream over an in-memory input through joins keeps at least four
+  batches a worker and hands the pool four batches a worker each round,
+  claimed as workers free up: input stored in key order (sales by date)
+  put every row a selective join kept into one or two of eight batches,
+  leaving the other workers idle. TPC-DS q99 67 -> 36 ms, q72 84 -> 68,
+  q15 14 -> 9.5, q93 20 -> 16. A top-k keeps one batch a worker a round,
+  so its bound tightens as before.
+- `unique()` on whole rows in any order (`keep="any"`, no
+  `maintain_order`) runs as a group_by on every column with no
+  aggregates, on every worker; with `keep="first"` (or any order kept)
+  it takes each key's first row straight from the row encoding instead
+  of counting first. Short string keys are encoded in registers rather
+  than through a stack copy. TPC-DS q35 (three uniques of 80K-307K rows)
+  82 -> 64 ms.
+- The execution report's last node of a streamed aggregation shows the
+  batches' reduction time in `busy_ms`.
 - An inner join that builds on its small left side emits its pairs in
   probe order when everything above it in a lazy plan ignores row order
   (an aggregation, through inner, left, semi and anti joins), skipping

@@ -254,6 +254,11 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
         ref column = chunk._data[StringColumn]
         if column._is_view_storage():
             var storage = column._view_storage_unchecked()
+            # A row equal to the one before reuses its code, as on the
+            # offsets path: a column of one repeated label (TPC-DS q35's
+            # unique on a key and a constant tag) costs one compare a row.
+            var last_key = UInt128(0)
+            var last_code = -1
             for i in range(len(column)):
                 if not column._valid(i):
                     if nulls_equal:
@@ -274,7 +279,13 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
                         | (UInt128(view.buffer_index) << 64)
                         | (UInt128(view.offset) << 96)
                     )
+                    if key == last_key and last_code >= 0:
+                        ids.append(last_code)
+                        row += 1
+                        continue
                     code = inline.get_or_insert(key, len(representatives))
+                    last_key = key
+                    last_code = code
                 else:
                     var value = storage._get_unchecked(column._offset + i)
                     code = long_lookup.get(value, -1)
@@ -298,6 +309,7 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
                 column._offsets[].unsafe_ptr().unsafe_offset(column._offset)
             )
             var bytes = column._base()
+            var byte_count = len(column._bytes[])
             # A missing bitmap means no nulls; counting them is O(n).
             var nulls = len(column._bits[]) != 0
             var last_key = UInt128(0)
@@ -314,14 +326,34 @@ def _encode_string_rows(series: Series, nulls_equal: Bool) -> RowKeys:
                 var length = Int(offsets[unsafe_offset=i + 1]) - start
                 var code: Int
                 if length <= 12:
-                    var key = UInt128(length)
-                    unsafe_memcpy(
-                        dest=Pointer(to=key)
-                        .unsafe_bitcast[UInt8]()
-                        .unsafe_offset(4),
-                        src=bytes.unsafe_offset(start),
-                        count=length,
-                    )
+                    var key: UInt128
+                    if start + 16 <= byte_count:
+                        # Two loads and a mask, in registers: copying the
+                        # bytes into the key on the stack and reading it
+                        # back stalled on store forwarding (70% of this
+                        # loop on a column of short labels).
+                        var low = (
+                            bytes.unsafe_offset(start)
+                            .unsafe_bitcast[UInt64]()
+                            .unsafe_load()
+                        )
+                        var high = (
+                            bytes.unsafe_offset(start + 8)
+                            .unsafe_bitcast[UInt64]()
+                            .unsafe_load()
+                        )
+                        var value = UInt128(low) | (UInt128(high) << 64)
+                        var mask = (UInt128(1) << UInt128(8 * length)) - 1
+                        key = UInt128(length) | ((value & mask) << 32)
+                    else:
+                        key = UInt128(length)
+                        unsafe_memcpy(
+                            dest=Pointer(to=key)
+                            .unsafe_bitcast[UInt8]()
+                            .unsafe_offset(4),
+                            src=bytes.unsafe_offset(start),
+                            count=length,
+                        )
                     if key == last_key and last_code >= 0:
                         out[unsafe_offset=i] = last_code
                         continue

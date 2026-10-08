@@ -37,7 +37,7 @@ from std.memory import ArcPointer
 from .csv_reader import _CsvBatches, _DecodeJob
 from .csv_types import _map_file
 from .parquet import _ParquetBatches
-from .parallel import Job, Pool, configured_workers, run_jobs
+from .parallel import Crew, Job, Pool, configured_workers, run_jobs
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     SUM,
@@ -670,9 +670,14 @@ struct _StreamJob(Job):
                 self.frame = self.frame.select(self.projection)
             return
         if len(self.expressions):
+            var began = Int(perf_counter_ns()) if self.counting else 0
             var reduction = _StreamReduction(
                 self.frame, self.expressions, self.keys
             )
+            if self.counting:
+                self.times[len(self.operations)] += (
+                    Int(perf_counter_ns()) - began
+                )
             self.rows = reduction.rows
             if self.bits > 0 and reduction.grouped:
                 self.reduced = reduction.split(self.bits)
@@ -1249,7 +1254,28 @@ struct LazyFrame(Copyable):
         Streaming batches default to 65,536 rows. Set streaming=False to use
         the materializing executor. Stateful/global operations retain their
         documented boundaries; collecting still retains the final output.
+
+        Parallel work inside runs on one crew of threads started for the
+        query (`parallel.Crew`) and joined before this returns.
         """
+        var crew = Crew.start()
+        try:
+            var result = self._collect(
+                optimize=optimize, streaming=streaming, batch_size=batch_size
+            )
+            crew.release()
+            return result^
+        except e:
+            crew.release()
+            raise e^
+
+    def _collect(
+        self,
+        *,
+        optimize: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) raises -> DataFrame:
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if getenv("DATAFRAME_EXECUTION_REPORT"):
@@ -1800,8 +1826,9 @@ struct LazyFrame(Copyable):
         var operation_rows = List[Int](
             length=2 * len(operations) if counting else 0, fill=0
         )
+        # Per operation, then the batches' reductions.
         var operation_times = List[Int](
-            length=len(operations) if counting else 0, fill=0
+            length=len(operations) + 1 if counting else 0, fill=0
         )
         var stream_began = Int(perf_counter_ns())
         # Aggregate state (#326). Batch states wait in `pending` and are
@@ -1876,12 +1903,26 @@ struct LazyFrame(Copyable):
                             bounded = False
         var rows_per_batch = batch_size
         if len(shared_joins[]) > 0 and input.height() > 0:
+            # Still four batches a worker: input stored in key order (sales
+            # by date) puts every row a selective join keeps into a few
+            # batches, and one batch per worker left the others idle while
+            # one worked through them (TPC-DS q99: 175K of 1.4M rows in one
+            # 180K-row batch, 74 ms on one worker).
             rows_per_batch = max(
-                batch_size, min(4 * batch_size, input.height() // workers)
+                batch_size, min(4 * batch_size, input.height() // (4 * workers))
             )
+        # An in-memory input hands each round four batches a worker, which
+        # the pool claims as workers free up, so uneven batches balance.
+        # Batches decoded from a file are held until their round ends, so
+        # those keep one a worker, as does a top-k (ClickBench q26 lost its
+        # bound for a first round four times as long).
+        var per_round = workers
+        if len(csv) == 0 and len(parquet) == 0 and top < 0:
+            # Not for a top-k, whose bound tightens between rounds.
+            per_round = 4 * workers
         while not ended:
             var jobs = List[_StreamJob]()
-            for _ in range(workers):
+            for _ in range(per_round):
                 var frame = DataFrame(List[Series](), height=0)
                 var decode = List[_DecodeJob]()
                 if len(csv):
@@ -1922,7 +1963,7 @@ struct LazyFrame(Copyable):
             if len(jobs) == 0:
                 break
             if not pool_ready:
-                pool = Pool(len(jobs))
+                pool = Pool(min(len(jobs), workers))
                 pool_ready = True
             pool.run(jobs, claim=True)
             if counting:
@@ -2123,6 +2164,7 @@ struct LazyFrame(Copyable):
                     "streaming",
                     into_terminal,
                     result.value().height() if result else 0,
+                    busy_ns=operation_times[len(operations)],
                     wall_ns=stream_wall,
                 )
             else:

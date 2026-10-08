@@ -97,6 +97,22 @@ def _is_int_key(key: Series) -> Bool:
     return False
 
 
+def _key_words(key: Series) -> List[UInt64]:
+    """Every row's word (`_int_word`) of an integer key with no nulls."""
+    var words = List[UInt64](unsafe_uninit_length=len(key))
+    var out = words.unsafe_ptr()
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if key._data.isa[Column[Scalar[D]]]():
+                var values = key._data[Column[Scalar[D]]].unsafe_values()
+                for i in range(len(key)):
+                    out.unsafe_offset(i)[] = _int_word[D](
+                        values.unsafe_offset(i)[]
+                    )
+    return words^
+
+
 def _int_key_at(key: Series, row: Int) -> Tuple[Bool, UInt64]:
     """Whether an integer key's row is valid, and its word."""
     comptime for k in range(len(NUMERIC_DTYPES)):
@@ -327,6 +343,10 @@ struct _HashBuildJob(Job):
 
     var hashes: ArcPointer[List[UInt64]]
     var order: ArcPointer[List[Int]]
+    # The hashes, and for an integer key without nulls its words, in
+    # bucket order: read in sequence instead of at each row (#378).
+    var ordered_hashes: ArcPointer[List[UInt64]]
+    var ordered_words: ArcPointer[List[UInt64]]
     var right_keys: List[Series]
     var typed_int: Bool
     var skip_nulls: Bool
@@ -338,6 +358,8 @@ struct _HashBuildJob(Job):
         out self,
         hashes: ArcPointer[List[UInt64]],
         order: ArcPointer[List[Int]],
+        ordered_hashes: ArcPointer[List[UInt64]],
+        ordered_words: ArcPointer[List[UInt64]],
         right_keys: List[Series],
         typed_int: Bool,
         first: Int,
@@ -346,6 +368,8 @@ struct _HashBuildJob(Job):
     ):
         self.hashes = hashes.copy()
         self.order = order.copy()
+        self.ordered_hashes = ordered_hashes.copy()
+        self.ordered_words = ordered_words.copy()
         self.right_keys = right_keys.copy()
         self.typed_int = typed_int
         self.skip_nulls = skip_nulls and not typed_int
@@ -371,41 +395,47 @@ struct _HashBuildJob(Job):
         )
         var duplicates = List[_DuplicateEntry]()
         var unique = 0
+        var order = self.order[].unsafe_ptr()
+        var ordered_hashes = self.ordered_hashes[].unsafe_ptr()
+        var words = self.ordered_words[].unsafe_ptr()
+        var have_words = len(self.ordered_words[]) > 0
         for position in range(self.last - 1, self.first - 1, -1):
-            var row = self.order[][position]
+            var row = order.unsafe_offset(position)[]
             if self.skip_nulls and not _row_valid(self.right_keys, row):
                 continue
-            var hash = self.hashes[][row]
+            var hash = ordered_hashes.unsafe_offset(position)[]
             var key = hash
-            if self.typed_int:
+            if have_words:
+                key = words.unsafe_offset(position)[]
+            elif self.typed_int:
                 var word = _int_key_at(self.right_keys[0], row)
                 if not word[0]:
                     continue
                 key = word[1]
             var slot = Int(hash & UInt64(size - 1))
-            while slots[slot].row >= 0:
-                var same = slots[slot].key == key
+            var table = slots.unsafe_ptr()
+            while table.unsafe_offset(slot)[].row >= 0:
+                ref entry = table.unsafe_offset(slot)[]
+                var same = entry.key == key
                 if same and not self.typed_int:
                     same = _row_equal(
                         self.right_keys,
                         self.right_keys,
                         row,
-                        Int(slots[slot].row),
+                        Int(entry.row),
                     )
                 if same:
                     duplicates.append(
-                        _DuplicateEntry(
-                            slots[slot].row, slots[slot].next_position
-                        )
+                        _DuplicateEntry(entry.row, entry.next_position)
                     )
-                    slots[slot].row = Int32(row)
-                    slots[slot].next_position = Int32(len(duplicates) - 1)
+                    entry.row = Int32(row)
+                    entry.next_position = Int32(len(duplicates) - 1)
                     break
                 slot = (slot + 1) & (size - 1)
-            if slots[slot].row < 0:
-                slots[slot] = _HashSlot(Int32(row), -1, key)
+            if table.unsafe_offset(slot)[].row < 0:
+                table.unsafe_offset(slot)[] = _HashSlot(Int32(row), -1, key)
                 if tagged:
-                    tags[slot] = _tag_of(hash)
+                    tags.unsafe_ptr().unsafe_offset(slot)[] = _tag_of(hash)
                 unique += 1
         var groups = List[Int32]()
         if len(duplicates) > 4 * unique:
@@ -947,13 +977,33 @@ def prepare_hash_index(
             progression[2],
         )
     var right_hashes = Partitioner(right, worker_count(len(right[0])))
-    var right_parts = right_hashes.scatter(worker_count(len(right[0])))
+    # Enough buckets that each one's slot table fits a core's L2 cache:
+    # a bucket is built by one thread inserting at random positions, and a
+    # table past the cache misses to memory on nearly every insert (1.5M
+    # rows in 16 buckets: 4 MB tables, about 100 ns a row). A table this
+    # size also keeps its tags (_TAG_BUCKET_BYTES), so probes take the
+    # branch-free tag path.
+    var typed_int = len(right) == 1 and _is_int_key(right[0])
+    var words = List[UInt64]()
+    if typed_int and right[0].null_count() == 0:
+        words = _key_words(right[0])
+    var right_parts = right_hashes.scatter(
+        worker_count(len(right[0])),
+        with_hashes=True,
+        words=Int(words.unsafe_ptr()) if len(words) > 0 else 0,
+    )
+    _ = words^
     # Moved, not copied: each is 8 bytes a row (#378).
     var order = List[Int]()
     swap(order, right_parts.order)
+    var ordered_hashes = List[UInt64]()
+    swap(ordered_hashes, right_parts.hashes)
+    var ordered_words = List[UInt64]()
+    swap(ordered_words, right_parts.words)
     var shared_right_hashes = ArcPointer(right_hashes^.into_hashes())
     var shared_order = ArcPointer(order^)
-    var typed_int = len(right) == 1 and _is_int_key(right[0])
+    var shared_hashes = ArcPointer(ordered_hashes^)
+    var shared_words = ArcPointer(ordered_words^)
     var skip_nulls = False
     for key in right:
         skip_nulls = skip_nulls or key.null_count() > 0
@@ -963,6 +1013,8 @@ def prepare_hash_index(
             _HashBuildJob(
                 shared_right_hashes,
                 shared_order,
+                shared_hashes,
+                shared_words,
                 right,
                 typed_int,
                 right_parts.bounds[bucket],

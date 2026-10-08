@@ -131,6 +131,19 @@ def _hash_column(
         comptime D = NUMERIC_DTYPES[k]
         if series._data.isa[Column[Scalar[D]]]():
             ref column = series._data[Column[Scalar[D]]]
+            comptime if not D.is_floating_point():
+                if len(column._bits[]) == 0:
+                    # No validity bitmap: every row through the pointer,
+                    # with no per-row validity test or bounds check.
+                    var values = column._ptr()
+                    for i in range(start, end):
+                        var value = values.unsafe_offset(i)[]
+
+                        comptime if D.is_unsigned():
+                            write(i, UInt64(value))
+                        else:
+                            write(i, bitcast[DType.uint64](Int64(value)))
+                    return
             for i in range(start, end):
                 if not column._valid(i):
                     write(i, _NULL_KEY)
@@ -231,10 +244,11 @@ struct _HashJob(Job):
         for j in range(len(self.keys)):
             _hash_column(self.keys[j], self.start, self.end, self.out, j == 0)
         var p = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=self.out)
+        var counts = self.histogram.unsafe_ptr()
         for i in range(self.start, self.end):
-            self.histogram[
+            counts.unsafe_offset(
                 Int(p.unsafe_offset(i)[] >> UInt64(_SLOT_SHIFT))
-            ] += 1
+            )[] += 1
 
 
 struct _ScatterJob(Job):
@@ -246,6 +260,9 @@ struct _ScatterJob(Job):
     var order: Int
     # Where to write each row's hash in bucket order too (0: nowhere).
     var ordered_hashes: Int
+    # Each row's key word, and where to write it in bucket order (0: none).
+    var words: Int
+    var ordered_words: Int
     var fold: Int
     var next: List[Int]
 
@@ -256,6 +273,8 @@ struct _ScatterJob(Job):
         hashes: Int,
         order: Int,
         ordered_hashes: Int,
+        words: Int,
+        ordered_words: Int,
         fold: Int,
         var next: List[Int],
     ):
@@ -264,6 +283,8 @@ struct _ScatterJob(Job):
         self.hashes = hashes
         self.order = order
         self.ordered_hashes = ordered_hashes
+        self.words = words
+        self.ordered_words = ordered_words
         self.fold = fold
         self.next = next^
 
@@ -273,6 +294,10 @@ struct _ScatterJob(Job):
         var oh = Pointer[UInt64, MutAnyOrigin](
             unsafe_from_address=self.ordered_hashes
         )
+        var w = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=self.words)
+        var ow = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=self.ordered_words
+        )
         for i in range(self.start, self.end):
             var hash = h.unsafe_offset(i)[]
             var slot = Int(hash >> UInt64(_SLOT_SHIFT))
@@ -281,6 +306,8 @@ struct _ScatterJob(Job):
             o.unsafe_offset(at)[] = i
             if self.ordered_hashes != 0:
                 oh.unsafe_offset(at)[] = hash
+            if self.words != 0:
+                ow.unsafe_offset(at)[] = w.unsafe_offset(i)[]
             self.next[bucket] = at + 1
 
 
@@ -295,6 +322,8 @@ struct Partitioned(Movable):
     var bounds: List[Int]
     # Each row's key hash in the same order as `order`, when requested.
     var hashes: List[UInt64]
+    # Each row's key word in the same order, when words were given.
+    var words: List[UInt64]
 
     def buckets(self) -> Int:
         return len(self.bounds) - 1
@@ -444,10 +473,15 @@ struct Partitioner(Movable):
         return self.hashes^
 
     def scatter(
-        mut self, workers: Int, with_hashes: Bool = False
+        mut self,
+        workers: Int,
+        with_hashes: Bool = False,
+        words: Int = 0,
     ) raises -> Partitioned:
         """Build the stable permutation, folding slots into buckets; with
-        `with_hashes`, also each row's hash in the same order."""
+        `with_hashes`, also each row's hash in the same order, and given
+        `words` (the address of one UInt64 a row), those in the same order.
+        """
         var buckets = 1
         var fold = 8
         while buckets < 2 * workers and buckets < _SLOTS:
@@ -475,6 +509,9 @@ struct Partitioner(Movable):
         var ordered = List[UInt64](
             unsafe_uninit_length=self.rows if with_hashes else 0
         )
+        var ordered_words = List[UInt64](
+            unsafe_uninit_length=self.rows if words != 0 else 0
+        )
         var cursor = starts.copy()
         var jobs = List[_ScatterJob](capacity=workers)
         for w in range(workers):
@@ -489,12 +526,14 @@ struct Partitioner(Movable):
                     Int(self.hashes.unsafe_ptr()),
                     Int(order.unsafe_ptr()),
                     Int(ordered.unsafe_ptr()) if with_hashes else 0,
+                    words,
+                    Int(ordered_words.unsafe_ptr()) if words != 0 else 0,
                     fold,
                     next^,
                 )
             )
         run_jobs(jobs)
-        return Partitioned(order^, starts^, ordered^)
+        return Partitioned(order^, starts^, ordered^, ordered_words^)
 
 
 struct _EncodeJob(Job):

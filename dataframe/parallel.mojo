@@ -36,6 +36,7 @@ from std.atomic import Atomic
 from std.ffi import _get_global, external_call
 from std.memory import Pointer
 from std.os import getenv
+from std.time import perf_counter_ns
 from std.sys import CompilationTarget, num_physical_cores, size_of
 
 # Threadripper 3970X and M1, 4/8/16-worker sweeps: 16k helps 100k-row
@@ -513,14 +514,28 @@ struct Pool(Movable):
     # (shared address, participant index) pairs, one per worker, on the C
     # heap so a worker's argument stays valid however the pool is moved.
     var _args: Int
+    # While a crew runs (`Crew`), the pool starts no threads: its rounds go
+    # to the crew, at most this many threads at once (0: not on a crew).
+    var _on_crew: Int
 
     def __init__(out self, workers: Int):
-        """Start `workers` - 1 threads; the caller is the remaining worker."""
+        """Start `workers` - 1 threads; the caller is the remaining worker.
+        Inside an operation running a crew, no threads are started: rounds
+        run on the crew's threads, which stay warm from one stage to the
+        next (a thread that slept through a stage starts the next one at a
+        low clock), and a produced round starts the threads then."""
         self.address = 0
         self._ids = List[UInt64]()
         self._args = 0
+        self._on_crew = 0
         if workers <= 1:
             return
+        if _current_crew().load() != 0:
+            self._on_crew = workers
+            return
+        self._start(workers)
+
+    def _start(mut self, workers: Int):
         var address = external_call["malloc", Int](size_of[_Shared]())
         if address == 0:
             return
@@ -567,13 +582,16 @@ struct Pool(Movable):
     def workers(self) -> Int:
         """Threads started, not counting the caller."""
         if self.address == 0:
-            return 0
+            return max(0, self._on_crew - 1)
         return Pointer[_Shared, MutAnyOrigin](
             unsafe_from_address=self.address
         )[].threads
 
     def run_produced[J: Job](mut self, mut jobs: _ProducedJobs[J]):
         """Start a produced round; call `submit` while discovering work."""
+        if self._on_crew > 1 and self.address == 0:
+            self._start(self._on_crew)
+            self._on_crew = 0
         jobs._begin(self.address if self.workers() > 0 else 0)
 
     def run[J: Job](mut self, mut jobs: List[J], *, claim: Bool = False) raises:
@@ -586,6 +604,9 @@ struct Pool(Movable):
         static shares used by sort's fine, balanced rounds.
         """
         if len(jobs) == 0:
+            return
+        if self.address == 0 and self._on_crew > 1:
+            _run_jobs(jobs, self._on_crew)
             return
         var slots = List[_Slot[J]](capacity=len(jobs))
         while len(jobs) > 0:
@@ -682,6 +703,8 @@ struct _Claims(Movable):
     var count: Int
     var entry: Int
     var next: Atomic[Int64]
+    # Jobs finished, for a caller that waits on crew threads (`_Crew`).
+    var done: Atomic[Int64]
 
     def __init__(out self, slots: Int, stride: Int, count: Int, entry: Int):
         self.slots = slots
@@ -689,6 +712,7 @@ struct _Claims(Movable):
         self.count = count
         self.entry = entry
         self.next = Atomic[Int64](0)
+        self.done = Atomic[Int64](0)
 
     def run(mut self):
         var entry = Pointer(to=self.entry).unsafe_bitcast[_Entry]()[]
@@ -697,6 +721,7 @@ struct _Claims(Movable):
             if i >= self.count:
                 return
             _ = entry(self.slots + i * self.stride)
+            _ = self.done.fetch_add(1)
 
 
 def _claim_worker(address: Int) abi("C") -> Int:
@@ -715,6 +740,264 @@ def _helper_entry[J: Job](address: Int) abi("C") -> Int:
     return 0
 
 
+# --- crew: helper threads for the run_jobs calls of one operation -------
+#
+# `run_jobs` starts threads for each call and joins them before returning,
+# about 15-35 us a thread. A query makes hundreds of calls, most of them two
+# jobs inside a stream's batch (TPC-DS q96: 363 calls, 737 jobs in a 6 ms
+# query), so starting threads was a large share of short queries. A crew is
+# a set of threads started once for an operation -- `LazyFrame.collect` --
+# that every `run_jobs` call inside it posts its jobs to instead. As with
+# `Pool`, it is joined when the operation ends (see the module docstring:
+# threads must not outlive the operation). Calls made while no crew is
+# running, or when every posting slot is taken, start threads as before.
+# A `Pool` made inside the operation sends its rounds to the crew as well,
+# so the same threads run every stage and none goes cold between them.
+
+comptime _POSTINGS = 64
+# How long a crew thread looks for work before parking. A thread that sleeps
+# wakes on a core the CPU governor (schedutil) has clocked down, and ran a
+# group-by's jobs 1.5x slower than a thread started fresh (PDS-H q1); one
+# kept busy between stages stays at full clock. Gaps inside a query are
+# mostly serial stretches of a few milliseconds, so 50 ms covers them; the
+# crew is joined when the operation ends, so no thread spins past it.
+comptime _CREW_SPIN_NS = 50_000_000
+
+
+struct _Crew(Movable):
+    """Crew state at a fixed heap address: the threads' lock and signal,
+    the stop flag, and `_POSTINGS` postings. Posting p is two words at
+    `postings + 16p`: the address of a `_Claims` (0 when free), and a state
+    word holding the helpers still wanted (high 32 bits) and the crew
+    threads running its jobs now (low 32 bits), changed together so a
+    caller can stop new joiners and wait for the last one."""
+
+    var mutex: Array[UInt8, _SYNC_BYTES]
+    var cond: Array[UInt8, _SYNC_BYTES]
+    var stopping: Atomic[Int64]
+    var postings: Int
+    var threads: Int
+
+    def __init__(out self, postings: Int):
+        self.mutex = Array[UInt8, _SYNC_BYTES](fill=0)
+        self.cond = Array[UInt8, _SYNC_BYTES](fill=0)
+        self.stopping = Atomic[Int64](0)
+        self.postings = postings
+        self.threads = 0
+
+    def _mutex(self) -> Int:
+        return Int(self.mutex.unsafe_ptr())
+
+    def _cond(self) -> Int:
+        return Int(self.cond.unsafe_ptr())
+
+    def _claims(self, p: Int) -> ref[MutAnyOrigin] Atomic[Int64]:
+        return Pointer[Atomic[Int64], MutAnyOrigin](
+            unsafe_from_address=self.postings + 16 * p
+        )[]
+
+    def _state(self, p: Int) -> ref[MutAnyOrigin] Atomic[Int64]:
+        return Pointer[Atomic[Int64], MutAnyOrigin](
+            unsafe_from_address=self.postings + 16 * p + 8
+        )[]
+
+    def _take(mut self) -> Int:
+        """Join a posting that still wants a helper: its index, or -1."""
+        for p in range(_POSTINGS):
+            var state = self._state(p).load()
+            while (state >> 32) > 0:
+                # One fewer wanted, one more running, in one step.
+                if self._state(p).compare_exchange(
+                    state, state - (Int64(1) << 32) + 1
+                ):
+                    return p
+                state = self._state(p).load()
+        return -1
+
+    def _wanted(mut self) -> Bool:
+        for p in range(_POSTINGS):
+            if (self._state(p).load() >> 32) > 0:
+                return True
+        return False
+
+    def post(mut self, claims: Int, helpers: Int) -> Int:
+        """Offer a job list to `helpers` crew threads; the posting's index,
+        or -1 when every posting is taken."""
+        for p in range(_POSTINGS):
+            var free = Int64(0)
+            if self._claims(p).compare_exchange(free, Int64(claims)):
+                self._state(p).store(Int64(helpers) << 32)
+                _ = external_call["pthread_mutex_lock", Int32](self._mutex())
+                _ = external_call["pthread_cond_broadcast", Int32](self._cond())
+                _ = external_call["pthread_mutex_unlock", Int32](self._mutex())
+                return p
+        return -1
+
+    def retire(mut self, p: Int, claims: Int) -> Int:
+        """Wait until the posting's jobs are done and no crew thread is in
+        it, then free it. New helpers are turned away first; returns how
+        many never joined, whose budget the caller still holds."""
+        ref list = Pointer[_Claims, MutAnyOrigin](unsafe_from_address=claims)[]
+        var unjoined = 0
+        while True:
+            var state = self._state(p).load()
+            if self._state(p).compare_exchange(state, state & 0xFFFFFFFF):
+                unjoined = Int(state >> 32)
+                break
+        while self._state(p).load() != 0 or list.done.load() < Int64(
+            list.count
+        ):
+            _ = external_call["sched_yield", Int32]()
+        self._claims(p).store(0)
+        return unjoined
+
+
+def _crew_worker(address: Int) abi("C") -> Int:
+    ref crew = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)[]
+    while True:
+        if crew.stopping.load() != 0:
+            return 0
+        var p = crew._take()
+        if p < 0:
+            var deadline = perf_counter_ns() + _CREW_SPIN_NS
+            while p < 0 and crew.stopping.load() == 0:
+                for _ in range(64):
+                    p = crew._take()
+                    if p >= 0:
+                        break
+                if perf_counter_ns() > deadline:
+                    break
+        if p < 0:
+            _ = external_call["pthread_mutex_lock", Int32](crew._mutex())
+            while not crew._wanted() and crew.stopping.load() == 0:
+                _ = external_call["pthread_cond_wait", Int32](
+                    crew._cond(), crew._mutex()
+                )
+            _ = external_call["pthread_mutex_unlock", Int32](crew._mutex())
+            continue
+        Pointer[_Claims, MutAnyOrigin](
+            unsafe_from_address=Int(crew._claims(p).load())
+        )[].run()
+        # Out of work: give the thread back to the budget now, as
+        # `_claim_worker` does, so a job still running can start helpers.
+        _release_helpers(1)
+        _ = crew._state(p).fetch_sub(1)
+
+
+def _crew_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var address = external_call["calloc", Int](1, size_of[Atomic[Int64]]())
+    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+
+
+def _crew_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    pass
+
+
+def _current_crew() -> ref[MutAnyOrigin] Atomic[Int64]:
+    """The address of the running crew's state, or 0."""
+    var address = _get_global["DATAFRAME_CREW", _crew_init, _crew_keep]()
+    return Pointer[Atomic[Int64], MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
+struct Crew(Movable):
+    """Helper threads for the `run_jobs` calls of one operation. `start`
+    begins one unless one is already running (then this one does nothing),
+    and `release` must be called when the operation ends, error or not: it
+    joins every thread."""
+
+    var address: Int
+    var ids: List[UInt64]
+
+    def __init__(out self):
+        self.address = 0
+        self.ids = List[UInt64]()
+
+    @staticmethod
+    def start() -> Crew:
+        var crew = Crew()
+        var helpers = configured_workers() - 1
+        if helpers <= 0 or _current_crew().load() != 0:
+            return crew^
+        var address = external_call["malloc", Int](size_of[_Crew]())
+        var postings = external_call["calloc", Int](_POSTINGS, 16)
+        if address == 0 or postings == 0:
+            return crew^
+        var pointer = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)
+        pointer.unsafe_write(_Crew(postings))
+        ref state = pointer[]
+        _ = external_call["pthread_mutex_init", Int32](state._mutex(), 0)
+        _ = external_call["pthread_cond_init", Int32](state._cond(), 0)
+        var entry: _Entry = _crew_worker
+        var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
+        var ids = List[UInt64](length=helpers, fill=0)
+        var started = 0
+        for t in range(helpers):
+            var rc = external_call["pthread_create", Int32](
+                Int(ids.unsafe_ptr()) + 8 * t, 0, entry_address, address
+            )
+            if rc != 0:
+                break
+            started += 1
+        state.threads = started
+        ids.resize(started, 0)
+        crew.address = address
+        crew.ids = ids^
+        var none = Int64(0)
+        if not _current_crew().compare_exchange(none, Int64(address)):
+            # Another operation started one first: stop ours.
+            crew.release()
+        return crew^
+
+    def release(mut self):
+        """Stop and join the threads, and free the state. Idempotent."""
+        if self.address == 0:
+            return
+        ref state = Pointer[_Crew, MutAnyOrigin](
+            unsafe_from_address=self.address
+        )[]
+        var mine = Int64(self.address)
+        _ = _current_crew().compare_exchange(mine, Int64(0))
+        _ = external_call["pthread_mutex_lock", Int32](state._mutex())
+        state.stopping.store(1)
+        _ = external_call["pthread_cond_broadcast", Int32](state._cond())
+        _ = external_call["pthread_mutex_unlock", Int32](state._mutex())
+        for t in range(len(self.ids)):
+            _ = external_call["pthread_join", Int32](self.ids[t], 0)
+        _ = external_call["free", NoneType](state.postings)
+        _ = external_call["free", NoneType](self.address)
+        self.address = 0
+        self.ids = List[UInt64]()
+
+
+def _run_on_crew[
+    J: Job
+](mut slots: List[_Slot[J]], entry: Int, threads: Int) -> Bool:
+    """Run every slot with crew threads and the caller; False (nothing
+    run) when no crew is running, no helper is free in the budget, or every
+    posting is taken."""
+    var address = Int(_current_crew().load())
+    if address == 0:
+        return False
+    var helpers = _reserve_helpers(min(len(slots), threads) - 1)
+    if helpers == 0:
+        return False
+    ref crew = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)[]
+    var claims = _Claims(
+        Int(slots.unsafe_ptr()), size_of[_Slot[J]](), len(slots), entry
+    )
+    var claims_address = Int(Pointer(to=claims))
+    var p = crew.post(claims_address, helpers)
+    if p < 0:
+        _release_helpers(helpers)
+        return False
+    claims.run()
+    _release_helpers(crew.retire(p, claims_address))
+    _ = claims^
+    return True
+
+
 def run_jobs[J: Job](mut jobs: List[J]) raises:
     """Run every job and return them, in order, with their results.
 
@@ -726,6 +1009,11 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
     work finer than the thread count for balance, and a job that starts
     jobs while every helper is busy runs them on its own thread.
     """
+    _run_jobs(jobs, Int.MAX)
+
+
+def _run_jobs[J: Job](mut jobs: List[J], limit: Int) raises:
+    """`run_jobs` on at most `limit` threads, the caller included."""
     if len(jobs) == 0:
         return
     var slots = List[_Slot[J]](capacity=len(jobs))
@@ -733,9 +1021,16 @@ def run_jobs[J: Job](mut jobs: List[J]) raises:
         slots.append(_Slot[J](jobs.pop(0)))
     var entry: _Entry = _entry[J]
     var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
+    if len(slots) > 1 and _run_on_crew(slots, entry_address, limit):
+        for t in range(len(slots)):
+            if slots[t].failed:
+                raise Error(slots[t].message)
+        while len(slots) > 0:
+            jobs.append(slots.pop(0).into_job())
+        return
     var helper: _Entry = _helper_entry[J]
     var helper_address = Pointer(to=helper).unsafe_bitcast[Int]()[]
-    var spawned = _reserve_helpers(len(slots) - 1)
+    var spawned = _reserve_helpers(min(len(slots), limit) - 1)
     # With a thread per job, the caller runs the last one; with fewer, the
     # threads and the caller claim jobs until none are left.
     var claiming = spawned < len(slots) - 1

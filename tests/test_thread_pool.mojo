@@ -10,7 +10,14 @@ from std.ffi import external_call
 from std.sys import num_physical_cores
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 
-from dataframe.parallel import Job, Pool, configured_workers, _ProducedJobs
+from dataframe.parallel import (
+    Crew,
+    Job,
+    Pool,
+    configured_workers,
+    run_jobs,
+    _ProducedJobs,
+)
 
 
 def c_string(text: String) -> List[UInt8]:
@@ -264,6 +271,108 @@ def test_oversubscribed_parked_pool_reuses_rounds_and_propagates_errors() raises
     pool.run(final)
     assert_equal(final[0].output, 49)
     pool.release()
+
+
+struct Nested(Job):
+    """A job that runs jobs of its own, as a stream batch's work does."""
+
+    var base: Int
+    var total: Int
+
+    def __init__(out self, base: Int):
+        self.base = base
+        self.total = 0
+
+    def run(mut self) raises:
+        var inner = List[Square]()
+        for i in range(5):
+            inner.append(Square(self.base + i))
+        run_jobs(inner)
+        for i in range(5):
+            self.total += inner[i].output
+
+
+def nested_total(base: Int) -> Int:
+    var total = 0
+    for i in range(5):
+        total += (base + i) * (base + i)
+    return total
+
+
+def test_crew_runs_jobs_nested_calls_and_pool_rounds() raises:
+    set_threads(8)
+    var crew = Crew.start()
+    for round in range(40):
+        var n = round % 13 + 1
+        var jobs = List[Square]()
+        for i in range(n):
+            jobs.append(Square(round + i))
+        run_jobs(jobs)
+        for i in range(n):
+            assert_equal(jobs[i].output, (round + i) * (round + i))
+        var nested = List[Nested]()
+        for i in range(n):
+            nested.append(Nested(i))
+        run_jobs(nested)
+        for i in range(n):
+            assert_equal(nested[i].total, nested_total(i))
+        # A pool inside the operation runs its rounds on the crew, capped
+        # at its own size, and starts threads only for a produced round.
+        var pool = Pool(3)
+        var squares = List[Square]()
+        for i in range(n):
+            squares.append(Square(i))
+        pool.run(squares, claim=round % 2 == 0)
+        for i in range(n):
+            assert_equal(squares[i].output, i * i)
+        if round % 10 == 0:
+            var produced = _ProducedJobs[Increment](n)
+            pool.run_produced(produced)
+            for _ in range(n):
+                produced.submit(Increment())
+            var result = produced.finish()
+            for i in range(n):
+                assert_equal(result[i].count, 1)
+        pool.release()
+    crew.release()
+    crew.release()
+
+
+def test_crew_raises_the_first_error_and_stays_usable() raises:
+    set_threads(4)
+    var crew = Crew.start()
+    for _ in range(5):
+        var jobs = List[Failing]()
+        for i in range(9):
+            jobs.append(Failing(i))
+        with assert_raises(contains="job 1 failed"):
+            run_jobs(jobs)
+    var jobs = List[Square]()
+    for i in range(9):
+        jobs.append(Square(i))
+    run_jobs(jobs)
+    assert_equal(jobs[8].output, 64)
+    crew.release()
+
+
+def test_second_crew_start_does_nothing() raises:
+    set_threads(4)
+    var first = Crew.start()
+    var second = Crew.start()
+    assert_equal(second.address, 0)
+    second.release()
+    var jobs = List[Square]()
+    for i in range(20):
+        jobs.append(Square(i))
+    run_jobs(jobs)
+    assert_equal(jobs[19].output, 361)
+    first.release()
+    # With no crew running, run_jobs starts threads as before.
+    var after = List[Square]()
+    for i in range(6):
+        after.append(Square(i))
+    run_jobs(after)
+    assert_equal(after[5].output, 25)
 
 
 def main() raises:
