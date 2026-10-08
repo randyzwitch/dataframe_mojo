@@ -287,6 +287,8 @@ not guaranteed. See [the expression contract](docs/expressions.md).
 - Hash grouping by any number of columns or key expressions of any dtype.
 - Stable multi-column sorting with per-column direction and null placement,
   plus `arg_sort`, `top_k`, and `bottom_k`.
+- [As-of joins](docs/join-asof.md) on sorted numeric or temporal keys, including
+  grouped backward/forward/nearest matching and eager/lazy APIs.
 - Hash joins on any number of keys of any dtype: inner, left, right, full,
   semi, anti, and cross, with `left_on`/`right_on`.
 - Expression IR, schema binding, scalar broadcasting, and grouped aggregates.

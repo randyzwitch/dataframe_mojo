@@ -59,6 +59,7 @@ from .expr import (
     COV,
 )
 from .frame import concat
+from .value import AnyValue
 from .csv import CsvSchema, read_csv
 from .csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import (
@@ -117,6 +118,7 @@ comptime DROP = 10
 comptime SCAN_PARQUET = 11
 comptime EXPLODE = 12
 comptime UNNEST = 13
+comptime ASOF = 14
 
 
 @fieldwise_init
@@ -142,6 +144,7 @@ struct PlanNode(Copyable):
     # Optional internal source-execution counter, shared across plan copies.
     # No counter storage is allocated unless profiling/tests attach one.
     var _executions: Optional[ArcPointer[Int]]
+    var asof_tolerance: Optional[AnyValue]
 
     def _record_execution(self):
         if self._executions:
@@ -181,6 +184,7 @@ def _plan_node(
         right_keys.copy(),
         coalesce,
         Optional[ArcPointer[Int]](),
+        Optional[AnyValue](),
     )
 
 
@@ -889,6 +893,245 @@ struct LazyFrame(Copyable):
     def unnest(self, column: String) -> Self:
         """Replace a struct column with its fields; see DataFrame.unnest."""
         return self._push(_plan_node(UNNEST, text=column))
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: List[String] = List[String](),
+        strategy: String = "backward",
+        tolerance: Optional[AnyValue] = None,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        """As-of join with sortedness checked at execution; see DataFrame.join_asof.
+
+        Inputs are materialized for a complete ordered scan. Optimizations
+        do not push filters or slices across this order-sensitive join.
+        """
+        var lhs = left_on
+        var rhs = right_on
+        if on != "":
+            if lhs != "" or rhs != "":
+                raise Error("join_asof: use on or left_on/right_on, not both")
+            lhs = on
+            rhs = on
+        if lhs == "" or rhs == "":
+            raise Error("join_asof requires on or both left_on and right_on")
+        var result = self.join(
+            other, left_on=[lhs], right_on=[rhs], suffix=suffix
+        )
+        ref node = result._nodes[len(result._nodes) - 1]
+        node.kind = ASOF
+        node.text = strategy
+        node.flags = [allow_exact_matches]
+        node.asof_tolerance = tolerance.copy()
+        for name in by:
+            node.names2.append(name)
+        return result^
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: List[String] = List[String](),
+        strategy: String = "backward",
+        tolerance: Int,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            other,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=by,
+            strategy=strategy,
+            tolerance=Optional(AnyValue(Int64(tolerance))),
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: List[String] = List[String](),
+        strategy: String = "backward",
+        tolerance: Float64,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            other,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=by,
+            strategy=strategy,
+            tolerance=Optional(AnyValue(tolerance)),
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: String,
+        strategy: String = "backward",
+        tolerance: Optional[AnyValue] = None,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            other,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=[by],
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: String,
+        strategy: String = "backward",
+        tolerance: Int,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            other,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=[by],
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: String,
+        strategy: String = "backward",
+        tolerance: Float64,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            other,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=[by],
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: NoneType,
+        strategy: String = "backward",
+        tolerance: Optional[AnyValue] = None,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            other,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=List[String](),
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: NoneType,
+        strategy: String = "backward",
+        tolerance: Int,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            other,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=List[String](),
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        other: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: NoneType,
+        strategy: String = "backward",
+        tolerance: Float64,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            other,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=List[String](),
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
 
     def join(
         self,
@@ -1983,6 +2226,21 @@ struct LazyFrame(Copyable):
             return input.group_by(
                 node.names, maintain_order=node.maintain_order
             ).agg(node.exprs)
+        if node.kind == ASOF:
+            var right = self._execute(node.right, empty, streaming, batch_size)
+            var groups = List[String]()
+            for i in range(1, len(node.names2)):
+                groups.append(node.names2[i])
+            return input.join_asof(
+                right,
+                left_on=node.names[0],
+                right_on=node.right_keys[0],
+                by=groups,
+                strategy=node.text,
+                tolerance=node.asof_tolerance,
+                suffix=node.names2[0],
+                allow_exact_matches=node.flags[0],
+            )
         if node.kind == JOIN:
             var right = self._execute(node.right, empty, streaming, batch_size)
             if node.how == JOIN_CROSS:
@@ -3275,7 +3533,7 @@ struct LazyFrame(Copyable):
             for child in [node.left, node.right]:
                 if child < 0:
                     continue
-                if reads_all or node.kind == JOIN:
+                if reads_all or node.kind == JOIN or node.kind == ASOF:
                     all_needed[child] = True
                 elif needed[child]:
                     var merged = needed[child].value().copy()
@@ -3403,6 +3661,8 @@ struct LazyFrame(Copyable):
                 + " AGG "
                 + _joined(_output_names(node.exprs))
             )
+        elif node.kind == ASOF:
+            label = "ASOF " + node.text + " " + _joined(node.names)
         elif node.kind == JOIN:
             label = "JOIN " + node.text + " on " + _key_pairs(node)
         elif node.kind == SORT and node.length >= 0:
