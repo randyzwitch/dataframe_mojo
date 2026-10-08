@@ -1882,12 +1882,26 @@ struct LazyFrame(Copyable):
                             bounded = False
         var rows_per_batch = batch_size
         if len(shared_joins[]) > 0 and input.height() > 0:
+            # Still four batches a worker: input stored in key order (sales
+            # by date) puts every row a selective join keeps into a few
+            # batches, and one batch per worker left the others idle while
+            # one worked through them (TPC-DS q99: 175K of 1.4M rows in one
+            # 180K-row batch, 74 ms on one worker).
             rows_per_batch = max(
-                batch_size, min(4 * batch_size, input.height() // workers)
+                batch_size, min(4 * batch_size, input.height() // (4 * workers))
             )
+        # An in-memory input hands each round four batches a worker, which
+        # the pool claims as workers free up, so uneven batches balance.
+        # Batches decoded from a file are held until their round ends, so
+        # those keep one a worker, as does a top-k (ClickBench q26 lost its
+        # bound for a first round four times as long).
+        var per_round = workers
+        if len(csv) == 0 and len(parquet) == 0 and top < 0:
+            # Not for a top-k, whose bound tightens between rounds.
+            per_round = 4 * workers
         while not ended:
             var jobs = List[_StreamJob]()
-            for _ in range(workers):
+            for _ in range(per_round):
                 var frame = DataFrame(List[Series](), height=0)
                 var decode = List[_DecodeJob]()
                 if len(csv):
@@ -1928,7 +1942,7 @@ struct LazyFrame(Copyable):
             if len(jobs) == 0:
                 break
             if not pool_ready:
-                pool = Pool(len(jobs))
+                pool = Pool(min(len(jobs), workers))
                 pool_ready = True
             pool.run(jobs, claim=True)
             if counting:
