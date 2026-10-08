@@ -182,3 +182,23 @@ queue time. Example compilation alone cost 8–10 and 7–8.5 minutes respective
 Initial targets are under 60 minutes per required job, then under 45 after
 measured driver tuning, without dropping test modules, cases, or query variants.
 These are review targets, not timeouts that terminate correctness coverage.
+
+CI builds the random-oracle runner once with `oracle --build-only`, then uses
+`oracle --runner build/oracle_runner` for both normal and mutation cases.
+Local invocations without `--runner` still rebuild. Reuse is explicitly scoped
+to the same checkout and job, not a persistent executable cache.
+
+The Parquet loader check accepts an optional output executable path. CI passes
+`build/ci-tests/test_parquet`, then sets `TEST_PARQUET_BINARY` to that path for
+the unit suite. The suite still runs the module; it reuses its compilation.
+An absent/non-executable explicit binary fails instead of silently rebuilding.
+Other modules build and execute separately, with separate timing records.
+
+Query-answer CI uses `bench_suites.py --correctness-only`: each selected query
+runs once per engine and variant, with no timed repetitions, trace reruns,
+reference-cache reuse, or performance reports. The usual smoke-scale suites
+and all their variants remain selected. Wrong answers, missing outcomes,
+failed workers, timeouts, and missing successful reference answers fail the
+check. Explicitly unsupported queries retain their visible unsupported status.
+JSON outcomes are saved as `build/suites/answers.json` by default, separately
+from performance results. Normal benchmark commands keep their existing behavior.

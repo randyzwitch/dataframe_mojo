@@ -521,6 +521,7 @@ def provenance(args):
         "platform": platform.platform(),
         "cpu": cpu,
         "tier": args.tier,
+        "mode": "correctness" if getattr(args, "correctness_only", False) else "performance",
         "baseline": args.baseline or "",
         "threads": args.threads,
         "scale": args.scale,
@@ -790,6 +791,28 @@ def geomean(values):
     if not values:
         return None
     return math.exp(sum(math.log(v) for v in values) / len(values))
+
+
+def check_correctness(result):
+    """Require every planned Mojo outcome and a reference for each answer."""
+    cells = evaluate(result)
+    failures = []
+    for plan in result["query_plan"]:
+        for query in plan["queries"]:
+            key = (plan["suite"], plan["variant"], query, "mojo")
+            cell = cells.get(key, {"status": "missing"})
+            status = cell["status"]
+            if status == "ok":
+                if not any(
+                    cells.get((*key[:3], engine), {}).get("status") == "ok"
+                    for engine in ("duckdb", "polars")
+                ):
+                    status = "missing successful reference"
+            print("/".join(key[:3]) + ": " + status)
+            # Keep explicitly unsupported queries visible, as in --check.
+            if status not in ("ok", "unsupported"):
+                failures.append((key, status))
+    return failures
 
 
 def report(result):
@@ -1158,10 +1181,27 @@ def main():
         action="store_true",
         help="exit nonzero if any dataframe_mojo answer is wrong or fails",
     )
+    parser.add_argument(
+        "--correctness-only",
+        action="store_true",
+        help="execute each query once, compare fresh answers, and skip performance reports",
+    )
     args = parser.parse_args()
     for name, value in TIERS[args.tier].items():
         if getattr(args, name) is None:
             setattr(args, name, value)
+    if args.correctness_only:
+        if args.baseline or args.report_from:
+            parser.error("--correctness-only cannot use --baseline or --report-from")
+        if "mojo" not in args.engines.split(",") or not set(
+            args.engines.split(",")
+        ).intersection(("duckdb", "polars")):
+            parser.error("--correctness-only requires Mojo and a reference engine")
+        args.rounds, args.reps = 1, 0
+        args.trace = args.reuse_references = False
+        args.allow_busy = True
+        if args.output == ROOT / "build" / "suites" / "results.json":
+            args.output = ROOT / "build" / "suites" / "answers.json"
     if args.all_suites:
         args.suites = ",".join(SUITES)
     if args.heldout:
@@ -1173,6 +1213,12 @@ def main():
         start = time.monotonic()
         result = measure(args)
         print(f"measured in {time.monotonic() - start:.0f} s", file=sys.stderr)
+    if args.correctness_only:
+        failures = check_correctness(result)
+        if failures:
+            print("dataframe_mojo failures:", failures, file=sys.stderr)
+            sys.exit(1)
+        return
     text = report(result)
     print(text)
     page = bench_html.render(

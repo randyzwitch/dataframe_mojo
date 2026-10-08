@@ -33,7 +33,20 @@ start=$SECONDS
 printf '%s\n' "${tests[@]}" | xargs -P "$jobs" -I {} bash -c '
     test="$1"
     log="$2/$(basename "$test")"
-    if mojo run -I . -I tests "$test" >"$log.out" 2>&1; then
+    binary="$log.bin"
+    if [ "$test" = tests/test_parquet.mojo ] && [ -n "${TEST_PARQUET_BINARY:-}" ]; then
+        binary="$TEST_PARQUET_BINARY"
+        if [ ! -x "$binary" ]; then
+            echo "Parquet test binary is not executable: $binary" >"$log.out"
+            echo fail >"$log.status"
+            exit 0
+        fi
+    elif ! python3 scripts/ci_time.py --label "compile:$test" -- \
+        mojo build -I . -I tests "$test" -o "$binary" >"$log.out" 2>&1; then
+        echo fail >"$log.status"
+        exit 0
+    fi
+    if python3 scripts/ci_time.py --label "execute:$test" -- "$binary" >>"$log.out" 2>&1; then
         echo pass >"$log.status"
     else
         echo fail >"$log.status"

@@ -289,5 +289,53 @@ class BenchmarkReports(unittest.TestCase):
         self.assertEqual(captured["suites"], list(bench.SUITES))
 
 
+class CorrectnessOnly(unittest.TestCase):
+    def result(self, status="ok", reference=True):
+        result = fixture()
+        result["query_plan"] = [dict(suite="h2o_groupby", variant="base", queries=["q1"])]
+        result["runs"] = [dict(
+            suite="h2o_groupby", variant="base", query="q1", engine=engine,
+            status=status if engine == "mojo" else "ok",
+            summary=dict(height=1, values=[2.0], names=["value"]),
+        ) for engine in (["mojo", "duckdb"] if reference else ["mojo"])]
+        return result
+
+    def test_untimed_answers_still_detect_wrong_missing_and_failed_results(self):
+        with patch("sys.stdout"):
+            self.assertFalse(bench.check_correctness(self.result()))
+            for status in ("failed", "timeout"):
+                self.assertTrue(bench.check_correctness(self.result(status)))
+            self.assertFalse(bench.check_correctness(self.result("unsupported")))
+            self.assertTrue(bench.check_correctness(self.result(reference=False)))
+            result = self.result()
+            result["runs"][0]["summary"]["height"] = 2
+            self.assertTrue(bench.check_correctness(result))
+            result["runs"] = []
+            self.assertTrue(bench.check_correctness(result))
+
+    def test_cli_runs_once_without_reports_or_reference_cache(self):
+        result = self.result()
+        with patch.object(bench, "measure", return_value=result) as measure, patch.object(
+            bench, "report"
+        ) as report, patch.object(bench.bench_html, "render") as render, patch.object(
+            sys, "argv", ["bench", "--correctness-only", "--engines", "mojo,duckdb"]
+        ), patch("sys.stdout"), patch("sys.stderr"):
+            bench.main()
+        args = measure.call_args.args[0]
+        self.assertEqual((args.rounds, args.reps), (1, 0))
+        self.assertFalse(args.reuse_references)
+        self.assertFalse(args.trace)
+        self.assertEqual(args.output.name, "answers.json")
+        report.assert_not_called()
+        render.assert_not_called()
+
+    def test_cli_wrong_answer_exits_nonzero(self):
+        with patch.object(bench, "measure", return_value=self.result("failed")), patch.object(
+            sys, "argv", ["bench", "--correctness-only"]
+        ), patch("sys.stdout"), patch("sys.stderr"), self.assertRaises(SystemExit) as error:
+            bench.main()
+        self.assertEqual(error.exception.code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
