@@ -88,6 +88,37 @@ failed and unsupported queries remain visible in the report.
 
 ## Running
 
+### Optional NVIDIA feasibility experiment
+
+`benchmarks/bench_gpu_feasibility.mojo` explores nullable numeric GPU
+execution for [#528](https://github.com/randyzwitch/dataframe_mojo/issues/528).
+It compares the existing CPU lazy API with a handwritten fused
+filter/multiply/sum/count GPU query. This is a mechanism experiment, not a
+GPU backend or evidence of general dataframe speedups.
+
+The optional `gpu` environment is Linux x86-64 only and pins `max-core` to
+the existing Mojo nightly. It does not change the CPU package dependencies.
+A compatible NVIDIA GPU/driver must be accessible during build and execution.
+
+```bash
+pixi install -e gpu
+pixi run -e gpu test-gpu-feasibility   # compile and check Float32/Float64
+pixi run -e gpu bench-gpu-feasibility # checks plus default size sweep
+
+# Compile separately to measure build cost and avoid rebuilding each run.
+/usr/bin/time -p pixi run -e gpu build-gpu-feasibility
+pixi run -e gpu ./build/bench_gpu_feasibility > build/gpu-feasibility.csv
+pixi run -e gpu ./build/bench_gpu_feasibility 1000000 15
+```
+
+Output contains `#` metadata lines followed by CSV. Timings distinguish fresh
+allocation plus transfers, reused allocations plus transfers, resident inputs
+with a host-visible result, and device event timing. Every timed result is
+checked outside the timed region. See [GPU feasibility](gpu-feasibility.md)
+for methodology, local findings, and limitations.
+
+### External suites
+
 There are two tiers. Data is generated or downloaded once into a directory
 beside the main checkout, `<checkout>_benchdata` (override with
 `DATAFRAME_BENCH_DATA`), and shared by every git worktree.

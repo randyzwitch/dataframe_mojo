@@ -105,3 +105,18 @@ build-dfparquet = "bash native/dfparquet/build.sh build/dfparquet"
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }
 native = { features = ["native"], solve-group = "default" }
+gpu = { features = ["gpu"], solve-group = "gpu" }
+
+# Optional NVIDIA feasibility benchmark; never a package/runtime dependency.
+# max-core supplies the Mojo accelerator library without the Python MAX API.
+[feature.gpu]
+platforms = ["linux-64"]
+
+[feature.gpu.dependencies]
+mojo = "==1.2.0.dev2026092105"
+max-core = "==26.7.0.dev2026092105"
+
+[feature.gpu.tasks]
+build-gpu-feasibility = "mkdir -p build && mojo build -I . benchmarks/bench_gpu_feasibility.mojo -o build/bench_gpu_feasibility"
+bench-gpu-feasibility = { cmd = "./build/bench_gpu_feasibility", depends-on = ["build-gpu-feasibility"] }
+test-gpu-feasibility = { cmd = "./build/bench_gpu_feasibility --check", depends-on = ["build-gpu-feasibility"] }
