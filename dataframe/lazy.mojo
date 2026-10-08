@@ -37,7 +37,7 @@ from std.memory import ArcPointer
 from .csv_reader import _CsvBatches, _DecodeJob
 from .csv_types import _map_file
 from .parquet import _ParquetBatches
-from .parallel import Job, Pool, configured_workers, run_jobs
+from .parallel import Crew, Job, Pool, configured_workers, run_jobs
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     SUM,
@@ -1254,7 +1254,28 @@ struct LazyFrame(Copyable):
         Streaming batches default to 65,536 rows. Set streaming=False to use
         the materializing executor. Stateful/global operations retain their
         documented boundaries; collecting still retains the final output.
+
+        Parallel work inside runs on one crew of threads started for the
+        query (`parallel.Crew`) and joined before this returns.
         """
+        var crew = Crew.start()
+        try:
+            var result = self._collect(
+                optimize=optimize, streaming=streaming, batch_size=batch_size
+            )
+            crew.release()
+            return result^
+        except e:
+            crew.release()
+            raise e^
+
+    def _collect(
+        self,
+        *,
+        optimize: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) raises -> DataFrame:
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if getenv("DATAFRAME_EXECUTION_REPORT"):
