@@ -672,6 +672,43 @@ def test_date_and_narrow_keys_join_like_int64_in_frame() raises:
                 assert_true(actual.column("b").equals(expected.column("b")))
 
 
+def _check_sliced_build[D: DType]() raises:
+    # A window into a larger column: hashes, key words and the build all
+    # read from the window's offset. Seven rows a key, so the bucket keeps
+    # compact duplicate groups.
+    var values = List[Scalar[D]]()
+    for i in range(51_000):
+        values.append(Scalar[D](i % 7_000))
+    var right = Series("k", Column[Scalar[D]](values^)).slice(1_000, 50_000)
+    var probes = List[Scalar[D]]()
+    for v in range(0, 7_500, 3):
+        probes.append(Scalar[D](v))
+    var left = Series("k", Column[Scalar[D]](probes^))
+    var prepared = prepare_hash_index([right.copy()], allow_progression=False)
+    var rows = prepared_hash_join_rows([left.copy()], prepared, False)
+    var expected_left = List[Int]()
+    var expected_right = List[Int]()
+    for i in range(len(left)):
+        var v = i * 3
+        if v >= 7_000:
+            continue
+        # Build row r holds (r + 1000) % 7000.
+        var r = (v + 6_000) % 7_000
+        while r < 50_000:
+            expected_left.append(i)
+            expected_right.append(r)
+            r += 7_000
+    assert_equal(len(rows[1]), len(expected_right))
+    assert_equal(rows[0], expected_left)
+    assert_equal(rows[1], expected_right)
+
+
+def test_sliced_build_keys_hash_and_index_from_their_offset() raises:
+    _check_sliced_build[DType.int64]()
+    _check_sliced_build[DType.int32]()
+    _check_sliced_build[DType.uint16]()
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 
