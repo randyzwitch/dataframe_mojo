@@ -107,6 +107,18 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Filters on a column stored in ascending order: a part comparing such a
+  column with a constant (`==`, `<`, `<=`, `>`, `>=`, `is_between`) keeps
+  one run of rows, found by binary search and taken as a zero-copy
+  slice, before any other part runs; the next column is then checked on
+  that run, where a secondary sort key is in order again. Whether a
+  column's buffer is ascending is checked once and kept with the buffer
+  (as DuckDB keeps zone maps with row groups), and a lazy scan of an
+  in-memory frame narrows to the run before batching. ClickBench q38
+  23 -> 8 ms, q41 15 -> 7, q40 17 -> 8, q42 32 -> 20, q37 42 -> 25, q36
+  44 -> 31, q39 86 -> 72 (hits is stored by CounterID and EventDate).
+- Mask filters split their copy across workers by the rows they scan,
+  not the rows they keep, and copy short runs element by element.
 - Join key sets also come from a left input made by joins (when its
   tables are at most a quarter of the right side's largest), filter each
   key of a multi-key join on its own, and follow a renamed key to the

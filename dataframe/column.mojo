@@ -24,6 +24,11 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     var _bits: ArcPointer[List[UInt8]]
     var _offset: Int
     var _length: Int
+    # Whether the whole value buffer is in ascending order, found once and
+    # shared by every window onto it: 0 not yet known, 1 ascending, 2 not.
+    # Buffers are immutable while shared, so it holds until a mutation,
+    # which starts a new cell (`sorted_range` reads it).
+    var _order: ArcPointer[Int]
 
     def __init__(out self, var values: List[Self.T]):
         # Bitmaps are shared as little-endian bytes (Arrow layout).
@@ -32,6 +37,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._offset = 0
         self._bits = ArcPointer(List[UInt8]())
         self._data = ArcPointer(values^)
+        self._order = ArcPointer(0)
 
     def __init__(out self, var values: List[Self.T], valid: List[Bool]) raises:
         if len(values) != len(valid):
@@ -41,6 +47,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._offset = 0
         self._bits = ArcPointer(bits^)
         self._data = ArcPointer(values^)
+        self._order = ArcPointer(0)
 
     def __init__(out self, *, var values: List[Self.T], var bits: List[UInt8]):
         """Adopt typed values and a prepacked validity bitmap without copying."""
@@ -48,6 +55,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._offset = 0
         self._data = ArcPointer(values^)
         self._bits = ArcPointer(bits^)
+        self._order = ArcPointer(0)
 
     def __len__(self) -> Int:
         return self._length
@@ -224,6 +232,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         """
         if not self._owned():
             self = self._compact()
+        self._order = ArcPointer(0)
         self._data[].reserve(rows)
         if len(self._bits[]) != 0:
             self._bits[].reserve((rows + 7) // 8)
@@ -254,6 +263,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
             Span(other._data[])[other._offset : other._offset + count]
         )
         self._length = start + count
+        self._order = ArcPointer(0)
 
     @staticmethod
     def _nulls(length: Int, fill: Self.T) -> Self:

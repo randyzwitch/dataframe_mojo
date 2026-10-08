@@ -59,6 +59,7 @@ from .expr import (
     COV,
 )
 from .frame import concat
+from .sorted_range import sorted_window
 from .value import AnyValue
 from .csv import CsvSchema, read_csv
 from .csv_reader import read_csv_explicit, read_csv_inferred
@@ -71,6 +72,7 @@ from .expr import (
     SELECTOR,
     Expr,
     col,
+    conjuncts,
     lit,
     is_reduction,
     is_window,
@@ -1733,6 +1735,37 @@ struct LazyFrame(Copyable):
             input = self._frames[source.offset].copy()
             if len(source.names):
                 input = input.select(source.names)
+            # A first filter whose parts a column stored in ascending order
+            # answers narrows the frame once to its run of rows, so only
+            # those rows are batched (ClickBench q41: 613K of 10M rows, in
+            # 10 batches instead of 153 that each searched again).
+            if (
+                len(operations) > 0
+                and operations[0].kind == FILTER
+                and _row_local(operations[0].exprs)
+                and input.height() > 0
+            ):
+                var parts = conjuncts(operations[0].exprs[0])
+                var window = sorted_window(
+                    input._columns, input.height(), parts
+                )
+                var any = False
+                for answered in window.used:
+                    any = any or answered
+                if any:
+                    trace_path("filter.sorted_range")
+                    input = input.slice(window.low, window.high - window.low)
+                    var rest = List[Expr]()
+                    for k in range(len(parts)):
+                        if not window.used[k]:
+                            rest.append(parts[k].copy())
+                    if len(rest) == 0:
+                        operations[0].exprs = [lit(True)]
+                    else:
+                        var remaining = rest[0].copy()
+                        for k in range(1, len(rest)):
+                            remaining = remaining & rest[k]
+                        operations[0].exprs = [remaining^]
         else:
             input = self._execute(cursor, False, True, batch_size)
         var workers = configured_workers()
