@@ -81,22 +81,79 @@ def test_key_sets_reach_the_right_side_and_keep_the_answer() raises:
             ),
             "semi " + String(shape),
         )
-    # The few-keys case filters the large table where it is scanned.
     var small = items(6, 37).lazy().filter(col("i_label") >= lit(Int64(0)))
     var report = (
         small.join(stock, left_on=["i_item"], right_on=["f_item"])
         .profile()[1]
         .copy()
     )
+    # The right side runs, filtered, before the join, which then builds on
+    # the few stock rows of those items instead of the 180K that pass the
+    # quantity filter.
     var narrowed = False
     for r in range(report.height()):
-        if report.item(r, "operator").string().startswith("FILTER"):
-            if (
-                report.item(r, "input_rows").int64() == 200_000
-                and report.item(r, "output_rows").int64() < 1_000
-            ):
-                narrowed = True
+        if report.item(r, "operator").string().startswith("JOIN inner on i_"):
+            narrowed = report.item(r, "build_rows").int64() < 1_000
     assert_true(narrowed, String(report))
+
+
+def test_two_key_sets_through_a_rename_from_a_join_chain() raises:
+    """TPC-DS q72's shape: a left input made by joins, two join keys, and
+    one right key that is a renamed column of a table under the right
+    side's own join. Each key filters on its own where it is selective,
+    the right side runs first, and the answer is the unoptimized one."""
+    var orders = DataFrame(
+        [
+            ints("o_item", 40_000, 5_000),
+            ints("o_day", 40_000, 365, 31),
+            ints("o_kind", 40_000, 9, 1),
+        ]
+    )
+    var kinds = DataFrame([ints("k_kind", 9, 9, 1), ints("k_flag", 9, 2, 1)])
+    var weeks = DataFrame(
+        [ints("w_day", 365, 365, 1), ints("w_week", 365, 365, 1)]
+    )
+    var sold = (
+        orders.lazy()
+        .join(
+            kinds.lazy().filter(col("k_flag") == lit(Int64(1))),
+            left_on=["o_kind"],
+            right_on=["k_kind"],
+        )
+        .join(
+            weeks.lazy()
+            .filter(col("w_day") < lit(Int64(20)))
+            .select_exprs([col("w_day"), (col("w_week") // 7).alias("week")]),
+            left_on=["o_day"],
+            right_on=["w_day"],
+        )
+    )
+    var stock = (
+        facts()
+        .lazy()
+        .join(
+            weeks.lazy().select_exprs(
+                [col("w_day").alias("s_day"), col("w_week").alias("s_week")]
+            ),
+            left_on=["f_day"],
+            right_on=["s_day"],
+        )
+    )
+    same(
+        sold.join(
+            stock, left_on=["o_item", "o_day"], right_on=["f_item", "s_week"]
+        ),
+        "two keys through a rename",
+    )
+    same(
+        sold.join(
+            stock,
+            left_on=["o_item", "o_day"],
+            right_on=["f_item", "s_week"],
+            how="semi",
+        ),
+        "two keys, semi",
+    )
 
 
 def test_integer_is_in_matches_the_equalities() raises:

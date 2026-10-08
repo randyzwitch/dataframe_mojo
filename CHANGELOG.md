@@ -107,6 +107,16 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- Join key sets also come from a left input made by joins (when its
+  tables are at most a quarter of the right side's largest), filter each
+  key of a multi-key join on its own, and follow a renamed key to the
+  table that supplies it. Once a key filter is placed, the right side
+  runs first, so the join sees both real heights and builds on the
+  smaller side. A tiny right input (32x smaller) also passes its keys to
+  a left side that groups before the join, so the group_by aggregates
+  only rows the join keeps. TPC-DS q72 (1999 sales against inventory by
+  item and week) 120 -> 81 ms, q59 (weekly sales joined to a year's
+  weeks) 125 -> 52 ms.
 - Join key sets passed sideways, as DuckDB's join filter pushdown does:
   an inner or semi join whose left input is a filtered table far smaller
   than the right side's largest table, where the right side has a join

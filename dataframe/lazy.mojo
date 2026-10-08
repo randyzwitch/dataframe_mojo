@@ -2422,11 +2422,12 @@ struct LazyFrame(Copyable):
 
     def _push_join_key_sets(mut self, streaming: Bool, batch_size: Int) raises:
         """Sideways information passing (DuckDB's join filter pushdown):
-        an inner or semi join on one key whose left input is a filtered
-        in-memory table runs that input first, and when it holds at most
-        one row for every eight the largest table on the right can, its
-        keys become a filter on the right key, which predicate pushdown
-        then moves toward the right side's scans. Rows whose key no left
+        an inner or semi join where one input is a filtered in-memory
+        table or a join chain over tables at most a quarter the size of
+        the other side's largest runs that input first, and each key's
+        values become a filter on the other side's key when a sample of the table
+        supplying it says the filter keeps at most one row in eight;
+        predicate pushdown then moves it toward that table. Rows whose key no left
         row has join nothing, so the result is unchanged. Up to 50
         distinct keys filter as a list (an equality per value per row);
         more as their min-max range, as DuckDB does
@@ -2434,10 +2435,12 @@ struct LazyFrame(Copyable):
         result, so it does not run twice. Only for a right side with a
         join of its own, which the filter then reaches first. TPC-DS q37
         and q82 join four items to an 11.7M-row inventory that is joined
-        to dates first.
+        to dates first; q72 joins 1999's sales to inventory by week, and
+        the weeks' range narrows the dates the inventory joins; q59 joins
+        a year's weeks (the small right side) to weekly sales, whose week
+        filter passes the group_by down to the date join.
         """
         var root = len(self._nodes) - 1
-        var added = False
         var changed = True
         while changed:
             changed = False
@@ -2450,67 +2453,154 @@ struct LazyFrame(Copyable):
                     node.how == JOIN_INNER or node.how == JOIN_SEMI
                 ):
                     continue
-                if len(node.names) != 1 or len(node.right_keys) != 1:
+                if len(node.names) != len(node.right_keys):
                     continue
-                if not self._filtered_table(node.left):
-                    continue
-                # Only a right side that does more than scan and filter
-                # before this join (a join of its own) gains: against a
-                # bare table the join already builds on its smaller side,
-                # and a filter there only copies rows (TPC-DS q43, 2x).
-                if not self._has_join(node.right):
-                    continue
-                var right_rows = self._largest_scan(node.right)
-                # The table under the left input, unfiltered, must be small
-                # next to the right side's largest table: then running the
-                # left input first costs little whatever it keeps.
-                var left_bound = self._height_bound(node.left)
-                if right_rows <= 0 or left_bound < 0:
-                    continue
-                if 8 * left_bound > right_rows:
-                    continue
-                var provider = self._provider_scan(
-                    node.right, node.right_keys[0]
-                )
-                if provider < 0:
-                    continue
-                var left = self._execute(
-                    node.left, False, streaming, batch_size
-                )
-                var left_name = node.names[0]
-                var right_name = node.right_keys[0]
-                self._frames.append(left.copy())
-                self._schemas.append(Optional[CsvSchema]())
-                self._nodes.append(
-                    _plan_node(SCAN_FRAME, offset=len(self._frames) - 1)
-                )
+                if self._key_set_side(j, True, streaming, batch_size):
+                    changed = True
+                elif self._key_set_side(j, False, streaming, batch_size):
+                    changed = True
+                if changed:
+                    root = len(self._nodes) - 1
+                    break
+
+    def _key_set_side(
+        mut self, j: Int, small_left: Bool, streaming: Bool, batch_size: Int
+    ) raises -> Bool:
+        """One direction of `_push_join_key_sets` for the join at `j`: the
+        small side (left when `small_left`) runs first and its keys filter
+        the other side. True when the plan changed."""
+        var small = self._nodes[j].left if small_left else self._nodes[j].right
+        var large = self._nodes[j].right if small_left else self._nodes[j].left
+        # A filtered table, or a join chain: inputs that keep few rows of
+        # what they read. A bare table keeps all of them.
+        if not (self._filtered_table(small) or self._has_join(small)):
+            return False
+        # Only a large side that does more than scan and filter before this
+        # join (a join of its own) gains: against a bare table the join
+        # already builds on its smaller side, and a filter there only
+        # copies rows (TPC-DS q43, 2x).
+        if not self._has_join(large):
+            return False
+        # A small right side already filters the left one inside the
+        # stream, where the join order puts the selective joins first;
+        # its keys pay only when a group_by on the left would otherwise
+        # aggregate rows the join then drops (TPC-DS q59's weekly sales).
+        # Pushed into plain join chains they cost PDS-H q8 5x and q21 2x.
+        if not small_left and not self._has_kind(large, AGG):
+            return False
+        var large_rows = self._largest_scan(large)
+        # The tables under the small side, unfiltered, must be at most a
+        # quarter of the other side's largest: then running it first and
+        # keeping its result costs at most a quarter of reading that table
+        # (TPC-DS q72's sales chain reads 1.9M demographics against 11.7M
+        # inventory rows).
+        var small_bound = self._height_bound(small)
+        if small_bound < 0:
+            small_bound = self._largest_scan(small)
+        if large_rows <= 0 or small_bound <= 0:
+            return False
+        # Against a left side the join probes anyway, a right side is run
+        # early only when it is tiny next to it (32x: TPC-DS q59's weeks
+        # against store sales are 39x smaller); PDS-H q21's 1.5M orders
+        # against 6M lineitem rows ran twice and filtered nothing.
+        if (4 if small_left else 32) * small_bound > large_rows:
+            return False
+        var small_keys = (
+            self._nodes[j]
+            .names.copy() if small_left else self._nodes[j]
+            .right_keys.copy()
+        )
+        var large_keys = (
+            self._nodes[j]
+            .right_keys.copy() if small_left else self._nodes[j]
+            .names.copy()
+        )
+        # Each key's table on the large side and its name there (through
+        # renames and group_by keys); computed keys get none.
+        var providers = List[Tuple[Int, String]]()
+        var any = False
+        for k in range(len(large_keys)):
+            var found = self._provider_scan(large, large_keys[k])
+            any = any or found[0] >= 0
+            providers.append(found)
+        if not any:
+            return False
+        var result = self._execute(small, False, streaming, batch_size)
+        if not small_left and not self._any_selective(
+            result, small_keys, providers
+        ):
+            # Nothing to pass: keep a right input as written, so the join
+            # order still ranks it by its filters (a table already run looks
+            # unfiltered, and PDS-H q21 then ran its selective supplier join
+            # last). A left input is the stream's base, which nothing ranks:
+            # its result is kept below, so it does not run twice.
+            return False
+        self._frames.append(result.copy())
+        self._schemas.append(Optional[CsvSchema]())
+        self._nodes.append(_plan_node(SCAN_FRAME, offset=len(self._frames) - 1))
+        if small_left:
+            self._nodes[j].left = len(self._nodes) - 1
+        else:
+            self._nodes[j].right = len(self._nodes) - 1
+        var marker = len(self._frames) - 1
+        var added = False
+        for k in range(len(providers)):
+            var scan = providers[k][0]
+            if scan < 0:
+                continue
+            var base = providers[k][1]
+            var dtype = (
+                self._frames[self._nodes[scan].offset].column(base).dtype()
+            )
+            var keys = result.column(small_keys[k])
+            var sampled = _key_set_filter(keys, base, dtype)
+            if not sampled or not self._selective_on(scan, sampled.value()):
+                continue
+            var pushed = _key_set_filter(keys, large_keys[k], dtype)
+            var target = (
+                self._nodes[j].right if small_left else self._nodes[j].left
+            )
+            self._nodes.append(
+                _plan_node(FILTER, target, exprs=[pushed.take()])
+            )
+            if small_left:
+                self._nodes[j].right = len(self._nodes) - 1
+            else:
                 self._nodes[j].left = len(self._nodes) - 1
-                var keys = _key_set_filter(
-                    left.column(left_name),
-                    right_name,
-                    self._frames[self._nodes[provider].offset]
-                    .column(right_name)
-                    .dtype(),
-                )
-                if keys and self._selective_on(provider, keys.value()):
-                    self._nodes.append(
-                        _plan_node(
-                            FILTER, self._nodes[j].right, exprs=[keys.take()]
-                        )
+            added = True
+        self._reorder()
+        if not added:
+            return True
+        # Not split again: splitting a merged filter and merging it back
+        # reverses its parts, and the written order is the order they are
+        # evaluated in (ClickBench q21 then ran its string search first).
+        self._push_predicates()
+        self._merge_filters()
+        if small_left:
+            # The right side is built next whatever happens: run it now,
+            # filtered, so the join sees both real heights and builds on
+            # the smaller side (TPC-DS q72 built its two-key index on 2.4M
+            # stock rows for 8,689 sales).
+            for at in range(len(self._nodes)):
+                ref joined = self._nodes[at]
+                if (
+                    joined.kind == JOIN
+                    and joined.left >= 0
+                    and self._nodes[joined.left].kind == SCAN_FRAME
+                    and self._nodes[joined.left].offset == marker
+                ):
+                    var right = self._execute(
+                        joined.right, False, streaming, batch_size
                     )
-                    self._nodes[j].right = len(self._nodes) - 1
-                    added = True
-                self._reorder()
-                root = len(self._nodes) - 1
-                changed = True
-                break
-        if added:
-            # Not split again: splitting a merged filter and merging it
-            # back reverses its parts, and the written order is the order
-            # they are evaluated in (ClickBench q21 then ran its string
-            # search before the cheap test).
-            self._push_predicates()
-            self._merge_filters()
+                    self._frames.append(right^)
+                    self._schemas.append(Optional[CsvSchema]())
+                    self._nodes.append(
+                        _plan_node(SCAN_FRAME, offset=len(self._frames) - 1)
+                    )
+                    self._nodes[at].right = len(self._nodes) - 1
+                    break
+            self._reorder()
+        return True
 
     def _filtered_table(self, index: Int) -> Bool:
         """Whether node `index` is an in-memory table under row-local
@@ -2534,23 +2624,46 @@ struct LazyFrame(Copyable):
             cursor = node.left
         return False
 
-    def _provider_scan(self, index: Int, name: String) -> Int:
-        """The in-memory table node under node `index` holding column
-        `name`, or -1."""
-        var stack: List[Int] = [index]
+    def _provider_scan(
+        self, index: Int, name: String
+    ) raises -> Tuple[Int, String]:
+        """The in-memory table node under node `index` that supplies
+        column `name`, and the column's name there, following renames
+        (`col(a).alias(b)`); (-1, "") when none does or the column is
+        computed."""
+        var stack = List[Tuple[Int, String]]()
+        stack.append((index, name))
         while len(stack) > 0:
-            var i = stack.pop()
+            var top = stack.pop()
+            var i = top[0]
+            var wanted = top[1]
             ref node = self._nodes[i]
-            if (
-                node.kind == SCAN_FRAME
-                and name in self._frames[node.offset].columns()
-            ):
-                return i
+            if node.kind == SCAN_FRAME:
+                if wanted in self._frames[node.offset].columns():
+                    return (i, wanted)
+                continue
+            if node.kind == AGG and wanted not in node.names:
+                # An aggregate, not a key: computed here.
+                continue
+            if node.kind == SELECT or node.kind == WITH_COLUMNS:
+                var renamed = False
+                var computed = False
+                for e in node.exprs:
+                    if e._name != wanted:
+                        continue
+                    var reads = _references(e)
+                    if reads and len(reads.value()) == 1 and len(e._nodes) == 1:
+                        wanted = reads.value()[0]
+                        renamed = True
+                    else:
+                        computed = True
+                if computed and not renamed:
+                    continue
             if node.left >= 0:
-                stack.append(node.left)
+                stack.append((node.left, wanted))
             if node.right >= 0:
-                stack.append(node.right)
-        return -1
+                stack.append((node.right, wanted))
+        return (-1, String())
 
     def _selective_on(mut self, scan: Int, keys: Expr) raises -> Bool:
         """Whether `keys` keeps at most one row in eight of the table at
@@ -2563,6 +2676,41 @@ struct LazyFrame(Copyable):
         var estimated = self._estimated_rows(len(self._nodes) - 1)
         _ = self._nodes.pop()
         return estimated >= 0 and 8 * estimated <= height
+
+    def _any_selective(
+        mut self,
+        result: DataFrame,
+        keys: List[String],
+        providers: List[Tuple[Int, String]],
+    ) raises -> Bool:
+        """Whether any key of `result` would filter its provider table to at
+        most one row in eight (`_selective_on`)."""
+        for k in range(len(providers)):
+            var scan = providers[k][0]
+            if scan < 0:
+                continue
+            var base = providers[k][1]
+            var dtype = (
+                self._frames[self._nodes[scan].offset].column(base).dtype()
+            )
+            var sampled = _key_set_filter(result.column(keys[k]), base, dtype)
+            if sampled and self._selective_on(scan, sampled.value()):
+                return True
+        return False
+
+    def _has_kind(self, index: Int, kind: Int) -> Bool:
+        """Whether a node of `kind` sits anywhere under node `index`."""
+        var stack: List[Int] = [index]
+        while len(stack) > 0:
+            var i = stack.pop()
+            ref node = self._nodes[i]
+            if node.kind == kind:
+                return True
+            if node.left >= 0:
+                stack.append(node.left)
+            if node.right >= 0:
+                stack.append(node.right)
+        return False
 
     def _has_join(self, index: Int) -> Bool:
         """Whether a join sits anywhere under node `index`."""
@@ -3842,23 +3990,29 @@ def _key_set_filter(
         comptime if D.is_integral() and D != DType.uint64:
             if distinct._data.isa[Column[Scalar[D]]]():
                 ref column = distinct._data[Column[Scalar[D]]]
-                var literals = List[Expr]()
+                # Bounds first: a literal per value only for a short list
+                # (PDS-H q21 built 729K literals for a range).
+                var count = 0
                 var low = Scalar[D].MAX
                 var high = Scalar[D].MIN
                 for i in range(len(column)):
                     if not column._valid(i):
                         continue
                     var value = column._get(i)
-                    literals.append(lit(value))
                     low = min(low, value)
                     high = max(high, value)
-                if len(literals) == 0:
+                    count += 1
+                if count == 0:
                     return Optional(lit(False))
-                if len(literals) <= 50:
-                    return Optional(col(name).is_in(literals))
-                return Optional(
-                    (col(name) >= lit(low)) & (col(name) <= lit(high))
-                )
+                if count > 50:
+                    return Optional(
+                        (col(name) >= lit(low)) & (col(name) <= lit(high))
+                    )
+                var literals = List[Expr](capacity=count)
+                for i in range(len(column)):
+                    if column._valid(i):
+                        literals.append(lit(column._get(i)))
+                return Optional(col(name).is_in(literals))
     return None
 
 
