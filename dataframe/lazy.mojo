@@ -670,9 +670,14 @@ struct _StreamJob(Job):
                 self.frame = self.frame.select(self.projection)
             return
         if len(self.expressions):
+            var began = Int(perf_counter_ns()) if self.counting else 0
             var reduction = _StreamReduction(
                 self.frame, self.expressions, self.keys
             )
+            if self.counting:
+                self.times[len(self.operations)] += (
+                    Int(perf_counter_ns()) - began
+                )
             self.rows = reduction.rows
             if self.bits > 0 and reduction.grouped:
                 self.reduced = reduction.split(self.bits)
@@ -1800,8 +1805,9 @@ struct LazyFrame(Copyable):
         var operation_rows = List[Int](
             length=2 * len(operations) if counting else 0, fill=0
         )
+        # Per operation, then the batches' reductions.
         var operation_times = List[Int](
-            length=len(operations) if counting else 0, fill=0
+            length=len(operations) + 1 if counting else 0, fill=0
         )
         var stream_began = Int(perf_counter_ns())
         # Aggregate state (#326). Batch states wait in `pending` and are
@@ -2123,6 +2129,7 @@ struct LazyFrame(Copyable):
                     "streaming",
                     into_terminal,
                     result.value().height() if result else 0,
+                    busy_ns=operation_times[len(operations)],
                     wall_ns=stream_wall,
                 )
             else:

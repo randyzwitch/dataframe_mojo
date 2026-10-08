@@ -2785,6 +2785,32 @@ struct DataFrame(Copyable, Sized, Writable):
             and keep != "none"
         ):
             raise Error("keep must be 'any', 'first', 'last', or 'none'")
+        var whole_rows = len(subset) == 0
+        if not whole_rows:
+            whole_rows = True
+            for name in self.columns():
+                whole_rows = whole_rows and name in subset
+        if (
+            keep == "any"
+            and not maintain_order
+            and whole_rows
+            and worker_count(self._height) > 1
+        ):
+            # Distinct whole rows in any order are a group_by on every
+            # column with no aggregates, which encodes on every worker
+            # (307K rows, 23K distinct: 3.5 ms against 10 through one
+            # dictionary; TPC-DS q35 takes three such uniques).
+            return self.group_by(self.columns()).agg(List[Expr]())
+        if keep == "any" or keep == "first":
+            # Each key's first row: `encode_rows` names it as the id's
+            # representative, and ids follow first occurrence, so the
+            # representatives are already in input order. No counts or
+            # second pass over the ids (TPC-DS q35: three 80K-307K-row
+            # uniques).
+            var encoded = encode_rows(
+                self._subset_keys(subset), nulls_equal=True
+            )
+            return self.take(encoded.representatives)
         var keyed = self._key_counts(subset)
         ref ids = keyed[0]
         ref counts = keyed[1]
