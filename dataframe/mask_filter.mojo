@@ -20,7 +20,7 @@ String and nested columns still go through a row list (`take`); #375 makes
 string gathers produce views.
 """
 from std.bit import count_trailing_zeros, pop_count
-from std.memory import ArcPointer, Pointer, unsafe_memcpy
+from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 
 from .bool_column import BoolColumn, _FULL, _bits64
 from .column import Column
@@ -48,7 +48,29 @@ struct _Selection(Copyable, Movable):
         ref valid = mask._bits[]
         var end = mask._offset + n
         var total = 0
-        for w in range(nwords):
+        var first = 0
+        if mask._offset % 8 == 0 and (
+            len(valid) == 0 or len(valid) == len(values)
+        ):
+            # Byte-aligned: each whole word is one 8-byte load (and one of
+            # the validity bitmap), not nine bounds-checked byte reads. A
+            # filter of 6M rows spent 3 ms here on one thread.
+            var data = values.unsafe_ptr().unsafe_offset(mask._offset // 8)
+            var bits = valid.unsafe_ptr().unsafe_offset(mask._offset // 8)
+            var all_valid = len(valid) == 0
+            first = n // 64
+            for w in range(first):
+                var word = bitcast[DType.uint64, 1](
+                    data.unsafe_offset(8 * w).unsafe_load[width=8]()
+                )
+                if not all_valid:
+                    word &= bitcast[DType.uint64, 1](
+                        bits.unsafe_offset(8 * w).unsafe_load[width=8]()
+                    )
+                self.words.append(word)
+                self.starts.append(total)
+                total += Int(pop_count(word))
+        for w in range(first, nwords):
             var bit = mask._offset + 64 * w
             var word = _bits64(values, bit, end) & _bits64(valid, bit, end)
             self.words.append(word)
