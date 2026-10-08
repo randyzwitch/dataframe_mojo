@@ -288,5 +288,78 @@ def test_laziness_and_schema() raises:
         _ = bad.collect_schema()
 
 
+def test_filter_copies_only_columns_read_after_it() raises:
+    # The stream's filter copies only what the next step reads: a selection
+    # (here one that renames), a grouped reduction with its keys, or a join
+    # input. Columns only the predicate reads must still filter correctly.
+    var n = 20_000
+    var d = List[Int32](capacity=n)
+    var q = List[Float64](capacity=n)
+    var p = List[Float64](capacity=n)
+    var g = List[String](capacity=n)
+    var id = List[Int64](capacity=n)
+    for i in range(n):
+        d.append(Int32(i % 365))
+        q.append(Float64(i % 50))
+        p.append(Float64(i % 1000) / 10)
+        g.append("g" + String(i % 7))
+        id.append(Int64(i % 900))
+    var df = DataFrame(
+        [
+            Series("d", Column[Int32](d^)),
+            Series("q", Column[Float64](q^)),
+            Series("p", Column[Float64](p^)),
+            Series("g", Column[String](g^)),
+            Series("id", Column[Int64](id^)),
+        ]
+    )
+    var predicate = (
+        (col("d") >= lit(Int32(30)))
+        & (col("d") < lit(Int32(200)))
+        & (col("q") < lit(Float64(24)))
+    )
+    same(
+        df.lazy()
+        .filter(predicate)
+        .select((col("p") * col("q")).sum().alias("r")),
+        df.filter(predicate).select((col("p") * col("q")).sum().alias("r")),
+    )
+    same(
+        df.lazy()
+        .filter(predicate)
+        .group_by("g", maintain_order=True)
+        .agg([col("p").sum().alias("s"), col("id").n_unique().alias("u")]),
+        df.filter(predicate)
+        .group_by("g", maintain_order=True)
+        .agg([col("p").sum().alias("s"), col("id").n_unique().alias("u")]),
+    )
+    same(
+        df.lazy().filter(predicate).select_exprs([col("id").alias("key")]),
+        df.filter(predicate).select_exprs([col("id").alias("key")]),
+    )
+    var names = List[String]()
+    var ids = List[Int64]()
+    for i in range(0, 900, 3):
+        names.append("n" + String(i))
+        ids.append(Int64(i))
+    var dim = DataFrame(
+        [
+            Series("id", Column[Int64](ids^)),
+            Series("name", Column[String](names^)),
+        ]
+    )
+    same(
+        df.lazy()
+        .filter(predicate)
+        .join(dim.lazy(), "id")
+        .group_by("name", maintain_order=True)
+        .agg([col("p").sum().alias("s")]),
+        df.filter(predicate)
+        .join(dim, "id")
+        .group_by("name", maintain_order=True)
+        .agg([col("p").sum().alias("s")]),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -653,17 +653,32 @@ struct _StreamJob(Job):
                     if self.counting:
                         self.counts[0] = height
                         self.counts[1] = self.frame.height()
-        for k in range(start, len(self.operations)):
+        var k = start
+        while k < len(self.operations):
             var began = 0
             if self.counting:
                 self.counts[2 * k] = self.frame.height()
                 began = Int(perf_counter_ns())
-            _apply_operation(
-                self.operations[k], self.frame, self.joins, self.indexes
+            var keeps = _filter_keeps(
+                self.operations,
+                k,
+                self.expressions.copy() if not self.keep_frame else List[
+                    Expr
+                ](),
+                self.keys,
             )
+            if keeps:
+                self.frame = self.frame.filter(
+                    self.operations[k].exprs[0], keep=keeps.value()
+                )
+            else:
+                _apply_operation(
+                    self.operations[k], self.frame, self.joins, self.indexes
+                )
             if self.counting:
                 self.counts[2 * k + 1] = self.frame.height()
                 self.times[k] += Int(perf_counter_ns()) - began
+            k += 1
         if self.collect_only:
             self.rows = self.frame.height()
             if len(self.projection):
@@ -685,6 +700,41 @@ struct _StreamJob(Job):
                 self.reduced.append(reduction^)
             if not self.keep_frame:
                 self.frame = self.frame.clear()
+
+
+def _filter_keeps(
+    operations: List[PlanNode], k: Int, after: List[Expr], keys: List[String]
+) -> Optional[List[String]]:
+    """The columns read after the filter at `k`, when that is known: by the
+    selection right after it, or, when it is the last operation, by the
+    stream's reduction (`after` and its group `keys`; empty `after` means
+    the batch itself is kept). The filter then copies only those columns,
+    not the ones only its predicate reads (PDS-H q6 filters on dates and
+    quantities and sums prices and discounts)."""
+    if operations[k].kind != FILTER:
+        return None
+    var exprs = List[Expr]()
+    var names = List[String]()
+    if k + 1 < len(operations):
+        if operations[k + 1].kind != SELECT:
+            return None
+        exprs = operations[k + 1].exprs.copy()
+    elif len(after) > 0:
+        # The group keys are read at the end of the pipeline, which is here.
+        exprs = after.copy()
+        names = keys.copy()
+    else:
+        return None
+    for e in exprs:
+        var reads = _references(e)
+        if not reads:
+            return None
+        for name in reads.value():
+            if name not in names:
+                names.append(name)
+    if len(names) == 0:
+        return None
+    return Optional(names^)
 
 
 def _apply_operation(
