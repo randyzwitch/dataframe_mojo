@@ -4,130 +4,197 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      macos-groups:
+        description: Number of macOS unit-test drivers (for measured calibration)
+        default: '10'
+        type: choice
+        options: ['10', '8', '6', '4']
+      macos-jobs:
+        description: Concurrent macOS compiler processes
+        default: '3'
+        type: choice
+        options: ['3', '2', '1']
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  checks:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          # The benchmark-separation check diffs against the PR's base.
           fetch-depth: 0
-
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
-
       - name: Check formatting
-        if: runner.os == 'Linux'
         run: pixi run format-check
-
       - name: Check release version consistency
-        if: runner.os == 'Linux'
         run: pixi run check-version
-
       - name: Check benchmark separation
-        if: runner.os == 'Linux' && github.event_name == 'pull_request'
-        run: bash scripts/check_benchmark_separation.sh origin/${{ github.base_ref }}
-
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: bash scripts/check_benchmark_separation.sh "$BASE_REF"
       - name: Check benchmark report provenance and coverage
-        if: runner.os == 'Linux'
         run: pixi run -e oracle python3 tests/test_bench_reports.py
-
       - name: Check CI runner orchestration
-        if: runner.os == 'Linux'
         run: python3 tests/test_ci_runners.py
-
       - name: Check dtype literals
-        if: runner.os == 'Linux'
         run: bash scripts/check_dtype_literals.sh
-
       - name: Check public docstrings and API reference
-        if: runner.os == 'Linux'
         run: |
           pixi run docs
           git diff --exit-code docs/api.md
 
-      # tests/test_parquet.mojo skips itself when the reader library is
-      # absent, so build it first on Linux and Apple Silicon and verify both
-      # loader search paths. The library is cached by the shim's sources; the
-      # Arrow version lives in build.sh, so a bump changes the key.
-      - name: Restore libdfparquet
-        id: dfparquet
-        uses: actions/cache@v6
+  native-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.10.2
         with:
-          path: |
-            build/dfparquet/libdfparquet.so
-            build/dfparquet/libdfparquet.dylib
-          key: dfparquet-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/dfparquet/**') }}
+          cache: true
+      # One cache restore/build per run, even on a cold cache. All Linux
+      # consumers use this exact artifact, including on fork PRs.
+      - uses: ./.github/actions/setup-parquet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dfparquet-linux
+          path: build/dfparquet/libdfparquet.so
+          if-no-files-found: error
+      - uses: ./.github/actions/ci-timings
+        if: always()
+        with:
+          name: ci-timings-native-linux
 
-      - name: Build libdfparquet
-        if: steps.dfparquet.outputs.cache-hit != 'true'
-        run: python3 scripts/ci_time.py --label native-build -- pixi run -e native build-dfparquet
-
+  unit-linux:
+    needs: native-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: dfparquet-linux
+          path: build/dfparquet
       - name: Verify Parquet exports and loader search paths
         run: python3 scripts/ci_time.py --label parquet-loader -- pixi run bash scripts/check_parquet_library.sh build/ci-tests/test_parquet
-
-      # The Linux runner has 16 GB and four cores. Compiling a driver
-      # program costs about 170 s and 4 GB whatever it holds (the library's
-      # instantiation), so fewer programs finish sooner, and one at a time
-      # keeps the peak down. Measured on four cores: 24 programs four at a
-      # time 1971 s at 12.9 GB peak; two programs one at a time 1187 s at
-      # 11.8 GB; one program 995 s at 15.4 GB, too close to the limit.
-      # macOS keeps 10 programs, three at a time.
+      # Keep the measured Linux memory bound: two grouped programs, serial.
       - name: Run tests
         env:
           TEST_PARQUET_BINARY: build/ci-tests/test_parquet
-          TEST_GROUPS: ${{ runner.os == 'Linux' && '2' || '10' }}
-          TEST_JOBS: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: python3 scripts/ci_time.py --label unit-tests -- pixi run test
-
-      - name: Differential tests against Polars
-        if: runner.os == 'Linux'
-        run: |
-          python3 scripts/ci_time.py --label oracle-compile -- pixi run -e oracle oracle --build-only
-          python3 scripts/ci_time.py --label oracle-cases -- pixi run -e oracle oracle --runner build/oracle_runner --cases 150 --seed ${{ github.run_number }}
-          python3 scripts/ci_time.py --label oracle-mutation-check -- pixi run -e oracle oracle --runner build/oracle_runner --mutation-check --cases 20
-          python3 scripts/ci_time.py --label oracle-arrow -- pixi run -e oracle oracle-arrow
-          python3 scripts/ci_time.py --label oracle-geometry -- pixi run -e oracle oracle-geometry
-          python3 scripts/ci_time.py --label oracle-geoparquet -- pixi run -e oracle oracle-geoparquet
-          python3 scripts/ci_time.py --label oracle-shapefile -- pixi run -e oracle oracle-shapefile
-          python3 scripts/ci_time.py --label oracle-asof -- pixi run -e oracle oracle-asof
-          python3 scripts/ci_time.py --label oracle-time-windows -- pixi run -e oracle oracle-time-windows
-          python3 scripts/ci_time.py --label check_parquet_write -- pixi run -e oracle python3 scripts/check_parquet_write.py
-          python3 scripts/ci_time.py --label check_parquet_stream -- pixi run -e oracle python3 scripts/check_parquet_stream.py build/dfparquet/libdfparquet.so
-
-      - name: Benchmark suite answers (smoke scale)
-        if: runner.os == 'Linux'
-        run: >-
-          python3 scripts/ci_time.py --label query-answers -- pixi run -e oracle python3 scripts/bench_suites.py
-          --suites h2o_groupby,h2o_join,pdsh --scale smoke --correctness-only
-          --engines mojo,duckdb --threads 4 --allow-busy --check
-
-      - name: TPC-DS answers (smoke scale)
-        if: runner.os == 'Linux'
-        run: >-
-          python3 scripts/ci_time.py --label query-answers -- pixi run -e oracle python3 scripts/bench_suites.py
-          --suites tpcds --scale smoke --correctness-only
-          --engines mojo,duckdb --threads 4 --allow-busy --check
-
-
-      - name: Summarize timings
+          TEST_GROUPS: '2'
+          TEST_JOBS: '1'
+        run: python3 scripts/ci_time.py --label unit-tests --budget-seconds 2400 -- pixi run test
+      - uses: ./.github/actions/ci-timings
         if: always()
-        run: python3 scripts/ci_time.py --summary
+        with:
+          name: ci-timings-unit-linux
 
-      - name: Upload timings
+  unit-macos:
+    # Preserve the existing branch-protection check name.
+    name: test (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          cache: true
+      - uses: ./.github/actions/setup-parquet
+      - name: Verify Parquet exports and loader search paths
+        run: python3 scripts/ci_time.py --label parquet-loader -- pixi run bash scripts/check_parquet_library.sh build/ci-tests/test_parquet
+      - name: Run tests
+        env:
+          TEST_PARQUET_BINARY: build/ci-tests/test_parquet
+          TEST_GROUPS: ${{ inputs.macos-groups || '10' }}
+          TEST_JOBS: ${{ inputs.macos-jobs || '3' }}
+        run: python3 scripts/ci_time.py --label unit-tests --budget-seconds 3300 -- pixi run test
+      - uses: ./.github/actions/ci-timings
+        if: always()
+        with:
+          name: ci-timings-unit-macos
+
+  oracles:
+    needs: native-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: dfparquet-linux
+          path: build/dfparquet
+      - name: Differential tests against Polars
+        env:
+          ORACLE_SEED: ${{ github.run_number }}
+        run: python3 scripts/ci_time.py --label oracles --budget-seconds 1500 -- bash scripts/ci_oracles.sh
+      - uses: ./.github/actions/ci-timings
+        if: always()
+        with:
+          name: ci-timings-oracles
+
+  answers:
+    needs: native-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: development
+            suites: h2o_groupby,h2o_join,pdsh
+          - name: tpcds
+            suites: tpcds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: dfparquet-linux
+          path: build/dfparquet
+      - name: Query answers (smoke scale)
+        env:
+          SUITES: ${{ matrix.suites }}
+        run: >-
+          python3 scripts/ci_time.py --label query-answers --budget-seconds 900 --
+          pixi run -e oracle python3 scripts/bench_suites.py
+          --suites "$SUITES" --scale smoke --correctness-only
+          --engines mojo,duckdb --threads 4
+      - name: Upload query answers
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-timings-${{ runner.os }}
-          path: build/ci-timings/*.json
+          name: query-answers-${{ matrix.name }}
+          path: build/suites/answers.json
           if-no-files-found: ignore
+      - uses: ./.github/actions/ci-timings
+        if: always()
+        with:
+          name: ci-timings-answers-${{ matrix.name }}
+
+  test-linux:
+    # Keep the existing required check, now aggregating every Linux check.
+    name: test (ubuntu-latest)
+    if: always()
+    needs: [checks, native-linux, unit-linux, oracles, answers]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all Linux checks to pass
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS_JSON"]).items()}
+          print(results)
+          sys.exit(0 if all(result == "success" for result in results.values()) else 1)
+          PY

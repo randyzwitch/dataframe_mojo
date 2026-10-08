@@ -202,3 +202,28 @@ failed workers, timeouts, and missing successful reference answers fail the
 check. Explicitly unsupported queries retain their visible unsupported status.
 JSON outcomes are saved as `build/suites/answers.json` by default, separately
 from performance results. Normal benchmark commands keep their existing behavior.
+
+### Independent required jobs
+
+Fast checks, Linux units, macOS units, Linux oracles, and two query-answer
+jobs run independently. One Linux job restores/builds `libdfparquet` and
+publishes it for the Linux consumers, avoiding multiple cold native builds.
+macOS restores/builds its own library and does not wait for Linux.
+
+The existing `test (ubuntu-latest)` check aggregates every Linux job and
+fails for failed, cancelled, or skipped dependencies. `test (macos-latest)`
+continues to cover the full macOS suite and both Parquet loader paths.
+Existing branch-protection names remain valid; no tests become optional.
+Job separation trades some repeated checkout/environment setup for shorter
+elapsed time. Timing artifacts have unique names for every job.
+
+Command budgets emit annotations without interrupting tests: 40 minutes for
+Linux units, 55 for macOS units, 25 for oracles, and 15 for each answer job.
+Budgets exclude setup and the separate Parquet loader compilation. Compare
+several warm-cache runs and total runner minutes before tightening them.
+
+The manual CI dispatch accepts `macos-groups` and `macos-jobs` for controlled
+calibration. Defaults remain ten drivers and three compiler processes. Try
+one configuration per dispatch (for example 6/2 or 4/1), compare compile times
+and peak memory with 10/3, and change the PR default only after repeated
+measurements without OOMs. Linux retains its measured 2/1 configuration.
