@@ -19,6 +19,7 @@ from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _append_validity, _pack_bits
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
+from .fused_compare import fused_comparisons, fused_mask
 from .sorted_range import sorted_window
 from .expr import (
     Expr,
@@ -2492,21 +2493,37 @@ struct DataFrame(Copyable, Sized, Writable):
         the remaining parts run together on the same rows and the masks
         combine: PDS-H q6's year of lineitem dates keeps a seventh, and its
         cheap numeric parts were 36% slower on gathered rows.
+
+        Parts comparing a numeric column with a constant go first, all of
+        them in one pass (`fused_comparisons`), as if they were one part.
         """
+        var fused = fused_comparisons(self._columns, self._height, parts)
         var order = List[Int]()
         for late in [False, True]:
             for k in range(len(parts)):
+                if fused.used[k]:
+                    continue
                 if _reads_strings(parts[k], self) == late:
                     order.append(k)
         var current = self.copy()
         var rows = List[Int]()
         var whole = True
         var k = 0
-        while k < len(order):
-            var mask = current._predicate_mask(
-                bind(parts[order[k]], current._columns), batch_size
-            )
-            k += 1
+        var pending = len(fused.mask) > 0
+        if pending:
+            trace_path("filter.fused_compare")
+        while pending or k < len(order):
+            var mask: BoolColumn
+            if pending:
+                mask = fused_mask(fused.mask, self._height)
+                pending = False
+            else:
+                mask = current._predicate_mask(
+                    bind(parts[order[k]], current._columns), batch_size
+                )
+                k += 1
+            if whole and k == len(order):
+                return self.filter(mask)
             if k < len(order):
                 var strings = _reads_strings(parts[order[len(order) - 1]], self)
                 var limit = current._height // (2 if strings else 8)
