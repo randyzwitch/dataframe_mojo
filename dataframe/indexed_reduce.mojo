@@ -21,6 +21,7 @@ from std.memory import Pointer, bitcast
 from .aggregate import Reducer, float_key, quantile_in
 from .binding import BoundExpr, bind
 from .column import Column
+from .partition import _mix
 from .execution import _new_reducer, _batch, evaluate
 from .expr import (
     COUNT,
@@ -150,13 +151,9 @@ def reduce_indexed(
     return reducer.finish().with_dtype(bound.dtypes[len(bound.dtypes) - 1])
 
 
-@always_inline
-def _mix_pair(group: Int, key: UInt64) -> UInt64:
-    """splitmix64's finalizer over a group and value together."""
-    var z = key ^ (UInt64(group) * 0x9E3779B97F4A7C15)
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EB
-    return z ^ (z >> 31)
+# A group's values up to this many are counted by comparing each with the
+# ones before it; a longer segment through a set of its own.
+comptime _SMALL_SEGMENT = 16
 
 
 def _distinct_counts[
@@ -168,30 +165,37 @@ def _distinct_counts[
     n: Int,
     group_count: Int,
 ) raises -> Series:
-    """Distinct values per group through one open-addressing set of
-    (group, value) pairs for the whole bucket, where a set per group cost
-    an allocation for every group with a second value: PDS-H q21 counts
-    suppliers for 1.5M orders, and those sets were a fifth of its time.
+    """Distinct values per group: the bucket's values are laid out by group
+    (a counting sort on the group number), then each group's segment is
+    counted on its own. A set of (group, value) pairs for the whole bucket
+    held 2n slots, so most of its probes missed the cache (PDS-H q21 counts
+    suppliers for 1.5M orders); segments are short and stay in cache, and
+    when a group's rows are adjacent the layout is written in sequence.
     A null counts once per group, as `n_unique` counts it."""
     var values = column._ptr()
     var nulls = column.null_count() > 0
     var counts = List[Int64](length=group_count, fill=0)
     var saw_null = List[Bool](length=group_count, fill=False)
-    # At most n distinct pairs; keep the table at most half full.
-    var size = 16
-    while size < 2 * n:
-        size *= 2
-    var mask = size - 1
-    var keys = List[UInt64](unsafe_uninit_length=size)
-    var groups = List[Int](length=size, fill=-1)
-    var slot_keys = keys.unsafe_ptr()
-    var slot_groups = groups.unsafe_ptr()
-    var tally = counts.unsafe_ptr()
+    # Segment bounds: each group's valid values, in group order.
+    var starts = List[Int](length=group_count + 1, fill=0)
+    var bound = starts.unsafe_ptr()
+    for p in range(n):
+        var group = g[unsafe_offset=p]
+        if nulls and not column._valid(rows[unsafe_offset=p]):
+            saw_null[group] = True
+            continue
+        bound[unsafe_offset=group + 1] += 1
+    for group in range(group_count):
+        bound[unsafe_offset=group + 1] += bound[unsafe_offset=group]
+    var laid = List[UInt64](
+        unsafe_uninit_length=bound[unsafe_offset=group_count]
+    )
+    var out = laid.unsafe_ptr()
+    var cursor = starts.copy()
+    var next = cursor.unsafe_ptr()
     for p in range(n):
         var row = rows[unsafe_offset=p]
-        var group = g[unsafe_offset=p]
         if nulls and not column._valid(row):
-            saw_null[group] = True
             continue
         var key: UInt64
         comptime if D.is_floating_point():
@@ -200,17 +204,63 @@ def _distinct_counts[
             key = bitcast[DType.uint64](
                 _canonical_int[D](values[unsafe_offset=row])
             )
-        var at = Int(_mix_pair(group, key)) & mask
-        while True:
-            var held = slot_groups[unsafe_offset=at]
-            if held < 0:
-                slot_groups[unsafe_offset=at] = group
-                slot_keys[unsafe_offset=at] = key
-                tally[unsafe_offset=group] += 1
-                break
-            if held == group and slot_keys[unsafe_offset=at] == key:
-                break
-            at = (at + 1) & mask
+        var group = g[unsafe_offset=p]
+        var at = next[unsafe_offset=group]
+        out[unsafe_offset=at] = key
+        next[unsafe_offset=group] = at + 1
+    var tally = counts.unsafe_ptr()
+    # A long segment is counted in a set of its own, sized to it: one
+    # table sized for the longest, where a slot belongs to the segment
+    # whose stamp (group + 1) it holds, so it is never cleared.
+    var longest = 0
+    for group in range(group_count):
+        longest = max(
+            longest, bound[unsafe_offset=group + 1] - bound[unsafe_offset=group]
+        )
+    var capacity = 16
+    while longest > _SMALL_SEGMENT and capacity < 2 * longest:
+        capacity *= 2
+    var set_keys = List[UInt64](
+        unsafe_uninit_length=capacity if longest > _SMALL_SEGMENT else 0
+    )
+    var stamps = List[Int](
+        length=capacity if longest > _SMALL_SEGMENT else 0, fill=0
+    )
+    var held_keys = set_keys.unsafe_ptr()
+    var held = stamps.unsafe_ptr()
+    for group in range(group_count):
+        var lo = bound[unsafe_offset=group]
+        var hi = bound[unsafe_offset=group + 1]
+        var distinct = 0
+        if hi - lo <= _SMALL_SEGMENT:
+            for i in range(lo, hi):
+                var key = out[unsafe_offset=i]
+                var seen = False
+                for j in range(lo, i):
+                    if out[unsafe_offset=j] == key:
+                        seen = True
+                        break
+                if not seen:
+                    distinct += 1
+        else:
+            var size = 16
+            while size < 2 * (hi - lo):
+                size *= 2
+            var mask = size - 1
+            var stamp = group + 1
+            for i in range(lo, hi):
+                var key = out[unsafe_offset=i]
+                var at = Int(_mix(key)) & mask
+                while True:
+                    if held[unsafe_offset=at] != stamp:
+                        held[unsafe_offset=at] = stamp
+                        held_keys[unsafe_offset=at] = key
+                        distinct += 1
+                        break
+                    if held_keys[unsafe_offset=at] == key:
+                        break
+                    at = (at + 1) & mask
+        tally[unsafe_offset=group] = Int64(distinct)
     for group in range(group_count):
         if saw_null[group]:
             counts[group] += 1
