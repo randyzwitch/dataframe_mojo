@@ -93,6 +93,7 @@ jobs:
           pixi run -e oracle oracle-geometry
           pixi run -e oracle oracle-geoparquet
           pixi run -e oracle oracle-asof
+          pixi run -e oracle oracle-time-windows
           pixi run -e oracle python3 scripts/check_parquet_write.py
           pixi run -e oracle python3 scripts/check_parquet_stream.py build/dfparquet/libdfparquet.so
 

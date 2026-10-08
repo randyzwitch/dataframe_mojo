@@ -16,6 +16,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 - Eager and lazy `join_asof` with backward/forward/nearest strategies,
   grouped sortedness validation, null-key handling and numeric/Duration
   tolerances. See [as-of joins](docs/join-asof.md) (#224).
+- Stable rolling std/var, duration-based rolling expressions and calendar-aware
+  dynamic/rolling dataframe aggregation (#225).
 
 - Geometry storage backed by ISO WKB, with CRS and edge metadata:
   `DataType.geometry`, `from_wkb`, and `to_wkb`. GeoArrow WKB metadata

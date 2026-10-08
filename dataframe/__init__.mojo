@@ -4,7 +4,7 @@ from .column import Column
 from .string_column import StringColumn, StringBuilder
 from .nested_column import ListColumn, StructColumn
 from .series import Series
-from .frame import DataFrame, Field, GroupBy, concat
+from .frame import DataFrame, Field, GroupBy, TimeGroupBy, concat
 from .groups import GroupIndices
 from .value import AnyValue
 from .dtype import DataType

@@ -15,6 +15,15 @@ from .expr import (
     SHIFT,
     RANK,
     ROLLING_SUM,
+    ROLLING_STD,
+    ROLLING_VAR,
+    ROLLING_SUM_BY,
+    ROLLING_MEAN_BY,
+    ROLLING_MIN_BY,
+    ROLLING_MAX_BY,
+    ROLLING_STD_BY,
+    ROLLING_VAR_BY,
+    is_rolling_by,
     ROLLING_MEAN,
     ROLLING_MIN,
     ROLLING_MAX,
@@ -36,7 +45,7 @@ from .reductions import WideInt
 from .series import Series, sort_indices
 from .rank import rank_numeric
 from .packed_sort import packed_arg_sort
-from std.math import isnan, floor
+from std.math import isnan, floor, sqrt, isfinite
 
 
 def partitions(n: Int, ids: List[Int]) -> List[List[Int]]:
@@ -138,11 +147,23 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     if input.is_chunked():
         return window_op(node, input.rechunk(), ids)
     var op_code = node.op
+    if (op_code == ROLLING_STD or op_code == ROLLING_VAR) and _is_narrow(
+        input.dtype()
+    ):
+        return window_op(node, input.cast(DataType.FLOAT64), ids)
     if (
-        op_code == CUM_SUM or op_code == ROLLING_SUM or op_code == ROLLING_MEAN
+        op_code == CUM_SUM
+        or op_code == ROLLING_SUM
+        or op_code == ROLLING_MEAN
+        or op_code == ROLLING_STD
+        or op_code == ROLLING_VAR
     ) and _is_narrow(input.dtype()):
         var result = window_op(node, _widen(input), ids)
-        if op_code == ROLLING_MEAN:
+        if (
+            op_code == ROLLING_MEAN
+            or op_code == ROLLING_STD
+            or op_code == ROLLING_VAR
+        ):
             return result^
         return _narrow_sum(result, input.dtype().sum_type())
     if op_code == RANK:
@@ -191,6 +212,8 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         return _bins(input, groups, node)
     if op == RANK:
         return _rank(input, groups, node.text, reverse)
+    if op == ROLLING_STD or op == ROLLING_VAR:
+        return _rolling_moments(input, valid, groups, node)
     if op == ROLLING_SUM or op == ROLLING_MEAN:
         return _rolling_sum(input, valid, groups, node)
     # The remaining operations gather a source row per output row.
@@ -630,3 +653,238 @@ def _rank_string_order(
     if average:
         return Series("", Column[Float64](floats^, valid))
     return Series("", Column[Int64](ints^, valid))
+
+
+def _rolling_moments(
+    input: Series, valid: List[Bool], groups: List[List[Int]], node: Node
+) raises -> Series:
+    var lower = List[Int](length=len(input), fill=0)
+    var upper = List[Int](length=len(input), fill=0)
+    var window = Int(node.integer)
+    for rows in groups:
+        for j in range(len(rows)):
+            lower[rows[j]] = max(0, j - window + 1)
+            upper[rows[j]] = j + 1
+    return _moments_bounds(
+        input,
+        valid,
+        groups,
+        lower,
+        upper,
+        window if node.floating < 0 else Int(node.floating),
+        node.min_count,
+        node.op == ROLLING_STD,
+    )
+
+
+def _moments_bounds(
+    input: Series,
+    valid: List[Bool],
+    groups: List[List[Int]],
+    lower: List[Int],
+    upper: List[Int],
+    needed: Int,
+    ddof: Int,
+    standard: Bool,
+) raises -> Series:
+    # Sliding Welford updates with removal. Translate by the first finite
+    # value so large common offsets do not spoil small variances. Each value
+    # is added/removed once for monotone window bounds; nonfinite values are
+    # counted separately so the state recovers when they leave the window.
+    var output = List[Float64](length=len(input), fill=0)
+    var mask = List[Bool](length=len(input), fill=False)
+    for rows in groups:
+        var origin = Float64(0)
+        for row in rows:
+            if valid[row] and isfinite(_numeric(input, row)):
+                origin = _numeric(input, row)
+                break
+        var lo = 0
+        var hi = 0
+        var count = 0
+        var bad = 0
+        var mean = Float64(0)
+        var m2 = Float64(0)
+        for row in rows:
+            var start = lower[row]
+            var stop = upper[row]
+            if start < lo or stop < hi or start >= hi:
+                lo = start
+                hi = start
+                count = 0
+                bad = 0
+                mean = 0
+                m2 = 0
+            while lo < start:
+                var at = rows[lo]
+                lo += 1
+                if not valid[at]:
+                    continue
+                var x = _numeric(input, at)
+                if not isfinite(x):
+                    bad -= 1
+                    continue
+                x -= origin
+                count -= 1
+                if count == 0:
+                    mean = 0
+                    m2 = 0
+                else:
+                    var delta = x - mean
+                    mean -= delta / Float64(count)
+                    m2 -= delta * (x - mean)
+                    m2 = max(m2, 0)
+            while hi < stop:
+                var at = rows[hi]
+                hi += 1
+                if not valid[at]:
+                    continue
+                var x = _numeric(input, at)
+                if not isfinite(x):
+                    bad += 1
+                    continue
+                x -= origin
+                count += 1
+                var delta = x - mean
+                mean += delta / Float64(count)
+                m2 += delta * (x - mean)
+            var total = count + bad
+            if total >= needed and total > ddof:
+                mask[row] = True
+                if bad:
+                    output[row] = Float64("nan")
+                else:
+                    var variance = max(m2, 0) / Float64(count - ddof)
+                    output[row] = sqrt(variance) if standard else variance
+    return Series("", Column[Float64](output^, mask))
+
+
+def rolling_by_op(
+    node: Node, input: Series, index: Series, ids: List[Int]
+) raises -> Series:
+    from .time_windows import rolling_bounds, negate_period
+
+    if input.is_chunked() or index.is_chunked():
+        return rolling_by_op(node, input.rechunk(), index.rechunk(), ids)
+    if node.op == ROLLING_SUM_BY and input.dtype() == DataType.UINT64:
+        var groups = partitions(len(input), ids)
+        var bounds = rolling_bounds(
+            index, groups, node.text, negate_period(node.text), node.text2
+        )
+        return _rolling_u64_sum(
+            input, groups, bounds[0], bounds[1], Int(node.floating)
+        )
+    var numeric = node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY
+    if numeric and node.op != ROLLING_SUM_BY and _is_narrow(input.dtype()):
+        return rolling_by_op(node, input.cast(DataType.FLOAT64), index, ids)
+    if numeric and _is_narrow(input.dtype()):
+        var result = rolling_by_op(node, _widen(input), index, ids)
+        return (
+            _narrow_sum(result, input.dtype().sum_type()) if node.op
+            == ROLLING_SUM_BY else result^
+        )
+    var groups = partitions(len(input), ids)
+    var bounds = rolling_bounds(
+        index, groups, node.text, negate_period(node.text), node.text2
+    )
+    var valid = validity(input)
+    var needed = Int(node.floating)
+    if node.op == ROLLING_STD_BY or node.op == ROLLING_VAR_BY:
+        return _moments_bounds(
+            input,
+            valid,
+            groups,
+            bounds[0],
+            bounds[1],
+            needed,
+            node.min_count,
+            node.op == ROLLING_STD_BY,
+        )
+    var is_int = node.op == ROLLING_SUM_BY and input.dtype() == DataType.INT64
+    var ints = List[Int64](length=len(input) if is_int else 0, fill=0)
+    var floats = List[Float64](
+        length=len(input) if numeric and not is_int else 0, fill=0
+    )
+    var mask = List[Bool](length=len(input), fill=False)
+    var source = List[Int](length=len(input), fill=-1)
+    var ranks = List[Int]()
+    if not numeric:
+        ranks = input._sort_ranks(False, True)
+    for rows in groups:
+        for row in rows:
+            var count = 0
+            var total = Float64(0)
+            var wide = WideInt(0)
+            var best = -1
+            var nan_row = -1
+            var begin = bounds[0][row]
+            var end = bounds[1][row]
+            for k in range(begin, end):
+                var at = rows[k]
+                if not valid[at]:
+                    continue
+                count += 1
+                if not numeric:
+                    if input.dtype().is_float():
+                        var x = input.get(at)._float
+                        if x != x:
+                            nan_row = at
+                    if best < 0 or (
+                        ranks[at]
+                        > ranks[best] if node.op
+                        == ROLLING_MAX_BY else ranks[at]
+                        < ranks[best]
+                    ):
+                        best = at
+                elif is_int:
+                    wide += (
+                        input._data[Column[Int64]]._get(at).cast[DType.int128]()
+                    )
+                else:
+                    total += _numeric(input, at)
+            if count < needed or (count == 0 and node.op != ROLLING_SUM_BY):
+                continue
+            mask[row] = True
+            if not numeric:
+                source[row] = nan_row if nan_row >= 0 else best
+            elif is_int:
+                if wide > WideInt(Int64.MAX) or wide < WideInt(Int64.MIN):
+                    raise Error("Int64 rolling_sum_by overflow")
+                ints[row] = wide.cast[DType.int64]()
+            else:
+                floats[row] = (
+                    total / Float64(count) if node.op
+                    == ROLLING_MEAN_BY else total
+                )
+    if not numeric:
+        return input.take_or_null(source)
+    if is_int:
+        return Series("", Column[Int64](ints^, mask))
+    return Series("", Column[Float64](floats^, mask))
+
+
+def _rolling_u64_sum(
+    input: Series,
+    groups: List[List[Int]],
+    lower: List[Int],
+    upper: List[Int],
+    needed: Int,
+) raises -> Series:
+    ref column = input._data[Column[UInt64]]
+    var values = List[UInt64](length=len(input), fill=0)
+    var valid = List[Bool](length=len(input), fill=False)
+    for rows in groups:
+        for row in rows:
+            var total = Int128(0)
+            var count = 0
+            for k in range(lower[row], upper[row]):
+                var at = rows[k]
+                if column._valid(at):
+                    total += Int128(column._get(at))
+                    count += 1
+            if count >= needed:
+                if total > Int128(UInt64.MAX):
+                    raise Error("UInt64 rolling_sum_by overflow")
+                valid[row] = True
+                values[row] = UInt64(total)
+    return Series("", Column[UInt64](values^, valid))

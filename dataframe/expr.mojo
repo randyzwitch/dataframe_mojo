@@ -199,6 +199,22 @@ comptime DT_REPLACE_TZ = 157
 comptime DT_CONVERT_TZ = 158
 
 
+# Row-count variance and duration windows. `min_count` stores ddof, `text` the
+# duration, and `text2` the closed-boundary option for binary *_by nodes.
+comptime ROLLING_STD = 163
+comptime ROLLING_VAR = 164
+comptime ROLLING_SUM_BY = 165
+comptime ROLLING_MEAN_BY = 166
+comptime ROLLING_MIN_BY = 167
+comptime ROLLING_MAX_BY = 168
+comptime ROLLING_STD_BY = 169
+comptime ROLLING_VAR_BY = 170
+
+
+def is_rolling_by(op: Int) -> Bool:
+    return op >= ROLLING_SUM_BY and op <= ROLLING_VAR_BY
+
+
 def is_binary(op: Int) -> Bool:
     return (op >= ADD and op <= EQ) or (op >= 20 and op < 50)
 
@@ -243,7 +259,9 @@ def is_dt_op(op: Int) -> Bool:
 
 
 def is_window(op: Int) -> Bool:
-    return op >= CUM_SUM and op <= QCUT and op != OVER
+    return (op >= CUM_SUM and op <= QCUT and op != OVER) or (
+        op >= ROLLING_STD and op <= ROLLING_VAR_BY
+    )
 
 
 def is_nested_op(op: Int) -> Bool:
@@ -817,6 +835,191 @@ struct Expr(Copyable):
     def rolling_max(self, window_size: Int, min_samples: Int = -1) -> Self:
         return self._window(
             ROLLING_MAX, Int64(window_size), floating=Float64(min_samples)
+        )
+
+    def rolling_std(
+        self, window_size: Int, min_samples: Int = -1, ddof: Int = 1
+    ) -> Self:
+        """Rolling std with stable sliding moments and count minus ddof."""
+        var result = self._window(
+            ROLLING_STD, Int64(window_size), floating=Float64(min_samples)
+        )
+        result._nodes[len(result._nodes) - 1].min_count = ddof
+        return result^
+
+    def rolling_var(
+        self, window_size: Int, min_samples: Int = -1, ddof: Int = 1
+    ) -> Self:
+        """Rolling var with stable sliding moments and count minus ddof."""
+        var result = self._window(
+            ROLLING_VAR, Int64(window_size), floating=Float64(min_samples)
+        )
+        result._nodes[len(result._nodes) - 1].min_count = ddof
+        return result^
+
+    def _rolling_by(
+        self,
+        by: Self,
+        op: Int,
+        window_size: String,
+        closed: String,
+        min_samples: Int,
+        ddof: Int,
+    ) -> Self:
+        var result = self._binary(by, op)
+        ref node = result._nodes[len(result._nodes) - 1]
+        node.text = window_size
+        node.text2 = closed
+        node.floating = Float64(min_samples)
+        node.min_count = ddof
+        return result^
+
+    def rolling_sum_by(
+        self,
+        by: Self,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling sum over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            by, ROLLING_SUM_BY, window_size, closed, min_samples, 1
+        )
+
+    def rolling_sum_by(
+        self,
+        by: String,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling sum over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            col(by), ROLLING_SUM_BY, window_size, closed, min_samples, 1
+        )
+
+    def rolling_mean_by(
+        self,
+        by: Self,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling mean over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            by, ROLLING_MEAN_BY, window_size, closed, min_samples, 1
+        )
+
+    def rolling_mean_by(
+        self,
+        by: String,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling mean over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            col(by), ROLLING_MEAN_BY, window_size, closed, min_samples, 1
+        )
+
+    def rolling_min_by(
+        self,
+        by: Self,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling min over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            by, ROLLING_MIN_BY, window_size, closed, min_samples, 1
+        )
+
+    def rolling_min_by(
+        self,
+        by: String,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling min over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            col(by), ROLLING_MIN_BY, window_size, closed, min_samples, 1
+        )
+
+    def rolling_max_by(
+        self,
+        by: Self,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling max over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            by, ROLLING_MAX_BY, window_size, closed, min_samples, 1
+        )
+
+    def rolling_max_by(
+        self,
+        by: String,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+    ) -> Self:
+        """Rolling max over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            col(by), ROLLING_MAX_BY, window_size, closed, min_samples, 1
+        )
+
+    def rolling_std_by(
+        self,
+        by: Self,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+        ddof: Int = 1,
+    ) -> Self:
+        """Rolling std over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            by, ROLLING_STD_BY, window_size, closed, min_samples, ddof
+        )
+
+    def rolling_std_by(
+        self,
+        by: String,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+        ddof: Int = 1,
+    ) -> Self:
+        """Rolling std over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            col(by), ROLLING_STD_BY, window_size, closed, min_samples, ddof
+        )
+
+    def rolling_var_by(
+        self,
+        by: Self,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+        ddof: Int = 1,
+    ) -> Self:
+        """Rolling var over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            by, ROLLING_VAR_BY, window_size, closed, min_samples, ddof
+        )
+
+    def rolling_var_by(
+        self,
+        by: String,
+        window_size: String,
+        closed: String = "right",
+        min_samples: Int = 1,
+        ddof: Int = 1,
+    ) -> Self:
+        """Rolling var over a sorted Date/Datetime duration window."""
+        return self._rolling_by(
+            col(by), ROLLING_VAR_BY, window_size, closed, min_samples, ddof
         )
 
     def forward_fill(self, limit: Int = -1) -> Self:

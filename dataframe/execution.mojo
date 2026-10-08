@@ -68,6 +68,7 @@ from .expr import (
     CAST,
     OVER,
     INTERPOLATE_BY,
+    is_rolling_by,
     is_dt_op,
     SEP,
     subtree,
@@ -91,7 +92,7 @@ from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
 from .hashing import encode_rows, encode_rows_parallel
 from .partition import encode_partitioned, low_cardinality
 from .distinct import distinct_counts
-from .window import window_op, interpolate_by_op
+from .window import window_op, interpolate_by_op, rolling_by_op
 from .fusion import fused
 from .temporal_kernels import dt_op, temporal_binary
 from .bool_column import BoolColumn
@@ -2062,7 +2063,7 @@ def evaluate[
                 row_mode,
             )
             var window_groups = groups.copy() if grouped else List[Int]()
-            if node.op == INTERPOLATE_BY:
+            if node.op == INTERPOLATE_BY or is_rolling_by(node.op):
                 var by = _full[width](
                     bound,
                     prepared_columns,
@@ -2072,7 +2073,14 @@ def evaluate[
                     batch_size,
                     row_mode,
                 )
-                states[node_index] = interpolate_by_op(input, by, window_groups)
+                if is_rolling_by(node.op):
+                    states[node_index] = rolling_by_op(
+                        node, input, by, window_groups
+                    )
+                else:
+                    states[node_index] = interpolate_by_op(
+                        input, by, window_groups
+                    )
             else:
                 states[node_index] = window_op(node, input, window_groups)
         elif node.op == OVER:

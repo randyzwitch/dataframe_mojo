@@ -1006,6 +1006,16 @@ struct Reducer(Movable):
             # Decimal states are 128-bit: widen a narrow decimal input.
             self.update(chunk._decimal128(), offset, grouped, groups)
             return
+        if (self.op == STD or self.op == VAR) and self.input == DataType.UINT64:
+            # Ordering uses biased Int64 keys for UInt64, but converting
+            # those keys to Float64 destroys variance among small values.
+            var floats = _float_values(chunk)
+            for i in range(len(floats[0])):
+                if floats[1][i]:
+                    self.moments[_group(grouped, groups, offset + i)].add(
+                        floats[0][i]
+                    )
+            return
         if self.op == SKEW or self.op == KURTOSIS:
             var floats = _float_values(chunk)
             for i in range(len(floats[0])):
