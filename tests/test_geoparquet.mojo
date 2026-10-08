@@ -16,6 +16,10 @@ from dataframe import (
     concat,
 )
 from dataframe.json_value import JsonValue
+from dataframe.geospatial_metadata import (
+    apply_geoparquet_metadata,
+    _geoparquet_crs_equal,
+)
 
 comptime ROOT = "tests/fixtures/geospatial/"
 comptime OUTPUT = "/tmp/dataframe_geoparquet_test.parquet"
@@ -131,6 +135,68 @@ def test_unsupported_m_and_nested_geometry_writes() raises:
     var nested = source.pack_struct("nested", ["geometry"])
     with assert_raises(contains="top-level"):
         write_geoparquet(nested, OUTPUT)
+
+
+def test_geopandas_datum_member_ids() raises:
+    # GeoPandas strips only datum-ensemble member IDs in its geo document.
+    # Preserve the richer Arrow CRS while accepting this redundant metadata.
+    var member = (
+        '{"name":"WGS 84 (Transit)","id":{"authority":"EPSG","code":1166}}'
+    )
+    var bare = '{"name":"WGS 84 (Transit)"}'
+    var prefix = '{"type":"GeographicCRS","datum_ensemble":{"members":['
+    var suffix = '],"ellipsoid":{"semi_major_axis":6378137}},"id":{"authority":"OGC","code":"CRS84"}}'
+    var rich = prefix + member + suffix
+    var sparse = prefix + bare + suffix
+    for nested in [False, True]:
+        var lhs = '{"base_crs":' + rich + "}" if nested else rich
+        var rhs = '{"base_crs":' + sparse + "}" if nested else sparse
+        assert_true(_geoparquet_crs_equal(JsonValue(lhs), JsonValue(rhs)))
+        assert_true(_geoparquet_crs_equal(JsonValue(rhs), JsonValue(lhs)))
+    var frame = from_geojson('{"type":"Point","coordinates":[1,2]}')
+    var geometry = from_wkb(
+        to_wkb(frame.column("geometry")), '{"crs":' + rich + "}"
+    )
+    frame = DataFrame([geometry^])
+    var metadata = (
+        '{"version":"1.1.0","primary_column":"geometry","columns":{"geometry":{"encoding":"WKB","geometry_types":["Point"],"crs":'
+        + sparse
+        + "}}}"
+    )
+    assert_true(apply_geoparquet_metadata(frame, metadata).equals(frame))
+    # IDs that are present in both copies must match. Missing IDs elsewhere
+    # and changed member names or ellipsoid parameters must still conflict.
+    for conflict in [
+        prefix
+        + '{"name":"WGS 84 (Transit)","id":{"authority":"EPSG","code":9999}}'
+        + suffix,
+        prefix + '{"name":"different datum"}' + suffix,
+        '{"type":"GeographicCRS","datum_ensemble":{"members":['
+        + bare
+        + '],"ellipsoid":{"semi_major_axis":1}},"id":{"authority":"OGC","code":"CRS84"}}',
+        '{"type":"GeographicCRS","datum_ensemble":{"members":['
+        + bare
+        + '],"ellipsoid":{"semi_major_axis":6378137}}}',
+    ]:
+        assert_true(
+            not _geoparquet_crs_equal(JsonValue(rich), JsonValue(conflict))
+        )
+        assert_true(
+            not _geoparquet_crs_equal(JsonValue(conflict), JsonValue(rich))
+        )
+        var bad = (
+            '{"version":"1.1.0","primary_column":"geometry","columns":{"geometry":{"encoding":"WKB","geometry_types":["Point"],"crs":'
+            + conflict
+            + "}}}"
+        )
+        with assert_raises(contains="Conflicting GeoParquet/GeoArrow metadata"):
+            _ = apply_geoparquet_metadata(frame, bad)
+    assert_true(
+        not _geoparquet_crs_equal(
+            JsonValue('{"members":[' + member + "]}"),
+            JsonValue('{"members":[' + bare + "]}"),
+        )
+    )
 
 
 def main() raises:

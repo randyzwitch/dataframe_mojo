@@ -130,7 +130,11 @@ Metadata rules follow the [GeoParquet 1.1 specification](https://geoparquet.org/
 
 - Omitted CRS means OGC:CRS84; explicit `null` means unknown. CRS PROJJSON, edge
   interpretation, orientation, and coordinate epoch are retained per column.
-- Conflicting GeoArrow and GeoParquet CRS/edge metadata raises.
+- Conflicting GeoArrow and GeoParquet CRS/edge metadata raises. GeoPandas'
+  omission of optional datum-ensemble member IDs is accepted when the remaining
+  CRS content agrees; IDs present in both copies must match. The Arrow CRS
+  is preserved. Other CRS differences still raise without a CRS database
+  to establish equivalence.
 - Geometry type inventories and file bounds are not retained as column
   invariants because filtering and concatenation can make them stale.
 - The dataframe has no active/primary geometry designation. Reading retains
@@ -168,6 +172,22 @@ reads/writes, CRS rules, projections, lazy execution, and empty files.
 Regenerate fixtures with `pixi run -e oracle python scripts/make_geospatial_fixtures.py`.
 Run the independent producer/consumer check with
 `pixi run -e oracle oracle-geospatial` after building `libdfparquet`.
+
+`pixi run -e oracle oracle-geoparquet` runs the GeoParquet interoperability
+checks used in CI. GeoPandas produces both 1.0 and 1.1 files, and DuckDB Spatial
+produces 1.0 files through its native Parquet writer. Both engines read the
+Mojo-written full, empty, filtered, empty-geometry and null-only outputs with
+warnings treated as errors.
+The checks compare exact WKB, CRS, geometry types and fresh file bounds across
+all seven geometry families, XY/XYZ, nulls and empties. CRS cases include unknown,
+CRS84 and projected coordinates. DuckDB's V1 writer omits CRS for untagged
+geometry, which declares CRS84; GeoPandas supplies the explicit-null CRS case.
+The suite also checks row-group selection and lazy pruning past corrupted row
+groups, eager/lazy projections over invalid WKB and corrupted geometry pages,
+unknown-version rejection, and ordinary binary Parquet. Mutation checks reject
+changed CRS, type inventories, bounds, WKB and missing metadata.
+It uses the same Spatial extension installation/cache as the Arrow
+oracle below; installation failures fail the check.
 
 `tests/test_geometry_accessors.mojo` covers all seven WKB families, all four
 coordinate layouts, both byte orders (including mixed-order children), empty
