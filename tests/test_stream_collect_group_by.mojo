@@ -131,5 +131,82 @@ def test_few_groups_keep_the_batch_states() raises:
     assert_equal(expected.height(), 97)
 
 
+def selective(
+    frame: DataFrame, keys: List[String], keep: Int
+) raises -> LazyFrame:
+    """A join that keeps one row in `keep` of each batch before the
+    group-by, as a date filter over a date-ordered fact table does (TPC-DS
+    q39: 500 of 32K rows a batch), so no single batch can decide whether
+    to collect: the decision comes from the rows held across batches."""
+    var ids = List[Int64]()
+    for i in range(0, 50, keep):
+        ids.append(Int64(i))
+    var dim = DataFrame([Series("d", Column[Int64](ids^))])
+    return (
+        frame.lazy()
+        .join(dim.lazy(), left_on=["d"], right_on=["d"])
+        .group_by(keys, maintain_order=True)
+        .agg(
+            [
+                col("x").sum().alias("sum"),
+                col("x").n_unique().alias("distinct"),
+                col("x").len().alias("rows"),
+            ]
+        )
+    )
+
+
+def test_selective_batches_decide_from_the_rows_held() raises:
+    # 200K rows, one in 25 kept: 8K rows reach the group-by, 500 a batch
+    # of 12.5K, over 6K groups. The decision waits until 32K rows were
+    # held or the input ends, whichever first; here the input ends, so
+    # the held batches are reduced then. Both orders must match the
+    # eager result, as must a plan that keeps every batch's state.
+    var frame = facts(200_000, 60_000)
+    for keyset in range(2):
+        var keys: List[String] = ["k"]
+        if keyset == 1:
+            keys = ["s", "k"]
+        var plan = selective(frame, keys, 25)
+        var expected = plan.collect(streaming=False)
+        assert_true(plan.collect(batch_size=12_500).equals(expected))
+        assert_true(plan.collect(batch_size=4096).equals(expected))
+    # Few groups among many held batches: states, built after the
+    # decision from the held batches in input order.
+    var few = selective(facts(200_000, 40), ["s"], 5)
+    var expected_few = few.collect(streaming=False)
+    assert_true(few.collect(batch_size=4096).equals(expected_few))
+    assert_equal(expected_few.height(), 40)
+    # Enough rows a batch to decide on one: many groups collected.
+    var wide = selective(facts(400_000, 100_000), ["k"], 2)
+    assert_true(
+        wide.collect(batch_size=16_384).equals(wide.collect(streaming=False))
+    )
+
+
+def test_unordered_group_by_matches_as_a_set() raises:
+    # Without maintain_order the collected group-by returns groups in
+    # bucket order; every group and its values are still the eager ones.
+    # Integer sums: a float sum associates differently when the held
+    # batches end up as merged states.
+    var frame = facts(120_000, 40_000)
+    var plan = (
+        frame.lazy()
+        .join(
+            DataFrame(
+                [Series("d", Column[Int64]([Int64(1), Int64(2), Int64(3)]))]
+            ).lazy(),
+            left_on=["d"],
+            right_on=["d"],
+        )
+        .group_by(["k"])
+        .agg([col("d").sum().alias("sum"), col("x").len().alias("rows")])
+    )
+    var expected = plan.collect(streaming=False).sort("k")
+    var streamed = plan.collect(batch_size=4096).sort("k")
+    assert_true(streamed.equals(expected))
+    assert_true(expected.height() > 4096)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
