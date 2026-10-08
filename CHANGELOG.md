@@ -114,6 +114,13 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- A stream over an in-memory input through joins keeps at least four
+  batches a worker and hands the pool four batches a worker each round,
+  claimed as workers free up: input stored in key order (sales by date)
+  put every row a selective join kept into one or two of eight batches,
+  leaving the other workers idle. TPC-DS q99 67 -> 36 ms, q72 84 -> 68,
+  q15 14 -> 9.5, q93 20 -> 16. A top-k keeps one batch a worker a round,
+  so its bound tightens as before.
 - `unique()` on whole rows in any order (`keep="any"`, no
   `maintain_order`) runs as a group_by on every column with no
   aggregates, on every worker; with `keep="first"` (or any order kept)
