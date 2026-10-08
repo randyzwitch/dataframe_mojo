@@ -1,4 +1,16 @@
 """An eager CPU dataframe with runtime schema and positional row semantics."""
+from .time_windows import (
+    positive_period,
+    closed_sides,
+    negate_period,
+    shift_time,
+    truncate_time,
+    check_time_index,
+    search_time,
+    rolling_bounds,
+)
+from .temporal import zone_of, parse_interval
+from .window import partitions as window_partitions
 from .dtype import DataType
 from std.collections import Dict, Optional
 from std.sys import num_physical_cores
@@ -2889,6 +2901,112 @@ struct DataFrame(Copyable, Sized, Writable):
         for name in names:
             fills.append(col(name).fill_null(value))
         return self.with_columns(fills)
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        group_by: List[String] = List[String](),
+    ) raises -> TimeGroupBy:
+        """Group sorted temporal rows into calendar-aligned, possibly overlapping windows."""
+        return TimeGroupBy(
+            self.copy(),
+            index_column,
+            every,
+            period.value() if period else every,
+            offset.value() if offset else "0d",
+            closed,
+            label,
+            group_by.copy(),
+            False,
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        group_by: List[String] = List[String](),
+    ) raises -> TimeGroupBy:
+        """Aggregate a duration window for each sorted temporal input row."""
+        return TimeGroupBy(
+            self.copy(),
+            index_column,
+            "",
+            period,
+            offset.value() if offset else negate_period(period),
+            closed,
+            "datapoint",
+            group_by.copy(),
+            True,
+        )
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        *,
+        group_by: String,
+    ) raises -> TimeGroupBy:
+        return self.group_by_dynamic(
+            index_column,
+            every,
+            period,
+            offset,
+            closed,
+            label,
+            List[String]([group_by]),
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        *,
+        group_by: String,
+    ) raises -> TimeGroupBy:
+        return self.rolling(
+            index_column, period, offset, closed, List[String]([group_by])
+        )
+
+    def group_by_dynamic(
+        self,
+        index_column: String,
+        every: String,
+        period: Optional[String] = None,
+        offset: Optional[String] = None,
+        closed: String = "left",
+        label: String = "left",
+        *,
+        group_by: NoneType,
+    ) raises -> TimeGroupBy:
+        return self.group_by_dynamic(
+            index_column, every, period, offset, closed, label, List[String]()
+        )
+
+    def rolling(
+        self,
+        index_column: String,
+        period: String,
+        offset: Optional[String] = None,
+        closed: String = "right",
+        *,
+        group_by: NoneType,
+    ) raises -> TimeGroupBy:
+        return self.rolling(
+            index_column, period, offset, closed, List[String]()
+        )
 
     def group_by(
         self, key: String, *, maintain_order: Bool = False
@@ -6449,3 +6567,146 @@ def _percent_label(q: Float64) -> String:
     while fraction.byte_length() < decimals:
         fraction = "0" + fraction
     return String(digits // factor) + "." + fraction + "%"
+
+
+@fieldwise_init
+struct TimeGroupBy(Copyable):
+    """A snapshot plus a duration grouping request, evaluated by agg.
+
+    Overlapping membership is gathered once, then existing grouped expression
+    reducers process all windows together. Empty rolling windows are retained;
+    empty dynamic windows are omitted.
+    """
+
+    var _frame: DataFrame
+    var _index: String
+    var _every: String
+    var _period: String
+    var _offset: String
+    var _closed: String
+    var _label: String
+    var _by: List[String]
+    var _rolling: Bool
+
+    def agg(
+        self, expression: Expr, *, batch_size: Int = 1024
+    ) raises -> DataFrame:
+        return self.agg([expression.copy()], batch_size=batch_size)
+
+    def agg(
+        self, expressions: List[Expr], *, batch_size: Int = 1024
+    ) raises -> DataFrame:
+        positive_period(self._period)
+        _ = parse_interval(self._offset)
+        var sides = closed_sides(self._closed)
+        if self._label not in ["left", "right", "datapoint"]:
+            raise Error("label must be left, right or datapoint")
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        var index = self._frame.column(self._index).rechunk()
+        var keys = List[Series]()
+        var names = List[String]([self._index])
+        for name in self._by:
+            if name in names:
+                raise Error("duplicate time grouping key: " + name)
+            names.append(name)
+            keys.append(self._frame.column(name))
+        var ids = List[Int]()
+        if len(keys):
+            ids = encode_rows(_expand_struct_keys(keys), True).ids.copy()
+        var groups = window_partitions(self._frame.height(), ids)
+        check_time_index(index, groups)
+        var dtype = index.dtype()
+        var zone = zone_of(dtype)
+        ref times = index._data[Column[Int64]]
+        var gathered = List[Int]()
+        var window_ids = List[Int]()
+        var representatives = List[Int]()
+        var labels = List[Int64]()
+        if self._rolling:
+            var bounds = rolling_bounds(
+                index, groups, self._period, self._offset, self._closed
+            )
+            for rows in groups:
+                for row in rows:
+                    var id = len(labels)
+                    labels.append(times._get(row))
+                    representatives.append(row)
+                    var begin = bounds[0][row]
+                    var end = bounds[1][row]
+                    for k in range(begin, end):
+                        gathered.append(rows[k])
+                        window_ids.append(id)
+        else:
+            positive_period(self._every)
+            for rows in groups:
+                if len(rows) == 0:
+                    continue
+                var first = times._get(rows[0])
+                var last = times._get(rows[len(rows) - 1])
+                var start = shift_time(
+                    truncate_time(first, dtype, self._every, zone),
+                    dtype,
+                    self._offset,
+                    zone,
+                )
+                while start > first or (start == first and not sides[0]):
+                    var previous = shift_time(
+                        start, dtype, negate_period(self._every), zone
+                    )
+                    if previous >= start:
+                        raise Error("every does not advance the time index")
+                    start = previous
+                # Large negative offsets can start before the first useful window.
+                while shift_time(start, dtype, self._period, zone) < first:
+                    start = shift_time(start, dtype, self._every, zone)
+                while start <= last:
+                    var end = shift_time(start, dtype, self._period, zone)
+                    var lo = search_time(times, rows, start, not sides[0])
+                    var hi = search_time(times, rows, end, sides[1])
+                    if lo < hi:
+                        var id = len(labels)
+                        labels.append(
+                            start if self._label
+                            == "left" else end if self._label
+                            == "right" else times._get(rows[lo])
+                        )
+                        representatives.append(rows[lo])
+                        for k in range(lo, hi):
+                            gathered.append(rows[k])
+                            window_ids.append(id)
+                    var next = shift_time(start, dtype, self._every, zone)
+                    if next <= start:
+                        raise Error("every does not advance the time index")
+                    start = next
+        var bound = _bind_all(expressions, self._frame._columns)
+        for expression in bound:
+            if expression.shape() != AGGREGATE:
+                raise Error(
+                    "Time grouping requires scalar aggregate expressions"
+                )
+            if expression.expr._name in names:
+                raise Error(
+                    "Aggregate output name collides with time grouping key: "
+                    + expression.expr._name
+                )
+        var columns = List[Series]()
+        for key in keys:
+            columns.append(key.take(representatives))
+        columns.append(
+            Series(self._index, Column[Int64](labels.copy())).with_dtype(dtype)
+        )
+        var input = self._frame.take(gathered)
+        for expression in bound:
+            columns.append(
+                evaluate(
+                    expression,
+                    input._columns,
+                    input.height(),
+                    batch_size=batch_size,
+                    grouped=True,
+                    groups=window_ids,
+                    group_count=len(labels),
+                )
+            )
+        return DataFrame(columns^, height=len(labels))

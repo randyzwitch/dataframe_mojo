@@ -7,6 +7,9 @@ is no Python, pandas, Polars, or Arrow runtime dependency.
 This is a working first implementation, not a production engine or a portable
 backend facade. The API is provisional.
 
+Calendar-aware rolling and dynamic grouping are described in
+[Time windows](docs/time-windows.md).
+
 ## Install
 
 Add it to another Pixi workspace straight from GitHub:

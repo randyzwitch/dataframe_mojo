@@ -75,6 +75,15 @@ from .expr import (
     CUM_COUNT,
     RANK,
     ROLLING_SUM,
+    ROLLING_STD,
+    ROLLING_VAR,
+    ROLLING_SUM_BY,
+    ROLLING_MEAN_BY,
+    ROLLING_MIN_BY,
+    ROLLING_MAX_BY,
+    ROLLING_STD_BY,
+    ROLLING_VAR_BY,
+    is_rolling_by,
     ROLLING_MEAN,
     ROLLING_MIN,
     ROLLING_MAX,
@@ -991,6 +1000,26 @@ def bind(
                     )
                 else:
                     dtype = DataType.STRING
+            elif is_rolling_by(node.op):
+                if (
+                    node.right < 0
+                    or node.right >= i
+                    or shapes[node.right] != ROWS
+                ):
+                    raise Error(
+                        "rolling_by requires a row-valued by expression"
+                    )
+                var index_type = types[node.right]
+                if not (index_type.is_date() or index_type.is_datetime()):
+                    raise Error("rolling_by requires a Date or Datetime index")
+                if not _numeric(input):
+                    raise Error("rolling_by requires numeric values")
+                if node.floating < 0 or node.min_count < 0:
+                    raise Error("min_samples and ddof must be nonnegative")
+                if node.op == ROLLING_SUM_BY:
+                    dtype = input.sum_type()
+                elif node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
+                    dtype = DataType.FLOAT64
             elif node.op == CUM_SUM or node.op == ROLLING_SUM:
                 if not _numeric(input) and not input.is_duration():
                     raise Error(
@@ -998,7 +1027,11 @@ def bind(
                         " found " + input.name()
                     )
                 dtype = input.sum_type()
-            elif node.op == ROLLING_MEAN:
+            elif (
+                node.op == ROLLING_MEAN
+                or node.op == ROLLING_STD
+                or node.op == ROLLING_VAR
+            ):
                 if not _numeric(input):
                     raise Error(
                         "rolling_mean requires a numeric expression, found "
@@ -1023,7 +1056,11 @@ def bind(
                 dtype = (
                     DataType.FLOAT64 if method == "average" else DataType.INT64
                 )
-            if node.op >= ROLLING_SUM and node.op <= ROLLING_MAX:
+            if (
+                (node.op >= ROLLING_SUM and node.op <= ROLLING_MAX)
+                or node.op == ROLLING_STD
+                or node.op == ROLLING_VAR
+            ):
                 if node.integer < 1:
                     raise Error("window_size must be at least 1")
                 if node.floating < -1:
@@ -1032,6 +1069,14 @@ def bind(
                 node.op == FORWARD_FILL or node.op == BACKWARD_FILL
             ) and node.integer < -1:
                 raise Error("fill limit must be nonnegative")
+            if (
+                node.op == ROLLING_STD or node.op == ROLLING_VAR
+            ) and node.min_count < 0:
+                raise Error("ddof must be nonnegative")
+            if (
+                node.op == ROLLING_STD or node.op == ROLLING_VAR
+            ) and node.floating > Float64(node.integer):
+                raise Error("min_samples cannot exceed window_size")
             shape = ROWS
             has_aggregate = aggregated[node.left]
         elif is_dt_op(node.op):

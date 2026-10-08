@@ -84,6 +84,7 @@ oracle-geometry = "python3 scripts/check_geometry_accessors.py"
 oracle-duckdb-spatial = "python3 scripts/check_duckdb_spatial.py"
 oracle-geoparquet = "python3 scripts/check_geoparquet.py"
 oracle-asof = "python3 scripts/check_asof.py"
+oracle-time-windows = "mojo run -I . tests/oracle/time_windows.mojo"
 bench-suites = "python3 scripts/bench_suites.py"
 
 [feature.oracle.pypi-dependencies]

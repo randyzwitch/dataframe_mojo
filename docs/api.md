@@ -389,6 +389,14 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Fill nulls in string columns with a string.
 - `def fill_null(self, value: Expr, subset: List[String] = List()) -> Self`
   Fill nulls with a scalar value.
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", group_by: List[String] = List()) -> TimeGroupBy`
+  Group sorted temporal rows into calendar-aligned, possibly overlapping windows.
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: String) -> TimeGroupBy`
+- `def group_by_dynamic(self, index_column: String, every: String, period: Optional[String] = None, offset: Optional[String] = None, closed: String = "left", label: String = "left", *, group_by: NoneType) -> TimeGroupBy`
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", group_by: List[String] = List()) -> TimeGroupBy`
+  Aggregate a duration window for each sorted temporal input row.
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: String) -> TimeGroupBy`
+- `def rolling(self, index_column: String, period: String, offset: Optional[String] = None, closed: String = "right", *, group_by: NoneType) -> TimeGroupBy`
 - `def group_by(self, key: String, *, maintain_order: Bool = False) -> GroupBy`
 - `def group_by(self, keys: List[String], *, maintain_order: Bool = False) -> GroupBy`
   Group by one or more columns of any dtype.
@@ -714,6 +722,34 @@ A flat, topologically ordered tree; composition never evaluates data.
 - `def rolling_mean(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
 - `def rolling_min(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
 - `def rolling_max(self, window_size: Int, min_samples: Int = Int(-1)) -> Self`
+- `def rolling_std(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1)) -> Self`
+  Rolling std with stable sliding moments and count minus ddof.
+- `def rolling_var(self, window_size: Int, min_samples: Int = Int(-1), ddof: Int = Int(1)) -> Self`
+  Rolling var with stable sliding moments and count minus ddof.
+- `def rolling_sum_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling sum over a sorted Date/Datetime duration window.
+- `def rolling_sum_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling sum over a sorted Date/Datetime duration window.
+- `def rolling_mean_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling mean over a sorted Date/Datetime duration window.
+- `def rolling_mean_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling mean over a sorted Date/Datetime duration window.
+- `def rolling_min_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling min over a sorted Date/Datetime duration window.
+- `def rolling_min_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling min over a sorted Date/Datetime duration window.
+- `def rolling_max_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling max over a sorted Date/Datetime duration window.
+- `def rolling_max_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1)) -> Self`
+  Rolling max over a sorted Date/Datetime duration window.
+- `def rolling_std_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
+  Rolling std over a sorted Date/Datetime duration window.
+- `def rolling_std_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
+  Rolling std over a sorted Date/Datetime duration window.
+- `def rolling_var_by(self, by: Self, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
+  Rolling var over a sorted Date/Datetime duration window.
+- `def rolling_var_by(self, by: String, window_size: String, closed: String = "right", min_samples: Int = Int(1), ddof: Int = Int(1)) -> Self`
+  Rolling var over a sorted Date/Datetime duration window.
 - `def forward_fill(self, limit: Int = Int(-1)) -> Self`
   Fill nulls with the last valid value, at most limit rows ahead (-1 means unlimited).
 - `def backward_fill(self, limit: Int = Int(-1)) -> Self`
@@ -1432,6 +1468,17 @@ It converts implicitly to an Expr whose unmatched rows are null.
 - `def otherwise(self, value: Expr) -> Expr`
 - `def end(self) -> Expr`
 - `def alias(self, name: String) -> Expr`
+
+## `TimeGroupBy`
+
+A snapshot plus a duration grouping request, evaluated by agg.
+
+Overlapping membership is gathered once, then existing grouped expression
+reducers process all windows together. Empty rolling windows are retained;
+empty dynamic windows are omitted.
+
+- `def agg(self, expression: Expr, *, batch_size: Int = Int(1024)) -> DataFrame`
+- `def agg(self, expressions: List[Expr], *, batch_size: Int = Int(1024)) -> DataFrame`
 
 ## `to_csv_string`
 

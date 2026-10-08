@@ -686,6 +686,8 @@ def parse_interval(every: String) raises -> Tuple[Int64, Int64, Int64]:
         var unit = String(every[byte=start:pos])
         if unit == "y":
             months = checked_add(months, checked_mul(amount, 12))
+        elif unit == "q":
+            months = checked_add(months, checked_mul(amount, 3))
         elif unit == "mo":
             months = checked_add(months, amount)
         elif unit == "d":
