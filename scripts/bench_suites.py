@@ -345,7 +345,7 @@ def trace_paths(stderr):
 
 OPERATOR_COLUMNS = (
     "node operator executor algorithm build_side input_rows build_rows "
-    "output_rows builds executions"
+    "output_rows builds executions busy_ms wall_ms"
 ).split()
 
 
@@ -362,8 +362,13 @@ def operator_reports(stderr):
             cells = line.split("\t")[1:]
             row = dict(zip(OPERATOR_COLUMNS, cells))
             for name in OPERATOR_COLUMNS:
+                if name not in row:
+                    # A baseline built before the column existed.
+                    continue
                 if name.endswith("rows") or name in ("node", "builds", "executions"):
                     row[name] = int(row[name])
+                elif name.endswith("_ms"):
+                    row[name] = float(row[name])
             if reports[current] and row["node"] <= reports[current][-1]["node"]:
                 # Rows come in node order; a lower node starts a new run.
                 reports[current] = []
