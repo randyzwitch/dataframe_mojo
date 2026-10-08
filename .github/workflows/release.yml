@@ -23,6 +23,9 @@ jobs:
       - name: Check public docstrings
         run: pixi run docs-check
 
+      - name: Build examples
+        run: pixi run build
+
       - name: Build package and run an example against it
         run: pixi run package-smoke
 

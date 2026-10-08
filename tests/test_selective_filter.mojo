@@ -104,5 +104,53 @@ def test_decimal_parts_and_odd_offsets() raises:
     check(data.slice(3, ROWS - 10), (col("b") >= 0) & (col("a") < 50))
 
 
+def test_fused_comparisons_every_type_operator_and_offset() raises:
+    # Parts comparing a numeric column with a constant run together in one
+    # pass (`fused_comparisons`); every width, each operator, the constant
+    # on either side, NaN, a validity bitmap with no null, and windows that
+    # start mid-byte and end mid-word.
+    var n = 20_011
+    var i8 = List[Int8](capacity=n)
+    var u16 = List[UInt16](capacity=n)
+    var i32 = List[Int32](capacity=n)
+    var f32 = List[Float32](capacity=n)
+    var f64 = List[Float64](capacity=n)
+    var all_valid = List[Bool](capacity=n)
+    var nan = Float64(0) / Float64(0)
+    for i in range(n):
+        i8.append(Int8(i % 200 - 100))
+        u16.append(UInt16((i * 31) % 60_000))
+        i32.append(Int32((i * 7) % 1000 - 500))
+        f32.append(Float32(i % 97) / 4)
+        f64.append(nan if i % 13 == 5 else Float64(i % 89))
+        all_valid.append(True)
+    var data = DataFrame(
+        [
+            Series("i8", Column[Int8](i8^)),
+            Series("u16", Column[UInt16](u16^)),
+            Series("i32", Column[Int32](i32^, all_valid^)),
+            Series("f32", Column[Float32](f32^)),
+            Series("f64", Column[Float64](f64^)),
+        ]
+    )
+    var frames = [data.copy(), data.slice(3, n - 10), data.slice(77, 9_000)]
+    for f in frames:
+        check(
+            f,
+            (col("i8") >= lit(Int8(-20)))
+            & (col("i8") < lit(Int8(60)))
+            & (col("u16") != lit(UInt16(310))),
+        )
+        check(
+            f,
+            (lit(Int32(0)) < col("i32"))
+            & (col("i32") <= lit(Int32(400)))
+            & (col("f32") > lit(Float32(3.5))),
+        )
+        check(f, (col("f64") != 7.0) & (col("f64") <= 40.0))
+        check(f, (col("f64") == 12.0) & (lit(100.0) > col("f64")))
+        check(f, (col("i32") == lit(Int32(-3))) & (col("f64") >= 0.0))
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

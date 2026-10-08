@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     strategy:
@@ -63,10 +67,10 @@ jobs:
 
       - name: Build libdfparquet
         if: steps.dfparquet.outputs.cache-hit != 'true'
-        run: pixi run -e native build-dfparquet
+        run: python3 scripts/ci_time.py --label native-build -- pixi run -e native build-dfparquet
 
       - name: Verify Parquet exports and loader search paths
-        run: pixi run bash scripts/check_parquet_library.sh
+        run: python3 scripts/ci_time.py --label parquet-loader -- pixi run bash scripts/check_parquet_library.sh
 
       # The Linux runner has 16 GB and four cores. Compiling a driver
       # program costs about 170 s and 4 GB whatever it holds (the library's
@@ -79,36 +83,45 @@ jobs:
         env:
           TEST_GROUPS: ${{ runner.os == 'Linux' && '2' || '10' }}
           TEST_JOBS: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: pixi run test
-
-      - name: Build examples
-        run: pixi run build
+        run: python3 scripts/ci_time.py --label unit-tests -- pixi run test
 
       - name: Differential tests against Polars
         if: runner.os == 'Linux'
         run: |
-          pixi run -e oracle oracle --cases 150 --seed ${{ github.run_number }}
-          pixi run -e oracle oracle --mutation-check --cases 20
-          pixi run -e oracle oracle-arrow
-          pixi run -e oracle oracle-geometry
-          pixi run -e oracle oracle-geoparquet
-          pixi run -e oracle oracle-shapefile
-          pixi run -e oracle oracle-asof
-          pixi run -e oracle oracle-time-windows
-          pixi run -e oracle python3 scripts/check_parquet_write.py
-          pixi run -e oracle python3 scripts/check_parquet_stream.py build/dfparquet/libdfparquet.so
+          python3 scripts/ci_time.py --label oracle-cases -- pixi run -e oracle oracle --cases 150 --seed ${{ github.run_number }}
+          python3 scripts/ci_time.py --label oracle-mutation-check -- pixi run -e oracle oracle --mutation-check --cases 20
+          python3 scripts/ci_time.py --label oracle-arrow -- pixi run -e oracle oracle-arrow
+          python3 scripts/ci_time.py --label oracle-geometry -- pixi run -e oracle oracle-geometry
+          python3 scripts/ci_time.py --label oracle-geoparquet -- pixi run -e oracle oracle-geoparquet
+          python3 scripts/ci_time.py --label oracle-shapefile -- pixi run -e oracle oracle-shapefile
+          python3 scripts/ci_time.py --label oracle-asof -- pixi run -e oracle oracle-asof
+          python3 scripts/ci_time.py --label oracle-time-windows -- pixi run -e oracle oracle-time-windows
+          python3 scripts/ci_time.py --label check_parquet_write -- pixi run -e oracle python3 scripts/check_parquet_write.py
+          python3 scripts/ci_time.py --label check_parquet_stream -- pixi run -e oracle python3 scripts/check_parquet_stream.py build/dfparquet/libdfparquet.so
 
       - name: Benchmark suite answers (smoke scale)
         if: runner.os == 'Linux'
         run: >-
-          pixi run -e oracle python3 scripts/bench_suites.py
+          python3 scripts/ci_time.py --label query-answers -- pixi run -e oracle python3 scripts/bench_suites.py
           --suites h2o_groupby,h2o_join,pdsh --scale smoke --rounds 1 --reps 1
           --engines mojo,duckdb --threads 4 --allow-busy --check
 
       - name: TPC-DS answers (smoke scale)
         if: runner.os == 'Linux'
         run: >-
-          pixi run -e oracle python3 scripts/bench_suites.py
+          python3 scripts/ci_time.py --label query-answers -- pixi run -e oracle python3 scripts/bench_suites.py
           --suites tpcds --scale smoke --rounds 1 --reps 1
           --engines mojo,duckdb --threads 4 --allow-busy --check
 
+
+      - name: Summarize timings
+        if: always()
+        run: python3 scripts/ci_time.py --summary
+
+      - name: Upload timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-timings-${{ runner.os }}
+          path: build/ci-timings/*.json
+          if-no-files-found: ignore
