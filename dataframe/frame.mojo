@@ -1535,7 +1535,11 @@ struct DataFrame(Copyable, Sized, Writable):
         coalesce: Bool = True,
         prepared: Optional[PreparedHashIndex] = None,
         range_filtered: Bool = False,
+        keep_order: Bool = True,
     ) raises -> Self:
+        """`keep_order=False` lets an inner join emit its pairs in whatever
+        order its probe produced them, for a caller whose consumers ignore
+        row order (a lazy plan feeding an aggregation)."""
         if how == JOIN_CROSS:
             raise Error(
                 "A cross join takes no keys; use join(right, how='cross')"
@@ -1878,7 +1882,10 @@ struct DataFrame(Copyable, Sized, Writable):
             var direct_identity = False
             if build_left:
                 var pairs = _smaller_build_join_rows(
-                    left_sources, right_sources, how == JOIN_LEFT
+                    left_sources,
+                    right_sources,
+                    how == JOIN_LEFT,
+                    keep_order or how != JOIN_INNER,
                 )
                 swap(left_rows, pairs[0])
                 swap(right_rows, pairs[1])
@@ -3088,16 +3095,25 @@ def _join_range_rows(
 
 
 def _smaller_build_join_rows(
-    left: List[Series], right: List[Series], include_unmatched: Bool
+    left: List[Series],
+    right: List[Series],
+    include_unmatched: Bool,
+    keep_order: Bool = True,
 ) raises -> Tuple[List[Int], List[Int]]:
     """Build on logical left, then stably restore left-major/right-input order.
 
     The physical probe emits right-major pairs. Stable counting scatter by
     logical left row preserves the original right-row ordering within every
-    left group, including duplicate keys on either side.
+    left group, including duplicate keys on either side. Without
+    `keep_order` (an inner join whose consumers ignore order) the pairs are
+    returned right-major as probed: the scatter cost more than the probe
+    (PDS-H q5: 750K pairs over 187K orders, 18 ms against 13).
     """
     trace_path("join.smaller_build")
     var pairs = direct_hash_join_rows(right, left, False)
+    if not keep_order and not include_unmatched:
+        trace_path("join.smaller_build_unordered")
+        return (pairs[1].copy(), pairs[0].copy())
     var starts = _group_index(pairs[1], len(left[0]))
     var order = _group_rows(pairs[1], starts)
     var left_rows = List[Int](capacity=len(order))

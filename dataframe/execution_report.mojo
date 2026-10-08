@@ -4,8 +4,10 @@
 executors record into it: one record per plan node that ran, with the
 rows it read and wrote, how many times it ran, and for a join the rows it
 built an index over, how many indexes it built, the build side and the
-algorithm. The counts are observed, never estimated, so tests can assert
-one build per streaming join and one execution per input without timing.
+algorithm, and the time it took. The counts are observed, never
+estimated, so tests can assert one build per streaming join and one
+execution per input without timing; the times are for finding where a
+query spends its time, as Polars' and DuckDB's profiles show.
 Without a report attached, the executors only test a flag.
 """
 from std.memory import ArcPointer
@@ -31,6 +33,10 @@ struct OperatorRecord(Copyable, Movable):
     var output_rows: Int
     var builds: Int  # indexes built for the join
     var executions: Int  # times the node ran
+    var busy_ns: Int  # a streamed operation's time summed over its
+    # batches (busy time across workers)
+    var wall_ns: Int  # an eager node's wall time including its inputs; a
+    # stream's last node: the whole stream's wall time
 
 
 struct ExecutionReport(Movable):
@@ -46,7 +52,9 @@ struct ExecutionReport(Movable):
             if self.records[i].node == node:
                 return i
         self.records.append(
-            OperatorRecord(node, operator, executor, "", "", 0, 0, 0, 0, 0)
+            OperatorRecord(
+                node, operator, executor, "", "", 0, 0, 0, 0, 0, 0, 0
+            )
         )
         return len(self.records) - 1
 
@@ -63,9 +71,11 @@ struct ExecutionReport(Movable):
         builds: Int = 0,
         algorithm: String = "",
         build_side: String = "",
+        busy_ns: Int = 0,
+        wall_ns: Int = 0,
     ):
-        """Add an execution of `node`; rows accumulate across executions
-        and across the batches of a stream."""
+        """Add an execution of `node`; rows and time accumulate across
+        executions and across the batches of a stream."""
         var at = self._slot(node, operator, executor)
         ref item = self.records[at]
         item.executor = executor
@@ -74,6 +84,8 @@ struct ExecutionReport(Movable):
         item.build_rows += build_rows
         item.builds += builds
         item.executions += executions
+        item.busy_ns += busy_ns
+        item.wall_ns += wall_ns
         if algorithm:
             item.algorithm = algorithm
         if build_side:
@@ -106,6 +118,8 @@ struct ExecutionReport(Movable):
         var outputs = List[Int64]()
         var builds = List[Int64]()
         var executions = List[Int64]()
+        var busy = List[Float64]()
+        var wall = List[Float64]()
         for item in ordered:
             nodes.append(Int64(item.node))
             operators.append(item.operator)
@@ -117,6 +131,8 @@ struct ExecutionReport(Movable):
             outputs.append(Int64(item.output_rows))
             builds.append(Int64(item.builds))
             executions.append(Int64(item.executions))
+            busy.append(Float64(item.busy_ns) / 1e6)
+            wall.append(Float64(item.wall_ns) / 1e6)
         return DataFrame(
             [
                 Series("node", Column[Int64](nodes^)),
@@ -129,6 +145,8 @@ struct ExecutionReport(Movable):
                 Series("output_rows", Column[Int64](outputs^)),
                 Series("builds", Column[Int64](builds^)),
                 Series("executions", Column[Int64](executions^)),
+                Series("busy_ms", Column[Float64](busy^)),
+                Series("wall_ms", Column[Float64](wall^)),
             ]
         )
 
@@ -140,9 +158,11 @@ struct ExecutionReport(Movable):
             var parts = List[String]()
             for name in table.columns():
                 var cell = table.item(r, name)
-                parts.append(
-                    String(cell.int64()) if cell.dtype()
-                    == DataType.INT64 else cell.string()
-                )
+                if cell.dtype() == DataType.INT64:
+                    parts.append(String(cell.int64()))
+                elif cell.dtype() == DataType.FLOAT64:
+                    parts.append(String(round(cell.float64(), 3)))
+                else:
+                    parts.append(cell.string())
             out.append(String("\t").join(parts))
         return out^

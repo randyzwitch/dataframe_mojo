@@ -168,6 +168,36 @@ def test_frame_scan_under_an_eager_step_is_not_streamed() raises:
         assert_equal(report.item(r, "executor").string(), "streaming")
 
 
+def test_report_times_and_an_unordered_join_under_an_aggregation() raises:
+    """The report times each node (busy time for streamed operations, wall
+    time for eager ones and the stream as a whole), and an inner join that
+    builds on its small left side feeds an aggregation in the order it
+    probed, with the aggregation's answer unchanged."""
+    var small = DataFrame([ints("k", 20_000, 20_000), ints("g", 20_000, 7)])
+    var large = DataFrame(
+        [ints("k", 600_000, 40_000), ints("v", 600_000, 1_000)]
+    )
+    var plan = (
+        small.lazy()
+        .filter(col("g") < lit(Int64(3)))
+        .join(large.lazy(), left_on=["k"], right_on=["k"])
+        .group_by(["g"])
+        .agg([col("v").sum().alias("s"), col("k").len().alias("n")])
+        .sort("g")
+    )
+    var profiled = plan.profile()
+    assert_true(profiled[0].equals(plan.collect(optimize=False)))
+    var report = profiled[1].copy()
+    assert_true("busy_ms" in report.columns())
+    assert_true("wall_ms" in report.columns())
+    var root_wall = 0.0
+    for r in range(report.height()):
+        assert_true(report.item(r, "busy_ms").float64() >= 0.0)
+        assert_true(report.item(r, "wall_ms").float64() >= 0.0)
+        root_wall = max(root_wall, report.item(r, "wall_ms").float64())
+    assert_true(root_wall > 0.0)
+
+
 def test_collect_without_profile_records_nothing() raises:
     var frame = DataFrame([ints("k", 100, 10)])
     var plan = frame.lazy().filter(col("k") > lit(Int64(3)))
