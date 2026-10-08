@@ -158,3 +158,27 @@ Sort bucket calibration and reproducible sweeps are recorded in
 The [upstream join baseline](upstream-join-baseline.md) records an earlier
 adaptation of two DuckDB join queries; its scripts are retired (see
 benchmarks.md) and the external suites supersede it.
+
+## CI cost and feedback
+
+Required PR CI preserves unit, interoperability, and query-answer checks.
+Example compilation runs separately on main, tags, manual dispatch, and PRs
+changing examples or the Pixi toolchain/configuration. Library-only PRs rely
+on the main-branch example check; release publishing also builds the examples.
+Do not require the path-filtered Examples workflow in branch protection.
+Superseded runs of the same PR are cancelled; main and tag runs are retained.
+
+`scripts/ci_time.py --label NAME -- COMMAND ...` records wall time, child CPU,
+peak child RSS and exit status in `build/ci-timings/`. CI publishes these files
+and a job summary even after failure. Nested rows overlap; peak child RSS is
+not aggregate concurrent memory. GitHub's job timestamps remain the source
+for setup/cache time and queue delay. Compare elapsed time and runner minutes
+separately, and compare native-cache hits with hits (misses with misses).
+
+Before adding another compiled program, check whether an existing driver can
+run its cases. Review timing changes across several runs when adding checks.
+The October 8 baseline was 72–91 minutes on Linux and 42–70 on macOS, excluding
+queue time. Example compilation alone cost 8–10 and 7–8.5 minutes respectively.
+Initial targets are under 60 minutes per required job, then under 45 after
+measured driver tuning, without dropping test modules, cases, or query variants.
+These are review targets, not timeouts that terminate correctness coverage.
