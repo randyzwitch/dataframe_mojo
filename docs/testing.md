@@ -182,3 +182,48 @@ queue time. Example compilation alone cost 8–10 and 7–8.5 minutes respective
 Initial targets are under 60 minutes per required job, then under 45 after
 measured driver tuning, without dropping test modules, cases, or query variants.
 These are review targets, not timeouts that terminate correctness coverage.
+
+CI builds the random-oracle runner once with `oracle --build-only`, then uses
+`oracle --runner build/oracle_runner` for both normal and mutation cases.
+Local invocations without `--runner` still rebuild. Reuse is explicitly scoped
+to the same checkout and job, not a persistent executable cache.
+
+The Parquet loader check accepts an optional output executable path. CI passes
+`build/ci-tests/test_parquet`, then sets `TEST_PARQUET_BINARY` to that path for
+the unit suite. The suite still runs the module; it reuses its compilation.
+An absent/non-executable explicit binary fails instead of silently rebuilding.
+Other modules build and execute separately, with separate timing records.
+
+Query-answer CI uses `bench_suites.py --correctness-only`: each selected query
+runs once per engine and variant, with no timed repetitions, trace reruns,
+reference-cache reuse, or performance reports. The usual smoke-scale suites
+and all their variants remain selected. Wrong answers, missing outcomes,
+failed workers, timeouts, and missing successful reference answers fail the
+check. Explicitly unsupported queries retain their visible unsupported status.
+JSON outcomes are saved as `build/suites/answers.json` by default, separately
+from performance results. Normal benchmark commands keep their existing behavior.
+
+### Independent required jobs
+
+Fast checks, Linux units, macOS units, Linux oracles, and two query-answer
+jobs run independently. One Linux job restores/builds `libdfparquet` and
+publishes it for the Linux consumers, avoiding multiple cold native builds.
+macOS restores/builds its own library and does not wait for Linux.
+
+The existing `test (ubuntu-latest)` check aggregates every Linux job and
+fails for failed, cancelled, or skipped dependencies. `test (macos-latest)`
+continues to cover the full macOS suite and both Parquet loader paths.
+Existing branch-protection names remain valid; no tests become optional.
+Job separation trades some repeated checkout/environment setup for shorter
+elapsed time. Timing artifacts have unique names for every job.
+
+Command budgets emit annotations without interrupting tests: 40 minutes for
+Linux units, 55 for macOS units, 25 for oracles, and 15 for each answer job.
+Budgets exclude setup and the separate Parquet loader compilation. Compare
+several warm-cache runs and total runner minutes before tightening them.
+
+The manual CI dispatch accepts `macos-groups` and `macos-jobs` for controlled
+calibration. Defaults remain ten drivers and three compiler processes. Try
+one configuration per dispatch (for example 6/2 or 4/1), compare compile times
+and peak memory with 10/3, and change the PR default only after repeated
+measurements without OOMs. Linux retains its measured 2/1 configuration.

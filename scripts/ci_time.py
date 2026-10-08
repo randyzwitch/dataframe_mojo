@@ -15,6 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--summary", action="store_true")
     parser.add_argument("--label", default="command")
+    parser.add_argument("--budget-seconds", type=float, help="warn when wall time exceeds this budget")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     directory = Path(os.environ.get("CI_TIMINGS_DIR", "build/ci-timings"))
@@ -60,6 +61,12 @@ def main():
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{uuid.uuid4()}.json").write_text(json.dumps(row) + "\n")
     print(f'CI timing: {args.label}: {row["seconds"]:.1f}s, exit {code}', flush=True)
+    if args.budget_seconds is not None and row["seconds"] > args.budget_seconds:
+        print(
+            f'::warning::{args.label} took {row["seconds"]:.1f}s; '
+            f'budget is {args.budget_seconds:.0f}s. Review the timing artifact.',
+            flush=True,
+        )
     return code
 
 
