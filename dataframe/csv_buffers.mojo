@@ -4,6 +4,7 @@ Numeric values are built in their output dtype and validity is packed during
 append. Variant payloads are swapped out at finish, transferring ownership.
 Strings use 16-byte views with inline short values and retained blocks.
 """
+from std.collections import Dict
 from std.memory import ArcPointer
 from std.utils import Variant
 from .column import Column, _append_validity_bit
@@ -11,7 +12,7 @@ from .bool_column import BoolColumn
 from .string_column import StringColumn
 from .string_view import StringViewBuilder
 from .series import Series
-from .dtype import DataType, NUMERIC_DTYPES
+from .dtype import CategoricalDictionary, DataType, NUMERIC_DTYPES
 from .csv_types import CsvField
 from .csv_integer import parse_csv_integer
 from .csv_numeric import parse_csv_float32, parse_csv_float64
@@ -76,19 +77,47 @@ struct _BoolBuffer(Copyable):
         )
 
 
-struct _Utf8Buffer(Movable):
+struct _Utf8Buffer[categorical: Bool = False](Movable):
     """builder.rs Utf8Field: encoding, quote byte, and scratch owned by builder."""
 
     var builder: StringViewBuilder
+    var codes: _NumericBuffer[DType.uint32]
+    var dictionary: CategoricalDictionary
+    var lookup: Dict[String, UInt32]
     var scratch: List[UInt8]
     var quote_char: UInt8
     var lossy: Bool
 
     def __init__(out self, capacity: Int, quote_char: UInt8, lossy: Bool):
-        self.builder = StringViewBuilder(capacity)
+        self.builder = StringViewBuilder(0 if Self.categorical else capacity)
+        self.codes = _NumericBuffer[DType.uint32](
+            capacity if Self.categorical else 0
+        )
+        self.dictionary = CategoricalDictionary()
+        self.lookup = Dict[String, UInt32]()
         self.scratch = List[UInt8]()
         self.quote_char = quote_char
         self.lossy = lossy
+
+    def append_null(mut self):
+        comptime if Self.categorical:
+            self.codes.append(0, False)
+        else:
+            self.builder.append_null()
+
+    def append(mut self, value: StringSlice) raises:
+        comptime if Self.categorical:
+            var key = String(value)
+            if key not in self.lookup:
+                if len(self.dictionary) > Int(UInt32.MAX):
+                    raise Error(
+                        "CSV categorical dictionary exceeds UInt32 codes"
+                    )
+                self.lookup[key] = UInt32(len(self.dictionary))
+                self.dictionary.append(value)
+            self.codes.append(self.lookup[key], True)
+        else:
+            self.builder.append(value)
 
     def add(
         mut self,
@@ -97,7 +126,7 @@ struct _Utf8Buffer(Movable):
         ignore_errors: Bool,
     ) raises:
         if len(raw) == 0:
-            self.builder.append_null()
+            self.append_null()
             return
         var bytes = raw
         if needs_escaping:
@@ -136,14 +165,19 @@ struct _Utf8Buffer(Movable):
             except:
                 if self.lossy:
                     var lossy = String(from_utf8_lossy=bytes)
-                    self.builder.append(StringSlice(lossy))
+                    self.append(StringSlice(lossy))
                 else:
-                    self.builder.append_null()
+                    self.append_null()
                 return
-        self.builder.append(StringSlice(unsafe_from_utf8=bytes))
+        self.append(StringSlice(unsafe_from_utf8=bytes))
 
-    def finish(deinit self) -> StringColumn:
-        return StringColumn(self.builder^.finish())
+    def finish(deinit self, name: String) raises -> Series:
+        comptime if Self.categorical:
+            return self.codes.finish(name).with_dtype(
+                DataType.categorical(self.dictionary^)
+            )
+        else:
+            return Series(name, StringColumn(self.builder^.finish()))
 
 
 comptime _Buffers = Variant[
@@ -159,7 +193,8 @@ comptime _Buffers = Variant[
     _NumericBuffer[DType.float32],
     _NumericBuffer[DType.int128],
     _BoolBuffer,
-    _Utf8Buffer,
+    _Utf8Buffer[False],
+    _Utf8Buffer[True],
 ]
 
 
@@ -202,6 +237,11 @@ struct CsvBuffer(Movable):
         except:
             # The dtype was checked when it was made.
             self.zone = TimeZone.utc()
+        if field.dtype.is_categorical():
+            self.storage = _Buffers(
+                _Utf8Buffer[True](capacity, quote_char, lossy)
+            )
+            return
         if field.dtype.is_decimal():
             self.storage = _Buffers(_NumericBuffer[DType.int128](capacity))
             return
@@ -213,9 +253,14 @@ struct CsvBuffer(Movable):
         if field.dtype == DataType.BOOL:
             self.storage = _Buffers(_BoolBuffer(capacity))
         else:
-            self.storage = _Buffers(_Utf8Buffer(capacity, quote_char, lossy))
+            self.storage = _Buffers(
+                _Utf8Buffer[False](capacity, quote_char, lossy)
+            )
 
     def add_null(mut self) raises:
+        if self.storage.isa[_Utf8Buffer[True]]():
+            self.storage[_Utf8Buffer[True]].append_null()
+            return
         if self.storage.isa[_NumericBuffer[DType.int128]]():
             self.storage[_NumericBuffer[DType.int128]].append(0, False)
             return
@@ -227,7 +272,7 @@ struct CsvBuffer(Movable):
         if self.storage.isa[_BoolBuffer]():
             self.storage[_BoolBuffer].append(False, False)
         else:
-            self.storage[_Utf8Buffer].builder.append_null()
+            self.storage[_Utf8Buffer[False]].append_null()
 
     def add(
         mut self,
@@ -235,8 +280,15 @@ struct CsvBuffer(Movable):
         needs_escaping: Bool,
         ignore_errors: Bool,
     ) raises:
-        if self.storage.isa[_Utf8Buffer]():
-            self.storage[_Utf8Buffer].add(raw, needs_escaping, ignore_errors)
+        if self.storage.isa[_Utf8Buffer[True]]():
+            self.storage[_Utf8Buffer[True]].add(
+                raw, needs_escaping, ignore_errors
+            )
+            return
+        if self.storage.isa[_Utf8Buffer[False]]():
+            self.storage[_Utf8Buffer[False]].add(
+                raw, needs_escaping, ignore_errors
+            )
             return
         var value = raw
         if needs_escaping and len(raw) >= 2:
@@ -396,6 +448,10 @@ struct CsvBuffer(Movable):
                 )
         if self.storage.isa[_BoolBuffer]():
             return self.storage[_BoolBuffer].finish(self.field.name)
-        var builder = _Utf8Buffer(0, 34, False)
-        swap(builder, self.storage[_Utf8Buffer])
-        return Series(self.field.name, builder^.finish())
+        if self.storage.isa[_Utf8Buffer[True]]():
+            var categorical = _Utf8Buffer[True](0, 34, False)
+            swap(categorical, self.storage[_Utf8Buffer[True]])
+            return categorical^.finish(self.field.name)
+        var builder = _Utf8Buffer[False](0, 34, False)
+        swap(builder, self.storage[_Utf8Buffer[False]])
+        return builder^.finish(self.field.name)

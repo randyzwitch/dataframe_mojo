@@ -232,6 +232,8 @@ means ISO 8601 (see dataframe/temporal.mojo).
 - `def float64(name: String, nullable: Bool = True) -> Self`
 - `def bool(name: String, nullable: Bool = True) -> Self`
 - `def string(name: String, nullable: Bool = True) -> Self`
+- `def categorical(name: String, nullable: Bool = True) -> Self`
+  Decode text directly into dictionary codes; never inferred.
 - `def date(name: String, format: String = "", nullable: Bool = True) -> Self`
 - `def datetime(name: String, unit: String = "us", format: String = "", nullable: Bool = True, time_zone: String = "") -> Self`
   A datetime field. With `time_zone`, text without a UTC offset is local time in that zone; text with one is converted.
@@ -1172,6 +1174,14 @@ Read a local Parquet file into a DataFrame.
 
 ```mojo
 def read_parquet(path: String, *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True) -> DataFrame
+```
+
+## `read_shapefile`
+
+Read SHP/DBF with optional validated SHX and verbatim WKT PRJ.
+
+```mojo
+def read_shapefile(path: String, *, geometry_name: String = "geometry", encoding: String = "utf-8") -> DataFrame
 ```
 
 ## `scan_csv`
