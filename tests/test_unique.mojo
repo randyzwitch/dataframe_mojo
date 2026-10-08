@@ -147,5 +147,41 @@ def test_frame_fill_null() raises:
     assert_equal(df.fill_null(null("int64")).column("a").null_count(), 1)
 
 
+def test_large_whole_row_unique_in_any_order() raises:
+    """Whole-row unique of a frame large enough for every worker runs as a
+    group_by with no aggregates: the same distinct rows as the ordered
+    unique (nulls equal, every NaN one value, -0.0 equal to 0.0, strings
+    by bytes), in some order."""
+    var n = 300_000
+    var ints = List[Int64](capacity=n)
+    var int_valid = List[Bool](capacity=n)
+    var floats = List[Float64](capacity=n)
+    var labels = List[String](capacity=n)
+    for i in range(n):
+        ints.append(Int64((i * 7919) % 5_003))
+        int_valid.append(i % 97 != 5)
+        var f = Float64(i % 3)
+        if i % 11 == 0:
+            f = Float64(0) / Float64(0)
+        elif i % 3 == 0:
+            f = -0.0 if i % 2 == 0 else 0.0
+        floats.append(f)
+        labels.append("t" + String(i % 4))
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](ints^, int_valid^)),
+            Series("f", Column[Float64](floats^)),
+            Series("s", Column[String](labels^)),
+        ]
+    )
+    var any = frame.unique()
+    var ordered = frame.unique(maintain_order=True)
+    assert_equal(any.height(), ordered.height())
+    var by: List[String] = ["k", "f", "s"]
+    assert_true(
+        any.sort(by, nulls_last=True).equals(ordered.sort(by, nulls_last=True))
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
