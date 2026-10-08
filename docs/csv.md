@@ -23,11 +23,22 @@ All reader options and positional name/type validation are shared with the
 explicit schema API. An empty or duplicate-name shorthand schema raises.
 
 `CsvSchema` is ordered, non-empty and has unique names. Construct fields with
-`CsvField.int64`, `.float64`, `.bool`, `.string`, `.date`, `.datetime`, `.time`,
-or `CsvField(name, dtype)` for any supported numeric width. Explicit schema
+`CsvField.int64`, `.float64`, `.bool`, `.string`, `.categorical`, `.date`,
+`.datetime`, `.time`, or `CsvField(name, dtype)` for any supported numeric width. Explicit schema
 names label columns by position, including when the file has different header
 names. `CsvField.nullable` remains accepted metadata; it does not prohibit null
 CSV values, matching Polars' nullable columns.
+
+Use `CsvField.categorical("region")`, `CsvField("region", DataType.CATEGORICAL)`,
+or `("region", DataType.CATEGORICAL)` to read dictionary-encoded strings.
+The decoder builds UInt32 codes and a dictionary of distinct values directly,
+without materializing a String column first. Decode chunks build their own
+dictionaries; assembly unifies their codes. Supplied dictionary contents are
+not a restriction on incoming values: the reader builds dictionaries from the
+CSV values. Categorical fields share String escaping, encoding, null-token
+and quoted-empty behavior. `scan_csv(path, schema)` supports the same fields.
+Categorical is never inferred; a `schema_overrides` entry of `"categorical"`
+is also an explicit request for this decoder.
 
 Empty and header-only files produce zero rows with an explicit schema. Short
 records are padded with nulls. Extra fields raise unless truncation or a partial
@@ -63,8 +74,8 @@ Errors include record/field context where conversion provides it; their text
 is not a compatibility interface.
 
 Strict UTF-8 validation checks each chunk once when the complete source schema
-contains a String column, even if that column is not projected. `utf8-lossy`
-replaces invalid String byte sequences with U+FFFD. Numeric-only input still
+contains a String or Categorical column, even if that column is not projected.
+`utf8-lossy` replaces invalid text byte sequences with U+FFFD. Numeric-only input still
 passes through the numeric grammar checks.
 
 ## Schema inference

@@ -151,7 +151,10 @@ def decode_chunk(
         # read_impl's `check_utf8` inspects the complete source schema, not
         # its projection. It runs before read_chunk, so an omitted text field
         # still makes a strict UTF-8 chunk invalid.
-        if schema._fields[i].dtype == DataType.STRING:
+        if (
+            schema._fields[i].dtype == DataType.STRING
+            or schema._fields[i].dtype.is_categorical()
+        ):
             needs_utf8 = True
         if keep[i]:
             selected += 1
