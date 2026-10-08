@@ -3016,9 +3016,16 @@ struct LazyFrame(Copyable):
                     and _row_local(self._nodes[under].exprs)
                 ):
                     under = self._nodes[under].left
+                # Not over a join: the join order and stream batches are
+                # tuned to where filters sit, and moving an OR-implied range
+                # below the joins cost TPC-DS q13 10% (an OR of decimal
+                # ranges over 2.9M rows, and joins on batches a tenth the
+                # size) and q69 14%. Over a group_by (TPC-DS q39) or a
+                # with_columns (PDS-H q22's phone prefix, 8%) it pays.
                 if (
                     under != child
                     and under >= 0
+                    and self._nodes[under].kind != JOIN
                     and self._passes(child, under) < 0
                     and self._passes(i, under) >= 0
                 ):

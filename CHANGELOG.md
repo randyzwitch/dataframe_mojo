@@ -697,6 +697,10 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Fixed
 
+- A row-local filter no longer trades places with filters stuck above a
+  join (#498 allowed it anywhere): moving OR-implied ranges below the
+  joins made TPC-DS q13 10% and q69 14% slower. Trades over a group_by
+  or a row-local step stay.
 - A lazy plan whose terminal step runs eagerly over an in-memory frame
   (a many-group `group_by`, a full `sort`, an eager join) no longer
   streams the frame's scan first: the stream only copied the frame into
