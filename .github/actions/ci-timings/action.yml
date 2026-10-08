@@ -1,0 +1,19 @@
+name: Publish CI timings
+description: Summarize and upload this job's command timing records.
+inputs:
+  name:
+    description: Unique artifact name within this workflow run.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Summarize timings
+      shell: bash
+      run: python3 scripts/ci_time.py --summary
+    - name: Upload timings
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: build/ci-timings/*.json
+        if-no-files-found: ignore
