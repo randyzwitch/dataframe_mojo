@@ -169,6 +169,9 @@ metadata. Rebuild `libdfparquet` to add the writer entry point. See the
 
 ## Geospatial storage and import
 
+Read GIS shapefiles with [read_shapefile](docs/shapefile.md), including Z/M
+coordinates, DBF attributes and CRS metadata.
+
 `read_geojson(path)` reads GeoJSON features into attribute columns and a
 `geometry` column. `read_parquet` / `scan_parquet` recognize WKB GeoParquet
 1.0 and 1.1 metadata; `write_geoparquet` writes GeoParquet 1.1.

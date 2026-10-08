@@ -69,3 +69,5 @@ from .geometry import (
 )
 from .wkb import GeometryBounds
 from .geojson import read_geojson, from_geojson
+
+from .shapefile import read_shapefile

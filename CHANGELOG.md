@@ -15,6 +15,8 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 - CSV schemas can request Categorical columns, building dictionary codes during
   decoding with String-equivalent null, escaping and encoding behavior (#432).
+- Native `read_shapefile` for SHP/DBF geometry and attributes, optional SHX
+  validation, Z/M coordinates and preserved WKT CRS metadata (#125).
 
 - Eager and lazy `join_asof` with backward/forward/nearest strategies,
   grouped sortedness validation, null-key handling and numeric/Duration

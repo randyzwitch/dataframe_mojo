@@ -1176,6 +1176,14 @@ Read a local Parquet file into a DataFrame.
 def read_parquet(path: String, *, columns: List[String] = List(), row_groups: Optional[List[Int]] = None, use_threads: Bool = True) -> DataFrame
 ```
 
+## `read_shapefile`
+
+Read SHP/DBF with optional validated SHX and verbatim WKT PRJ.
+
+```mojo
+def read_shapefile(path: String, *, geometry_name: String = "geometry", encoding: String = "utf-8") -> DataFrame
+```
+
 ## `scan_csv`
 
 Lazily read a CSV file with an inferred schema. Nothing is read until collect; projection and head() are pushed into the reader.
