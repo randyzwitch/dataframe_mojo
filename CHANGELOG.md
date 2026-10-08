@@ -13,6 +13,9 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Added
 
+- CSV schemas can request Categorical columns, building dictionary codes during
+  decoding with String-equivalent null, escaping and encoding behavior (#432).
+
 - Eager and lazy `join_asof` with backward/forward/nearest strategies,
   grouped sortedness validation, null-key handling and numeric/Duration
   tolerances. See [as-of joins](docs/join-asof.md) (#224).

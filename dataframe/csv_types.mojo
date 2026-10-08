@@ -53,6 +53,11 @@ struct CsvField(Copyable):
         return CsvField(name, CSV_STRING, nullable)
 
     @staticmethod
+    def categorical(name: String, nullable: Bool = True) -> CsvField:
+        """Decode text directly into dictionary codes; never inferred."""
+        return CsvField(name, DataType.CATEGORICAL, nullable)
+
+    @staticmethod
     def date(
         name: String, format: String = "", nullable: Bool = True
     ) -> CsvField:
