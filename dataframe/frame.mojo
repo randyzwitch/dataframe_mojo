@@ -111,6 +111,7 @@ from .packed_sort import (
 # A head of a sort at least 1/this of the rows sorts fully (#332).
 comptime _TOP_K_FRACTION = 10
 from .value import AnyValue
+from .asof import asof_rows
 from .hashing import (
     RowKeys,
     encode_rows,
@@ -1164,6 +1165,299 @@ struct DataFrame(Copyable, Sized, Writable):
                 while len(words) > 0:
                     ranks.append(words.pop(0))
         return ranks^
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: List[String] = List[String](),
+        strategy: String = "backward",
+        tolerance: Optional[AnyValue] = None,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        """Match each left row to an ordered right key, optionally within `by`.
+
+        Strategies are backward (last <=), forward (first >=), and nearest
+        (ties prefer the later key and last duplicate). Null ordered keys
+        and null group keys do not match. Both sides must be sorted within
+        each group, ignoring null ordered keys; unsorted input raises.
+        Keys must have the same integer, float, Date, Datetime or Duration
+        dtype. Use `on`, or both `left_on` and `right_on`. Right keys with a
+        different name are retained; common keys and `by` columns coalesce.
+        Tolerance is a nonnegative number in key units or an AnyValue
+        Duration (for temporal keys), and None means no limit. Numeric
+        overloads accept plain integers/floats; AnyValue also retains an
+        explicitly typed unsigned tolerance. `by` is a list of column names.
+        """
+        var left_key = left_on
+        var right_key = right_on
+        if on != "":
+            if left_key != "" or right_key != "":
+                raise Error("join_asof: use on or left_on/right_on, not both")
+            left_key = on
+            right_key = on
+        if left_key == "" or right_key == "":
+            raise Error("join_asof requires on or both left_on and right_on")
+        var lhs = self.column(left_key)
+        var rhs = right.column(right_key)
+        var groups = by.copy()
+        var seen = Dict[String, Bool]()
+        var stacked = List[Series]()
+        for name in groups:
+            if name in seen or name == left_key or name == right_key:
+                raise Error("join_asof duplicate or ordered key in by: " + name)
+            seen[name] = True
+            var l = self.column(name)
+            var r = right.column(name)
+            if l.dtype().is_categorical() or r.dtype().is_categorical():
+                unify(l, r)
+            if l.dtype() != r.dtype():
+                raise Error("join_asof by dtypes must match: " + name)
+            stacked.append(l.append(r))
+        var left_ids = List[Int]()
+        var right_ids = List[Int]()
+        var matchable = List[Bool]([True])
+        if len(groups):
+            var keys = encode_rows(_expand_struct_keys(stacked), True)
+            matchable = List[Bool](length=keys.count(), fill=True)
+            for g in range(keys.count()):
+                for key in stacked:
+                    if key.get(keys.representatives[g]).is_null():
+                        matchable[g] = False
+            for row in range(self.height()):
+                left_ids.append(keys.ids[row])
+            for row in range(right.height()):
+                right_ids.append(keys.ids[self.height() + row])
+        var rows = asof_rows(
+            lhs,
+            rhs,
+            left_ids,
+            right_ids,
+            matchable,
+            strategy,
+            tolerance,
+            allow_exact_matches,
+        )
+        var columns = self._columns.copy()
+        var names = Dict[String, Bool]()
+        for name in self.columns():
+            names[name] = True
+        var left_names = names.copy()
+        for column in right._columns:
+            var name = column.name()
+            if name in seen or (name == right_key and left_key == right_key):
+                continue
+            if name in left_names:
+                name += suffix
+            if name in names:
+                raise Error("join_asof output name collision: " + name)
+            names[name] = True
+            columns.append(column.take_or_null(rows).renamed(name))
+        return Self(columns^, height=self.height())
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: List[String] = List[String](),
+        strategy: String = "backward",
+        tolerance: Int,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            right,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=by,
+            strategy=strategy,
+            tolerance=Optional(AnyValue(Int64(tolerance))),
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: List[String] = List[String](),
+        strategy: String = "backward",
+        tolerance: Float64,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            right,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=by,
+            strategy=strategy,
+            tolerance=Optional(AnyValue(tolerance)),
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: String,
+        strategy: String = "backward",
+        tolerance: Optional[AnyValue] = None,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            right,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=[by],
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: String,
+        strategy: String = "backward",
+        tolerance: Int,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            right,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=[by],
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: String,
+        strategy: String = "backward",
+        tolerance: Float64,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            right,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=[by],
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: NoneType,
+        strategy: String = "backward",
+        tolerance: Optional[AnyValue] = None,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            right,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=List[String](),
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: NoneType,
+        strategy: String = "backward",
+        tolerance: Int,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            right,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=List[String](),
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
+
+    def join_asof(
+        self,
+        right: Self,
+        on: String = "",
+        *,
+        left_on: String = "",
+        right_on: String = "",
+        by: NoneType,
+        strategy: String = "backward",
+        tolerance: Float64,
+        suffix: String = "_right",
+        allow_exact_matches: Bool = True,
+    ) raises -> Self:
+        return self.join_asof(
+            right,
+            on,
+            left_on=left_on,
+            right_on=right_on,
+            by=List[String](),
+            strategy=strategy,
+            tolerance=tolerance,
+            suffix=suffix,
+            allow_exact_matches=allow_exact_matches,
+        )
 
     def join(
         self,

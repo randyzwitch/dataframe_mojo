@@ -348,6 +348,16 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def bottom_k(self, k: Int, by: List[String]) -> Self`
   The k rows that sort(by) would put first; nulls rank last.
 - `def bottom_k(self, k: Int, by: String) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+  Match each left row to an ordered right key, optionally within `by`.
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, right: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join(self, right: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
 - `def join(self, right: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
 - `def join(self, right: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
@@ -908,6 +918,16 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def explode(self, column: String) -> Self`
 - `def unnest(self, column: String) -> Self`
   Replace a struct column with its fields; see DataFrame.unnest.
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+  As-of join with sortedness checked at execution; see DataFrame.join_asof.
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: List[String] = List(), strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: String, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Optional[AnyValue] = None, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Int, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
+- `def join_asof(self, other: Self, on: String = "", *, left_on: String = "", right_on: String = "", by: NoneType, strategy: String = "backward", tolerance: Float64, suffix: String = "_right", allow_exact_matches: Bool = True) -> Self`
 - `def join(self, other: Self, on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
   Join with another lazy plan on keys named alike on both sides; see DataFrame.join.
 - `def join(self, other: Self, *, left_on: List[String], right_on: List[String], how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
