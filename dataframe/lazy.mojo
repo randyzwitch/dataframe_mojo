@@ -30,6 +30,7 @@ whose aggregates they read, because that would change which rows those
 operators see.
 """
 from std.os import getenv
+from std.time import perf_counter_ns
 from std.io import FileDescriptor
 from std.collections import Dict, Optional
 from std.memory import ArcPointer
@@ -97,6 +98,7 @@ from .join_type import (
     JOIN_LEFT,
     JOIN_SEMI,
     join_code,
+    join_type,
 )
 from .join_hash import (
     PreparedHashIndex,
@@ -585,6 +587,8 @@ struct _StreamJob(Job):
     # plan's execution report.
     var counting: Bool
     var counts: List[Int]
+    # With `counting`, nanoseconds each operation took on this batch.
+    var times: List[Int]
     # A grouped reduction keeps its batch (projected to the columns the
     # reduction reads) beside its state during the first round, so the
     # stream can switch to collecting batches for one eager group-by when
@@ -619,6 +623,7 @@ struct _StreamJob(Job):
         self.rows = 0
         self.counting = False
         self.counts = List[Int]()
+        self.times = List[Int]()
         self.keep_frame = False
         self.collect_only = False
         self.projection = List[String]()
@@ -635,6 +640,7 @@ struct _StreamJob(Job):
             self.frame = self.decode.pop().into_frame()
         if self.counting:
             self.counts = List[Int](length=2 * len(self.operations), fill=0)
+            self.times = List[Int](length=len(self.operations) + 1, fill=0)
         var start = 0
         if self.bound.kind != _BOUND_NONE and len(self.operations) > 0:
             var bounded = self.bound.rows(self.frame)
@@ -648,13 +654,16 @@ struct _StreamJob(Job):
                         self.counts[0] = height
                         self.counts[1] = self.frame.height()
         for k in range(start, len(self.operations)):
+            var began = 0
             if self.counting:
                 self.counts[2 * k] = self.frame.height()
+                began = Int(perf_counter_ns())
             _apply_operation(
                 self.operations[k], self.frame, self.joins, self.indexes
             )
             if self.counting:
                 self.counts[2 * k + 1] = self.frame.height()
+                self.times[k] += Int(perf_counter_ns()) - began
         if self.collect_only:
             self.rows = self.frame.height()
             if len(self.projection):
@@ -771,6 +780,8 @@ struct LazyFrame(Copyable):
         builds: Int = 0,
         algorithm: String = "",
         build_side: String = "",
+        busy_ns: Int = 0,
+        wall_ns: Int = 0,
     ):
         """Add to the attached report, if any."""
         if not self._report:
@@ -787,6 +798,8 @@ struct LazyFrame(Copyable):
             builds=builds,
             algorithm=algorithm,
             build_side=build_side,
+            busy_ns=busy_ns,
+            wall_ns=wall_ns,
         )
 
     def _push(self, var node: PlanNode) -> Self:
@@ -1250,10 +1263,12 @@ struct LazyFrame(Copyable):
                 var parts = List[String]()
                 for name in report.columns():
                     var cell = report.item(r, name)
-                    parts.append(
-                        String(cell.int64()) if cell.dtype()
-                        == DataType.INT64 else cell.string()
-                    )
+                    if cell.dtype() == DataType.INT64:
+                        parts.append(String(cell.int64()))
+                    elif cell.dtype() == DataType.FLOAT64:
+                        parts.append(String(round(cell.float64(), 3)))
+                    else:
+                        parts.append(cell.string())
                 print(
                     "dataframe-operator:\t" + String("\t").join(parts),
                     file=FileDescriptor(2),
@@ -1278,9 +1293,12 @@ struct LazyFrame(Copyable):
         `operator` (its `explain` label), `executor` ("streaming" or
         "eager"), `algorithm` and `build_side` for joins, `input_rows`
         (read from the left or probe input), `build_rows` (the right input
-        a join indexed), `output_rows`, `builds` (indexes built) and
-        `executions` (times the node ran). Counts are observed, never
-        estimated, and the result is the one `collect` returns.
+        a join indexed), `output_rows`, `builds` (indexes built),
+        `executions` (times the node ran), `busy_ms` (a streamed operation's
+        time summed over its batches, across workers) and `wall_ms` (an
+        eager node's wall time including its inputs; on a stream's last
+        node, the whole stream's). Counts are observed, never estimated,
+        and the result is the one `collect` returns.
         """
         if batch_size <= 0:
             raise Error("batch_size must be positive")
@@ -1782,6 +1800,10 @@ struct LazyFrame(Copyable):
         var operation_rows = List[Int](
             length=2 * len(operations) if counting else 0, fill=0
         )
+        var operation_times = List[Int](
+            length=len(operations) if counting else 0, fill=0
+        )
+        var stream_began = Int(perf_counter_ns())
         # Aggregate state (#326). Batch states wait in `pending` and are
         # merged together once their groups reach the accumulated count (or
         # 64 batches), so each merge covers at least as much new work as old
@@ -1914,6 +1936,9 @@ struct LazyFrame(Copyable):
                         fed_rows += jobs[i].frame.height()
                     for k in range(len(counts)):
                         operation_rows[k] += counts[k]
+                    for k in range(len(jobs[i].times)):
+                        if k < len(operation_times):
+                            operation_times[k] += jobs[i].times[k]
             # Pool returns jobs in submission order, independently of worker
             # completion order. Merge states and assemble rows in that order.
             for i in range(len(jobs)):
@@ -2088,14 +2113,23 @@ struct LazyFrame(Copyable):
                     "streaming",
                     operation_rows[2 * k],
                     operation_rows[2 * k + 1],
+                    busy_ns=operation_times[k],
                 )
                 into_terminal = operation_rows[2 * k + 1]
+            var stream_wall = Int(perf_counter_ns()) - stream_began
             if index != cursor and (index not in operation_nodes):
                 self._record(
                     index,
                     "streaming",
                     into_terminal,
                     result.value().height() if result else 0,
+                    wall_ns=stream_wall,
+                )
+            else:
+                # The stream's last node is one of its operations: add the
+                # stream's wall time there, with nothing else.
+                self._record(
+                    index, "streaming", 0, 0, executions=0, wall_ns=stream_wall
                 )
         return result^
 
@@ -2114,10 +2148,12 @@ struct LazyFrame(Copyable):
             return self._execute_node(index, empty, streaming, batch_size)
         # Record what the node did: its inputs record themselves as they
         # run below it, so the input rows are read back from the report.
+        var began = Int(perf_counter_ns())
         var result = self._execute_node(index, empty, streaming, batch_size)
+        var took = Int(perf_counter_ns()) - began
         ref node = self._nodes[index]
         if _is_scan(node.kind):
-            self._record(index, "eager", 0, result.height())
+            self._record(index, "eager", 0, result.height(), wall_ns=took)
         elif node.kind == JOIN:
             var left = self._report.value()[].find(node.left)
             var right = self._report.value()[].find(node.right)
@@ -2135,6 +2171,7 @@ struct LazyFrame(Copyable):
                 builds=1,
                 algorithm="cross" if node.how == JOIN_CROSS else "eager_hash",
                 build_side="left" if build_left else "right",
+                wall_ns=took,
             )
         else:
             var left = self._report.value()[].find(node.left)
@@ -2143,6 +2180,7 @@ struct LazyFrame(Copyable):
                 "eager",
                 left.value().output_rows if left else -1,
                 result.height(),
+                wall_ns=took,
             )
         return result^
 
@@ -2278,13 +2316,21 @@ struct LazyFrame(Copyable):
             var right = self._execute(node.right, empty, streaming, batch_size)
             if node.how == JOIN_CROSS:
                 return input.join(right, how=node.text, suffix=node.names2[0])
-            return input.join(
+            # Consumers that ignore row order let the join skip restoring
+            # left-major order after probing.
+            var free = self._order_free_above(
+                index, self._live_parents(len(self._nodes) - 1), True
+            )
+            return input._join_impl(
                 right,
                 left_on=node.names,
                 right_on=node.right_keys,
-                how=node.text,
+                # Parsed here, as `DataFrame.join` would: an unknown type
+                # raises.
+                how=join_type(node.text),
                 suffix=node.names2[0],
                 coalesce=node.coalesce,
+                keep_order=not free,
             )
         if node.kind == SORT:
             var n = len(node.names)
@@ -2788,13 +2834,29 @@ struct LazyFrame(Copyable):
                     stack.append(child)
         return parents^
 
-    def _order_free_above(self, top: Int, parents: List[Int]) -> Bool:
+    def _order_free_above(
+        self, top: Int, parents: List[Int], through_joins: Bool = False
+    ) -> Bool:
         """Whether the plan above `top` gives the same result whatever
         order `top`'s rows arrive in: row-local steps up to an aggregation
-        that reads no row position."""
+        that reads no row position. With `through_joins`, inner, left, semi
+        and anti joins on the way pass any order on, as they keep their
+        inputs' rows."""
         var cursor = parents[top]
         while cursor >= 0:
             ref node = self._nodes[cursor]
+            if (
+                through_joins
+                and node.kind == JOIN
+                and (
+                    node.how == JOIN_INNER
+                    or node.how == JOIN_LEFT
+                    or node.how == JOIN_SEMI
+                    or node.how == JOIN_ANTI
+                )
+            ):
+                cursor = parents[cursor]
+                continue
             if node.kind == AGG:
                 return not node.maintain_order and _order_insensitive(
                     node.exprs

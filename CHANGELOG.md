@@ -109,6 +109,18 @@ breaking changes can happen in any release and are listed under **Breaking**.
 
 ### Changed
 
+- An inner join that builds on its small left side emits its pairs in
+  probe order when everything above it in a lazy plan ignores row order
+  (an aggregation, through inner, left, semi and anti joins), skipping
+  the scatter that restores left-major order. PDS-H q5 44 -> 38 ms.
+
+### Added
+
+- `LazyFrame.profile()` reports time per node: `busy_ms`, a streamed
+  operation's time summed over its batches, and `wall_ms`, an eager
+  node's wall time including its inputs (and a stream's, on its last
+  node). `DATAFRAME_EXECUTION_REPORT=1` prints both, and the benchmark
+  script reads them.
 - Filters on a column stored in ascending order: a part comparing such a
   column with a constant (`==`, `<`, `<=`, `>`, `>=`, `is_between`) keeps
   one run of rows, found by binary search and taken as a zero-copy
