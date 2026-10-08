@@ -207,11 +207,19 @@ struct _CompressJob(Job):
                         _FULL >> UInt64(b0)
                     ) else Int(count_trailing_zeros(~rest))
                     var run = min(ones, self.last - k)
-                    unsafe_memcpy(
-                        dest=out.unsafe_offset(k),
-                        src=src.unsafe_offset(local + b0),
-                        count=run,
-                    )
+                    if run <= 8:
+                        # Short runs (a sparse mask): a call per run cost
+                        # more than the copy.
+                        for i in range(run):
+                            out.unsafe_offset(k + i)[] = src.unsafe_offset(
+                                local + b0 + i
+                            )[]
+                    else:
+                        unsafe_memcpy(
+                            dest=out.unsafe_offset(k),
+                            src=src.unsafe_offset(local + b0),
+                            count=run,
+                        )
                     if out_valid_address != 0:
                         var bits = Pointer[List[UInt8], MutAnyOrigin](
                             unsafe_from_address=out_valid_address
@@ -362,7 +370,10 @@ def filter_columns(
             Int(Pointer(to=bitmaps[j])) if len(bitmaps[j]) > 0 else 0
         )
     if len(fixed_index) > 0 and count > 0:
-        var workers = worker_count(count)
+        # The work is the mask's words, not the kept rows: a filter keeping
+        # one row in seven of 613K (ClickBench q41's slice) ran on one
+        # thread when sized by its 86K output rows.
+        var workers = min(worker_count(len(mask)), max(1, count // 64))
         var jobs = List[_CompressJob](capacity=workers)
         for w in range(workers):
             var first = (count * w // workers) // 64 * 64

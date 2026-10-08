@@ -7,6 +7,7 @@ from .bool_column import BoolColumn, both_true, true_count
 from .column import Column, _append_validity, _pack_bits
 from .string_column import StringColumn, StringBuilder
 from .series import Series, sort_indices, smallest_indices
+from .sorted_range import sorted_window
 from .expr import (
     Expr,
     ARG_MIN,
@@ -2326,6 +2327,14 @@ struct DataFrame(Copyable, Sized, Writable):
         return Self(columns^, height=self._height)
 
     def filter(self, predicate: Expr, *, batch_size: Int = 8192) raises -> Self:
+        # A literal true keeps every row as it is (a filter whose parts an
+        # ordered column answered leaves one behind).
+        if (
+            len(predicate._nodes) == 1
+            and predicate._nodes[0].op == LIT_BOOL
+            and predicate._nodes[0].integer != 0
+        ):
+            return self.copy()
         var predicates = expand(predicate, self._columns)
         if len(predicates) != 1:
             raise Error("A filter selector must match exactly one column")
@@ -2334,6 +2343,29 @@ struct DataFrame(Copyable, Sized, Writable):
             raise Error("Filter expression must return Boolean values")
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        # Parts comparing a column stored in ascending order with a constant
+        # keep one run of rows: two binary searches and a zero-copy slice
+        # (ClickBench q36-q42 filter CounterID and EventDate, the order the
+        # hits table is stored in).
+        if self._height > 0 and _row_local(predicates):
+            var parts = conjuncts(predicates[0])
+            var window = sorted_window(self._columns, self._height, parts)
+            var any = False
+            for answered in window.used:
+                any = any or answered
+            if any:
+                trace_path("filter.sorted_range")
+                var narrowed = self.slice(window.low, window.high - window.low)
+                var rest = List[Expr]()
+                for k in range(len(parts)):
+                    if not window.used[k]:
+                        rest.append(parts[k].copy())
+                if len(rest) == 0 or narrowed.height() == 0:
+                    return narrowed^
+                var remaining = rest[0].copy()
+                for k in range(1, len(rest)):
+                    remaining = remaining & rest[k]
+                return narrowed.filter(remaining, batch_size=batch_size)
         # Each partition's first k rows by ordinal rank: no rank computed.
         var top = top_k_mask(bound, self._columns, self._height)
         if top:
