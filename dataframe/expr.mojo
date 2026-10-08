@@ -201,14 +201,14 @@ comptime DT_CONVERT_TZ = 158
 
 # Row-count variance and duration windows. `min_count` stores ddof, `text` the
 # duration, and `text2` the closed-boundary option for binary *_by nodes.
-comptime ROLLING_STD = 163
-comptime ROLLING_VAR = 164
-comptime ROLLING_SUM_BY = 165
-comptime ROLLING_MEAN_BY = 166
-comptime ROLLING_MIN_BY = 167
-comptime ROLLING_MAX_BY = 168
-comptime ROLLING_STD_BY = 169
-comptime ROLLING_VAR_BY = 170
+comptime ROLLING_STD = 173
+comptime ROLLING_VAR = 174
+comptime ROLLING_SUM_BY = 175
+comptime ROLLING_MEAN_BY = 176
+comptime ROLLING_MIN_BY = 177
+comptime ROLLING_MAX_BY = 178
+comptime ROLLING_STD_BY = 179
+comptime ROLLING_VAR_BY = 180
 
 
 def is_rolling_by(op: Int) -> Bool:

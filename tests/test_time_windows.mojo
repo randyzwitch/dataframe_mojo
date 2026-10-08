@@ -165,6 +165,23 @@ def test_lazy_and_chunked_windows() raises:
         _ = unsorted.collect()
 
 
+def test_time_windows_and_membership_dispatch_independently() raises:
+    # String membership and duration variance must have distinct opcodes.
+    var df = frame()
+    var result = df.select_exprs(
+        [
+            col("g").is_in([String("a")]).alias("member"),
+            col("v").rolling_var_by("t", "2d", ddof=0).alias("variance"),
+        ]
+    )
+    assert_equal(
+        texts(result.column("member")),
+        [String("true"), "false", "true", "false", "true"],
+    )
+    var expected = df.select(col("v").rolling_var_by("t", "2d", ddof=0))
+    assert_equal(texts(result.column("variance")), texts(expected.column("v")))
+
+
 def main() raises:
     var suite = TestSuite.discover_tests[__functions_in_module()]()
     suite^.run()
