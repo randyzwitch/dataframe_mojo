@@ -22,6 +22,7 @@ from std.memory import Pointer, bitcast
 from .aggregate import Reducer
 from .binding import BoundExpr
 from .column import Column
+from .huge_pages import huge_list
 from .dtype import DataType
 from .execution import _new_reducer
 from .expr import COL, COUNT, LEN, MAX, MEAN, MIN, SUM
@@ -60,7 +61,7 @@ def _moderate_groups(key: Series) raises -> Bool:
     var whole = key.rechunk() if key.is_chunked() else key.copy()
     var values = whole._data[Column[Int64]]._ptr()
     var capacity = 1 << 17
-    var table = List[UInt64](length=capacity, fill=0)
+    var table = huge_list(capacity, UInt64(0))
     var used = List[Bool](length=capacity, fill=False)
     var cells = table.unsafe_ptr()
     var occupied = used.unsafe_ptr()
@@ -164,7 +165,7 @@ struct _RangeTableJob(Job):
         var ids = List[Int](unsafe_uninit_length=n)
         var out = ids.unsafe_ptr()
         var capacity = 1024
-        var table = List[Int32](length=capacity, fill=-1)
+        var table = huge_list(capacity, Int32(-1))
         for i in range(n):
             if nulls and not column._valid(i):
                 if self.null_group < 0:
@@ -196,7 +197,7 @@ struct _RangeTableJob(Job):
                 slot = (slot + 1) & mask
             if 2 * len(self.keys) > capacity:
                 capacity *= 2
-                table = List[Int32](length=capacity, fill=-1)
+                table = huge_list(capacity, Int32(-1))
                 var grown = table.unsafe_ptr()
                 for g in range(len(self.keys)):
                     if g == self.null_group:
@@ -328,7 +329,7 @@ struct _PartMergeJob(Job):
         while capacity < 2 * total:
             capacity *= 2
         var mask = capacity - 1
-        var table = List[Int32](length=capacity, fill=-1)
+        var table = huge_list(capacity, Int32(-1))
         var final_hashes = List[UInt64](capacity=total)
         # (range, group) of each final group's first appearance.
         var origin_range = List[Int](capacity=total)

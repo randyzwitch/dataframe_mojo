@@ -142,6 +142,7 @@ from .hashing import (
 from .groups import GroupIndices
 from .top_k import top_k_mask
 from .hash_agg import hash_agg_eligible, hash_aggregate
+from .huge_pages import huge_list
 from .row_sort import row_arg_sort
 from .indexed_reduce import (
     indexed_reductions,
@@ -6170,7 +6171,7 @@ struct _KeyIndex(Movable):
         var capacity = 1024
         while capacity < 2 * n:
             capacity *= 2
-        self.slots = List[Int](length=capacity, fill=-1)
+        self.slots = huge_list(capacity, -1)
         for row in range(n):
             _ = self.find_or_insert(distinct, row)
 
@@ -6179,7 +6180,7 @@ struct _KeyIndex(Movable):
 
     def _grow(mut self):
         var capacity = max(1024, 2 * len(self.slots))
-        self.slots = List[Int](length=capacity, fill=-1)
+        self.slots = huge_list(capacity, -1)
         var mask = capacity - 1
         for id in range(len(self.hashes)):
             var slot = Int(self.hashes[id]) & mask
