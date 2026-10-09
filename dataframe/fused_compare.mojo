@@ -4,7 +4,7 @@ A filter like PDS-H q6's (a date range, a discount range and a quantity
 bound: five comparisons on three columns) evaluated each comparison as its
 own expression, each writing a full-length bitmap that the next AND read
 back, about 2 ns a row a comparison. Here every comparison of a numeric
-column with no nulls against a constant of the column's own type runs over
+column against a constant of the column's own type runs over
 cache-sized blocks of rows, and each block's bits are ANDed in a buffer that
 stays in L1, so each column is read from memory once and one bitmap is
 written. DuckDB evaluates such conjunctions on one selection vector the same
@@ -17,7 +17,7 @@ from .column import Column
 from .dtype import NUMERIC_DTYPES
 from .execution import evaluate
 from .expr import COL, EQ, GE, GT, LE, LT, NE, Expr, subtree
-from .expr_kernels import _compare_lanes
+from .expr_kernels import _compare_lanes, _window_bytes
 from .parallel import Job, partitions, run_jobs, worker_count
 from .series import Series
 
@@ -32,6 +32,9 @@ struct _Comparison(Copyable, Movable):
     var op: Int
     # The constant, one row of the column's dtype.
     var value: Series
+    # Whether any row is null: those compare false, which costs a pass
+    # over the validity bits that an all-valid column skips.
+    var nulls: Bool
 
 
 @fieldwise_init
@@ -71,9 +74,10 @@ def _is_constant(expr: Expr, index: Int) -> Bool:
 def _comparison(
     part: Expr, columns: List[Series]
 ) raises -> Optional[_Comparison]:
-    """The part as `column op constant`, when the column is numeric with
-    no nulls and the constant evaluates to one valid value of the column's
-    exact dtype; None for any other part."""
+    """The part as `column op constant`, when the column is numeric and
+    the constant evaluates to one valid value of the column's exact
+    dtype; None for any other part. A null row compares false, as a
+    filter drops it."""
     var root = len(part._nodes) - 1
     ref node = part._nodes[root]
     var op = node.op
@@ -102,7 +106,7 @@ def _comparison(
     if found < 0:
         return None
     ref column = columns[found]
-    if column.is_chunked() or column.null_count() > 0:
+    if column.is_chunked():
         return None
     # A validity bitmap with no null in it (Parquet imports carry one) is
     # as good as none: every row's value is read.
@@ -117,11 +121,13 @@ def _comparison(
     var value = evaluate(
         bind(subtree(part, constant_at), no_columns), no_columns, 1
     )
-    if len(value) != 1 or value.is_chunked():
+    if len(value) != 1 or value.is_chunked() or value.null_count() > 0:
         return None
-    if value.dtype() != column.dtype() or value.null_count() > 0:
+    if value.dtype() != column.dtype():
         return None
-    return Optional(_Comparison(column.copy(), op, value^))
+    return Optional(
+        _Comparison(column.copy(), op, value^, column.null_count() > 0)
+    )
 
 
 @always_inline
@@ -172,7 +178,8 @@ def _apply[
     bits: Pointer[UInt8, MutAnyOrigin],
     initial: Bool,
 ):
-    var values = comparison.column._data[Column[Scalar[D]]]._ptr()
+    ref column = comparison.column._data[Column[Scalar[D]]]
+    var values = column._ptr()
     var constant = comparison.value._data[Column[Scalar[D]]]._get(0)
     var op = comparison.op
     if op == LT:
@@ -187,6 +194,13 @@ def _apply[
         _block[D, EQ](values, constant, first, rows, bits, initial)
     else:
         _block[D, NE](values, constant, first, rows, bits, initial)
+    if comparison.nulls:
+        # Null rows compare false: AND the validity of these rows in.
+        var valid = _window_bytes(
+            column._bits[], column._offset + first, rows, rows, UInt8(255)
+        )
+        for k in range(len(valid)):
+            bits[unsafe_offset=k] &= valid[k]
 
 
 struct _FusedJob(Job):
