@@ -375,7 +375,7 @@ def _morsel_ranges(
     frame: DataFrame, morsel_rows: Int, workers: Int
 ) -> List[Int]:
     """(offset, length) pairs covering the frame: each chunk of columns
-    chunked at the same rows is cut into even pieces of at most
+    chunked at the same rows is cut into even pieces of about
     `morsel_rows`, and a frame without such chunks likewise. When that
     gives fewer than four morsels a worker, the pieces are cut finer so
     their count is a multiple of `workers` and the last round of morsels
@@ -400,7 +400,14 @@ def _morsel_ranges(
         if length > 0:
             starts.append(start)
             lengths.append(length)
-            pieces.append((length + morsel_rows - 1) // morsel_rows)
+            # Pieces of about `morsel_rows`: a chunk a little longer than
+            # the target stays one morsel rather than two short ones, each
+            # paying the steps' setup (TPC-DS q9's fifteen conditional
+            # sums over 123K-row groups cut at 90K: 145 to 174 ms on one
+            # thread).
+            pieces.append(
+                max(1, (2 * length + morsel_rows) // (2 * morsel_rows))
+            )
             total += pieces[len(pieces) - 1]
         start = end
     if total > 1 and total < 4 * lanes and total % lanes != 0:
@@ -424,11 +431,19 @@ def _morsel_ranges(
                 break
             pieces[longest] += 1
             scaled += 1
+    # Boundaries inside a chunk fall on multiples of 64 rows, so a
+    # morsel's validity bitmaps start on a byte: kernels that AND or
+    # window bitmaps take their slow path from a bit offset (TPC-DS q9's
+    # masked sums, 145 to 174 ms on one thread at 87,381-row morsels).
     var ranges = List[Int]()
     for c in range(len(pieces)):
         for p in range(pieces[c]):
             var low = starts[c] + lengths[c] * p // pieces[c]
             var high = starts[c] + lengths[c] * (p + 1) // pieces[c]
+            if p > 0:
+                low = starts[c] + (low - starts[c]) // 64 * 64
+            if p + 1 < pieces[c]:
+                high = starts[c] + (high - starts[c]) // 64 * 64
             if high > low:
                 ranges.append(low)
                 ranges.append(high - low)
