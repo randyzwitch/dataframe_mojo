@@ -128,8 +128,10 @@ provenance to `build/suites/results.json` and the report beside it, as
 Markdown (`results.md`) and as a self-contained HTML page (`results.html`,
 from `scripts/bench_html.py`) that opens in any browser; `--report-from`
 re-renders both from a saved file. Provenance includes engine and benchmark
-working-tree status, local query/generator/runner SHA-256 hashes and an
-exposure record for each selected suite. These identify the local workload;
+working-tree status, local query/generator/runner SHA-256 hashes, the CPU
+frequency governor (a parked thread wakes on a core `schedutil` has clocked
+down, which moves the short queries; #527) and an exposure record for each
+selected suite. These identify the local workload;
 historical upstream commits were not recorded and remain explicitly unknown.
 DuckDB's recorded version identifies its `tpch_queries`, `dbgen`,
 `tpcds_queries` and `dsdgen` implementations.
