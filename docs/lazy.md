@@ -7,16 +7,26 @@ nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
 rows. `explain()` prints the optimized plan with execution annotations, root first; `explain(optimize=False)`
 and `collect(optimize=False)` show and run the plan as written.
 
-`collect`, `profile`, and `fetch` accept `engine="cpu"` (the default),
-`engine="auto"`, or `engine="accel"`. Auto conservatively selects CPU.
-CPU and auto need no accelerator dependency or device discovery.
+`collect`, `profile`, and `fetch` default to `engine="auto"`; `engine="cpu"`
+forces CPU execution and `engine="accel"` requires an accelerator provider.
+In this CPU distribution, auto uses CPU without accelerator dependencies or
+device discovery. Eager operations retain their existing behavior.
 
 The core exposes an `AcceleratorBackend` extension interface. A separately
-built provider can implement accelerated execution; this CPU distribution
-ships without one. `engine="accel"` raises a missing-provider error unless a
-provider is registered or explicitly passed with `accelerator=...`. Explicit
-acceleration never falls back to CPU. Auto remains CPU, including when an
-explicit provider is supplied.
+built provider owns automatic capability, memory and cost checks through
+`select_auto(plan, optimize, streaming, batch_size)`, returning a placement (`cpu`, `accel`, or `mixed`) and a
+reason before execution. Providers without a policy inherit CPU selection.
+The core delegates selected accelerator/mixed plans to `execute_auto`, which
+receives the CPU optimization, streaming and batch-size options for any CPU
+portion. Provider execution errors propagate; collection never retries them
+on CPU. `explain(engine="auto")` shows the placement reason and automatic
+profiles add a `selection_reason` column.
+
+`engine="accel"` raises a missing-provider error unless a provider is registered
+or explicitly passed with `accelerator=...`. Explicit acceleration never
+falls back to CPU. An explicitly passed provider owns automatic selection
+when `engine="auto"` is supplied; omitting `engine` on these explicit-provider
+overloads retains forced acceleration for compatibility.
 
 `join(other, on, how)` joins on keys named alike on both sides;
 `join(other, left_on=[...], right_on=[...], how, suffix, coalesce)` pairs

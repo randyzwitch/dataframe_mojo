@@ -974,21 +974,21 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def join(self, other: Self, on: String, how: String = "inner", suffix: String = "_right", coalesce: Bool = True) -> Self`
 - `def join(self, other: Self, *, how: String, suffix: String = "_right") -> Self`
   Cross join: every row of this plan paired with every row of `other`, left-major; see DataFrame.join(right, how="cross").
-- `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "cpu") -> DataFrame`
+- `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> DataFrame`
   Optimize (unless disabled) and execute the plan.
 - `def collect[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`
-  Execute with an explicit optional runtime; auto still selects CPU.
+  Execute with an explicit optional runtime and its placement policy.
 - `def profile[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> Tuple[DataFrame, DataFrame]`
   Execute with a provider and report its observed execution regions.
-- `def profile(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "cpu") -> Tuple[DataFrame, DataFrame]`
+- `def profile(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> Tuple[DataFrame, DataFrame]`
   Collect, and report what each plan node did (#439).
-- `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True) -> String`
+- `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> String`
   Describe provider capability without submitting device work.
-- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, engine: String = "cpu") -> String`
+- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> String`
   The (optimized) plan, one operator per line, root first.
 - `def fetch[B: AcceleratorBackend](self, n: Int = Int(5), *, accelerator: B, engine: String = "accel") -> DataFrame`
   Collect the first n rows using an explicit provider.
-- `def fetch(self, n: Int = Int(5), *, engine: String = "cpu") -> DataFrame`
+- `def fetch(self, n: Int = Int(5), *, engine: String = "auto") -> DataFrame`
   Collect only the first n rows of the result.
 - `def collect_schema(self) -> List[String]`
   Output names and dtypes as "name: dtype", computed without reading rows: every scan yields zero rows, then the plan runs as usual, so binding validates each expression exactly as collect would.
