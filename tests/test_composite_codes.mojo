@@ -250,5 +250,49 @@ def test_composite_categorical_lookup_checks_valid_codes() raises:
     assert_equal(codes, [0, -1])
 
 
+def test_narrow_integer_keys_take_the_direct_table() raises:
+    # Int16, UInt8 and Int32 keys number by first occurrence like Int64
+    # ones, with nulls, across the whole value range of a narrow type, and
+    # through the chunked route (`column_codes` on a chunked series must
+    # encode every chunk, not the first alone).
+    var int16 = Series(
+        "k",
+        Column[Int16](
+            [Int16.MAX, -5, Int16.MIN, -5, 0, Int16.MAX, 0],
+            [True, True, True, False, True, True, True],
+        ),
+    )
+    var codes = List[Int]()
+    var nulls = List[Bool](length=7, fill=False)
+    assert_equal(column_codes(int16, codes, nulls), 4)
+    assert_equal(codes, [0, 1, 2, -1, 3, 0, 3])
+    assert_equal(nulls, [False, False, False, True, False, False, False])
+    var keys = encode_rows([int16.copy()], nulls_equal=True)
+    assert_equal(keys.ids, [0, 1, 2, 3, 4, 0, 4])
+    assert_equal(keys.representatives, [0, 1, 2, 3, 4])
+
+    var bytes = Series("k", Column[UInt8]([255, 0, 255, 7, 7, 0]))
+    codes = List[Int]()
+    nulls = List[Bool](length=6, fill=False)
+    assert_equal(column_codes(bytes, codes, nulls), 3)
+    assert_equal(codes, [0, 1, 0, 2, 2, 1])
+
+    # A span past the direct table's limit for 32-bit keys gives the same
+    # numbering through the hash table.
+    var wide = Series("k", Column[Int32]([100_000, -100_000, 100_000, 3]))
+    codes = List[Int]()
+    nulls = List[Bool](length=4, fill=False)
+    assert_equal(column_codes(wide, codes, nulls), 3)
+    assert_equal(codes, [0, 1, 0, 2])
+
+    var chunked = Series._from_chunks([int16.slice(0, 3), int16.slice(3, 4)])
+    codes = List[Int]()
+    nulls = List[Bool](length=7, fill=False)
+    assert_equal(column_codes(chunked, codes, nulls), 4)
+    assert_equal(codes, [0, 1, 2, -1, 3, 0, 3])
+    var chunked_keys = encode_rows([chunked.copy()], nulls_equal=False)
+    assert_equal(chunked_keys.ids, [0, 1, 2, -1, 3, 0, 3])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

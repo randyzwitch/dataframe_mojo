@@ -7,6 +7,7 @@ Float64 keys treat every NaN as one value and -0.0 as equal to 0.0.
 """
 from std.collections import Dict
 from std.memory import Pointer, bitcast, unsafe_memcpy
+from std.sys import size_of
 from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
@@ -104,13 +105,16 @@ def column_codes(
     mut codes: List[Int],
     mut nulls: List[Bool],
     *,
-    dense_int64: Bool = True,
+    dense: Bool = True,
 ) raises -> Int:
     """Replace codes with owned per-row codes and fill null flags.
 
     Value encoders number valid values by first occurrence. BoolColumn
     retains its fixed 0/1 codes. Return the valid-value code-domain size.
     """
+    if series.is_chunked():
+        # A chunked series' `_data` is its first chunk alone.
+        return column_codes(series.rechunk(), codes, nulls, dense=dense)
     if series._data.isa[StringColumn]():
         var keys = _encode_string_rows(series, False)
         var count = keys.count()
@@ -141,10 +145,10 @@ def column_codes(
         codes = keys.ids^
         keys.ids = List[Int]()
         return count
-    if dense_int64 and series._data.isa[Column[Int64]]():
-        var dense = _encode_dense_int64(series._data[Column[Int64]], False)
-        if dense:
-            var keys = dense.take()
+    if dense:
+        var found = _encode_dense(series, False)
+        if found:
+            var keys = found.take()
             var count = keys.count()
             if series.null_count() > 0:
                 for i in range(len(keys.ids)):
@@ -164,6 +168,7 @@ def column_codes(
             for i in range(len(column)):
                 if has_nulls and not column._valid(i):
                     nulls[i] = True
+                    codes[i] = -1
                     continue
                 comptime if D.is_floating_point():
                     codes[i] = table.code(float_key(Float64(column._get(i))))
@@ -505,6 +510,16 @@ def encode_rows_parallel(
     return RowKeys(ids^, representatives^)
 
 
+def _unsigned_distance[D: DType](low: Scalar[D], value: Scalar[D]) -> UInt64:
+    """`value - low` as an unsigned count, for value >= low."""
+    comptime if D.is_signed():
+        return UInt64(value.cast[DType.int64]()) - UInt64(
+            low.cast[DType.int64]()
+        )
+    else:
+        return value.cast[DType.uint64]() - low.cast[DType.uint64]()
+
+
 def _encode_dense_int64(
     column: Column[Int64], nulls_equal: Bool
 ) raises -> Optional[RowKeys]:
@@ -517,19 +532,39 @@ def _encode_dense_int64(
 def _encode_dense_int64_parts(
     parts: List[Column[Int64]], nulls_equal: Bool
 ) raises -> Optional[RowKeys]:
-    """Ids by direct lookup when the key's values span fewer than 4,096
-    integers, avoiding a hash-table probe and a renumbering pass per row.
-    Values and ids go through pointers, and a column without nulls reads no
-    validity: H2O's 100-value id4 spent most of a group-by here. The key
-    may arrive as several chunks (a Parquet scan's row groups, or a worker's
-    range across two of them); they are read in place, where copying them
-    into one buffer first cost a group-by a quarter of its time."""
+    return _encode_dense_parts[DType.int64](parts, nulls_equal)
+
+
+def _dense_span_limit[D: DType]() -> Int:
+    """How many integers a key's values may span for direct lookup: a
+    16-bit or narrower key's whole domain (a 512 KB table), otherwise the
+    4,096 measured for Int64 keys."""
+    comptime if size_of[Scalar[D]]() <= 2:
+        return 1 << 16
+    else:
+        return 4096
+
+
+def _encode_dense_parts[
+    D: DType
+](parts: List[Column[Scalar[D]]], nulls_equal: Bool) raises -> Optional[
+    RowKeys
+]:
+    """Ids by direct lookup when an integer key's values span few enough
+    integers (`_dense_span_limit`), avoiding a hash-table probe and a
+    renumbering pass per row. Values and ids go through pointers, and a
+    column without nulls reads no validity: H2O's 100-value id4 spent most
+    of a group-by here, and ClickBench q7's Int16 AdvEngineID went through
+    the hash table at 6 ns a row. The key may arrive as several chunks (a
+    Parquet scan's row groups, or a worker's range across two of them);
+    they are read in place, where copying them into one buffer first cost
+    a group-by a quarter of its time."""
     var n = 0
     for part in parts:
         n += len(part)
     var first = True
-    var low = Int64(0)
-    var high = Int64(0)
+    var low = Scalar[D](0)
+    var high = Scalar[D](0)
     # A chunk without nulls may hold no validity bitmap, so only chunks
     # with nulls read one.
     for part in parts:
@@ -561,9 +596,13 @@ def _encode_dense_int64_parts(
                 else:
                     low = min(low, value)
                     high = max(high, value)
-    if not first and UInt64(high) - UInt64(low) >= 4096:
+    var width = UInt64(0) if first else _unsigned_distance[D](low, high)
+    # A table no larger than a few times the input: a small bucket of a
+    # partitioned group-by should not clear a 512 KB table to encode it.
+    var limit = min(_dense_span_limit[D](), max(4096, 4 * n))
+    if width >= UInt64(limit):
         return None
-    var span = 1 if first else Int(UInt64(high) - UInt64(low)) + 1
+    var span = Int(width) + 1
     var slots = List[Int](length=span, fill=-1)
     var table = slots.unsafe_ptr()
     var ids = List[Int](unsafe_uninit_length=n)
@@ -579,7 +618,9 @@ def _encode_dense_int64_parts(
         var out = ids.unsafe_ptr().unsafe_offset(offset)
         if not nulls:
             for i in range(length):
-                var slot = Int(UInt64(values[unsafe_offset=i]) - UInt64(low))
+                var slot = Int(
+                    _unsigned_distance[D](low, values[unsafe_offset=i])
+                )
                 var id = table[unsafe_offset=slot]
                 if id < 0:
                     id = len(representatives)
@@ -598,7 +639,7 @@ def _encode_dense_int64_parts(
                 else:
                     out[unsafe_offset=i] = -1
                 continue
-            var slot = Int(UInt64(values[unsafe_offset=i]) - UInt64(low))
+            var slot = Int(_unsigned_distance[D](low, values[unsafe_offset=i]))
             var id = table[unsafe_offset=slot]
             if id < 0:
                 id = len(representatives)
@@ -650,6 +691,37 @@ def _encode_categorical[
     return RowKeys(ids^, representatives^)
 
 
+def _encode_dense(
+    series: Series, nulls_equal: Bool
+) raises -> Optional[RowKeys]:
+    """`_encode_dense_parts` for one contiguous integer key of any width;
+    None for other storage or a wide value span."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if series._data.isa[Column[Scalar[D]]]():
+                var parts = List[Column[Scalar[D]]]()
+                parts.append(series._data[Column[Scalar[D]]].copy())
+                return _encode_dense_parts[D](parts, nulls_equal)
+    return None
+
+
+def _encode_dense_chunks(
+    series: Series, nulls_equal: Bool
+) raises -> Optional[RowKeys]:
+    """`_encode_dense_parts` over a chunked integer key's chunks, read in
+    place; None for other storage or a wide value span."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        comptime if not D.is_floating_point():
+            if series.chunks()[0]._data.isa[Column[Scalar[D]]]():
+                var parts = List[Column[Scalar[D]]]()
+                for chunk in series.chunks():
+                    parts.append(chunk._data[Column[Scalar[D]]].copy())
+                return _encode_dense_parts[D](parts, nulls_equal)
+    return None
+
+
 def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
     """Assign dense ids to distinct key rows, in first-occurrence order.
 
@@ -667,11 +739,8 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         return _encode_string_rows(keys[0], nulls_equal)
     for key in keys:
         if key.is_chunked():
-            if len(keys) == 1 and keys[0]._data.isa[Column[Int64]]():
-                var parts = List[Column[Int64]]()
-                for chunk in keys[0].chunks():
-                    parts.append(chunk._data[Column[Int64]].copy())
-                var dense = _encode_dense_int64_parts(parts, nulls_equal)
+            if len(keys) == 1:
+                var dense = _encode_dense_chunks(keys[0], nulls_equal)
                 if dense:
                     return dense.take()
             var contiguous = List[Series](capacity=len(keys))
@@ -695,10 +764,8 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
             len(keys[0].dtype().dictionary()[]),
             nulls_equal,
         )
-    if len(keys) == 1 and keys[0]._data.isa[Column[Int64]]():
-        var dense = _encode_dense_int64(
-            keys[0]._data[Column[Int64]], nulls_equal
-        )
+    if len(keys) == 1:
+        var dense = _encode_dense(keys[0], nulls_equal)
         if dense:
             return dense.take()
     # Every row gets an id (or -1) below before any is read (#388).
@@ -721,7 +788,7 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         var codes = List[Int]()
         var has_nulls = keys[0].null_count() > 0
         var nulls = List[Bool](length=n if has_nulls else 0, fill=False)
-        var distinct = column_codes(keys[0], codes, nulls, dense_int64=False)
+        var distinct = column_codes(keys[0], codes, nulls, dense=False)
         if not has_nulls and not keys[0]._data.isa[BoolColumn]():
             for i in range(n):
                 if codes[i] == len(representatives):
