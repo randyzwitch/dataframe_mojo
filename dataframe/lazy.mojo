@@ -1050,17 +1050,24 @@ def _apply_operation(
         )
 
 
-def _automatic_decision(selected: Tuple[String, String]) raises -> _BackendDecision:
-    if selected[0] != "cpu" and selected[0] != "accel" and selected[0] != "mixed":
+def _automatic_decision(
+    selected: Tuple[String, String]
+) raises -> _BackendDecision:
+    if (
+        selected[0] != "cpu"
+        and selected[0] != "accel"
+        and selected[0] != "mixed"
+    ):
         raise Error("Invalid automatic provider decision: " + selected[0])
     return _BackendDecision(selected[0], True, selected[1])
 
 
 def _selection_report(report: DataFrame, reason: String) raises -> DataFrame:
     return report.with_column(
-        Series("selection_reason", Column[String](
-            List[String](length=report.height(), fill=reason)
-        ))
+        Series(
+            "selection_reason",
+            Column[String](List[String](length=report.height(), fill=reason)),
+        )
     )
 
 
@@ -1072,8 +1079,12 @@ trait AcceleratorBackend(Copyable):
         return ("cpu", "provider has no automatic placement policy")
 
     def execute_auto(
-        self, plan: LazyFrame, optimize: Bool, streaming: Bool,
-        batch_size: Int, profiling: Bool,
+        self,
+        plan: LazyFrame,
+        optimize: Bool,
+        streaming: Bool,
+        batch_size: Int,
+        profiling: Bool,
     ) raises -> Tuple[DataFrame, DataFrame]:
         return self.execute_profiled(plan) if profiling else self.execute(plan)
 
@@ -1662,7 +1673,9 @@ struct LazyFrame(Copyable):
                     self, optimize, streaming, batch_size, False
                 )[0].copy()
             return self.collect(
-                engine="cpu", optimize=optimize, streaming=streaming,
+                engine="cpu",
+                optimize=optimize,
+                streaming=streaming,
                 batch_size=batch_size,
             )
         if engine != "accel":
@@ -1699,7 +1712,9 @@ struct LazyFrame(Copyable):
                     self, optimize, streaming, batch_size, True
                 )
             var result = self.profile(
-                engine="cpu", optimize=optimize, streaming=streaming,
+                engine="cpu",
+                optimize=optimize,
+                streaming=streaming,
                 batch_size=batch_size,
             )
             return (result[0].copy(), _selection_report(result[1], selected[1]))
@@ -1728,9 +1743,17 @@ struct LazyFrame(Copyable):
             var selected = accelerator.select_auto(self)
             _ = _automatic_decision(selected)
             return (
-                "ENGINE " + selected[0] + ": " + selected[1] + "\n"
-                + (self.explain(engine="cpu", optimize=optimize, streaming=streaming)
-                   if selected[0] == "cpu" else "")
+                "ENGINE "
+                + selected[0]
+                + ": "
+                + selected[1]
+                + "\n"
+                + (
+                    self.explain(
+                        engine="cpu", optimize=optimize, streaming=streaming
+                    ) if selected[0]
+                    == "cpu" else ""
+                )
             )
         if engine != "accel":
             return self.explain(
@@ -1759,7 +1782,9 @@ struct LazyFrame(Copyable):
             # One `dataframe-operator:` line per executed node on stderr,
             # the columns of `profile`'s report, for benchmark traces.
             var profiled = self.profile(
-                optimize=optimize, streaming=streaming, batch_size=batch_size,
+                optimize=optimize,
+                streaming=streaming,
+                batch_size=batch_size,
                 engine="cpu",
             )
             var report = profiled[1].copy()

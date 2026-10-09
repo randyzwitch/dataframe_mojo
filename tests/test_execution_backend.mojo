@@ -89,7 +89,6 @@ def test_explicit_provider_dispatch_without_gpu_dependencies() raises:
     assert_equal(plan.explain(accelerator=provider), "probe provider")
 
 
-
 @fieldwise_init
 struct AutomaticProbe(AcceleratorBackend):
     var choice: String
@@ -116,7 +115,9 @@ def test_auto_provider_dispatch_and_errors() raises:
             _ = plan.collect(engine="auto", accelerator=provider)
         with assert_raises(contains="execution fault must propagate"):
             _ = plan.profile(engine="auto", accelerator=provider)
-        assert_equal(plan.collect(engine="cpu", accelerator=provider).height(), 2)
+        assert_equal(
+            plan.collect(engine="cpu", accelerator=provider).height(), 2
+        )
         with assert_raises(contains="batch_size must be positive"):
             _ = plan.collect(engine="auto", accelerator=provider, batch_size=0)
     var bad = AutomaticProbe("typo")
@@ -136,6 +137,7 @@ def test_auto_cpu_reason_in_profile() raises:
     assert_equal(
         result[1].item(0, "selection_reason").string(), "test placement reason"
     )
+
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

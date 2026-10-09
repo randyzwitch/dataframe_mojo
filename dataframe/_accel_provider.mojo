@@ -31,7 +31,10 @@ def select_auto(plan: LazyFrame) -> Tuple[String, String]:
 
 
 def execute_auto(
-    plan: LazyFrame, optimize: Bool, streaming: Bool, batch_size: Int,
+    plan: LazyFrame,
+    optimize: Bool,
+    streaming: Bool,
+    batch_size: Int,
     profiling: Bool,
 ) raises -> Tuple[DataFrame, DataFrame]:
     """Execute a selected region; execution errors must propagate to callers."""
