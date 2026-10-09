@@ -42,12 +42,18 @@ struct NvidiaRuntime(AcceleratorBackend):
 
     var _ctx: DeviceContext
     var _device_id: Int
+    var _memory_limit: Int
 
-    def __init__(out self, device_id: Int = 0) raises:
+    def __init__(
+        out self, device_id: Int = 0, *, memory_limit_bytes: Int = -1
+    ) raises:
+        if memory_limit_bytes < -1:
+            raise Error("memory_limit_bytes must be -1 or nonnegative")
         if device_id < 0 or device_id >= Self.device_count():
             raise Error("NVIDIA device is unavailable: " + String(device_id))
         self._ctx = DeviceContext(device_id, api="cuda")
         self._device_id = device_id
+        self._memory_limit = memory_limit_bytes
 
     @staticmethod
     def device_count() -> Int:
@@ -70,9 +76,26 @@ struct NvidiaRuntime(AcceleratorBackend):
         """Lower and execute a supported float reduction region."""
         return execute(self, plan)
 
+    def execute_profiled(
+        self, plan: LazyFrame
+    ) raises -> Tuple[DataFrame, DataFrame]:
+        """Execute once with measured CUDA kernel timing."""
+        return execute(self, plan, profiling=True)
+
+    def memory_info(self) raises -> Tuple[Int, Int]:
+        """Free and total device memory at this instant, in bytes."""
+        var info = self._ctx.get_memory_info()
+        return (Int(info[0]), Int(info[1]))
+
+    def memory_budget(self, free_bytes: Int) -> Int:
+        """Requested payload cap, limited by currently free device memory."""
+        return free_bytes if self._memory_limit < 0 else min(
+            free_bytes, self._memory_limit
+        )
+
     def describe(self, plan: LazyFrame) -> String:
-        """Explain capability without submitting device work."""
-        return describe(plan)
+        """Explain support, memory preflight, and transfer boundaries."""
+        return describe(self, plan)
 
     def upload[
         D: DType

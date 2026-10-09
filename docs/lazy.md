@@ -73,8 +73,42 @@ there is no resident-query cache. Each projection currently uses its own
 two-stage reduction over the shared uploaded input. All GPU work completes
 before returning.
 `profile(accelerator=runtime)` reports one observed fused region with executor
-`nvidia`, source rows, result rows, and wall time including transfers and
-allocations. It does not invent separate timings for fused logical operators.
+`nvidia`, source rows, result rows, and executor wall time including binding,
+memory preflight, allocations, and transfers. It appends GPU diagnostic columns
+to the existing CPU report columns: `device_id`, `device_name`, `upload_bytes`,
+`download_bytes`, `workspace_bytes`, `device_output_bytes`,
+`peak_requested_device_bytes`, `memory_budget_bytes`, `free_device_bytes`,
+`free_device_after_execution_bytes`, `kernel_launches`, `synchronizations`,
+`kernel_ms`, `initialization_ms`, and `boundaries`.
+
+Kernel time uses CUDA events around each two-kernel reduction and includes the
+inter-kernel gap. Only `profile` enables those timers and their waits; ordinary
+`collect` does not. `kernel_ms` is null in an untimed provider execution report.
+Synchronization counts describe explicit library wait boundaries (including
+profile timer waits), not every internal driver operation. Default-provider
+context setup is reported separately as `initialization_ms`; an explicit
+runtime was initialized by its caller and reports zero for that column. CPU
+profiling retains its existing columns and behavior.
+
+Before uploading, the GPU path checks requested input, workspace, and output
+bytes against currently free device memory. `NvidiaRuntime(memory_limit_bytes=N)`
+adds a query payload cap; `DATAFRAME_ACCEL_MEMORY_LIMIT=N` applies the same cap
+to the registered provider. The setting is nonnegative bytes. Explicit runtime
+configuration overrides provider environment settings. Unsupported plans and
+insufficient estimated memory are rejected before upload. Auto still selects
+CPU; allocation failures, kernel faults, and driver errors propagate without
+CPU retry.
+
+The estimate includes bitmap slice offsets and all simultaneously requested
+query buffers. It excludes SDK allocator reservations and bookkeeping, so it
+is not a hard process VRAM limit or an allocation guarantee. The pinned SDK
+can reserve substantially more than a tiny query's payload (a 256 MiB arena
+was observed locally). Free-memory snapshots include other GPU users and SDK
+reservations; their difference is not an attributable peak-memory measurement.
+`explain(engine="accel")` may create a temporary context to inspect device
+memory, while CPU/auto explain never does. It lists device, budget, allocations,
+and the upload → reduction → scalar-download → host-result boundaries.
+
 `DATAFRAME_EXECUTION_REPORT` stderr tracing currently applies only to CPU
 execution; use `profile` or Nsight for this GPU path.
 

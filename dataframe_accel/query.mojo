@@ -1,10 +1,21 @@
 """NVIDIA execution of capability-checked float reduction regions."""
 from max.gpu import block_idx, thread_idx
-from max.gpu.host import DeviceBuffer
+from max.gpu.host import DeviceBuffer, DeviceContext
 from max.gpu.sync import barrier
 from std.memory import AddressSpace, stack_allocation
 from std.time import perf_counter_ns
-from dataframe.accel_plan import AccelPlan, lower_accel
+from dataframe.accel_plan import (
+    AccelPlan,
+    AccelReduction,
+    AccelScalar,
+    lower_accel,
+)
+from dataframe.accel_memory import (
+    AccelMemory,
+    plan_memory,
+    ACCEL_THREADS,
+    ACCEL_MAX_BLOCKS,
+)
 from dataframe.column import Column
 from dataframe.dtype import DataType
 from dataframe.expr import COUNT
@@ -13,10 +24,15 @@ from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
 from dataframe.series import Series
 from dataframe.execution_report import ExecutionReport
-from .nvidia import NvidiaRuntime, _HostDownload, _drain_before_release
+from .nvidia import (
+    NvidiaRuntime,
+    NvidiaColumn,
+    _HostDownload,
+    _drain_before_release,
+)
 
-comptime THREADS = 256
-comptime MAX_BLOCKS = 1024
+comptime THREADS = ACCEL_THREADS
+comptime MAX_BLOCKS = ACCEL_MAX_BLOCKS
 
 
 @always_inline
@@ -120,12 +136,60 @@ def _finish(
         output_count[unsafe_offset=0] = reduced[1]
 
 
+def _enqueue[
+    D: DType
+](
+    ctx: DeviceContext,
+    source: NvidiaColumn[D],
+    reduction: AccelReduction,
+    predicate: AccelScalar,
+    sums: DeviceBuffer[DType.float64],
+    counts: DeviceBuffer[DType.int64],
+    output: DeviceBuffer[DType.float64],
+    output_count: DeviceBuffer[DType.int64],
+    blocks: Int,
+) raises:
+    ctx.enqueue_function[_partial[D]](
+        source._values,
+        source._bits,
+        sums,
+        counts,
+        Int64(len(source)),
+        Int64(source.validity_offset()),
+        Int64(source.has_validity()),
+        Int64(blocks),
+        Int64(predicate.op),
+        predicate.literal,
+        Int64(predicate.literal_left),
+        Int64(reduction.input.op),
+        reduction.input.literal,
+        Int64(reduction.input.literal_left),
+        grid_dim=blocks,
+        block_dim=THREADS,
+    )
+    ctx.enqueue_function[_finish](
+        sums,
+        counts,
+        output,
+        output_count,
+        Int64(blocks),
+        grid_dim=1,
+        block_dim=THREADS,
+    )
+
+
 def _execute[
     D: DType
-](runtime: NvidiaRuntime, plan: AccelPlan) raises -> DataFrame:
+](
+    runtime: NvidiaRuntime,
+    plan: AccelPlan,
+    memory: AccelMemory,
+    profiling: Bool,
+) raises -> Tuple[DataFrame, Int, Int]:
     var source = runtime.upload[D](plan.source.numeric[D]())
     var ctx = runtime._ctx
-    var blocks = max(1, min(MAX_BLOCKS, (len(source) + THREADS - 1) // THREADS))
+    var blocks = memory.blocks
+    var kernel_ns = 0
     var sums = ctx.enqueue_create_buffer[DType.float64](blocks)
     var counts = ctx.enqueue_create_buffer[DType.int64](blocks)
     var output = ctx.enqueue_create_buffer[DType.float64](1)
@@ -135,33 +199,45 @@ def _execute[
         var host_sum = _HostDownload[DType.float64](ctx, 1, 0)
         var host_count = _HostDownload[DType.int64](ctx, 1, 0)
         try:
-            ctx.enqueue_function[_partial[D]](
-                source._values,
-                source._bits,
-                sums,
-                counts,
-                Int64(len(source)),
-                Int64(source.validity_offset()),
-                Int64(source.has_validity()),
-                Int64(blocks),
-                Int64(plan.predicate.op),
-                plan.predicate.literal,
-                Int64(plan.predicate.literal_left),
-                Int64(reduction.input.op),
-                reduction.input.literal,
-                Int64(reduction.input.literal_left),
-                grid_dim=blocks,
-                block_dim=THREADS,
-            )
-            ctx.enqueue_function[_finish](
-                sums,
-                counts,
-                output,
-                output_count,
-                Int64(blocks),
-                grid_dim=1,
-                block_dim=THREADS,
-            )
+            if profiling:
+
+                def kernels(
+                    timing_ctx: DeviceContext,
+                ) raises {
+                    imm source,
+                    imm reduction,
+                    imm plan,
+                    imm sums,
+                    imm counts,
+                    imm output,
+                    imm output_count,
+                    imm blocks,
+                }:
+                    _enqueue[D](
+                        timing_ctx,
+                        source,
+                        reduction,
+                        plan.predicate,
+                        sums,
+                        counts,
+                        output,
+                        output_count,
+                        blocks,
+                    )
+
+                kernel_ns += ctx.execution_time(kernels, 1)
+            else:
+                _enqueue[D](
+                    ctx,
+                    source,
+                    reduction,
+                    plan.predicate,
+                    sums,
+                    counts,
+                    output,
+                    output_count,
+                    blocks,
+                )
             host_sum.pending = True
             ctx.enqueue_copy(host_sum.values.unsafe_ptr(), output)
             host_count.pending = True
@@ -188,25 +264,30 @@ def _execute[
             _drain_before_release(ctx)
             raise error^
     source.wait()
+    var free_after = runtime.memory_info()[0]
     var result = DataFrame(columns^)
     if plan.limit >= 0:
-        return result.head(plan.limit)
-    return result^
+        result = result.head(plan.limit)
+    return (result^, kernel_ns, free_after)
 
 
 def execute(
-    runtime: NvidiaRuntime, query: LazyFrame
+    runtime: NvidiaRuntime, query: LazyFrame, *, profiling: Bool = False
 ) raises -> Tuple[DataFrame, DataFrame]:
-    var plan = lower_accel(query)
     var start = perf_counter_ns()
-    var result: DataFrame
+    var plan = lower_accel(query)
+    var memory = plan_memory(plan)
+    var free = runtime.memory_info()[0]
+    var budget = runtime.memory_budget(free)
+    memory.require_budget(budget)
+    var executed: Tuple[DataFrame, Int, Int]
     if plan.source.dtype() == DataType.FLOAT32:
-        result = _execute[DType.float32](runtime, plan)
+        executed = _execute[DType.float32](runtime, plan, memory, profiling)
     else:
-        result = _execute[DType.float64](runtime, plan)
+        executed = _execute[DType.float64](runtime, plan, memory, profiling)
     var elapsed = Int(perf_counter_ns() - start)
+    var result = executed[0].copy()
     var report = ExecutionReport()
-    # One observed fused region; no invented per-operator row/timing counts.
     report.record(
         plan.root,
         "FUSED FLOAT REDUCTIONS",
@@ -216,17 +297,96 @@ def execute(
         algorithm="scalar_filter_reductions",
         wall_ns=elapsed,
     )
-    return (result^, report.frame())
+    var columns = report.frame()._columns.copy()
+    columns.append(
+        Series("device_id", Column[Int64]([Int64(runtime.device_id())]))
+    )
+    columns.append(Series("device_name", Column[String]([runtime.name()])))
+    columns.append(
+        Series("upload_bytes", Column[Int64]([Int64(memory.input_bytes)]))
+    )
+    columns.append(
+        Series("download_bytes", Column[Int64]([Int64(memory.download_bytes)]))
+    )
+    columns.append(
+        Series(
+            "workspace_bytes", Column[Int64]([Int64(memory.workspace_bytes)])
+        )
+    )
+    columns.append(
+        Series(
+            "device_output_bytes", Column[Int64]([Int64(memory.output_bytes)])
+        )
+    )
+    columns.append(
+        Series(
+            "peak_requested_device_bytes",
+            Column[Int64]([Int64(memory.peak_bytes)]),
+        )
+    )
+    columns.append(
+        Series("memory_budget_bytes", Column[Int64]([Int64(budget)]))
+    )
+    columns.append(Series("free_device_bytes", Column[Int64]([Int64(free)])))
+    columns.append(
+        Series(
+            "free_device_after_execution_bytes",
+            Column[Int64]([Int64(executed[2])]),
+        )
+    )
+    columns.append(
+        Series("kernel_launches", Column[Int64]([Int64(memory.launches)]))
+    )
+    # Each host download finishes with a stream wait; source.wait adds one.
+    # Event timing adds one timer wait per projection, only under profile().
+    columns.append(
+        Series(
+            "synchronizations",
+            Column[Int64](
+                [Int64(len(plan.reductions) * (3 if profiling else 2) + 1)]
+            ),
+        )
+    )
+    columns.append(
+        Series(
+            "kernel_ms",
+            Column[Float64]([Float64(executed[1]) / 1e6], [profiling]),
+        )
+    )
+    columns.append(Series("initialization_ms", Column[Float64]([0])))
+    columns.append(
+        Series(
+            "boundaries",
+            Column[String](
+                [
+                    "host upload -> GPU reductions -> scalar download -> host result"
+                ]
+            ),
+        )
+    )
+    return (result^, DataFrame(columns^))
 
 
-def describe(query: LazyFrame) -> String:
+def describe(runtime: NvidiaRuntime, query: LazyFrame) -> String:
     try:
         var plan = lower_accel(query)
+        var memory = plan_memory(plan)
+        var free = runtime.memory_info()[0]
+        var budget = runtime.memory_budget(free)
+        memory.require_budget(budget)
         return (
             "ENGINE accel: NVIDIA supported; one in-memory float reduction region\n"
-            + "  "
-            + String(len(plan.reductions))
-            + " sum/count projections; Float64 accumulation; Int64 counts\n"
+            + "  device="
+            + String(runtime.device_id())
+            + " ("
+            + runtime.name()
+            + "); free="
+            + String(free)
+            + " B; payload_budget="
+            + String(budget)
+            + " B\n  "
+            + memory.describe()
+            + "\n  host upload -> GPU reductions -> scalar download -> synchronized host result\n  estimates exclude SDK reservations; allocation/runtime faults propagate without CPU retry\n"
         )
     except error:
         return "ENGINE accel: " + String(error) + "\n"

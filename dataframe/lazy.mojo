@@ -49,6 +49,7 @@ from .parallel import Crew, Job, Pool, configured_workers, run_jobs
 from .execution_backend import _select_backend
 from ._accel_provider import (
     execute as _execute_accel,
+    execute_profiled as _profile_accel,
     describe as _describe_accel,
 )
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
@@ -1056,6 +1057,12 @@ trait AcceleratorBackend(Copyable):
     def describe(self, plan: LazyFrame) -> String:
         ...
 
+    def execute_profiled(
+        self, plan: LazyFrame
+    ) raises -> Tuple[DataFrame, DataFrame]:
+        """Optional measured execution; providers may retain the base report."""
+        return self.execute(plan)
+
 
 struct LazyFrame(Copyable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
@@ -1613,13 +1620,9 @@ struct LazyFrame(Copyable):
                 streaming=streaming,
                 batch_size=batch_size,
             )
-        return self.profile(
-            accelerator=accelerator,
-            engine=engine,
-            optimize=optimize,
-            streaming=streaming,
-            batch_size=batch_size,
-        )[0].copy()
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        return accelerator.execute(self)[0].copy()
 
     def profile[
         B: AcceleratorBackend
@@ -1643,7 +1646,7 @@ struct LazyFrame(Copyable):
                 streaming=streaming,
                 batch_size=batch_size,
             )
-        return accelerator.execute(self)
+        return accelerator.execute_profiled(self)
 
     def explain[
         B: AcceleratorBackend
@@ -1729,14 +1732,15 @@ struct LazyFrame(Copyable):
         eager node's wall time including its inputs; on a stream's last
         node, the whole stream's). Counts are observed, never estimated,
         and the result is the one `collect` returns.
-        Engine selection follows `collect`; the report schema is unchanged.
+        Engine selection follows `collect`. CPU report columns are unchanged;
+        accelerator providers may append device and timing diagnostics.
         """
         var backend = _select_backend(engine)
         backend.require_available()
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if engine == "accel":
-            return _execute_accel(self)
+            return _profile_accel(self)
         var plan = self._optimized() if optimize else self.copy()
         if optimize:
             plan._push_join_key_sets(streaming, batch_size)

@@ -19,3 +19,7 @@ def execute(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
 
 def describe(plan: LazyFrame) -> String:
     return "ENGINE accel: Accelerator provider is not installed; use the optional GPU package or accelerator=runtime\n"
+
+
+def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+    return execute(plan)
