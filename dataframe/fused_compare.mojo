@@ -17,7 +17,7 @@ from .column import Column
 from .dtype import NUMERIC_DTYPES
 from .execution import evaluate
 from .expr import COL, EQ, GE, GT, LE, LT, NE, Expr, subtree
-from .expr_kernels import _compare_lanes, _window_bytes
+from .expr_kernels import _compare_lanes
 from .parallel import Job, partitions, run_jobs, worker_count
 from .series import Series
 
@@ -169,6 +169,34 @@ def _block[
             bits[unsafe_offset=full] &= byte
 
 
+@always_inline
+def _and_valid(
+    valid: List[UInt8],
+    offset: Int,
+    rows: Int,
+    bits: Pointer[UInt8, MutAnyOrigin],
+):
+    """AND the validity of `rows` rows from bit `offset` into `bits`, whose
+    bit 0 is the first of those rows."""
+    var count = (rows + 7) // 8
+    var byte = offset >> 3
+    var shift = UInt8(offset & 7)
+    var src = valid.unsafe_ptr().unsafe_offset(byte)
+    if shift == 0:
+        for k in range(count):
+            bits[unsafe_offset=k] &= src[unsafe_offset=k]
+        return
+    # The last byte's upper bits may lie past the bitmap when the rows past
+    # `rows` do; those bits of the mask are zero already.
+    var whole = count if byte + count < len(valid) else count - 1
+    for k in range(whole):
+        bits[unsafe_offset=k] &= (src[unsafe_offset=k] >> shift) | (
+            src[unsafe_offset=k + 1] << (8 - shift)
+        )
+    if whole < count:
+        bits[unsafe_offset=whole] &= src[unsafe_offset=whole] >> shift
+
+
 def _apply[
     D: DType
 ](
@@ -196,11 +224,7 @@ def _apply[
         _block[D, NE](values, constant, first, rows, bits, initial)
     if comparison.nulls:
         # Null rows compare false: AND the validity of these rows in.
-        var valid = _window_bytes(
-            column._bits[], column._offset + first, rows, rows, UInt8(255)
-        )
-        for k in range(len(valid)):
-            bits[unsafe_offset=k] &= valid[k]
+        _and_valid(column._bits[], column._offset + first, rows, bits)
 
 
 struct _FusedJob(Job):

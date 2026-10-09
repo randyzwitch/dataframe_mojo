@@ -171,7 +171,15 @@ def test_fused_comparisons_with_nulls() raises:
             Series("p", Column[Float64](p^, p_valid^)),
         ]
     )
-    var frames = [data.copy(), data.slice(5, n - 9)]
+    # Slices start the validity bits mid-byte, and some end in the
+    # bitmap's last byte.
+    var frames = [
+        data.copy(),
+        data.slice(5, n - 9),
+        data.slice(3, n - 3),
+        data.slice(8, n - 8),
+        data.slice(1, n - 1),
+    ]
     for f in frames:
         check(f, (col("q") >= lit(Int32(10))) & (col("q") <= lit(Int32(30))))
         check(f, (col("q") > lit(Int32(4))) & (col("p") < 40.0))
