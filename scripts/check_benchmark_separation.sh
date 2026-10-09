@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Rule 2 in docs/benchmarks.md: a PR that changes the engine (dataframe/)
+# Rule 2 in docs/benchmarks.md: a PR that changes the engine
+# (dataframe/)
 # must not also change what measures it (benchmarks/, scripts/bench_*),
 # unless a commit explains why in a "Benchmark-Change:" trailer.
 #

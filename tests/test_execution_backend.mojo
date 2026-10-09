@@ -1,6 +1,7 @@
 """Backend policy stays above CPU scheduling and rejects unavailable engines."""
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit, scan_csv
+from dataframe.lazy import AcceleratorBackend, LazyFrame
 
 
 def test_cpu_and_auto_preserve_query_results() raises:
@@ -30,15 +31,15 @@ def test_cpu_and_auto_preserve_query_results() raises:
 
 def test_unavailable_backend_rejected_before_reading_source() raises:
     var plan = scan_csv("/nonexistent/dataframe_backend_selection/input.csv")
-    with assert_raises(contains="Accelerator execution is not implemented"):
+    with assert_raises(contains="Accelerator provider is not installed"):
         _ = plan.collect(engine="accel")
-    with assert_raises(contains="Accelerator execution is not implemented"):
+    with assert_raises(contains="Accelerator provider is not installed"):
         _ = plan.profile(engine="accel")
-    with assert_raises(contains="Accelerator execution is not implemented"):
+    with assert_raises(contains="Accelerator provider is not installed"):
         _ = plan.fetch(engine="accel")
     var description = plan.explain(engine="accel")
     assert_true("ENGINE accel:" in description)
-    assert_true("Accelerator execution is not implemented" in description)
+    assert_true("Accelerator provider is not installed" in description)
 
 
 def test_invalid_engine_is_not_silently_ignored() raises:
@@ -52,6 +53,40 @@ def test_invalid_engine_is_not_silently_ignored() raises:
             _ = plan.fetch(engine=engine)
         with assert_raises(contains="Unknown engine"):
             _ = plan.explain(engine=engine)
+
+
+@fieldwise_init
+struct ProbeBackend(AcceleratorBackend):
+    def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+        raise Error("provider invoked")
+
+    def describe(self, plan: LazyFrame) -> String:
+        return "probe provider"
+
+
+def test_explicit_provider_dispatch_without_gpu_dependencies() raises:
+    var provider = ProbeBackend()
+    var plan = (
+        DataFrame([Series("x", Column[Int64]([1, 2]))])
+        .lazy()
+        .select(col("x").sum())
+    )
+    for engine in ["cpu", "auto"]:
+        assert_true(
+            plan.collect(engine=engine, accelerator=provider).equals(
+                plan.collect()
+            )
+        )
+        assert_true(
+            plan.profile(engine=engine, accelerator=provider)[0].equals(
+                plan.collect()
+            )
+        )
+    with assert_raises(contains="provider invoked"):
+        _ = plan.collect(engine="accel", accelerator=provider)
+    with assert_raises(contains="Unknown engine"):
+        _ = plan.collect(engine="typo", accelerator=provider)
+    assert_equal(plan.explain(accelerator=provider), "probe provider")
 
 
 def main() raises:
