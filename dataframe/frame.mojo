@@ -395,6 +395,18 @@ struct DataFrame(Copyable, Sized, Writable):
     def item(self, row: Int, column: String) raises -> AnyValue:
         return self._columns[self._index(column)].get(row)
 
+    def _shares_buffers_with(self, other: Self) -> Bool:
+        """Whether both frames are the same columns over the same Arrow
+        buffers (the same frame, however many times copied)."""
+        if self.width() != other.width() or self._height != other._height:
+            return False
+        for c in range(self.width()):
+            if self._columns[c].name() != other._columns[c].name():
+                return False
+            if not self._columns[c]._shares_buffers_with(other._columns[c]):
+                return False
+        return True
+
     def equals(self, other: Self, *, null_equal: Bool = True) -> Bool:
         """Same names, dtypes, order, height, and cells (NaN equals NaN)."""
         if self._height != other._height or self.width() != other.width():

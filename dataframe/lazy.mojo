@@ -1561,6 +1561,7 @@ struct LazyFrame(Copyable):
         var plan = self._optimized() if optimize else self.copy()
         if optimize:
             plan._push_join_key_sets(streaming, batch_size)
+            plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         return plan._execute(len(plan._nodes) - 1, False, streaming, batch_size)
 
@@ -1589,6 +1590,7 @@ struct LazyFrame(Copyable):
         var plan = self._optimized() if optimize else self.copy()
         if optimize:
             plan._push_join_key_sets(streaming, batch_size)
+            plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
         plan._report = Optional(ArcPointer(ExecutionReport()))
         var result = plan._execute(
@@ -2721,6 +2723,146 @@ struct LazyFrame(Copyable):
         plan._fuse_top_k()
         plan._push_projections()
         return plan^
+
+    def _share_subplans(mut self, streaming: Bool, batch_size: Int) raises:
+        """Execute a subplan used in two places once (common-subplan
+        elimination, as Polars' `comm_subplan_elim` and DuckDB's shared
+        CTEs do). Two nodes whose subtrees read the same (`_signature`)
+        would compute the same frame twice: PDS-H q21 filters lineitem
+        for late shipments both as a join input and under a grouped
+        n_unique, TPC-DS q39 joins and groups inventory once per month
+        compared. The largest such subtree is collected on its own, with
+        every planner pass, and every node holding it becomes a scan of
+        the result. Runs after join key sets pass sideways: copies that
+        receive different key sets are left apart, since one shared
+        result could not take either set (TPC-DS q59's weekly sales per
+        store are joined with a different year's weeks on each side, and
+        shared whole cost 40 to 56 ms).
+
+        Only a subtree holding an aggregation or a unique is shared: its
+        result is small next to its input, and holding it whole costs
+        little. Joins and filters alone are not, since their output can
+        be as large as their input (TPC-DS q39's two branches agree only
+        on the 11.7M-row joins below their date filters, and holding
+        those doubled the query) and a stream processes them in batches
+        in whatever join order the planner picks."""
+        # Two plans joined carry their own copies of a frame they both
+        # scan, in separate slots: a scan's signature names the first slot
+        # holding the same buffers.
+        var canonical = List[Int](capacity=len(self._frames))
+        for f in range(len(self._frames)):
+            var first = f
+            for g in range(f):
+                if canonical[g] == g and self._frames[g]._shares_buffers_with(
+                    self._frames[f]
+                ):
+                    first = g
+                    break
+            canonical.append(first)
+        var signatures = List[String]()
+        var sizes = List[Int]()
+        var reducing = List[Bool]()
+        for i in range(len(self._nodes)):
+            signatures.append(self._signature(i, signatures, canonical))
+            ref node = self._nodes[i]
+            var size = 1
+            var reduces = node.kind == AGG or node.kind == UNIQUE
+            if node.left >= 0:
+                size += sizes[node.left]
+                reduces = reduces or reducing[node.left]
+            if node.right >= 0:
+                size += sizes[node.right]
+                reduces = reduces or reducing[node.right]
+            sizes.append(size)
+            reducing.append(reduces)
+        # Nodes under a shared subtree are replaced with it.
+        var covered = List[Bool](length=len(self._nodes), fill=False)
+        var shared = False
+        while True:
+            # The largest subtree that two uncovered nodes hold.
+            var best = -1
+            for i in range(len(self._nodes)):
+                if covered[i] or not reducing[i]:
+                    continue
+                if best >= 0 and sizes[i] <= sizes[best]:
+                    continue
+                for j in range(len(self._nodes)):
+                    if (
+                        j != i
+                        and not covered[j]
+                        and signatures[j] == signatures[i]
+                    ):
+                        best = i
+                        break
+            if best < 0:
+                break
+            trace_path("lazy.shared_subplan")
+            var sub = self.copy()
+            sub._reorder(best)
+            var frame = sub._collect(
+                optimize=True, streaming=streaming, batch_size=batch_size
+            )
+            self._frames.append(frame^)
+            self._schemas.append(Optional[CsvSchema]())
+            var slot = len(self._frames) - 1
+            for j in range(len(self._nodes)):
+                if not covered[j] and signatures[j] == signatures[best]:
+                    self._cover(j, covered)
+                    self._nodes[j] = _plan_node(SCAN_FRAME, offset=slot)
+            shared = True
+        if shared:
+            self._reorder()
+            self._compact_scan_slots()
+
+    def _cover(self, index: Int, mut covered: List[Bool]):
+        var stack = List[Int]()
+        stack.append(index)
+        while len(stack) > 0:
+            var i = stack.pop()
+            if covered[i]:
+                continue
+            covered[i] = True
+            for child in [self._nodes[i].left, self._nodes[i].right]:
+                if child >= 0:
+                    stack.append(child)
+
+    def _signature(
+        self, index: Int, below: List[String], canonical: List[Int]
+    ) -> String:
+        """What a node computes, as text: its kind and every setting, its
+        expressions node by node, and its inputs' signatures (already in
+        `below`, since children come before parents). A frame scan names
+        its slot through `canonical`."""
+        ref node = self._nodes[index]
+        var text = String(node.kind)
+        text += "|" + _joined(node.names) + "|" + _joined(node.names2)
+        for flag in node.flags:
+            text += "1" if flag else "0"
+        var slot = node.offset
+        if node.kind == SCAN_FRAME and slot >= 0 and slot < len(canonical):
+            slot = canonical[slot]
+        text += "|" + node.text + "|" + String(slot)
+        text += "|" + String(node.length)
+        text += "|" + ("o" if node.maintain_order else "u")
+        text += "|" + String(node.how) + "|" + _joined(node.right_keys)
+        text += "|" + ("c" if node.coalesce else "n")
+        if node.asof_tolerance:
+            text += "|" + String(node.asof_tolerance.value())
+        for e in node.exprs:
+            text += "|" + _expr_signature(e)
+        # Children by a hash of their text, so a signature stays short
+        # however deep the plan.
+        text += (
+            "|("
+            + (String(_text_hash(below[node.left])) if node.left >= 0 else "")
+            + ")"
+        )
+        text += (
+            "("
+            + (String(_text_hash(below[node.right])) if node.right >= 0 else "")
+            + ")"
+        )
+        return text^
 
     def _parents(self) -> List[Int]:
         var parents = List[Int](length=len(self._nodes), fill=-1)
@@ -4396,6 +4538,43 @@ def _chain_member(node: PlanNode) -> Bool:
 
 def _is_scan(kind: Int) -> Bool:
     return kind == SCAN_FRAME or kind == SCAN_CSV or kind == SCAN_PARQUET
+
+
+def _text_hash(text: String) -> UInt64:
+    """FNV-1a over the text's bytes."""
+    var h = UInt64(0xCBF29CE484222325)
+    for b in text.as_bytes():
+        h = (h ^ UInt64(b)) * 0x100000001B3
+    return h
+
+
+def _expr_signature(expr: Expr) -> String:
+    """An expression as text, node by node, for `_signature`."""
+    var text = expr._name
+    for n in expr._nodes:
+        text += (
+            ";"
+            + String(n.op)
+            + ","
+            + String(n.left)
+            + ","
+            + String(n.right)
+            + ","
+            + n.text
+            + ","
+            + String(n.integer)
+            + ","
+            + String(n.floating)
+            + ","
+            + String(n.min_count)
+            + ","
+            + String(n.extra)
+            + ","
+            + n.text2
+        )
+        for d in n.dtypes:
+            text += "," + (d.value().name() if d else "_")
+    return text^
 
 
 def _joined(names: List[String]) -> String:
