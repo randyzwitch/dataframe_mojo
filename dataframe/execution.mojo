@@ -8,6 +8,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .expr import INT_IS_IN
 from .expr import (
     Node,
+    Expr,
     COL,
     LIT_INT,
     LIT_FLOAT,
@@ -788,6 +789,9 @@ struct _ReduceJob[width: Int](Job):
     var grouped: Bool
     var groups: ArcPointer[List[Int]]
     var reducer: Reducer
+    # Column statistics shared by the expressions of one batch
+    # (`_ColumnStats`); a job started with none keeps its own.
+    var stats: ArcPointer[List[_ColumnStats]]
 
     def __init__(
         out self,
@@ -801,7 +805,11 @@ struct _ReduceJob[width: Int](Job):
         grouped: Bool,
         groups: ArcPointer[List[Int]],
         group_count: Int,
+        stats: Optional[ArcPointer[List[_ColumnStats]]] = None,
     ):
+        self.stats = stats.value().copy() if stats else ArcPointer(
+            List[_ColumnStats]()
+        )
         self.bound = bound.copy()
         self.columns = columns.copy()
         self.states = states.copy()
@@ -847,6 +855,7 @@ struct _ReduceJob[width: Int](Job):
             self.start,
             self.end,
             self.grouped,
+            self.stats,
         ):
             return
         for offset in range(self.start, self.end, self.batch_size):
@@ -1137,6 +1146,231 @@ def _valid_lanes(
 comptime _SUM_BLOCK = 1 << 30
 
 
+@fieldwise_init
+struct _ColumnStats(Copyable, Movable):
+    """The sum, count, min and max of one column's valid rows [start,
+    end), kept for the expressions of one batch that read the same
+    column (`_shifted_int_sum`: ClickBench q29's ninety sums of one
+    column plus a constant take one pass instead of ninety)."""
+
+    var column: Int
+    var start: Int
+    var end: Int
+    var total: Int128
+    var count: Int
+    var smallest: Int64
+    var largest: Int64
+
+
+def _shifted_int_sum(
+    mut reducer: Reducer,
+    bound: BoundExpr,
+    columns: List[Series],
+    node: Node,
+    start: Int,
+    end: Int,
+    stats: ArcPointer[List[_ColumnStats]],
+) raises -> Bool:
+    """`sum(col + c)`, `sum(col - c)`, `sum(c - col)` and `sum(col * c)`
+    (or their means) of an integer column and an integer literal, from
+    the column's own sum and count: `sum(col) + c * count`, and so on.
+    Exact in integers. The materialized form raises when a row's result
+    leaves the expression's type, so the same pass takes the column's
+    min and max and the shortcut is declined when either would; the
+    ordinary path then raises as before. ClickBench q29 sums a 16-bit
+    column plus a constant ninety times: a pass that wrote each sum's
+    input and read it back cost 0.8 ms a sum, this reads it once."""
+    if node.op != SUM and node.op != MEAN:
+        return False
+    ref inner = bound.expr._nodes[node.left]
+    if inner.op != ADD and inner.op != SUB and inner.op != MUL:
+        return False
+    if inner.left < 0 or inner.right < 0:
+        return False
+    var column_at = inner.left
+    var literal_at = inner.right
+    var column_first = True
+    if (
+        bound.expr._nodes[inner.left].op == LIT_INT
+        and bound.expr._nodes[inner.right].op == COL
+    ):
+        column_at = inner.right
+        literal_at = inner.left
+        column_first = False
+    elif not (
+        bound.expr._nodes[inner.left].op == COL
+        and bound.expr._nodes[inner.right].op == LIT_INT
+    ):
+        return False
+    if inner.op == MUL and not column_first:
+        column_first = True
+    var c = bound.expr._nodes[literal_at].integer
+    ref series = columns[bound.sources[column_at]]
+    if series.dtype().is_decimal():
+        return False
+    var result = bound.dtypes[node.left]
+    if result.is_decimal() or not result.is_integer():
+        return False
+    if result == DataType.UINT64:
+        return False
+    var low = Int64.MIN
+    var high = Int64.MAX
+    if result == DataType.INT8:
+        low = Int64(Int8.MIN)
+        high = Int64(Int8.MAX)
+    elif result == DataType.INT16:
+        low = Int64(Int16.MIN)
+        high = Int64(Int16.MAX)
+    elif result == DataType.INT32:
+        low = Int64(Int32.MIN)
+        high = Int64(Int32.MAX)
+    elif result == DataType.UINT8:
+        low = 0
+        high = Int64(UInt8.MAX)
+    elif result == DataType.UINT16:
+        low = 0
+        high = Int64(UInt16.MAX)
+    elif result == DataType.UINT32:
+        low = 0
+        high = Int64(UInt32.MAX)
+    var source = bound.sources[column_at]
+    var found = Optional[_ColumnStats]()
+    for k in range(len(stats[])):
+        ref known = stats[][k]
+        if known.column == source and known.start == start and known.end == end:
+            found = known.copy()
+            break
+    if not found:
+        # Chunk by chunk (a Parquet column holds a chunk per row group);
+        # the chunks' stats combine.
+        var gathered = _ColumnStats(
+            source, start, end, 0, 0, Int64.MAX, Int64.MIN
+        )
+        var pieces = List[Series]()
+        if series.is_chunked():
+            pieces = series.chunks()
+        else:
+            pieces.append(series.copy())
+        var chunk_start = 0
+        for part in pieces:
+            var chunk_end = chunk_start + len(part)
+            var lo = max(start, chunk_start)
+            var hi = min(end, chunk_end)
+            if lo < hi:
+                var added = False
+                comptime for k in range(len(NUMERIC_DTYPES)):
+                    comptime D = NUMERIC_DTYPES[k]
+                    comptime if D.is_integral() and D != DType.uint64:
+                        if part._data.isa[Column[Scalar[D]]]():
+                            var piece = _column_stats[D](
+                                part._data[Column[Scalar[D]]],
+                                lo - chunk_start,
+                                hi - chunk_start,
+                            )
+                            gathered.total += piece[0]
+                            gathered.count += piece[1]
+                            gathered.smallest = min(gathered.smallest, piece[2])
+                            gathered.largest = max(gathered.largest, piece[3])
+                            added = True
+                if not added:
+                    return False
+            chunk_start = chunk_end
+            if chunk_start >= end:
+                break
+        stats[].append(gathered.copy())
+        found = gathered^
+    return _shifted_int_sum_from(
+        reducer, found.value(), inner.op, c, column_first, low, high
+    )
+
+
+def _column_stats[
+    D: DType
+](column: Column[Scalar[D]], start: Int, end: Int) -> Tuple[
+    Int128, Int, Int64, Int64
+]:
+    """One pass for the sum, count, min and max of the valid rows
+    [start, end); min and max are Int64.MAX and Int64.MIN when none."""
+    var values = column._ptr()
+    var bits = column.unsafe_validity()
+    var all_valid = len(column._bits[]) == 0
+    var count = _count_valid(
+        column._bits[], column._offset + start, end - start
+    )
+    var sum = SIMD[DType.int64, 8](0)
+    var least = SIMD[DType.int64, 8](Int64.MAX)
+    var most = SIMD[DType.int64, 8](Int64.MIN)
+    var i = start
+    while i + 8 <= end:
+        var v = values.unsafe_load[width=8](i).cast[DType.int64]()
+        if not all_valid:
+            var valid = _valid_lanes(bits, column._offset + i)
+            sum += valid.select(v, SIMD[DType.int64, 8](0))
+            least = min(least, valid.select(v, SIMD[DType.int64, 8](Int64.MAX)))
+            most = max(most, valid.select(v, SIMD[DType.int64, 8](Int64.MIN)))
+        else:
+            sum += v
+            least = min(least, v)
+            most = max(most, v)
+        i += 8
+    var total = sum.reduce_add().cast[DType.int128]()
+    var smallest = least.reduce_min()
+    var largest = most.reduce_max()
+    while i < end:
+        if all_valid or column._valid(i):
+            var v = column._get(i).cast[DType.int64]()
+            total += v.cast[DType.int128]()
+            smallest = min(smallest, v)
+            largest = max(largest, v)
+        i += 1
+    return (total, count, smallest, largest)
+
+
+def _shifted_int_sum_from(
+    mut reducer: Reducer,
+    stats: _ColumnStats,
+    op: Int,
+    c: Int64,
+    column_first: Bool,
+    low: Int64,
+    high: Int64,
+) -> Bool:
+    """Commit `sum(col op c)` from the column's stats; see
+    `_shifted_int_sum`."""
+    if stats.count == 0:
+        return True
+    # Each row's result must stay within the expression's type, as the
+    # checked kernel requires; the extremes decide for every row.
+    var n = Int128(stats.count)
+    var wide_c = Int128(c)
+    var smallest = Int128(stats.smallest)
+    var largest = Int128(stats.largest)
+    var edges = List[Int128]()
+    var shifted: Int128
+    if op == ADD:
+        edges.append(smallest + wide_c)
+        edges.append(largest + wide_c)
+        shifted = stats.total + wide_c * n
+    elif op == SUB and column_first:
+        edges.append(smallest - wide_c)
+        edges.append(largest - wide_c)
+        shifted = stats.total - wide_c * n
+    elif op == SUB:
+        edges.append(wide_c - smallest)
+        edges.append(wide_c - largest)
+        shifted = wide_c * n - stats.total
+    else:
+        edges.append(smallest * wide_c)
+        edges.append(largest * wide_c)
+        shifted = stats.total * wide_c
+    for edge in edges:
+        if edge < Int128(low) or edge > Int128(high):
+            return False
+    reducer.int_sums[0].total += shifted
+    reducer.int_sums[0].count += Int64(stats.count)
+    return True
+
+
 def _direct_int_sum[
     D: DType
 ](mut reducer: Reducer, column: Column[Scalar[D]], start: Int, end: Int):
@@ -1401,6 +1635,7 @@ def _direct_numeric_reduction(
     start: Int,
     end: Int,
     grouped: Bool,
+    stats: ArcPointer[List[_ColumnStats]],
 ) raises -> Bool:
     if grouped:
         return False
@@ -1411,6 +1646,8 @@ def _direct_numeric_reduction(
         return True
     if _widening_cast(bound, columns, node):
         input = bound.expr._nodes[input].left
+    elif _shifted_int_sum(reducer, bound, columns, node, start, end, stats):
+        return True
     elif bound.expr._nodes[input].op != COL:
         return False
     if input == node.left and _direct_float_sum(
@@ -1451,6 +1688,65 @@ def _scan_width(bound: BoundExpr, columns: List[Series], node: Node) -> Int:
     return max(
         1, columns[bound.sources[input]].dtype().physical().bit_width() // 8
     )
+
+
+def _shifted_sum_shape(
+    bound: BoundExpr, columns: List[Series], node: Node
+) -> Bool:
+    """Whether a reduction has the `sum(col op c)` shape `_shifted_int_sum`
+    reads from the column's stats: an integer column and literal under
+    `+`, `-` or `*`, summed or averaged into an integer type."""
+    if node.op != SUM and node.op != MEAN:
+        return False
+    ref inner = bound.expr._nodes[node.left]
+    if inner.op != ADD and inner.op != SUB and inner.op != MUL:
+        return False
+    if inner.left < 0 or inner.right < 0:
+        return False
+    var column_at = -1
+    if (
+        bound.expr._nodes[inner.left].op == COL
+        and bound.expr._nodes[inner.right].op == LIT_INT
+    ):
+        column_at = inner.left
+    elif (
+        bound.expr._nodes[inner.left].op == LIT_INT
+        and bound.expr._nodes[inner.right].op == COL
+    ):
+        column_at = inner.right
+    else:
+        return False
+    var dtype = columns[bound.sources[column_at]].dtype()
+    if dtype.is_decimal() or not dtype.is_integer() or dtype == DataType.UINT64:
+        return False
+    var result = bound.dtypes[node.left]
+    return (
+        result.is_integer()
+        and not result.is_decimal()
+        and result != DataType.UINT64
+    )
+
+
+def direct_reductions(
+    expressions: List[Expr], columns: List[Series]
+) raises -> Bool:
+    """Whether every expression is one reduction that runs as one scan of
+    its column (`_direct_scan`, or the `sum(col op c)` shape), writing no
+    temporary: such a batch can be as long as the input allows, where one
+    that materializes per-batch values must fit them in cache (TPC-DS q9's
+    fifteen conditional sums: 25 ms at 64K rows a batch, 34 at 90K)."""
+    for expression in expressions:
+        var bound = bind(expression, columns)
+        var root = len(bound.expr._nodes) - 1
+        ref node = bound.expr._nodes[root]
+        if not is_reduction(node.op):
+            return False
+        if not (
+            _direct_scan(bound, columns, node)
+            or _shifted_sum_shape(bound, columns, node)
+        ):
+            return False
+    return True
 
 
 def _direct_scan(bound: BoundExpr, columns: List[Series], node: Node) -> Bool:
@@ -1749,7 +2045,14 @@ def _reduce[
         ):
             return reducer^
         if _direct_numeric_reduction(
-            reducer, bound, columns, node, 0, height, grouped
+            reducer,
+            bound,
+            columns,
+            node,
+            0,
+            height,
+            grouped,
+            ArcPointer(List[_ColumnStats]()),
         ):
             return reducer^
         for offset in range(0, height, batch_size):

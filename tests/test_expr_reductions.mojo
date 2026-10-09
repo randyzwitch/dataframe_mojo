@@ -397,5 +397,97 @@ def test_decimal_mean_is_float64_everywhere() raises:
     )
 
 
+def _shifted_frame[D: DType](n: Int, with_nulls: Bool) raises -> DataFrame:
+    var values = List[Scalar[D]](capacity=n)
+    var valid = List[Bool](capacity=n)
+    for i in range(n):
+        values.append(Scalar[D]((i * 7) % 90))
+        valid.append(i % 11 != 3)
+    if with_nulls:
+        return DataFrame([Series("v", Column[Scalar[D]](values^, valid^))])
+    return DataFrame([Series("v", Column[Scalar[D]](values^))])
+
+
+def _expected_shift(n: Int, with_nulls: Bool, op: String, c: Int) -> Int:
+    var total = 0
+    for i in range(n):
+        if with_nulls and i % 11 == 3:
+            continue
+        var v = (i * 7) % 90
+        if op == "add":
+            total += v + c
+        elif op == "sub":
+            total += v - c
+        elif op == "rsub":
+            total += c - v
+        else:
+            total += v * c
+    return total
+
+
+def test_sum_of_column_and_integer_literal_from_column_stats() raises:
+    # `sum(col op c)` for an integer column and literal comes from the
+    # column's sum, count and extremes without materializing the rows,
+    # through the streaming and the eager paths, with nulls, every
+    # operator and order, a negative literal, and a mean; a row whose
+    # result leaves the column's type still raises as the row-by-row
+    # kernel does.
+    var n = 50_000
+    for nulls in [False, True]:
+        var df8 = _shifted_frame[DType.int16](n, nulls)
+        var exprs: List[Expr] = [
+            (col("v") + 5).sum().alias("add"),
+            (col("v") - 3).sum().alias("sub"),
+            (Expr(200) - col("v")).sum().alias("rsub"),
+            (col("v") * -4).sum().alias("mul"),
+            (col("v") + 7).mean().alias("mean"),
+        ]
+        var lazy = df8.lazy().select_exprs(exprs).collect()
+        var eager = df8.select_exprs(exprs)
+        for frame in [lazy.copy(), eager.copy()]:
+            assert_equal(
+                frame.item(0, "add").int64(),
+                Int64(_expected_shift(n, nulls, "add", 5)),
+            )
+            assert_equal(
+                frame.item(0, "sub").int64(),
+                Int64(_expected_shift(n, nulls, "sub", 3)),
+            )
+            assert_equal(
+                frame.item(0, "rsub").int64(),
+                Int64(_expected_shift(n, nulls, "rsub", 200)),
+            )
+            assert_equal(
+                frame.item(0, "mul").int64(),
+                Int64(_expected_shift(n, nulls, "mul", -4)),
+            )
+            var rows = n - (n + 7) // 11 if nulls else n
+            assert_almost_equal(
+                frame.item(0, "mean").float64(),
+                Float64(_expected_shift(n, nulls, "add", 7)) / Float64(rows),
+                atol=1e-9,
+            )
+    # Unsigned and narrow: a UInt8 column minus more than its minimum
+    # underflows for some row, and an Int8 column plus 100 overflows.
+    var u8 = _shifted_frame[DType.uint8](n, False)
+    assert_equal(
+        u8.lazy().select_exprs([(col("v") + 1).sum()]).collect().item().int64(),
+        Int64(_expected_shift(n, False, "add", 1)),
+    )
+    with assert_raises(contains="overflow"):
+        _ = u8.lazy().select_exprs([(col("v") - 1).sum()]).collect()
+    var i8 = _shifted_frame[DType.int8](n, False)
+    with assert_raises(contains="overflow"):
+        _ = i8.lazy().select_exprs([(col("v") + 100).sum()]).collect()
+    assert_equal(
+        i8.lazy()
+        .select_exprs([(col("v") - 100).sum()])
+        .collect()
+        .item()
+        .int64(),
+        Int64(_expected_shift(n, False, "sub", 100)),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
