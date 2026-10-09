@@ -737,21 +737,34 @@ struct _GatherJob(Job):
                 var input = column._ptr()
                 # The output starts uninitialized (see `_allocate`), so a
                 # null-extended slot is written too, as zero.
-                if self.skip_validity:
+                # Indices through a pointer and the flags decided once:
+                # a bounds check and two field reads per row kept the
+                # loop from overlapping its scattered loads (PDS-H q2's
+                # 159K-row gather of three columns, 3 ms on three workers).
+                var positions = rows.unsafe_ptr()
+                if self.skip_validity and not self.or_null:
                     for k in range(self.start, self.end):
-                        var row = rows[k]
-                        if self.or_null and row < 0:
+                        out.unsafe_offset(k)[] = input.unsafe_offset(
+                            positions.unsafe_offset(k)[]
+                        )[]
+                    return
+                if self.skip_validity:
+                    var mark = not self.share_validity
+                    for k in range(self.start, self.end):
+                        var row = positions.unsafe_offset(k)[]
+                        if row < 0:
                             out.unsafe_offset(k)[] = 0
                             continue
                         out.unsafe_offset(k)[] = input.unsafe_offset(row)[]
-                        if self.or_null and not self.share_validity:
+                        if mark:
                             out_bits.unsafe_offset(k // 8)[] |= UInt8(
                                 1
                             ) << UInt8(k % 8)
                     return
+                var or_null = self.or_null
                 for k in range(self.start, self.end):
-                    var row = rows[k]
-                    if self.or_null and row < 0:
+                    var row = positions.unsafe_offset(k)[]
+                    if or_null and row < 0:
                         out.unsafe_offset(k)[] = 0
                         continue
                     out.unsafe_offset(k)[] = input.unsafe_offset(row)[]
