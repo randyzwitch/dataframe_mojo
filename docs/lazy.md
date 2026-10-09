@@ -8,27 +8,57 @@ rows. `explain()` prints the optimized plan with execution annotations, root fir
 and `collect(optimize=False)` show and run the plan as written.
 
 `collect`, `profile`, and `fetch` accept `engine="cpu"` (the default),
-`engine="auto"`, or `engine="accel"`. CPU execution retains the existing
-streaming and optimization options. Auto currently selects CPU because the
-accelerator backend is not implemented. Explicit accelerator requests raise
-before execution or file reads; they never silently fall back to CPU. No accelerator
-dependency or device discovery is needed for CPU or auto execution.
+`engine="auto"`, or `engine="accel"`. Auto conservatively selects CPU.
+CPU and auto need no accelerator dependency or device discovery.
 
-`explain(engine="auto")` prepends the selection and its reason.
-`explain(engine="accel")` reports that the backend is unavailable without
-executing the query; its operator lines still describe the logical/CPU plan,
-not a lowered accelerator plan. The default `explain()` output is unchanged.
+For NVIDIA execution, use the optional GPU environment and pass a runtime:
 
-Backend selection occurs before CPU executor setup, independently of the
-pipeline rewrite in [#538](https://github.com/randyzwitch/dataframe_mojo/issues/538).
-Availability is the first capability gate. NVIDIA will be the first
-accelerator backend. Expression/type checks
-(including intermediate and accumulator types), null and ordering semantics,
-memory checks, device execution, and cost-based auto placement remain work
-under [#528](https://github.com/randyzwitch/dataframe_mojo/issues/528).
-The engine selects an execution family, not a physical device. A future
-device selector will identify one accelerator, with buffers and contexts
-owned by that device; splitting a query across devices is separate work.
+```mojo
+from dataframe_accel.nvidia import NvidiaRuntime
+
+var runtime = NvidiaRuntime(device_id=0)
+var query = frame.lazy().filter(col("x") > 0).select_exprs([
+    (col("x") * 1.25).sum().alias("total"),
+    col("x").count().alias("count"),
+])
+print(query.explain(engine="accel", accelerator=runtime))
+var result = query.collect(engine="accel", accelerator=runtime)
+```
+
+The initial GPU region supports one in-memory, nonchunked Float32/Float64
+column, optionally filtered by one comparison with a scalar (`>`, `>=`, `<`,
+`<=`, `==`, `!=`), followed by sum/count projections. Each reduction input is
+the column itself or one scalar `+`, `-`, or `*` operation; either operand
+order is supported. All expressions must read the same column. Aliases,
+`sum(min_count=...)`, nullable slices, and a final `head`/`fetch` are supported.
+The shared expression binder resolves literals and validates types. No
+implicit mixed-dtype arithmetic is added. Row arithmetic rounds in the input
+dtype; sums accumulate in Float64 and return the input dtype, and counts use
+Int64. Parallel reduction can change floating-point summation order.
+
+Unsupported plans raise before device submission; `explain` gives the
+capability reason. File scans, joins, grouping, intermediate projections,
+compound predicates, longer arithmetic expressions, and other dtypes are
+not supported yet. `engine="accel"` without an explicit runtime explains or
+raises the missing-runtime error. Explicit acceleration never falls back.
+`engine="auto"` still runs on CPU even when a runtime is passed.
+
+A runtime selects one CUDA-visible device and can be reused across queries.
+Each collection uploads the source and downloads only aggregate results;
+there is no resident-query cache. Each projection currently uses its own
+two-stage reduction over the shared uploaded input. All GPU work completes
+before returning.
+`profile(accelerator=runtime)` reports one observed fused region with executor
+`nvidia`, source rows, result rows, and wall time including transfers and
+allocations. It does not invent separate timings for fused logical operators.
+`DATAFRAME_EXECUTION_REPORT` stderr tracing currently applies only to CPU
+execution; use `profile` or Nsight for this GPU path.
+
+GPU lowering is independent of CPU scheduling and optimization; `optimize`
+and `streaming` affect only CPU execution. `batch_size` is validated for all
+engines but does not partition this GPU region. Default CPU `explain()` is
+unchanged. Automatic placement, additional operations, and other accelerator
+vendors remain work under [#528](https://github.com/randyzwitch/dataframe_mojo/issues/528).
 
 `join(other, on, how)` joins on keys named alike on both sides;
 `join(other, left_on=[...], right_on=[...], how, suffix, coalesce)` pairs

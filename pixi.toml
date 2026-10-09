@@ -122,3 +122,6 @@ bench-gpu-feasibility = { cmd = "./build/bench_gpu_feasibility", depends-on = ["
 test-gpu-feasibility = { cmd = "./build/bench_gpu_feasibility --check", depends-on = ["build-gpu-feasibility"] }
 build-nvidia-runtime-tests = "mkdir -p build && mojo build -I . tests/accel/test_nvidia_runtime.mojo -o build/test_nvidia_runtime"
 test-nvidia-runtime = { cmd = "./build/test_nvidia_runtime", depends-on = ["build-nvidia-runtime-tests"] }
+
+build-nvidia-query-tests = "mkdir -p build && mojo build -I . tests/accel/test_nvidia_query.mojo -o build/test_nvidia_query"
+test-nvidia-query = { cmd = "./build/test_nvidia_query", depends-on = ["build-nvidia-query-tests"] }

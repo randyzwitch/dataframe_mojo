@@ -976,14 +976,22 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Cross join: every row of this plan paired with every row of `other`, left-major; see DataFrame.join(right, how="cross").
 - `def collect(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "cpu") -> DataFrame`
   Optimize (unless disabled) and execute the plan.
+- `def collect[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> DataFrame`
+  Execute with an explicit optional runtime; auto still selects CPU.
+- `def profile[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> Tuple[DataFrame, DataFrame]`
+  Execute with a provider and report its observed execution regions.
 - `def profile(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "cpu") -> Tuple[DataFrame, DataFrame]`
   Collect, and report what each plan node did (#439).
+- `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True) -> String`
+  Describe provider capability without submitting device work.
+- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, engine: String = "cpu") -> String`
+  The (optimized) plan, one operator per line, root first.
+- `def fetch[B: AcceleratorBackend](self, n: Int = Int(5), *, accelerator: B, engine: String = "accel") -> DataFrame`
+  Collect the first n rows using an explicit provider.
 - `def fetch(self, n: Int = Int(5), *, engine: String = "cpu") -> DataFrame`
   Collect only the first n rows of the result.
 - `def collect_schema(self) -> List[String]`
   Output names and dtypes as "name: dtype", computed without reading rows: every scan yields zero rows, then the plan runs as usual, so binding validates each expression exactly as collect would.
-- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, engine: String = "cpu") -> String`
-  The (optimized) plan, one operator per line, root first.
 
 ## `LazyGroupBy`
 

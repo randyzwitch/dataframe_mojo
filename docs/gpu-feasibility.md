@@ -12,10 +12,12 @@ filter compaction, arbitrary expression lowering, or automatic placement.
 
 ## NVIDIA runtime foundation
 
-`dataframe_accel.nvidia` is an optional storage runtime, separate from the
+`dataframe_accel.nvidia` is an optional NVIDIA runtime, separate from the
 handwritten query experiment. It imports the existing `Column` layout,
 numeric dtype definitions, and bitmap normalization helper. It does not
-duplicate expression semantics or enable `collect(engine="accel")` yet.
+duplicate expression semantics. It now also executes a limited float reduction
+region through `collect(engine="accel", accelerator=runtime)`; see
+[lazy queries](lazy.md) for capability limits and semantics.
 The CPU package never imports this module and still builds without MAX.
 
 ```mojo
@@ -33,6 +35,7 @@ Run the optional tests on an NVIDIA machine with the pinned GPU environment:
 
 ```bash
 pixi run -e gpu test-nvidia-runtime
+pixi run -e gpu test-nvidia-query
 ```
 
 One `NvidiaRuntime` holds a context and ordered stream for one CUDA-visible

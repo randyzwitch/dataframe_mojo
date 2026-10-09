@@ -10,6 +10,9 @@ from std.os import abort
 from std.sys import size_of
 from dataframe.column import Column, _copy_validity
 from dataframe.dtype import NUMERIC_DTYPES
+from dataframe.lazy import AcceleratorBackend, LazyFrame
+from dataframe.frame import DataFrame
+from .query import execute, describe
 
 
 def _drain_before_release(ctx: DeviceContext):
@@ -29,7 +32,7 @@ def _require_storage_dtype[D: DType]() raises:
     raise Error("Unsupported NVIDIA column storage dtype: " + String(D))
 
 
-struct NvidiaRuntime(Copyable):
+struct NvidiaRuntime(AcceleratorBackend):
     """Reusable context for one explicit CUDA device; no global singleton.
 
     Device IDs are CUDA-visible ordinals. This runtime has one stream and
@@ -62,6 +65,14 @@ struct NvidiaRuntime(Copyable):
     def shares_context(self, other: Self) -> Bool:
         """Whether both handles use the same context and ordered stream."""
         return self._ctx == other._ctx
+
+    def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+        """Lower and execute a supported float reduction region."""
+        return execute(self, plan)
+
+    def describe(self, plan: LazyFrame) -> String:
+        """Explain capability without submitting device work."""
+        return describe(plan)
 
     def upload[
         D: DType

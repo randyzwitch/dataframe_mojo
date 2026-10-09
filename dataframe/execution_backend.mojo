@@ -31,13 +31,13 @@ def _select_backend(engine: String) raises -> _BackendDecision:
         return _BackendDecision(
             "cpu",
             True,
-            "auto uses CPU; accelerator execution is not implemented",
+            "auto uses CPU; automatic accelerator selection is not enabled",
         )
     if engine == "accel":
         return _BackendDecision(
             "accel",
             False,
-            "Accelerator execution is not implemented; use engine='cpu' or 'auto'",
+            "Accelerator execution requires an explicit accelerator runtime; use accelerator=runtime or engine='cpu'",
         )
     raise Error(
         "Unknown engine '" + engine + "'; expected 'cpu', 'auto', or 'accel'"
