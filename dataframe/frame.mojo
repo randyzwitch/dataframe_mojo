@@ -69,7 +69,7 @@ from .expr import (
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
-from .execution import evaluate, _ReduceJob
+from .execution import evaluate, _ReduceJob, _ColumnStats
 from .aggregate import Reducer
 from .sampling import sample_size, sample_indices
 from .mask_filter import filter_columns
@@ -6475,6 +6475,8 @@ struct _StreamReduction(Movable):
         self.names = List[String]()
         self.dtypes = List[DataType]()
         var shared = ArcPointer(ids^)
+        # Column statistics the batch's expressions share (`_ColumnStats`).
+        var column_stats = ArcPointer(List[_ColumnStats]())
         for expression in expressions:
             var bound = bind(expression, frame._columns)
             if bound.shape() != AGGREGATE:
@@ -6511,6 +6513,7 @@ struct _StreamReduction(Movable):
                     self.grouped,
                     shared,
                     count,
+                    Optional(column_stats),
                 )
                 job.run()
                 var name = "__stream_reduction_" + String(len(self.states))

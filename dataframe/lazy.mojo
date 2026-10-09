@@ -90,6 +90,7 @@ from .series import Series
 from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .trace import trace_path
+from .execution import direct_reductions
 from .execution_report import ExecutionReport
 from .join_type import (
     JOIN_ANTI,
@@ -2177,6 +2178,21 @@ struct LazyFrame(Copyable):
             rows_per_batch = max(
                 batch_size, min(4 * batch_size, input.height() // (4 * workers))
             )
+        elif (
+            len(operations) == 0
+            and len(expressions) > 0
+            and len(keys) == 0
+            and input.height() > 0
+            and direct_reductions(expressions, input._columns)
+        ):
+            # Ungrouped reductions straight off an in-memory input that
+            # each run as one scan of their column: four batches a worker
+            # and no more, since each batch binds and sets up every
+            # expression (ClickBench q29: ninety sums, 153 batches of 64K
+            # rows cost 15 ms of that; 32 batches cost 4). A reduction
+            # that materializes per-batch values keeps `batch_size`, which
+            # fits them in cache (TPC-DS q9, 34 ms against 25 at 90K rows).
+            rows_per_batch = max(batch_size, input.height() // (4 * workers))
         # An in-memory input hands each round four batches a worker, which
         # the pool claims as workers free up, so uneven batches balance.
         # Batches decoded from a file are held until their round ends, so
