@@ -49,29 +49,43 @@ print(query.explain(engine="accel", accelerator=runtime))
 var result = query.collect(engine="accel", accelerator=runtime)
 ```
 
-The initial GPU region supports one in-memory, nonchunked Float32/Float64
-column, optionally filtered by one comparison with a scalar (`>`, `>=`, `<`,
-`<=`, `==`, `!=`), followed by sum/count projections. Each reduction input is
-the column itself or one scalar `+`, `-`, or `*` operation; either operand
-order is supported. All expressions must read the same column. Aliases,
-`sum(min_count=...)`, nullable slices, and a final `head`/`fetch` are supported.
-The shared expression binder resolves literals and validates types. No
-implicit mixed-dtype arithmetic is added. Row arithmetic rounds in the input
-dtype; sums accumulate in Float64 and return the input dtype, and counts use
-Int64. Parallel reduction can change floating-point summation order.
+The bounded GPU region accepts an in-memory, nonchunked frame whose columns
+are Bool and one common numeric dtype, Float32 or Float64. It supports:
 
-Unsupported plans raise before device submission; `explain` gives the
-capability reason. File scans, joins, grouping, intermediate projections,
-compound predicates, longer arithmetic expressions, and other dtypes are
-not supported yet. `engine="accel"` without an installed provider or explicit runtime explains
-or raises the missing-provider error. Explicit acceleration never falls back.
-`engine="auto"` still runs on CPU even when a runtime is passed.
+- `select`, `with_columns`, `drop`, repeated stable `filter`, and final
+  `head`/`fetch`;
+- row-local `+`, `-`, `*`, negation, all six comparisons, Boolean AND/OR/XOR/NOT,
+  `is_null`, `is_not_null`, and `fill_null`;
+- column/column and column/literal expressions, nullable typed literals, aliases,
+  scalar broadcasting alongside row expressions, and nullable slices;
+- terminal float `sum(min_count=...)` and float/Boolean `count` projections.
+
+The shared expression binder resolves literals and validates types. Logical
+Boolean outputs remain bit-packed Bool columns. No implicit mixed-dtype
+arithmetic is added. Row arithmetic rounds in the input dtype; sums accumulate
+in Float64 and return the input dtype, and counts use Int64. Parallel reduction
+can change floating-point summation order. Boolean expressions use the CPU
+executor's Kleene null semantics; null filter predicates discard their rows.
+
+The resident path has explicit bounds: 64 source/intermediate value slots,
+64 plan steps, and 64 nodes per expression. Slots are immutable within a
+collection and include temporary predicates. Unsupported plans raise before
+device submission; `explain` gives the capability reason. File scans, chunked
+input, integer execution, mixed Float32/Float64 sources, division, scalar-only
+select, intermediate slices, joins, grouping, and other reductions remain
+unsupported. `engine="accel"` without an installed provider or explicit runtime
+explains or raises the missing-provider error. Explicit acceleration never
+falls back. `engine="auto"` still runs on CPU even when a runtime is passed.
 
 A runtime selects one CUDA-visible device and can be reused across queries.
-Each collection uploads the source and downloads only aggregate results;
-there is no resident-query cache. Each projection currently uses its own
-two-stage reduction over the shared uploaded input. All GPU work completes
-before returning.
+Each collection uploads its source once. Row expressions execute as bounded
+programs, fusing nodes within each expression; columns and filter row counts
+remain on device between steps. Stable compaction uses contiguous block scans,
+a bounded block-offset pass, and gather into a separate matrix. One thread
+owns each packed Boolean/validity output byte. Final collection downloads the
+result into ordinary CPU-accessible columns; there is no resident-query cache.
+The existing specialized scalar-filter/float-reduction path remains available
+for its supported shapes. All GPU work completes before returning.
 `profile(accelerator=runtime)` reports one observed fused region with executor
 `nvidia`, source rows, result rows, and executor wall time including binding,
 memory preflight, allocations, and transfers. It appends GPU diagnostic columns
@@ -81,8 +95,9 @@ to the existing CPU report columns: `device_id`, `device_name`, `upload_bytes`,
 `free_device_after_execution_bytes`, `kernel_launches`, `synchronizations`,
 `kernel_ms`, `initialization_ms`, and `boundaries`.
 
-Kernel time uses CUDA events around each two-kernel reduction and includes the
-inter-kernel gap. Only `profile` enables those timers and their waits; ordinary
+Kernel time uses CUDA events around the resident pipeline and final packing
+or reductions (or each specialized two-kernel reduction). It includes the
+inter-kernel gaps. Only `profile` enables those timers and their waits; ordinary
 `collect` does not. `kernel_ms` is null in an untimed provider execution report.
 Synchronization counts describe explicit library wait boundaries (including
 profile timer waits), not every internal driver operation. Default-provider
@@ -107,7 +122,13 @@ was observed locally). Free-memory snapshots include other GPU users and SDK
 reservations; their difference is not an attributable peak-memory measurement.
 `explain(engine="accel")` may create a temporary context to inspect device
 memory, while CPU/auto explain never does. It lists device, budget, allocations,
-and the upload → reduction → scalar-download → host-result boundaries.
+and the upload → resident execution → download → host-result boundaries.
+For the resident path, `workspace_bytes` includes both matrices, source bitmap
+staging, descriptors, filter ranks, reduction partials and reusable packed
+outputs; `device_output_bytes` is zero because output slots already belong to
+the matrices. `upload_bytes` reports actual transfer traffic separately.
+`download_bytes` in the profile reflects the actual filtered result size;
+`explain` states that this size is data-dependent.
 
 `DATAFRAME_EXECUTION_REPORT` stderr tracing currently applies only to CPU
 execution; use `profile` or Nsight for this GPU path.

@@ -9,6 +9,7 @@ from std.time import perf_counter_ns
 from dataframe.column import Column
 from dataframe.series import Series
 from dataframe.accel_plan import lower_accel
+from dataframe.accel_rows import lower_rows
 from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
 from .nvidia import NvidiaRuntime
@@ -60,7 +61,7 @@ def _memory_limit() raises -> Int:
 def _execute(
     plan: LazyFrame, profiling: Bool
 ) raises -> Tuple[DataFrame, DataFrame]:
-    _ = lower_accel(plan)
+    validate(plan)
     var device = _available_device()
     var limit = _memory_limit()
     var start = perf_counter_ns()
@@ -85,7 +86,7 @@ def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
 
 def describe(plan: LazyFrame) -> String:
     try:
-        _ = lower_accel(plan)
+        validate(plan)
         var runtime = NvidiaRuntime(
             _available_device(), memory_limit_bytes=_memory_limit()
         )
@@ -95,3 +96,13 @@ def describe(plan: LazyFrame) -> String:
         )
     except error:
         return "ENGINE accel: " + String(error) + "\n"
+
+
+def validate(plan: LazyFrame) raises:
+    var supported = True
+    try:
+        _ = lower_accel(plan)
+    except:
+        supported = False
+    if not supported:
+        _ = lower_rows(plan)

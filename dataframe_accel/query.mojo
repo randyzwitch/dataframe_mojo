@@ -1,8 +1,6 @@
-"""NVIDIA execution of capability-checked float reduction regions."""
+"""NVIDIA dispatch with specialized float reductions and resident row regions."""
 from max.gpu import block_idx, thread_idx
 from max.gpu.host import DeviceBuffer, DeviceContext
-from max.gpu.sync import barrier
-from std.memory import AddressSpace, stack_allocation
 from std.time import perf_counter_ns
 from dataframe.accel_plan import (
     AccelPlan,
@@ -24,6 +22,8 @@ from dataframe.frame import DataFrame
 from dataframe.lazy import LazyFrame
 from dataframe.series import Series
 from dataframe.execution_report import ExecutionReport
+from .row_query import execute_rows, describe_rows
+from .reductions import reduce_pair as _reduce, finish as _finish
 from .nvidia import (
     NvidiaRuntime,
     NvidiaColumn,
@@ -33,28 +33,6 @@ from .nvidia import (
 
 comptime THREADS = ACCEL_THREADS
 comptime MAX_BLOCKS = ACCEL_MAX_BLOCKS
-
-
-@always_inline
-def _reduce(total: Float64, count: Int64) -> Tuple[Float64, Int64]:
-    # This pinned SDK does not support Float64 block.sum warp shuffles.
-    var sums = stack_allocation[
-        THREADS, DType.float64, address_space=AddressSpace.SHARED
-    ]()
-    var counts = stack_allocation[
-        THREADS, DType.int64, address_space=AddressSpace.SHARED
-    ]()
-    var tid = Int(thread_idx.x)
-    sums[unsafe_offset=tid] = total
-    counts[unsafe_offset=tid] = count
-    barrier()
-    comptime for step in range(8):
-        comptime stride = THREADS >> (step + 1)
-        if tid < stride:
-            sums[unsafe_offset=tid] += sums[unsafe_offset=tid + stride]
-            counts[unsafe_offset=tid] += counts[unsafe_offset=tid + stride]
-        barrier()
-    return (sums[unsafe_offset=0], counts[unsafe_offset=0])
 
 
 def _partial[
@@ -114,26 +92,6 @@ def _partial[
     if thread_idx.x == 0:
         sums[unsafe_offset=Int(block_idx.x)] = reduced[0]
         counts[unsafe_offset=Int(block_idx.x)] = reduced[1]
-
-
-def _finish(
-    sums: DeviceBuffer[DType.float64].device_type,
-    counts: DeviceBuffer[DType.int64].device_type,
-    output: DeviceBuffer[DType.float64].device_type,
-    output_count: DeviceBuffer[DType.int64].device_type,
-    blocks: Int64,
-):
-    var total = Float64(0)
-    var count = Int64(0)
-    var i = Int(thread_idx.x)
-    while i < Int(blocks):
-        total += sums[unsafe_offset=i]
-        count += counts[unsafe_offset=i]
-        i += THREADS
-    var reduced = _reduce(total, count)
-    if thread_idx.x == 0:
-        output[unsafe_offset=0] = reduced[0]
-        output_count[unsafe_offset=0] = reduced[1]
 
 
 def _enqueue[
@@ -275,6 +233,13 @@ def execute(
     runtime: NvidiaRuntime, query: LazyFrame, *, profiling: Bool = False
 ) raises -> Tuple[DataFrame, DataFrame]:
     var start = perf_counter_ns()
+    var supported = True
+    try:
+        _ = lower_accel(query)
+    except:
+        supported = False
+    if not supported:
+        return execute_rows(runtime, query, profiling)
     var plan = lower_accel(query)
     var memory = plan_memory(plan)
     var free = runtime.memory_info()[0]
@@ -369,6 +334,13 @@ def execute(
 
 def describe(runtime: NvidiaRuntime, query: LazyFrame) -> String:
     try:
+        var supported = True
+        try:
+            _ = lower_accel(query)
+        except:
+            supported = False
+        if not supported:
+            return describe_rows(runtime, query)
         var plan = lower_accel(query)
         var memory = plan_memory(plan)
         var free = runtime.memory_info()[0]

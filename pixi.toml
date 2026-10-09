@@ -131,3 +131,6 @@ test-nvidia-package = { cmd = "python3 scripts/test_accel_package.py --package-d
 
 build-nvidia-budget-tests = "mkdir -p build && mojo build -I . tests/accel/test_nvidia_budget.mojo -o build/test_nvidia_budget"
 test-nvidia-budget = { cmd = "./build/test_nvidia_budget", depends-on = ["build-nvidia-budget-tests"] }
+
+build-nvidia-row-tests = "mkdir -p build && mojo build -I . tests/accel/test_nvidia_rows.mojo -o build/test_nvidia_rows"
+test-nvidia-rows = { cmd = "./build/test_nvidia_rows", depends-on = ["build-nvidia-row-tests"] }

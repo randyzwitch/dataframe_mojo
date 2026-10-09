@@ -57,6 +57,21 @@ def main() raises:
         assert_equal(
             report[1].item(0, "peak_requested_device_bytes").int64(), Int64(44)
         )
+        var rows = (
+            DataFrame([Series("x", Column[Float32]([-2, 1, 3]))])
+            .lazy()
+            .with_columns((col("x") > 0).alias("keep"))
+            .filter(col("keep"))
+            .select_exprs([((col("x") + 1) * 2).alias("y"), col("keep")])
+        )
+        assert_true(
+            rows.collect(engine="accel").equals(rows.collect(engine="cpu"))
+        )
+        assert_true("resident" in rows.explain(engine="accel"))
+        assert_equal(
+            rows.profile(engine="accel")[1].item(0, "executor").string(),
+            "nvidia",
+        )
         with assert_raises(contains="batch_size must be positive"):
             _ = plan.collect(engine="accel", batch_size=0)
     print("registered provider:", mode, "passed")

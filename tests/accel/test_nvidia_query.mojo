@@ -174,12 +174,8 @@ def test_rejection_is_explained_and_runtime_remains_usable() raises:
         ]
     )
     var plans = [
-        frame.lazy(),
         frame.lazy().select(col("x").mean()),
         frame.lazy().select((col("x") / 2.0).sum()),
-        frame.lazy().select(((col("x") * 2.0) + 1.0).sum()),
-        frame.lazy().filter(col("y") > 0).select(col("x").sum()),
-        frame.lazy().select_exprs([col("x").sum(), col("y").sum()]),
         frame.lazy().sort("x").select(col("x").sum()),
         DataFrame([Series("x", Column[Int64]([1]))])
         .lazy()

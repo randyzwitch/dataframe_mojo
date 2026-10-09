@@ -73,7 +73,7 @@ struct NvidiaRuntime(AcceleratorBackend):
         return self._ctx == other._ctx
 
     def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-        """Lower and execute a supported float reduction region."""
+        """Lower and execute a supported numeric/Boolean region."""
         return execute(self, plan)
 
     def execute_profiled(
