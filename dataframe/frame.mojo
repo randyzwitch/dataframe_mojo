@@ -2346,7 +2346,17 @@ struct DataFrame(Copyable, Sized, Writable):
                 columns[replacement] = result^
         return Self(columns^, height=self._height)
 
-    def filter(self, predicate: Expr, *, batch_size: Int = 8192) raises -> Self:
+    def filter(
+        self,
+        predicate: Expr,
+        *,
+        batch_size: Int = 8192,
+        keep: List[String] = List[String](),
+    ) raises -> Self:
+        """The rows `predicate` keeps. Given `keep`, only those columns are
+        returned: the predicate still reads any column, but columns only it
+        reads are never copied (a lazy filter whose later steps read fewer
+        columns than it does)."""
         # A literal true keeps every row as it is (a filter whose parts an
         # ordered column answered leaves one behind).
         if (
@@ -2354,7 +2364,7 @@ struct DataFrame(Copyable, Sized, Writable):
             and predicate._nodes[0].op == LIT_BOOL
             and predicate._nodes[0].integer != 0
         ):
-            return self.copy()
+            return self._kept(keep)
         var predicates = expand(predicate, self._columns)
         if len(predicates) != 1:
             raise Error("A filter selector must match exactly one column")
@@ -2381,16 +2391,18 @@ struct DataFrame(Copyable, Sized, Writable):
                     if not window.used[k]:
                         rest.append(parts[k].copy())
                 if len(rest) == 0 or narrowed.height() == 0:
-                    return narrowed^
+                    return narrowed._kept(keep)
                 var remaining = rest[0].copy()
                 for k in range(1, len(rest)):
                     remaining = remaining & rest[k]
-                return narrowed.filter(remaining, batch_size=batch_size)
+                return narrowed.filter(
+                    remaining, batch_size=batch_size, keep=keep
+                )
         # Each partition's first k rows by ordinal rank: no rank computed.
         var top = top_k_mask(bound, self._columns, self._height)
         if top:
             trace_path("filter.top_k_per_partition")
-            return self.filter(top.value())
+            return self._kept(keep).filter(top.value())
         if len(bound.expr._nodes) == 3:
             ref node = bound.expr._nodes[2]
             if (
@@ -2409,7 +2421,7 @@ struct DataFrame(Copyable, Sized, Writable):
             ):
                 # Aligned chunks take the per-chunk path below instead.
                 if not can_filter_aligned_chunks(self._columns):
-                    return self._filter_rows(
+                    return self._kept(keep)._filter_rows(
                         float_compare_rows(
                             self._columns[bound.sources[node.left]],
                             node.op,
@@ -2425,7 +2437,7 @@ struct DataFrame(Copyable, Sized, Writable):
             and can_filter_aligned_chunks(self._columns)
         ):
             trace_path("filter.aligned_chunks")
-            return self._filter_chunks(predicates[0], batch_size)
+            return self._filter_chunks(predicates[0], batch_size, keep)
         var parts = conjuncts(predicates[0])
         if (
             len(parts) > 1
@@ -2433,10 +2445,19 @@ struct DataFrame(Copyable, Sized, Writable):
             and _row_local(parts)
         ):
             trace_path("filter.selective_and")
-            return self._filter_selective(parts, batch_size)
-        return self.filter(self._predicate_mask(bound, batch_size))
+            return self._filter_selective(parts, batch_size, keep)
+        var mask = self._predicate_mask(bound, batch_size)
+        return self._kept(keep).filter(mask)
 
-    def _filter_chunks(self, predicate: Expr, batch_size: Int) raises -> Self:
+    def _kept(self, keep: List[String]) raises -> Self:
+        """This frame, or only the `keep` columns when given."""
+        if len(keep) == 0:
+            return self.copy()
+        return self.select(keep)
+
+    def _filter_chunks(
+        self, predicate: Expr, batch_size: Int, keep: List[String]
+    ) raises -> Self:
         """Filter each aligned chunk on its own, in parallel, and keep the
         surviving pieces as the output's chunks. The predicate must be
         row-local: a chunk sees only its own rows."""
@@ -2452,16 +2473,19 @@ struct DataFrame(Copyable, Sized, Writable):
                         column.dtype(),
                     )
                 )
-            jobs.append(_ChunkFilterJob(Self(parts^), predicate, batch_size))
+            jobs.append(
+                _ChunkFilterJob(Self(parts^), predicate, batch_size, keep)
+            )
         run_jobs(jobs)
-        var output = List[Series](capacity=len(self._columns))
-        for c in range(len(self._columns)):
+        var shape = self._kept(keep)
+        var output = List[Series](capacity=len(shape._columns))
+        for c in range(len(shape._columns)):
             var pieces = List[Series]()
             for i in range(len(jobs)):
                 if jobs[i].result.height() > 0:
                     pieces.append(jobs[i].result._columns[c].copy())
             if len(pieces) == 0:
-                output.append(self._columns[c].slice(0, 0))
+                output.append(shape._columns[c].slice(0, 0))
             elif len(pieces) == 1:
                 output.append(pieces[0].copy())
             else:
@@ -2479,7 +2503,7 @@ struct DataFrame(Copyable, Sized, Writable):
         return result.bool()
 
     def _filter_selective(
-        self, parts: List[Expr], batch_size: Int
+        self, parts: List[Expr], batch_size: Int, keep: List[String]
     ) raises -> Self:
         """Filter by the AND of row-local `parts`, each evaluated only on
         the rows the earlier ones kept, as DuckDB's conjunction filters
@@ -2523,7 +2547,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 )
                 k += 1
             if whole and k == len(order):
-                return self.filter(mask)
+                return self._kept(keep).filter(mask)
             if k < len(order):
                 var strings = _reads_strings(parts[order[len(order) - 1]], self)
                 var limit = current._height // (2 if strings else 8)
@@ -2536,7 +2560,7 @@ struct DataFrame(Copyable, Sized, Writable):
                     )
                     var both = both_true(mask, other)
                     if whole:
-                        return self.filter(both)
+                        return self._kept(keep).filter(both)
                     mask = both^
                     k = len(order)
             var kept = true_rows(mask)
@@ -2555,7 +2579,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 current = self.select(names)._filter_rows(kept.copy())
             rows = kept^
             whole = False
-        return self._filter_rows(rows^)
+        return self._kept(keep)._filter_rows(rows^)
 
     def unpivot(
         self,
@@ -3521,19 +3545,25 @@ struct _ChunkFilterJob(Job):
     var frame: DataFrame
     var predicate: Expr
     var batch_size: Int
+    var keep: List[String]
     var result: DataFrame
 
     def __init__(
-        out self, var frame: DataFrame, predicate: Expr, batch_size: Int
+        out self,
+        var frame: DataFrame,
+        predicate: Expr,
+        batch_size: Int,
+        keep: List[String],
     ) raises:
         self.frame = frame^
         self.predicate = predicate.copy()
         self.batch_size = batch_size
+        self.keep = keep.copy()
         self.result = DataFrame(List[Series]())
 
     def run(mut self) raises:
         self.result = self.frame.filter(
-            self.predicate, batch_size=self.batch_size
+            self.predicate, batch_size=self.batch_size, keep=self.keep
         )
 
 

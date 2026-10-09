@@ -325,7 +325,8 @@ Own equal-length, uniquely named columns; transformations copy storage.
   Filter with a byte-per-value Boolean column (packed first).
 - `def filter(self, mask: BoolColumn) -> Self`
   Keep true rows, dropping false and null mask entries, in input order.
-- `def filter(self, predicate: Expr, *, batch_size: Int = Int(8192)) -> Self`
+- `def filter(self, predicate: Expr, *, batch_size: Int = Int(8192), keep: List[String] = List()) -> Self`
+  The rows `predicate` keeps. Given `keep`, only those columns are returned: the predicate still reads any column, but columns only it reads are never copied (a lazy filter whose later steps read fewer columns than it does).
 - `def explode(self, column: String) -> Self`
 - `def explode(self, columns: List[String]) -> Self`
   One output row per list element; other columns repeat. An empty or null list gives one row holding null. Several columns explode together and must have the same element count in every row.
