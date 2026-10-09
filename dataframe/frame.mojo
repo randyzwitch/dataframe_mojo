@@ -82,7 +82,14 @@ from .gather import (
     can_filter_aligned_chunks,
     filter_range_int64_chunks,
 )
-from .parallel import Job, Pool, partitions, run_jobs, worker_count
+from .parallel import (
+    Job,
+    Pool,
+    configured_workers,
+    partitions,
+    run_jobs,
+    worker_count,
+)
 from .partition import (
     Partitioner,
     encode_bucket,
@@ -5717,8 +5724,17 @@ struct GroupBy(Copyable):
         if whole:
             return self._agg_whole(bound, batch_size)
         trace_path("group_by.partitioned")
-        var partitioner = Partitioner(self._keys, workers)
-        var parts = partitioner.scatter(workers, with_hashes=True)
+        # Hashing, scattering and encoding a composite key cost 50 to 80 ns
+        # a row of thread time, against under 1 ns for the scans the shared
+        # 64K-row floor is sized for, so this route divides finer: 180K
+        # rows of TPC-DS q39 (45K groups) took 15 ms on the floor's two
+        # workers, the same at any thread count.
+        var threads = max(
+            workers,
+            min(configured_workers(), height // _PARTITION_ROWS_PER_WORKER),
+        )
+        var partitioner = Partitioner(self._keys, threads)
+        var parts = partitioner.scatter(threads, with_hashes=True)
         var buckets = parts.buckets()
         var referenced = self._referenced(bound)
         # Heavy: a bucket big enough to serialize the batch on its own. It
@@ -5755,7 +5771,7 @@ struct GroupBy(Copyable):
             var values = List[Series]()
             if len(gathered_sources) > 0:
                 values = take_parallel(
-                    gathered_sources, parts.order.copy(), workers
+                    gathered_sources, parts.order.copy(), threads
                 )
             var jobs = List[_HashedBucketJob]()
             for b in range(buckets):
@@ -5783,24 +5799,31 @@ struct GroupBy(Copyable):
             run_jobs(jobs)
             var frames = List[DataFrame](capacity=len(jobs))
             var starts = List[Int]()
+            var runs = List[Int]()
+            runs.append(0)
             for j in range(len(jobs)):
                 frames.append(
                     DataFrame(jobs[j].result.copy(), height=len(jobs[j].firsts))
                 )
                 for row in jobs[j].firsts:
                     starts.append(row)
+                runs.append(len(starts))
             _ = partitioner^
             _ = parts^
             var grouped = concat(frames)
             if not self._maintain_order:
                 return grouped^
-            return grouped.take(sort_indices([starts^]))
+            # Each bucket's groups are already in first-row order (its
+            # rows were scattered in input order), so the whole order is
+            # a merge of the buckets' runs, not a sort: 45K groups of
+            # TPC-DS q39 took 2.4 ms to sort and 0.2 ms to merge.
+            return grouped.take(_merge_ascending_runs(starts, runs))
         var sources = List[Series](capacity=len(self._keys) + len(referenced))
         for key in self._keys:
             sources.append(key.copy())
         for column in referenced:
             sources.append(column.copy())
-        var gathered = take_parallel(sources, parts.order.copy(), workers)
+        var gathered = take_parallel(sources, parts.order.copy(), threads)
         var keys = List[Series](capacity=len(self._keys))
         var columns = List[Series](capacity=len(referenced))
         for i in range(len(gathered)):
@@ -5949,6 +5972,8 @@ def _is_untyped(value: Expr) -> Bool:
 
 
 comptime SELECTIVE_FILTER_ROWS = 4096
+# Rows a worker in the hash-partitioned group-by: about 1 ms of work each.
+comptime _PARTITION_ROWS_PER_WORKER = 16384
 """Frames shorter than this evaluate an AND filter whole."""
 
 
@@ -6209,6 +6234,72 @@ struct _FinishJob(Job):
 
     def run(mut self) raises:
         self.frame = self.state.finish()
+
+
+def _merge_ascending_runs(values: List[Int], runs: List[Int]) -> List[Int]:
+    """Indices that order `values` ascending, where `values[runs[r] :
+    runs[r + 1]]` is ascending for every run r: bottom-up pairwise merges
+    of neighbouring runs, log2(runs) linear passes, stable (an earlier run
+    wins a tie). Sequential two-pointer scans, where a heap of the runs'
+    heads was bound by its dependent loads (22 ns a value)."""
+    var n = len(values)
+    var bounds = List[Int]()
+    for r in range(len(runs) - 1):
+        if runs[r] < runs[r + 1] or len(bounds) == 0:
+            if len(bounds) == 0:
+                bounds.append(runs[r])
+            bounds.append(runs[r + 1])
+    var order = List[Int](unsafe_uninit_length=n)
+    var scratch = List[Int](unsafe_uninit_length=n)
+    var v = values.unsafe_ptr()
+    var src = order.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var dst = scratch.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    for i in range(n):
+        src[unsafe_offset=i] = i
+    var base = bounds[0]
+    while len(bounds) > 2:
+        var merged = List[Int]()
+        merged.append(bounds[0])
+        var r = 0
+        while r + 1 < len(bounds):
+            var lo = bounds[r] - base
+            var hi = (
+                bounds[r + 2] - base if r + 2
+                < len(bounds) else bounds[r + 1] - base
+            )
+            var mid = bounds[r + 1] - base
+            var i = lo
+            var j = mid
+            var k = lo
+            while i < mid and j < hi:
+                var a = src[unsafe_offset=i]
+                var b = src[unsafe_offset=j]
+                if v[unsafe_offset=b] < v[unsafe_offset=a]:
+                    dst[unsafe_offset=k] = b
+                    j += 1
+                else:
+                    dst[unsafe_offset=k] = a
+                    i += 1
+                k += 1
+            while i < mid:
+                dst[unsafe_offset=k] = src[unsafe_offset=i]
+                i += 1
+                k += 1
+            while j < hi:
+                dst[unsafe_offset=k] = src[unsafe_offset=j]
+                j += 1
+                k += 1
+            merged.append(hi + base)
+            r += 2
+        bounds = merged^
+        var held = src
+        src = dst
+        dst = held
+    if src != order.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]():
+        for i in range(n):
+            order[i] = scratch[i]
+    _ = scratch^
+    return order^
 
 
 def _finish_parts(var parts: List[_StreamReduction]) raises -> DataFrame:
