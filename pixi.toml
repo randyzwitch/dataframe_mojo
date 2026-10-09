@@ -53,8 +53,8 @@ mojo = ">=1.2.0.dev2026092105,<1.3"
 test = "bash scripts/run_tests.sh"
 check-version = "python3 scripts/check_version.py"
 example = "mojo run -I . examples/sales.mojo && mojo run -I . examples/expressions.mojo && mojo run -I . examples/read_csv.mojo"
-format = "mblack --target-version mojo --line-length 80 dataframe tests examples benchmarks"
-format-check = "mblack --check --target-version mojo --line-length 80 dataframe tests examples benchmarks"
+format = "mblack --target-version mojo --line-length 80 dataframe dataframe_accel tests examples benchmarks"
+format-check = "mblack --check --target-version mojo --line-length 80 dataframe dataframe_accel tests examples benchmarks"
 build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales && mojo build -I . examples/expressions.mojo -o build/expressions && mojo build -I . examples/read_csv.mojo -o build/read_csv"
 bench-csv = "mojo run -I . benchmarks/bench_csv.mojo"
 bench = "mojo run -I . benchmarks/bench_suite.mojo"
@@ -120,3 +120,5 @@ max-core = "==26.7.0.dev2026092105"
 build-gpu-feasibility = "mkdir -p build && mojo build -I . benchmarks/bench_gpu_feasibility.mojo -o build/bench_gpu_feasibility"
 bench-gpu-feasibility = { cmd = "./build/bench_gpu_feasibility", depends-on = ["build-gpu-feasibility"] }
 test-gpu-feasibility = { cmd = "./build/bench_gpu_feasibility --check", depends-on = ["build-gpu-feasibility"] }
+build-nvidia-runtime-tests = "mkdir -p build && mojo build -I . tests/accel/test_nvidia_runtime.mojo -o build/test_nvidia_runtime"
+test-nvidia-runtime = { cmd = "./build/test_nvidia_runtime", depends-on = ["build-nvidia-runtime-tests"] }

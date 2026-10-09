@@ -22,6 +22,17 @@ must pass it the same argument types everywhere, or a group fails to link;
 pass addresses as `Int`. Beyond hand-written
 contract tests, three generative layers look for interaction bugs.
 
+## Optional NVIDIA runtime
+
+`pixi run -e gpu test-nvidia-runtime` builds and runs
+`tests/accel/test_nvidia_runtime.mojo` on an NVIDIA machine. These tests cover
+device-owned column storage, bit-preserving transfers, sliced validity,
+context reuse, and pending-transfer cleanup on exception unwinding. They are
+outside the default `tests/test_*.mojo` discovery, so CPU tests and package
+builds require neither MAX nor a GPU. Formatting still checks the optional
+package and tests. See [NVIDIA runtime foundation](gpu-feasibility.md#nvidia-runtime-foundation)
+for the ownership contract and current limitations.
+
 ## Differential testing against Polars
 
 `scripts/oracle.py` generates random inputs (all four dtypes, 15% nulls,

@@ -10,6 +10,67 @@ it fuses the predicate and multiplication into a partial reduction, then
 reduces those partials in a second kernel. It does not yet implement stable
 filter compaction, arbitrary expression lowering, or automatic placement.
 
+## NVIDIA runtime foundation
+
+`dataframe_accel.nvidia` is an optional storage runtime, separate from the
+handwritten query experiment. It imports the existing `Column` layout,
+numeric dtype definitions, and bitmap normalization helper. It does not
+duplicate expression semantics or enable `collect(engine="accel")` yet.
+The CPU package never imports this module and still builds without MAX.
+
+```mojo
+from dataframe import Column
+from dataframe_accel.nvidia import NvidiaRuntime
+
+var runtime = NvidiaRuntime(device_id=0)
+var source = Column[Float32]([1, 2, 3], [True, False, True])
+var device = runtime.upload[DType.float32](source.slice(1, 2))
+device.wait()
+var restored = device.download()
+```
+
+Run the optional tests on an NVIDIA machine with the pinned GPU environment:
+
+```bash
+pixi run -e gpu test-nvidia-runtime
+```
+
+One `NvidiaRuntime` holds a context and ordered stream for one CUDA-visible
+device ordinal. Reuse the runtime across uploads; copying its handle shares
+the same context. Each `NvidiaColumn` retains its owning runtime, so it can
+outlive the caller's handle. There is no process-global context, concurrent
+host submission, cross-context buffer use, or multi-GPU query execution.
+`belongs_to()` compares contexts, not just physical device IDs.
+
+Uploads copy exactly the selected value window and the overlapping validity
+bytes. The remaining bit offset is retained on device; no payload conversion
+or bitmap repacking occurs during upload. This includes null payload bits,
+NaNs, signed zero, and absent or explicitly all-valid bitmaps. Downloads
+normalize the bitmap using the CPU column helper and return the same numeric
+storage dtype. Empty columns use zero-length buffers and queue no copies.
+
+The returned device column owns its buffers and retains the immutable CPU
+source until `wait()`, `download()`, or destruction drains the transfer.
+`is_ready()` records a confirmed synchronization, not a live driver query;
+waiting on another column can finish this upload without changing the flag.
+Device buffers are not host-accessible, independently of their readiness.
+Pending downloads likewise own their destination lists until completion,
+including exceptional exits. An upload initializer drains any queued copies
+before unwinding if a later enqueue fails.
+
+Explicit synchronization reports driver errors. If destructor cleanup cannot
+synchronize, it aborts rather than release host memory potentially still in
+use. The tests exercise ordinary exception unwinding with pending transfers;
+they do not inject device loss, driver synchronization faults, or out-of-memory
+conditions. These remain required fault-testing work before production use.
+The runtime has no spilling, pinned staging, allocation pool of its own, or
+query kernels. Device allocations and their release use the MAX runtime.
+
+Tests cover all ten shared numeric storage dtypes, slice/bitmap boundaries,
+context and source lifetime, repeated downloads, and error unwinding. A
+second-device check runs only when two CUDA devices are visible; ordinary
+CPU CI does not execute this optional test module.
+
 ## Local results
 
 These measurements retain their original baseline below. The draft PR is

@@ -16,9 +16,9 @@ useful going forward, while acknowledging prior exposure.
    (`benchmarks/bench_*.mojo`) remain development tools for one mechanism at
    a time; they are not evidence of general performance.
 2. **Benchmarks and engine changes go in separate PRs.** A PR that changes
-   `dataframe/` must not also add or change a suite, its data generator or
-   its queries (`benchmarks/`, `scripts/bench_*`). This stops a fast path and
-   the benchmark that justifies it from arriving together.
+   `dataframe/` or `dataframe_accel/` must not also add or change a suite,
+   its data generator or queries (`benchmarks/`, `scripts/bench_*`). This
+   stops a fast path and the benchmark that justifies it from arriving together.
    `scripts/check_benchmark_separation.sh` enforces this in CI; a PR that
    genuinely needs both (for example, this one, which adds tracing hooks and
    the suites together) says why in a `Benchmark-Change:` commit trailer.
