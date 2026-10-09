@@ -6,6 +6,7 @@ continue to the next slot. Exact column equality resolves hash collisions.
 Building in reverse row order and probing disjoint left ranges preserves the
 join's documented left-major, right-input match order.
 """
+from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 from std.sys import size_of
 
@@ -194,21 +195,48 @@ def _tagged_probe(index: _HashBucket, hash: UInt64, key: UInt64) -> Int:
         return -1
     while True:
         var group = tags.unsafe_offset(position).unsafe_load[width=16]()
-        var hits = group.eq(wanted)
-        var empties = group.eq(SIMD[DType.uint8, 16](0))
-        if hits.reduce_or():
-            for lane in range(_TAG_LANES):
-                if empties[lane]:
-                    return -1
-                if hits[lane]:
-                    var at = (position + lane) & mask
-                    if slots.unsafe_offset(at)[].key == key:
-                        return at
-            if empties.reduce_or():
-                return -1
-        elif empties.reduce_or():
+        # Lane masks: the candidates are the matching tags before the
+        # first empty lane, walked by their set bits instead of a scalar
+        # pass over sixteen lanes (q2's 800K probes spent a third of the
+        # probe there).
+        var hits = _lane_bits(group.eq(wanted))
+        var empties = _lane_bits(group.eq(SIMD[DType.uint8, 16](0)))
+        var candidates = hits
+        if empties != 0:
+            candidates &= (empties & (0 - empties)) - 1
+        while candidates != 0:
+            var lane = Int(count_trailing_zeros(candidates))
+            candidates &= candidates - 1
+            var at = (position + lane) & mask
+            if slots.unsafe_offset(at)[].key == key:
+                return at
+        if empties != 0:
             return -1
         position = (position + _TAG_LANES) & mask
+
+
+@always_inline
+def _lane_bits(lanes: SIMD[DType.bool, 16]) -> UInt16:
+    """Bit `l` set where lane `l` is true."""
+    comptime weights = SIMD[DType.uint16, 16](
+        1,
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+        2048,
+        4096,
+        8192,
+        16384,
+        32768,
+    )
+    return (lanes.cast[DType.uint16]() * weights).reduce_add()
 
 
 struct _TagCursor:
@@ -643,13 +671,14 @@ struct _HashProbeJob(Job):
                                 )
                                 self.left_rows.append(i)
                                 self.right_rows.append(Int(slot.row))
-                                _append_duplicate_rows(
-                                    index,
-                                    Int(slot.next_position),
-                                    i,
-                                    self.left_rows,
-                                    self.right_rows,
-                                )
+                                if slot.next_position >= 0:
+                                    _append_duplicate_rows(
+                                        index,
+                                        Int(slot.next_position),
+                                        i,
+                                        self.left_rows,
+                                        self.right_rows,
+                                    )
                             elif self.include_unmatched:
                                 self.left_rows.append(i)
                                 self.right_rows.append(-1)
