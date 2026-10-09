@@ -3319,28 +3319,78 @@ def _smaller_build_join_rows(
     if not keep_order and not include_unmatched:
         trace_path("join.smaller_build_unordered")
         return (pairs[1].copy(), pairs[0].copy())
-    var starts = _group_index(pairs[1], len(left[0]))
-    var order = _group_rows(pairs[1], starts)
-    var left_rows = List[Int](capacity=len(order))
-    var right_rows = List[Int](capacity=len(order))
-    for i in range(len(left[0])):
-        if starts[i] == starts[i + 1] and include_unmatched:
-            left_rows.append(i)
-            right_rows.append(-1)
-        for at in range(starts[i], starts[i + 1]):
-            left_rows.append(i)
-            right_rows.append(pairs[0][order[at]])
+    # A counting sort of the pairs by left row, written straight into the
+    # output: the probe's right rows land in their left group in probe
+    # order, and the left row of every output position follows from the
+    # group starts. Through pointers, in two passes over the pairs: the
+    # list-indexed three passes before cost 19 ns a pair (PDS-H q2, 159K
+    # pairs, 3 ms on one thread).
+    var count = len(left[0])
+    var pairs_left = pairs[1].unsafe_ptr()
+    var pairs_right = pairs[0].unsafe_ptr()
+    var n = len(pairs[0])
+    var starts = _group_index(pairs[1], count)
+    var cursor = starts.copy()
+    var unmatched = 0
+    if include_unmatched:
+        for i in range(count):
+            if starts[i] == starts[i + 1]:
+                unmatched += 1
+    var total = n + unmatched
+    var left_rows = List[Int](unsafe_uninit_length=total)
+    var right_rows = List[Int](unsafe_uninit_length=total)
+    var out_left = left_rows.unsafe_ptr()
+    var out_right = right_rows.unsafe_ptr()
+    if unmatched == 0:
+        var at = cursor.unsafe_ptr()
+        for k in range(n):
+            var i = pairs_left[unsafe_offset=k]
+            var position = at[unsafe_offset=i]
+            at[unsafe_offset=i] = position + 1
+            out_right[unsafe_offset=position] = pairs_right[unsafe_offset=k]
+        var group_start = starts.unsafe_ptr()
+        for i in range(count):
+            for position in range(
+                group_start[unsafe_offset=i], group_start[unsafe_offset=i + 1]
+            ):
+                out_left[unsafe_offset=position] = i
+        return (left_rows^, right_rows^)
+    # With unmatched left rows an output position shifts by the unmatched
+    # rows before its group: the group starts move accordingly.
+    var shifted = List[Int](unsafe_uninit_length=count + 1)
+    var shift = shifted.unsafe_ptr()
+    var seen = 0
+    for i in range(count):
+        shift[unsafe_offset=i] = starts[i] + seen
+        if starts[i] == starts[i + 1]:
+            out_left[unsafe_offset=starts[i] + seen] = i
+            out_right[unsafe_offset=starts[i] + seen] = -1
+            seen += 1
+    shift[unsafe_offset=count] = n + seen
+    var at = List[Int](unsafe_uninit_length=count)
+    var fill = at.unsafe_ptr()
+    for i in range(count):
+        fill[unsafe_offset=i] = shift[unsafe_offset=i]
+    for k in range(n):
+        var i = pairs_left[unsafe_offset=k]
+        var position = fill[unsafe_offset=i]
+        fill[unsafe_offset=i] = position + 1
+        out_left[unsafe_offset=position] = i
+        out_right[unsafe_offset=position] = pairs_right[unsafe_offset=k]
     return (left_rows^, right_rows^)
 
 
 def _group_index(ids: List[Int], count: Int) -> List[Int]:
     """Start offset per key id, in a flat CSR layout (count + 1 entries)."""
     var starts = List[Int](length=count + 1, fill=0)
-    for id in ids:
+    var counts = starts.unsafe_ptr()
+    var source = ids.unsafe_ptr()
+    for k in range(len(ids)):
+        var id = source[unsafe_offset=k]
         if id >= 0:
-            starts[id + 1] += 1
+            counts[unsafe_offset=id + 1] += 1
     for g in range(count):
-        starts[g + 1] += starts[g]
+        counts[unsafe_offset=g + 1] += counts[unsafe_offset=g]
     return starts^
 
 
@@ -3543,13 +3593,17 @@ def _dense_right_int64_rows(
 
 def _group_rows(ids: List[Int], starts: List[Int]) -> List[Int]:
     """Row indices grouped by key id, each group in increasing row order."""
-    var rows = List[Int](length=starts[len(starts) - 1], fill=0)
+    var rows = List[Int](unsafe_uninit_length=starts[len(starts) - 1])
     var cursor = starts.copy()
+    var at = cursor.unsafe_ptr()
+    var out = rows.unsafe_ptr()
+    var source = ids.unsafe_ptr()
     for i in range(len(ids)):
-        var id = ids[i]
+        var id = source[unsafe_offset=i]
         if id >= 0:
-            rows[cursor[id]] = i
-            cursor[id] += 1
+            var position = at[unsafe_offset=id]
+            at[unsafe_offset=id] = position + 1
+            out[unsafe_offset=position] = i
     return rows^
 
 
