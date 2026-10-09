@@ -93,7 +93,13 @@ def test_explicit_provider_dispatch_without_gpu_dependencies() raises:
 struct AutomaticProbe(AcceleratorBackend):
     var choice: String
 
-    def select_auto(self, plan: LazyFrame) -> Tuple[String, String]:
+    def select_auto(
+        self,
+        plan: LazyFrame,
+        optimize: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) -> Tuple[String, String]:
         return (self.choice, "test placement reason")
 
     def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
@@ -137,6 +143,99 @@ def test_auto_cpu_reason_in_profile() raises:
     assert_equal(
         result[1].item(0, "selection_reason").string(), "test placement reason"
     )
+
+
+@fieldwise_init
+struct OptionsProbe(AcceleratorBackend):
+    def select_auto(
+        self,
+        plan: LazyFrame,
+        optimize: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) -> Tuple[String, String]:
+        return (
+            "cpu" if not optimize
+            and not streaming
+            and batch_size == 123 else "accel",
+            "matched CPU execution settings",
+        )
+
+    def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+        raise Error("CPU options were not forwarded")
+
+    def describe(self, plan: LazyFrame) -> String:
+        return "options probe"
+
+
+def test_auto_policy_receives_execution_settings() raises:
+    var plan = DataFrame([Series("x", Column[Int64]([1, 2]))]).lazy()
+    var provider = OptionsProbe()
+    assert_equal(
+        plan.collect(
+            engine="auto",
+            accelerator=provider,
+            optimize=False,
+            streaming=False,
+            batch_size=123,
+        ).height(),
+        2,
+    )
+    var result = plan.profile(
+        engine="auto",
+        accelerator=provider,
+        optimize=False,
+        streaming=False,
+        batch_size=123,
+    )
+    assert_equal(
+        result[1].item(0, "selection_reason").string(),
+        "matched CPU execution settings",
+    )
+    assert_true(
+        "ENGINE cpu: matched CPU execution settings"
+        in plan.explain(
+            engine="auto",
+            accelerator=provider,
+            optimize=False,
+            streaming=False,
+            batch_size=123,
+        )
+    )
+    with assert_raises(contains="CPU options were not forwarded"):
+        _ = plan.collect(engine="auto", accelerator=provider)
+
+
+@fieldwise_init
+struct SuccessfulAutoProbe(AcceleratorBackend):
+    var choice: String
+
+    def select_auto(
+        self,
+        plan: LazyFrame,
+        optimize: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) -> Tuple[String, String]:
+        return (self.choice, "successful automatic selection")
+
+    def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+        return plan.profile(engine="cpu")
+
+    def describe(self, plan: LazyFrame) -> String:
+        return "successful probe"
+
+
+def test_selected_provider_profile_includes_selection_reason() raises:
+    var plan = DataFrame([Series("x", Column[Int64]([1, 2]))]).lazy()
+    for choice in ["accel", "mixed"]:
+        var provider = SuccessfulAutoProbe(choice)
+        var result = plan.profile(engine="auto", accelerator=provider)
+        assert_equal(result[0].height(), 2)
+        assert_equal(
+            result[1].item(0, "selection_reason").string(),
+            "successful automatic selection",
+        )
 
 
 def main() raises:

@@ -982,9 +982,9 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Execute with a provider and report its observed execution regions.
 - `def profile(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> Tuple[DataFrame, DataFrame]`
   Collect, and report what each plan node did (#439).
-- `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True) -> String`
+- `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> String`
   Describe provider capability without submitting device work.
-- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, engine: String = "auto") -> String`
+- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> String`
   The (optimized) plan, one operator per line, root first.
 - `def fetch[B: AcceleratorBackend](self, n: Int = Int(5), *, accelerator: B, engine: String = "accel") -> DataFrame`
   Collect the first n rows using an explicit provider.

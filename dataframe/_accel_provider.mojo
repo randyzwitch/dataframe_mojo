@@ -25,7 +25,12 @@ def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
     return execute(plan)
 
 
-def select_auto(plan: LazyFrame) -> Tuple[String, String]:
+def select_auto(
+    plan: LazyFrame,
+    optimize: Bool,
+    streaming: Bool,
+    batch_size: Int,
+) -> Tuple[String, String]:
     """Select before execution; optional providers own capability and cost gates."""
     return ("cpu", "auto uses CPU; accelerator provider is not installed")
 

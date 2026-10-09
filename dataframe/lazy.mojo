@@ -1074,7 +1074,13 @@ def _selection_report(report: DataFrame, reason: String) raises -> DataFrame:
 trait AcceleratorBackend(Copyable):
     """Optional execution provider; importing dataframe needs no GPU SDK."""
 
-    def select_auto(self, plan: LazyFrame) -> Tuple[String, String]:
+    def select_auto(
+        self,
+        plan: LazyFrame,
+        optimize: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) -> Tuple[String, String]:
         """Default keeps existing third-party providers on CPU in auto mode."""
         return ("cpu", "provider has no automatic placement policy")
 
@@ -1597,10 +1603,18 @@ struct LazyFrame(Copyable):
             suffix=suffix,
         )
 
-    def _backend(self, engine: String) raises -> _BackendDecision:
+    def _backend(
+        self,
+        engine: String,
+        optimize: Bool,
+        streaming: Bool,
+        batch_size: Int,
+    ) raises -> _BackendDecision:
         var decision = _select_backend(engine)
         if engine == "auto":
-            var selected = _select_auto_accel(self)
+            var selected = _select_auto_accel(
+                self, optimize, streaming, batch_size
+            )
             decision = _automatic_decision(selected)
         return decision^
 
@@ -1625,10 +1639,10 @@ struct LazyFrame(Copyable):
         Without a provider, auto uses CPU. 'cpu' forces CPU;
         'accel' uses an optional registered provider or an explicit runtime.
         """
-        var backend = self._backend(engine)
-        backend.require_available()
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        var backend = self._backend(engine, optimize, streaming, batch_size)
+        backend.require_available()
         if engine == "auto" and backend.engine != "cpu":
             return _execute_auto_accel(
                 self, optimize, streaming, batch_size, False
@@ -1666,7 +1680,9 @@ struct LazyFrame(Copyable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if engine == "auto":
-            var selected = accelerator.select_auto(self)
+            var selected = accelerator.select_auto(
+                self, optimize, streaming, batch_size
+            )
             _ = _automatic_decision(selected)
             if selected[0] != "cpu":
                 return accelerator.execute_auto(
@@ -1705,11 +1721,17 @@ struct LazyFrame(Copyable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         if engine == "auto":
-            var selected = accelerator.select_auto(self)
+            var selected = accelerator.select_auto(
+                self, optimize, streaming, batch_size
+            )
             _ = _automatic_decision(selected)
             if selected[0] != "cpu":
-                return accelerator.execute_auto(
+                var result = accelerator.execute_auto(
                     self, optimize, streaming, batch_size, True
+                )
+                return (
+                    result[0].copy(),
+                    _selection_report(result[1], selected[1]),
                 )
             var result = self.profile(
                 engine="cpu",
@@ -1736,11 +1758,16 @@ struct LazyFrame(Copyable):
         engine: String = "accel",
         optimize: Bool = True,
         streaming: Bool = True,
+        batch_size: Int = 65536,
     ) raises -> String:
         """Describe provider capability without submitting device work."""
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
         _ = _select_backend(engine)
         if engine == "auto":
-            var selected = accelerator.select_auto(self)
+            var selected = accelerator.select_auto(
+                self, optimize, streaming, batch_size
+            )
             _ = _automatic_decision(selected)
             return (
                 "ENGINE "
@@ -1750,14 +1777,20 @@ struct LazyFrame(Copyable):
                 + "\n"
                 + (
                     self.explain(
-                        engine="cpu", optimize=optimize, streaming=streaming
+                        engine="cpu",
+                        optimize=optimize,
+                        streaming=streaming,
+                        batch_size=batch_size,
                     ) if selected[0]
                     == "cpu" else ""
                 )
             )
         if engine != "accel":
             return self.explain(
-                engine=engine, optimize=optimize, streaming=streaming
+                engine=engine,
+                optimize=optimize,
+                streaming=streaming,
+                batch_size=batch_size,
             )
         return accelerator.describe(self)
 
@@ -1833,13 +1866,17 @@ struct LazyFrame(Copyable):
         Engine selection follows `collect`. Auto mode adds selection_reason;
         accelerator providers may append device and timing diagnostics.
         """
-        var backend = self._backend(engine)
-        backend.require_available()
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        var backend = self._backend(engine, optimize, streaming, batch_size)
+        backend.require_available()
         if engine == "auto" and backend.engine != "cpu":
-            return _execute_auto_accel(
+            var result = _execute_auto_accel(
                 self, optimize, streaming, batch_size, True
+            )
+            return (
+                result[0].copy(),
+                _selection_report(result[1], backend.reason),
             )
         if engine == "accel":
             return _profile_accel(self)
@@ -1877,6 +1914,7 @@ struct LazyFrame(Copyable):
         *,
         optimize: Bool = True,
         streaming: Bool = True,
+        batch_size: Int = 65536,
         engine: String = "auto",
     ) raises -> String:
         """The (optimized) plan, one operator per line, root first.
@@ -1887,7 +1925,9 @@ struct LazyFrame(Copyable):
         backend can be explained without executing or probing a device;
         the operator lines still describe the logical/CPU plan.
         """
-        var backend = self._backend(engine)
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        var backend = self._backend(engine, optimize, streaming, batch_size)
         if engine == "accel" and backend.available:
             return _describe_accel(self)
         if engine == "auto" and backend.engine != "cpu":

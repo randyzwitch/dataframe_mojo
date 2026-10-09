@@ -14,12 +14,12 @@ device discovery. Eager operations retain their existing behavior.
 
 The core exposes an `AcceleratorBackend` extension interface. A separately
 built provider owns automatic capability, memory and cost checks through
-`select_auto(plan)`, returning a placement (`cpu`, `accel`, or `mixed`) and a
+`select_auto(plan, optimize, streaming, batch_size)`, returning a placement (`cpu`, `accel`, or `mixed`) and a
 reason before execution. Providers without a policy inherit CPU selection.
 The core delegates selected accelerator/mixed plans to `execute_auto`, which
 receives the CPU optimization, streaming and batch-size options for any CPU
 portion. Provider execution errors propagate; collection never retries them
-on CPU. `explain(engine="auto")` shows the placement reason and CPU automatic
+on CPU. `explain(engine="auto")` shows the placement reason and automatic
 profiles add a `selection_reason` column.
 
 `engine="accel"` raises a missing-provider error unless a provider is registered
