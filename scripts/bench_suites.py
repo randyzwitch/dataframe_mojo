@@ -516,6 +516,16 @@ def provenance(args):
                 break
     else:
         cpu = run(["sysctl", "-n", "machdep.cpu.brand_string"])
+    # The CPU frequency governor: a parked thread wakes on a core that
+    # `schedutil` has clocked down, so short queries ramp from a lower
+    # clock and the small cells move between runs (#527).
+    governor = "unknown"
+    scaling = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+    if scaling.exists():
+        try:
+            governor = scaling.read_text().strip()
+        except OSError:
+            pass
     return {
         "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "revision": run(["git", "rev-parse", "HEAD"]),
@@ -525,6 +535,7 @@ def provenance(args):
         "duckdb": duckdb.__version__,
         "platform": platform.platform(),
         "cpu": cpu,
+        "governor": governor,
         "tier": args.tier,
         "mode": "correctness" if getattr(args, "correctness_only", False) else "performance",
         "baseline": args.baseline or "",
@@ -830,7 +841,8 @@ def report(result):
         f"Tier `{info.get('tier', 'full')}`. Revision `{info['revision'][:10]}`"
         f"{' (dirty)' if info['dirty'] else ''}, "
         f"{info['mojo']}, Polars {info['polars']}, DuckDB {info['duckdb']}. "
-        f"{info['cpu']}, {info['threads']} threads, scale `{info['scale']}`, "
+        f"{info['cpu']} ({info.get('governor', 'unknown')} governor), "
+        f"{info['threads']} threads, scale `{info['scale']}`, "
         f"{info['rounds']} rounds of {info['reps']} timed runs.",
         "",
         "Times are medians over rounds of the fastest run, in milliseconds. "

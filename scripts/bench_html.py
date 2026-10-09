@@ -283,6 +283,7 @@ def render(result, cells, suites, variants_of, instrumented):
                 ("Polars", info.get("polars", "")),
                 ("DuckDB", info.get("duckdb", "")),
                 ("CPU", info.get("cpu", "")),
+                ("CPU governor", info.get("governor", "unknown")),
                 ("measured", when + " UTC"),
             ]
         )
