@@ -38,6 +38,7 @@ from .csv_reader import _CsvBatches, _DecodeJob
 from .csv_types import _map_file
 from .parquet import _ParquetBatches
 from .parallel import Crew, Job, Pool, configured_workers, run_jobs
+from .execution_backend import _select_backend
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     SUM,
@@ -1507,6 +1508,7 @@ struct LazyFrame(Copyable):
         optimize: Bool = True,
         streaming: Bool = True,
         batch_size: Int = 65536,
+        engine: String = "cpu",
     ) raises -> DataFrame:
         """Optimize (unless disabled) and execute the plan.
 
@@ -1516,7 +1518,12 @@ struct LazyFrame(Copyable):
 
         Parallel work inside runs on one crew of threads started for the
         query (`parallel.Crew`) and joined before this returns.
+
+        engine='cpu' preserves CPU execution. 'auto' currently selects CPU;
+        'accel' raises until the accelerator backend is implemented.
         """
+        var backend = _select_backend(engine)
+        backend.require_available()
         var crew = Crew.start()
         try:
             var result = self._collect(
@@ -1572,6 +1579,7 @@ struct LazyFrame(Copyable):
         optimize: Bool = True,
         streaming: Bool = True,
         batch_size: Int = 65536,
+        engine: String = "cpu",
     ) raises -> Tuple[DataFrame, DataFrame]:
         """Collect, and report what each plan node did (#439).
 
@@ -1585,7 +1593,10 @@ struct LazyFrame(Copyable):
         eager node's wall time including its inputs; on a stream's last
         node, the whole stream's). Counts are observed, never estimated,
         and the result is the one `collect` returns.
+        Engine selection follows `collect`; the report schema is unchanged.
         """
+        var backend = _select_backend(engine)
+        backend.require_available()
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         var plan = self._optimized() if optimize else self.copy()
@@ -1600,9 +1611,9 @@ struct LazyFrame(Copyable):
         var report = plan._report.value()[].frame()
         return (result^, report^)
 
-    def fetch(self, n: Int = 5) raises -> DataFrame:
+    def fetch(self, n: Int = 5, *, engine: String = "cpu") raises -> DataFrame:
         """Collect only the first n rows of the result."""
-        return self.head(n).collect()
+        return self.head(n).collect(engine=engine)
 
     def collect_schema(self) raises -> List[String]:
         """Output names and dtypes as "name: dtype", computed without reading
@@ -1616,15 +1627,25 @@ struct LazyFrame(Copyable):
         return out^
 
     def explain(
-        self, *, optimize: Bool = True, streaming: Bool = True
+        self,
+        *,
+        optimize: Bool = True,
+        streaming: Bool = True,
+        engine: String = "cpu",
     ) raises -> String:
         """The (optimized) plan, one operator per line, root first.
 
         Streaming annotations show batch-capable operators, aggregate state
         and materialization boundaries. streaming=False omits annotations.
+        Non-default engines prepend the backend decision. An unavailable
+        backend can be explained without executing or probing a device;
+        the operator lines still describe the logical/CPU plan.
         """
+        var backend = _select_backend(engine)
         var plan = self._optimized() if optimize else self.copy()
         var out = String()
+        if engine != "cpu":
+            out = backend.describe()
         plan._describe(len(plan._nodes) - 1, 0, out, streaming)
         return out^
 
