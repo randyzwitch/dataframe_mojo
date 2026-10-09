@@ -28,7 +28,7 @@ def build(output: Path) -> None:
             shutil.copytree(ROOT / package, stage / package)
         (stage / "dataframe" / "_accel_provider.mojo").write_text(
             '"""NVIDIA registration for the optional GPU distribution."""\n'
-            "from dataframe_accel.provider import installed, execute, describe\n"
+            "from dataframe_accel.provider import installed, execute, execute_profiled, describe\n"
         )
         artifacts = {}
         for package in ("dataframe", "dataframe_accel"):

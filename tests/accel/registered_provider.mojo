@@ -24,6 +24,13 @@ def main() raises:
         assert_true("device is unavailable" in plan.explain(engine="accel"))
         with assert_raises(contains="device is unavailable"):
             _ = plan.collect(engine="accel")
+    elif mode == "budget":
+        assert_true("memory preflight rejected" in plan.explain(engine="accel"))
+        with assert_raises(contains="memory preflight rejected"):
+            _ = plan.collect(engine="accel")
+    elif mode == "invalid-memory":
+        with assert_raises(contains="DATAFRAME_ACCEL_MEMORY_LIMIT"):
+            _ = plan.collect(engine="accel")
     elif mode == "invalid-device":
         assert_true("DATAFRAME_ACCEL_DEVICE" in plan.explain(engine="accel"))
         with assert_raises(contains="DATAFRAME_ACCEL_DEVICE"):
@@ -45,6 +52,11 @@ def main() raises:
         var report = plan.profile(engine="accel")
         assert_true(report[0].equals(cpu))
         assert_equal(report[1].item(0, "executor").string(), "nvidia")
+        assert_true(report[1].item(0, "kernel_ms").float64() > 0)
+        assert_true(report[1].item(0, "initialization_ms").float64() >= 0)
+        assert_equal(
+            report[1].item(0, "peak_requested_device_bytes").int64(), Int64(44)
+        )
         with assert_raises(contains="batch_size must be positive"):
             _ = plan.collect(engine="accel", batch_size=0)
     print("registered provider:", mode, "passed")

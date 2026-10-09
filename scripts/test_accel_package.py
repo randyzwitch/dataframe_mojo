@@ -30,6 +30,7 @@ def check(package_dir: Path, provider: str) -> None:
         def run(mode: str, **settings: str) -> None:
             env = os.environ.copy()
             env.pop("DATAFRAME_ACCEL_DEVICE", None)
+            env.pop("DATAFRAME_ACCEL_MEMORY_LIMIT", None)
             env.update(settings)
             subprocess.run([str(binary), mode], cwd=work, env=env, check=True)
 
@@ -42,6 +43,9 @@ def check(package_dir: Path, provider: str) -> None:
             run("invalid-device", DATAFRAME_ACCEL_DEVICE="invalid")
             run("invalid-device", DATAFRAME_ACCEL_DEVICE="-1")
             run("unsupported", DATAFRAME_ACCEL_DEVICE="invalid")
+            run("budget", DATAFRAME_ACCEL_MEMORY_LIMIT="0")
+            run("invalid-memory", DATAFRAME_ACCEL_MEMORY_LIMIT="invalid")
+            run("invalid-memory", DATAFRAME_ACCEL_MEMORY_LIMIT="-1")
             override_source = work / "override.mojo"
             shutil.copyfile(
                 ROOT / "tests" / "accel" / "registered_override.mojo", override_source
@@ -62,6 +66,7 @@ def check(package_dir: Path, provider: str) -> None:
             )
             env = os.environ.copy()
             env["DATAFRAME_ACCEL_DEVICE"] = "invalid"
+            env["DATAFRAME_ACCEL_MEMORY_LIMIT"] = "invalid"
             subprocess.run([str(override_binary)], cwd=work, env=env, check=True)
 
 
