@@ -33,7 +33,7 @@ def _select_backend(engine: String) raises -> _BackendDecision:
         return _BackendDecision(
             "cpu",
             True,
-            "auto uses CPU; automatic accelerator selection is not enabled",
+            "automatic placement policy has not been consulted",
         )
     if engine == "accel":
         return _BackendDecision(

@@ -25,7 +25,7 @@ def test_cpu_and_auto_preserve_query_results() raises:
                 )
         assert_true(plan.profile(engine=engine)[0].equals(expected))
         assert_true(plan.fetch(1, engine=engine).equals(expected))
-    assert_equal(plan.explain(), plan.explain(engine="cpu"))
+    assert_equal(plan.explain(), plan.explain(engine="auto"))
     assert_true("ENGINE cpu: auto uses CPU" in plan.explain(engine="auto"))
 
 
@@ -88,6 +88,54 @@ def test_explicit_provider_dispatch_without_gpu_dependencies() raises:
         _ = plan.collect(engine="typo", accelerator=provider)
     assert_equal(plan.explain(accelerator=provider), "probe provider")
 
+
+
+@fieldwise_init
+struct AutomaticProbe(AcceleratorBackend):
+    var choice: String
+
+    def select_auto(self, plan: LazyFrame) -> Tuple[String, String]:
+        return (self.choice, "test placement reason")
+
+    def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+        raise Error("execution fault must propagate")
+
+    def describe(self, plan: LazyFrame) -> String:
+        return "automatic probe"
+
+
+def test_auto_provider_dispatch_and_errors() raises:
+    var plan = DataFrame([Series("x", Column[Int64]([1, 2]))]).lazy()
+    for choice in ["accel", "mixed"]:
+        var provider = AutomaticProbe(choice)
+        assert_true(
+            ("ENGINE " + choice + ": test placement reason")
+            in plan.explain(engine="auto", accelerator=provider)
+        )
+        with assert_raises(contains="execution fault must propagate"):
+            _ = plan.collect(engine="auto", accelerator=provider)
+        with assert_raises(contains="execution fault must propagate"):
+            _ = plan.profile(engine="auto", accelerator=provider)
+        assert_equal(plan.collect(engine="cpu", accelerator=provider).height(), 2)
+        with assert_raises(contains="batch_size must be positive"):
+            _ = plan.collect(engine="auto", accelerator=provider, batch_size=0)
+    var bad = AutomaticProbe("typo")
+    with assert_raises(contains="Invalid automatic provider decision"):
+        _ = plan.collect(engine="auto", accelerator=bad)
+    with assert_raises(contains="Invalid automatic provider decision"):
+        _ = plan.profile(engine="auto", accelerator=bad)
+    with assert_raises(contains="Invalid automatic provider decision"):
+        _ = plan.explain(engine="auto", accelerator=bad)
+
+
+def test_auto_cpu_reason_in_profile() raises:
+    var plan = DataFrame([Series("x", Column[Int64]([1, 2]))]).lazy()
+    var provider = AutomaticProbe("cpu")
+    var result = plan.profile(engine="auto", accelerator=provider)
+    assert_equal(result[0].height(), 2)
+    assert_equal(
+        result[1].item(0, "selection_reason").string(), "test placement reason"
+    )
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
