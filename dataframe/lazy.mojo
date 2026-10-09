@@ -39,6 +39,10 @@ from .csv_types import _map_file
 from .parquet import _ParquetBatches
 from .parallel import Crew, Job, Pool, configured_workers, run_jobs
 from .execution_backend import _select_backend
+from ._accel_provider import (
+    execute as _execute_accel,
+    describe as _describe_accel,
+)
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
     SUM,
@@ -1530,10 +1534,14 @@ struct LazyFrame(Copyable):
         query (`parallel.Crew`) and joined before this returns.
 
         engine='cpu' preserves CPU execution. 'auto' currently selects CPU;
-        'accel' requires the overload with an explicit accelerator runtime.
+        'accel' uses an optional registered provider or an explicit runtime.
         """
         var backend = _select_backend(engine)
         backend.require_available()
+        if engine == "accel":
+            if batch_size <= 0:
+                raise Error("batch_size must be positive")
+            return _execute_accel(self)[0].copy()
         var crew = Crew.start()
         try:
             var result = self._collect(
@@ -1690,6 +1698,8 @@ struct LazyFrame(Copyable):
         backend.require_available()
         if batch_size <= 0:
             raise Error("batch_size must be positive")
+        if engine == "accel":
+            return _execute_accel(self)
         var plan = self._optimized() if optimize else self.copy()
         if optimize:
             plan._push_join_key_sets(streaming, batch_size)
@@ -1733,6 +1743,8 @@ struct LazyFrame(Copyable):
         the operator lines still describe the logical/CPU plan.
         """
         var backend = _select_backend(engine)
+        if engine == "accel" and backend.available:
+            return _describe_accel(self)
         var plan = self._optimized() if optimize else self.copy()
         var out = String()
         if engine != "cpu":

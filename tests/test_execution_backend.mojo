@@ -31,24 +31,15 @@ def test_cpu_and_auto_preserve_query_results() raises:
 
 def test_unavailable_backend_rejected_before_reading_source() raises:
     var plan = scan_csv("/nonexistent/dataframe_backend_selection/input.csv")
-    with assert_raises(
-        contains="Accelerator execution requires an explicit accelerator runtime"
-    ):
+    with assert_raises(contains="Accelerator provider is not installed"):
         _ = plan.collect(engine="accel")
-    with assert_raises(
-        contains="Accelerator execution requires an explicit accelerator runtime"
-    ):
+    with assert_raises(contains="Accelerator provider is not installed"):
         _ = plan.profile(engine="accel")
-    with assert_raises(
-        contains="Accelerator execution requires an explicit accelerator runtime"
-    ):
+    with assert_raises(contains="Accelerator provider is not installed"):
         _ = plan.fetch(engine="accel")
     var description = plan.explain(engine="accel")
     assert_true("ENGINE accel:" in description)
-    assert_true(
-        "Accelerator execution requires an explicit accelerator runtime"
-        in description
-    )
+    assert_true("Accelerator provider is not installed" in description)
 
 
 def test_invalid_engine_is_not_silently_ignored() raises:

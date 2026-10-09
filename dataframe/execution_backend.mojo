@@ -5,6 +5,8 @@ operation/type/semantic and memory checks belong to a backend's lowering
 once that backend exists. CPU scheduling remains owned by the CPU executor.
 """
 
+from ._accel_provider import installed
+
 
 struct _BackendDecision(Movable):
     var engine: String
@@ -36,8 +38,8 @@ def _select_backend(engine: String) raises -> _BackendDecision:
     if engine == "accel":
         return _BackendDecision(
             "accel",
-            False,
-            "Accelerator execution requires an explicit accelerator runtime; use accelerator=runtime or engine='cpu'",
+            installed(),
+            "registered accelerator provider" if installed() else "Accelerator provider is not installed; use the optional GPU package or accelerator=runtime",
         )
     raise Error(
         "Unknown engine '" + engine + "'; expected 'cpu', 'auto', or 'accel'"
