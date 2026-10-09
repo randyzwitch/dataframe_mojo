@@ -118,7 +118,10 @@ struct _CompressJob(Job):
     column; `first` is a multiple of 64 and so is `last` unless it is the
     end. Input rows run from `row` on."""
 
-    var selection: _Selection
+    # The caller's selection, by address: it outlives the jobs, which only
+    # read it. A copy per job cost 16 bytes per 64 rows each, 20 MB for
+    # the 144 jobs of ClickBench q7's 18-chunk filter.
+    var selection: Int
     var columns: List[_Chunks]
     var values: List[Int]
     var valid: List[Int]
@@ -128,7 +131,7 @@ struct _CompressJob(Job):
 
     def __init__(
         out self,
-        selection: _Selection,
+        selection: Int,
         columns: List[_Chunks],
         values: List[Int],
         valid: List[Int],
@@ -136,7 +139,7 @@ struct _CompressJob(Job):
         last: Int,
         row: Int,
     ):
-        self.selection = selection.copy()
+        self.selection = selection
         self.columns = columns.copy()
         self.values = values.copy()
         self.valid = valid.copy()
@@ -161,6 +164,9 @@ struct _CompressJob(Job):
             unsafe_from_address=self.values[c]
         )[].unsafe_ptr()
         var out_valid_address = self.valid[c]
+        var words = Pointer[_Selection, MutAnyOrigin](
+            unsafe_from_address=self.selection
+        )[].words.unsafe_ptr()
         var k = self.first
         var row = self.row
         var chunk = 0
@@ -169,7 +175,7 @@ struct _CompressJob(Job):
         while k < self.last:
             # Next word of the mask from `row` on.
             var w = row >> 6
-            var word = self.selection.words[w] & (_FULL << UInt64(row & 63))
+            var word = words[unsafe_offset=w] & (_FULL << UInt64(row & 63))
             row = 64 * (w + 1)
             if word == 0:
                 continue
@@ -281,12 +287,15 @@ struct _CompressJob(Job):
             unsafe_from_address=self.values[c]
         )[].unsafe_ptr()
         var out_valid_address = self.valid[c]
+        var words = Pointer[_Selection, MutAnyOrigin](
+            unsafe_from_address=self.selection
+        )[].words.unsafe_ptr()
         var k = self.first
         var row = self.row
         var chunk = 0
         while k < self.last:
             var w = row >> 6
-            var word = self.selection.words[w] & (_FULL << UInt64(row & 63))
+            var word = words[unsafe_offset=w] & (_FULL << UInt64(row & 63))
             row = 64 * (w + 1)
             var base = 64 * w
             while word != 0 and k < self.last:
@@ -407,7 +416,7 @@ def filter_columns(
                 continue
             jobs.append(
                 _CompressJob(
-                    selection,
+                    Int(Pointer(to=selection)),
                     chunked,
                     value_lists_fixed,
                     valid_lists,
@@ -420,6 +429,8 @@ def filter_columns(
             jobs[0].run()
         else:
             run_jobs(jobs)
+        # The jobs read the selection by address: keep it alive past them.
+        _ = selection^
     for j in range(len(fixed_index)):
         ref column = columns[fixed_index[j]]
         var bits = bitmaps[j].copy()
