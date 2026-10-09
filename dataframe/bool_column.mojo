@@ -9,7 +9,7 @@ Both buffers use the bitmap helpers in `column.mojo`, so windows at any
 offset append, slice, and compact correctly.
 """
 from std.bit import pop_count
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, bitcast
 from .column import (
     Column,
     _append_bits,
@@ -294,17 +294,38 @@ def _bits64(bits: List[UInt8], bit: Int, length: Int) -> UInt64:
 
 def true_count(mask: BoolColumn) -> Int:
     """Valid true entries, 64 rows at a time."""
-    if mask._offset % 8 == 0 and len(mask._bits[]) == 0:
-        # Byte-aligned values and no nulls: count whole bytes, then the
-        # tail's bits.
+    if mask._offset % 8 == 0 and (
+        len(mask._bits[]) == 0 or len(mask._bits[]) == len(mask._data[])
+    ):
+        # Byte-aligned: whole 64-bit words of values (ANDed with the
+        # validity words when there are nulls), then the tail's bytes and
+        # bits. The bit-assembly path below cost ClickBench q19 a fifth of
+        # its time on a mask with a validity bitmap.
         var data = mask._data[].unsafe_ptr().unsafe_offset(mask._offset // 8)
-        var full = mask._length // 8
+        var nulls = len(mask._bits[]) > 0
+        var bits = mask._bits[].unsafe_ptr().unsafe_offset(mask._offset // 8)
+        var full_bytes = mask._length // 8
+        var words = full_bytes // 8
         var count = 0
-        for i in range(full):
-            count += Int(pop_count(data[unsafe_offset=i]))
-        var rest = mask._length - 8 * full
+        for w in range(words):
+            var word = bitcast[DType.uint64, 1](
+                data.unsafe_offset(8 * w).unsafe_load[width=8]()
+            )
+            if nulls:
+                word &= bitcast[DType.uint64, 1](
+                    bits.unsafe_offset(8 * w).unsafe_load[width=8]()
+                )
+            count += Int(pop_count(word))
+        for i in range(8 * words, full_bytes):
+            var byte = data[unsafe_offset=i]
+            if nulls:
+                byte &= bits[unsafe_offset=i]
+            count += Int(pop_count(byte))
+        var rest = mask._length - 8 * full_bytes
         if rest > 0:
-            var last = data[unsafe_offset=full] & UInt8((1 << rest) - 1)
+            var last = data[unsafe_offset=full_bytes] & UInt8((1 << rest) - 1)
+            if nulls:
+                last &= bits[unsafe_offset=full_bytes]
             count += Int(pop_count(last))
         return count
     ref values = mask._data[]

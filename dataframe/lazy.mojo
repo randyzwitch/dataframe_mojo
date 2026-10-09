@@ -37,6 +37,14 @@ from std.memory import ArcPointer
 from .csv_reader import _CsvBatches, _DecodeJob
 from .csv_types import _map_file
 from .parquet import _ParquetBatches
+from .pipeline import (
+    STEP_DROP,
+    STEP_FILTER,
+    STEP_SELECT,
+    STEP_WITH_COLUMNS,
+    Step,
+    run_pipeline,
+)
 from .parallel import Crew, Job, Pool, configured_workers, run_jobs
 from .execution_backend import _select_backend
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
@@ -945,6 +953,35 @@ def _filter_keeps(
     if len(names) == 0:
         return None
     return Optional(names^)
+
+
+def _pipeline_steps(operations: List[PlanNode]) -> Bool:
+    """Whether every operation is a row-local step a pipeline runs."""
+    for node in operations:
+        if (
+            node.kind == FILTER
+            or node.kind == SELECT
+            or node.kind == WITH_COLUMNS
+        ):
+            if not _row_local(node.exprs):
+                return False
+        elif node.kind != DROP:
+            return False
+    return True
+
+
+def _steps_of(operations: List[PlanNode]) -> List[Step]:
+    var steps = List[Step](capacity=len(operations))
+    for node in operations:
+        var kind = STEP_DROP
+        if node.kind == FILTER:
+            kind = STEP_FILTER
+        elif node.kind == SELECT:
+            kind = STEP_SELECT
+        elif node.kind == WITH_COLUMNS:
+            kind = STEP_WITH_COLUMNS
+        steps.append(Step(kind, node.exprs.copy(), node.names.copy()))
+    return steps^
 
 
 def _apply_operation(
@@ -2214,6 +2251,57 @@ struct LazyFrame(Copyable):
             # that materializes per-batch values keeps `batch_size`, which
             # fits them in cache (TPC-DS q9, 34 ms against 25 at 90K rows).
             rows_per_batch = max(batch_size, input.height() // (4 * workers))
+        # Row-local steps over an in-memory frame into a materialize or an
+        # ungrouped reduce sink run as a thread-owned pipeline (#538): each
+        # worker takes morsels from a shared cursor and runs every step on
+        # them; nothing is held, judged or merged on the main thread.
+        if (
+            source.kind == SCAN_FRAME
+            and len(csv) == 0
+            and len(parquet) == 0
+            and len(shared_joins[]) == 0
+            and top < 0
+            and limit < 0
+            and skip == 0
+            and len(keys) == 0
+            and _pipeline_steps(operations)
+        ):
+            var began = Int(perf_counter_ns())
+            var piped_counts = List[Int]()
+            var piped = run_pipeline(
+                input,
+                _steps_of(operations),
+                expressions,
+                workers,
+                rows_per_batch,
+                batch_size,
+                piped_counts,
+            )
+            if counting:
+                self._record(cursor, "streaming", 0, piped_counts[0])
+                var into_terminal = piped_counts[0]
+                for k in range(len(operations)):
+                    self._record(
+                        operation_nodes[k],
+                        "streaming",
+                        piped_counts[2 * k + 1],
+                        piped_counts[2 * k + 2],
+                    )
+                    into_terminal = piped_counts[2 * k + 2]
+                var wall = Int(perf_counter_ns()) - began
+                if index != cursor and (index not in operation_nodes):
+                    self._record(
+                        index,
+                        "streaming",
+                        into_terminal,
+                        piped.height(),
+                        wall_ns=wall,
+                    )
+                else:
+                    self._record(
+                        index, "streaming", 0, 0, executions=0, wall_ns=wall
+                    )
+            return piped^
         # An in-memory input hands each round four batches a worker, which
         # the pool claims as workers free up, so uneven batches balance.
         # Batches decoded from a file are held until their round ends, so
