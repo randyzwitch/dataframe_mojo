@@ -323,3 +323,11 @@ historical record in `docs/`.
 | `bench_progression.mojo`, `scripts/bench_progression.py` | Written with the equal-run progression path it measured (#308); only its rejection cases remained meaningful, and the join matrix's `shuffled` layout covers them |
 | `bench_aggregate_fusion.mojo` | Measured the fused Float64 group-by path removed in #319 |
 | `bench_agg_shapes.mojo`, `scripts/bench_agg_shapes_polars.py` | One-off comparison for #319; the H2O group-by suite and its variants cover it |
+
+## NVIDIA executor calibration
+
+The [NVIDIA calibration guide](accel-calibration.md) describes the separate
+development sweep for the registered accelerator backend: size, dtype, nulls,
+selectivity, and aggregate count; cold-process startup, warm collect, and
+separate event timing; per-case correctness and conservative measured cost
+envelopes. It does not enable automatic GPU placement.

@@ -42,6 +42,8 @@ jobs:
         run: bash scripts/check_benchmark_separation.sh "$BASE_REF"
       - name: Check benchmark report provenance and coverage
         run: pixi run -e oracle python3 tests/test_bench_reports.py
+      - name: Check accelerator calibration integrity
+        run: python3 -m unittest discover -s scripts -p test_bench_accel_calibration.py
       - name: Check CI runner orchestration
         run: python3 tests/test_ci_runners.py
       - name: Check dtype literals
