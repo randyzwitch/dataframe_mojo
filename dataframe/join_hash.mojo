@@ -13,6 +13,7 @@ from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
+from .huge_pages import huge_list, huge_uninit
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, _mix
 from .series import Series
@@ -99,7 +100,7 @@ def _is_int_key(key: Series) -> Bool:
 
 def _key_words(key: Series) -> List[UInt64]:
     """Every row's word (`_int_word`) of an integer key with no nulls."""
-    var words = List[UInt64](unsafe_uninit_length=len(key))
+    var words = huge_uninit[UInt64](len(key))
     var out = words.unsafe_ptr()
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
@@ -388,7 +389,7 @@ struct _HashBuildJob(Job):
         # power-of-two jump for buckets with many duplicate rows.
         while size * 2 < 3 * (self.last - self.first):
             size *= 2
-        var slots = List[_HashSlot](length=size, fill=_HashSlot(-1, -1, 0))
+        var slots = huge_list(size, _HashSlot(-1, -1, 0))
         var tagged = size * size_of[_HashSlot]() <= _TAG_BUCKET_BYTES
         var tags = List[UInt8](
             length=size + _TAG_LANES if tagged else 0, fill=0
@@ -445,9 +446,7 @@ struct _HashBuildJob(Job):
             var compact_size = 2
             while compact_size * 2 < 3 * unique:
                 compact_size *= 2
-            var compact = List[_HashSlot](
-                length=compact_size, fill=_HashSlot(-1, -1, 0)
-            )
+            var compact = huge_list(compact_size, _HashSlot(-1, -1, 0))
             tagged = compact_size * size_of[_HashSlot]() <= _TAG_BUCKET_BYTES
             var compact_tags = List[UInt8](
                 length=compact_size + _TAG_LANES if tagged else 0, fill=0
