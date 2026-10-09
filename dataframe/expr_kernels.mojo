@@ -1,6 +1,7 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
 from std.sys import size_of
+from .float_ops import arithmetic, compare
 from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
 from .column import Column, _bit, _copy_validity, _pack_bits
@@ -220,34 +221,15 @@ def _float_block[
     var x = _lanes[D, width](left, start)
     var y = _lanes[D, width](right, start)
     comptime if is_comparison(op):
-        var result: SIMD[DType.bool, width]
-        comptime if op == GT:
-            result = x.gt(y)
-        elif op == LT:
-            result = x.lt(y)
-        elif op == GE:
-            result = x.ge(y)
-        elif op == LE:
-            result = x.le(y)
-        elif op == EQ:
-            result = x.eq(y)
-        else:
-            # SIMD ne is an ordered comparison; IEEE requires NaN != NaN.
-            result = ~x.eq(y)
+        var result = compare[D, width](op, x, y)
         var mask = _mask[width](valid, start)
         predicates.unsafe_ptr().unsafe_offset(start).unsafe_bitcast[
             Scalar[DType.bool]
         ]().unsafe_store(result & mask)
     else:
         var result: SIMD[D, width]
-        comptime if op == ADD:
-            result = x + y
-        elif op == SUB:
-            result = x - y
-        elif op == MUL:
-            result = x * y
-        elif op == DIV:
-            result = x / y
+        comptime if op == ADD or op == SUB or op == MUL or op == DIV:
+            result = arithmetic[D, width](op, x, y)
         else:
             result = SIMD[D, width](0)
             comptime for lane in range(width):

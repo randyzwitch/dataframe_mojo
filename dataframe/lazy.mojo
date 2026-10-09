@@ -1043,6 +1043,16 @@ def _apply_operation(
         )
 
 
+trait AcceleratorBackend(Copyable):
+    """Optional execution provider; importing dataframe needs no GPU SDK."""
+
+    def execute(self, plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+        ...
+
+    def describe(self, plan: LazyFrame) -> String:
+        ...
+
+
 struct LazyFrame(Copyable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
@@ -1557,7 +1567,7 @@ struct LazyFrame(Copyable):
         query (`parallel.Crew`) and joined before this returns.
 
         engine='cpu' preserves CPU execution. 'auto' currently selects CPU;
-        'accel' raises until the accelerator backend is implemented.
+        'accel' requires the overload with an explicit accelerator runtime.
         """
         var backend = _select_backend(engine)
         backend.require_available()
@@ -1571,6 +1581,87 @@ struct LazyFrame(Copyable):
         except e:
             crew.release()
             raise e^
+
+    def collect[
+        B: AcceleratorBackend
+    ](
+        self,
+        *,
+        accelerator: B,
+        engine: String = "accel",
+        optimize: Bool = True,
+        streaming: Bool = True,
+        batch_size: Int = 65536,
+    ) raises -> DataFrame:
+        """Execute with an explicit optional runtime; auto still selects CPU.
+
+        The provider lowers the logical plan independently of CPU streaming
+        and optimization. Unsupported plans raise before device submission.
+        """
+        if engine != "accel":
+            return self.collect(
+                engine=engine,
+                optimize=optimize,
+                streaming=streaming,
+                batch_size=batch_size,
+            )
+        return self.profile(
+            accelerator=accelerator,
+            engine=engine,
+            optimize=optimize,
+            streaming=streaming,
+            batch_size=batch_size,
+        )[0].copy()
+
+    def profile[
+        B: AcceleratorBackend
+    ](
+        self,
+        *,
+        accelerator: B,
+        engine: String = "accel",
+        optimize: Bool = True,
+        streaming: Bool = True,
+        batch_size: Int = 65536,
+    ) raises -> Tuple[DataFrame, DataFrame]:
+        """Execute with a provider and report its observed execution regions."""
+        _ = _select_backend(engine)
+        if batch_size <= 0:
+            raise Error("batch_size must be positive")
+        if engine != "accel":
+            return self.profile(
+                engine=engine,
+                optimize=optimize,
+                streaming=streaming,
+                batch_size=batch_size,
+            )
+        return accelerator.execute(self)
+
+    def explain[
+        B: AcceleratorBackend
+    ](
+        self,
+        *,
+        accelerator: B,
+        engine: String = "accel",
+        optimize: Bool = True,
+        streaming: Bool = True,
+    ) raises -> String:
+        """Describe provider capability without submitting device work."""
+        _ = _select_backend(engine)
+        if engine != "accel":
+            return self.explain(
+                engine=engine, optimize=optimize, streaming=streaming
+            )
+        return accelerator.describe(self)
+
+    def fetch[
+        B: AcceleratorBackend
+    ](
+        self, n: Int = 5, *, accelerator: B, engine: String = "accel"
+    ) raises -> DataFrame:
+        """Collect the first n rows using an explicit provider."""
+        return self.head(n).collect(accelerator=accelerator, engine=engine)
 
     def _collect(
         self,

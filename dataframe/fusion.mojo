@@ -10,6 +10,7 @@ operation; null rows get a zero payload. Results are identical to the
 unfused kernels, which remain available with bind(..., fuse=False).
 """
 from std.memory import pack_bits
+from .float_ops import arithmetic, compare
 from .dtype import DataType
 from .binding import BoundExpr
 from .bool_column import BoolColumn
@@ -63,13 +64,7 @@ def _apply[
 ](
     op: Int, x: SIMD[DType.float64, width], y: SIMD[DType.float64, width]
 ) -> SIMD[DType.float64, width]:
-    if op == ADD:
-        return x + y
-    if op == SUB:
-        return x - y
-    if op == MUL:
-        return x * y
-    return x / y
+    return arithmetic[DType.float64, width](op, x, y)
 
 
 def _compare[
@@ -77,18 +72,7 @@ def _compare[
 ](
     op: Int, x: SIMD[DType.float64, width], y: SIMD[DType.float64, width]
 ) -> SIMD[DType.bool, width]:
-    if op == GT:
-        return x.gt(y)
-    if op == LT:
-        return x.lt(y)
-    if op == GE:
-        return x.ge(y)
-    if op == LE:
-        return x.le(y)
-    if op == EQ:
-        return x.eq(y)
-    # SIMD ne is ordered; IEEE requires NaN != NaN.
-    return ~x.eq(y)
+    return compare[DType.float64, width](op, x, y)
 
 
 def _run[

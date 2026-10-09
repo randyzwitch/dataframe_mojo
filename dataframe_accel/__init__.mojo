@@ -1,5 +1,5 @@
-"""Optional accelerator runtime; the CPU dataframe package does not import it.
+"""Optional accelerator providers; the CPU package does not import them.
 
-Use the gpu environment and import a backend explicitly. Runtime storage
-does not yet enable LazyFrame.collect(engine="accel").
+In the gpu environment, pass NvidiaRuntime explicitly to a supported query:
+query.collect(engine="accel", accelerator=runtime).
 """
