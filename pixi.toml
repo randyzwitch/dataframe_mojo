@@ -125,3 +125,6 @@ test-nvidia-runtime = { cmd = "./build/test_nvidia_runtime", depends-on = ["buil
 
 build-nvidia-query-tests = "mkdir -p build && mojo build -I . tests/accel/test_nvidia_query.mojo -o build/test_nvidia_query"
 test-nvidia-query = { cmd = "./build/test_nvidia_query", depends-on = ["build-nvidia-query-tests"] }
+
+package-nvidia = "python3 scripts/build_accel_package.py"
+test-nvidia-package = { cmd = "python3 scripts/test_accel_package.py --package-dir dist/nvidia --provider nvidia", depends-on = ["package-nvidia"] }

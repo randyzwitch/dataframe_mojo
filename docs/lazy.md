@@ -11,7 +11,31 @@ and `collect(optimize=False)` show and run the plan as written.
 `engine="auto"`, or `engine="accel"`. Auto conservatively selects CPU.
 CPU and auto need no accelerator dependency or device discovery.
 
-For NVIDIA execution, use the optional GPU environment and pass a runtime:
+For NVIDIA execution without vendor imports, build the optional distribution:
+
+```sh
+pixi run -e gpu package-nvidia
+# Run from outside this source checkout, using the generated packages:
+pixi run --manifest-path /path/to/repo/pixi.toml -e gpu \
+  mojo run -I /path/to/repo/dist/nvidia /path/to/app.mojo
+```
+
+The application's imports remain `from dataframe import ...`; collection is
+`query.collect(engine="accel")`. Both generated `.mojoc` packages must be on
+the import path. The GPU environment supplies MAX; CPU installations do not
+need it. The package builder registers the provider in a temporary copy and
+never changes the checked-out CPU sources. Do not put the source checkout
+before the optional distribution on the compiler's import path.
+
+`DATAFRAME_ACCEL_DEVICE` selects a nonnegative CUDA-visible ordinal (default
+0). Unsupported plans are rejected before context creation; absent devices
+and invalid ordinals produce clear errors. Each default collection owns its
+context reference until completion; SDK-managed allocation caches may outlive
+that reference. `cpu` and `auto` do not initialize a GPU, even when
+the optional distribution is installed. Auto remains CPU in this milestone.
+
+An explicit runtime still overrides provider/device discovery and permits
+context reuse, including when compiling directly from the source checkout:
 
 ```mojo
 from dataframe_accel.nvidia import NvidiaRuntime
@@ -39,8 +63,8 @@ Int64. Parallel reduction can change floating-point summation order.
 Unsupported plans raise before device submission; `explain` gives the
 capability reason. File scans, joins, grouping, intermediate projections,
 compound predicates, longer arithmetic expressions, and other dtypes are
-not supported yet. `engine="accel"` without an explicit runtime explains or
-raises the missing-runtime error. Explicit acceleration never falls back.
+not supported yet. `engine="accel"` without an installed provider or explicit runtime explains
+or raises the missing-provider error. Explicit acceleration never falls back.
 `engine="auto"` still runs on CPU even when a runtime is passed.
 
 A runtime selects one CUDA-visible device and can be reused across queries.
