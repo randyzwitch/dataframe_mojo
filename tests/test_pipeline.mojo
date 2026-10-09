@@ -96,7 +96,7 @@ def test_pipeline_reductions_and_empty_results() raises:
 
 def test_morsel_ranges_never_cross_a_chunk() raises:
     var t = table(10_000, 3)
-    var ranges = _morsel_ranges(t, 1024)
+    var ranges = _morsel_ranges(t, 1024, 4)
     var ends = t._columns[0]._chunked.value()[].ends.copy()
     var covered = 0
     for k in range(len(ranges) // 2):
@@ -113,8 +113,14 @@ def test_morsel_ranges_never_cross_a_chunk() raises:
             start = end
         assert_true(inside)
     assert_equal(covered, 10_000)
-    var plain = _morsel_ranges(table(5_000, 1), 2048)
-    assert_equal(len(plain) // 2, 3)
+    # Three pieces of 2,048 (fewer than four a worker) are cut to four.
+    var plain = _morsel_ranges(table(5_000, 1), 2048, 4)
+    assert_equal(len(plain) // 2, 4)
+    # Many pieces stay as they are.
+    var many = _morsel_ranges(table(50_000, 1), 1000, 4)
+    assert_equal(len(many) // 2, 50)
+    var single = _morsel_ranges(table(100, 1), 2048, 4)
+    assert_equal(len(single) // 2, 1)
 
 
 def main() raises:
