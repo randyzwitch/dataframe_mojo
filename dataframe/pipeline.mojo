@@ -17,11 +17,10 @@ from std.ffi import external_call
 from std.memory import ArcPointer, Pointer
 from std.sys import size_of
 
-from .binding import bind
 from .bool_column import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
 from .frame import DataFrame, _StreamReduction, concat
-from .gather import can_filter_aligned_chunks
+from .gather import can_filter_aligned_chunks, true_rows
 from .mask_filter import filter_columns
 from .parallel import Job, run_jobs
 from .series import Series
@@ -104,10 +103,7 @@ struct Morsel(Movable):
         ref others = filtered[1]
         if len(others) > 0:
             # String and nested columns: the row-list route.
-            var rows = List[Int](capacity=self.count)
-            for r in range(len(self.mask)):
-                if self.mask._get(r) and self.mask._valid(r):
-                    rows.append(r)
+            var rows = true_rows(self.mask)
             var next_fixed = 0
             var next_other = 0
             for k in range(len(indices)):
@@ -156,9 +152,7 @@ struct Morsel(Movable):
         var narrowed: BoolColumn
         if not self.selected:
             var input = self._compact_frame(names)
-            narrowed = input._predicate_mask(
-                bind(predicate, input._columns), batch_size
-            )
+            narrowed = input._selection(predicate, batch_size)
             var kept = true_count(narrowed)
             if kept == self.count:
                 return
@@ -169,9 +163,7 @@ struct Morsel(Movable):
                 self.compact[i] = False
             return
         var input = self._compact_frame(names)
-        narrowed = input._predicate_mask(
-            bind(predicate, input._columns), batch_size
-        )
+        narrowed = input._selection(predicate, batch_size)
         var kept = true_count(narrowed)
         if kept == self.count:
             return
@@ -379,30 +371,82 @@ struct _PipelineJob(Job):
                 self.sequences.append(morsel.sequence)
 
 
-def _morsel_ranges(frame: DataFrame, morsel_rows: Int) -> List[Int]:
+def _morsel_ranges(
+    frame: DataFrame, morsel_rows: Int, workers: Int
+) -> List[Int]:
     """(offset, length) pairs covering the frame: each chunk of columns
-    chunked at the same rows is cut into pieces of at most `morsel_rows`,
-    evenly, and a frame without such chunks into pieces of `morsel_rows`."""
+    chunked at the same rows is cut into even pieces of about
+    `morsel_rows`, and a frame without such chunks likewise. When that
+    gives fewer than four morsels a worker, the pieces are cut finer so
+    their count is a multiple of `workers` and the last round of morsels
+    is as full as the first: ten even pieces of 600K rows on eight
+    workers left two workers a whole second round (PDS-H q12 at scale
+    0.1, 1.8 to 2.1 ms). Many morsels are left as they are: each costs
+    its steps' setup (ClickBench q29's ninety sums, 36 morsels of 312K
+    rows against 144 of 69K, 4 to 6 ms)."""
     var ends = List[Int]()
     if can_filter_aligned_chunks(frame._columns):
         ends = frame._columns[0]._chunked.value()[].ends.copy()
     else:
         ends.append(frame.height())
-    var ranges = List[Int]()
+    var lanes = max(1, workers)
+    var lengths = List[Int]()
+    var starts = List[Int]()
+    var pieces = List[Int]()
+    var total = 0
     var start = 0
     for end in ends:
         var length = end - start
-        if length <= 0:
-            start = end
-            continue
-        var pieces = (length + morsel_rows - 1) // morsel_rows
-        for p in range(pieces):
-            var low = start + length * p // pieces
-            var high = start + length * (p + 1) // pieces
+        if length > 0:
+            starts.append(start)
+            lengths.append(length)
+            # Pieces of about `morsel_rows`: a chunk a little longer than
+            # the target stays one morsel rather than two short ones, each
+            # paying the steps' setup (TPC-DS q9's fifteen conditional
+            # sums over 123K-row groups cut at 90K: 145 to 174 ms on one
+            # thread).
+            pieces.append(
+                max(1, (2 * length + morsel_rows) // (2 * morsel_rows))
+            )
+            total += pieces[len(pieces) - 1]
+        start = end
+    if total > 1 and total < 4 * lanes and total % lanes != 0:
+        # Cut every chunk finer by the same factor, then give the longest
+        # chunks one more piece each until the count is a multiple.
+        var wanted = total + lanes - total % lanes
+        var scaled = 0
+        for c in range(len(pieces)):
+            pieces[c] = min(lengths[c], pieces[c] * wanted // total)
+            scaled += pieces[c]
+        while scaled < wanted:
+            var longest = -1
+            for c in range(len(pieces)):
+                if pieces[c] < lengths[c] and (
+                    longest < 0
+                    or lengths[c] // pieces[c]
+                    > lengths[longest] // pieces[longest]
+                ):
+                    longest = c
+            if longest < 0:
+                break
+            pieces[longest] += 1
+            scaled += 1
+    # Boundaries inside a chunk fall on multiples of 64 rows, so a
+    # morsel's validity bitmaps start on a byte: kernels that AND or
+    # window bitmaps take their slow path from a bit offset (TPC-DS q9's
+    # masked sums, 145 to 174 ms on one thread at 87,381-row morsels).
+    var ranges = List[Int]()
+    for c in range(len(pieces)):
+        for p in range(pieces[c]):
+            var low = starts[c] + lengths[c] * p // pieces[c]
+            var high = starts[c] + lengths[c] * (p + 1) // pieces[c]
+            if p > 0:
+                low = starts[c] + (low - starts[c]) // 64 * 64
+            if p + 1 < pieces[c]:
+                high = starts[c] + (high - starts[c]) // 64 * 64
             if high > low:
                 ranges.append(low)
                 ranges.append(high - low)
-        start = end
     return ranges^
 
 
@@ -421,7 +465,9 @@ def run_pipeline(
     then each step's input and output rows."""
     trace_path("pipeline.run")
     var shared = ArcPointer(frame.copy())
-    var ranges = ArcPointer(_morsel_ranges(frame, max(1, morsel_rows)))
+    var ranges = ArcPointer(
+        _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
+    )
     var cursor = _Cursor.new()
     var jobs = List[_PipelineJob](capacity=workers)
     for _ in range(max(1, workers)):

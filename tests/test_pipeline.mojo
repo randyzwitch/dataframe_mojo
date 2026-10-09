@@ -96,7 +96,7 @@ def test_pipeline_reductions_and_empty_results() raises:
 
 def test_morsel_ranges_never_cross_a_chunk() raises:
     var t = table(10_000, 3)
-    var ranges = _morsel_ranges(t, 1024)
+    var ranges = _morsel_ranges(t, 1024, 4)
     var ends = t._columns[0]._chunked.value()[].ends.copy()
     var covered = 0
     for k in range(len(ranges) // 2):
@@ -104,7 +104,7 @@ def test_morsel_ranges_never_cross_a_chunk() raises:
         var high = low + ranges[2 * k + 1]
         assert_equal(low, covered)
         covered = high
-        assert_true(ranges[2 * k + 1] <= 1024)
+        assert_true(ranges[2 * k + 1] <= 1024 + 512 + 64)
         var inside = False
         var start = 0
         for end in ends:
@@ -113,8 +113,31 @@ def test_morsel_ranges_never_cross_a_chunk() raises:
             start = end
         assert_true(inside)
     assert_equal(covered, 10_000)
-    var plain = _morsel_ranges(table(5_000, 1), 2048)
-    assert_equal(len(plain) // 2, 3)
+    # Boundaries inside a chunk are 64-row aligned to the chunk's start.
+    var chunk_starts = List[Int]()
+    var at = 0
+    for end in ends:
+        chunk_starts.append(at)
+        at = end
+    for k in range(len(ranges) // 2):
+        var low = ranges[2 * k]
+        if low not in chunk_starts:
+            var base = 0
+            for c in chunk_starts:
+                if c <= low:
+                    base = c
+            assert_equal((low - base) % 64, 0)
+    # About two pieces of 2,048 (fewer than four a worker) are cut to four.
+    var plain = _morsel_ranges(table(5_000, 1), 2048, 4)
+    assert_equal(len(plain) // 2, 4)
+    # A chunk a little longer than the target stays one morsel.
+    var one = _morsel_ranges(table(2_900, 1), 2048, 4)
+    assert_equal(len(one) // 2, 1)
+    # Many pieces stay as they are.
+    var many = _morsel_ranges(table(50_000, 1), 1000, 4)
+    assert_equal(len(many) // 2, 50)
+    var single = _morsel_ranges(table(100, 1), 2048, 4)
+    assert_equal(len(single) // 2, 1)
 
 
 def main() raises:
