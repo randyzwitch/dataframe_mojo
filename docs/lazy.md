@@ -7,6 +7,29 @@ nodes; nothing reads data until `collect()`. `fetch(n)` collects the first `n`
 rows. `explain()` prints the optimized plan with execution annotations, root first; `explain(optimize=False)`
 and `collect(optimize=False)` show and run the plan as written.
 
+`collect`, `profile`, and `fetch` accept `engine="cpu"` (the default),
+`engine="auto"`, or `engine="accel"`. CPU execution retains the existing
+streaming and optimization options. Auto currently selects CPU because the
+accelerator backend is not implemented. Explicit accelerator requests raise
+before execution or file reads; they never silently fall back to CPU. No accelerator
+dependency or device discovery is needed for CPU or auto execution.
+
+`explain(engine="auto")` prepends the selection and its reason.
+`explain(engine="accel")` reports that the backend is unavailable without
+executing the query; its operator lines still describe the logical/CPU plan,
+not a lowered accelerator plan. The default `explain()` output is unchanged.
+
+Backend selection occurs before CPU executor setup, independently of the
+pipeline rewrite in [#538](https://github.com/randyzwitch/dataframe_mojo/issues/538).
+Availability is the first capability gate. NVIDIA will be the first
+accelerator backend. Expression/type checks
+(including intermediate and accumulator types), null and ordering semantics,
+memory checks, device execution, and cost-based auto placement remain work
+under [#528](https://github.com/randyzwitch/dataframe_mojo/issues/528).
+The engine selects an execution family, not a physical device. A future
+device selector will identify one accelerator, with buffers and contexts
+owned by that device; splitting a query across devices is separate work.
+
 `join(other, on, how)` joins on keys named alike on both sides;
 `join(other, left_on=[...], right_on=[...], how, suffix, coalesce)` pairs
 differently named keys (`o_custkey` with `c_custkey`), with the eager join's
