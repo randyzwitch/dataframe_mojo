@@ -361,5 +361,69 @@ def test_filter_copies_only_columns_read_after_it() raises:
     )
 
 
+def test_shared_subplans_run_once_and_match() raises:
+    # A grouped subplan used twice (a self-join of an aggregate, as TPC-DS
+    # q65 and q1 do) is executed once and both uses read the result; the
+    # same plan with the copies differing is not shared. Both match the
+    # eager result and the unoptimized plan.
+    var n = 30_000
+    var k = List[Int64](capacity=n)
+    var g = List[String](capacity=n)
+    var v = List[Float64](capacity=n)
+    for i in range(n):
+        k.append(Int64(i % 700))
+        g.append("g" + String(i % 9))
+        v.append(Float64(i % 101))
+    var df = DataFrame(
+        [
+            Series("k", Column[Int64](k^)),
+            Series("g", Column[String](g^)),
+            Series("v", Column[Float64](v^)),
+        ]
+    )
+    var totals = (
+        df.lazy()
+        .filter(col("v") > lit(Float64(3)))
+        .group_by("k", maintain_order=True)
+        .agg([col("v").sum().alias("s"), col("v").len().alias("c")])
+    )
+    var eager_totals = (
+        df.filter(col("v") > lit(Float64(3)))
+        .group_by("k", maintain_order=True)
+        .agg([col("v").sum().alias("s"), col("v").len().alias("c")])
+    )
+    var averages = totals.group_by("c", maintain_order=True).agg(
+        [col("s").mean().alias("avg_s")]
+    )
+    var eager_averages = eager_totals.group_by("c", maintain_order=True).agg(
+        [col("s").mean().alias("avg_s")]
+    )
+    same(
+        totals.join(averages, "c").filter(col("s") > col("avg_s")),
+        eager_totals.join(eager_averages, "c").filter(col("s") > col("avg_s")),
+    )
+    # The copies differ (one more filter): nothing shared, same answer.
+    var other = (
+        df.lazy()
+        .filter(col("v") > lit(Float64(3)))
+        .filter(col("g").ne(lit(String("g4"))))
+        .group_by("k", maintain_order=True)
+        .agg([col("v").sum().alias("s2")])
+    )
+    var eager_other = (
+        df.filter(col("v") > lit(Float64(3)))
+        .filter(col("g").ne(lit(String("g4"))))
+        .group_by("k", maintain_order=True)
+        .agg([col("v").sum().alias("s2")])
+    )
+    same(totals.join(other, "k"), eager_totals.join(eager_other, "k"))
+    # Two scans of the same frame are not a shared subplan: a join of a
+    # frame with itself still answers.
+    same(
+        df.lazy().join(df.lazy().select(["k", "g"]), ["k", "g"]),
+        df.join(df.select(["k", "g"]), ["k", "g"]),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

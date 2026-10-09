@@ -152,5 +152,45 @@ def test_fused_comparisons_every_type_operator_and_offset() raises:
         check(f, (col("i32") == lit(Int32(-3))) & (col("f64") >= 0.0))
 
 
+def test_fused_comparisons_with_nulls() raises:
+    # A null row compares false, as the filter drops it, on an integer
+    # and a float column with nulls, through every part shape.
+    var n = 30_011
+    var q = List[Int32](capacity=n)
+    var q_valid = List[Bool](capacity=n)
+    var p = List[Float64](capacity=n)
+    var p_valid = List[Bool](capacity=n)
+    for i in range(n):
+        q.append(Int32(i % 100))
+        q_valid.append(i % 7 != 2)
+        p.append(Float64(i % 211) / 2)
+        p_valid.append(i % 13 != 5)
+    var data = DataFrame(
+        [
+            Series("q", Column[Int32](q^, q_valid^)),
+            Series("p", Column[Float64](p^, p_valid^)),
+        ]
+    )
+    # Slices start the validity bits mid-byte, and some end in the
+    # bitmap's last byte.
+    var frames = [
+        data.copy(),
+        data.slice(5, n - 9),
+        data.slice(3, n - 3),
+        data.slice(8, n - 8),
+        data.slice(1, n - 1),
+    ]
+    for f in frames:
+        check(f, (col("q") >= lit(Int32(10))) & (col("q") <= lit(Int32(30))))
+        check(f, (col("q") > lit(Int32(4))) & (col("p") < 40.0))
+        check(f, (col("q") != lit(Int32(4))) & (col("p") >= 100.0))
+        check(
+            f,
+            (col("q") >= lit(Int32(10)))
+            & (col("q") <= lit(Int32(30)))
+            & ((col("p") < 5.0) | (col("p") > 100.0)),
+        )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

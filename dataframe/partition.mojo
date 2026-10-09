@@ -31,6 +31,7 @@ from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
 from .dtype import NUMERIC_DTYPES
+from .huge_pages import huge_list, huge_uninit
 from .gather import take_parallel
 from .hashing import RowKeys, encode_rows
 from .parallel import Job, partitions, run_jobs
@@ -447,7 +448,7 @@ struct Partitioner(Movable):
         self.rows = len(contiguous[0])
         self.keys = contiguous.copy()
         # Every row's hash is written by exactly one _HashJob (#388).
-        self.hashes = List[UInt64](unsafe_uninit_length=self.rows)
+        self.hashes = huge_uninit[UInt64](self.rows)
         self.histogram = List[Int](length=_SLOTS, fill=0)
         self.worker_histograms = List[List[Int]](capacity=workers)
         var bounds = partitions(self.rows, workers, 64)
@@ -505,13 +506,9 @@ struct Partitioner(Movable):
             per_worker.append(counts^)
         # Both are permutations of every row, each slot written once by
         # the scatter jobs, so neither is filled first (#388).
-        var order = List[Int](unsafe_uninit_length=self.rows)
-        var ordered = List[UInt64](
-            unsafe_uninit_length=self.rows if with_hashes else 0
-        )
-        var ordered_words = List[UInt64](
-            unsafe_uninit_length=self.rows if words != 0 else 0
-        )
+        var order = huge_uninit[Int](self.rows)
+        var ordered = huge_uninit[UInt64](self.rows if with_hashes else 0)
+        var ordered_words = huge_uninit[UInt64](self.rows if words != 0 else 0)
         var cursor = starts.copy()
         var jobs = List[_ScatterJob](capacity=workers)
         for w in range(workers):
@@ -955,7 +952,7 @@ def encode_bucket(
     firsts.clear()
     var group_hashes = List[UInt64]()
     var capacity = 1024
-    var table = List[Int32](length=capacity, fill=-1)
+    var table = huge_list(capacity, Int32(-1))
     var out = ids.unsafe_ptr()
     # One offsets-backed string key without nulls, the common case, is
     # compared directly against the group's first row.
@@ -1084,7 +1081,7 @@ def encode_bucket(
         if 2 * len(firsts) > capacity:
             # Rehash from the stored group hashes; ids do not change.
             capacity *= 2
-            table = List[Int32](length=capacity, fill=-1)
+            table = huge_list(capacity, Int32(-1))
             var grown = table.unsafe_ptr()
             for g in range(len(firsts)):
                 var at = Int(group_hashes[g]) & (capacity - 1)

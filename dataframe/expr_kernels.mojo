@@ -1,5 +1,6 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
+from std.sys import size_of
 from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
 from .column import Column, _bit, _copy_validity, _pack_bits
@@ -334,6 +335,18 @@ def _int_binary[
             return result.cast[D]()
 
 
+@always_inline
+def _lane_op[
+    op: Int, L: DType, lanes: Int
+](x: SIMD[L, lanes], y: SIMD[L, lanes]) -> SIMD[L, lanes]:
+    comptime if op == ADD:
+        return x + y
+    elif op == SUB:
+        return x - y
+    else:
+        return x * y
+
+
 def _vector_int[
     op: Int, D: DType
 ](left: Column[Scalar[D]], right: Column[Scalar[D]], n: Int) raises -> Series:
@@ -342,29 +355,27 @@ def _vector_int[
     (#384). An overflowing block is redone row by row, so the error is the
     checked operation's own."""
     comptime lanes = 16
+    # 8- and 16-bit values add, subtract and multiply within Int32, so
+    # their lanes are Int32: half the registers of Int64 lanes (ClickBench
+    # q29 adds a constant to a 16-bit column 90 times).
+    comptime L = DType.int32 if size_of[Scalar[D]]() <= 2 else DType.int64
     var values = List[Scalar[D]](unsafe_uninit_length=n)
     var out = values.unsafe_ptr()
     var a = left._ptr()
     var b = right._ptr()
     var a_scalar = len(left) == 1
     var b_scalar = len(right) == 1
-    var low = SIMD[DType.int64, lanes](Int64(Scalar[D].MIN))
-    var high = SIMD[DType.int64, lanes](Int64(Scalar[D].MAX))
+    var low = SIMD[L, lanes](Scalar[L](Scalar[D].MIN))
+    var high = SIMD[L, lanes](Scalar[L](Scalar[D].MAX))
     var i = 0
     while i + lanes <= n:
-        var x = SIMD[DType.int64, lanes](
-            Int64(a[])
-        ) if a_scalar else a.unsafe_load[width=lanes](i).cast[DType.int64]()
-        var y = SIMD[DType.int64, lanes](
-            Int64(b[])
-        ) if b_scalar else b.unsafe_load[width=lanes](i).cast[DType.int64]()
-        var r: SIMD[DType.int64, lanes]
-        comptime if op == ADD:
-            r = x + y
-        elif op == SUB:
-            r = x - y
-        else:
-            r = x * y
+        var x = SIMD[L, lanes](Scalar[L](a[])) if a_scalar else a.unsafe_load[
+            width=lanes
+        ](i).cast[L]()
+        var y = SIMD[L, lanes](Scalar[L](b[])) if b_scalar else b.unsafe_load[
+            width=lanes
+        ](i).cast[L]()
+        var r = _lane_op[op, L, lanes](x, y)
         if (r.lt(low) | r.gt(high)).reduce_or():
             for k in range(lanes):
                 _ = _int_binary[op, D](

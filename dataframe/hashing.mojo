@@ -10,6 +10,7 @@ from std.memory import Pointer, bitcast, unsafe_memcpy
 from .aggregate import float_key
 from .bool_column import BoolColumn
 from .column import Column, _validity_at
+from .huge_pages import huge_list
 from .dtype import DataType, NUMERIC_DTYPES
 from .string_column import StringColumn, StringBuilder
 from .series import Series
@@ -90,7 +91,7 @@ struct _U64Codes(Movable):
     def _grow(mut self):
         var size = 2 * len(self.slots)
         self.shift -= 1
-        self.slots = List[Int32](length=size, fill=-1)
+        self.slots = huge_list(size, Int32(-1))
         for at in range(self.count):
             var slot = Int((self.keys[at] * 0x9E3779B97F4A7C15) >> self.shift)
             while self.slots[slot] >= 0:

@@ -572,6 +572,37 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             return len(self._data[StructColumn])
         return len(self._data[StringColumn])
 
+    def _shares_buffers_with(self, other: Self) -> Bool:
+        """Whether both series read the same Arrow buffers: the same
+        column, however many times copied. Chunked series share when
+        every chunk does; list and struct columns never report sharing."""
+        if self.is_chunked() or other.is_chunked():
+            if not (self.is_chunked() and other.is_chunked()):
+                return False
+            var mine = self.chunks()
+            var theirs = other.chunks()
+            if len(mine) != len(theirs):
+                return False
+            for i in range(len(mine)):
+                if not mine[i]._shares_buffers_with(theirs[i]):
+                    return False
+            return True
+        comptime for i in range(len(FixedElements.Ts)):
+            comptime E: Copyable & Deinitable = FixedElements.Ts[i]
+            if self._data.isa[Column[E]]():
+                return other._data.isa[Column[E]]() and self._data[
+                    Column[E]
+                ]._shares_buffers_with(other._data[Column[E]])
+        if self._data.isa[BoolColumn]():
+            return other._data.isa[BoolColumn]() and self._data[
+                BoolColumn
+            ]._shares_buffers_with(other._data[BoolColumn])
+        if self._data.isa[StringColumn]():
+            return other._data.isa[StringColumn]() and self._data[
+                StringColumn
+            ]._shares_buffers_with(other._data[StringColumn])
+        return False
+
     def null_count(self) -> Int:
         if self.is_chunked():
             var count = 0
