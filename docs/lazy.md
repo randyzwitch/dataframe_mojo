@@ -224,3 +224,7 @@ raw samples and reproduction commands.
 Tests check that optimized and unoptimized plans produce identical results for
 every rewrite. Tests also compare batch sizes, worker counts, joins and aggregate
 state against the materializing executor, including failures and early cleanup.
+
+The [accelerator execution contract](accelerator-contract.md) specifies the
+shared capability, placement, ownership and readiness requirements for
+discrete and unified memory, including the gates for future automatic placement.
