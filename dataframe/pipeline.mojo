@@ -14,7 +14,7 @@ slices a chunk into dictionary vectors the same way.
 """
 from std.atomic import Atomic
 from std.ffi import external_call
-from std.memory import ArcPointer, Pointer
+from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 from std.time import perf_counter_ns
 
@@ -47,6 +47,7 @@ from .frame import (
     _equality_words,
     _expand_struct_keys,
     _finish_parts,
+    _rows_mask,
     _word_hash,
     concat,
 )
@@ -77,6 +78,14 @@ comptime _PART_BITS = 4
 # 2^_PART_BITS parts: a few groups (ClickBench q7's eight) pay nothing
 # per part and morsel, many fit the parts' tables in cache.
 comptime _SPLIT_GROUPS = 4096
+# The column a top-k sink adds to its candidates: the row's place in the
+# source's order (morsel sequence, then row within the morsel's output),
+# the last sort key, so ties come out as a stable sort of the whole input
+# would place them, whichever worker held them.
+comptime _ORDER_COLUMN = "__pipeline_order"
+# Candidate rows a worker holds before folding them to the k best: the
+# fold's setup is worth about this many rows of comparisons.
+comptime _FOLD_ROWS = 8192
 
 
 @fieldwise_init
@@ -105,6 +114,113 @@ def _reads(exprs: List[Expr]) -> Optional[List[String]]:
             if node.op == COL and node.text not in names:
                 names.append(node.text)
     return Optional(names^)
+
+
+comptime _BOUND_NONE = 0
+comptime _BOUND_INT = 1
+comptime _BOUND_FLOAT = 2
+
+
+struct _TopBound(Copyable, Movable):
+    """The first sort key's value at a streamed top-k's k-th row so far.
+
+    A row whose key is worse than it (after it in the sort's direction)
+    cannot enter the top k, so a batch keeps only rows at or better than
+    the bound when at most one in eight are, ties included (later keys decide those) and nulls included
+    (wherever the sort puts them). Integer-backed keys (integers, dates,
+    datetimes, durations) compare as Int64, floats as Float64 with NaN
+    kept; other dtypes get no bound.
+    """
+
+    var kind: Int
+    var name: String
+    var descending: Bool
+    var integer: Int64
+    var floating: Float64
+
+    def __init__(out self):
+        self.kind = _BOUND_NONE
+        self.name = String()
+        self.descending = False
+        self.integer = 0
+        self.floating = 0.0
+
+    def __init__(
+        out self, candidates: DataFrame, name: String, descending: Bool, k: Int
+    ) raises:
+        """The bound from `candidates`, sorted best first, once it holds
+        `k` rows; none before then or when its k-th key is null."""
+        self = Self()
+        if candidates.height() < k or k <= 0:
+            return
+        var key = candidates.column(name)
+        if key.is_chunked():
+            key = key.rechunk()
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            if key._data.isa[Column[Scalar[D]]]():
+                ref column = key._data[Column[Scalar[D]]]
+                if not column._valid(k - 1):
+                    return
+                var value = column._get(k - 1)
+                comptime if D.is_floating_point():
+                    self.floating = Float64(value)
+                    if self.floating != self.floating:
+                        # NaN sorts past every number: no row is worse.
+                        return
+                    self.kind = _BOUND_FLOAT
+                elif D == DType.uint64:
+                    return
+                else:
+                    self.integer = Int64(value)
+                    self.kind = _BOUND_INT
+                self.name = name
+                self.descending = descending
+                return
+
+    def rows(self, frame: DataFrame) raises -> Optional[List[Int]]:
+        """The rows of `frame` that can still enter the top k, or None
+        when every row can (or the batch lacks the key)."""
+        if frame.height() == 0 or self.name not in frame.columns():
+            return None
+        var key = frame.column(self.name)
+        if key.is_chunked():
+            key = key.rechunk()
+        var rows = List[Int]()
+        comptime for d in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[d]
+            if key._data.isa[Column[Scalar[D]]]():
+                ref column = key._data[Column[Scalar[D]]]
+                var values = column.unsafe_values()
+                var nulls = column.null_count() > 0
+                for i in range(len(column)):
+                    if nulls and not column._valid(i):
+                        rows.append(i)
+                        continue
+                    var value = values.unsafe_offset(i)[]
+                    var ok: Bool
+                    comptime if D.is_floating_point():
+                        var x = Float64(value)
+                        ok = x != x or (
+                            x
+                            >= self.floating if self.descending else x
+                            <= self.floating
+                        )
+                    elif D == DType.uint64:
+                        ok = True
+                    else:
+                        var x = Int64(value)
+                        ok = (
+                            x
+                            >= self.integer if self.descending else x
+                            <= self.integer
+                        )
+                    if ok:
+                        rows.append(i)
+                if len(rows) == frame.height():
+                    return None
+                return rows^
+        return None
 
 
 struct Morsel(Movable):
@@ -332,6 +448,15 @@ struct Morsel(Movable):
         else:
             self.drop(step.names)
 
+    def narrow(mut self, rows: List[Int]) raises:
+        """Select only `rows` (ascending) of a fresh morsel: a top-k's
+        bound applied before any step reads a column."""
+        self.mask = _rows_mask(rows, self.frame._height)
+        self.selected = True
+        self.count = len(rows)
+        for i in range(len(self.compact)):
+            self.compact[i] = False
+
     def materialized(mut self) raises -> DataFrame:
         self.gather_all()
         return self.frame.copy()
@@ -374,6 +499,95 @@ struct _Cursor(Copyable, Movable):
 
     def free(self):
         _ = external_call["free", NoneType](self.address)
+
+
+def _float_order(value: Float64) -> Int64:
+    """An Int64 that orders as the float does (its own inverse)."""
+    var bits = bitcast[DType.int64](value)
+    return bits if bits >= 0 else bits ^ Int64(0x7FFFFFFFFFFFFFFF)
+
+
+@fieldwise_init
+struct _SharedBound(Copyable, Movable):
+    """The tightest top-k bound any worker has found, shared by all: a
+    worker folding its candidates publishes its k-th key, and every
+    worker narrows its next morsel by the tightest (DuckDB's top-n shares
+    its heap boundary across threads). Two atomics: whether a bound is
+    set, and the key as an Int64 that orders as the key does."""
+
+    var address: Int
+
+    @staticmethod
+    def new() -> _SharedBound:
+        return _SharedBound(
+            external_call["calloc", Int](2, size_of[Atomic[Int64]]())
+        )
+
+    def _slot(self, k: Int) -> Pointer[Atomic[Int64], MutAnyOrigin]:
+        return Pointer[Atomic[Int64], MutAnyOrigin](
+            unsafe_from_address=self.address + k * size_of[Atomic[Int64]]()
+        )
+
+    def publish(self, bound: _TopBound):
+        if bound.kind == _BOUND_NONE:
+            return
+        var key = bound.integer if bound.kind == _BOUND_INT else _float_order(
+            bound.floating
+        )
+        var value = self._slot(1)
+        var state = self._slot(0)
+        while True:
+            var set = state[].load()
+            var current = value[].load()
+            if set != 0:
+                var tighter = (
+                    key > current if bound.descending else key < current
+                )
+                if not tighter:
+                    return
+                if value[].compare_exchange(current, key):
+                    return
+                continue
+            # Unset: store the key, then the flag; a reader sees the flag
+            # only after the key.
+            if value[].compare_exchange(current, key):
+                state[].store(1)
+                return
+
+    def tighten(
+        self,
+        mut bound: _TopBound,
+        name: String,
+        descending: Bool,
+        floating: Bool,
+    ):
+        """Adopt the shared bound into `bound` when it is tighter."""
+        if self._slot(0)[].load() == 0:
+            return
+        var key = self._slot(1)[].load()
+        if bound.kind != _BOUND_NONE:
+            var mine = (
+                bound.integer if bound.kind
+                == _BOUND_INT else _float_order(bound.floating)
+            )
+            var tighter = key > mine if descending else key < mine
+            if not tighter:
+                return
+        bound.name = name
+        bound.descending = descending
+        if floating:
+            bound.kind = _BOUND_FLOAT
+            bound.floating = bitcast[DType.float64](_float_order_inverse(key))
+        else:
+            bound.kind = _BOUND_INT
+            bound.integer = key
+
+    def free(self):
+        _ = external_call["free", NoneType](self.address)
+
+
+def _float_order_inverse(key: Int64) -> Int64:
+    return key if key >= 0 else key ^ Int64(0x7FFFFFFFFFFFFFFF)
 
 
 def _plain_op(op: Int) -> Bool:
@@ -1001,6 +1215,23 @@ struct _PipelineJob(Job):
     # selections over the source frame rather than their rows.
     var filter_only: Bool
     var batch_size: Int
+    # Top-k sink (a materialize sink keeping the k best rows by the sort
+    # keys): this worker's candidates in `parts`, their row count, and
+    # the running bound on the first key once k candidates are held
+    # (`bounded`: the key is an input column no step rewrites, so the
+    # bound narrows a morsel before any step reads it).
+    var top: Int
+    var top_names: List[String]
+    var top_descending: List[Bool]
+    var top_nulls_last: List[Bool]
+    var bounded: Bool
+    var candidate_rows: Int
+    # Candidate rows that trigger the next fold; doubles after each.
+    var fold_at: Int
+    var bound: _TopBound
+    var shared_bound: _SharedBound
+    # Whether the first sort key is a float (the shared bound's key kind).
+    var floating_key: Bool
     # Materialize sink: the morsels' frames and their sequence numbers.
     var parts: List[DataFrame]
     var sequences: List[Int]
@@ -1028,7 +1259,24 @@ struct _PipelineJob(Job):
         ordered: Bool,
         insert: Bool,
         batch_size: Int,
+        top: Int,
+        top_names: List[String],
+        top_descending: List[Bool],
+        top_nulls_last: List[Bool],
+        bounded: Bool,
+        shared_bound: _SharedBound,
+        floating_key: Bool,
     ):
+        self.shared_bound = shared_bound.copy()
+        self.floating_key = floating_key
+        self.top = top
+        self.top_names = top_names.copy()
+        self.top_descending = top_descending.copy()
+        self.top_nulls_last = top_nulls_last.copy()
+        self.bounded = bounded
+        self.candidate_rows = 0
+        self.fold_at = 4 * max(1, top)
+        self.bound = _TopBound()
         self.frame = frame.copy()
         self.cursor = cursor
         self.ranges = ranges.copy()
@@ -1053,17 +1301,56 @@ struct _PipelineJob(Job):
         # busy nanoseconds on this worker.
         self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
 
+    def _fold_candidates(mut self) raises:
+        """Fold this worker's candidates to the k best (DuckDB's heap), and
+        tighten the bound from the k-th, shared with every worker."""
+        var merged = _top_rows(
+            concat(self.parts),
+            self.top_names,
+            self.top_descending,
+            self.top_nulls_last,
+            self.top,
+            1,
+        )
+        self.candidate_rows = merged.height()
+        if self.bounded:
+            self.bound = _TopBound(
+                merged, self.top_names[0], self.top_descending[0], self.top
+            )
+            self.shared_bound.publish(self.bound)
+        self.parts = [merged^]
+
     def run(mut self) raises:
         var count = len(self.ranges[]) // 2
         var cursor = _Cursor(self.cursor)
         while True:
             var k = cursor.take(1)
             if k >= count:
+                # The worker's leftover candidates folded to k, so the
+                # finish sorts at most k rows a worker.
+                if self.top > 0 and self.candidate_rows > self.top:
+                    self._fold_candidates()
                 return
             var offset = self.ranges[][2 * k]
             var length = self.ranges[][2 * k + 1]
             var morsel = Morsel(self.frame[].slice(offset, length), k)
             self.counts[0] += length
+            if self.top > 0 and self.bounded:
+                self.shared_bound.tighten(
+                    self.bound,
+                    self.top_names[0],
+                    self.top_descending[0],
+                    self.floating_key,
+                )
+            if self.top > 0 and self.bound.kind != _BOUND_NONE:
+                # Narrow to the rows that can still enter the top k when
+                # at most one in eight can: gathering a step's columns at
+                # scattered rows costs more than reading them whole past
+                # that (ClickBench q26's string filter on 15% of the rows:
+                # 31 ms busy against 6 reading every row).
+                var kept = self.bound.rows(morsel.frame)
+                if kept and 8 * len(kept.value()) <= morsel.height():
+                    morsel.narrow(kept.value())
             for i in range(len(self.steps)):
                 self.counts[2 * i + 1] += morsel.height()
                 var began = Int(perf_counter_ns())
@@ -1163,9 +1450,80 @@ struct _PipelineJob(Job):
                             batch.append(piece^)
                             self.reduction[p].merge_all(batch, parallel=False)
                         p += 1
+            elif self.top > 0:
+                var output = morsel.materialized()
+                var h = output.height()
+                var places = List[Int64](capacity=h)
+                var base = Int64(morsel.sequence) << 40
+                for r in range(h):
+                    places.append(base + Int64(r))
+                output = output.with_column(
+                    Series(_ORDER_COLUMN, Column[Int64](places^))
+                )
+                self.candidate_rows += h
+                self.parts.append(output^)
+                # Folds come at doubling candidate counts, from a few rows
+                # past k up to a few thousand: the first folds are cheap
+                # and tighten the shared bound fast (a bound from 40 rows
+                # kept 10% of ClickBench q26's rows; from 8K rows, 0.1%),
+                # and the fold's setup per call (dense ranks of a string
+                # key) is then paid once per thousands of rows, not per
+                # morsel (650 folds cost q26 44 ms).
+                if self.candidate_rows > self.fold_at and len(self.parts) > 1:
+                    self._fold_candidates()
+                    self.fold_at = min(_FOLD_ROWS, 2 * self.fold_at)
             else:
                 self.parts.append(morsel.materialized())
                 self.sequences.append(morsel.sequence)
+
+
+def _top_rows(
+    candidates: DataFrame,
+    names: List[String],
+    descending: List[Bool],
+    nulls_last: List[Bool],
+    k: Int,
+    threads: Int,
+) raises -> DataFrame:
+    """The k best candidate rows in order, ties by their place in the
+    source. With several keys, the rows are first cut to those whose first
+    key is at or better than the k-th best first key (a numeric key, no
+    null there): later keys only settle ties, so ranking a string key over
+    every candidate (what a multi-key selection does) is spared for all
+    but the tied rows, as a lexicographic heap compares them."""
+    var pool = candidates.copy()
+    if len(names) > 1 and pool.height() > k:
+        var first = pool.take(
+            pool._arg_sort_head(
+                [names[0]], [descending[0]], [nulls_last[0]], k, threads
+            )
+        )
+        var bound = _TopBound(first, names[0], descending[0], k)
+        if bound.kind != _BOUND_NONE:
+            var kept = bound.rows(pool)
+            if kept:
+                pool = pool.take(kept.value())
+    return pool.take(
+        pool._arg_sort_head(
+            _with_order(names),
+            _with_false(descending),
+            _with_false(nulls_last),
+            k,
+            threads,
+        )
+    )
+
+
+def _with_order(names: List[String]) -> List[String]:
+    var out = names.copy()
+    out.append(_ORDER_COLUMN)
+    return out^
+
+
+def _with_false(flags: List[Bool]) -> List[Bool]:
+    var out = flags.copy()
+    out.append(False)
+    return out^
 
 
 def _bits_at(address: Int, count: Int, bit: Int, n: Int) -> UInt64:
@@ -1337,6 +1695,11 @@ def run_pipeline(
     morsel_rows: Int,
     batch_size: Int,
     mut counts: List[Int],
+    top: Int = -1,
+    top_names: List[String] = List[String](),
+    top_descending: List[Bool] = List[Bool](),
+    top_nulls_last: List[Bool] = List[Bool](),
+    bounded: Bool = False,
 ) raises -> DataFrame:
     """Run the steps over `frame` in morsels on `workers` threads, into a
     materialize sink, or a reduce sink when `expressions` are reductions
@@ -1351,6 +1714,13 @@ def run_pipeline(
         _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
     )
     var cursor = _Cursor.new()
+    var shared_bound = _SharedBound.new()
+    var floating_key = False
+    if top > 0 and len(top_names) > 0 and top_names[0] in frame.columns():
+        floating_key = frame.column(top_names[0]).dtype().physical() in (
+            DataType.FLOAT64,
+            DataType.FLOAT32,
+        )
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
@@ -1369,14 +1739,23 @@ def run_pipeline(
                 ordered,
                 insert,
                 batch_size,
+                top,
+                top_names,
+                top_descending,
+                top_nulls_last,
+                bounded,
+                shared_bound,
+                floating_key,
             )
         )
     try:
         run_jobs(jobs)
     except e:
         cursor.free()
+        shared_bound.free()
         raise e
     cursor.free()
+    shared_bound.free()
     counts = List[Int](length=3 * len(steps) + 1, fill=0)
     for j in range(len(jobs)):
         for i in range(len(counts)):
@@ -1490,9 +1869,14 @@ def run_pipeline(
         return merged[0].finish()
     # Morsels in source order: each worker's parts are in the order it
     # took them, so a merge by sequence over the workers' lists orders all.
+    # A top-k's candidates have no order to keep.
     var parts = List[DataFrame]()
     var next = List[Int](length=len(jobs), fill=0)
-    while True:
+    if top > 0:
+        for j in range(len(jobs)):
+            for part in jobs[j].parts:
+                parts.append(part.copy())
+    while top <= 0:
         var best = -1
         var best_sequence = 0
         for j in range(len(jobs)):
@@ -1512,6 +1896,14 @@ def run_pipeline(
             morsel.apply(step, batch_size, joins, indexes)
             empty = morsel.materialized()
         return empty^
+    if top > 0:
+        # Every worker's candidates, sorted once to the k best, ties by
+        # their place in the source.
+        var merged = parts[0].copy() if len(parts) == 1 else concat(parts)
+        merged = _top_rows(
+            merged, top_names, top_descending, top_nulls_last, top, 0
+        )
+        return merged.drop([_ORDER_COLUMN])
     if len(parts) == 1:
         return parts[0].copy()
     return concat(parts)

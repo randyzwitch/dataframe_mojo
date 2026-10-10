@@ -38,6 +38,10 @@ from .csv_reader import _CsvBatches, _DecodeJob
 from .csv_types import _map_file
 from .parquet import _ParquetBatches
 from .pipeline import (
+    _BOUND_FLOAT,
+    _BOUND_INT,
+    _BOUND_NONE,
+    _TopBound,
     STEP_DROP,
     STEP_FILTER,
     STEP_JOIN,
@@ -636,113 +640,6 @@ def _merge_parts(
     for p in range(parts):
         states.append(jobs[p % job_count].states.pop(0))
         pending.append(carried.pop(0))
-
-
-comptime _BOUND_NONE = 0
-comptime _BOUND_INT = 1
-comptime _BOUND_FLOAT = 2
-
-
-struct _TopBound(Copyable, Movable):
-    """The first sort key's value at a streamed top-k's k-th row so far.
-
-    A row whose key is worse than it (after it in the sort's direction)
-    cannot enter the top k, so a batch keeps only rows at or better than
-    the bound when at most one in eight are, ties included (later keys decide those) and nulls included
-    (wherever the sort puts them). Integer-backed keys (integers, dates,
-    datetimes, durations) compare as Int64, floats as Float64 with NaN
-    kept; other dtypes get no bound.
-    """
-
-    var kind: Int
-    var name: String
-    var descending: Bool
-    var integer: Int64
-    var floating: Float64
-
-    def __init__(out self):
-        self.kind = _BOUND_NONE
-        self.name = String()
-        self.descending = False
-        self.integer = 0
-        self.floating = 0.0
-
-    def __init__(
-        out self, candidates: DataFrame, name: String, descending: Bool, k: Int
-    ) raises:
-        """The bound from `candidates`, sorted best first, once it holds
-        `k` rows; none before then or when its k-th key is null."""
-        self = Self()
-        if candidates.height() < k or k <= 0:
-            return
-        var key = candidates.column(name)
-        if key.is_chunked():
-            key = key.rechunk()
-        comptime for d in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[d]
-            if key._data.isa[Column[Scalar[D]]]():
-                ref column = key._data[Column[Scalar[D]]]
-                if not column._valid(k - 1):
-                    return
-                var value = column._get(k - 1)
-                comptime if D.is_floating_point():
-                    self.floating = Float64(value)
-                    if self.floating != self.floating:
-                        # NaN sorts past every number: no row is worse.
-                        return
-                    self.kind = _BOUND_FLOAT
-                elif D == DType.uint64:
-                    return
-                else:
-                    self.integer = Int64(value)
-                    self.kind = _BOUND_INT
-                self.name = name
-                self.descending = descending
-                return
-
-    def rows(self, frame: DataFrame) raises -> Optional[List[Int]]:
-        """The rows of `frame` that can still enter the top k, or None
-        when every row can (or the batch lacks the key)."""
-        if frame.height() == 0 or self.name not in frame.columns():
-            return None
-        var key = frame.column(self.name)
-        if key.is_chunked():
-            key = key.rechunk()
-        var rows = List[Int]()
-        comptime for d in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[d]
-            if key._data.isa[Column[Scalar[D]]]():
-                ref column = key._data[Column[Scalar[D]]]
-                var values = column.unsafe_values()
-                var nulls = column.null_count() > 0
-                for i in range(len(column)):
-                    if nulls and not column._valid(i):
-                        rows.append(i)
-                        continue
-                    var value = values.unsafe_offset(i)[]
-                    var ok: Bool
-                    comptime if D.is_floating_point():
-                        var x = Float64(value)
-                        ok = x != x or (
-                            x
-                            >= self.floating if self.descending else x
-                            <= self.floating
-                        )
-                    elif D == DType.uint64:
-                        ok = True
-                    else:
-                        var x = Int64(value)
-                        ok = (
-                            x
-                            >= self.integer if self.descending else x
-                            <= self.integer
-                        )
-                    if ok:
-                        rows.append(i)
-                if len(rows) == frame.height():
-                    return None
-                return rows^
-        return None
 
 
 def _bounded_batch(
@@ -2312,9 +2209,7 @@ struct LazyFrame(Copyable):
         # left-major order.
         var piped = (
             self._nodes[cursor].kind == SCAN_FRAME
-            and top < 0
-            and limit < 0
-            and skip == 0
+            and (top < 0 and limit < 0 and skip == 0 or top > 0)
             and _pipeline_steps(operations, indexes)
             and not _counts_distinct(expressions)
             and (len(joins) == 0 or len(keys) == 0 or not ordered)
@@ -2620,9 +2515,16 @@ struct LazyFrame(Copyable):
         if piped and len(csv) == 0 and len(parquet) == 0:
             var began = Int(perf_counter_ns())
             var piped_counts = List[Int]()
+            # A top-k's TOP_K node was appended to the operations for the
+            # stream's per-batch selection; the pipeline's sink keeps the
+            # k best itself, so the steps stop before it.
+            var step_count = len(operations) - 1 if top > 0 else len(operations)
+            var step_nodes = List[PlanNode](capacity=step_count)
+            for k in range(step_count):
+                step_nodes.append(operations[k].copy())
             var piped_result = run_pipeline(
                 input,
-                _steps_of(operations),
+                _steps_of(step_nodes),
                 shared_joins,
                 shared_indexes,
                 expressions,
@@ -2633,19 +2535,33 @@ struct LazyFrame(Copyable):
                 rows_per_batch,
                 batch_size,
                 piped_counts,
+                top=top,
+                top_names=top_names,
+                top_descending=top_descending,
+                top_nulls_last=top_nulls_last,
+                bounded=bounded,
             )
+            if top > 0:
+                piped_result = piped_result.slice(skip, limit)
             if counting:
                 self._record(cursor, "pipeline", 0, piped_counts[0])
                 var into_terminal = piped_counts[0]
-                for k in range(len(operations)):
+                for k in range(step_count):
                     self._record(
                         operation_nodes[k],
                         "pipeline",
                         piped_counts[2 * k + 1],
                         piped_counts[2 * k + 2],
-                        busy_ns=piped_counts[2 * len(operations) + 1 + k],
+                        busy_ns=piped_counts[2 * step_count + 1 + k],
                     )
                     into_terminal = piped_counts[2 * k + 2]
+                if top > 0:
+                    self._record(
+                        top_node,
+                        "pipeline",
+                        into_terminal,
+                        piped_result.height(),
+                    )
                 var wall = Int(perf_counter_ns()) - began
                 if index != cursor and (index not in operation_nodes):
                     self._record(
