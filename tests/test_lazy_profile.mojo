@@ -61,7 +61,7 @@ def test_streaming_join_builds_once_and_counts_rows() raises:
             joins += 1
             assert_equal(report.item(r, "builds").int64(), 1)
             assert_equal(report.item(r, "executions").int64(), 1)
-            assert_equal(report.item(r, "executor").string(), "streaming")
+            assert_equal(report.item(r, "executor").string(), "pipeline")
             assert_equal(report.item(r, "build_side").string(), "right")
             assert_true(
                 report.item(r, "algorithm").string()
@@ -122,7 +122,9 @@ def test_frame_scan_under_an_eager_step_is_not_streamed() raises:
     """A plan whose terminal step runs eagerly over an in-memory frame
     (a many-group aggregation, a full sort) reads the frame as it is: the
     scan is not streamed into batches that would only be concatenated
-    and rechunked again (ClickBench q16, 275 -> 181 ms)."""
+    and rechunked again (ClickBench q16, 275 -> 181 ms). A many-group
+    aggregation runs as a pipeline whose sink keeps the morsels'
+    selections and groups the frame's own rows once."""
     var frame = DataFrame([ints("k", 200_000, 150_000), ints("v", 200_000, 7)])
     var grouped = frame.lazy().group_by(["k"]).agg([col("v").sum().alias("s")])
     var profiled = grouped.profile()
@@ -130,15 +132,14 @@ def test_frame_scan_under_an_eager_step_is_not_streamed() raises:
     assert_true(profiled[0].equals(grouped.collect(streaming=False)))
     for r in range(report.height()):
         if report.item(r, "operator").string().startswith("SCAN frame"):
-            assert_equal(report.item(r, "executor").string(), "eager")
+            assert_equal(report.item(r, "executor").string(), "pipeline")
             assert_equal(report.item(r, "output_rows").int64(), 200_000)
     var sorted = frame.lazy().sort("v").profile()
     report = sorted[1].copy()
     assert_true(sorted[0].equals(frame.sort("v")))
     for r in range(report.height()):
         assert_equal(report.item(r, "executor").string(), "eager")
-    # Row-local steps that keep every row (with_columns) under the eager
-    # step run eagerly too; a filter still streams, since it keeps few.
+    # Row-local steps under the aggregation run in the pipeline too.
     var widened = (
         frame.lazy()
         .with_columns([(col("v") * lit(Int64(2))).alias("w")])
@@ -147,7 +148,7 @@ def test_frame_scan_under_an_eager_step_is_not_streamed() raises:
     )
     report = widened.profile()[1].copy()
     for r in range(report.height()):
-        assert_equal(report.item(r, "executor").string(), "eager")
+        assert_equal(report.item(r, "executor").string(), "pipeline")
     assert_equal(rows_of(report, "WITH_COLUMNS")[2], 200_000)
     var narrowed = (
         frame.lazy()
@@ -159,13 +160,13 @@ def test_frame_scan_under_an_eager_step_is_not_streamed() raises:
     assert_equal(rows_of(report, "FILTER")[0], 200_000)
     for r in range(report.height()):
         if report.item(r, "operator").string().startswith("FILTER"):
-            assert_equal(report.item(r, "executor").string(), "streaming")
-    # A streamed reduction over the frame still streams.
+            assert_equal(report.item(r, "executor").string(), "pipeline")
+    # A reduction over the frame runs as a pipeline.
     var summed = frame.lazy().select_exprs([col("v").sum().alias("s")])
     report = summed.profile()[1].copy()
     assert_equal(rows_of(report, "SCAN frame")[2], 200_000)
     for r in range(report.height()):
-        assert_equal(report.item(r, "executor").string(), "streaming")
+        assert_equal(report.item(r, "executor").string(), "pipeline")
 
 
 def test_report_times_and_an_unordered_join_under_an_aggregation() raises:

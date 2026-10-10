@@ -149,18 +149,47 @@ once. The main thread does no per-morsel work.
 - **Materialize** (the collect itself): each thread appends its morsels'
   gathered frames to a local list; combine concatenates in sequence
   order (or any order when the plan above is order-free).
-- **Hash aggregate**: each thread keeps partitioned tables keyed by hash
-  (the `group_by.partitioned` machinery, `_KeyIndex`, the indexed
-  reducers), updating states in place from the morsel's rows; combine
-  merges partition by partition in parallel, one thread per partition.
-  There is no per-batch `_StreamReduction` and no state merge on the
-  main thread; the collect-or-merge judgement (#530) disappears, because
-  a thread-local partitioned table is right at every cardinality, which
-  is what DuckDB and Polars rely on.
-- **Hash join build**: each thread appends its morsels' key and payload
-  rows to a local collection partitioned by hash; the table is built per
-  partition over all threads' rows (`_HashBuildJob` over the partition),
-  as Polars' `BuildState` does. The probe operator reads it.
+- **Hash aggregate**: the plan picks one of two modes for every thread
+  from 4,096 sampled key rows. Few groups (a quarter or fewer of the
+  sample distinct) and fixed-width keys: each thread keeps a table of
+  group ids keyed by the key's equality words and their hash, split
+  into 16 hash parts once it passes 4,096 groups, updating reducer
+  states in place from the morsel's rows (a reduction of a computed
+  input evaluates it once per morsel); combine merges the threads'
+  parts of one hash on one thread, parts in parallel, or the unsplit
+  tables as one (DuckDB's thread-local radix-partitioned aggregate
+  table, which also partitions only as it grows).
+  Many groups: each thread keeps its morsels' selections over the source
+  frame (or their output frames when a step made columns), and the
+  finish gathers the kept rows once and runs the eager partitioned
+  group-by over them: one scatter of every row into buckets, each bucket
+  encoded on its own thread, which inserting rows one at a time into
+  tables that outgrow the caches does not match (ClickBench q32, 10M
+  groups: 850 ms inserted against 300 scattered); Polars' streaming
+  group-by and DuckDB's sink partition and finalize the same way once
+  their tables grow. There is no per-batch `_StreamReduction` and no
+  state merge on the main thread; the collect-or-merge judgement (#530)
+  is made once, before any row is read. Open: strings. The tables
+  compare keys by their words, exact for fixed-width keys only, and the
+  late gather of string rows costs more than the eager route's per-chunk
+  filter (q12: 85 ms against 48), so a plan that groups or reduces
+  strings under a filter or projection still takes the eager route; the
+  fix is a row-layout key store with the strings' bytes, as DuckDB's
+  aggregate hash table keeps them.
+- **Hash join**: the build side is a sub-plan collected before the
+  pipeline runs (its own pipelines), rechunked once, and indexed with
+  `prepare_hash_index` (parallel over buckets); the index is shared by
+  every worker. The probe is a step: a worker probes the index with its
+  morsel's rows on its own thread and gathers the matched rows of both
+  sides in one piece, which is the next step's morsel (DuckDB's
+  `PhysicalHashJoin::ExecuteInternal` on one chunk, Polars' probe task).
+  Inner, left, semi and anti joins run this way under every sink except
+  a grouped sink that must keep first-occurrence order, since a morsel's
+  output rows carry no unique position in the join's left-major order.
+  Still to do from the design: a build sink that partitions each
+  worker's morsels by hash and builds per partition (Polars'
+  `BuildState`), and a probe-side selection instead of a gather for
+  joins that keep most rows.
 - **Top-k and sort**: thread-local heaps or sorted runs, combined once.
 - **Unique**: a hash aggregate with no reductions.
 
