@@ -58,6 +58,13 @@ result is copied to ordinary CPU columns. Checked integer arithmetic currently
 requires terminal projections without head, matching the shared planner's
 observable-overflow boundary.
 
+Minimum and maximum preserve the input dtype, ignore nulls, and return null
+for empty or all-null inputs. NaNs order above numeric values, so maximum
+returns NaN if any valid value is NaN; minimum returns NaN only when every
+valid value is NaN. Equal values retain the earliest selected row, including
+signed zeros. Float32 extrema compare native encodings and preserve subnormal
+values without arithmetic emulation.
+
 Count and length return Int64. Int8, Int16, UInt8, and UInt16 sums return Int64.
 Int32 and UInt32 sums retain their input dtype with a final range check. These
 sums use an exact Int64 accumulator. The initial input has at most Int32.MAX
@@ -87,8 +94,8 @@ on CPU until matched end-to-end cost evidence is available.
 
 The wrapper and native library use ABI version 2; rebuild the optional library
 when upgrading. Homogeneous plans retain their original native-width matrices.
-Mixed plans store each value as an exact 64-bit word, with generated native
-operations for each expression dtype. Numeric inputs are staged at their original
+Mixed plans and extrema reductions store each value as an exact 64-bit word,
+with generated native operations for each expression dtype. Numeric inputs are staged at their original
 width and packed on the GPU. Output words are copied into the matching CPU
 column width after synchronization; CPU code does not evaluate expressions.
 

@@ -291,10 +291,13 @@ Shape validate(const DFMRequest &r, bool storage = false) {
         fail("Invalid Metal row output");
     } else {
       if (v.reduction != DFM_COUNT && v.reduction != DFM_LEN &&
-          !(v.reduction == DFM_SUM && sumSupported(slotType(r, v.slot))))
+          !(v.reduction == DFM_SUM && sumSupported(slotType(r, v.slot))) &&
+          !((v.reduction == DFM_MIN || v.reduction == DFM_MAX) && typed(r)))
         fail("Metal reduction requires unsupported accumulator precision");
-      if (v.dtype !=
-          (v.reduction == DFM_SUM ? sumType(slotType(r, v.slot)) : DFM_INT64))
+      if (v.dtype != (v.reduction == DFM_SUM ? sumType(slotType(r, v.slot))
+                      : (v.reduction == DFM_MIN || v.reduction == DFM_MAX)
+                          ? slotType(r, v.slot)
+                          : DFM_INT64))
         fail("Invalid Metal reduction dtype");
     }
     if (storage && (r.rows || r.reductions) && (!v.values || !v.validity))
@@ -572,23 +575,50 @@ kernel void pack_rows(device const T *x[[buffer(0)]],device const uchar *v[[buff
  valid|=uchar(v[idx]!=0)<<b;value|=uchar(x[idx]!=T(0))<<b;}}
  bits[(2*at.y)*p.x+at.x]=valid;bits[(2*at.y+1)*p.x+at.x]=value;
 }
+// Extrema retain the earliest selected row on ties. Partial.count is row+1
+// for extrema and the valid count for sum/count; zero denotes no candidate.
+// Compare Float32 encodings to preserve subnormal ordering without FTZ.
+bool extrema_better(ulong a,ulong b,long type,bool maximum) {
+ if(type==1){uint x=uint(a),y=uint(b),ax=x&0x7fffffffU,ay=y&0x7fffffffU;
+ bool nx=ax>0x7f800000U,ny=ay>0x7f800000U;
+ if(nx||ny)return nx!=ny&&(maximum?nx:ny);
+ if(ax==0&&ay==0)return false;
+ uint kx=(x&0x80000000U)?~x:(x^0x80000000U);
+ uint ky=(y&0x80000000U)?~y:(y^0x80000000U);
+ return maximum?kx>ky:kx<ky;}
+ if(type==2||type==3||type==5||type==6)
+ return maximum?long(a)>long(b):long(a)<long(b);
+ return maximum?a>b:a<b;
+}
+void extrema_merge(thread long &value,thread long &index,long candidate,long other,Out out) {
+ if(!other)return;
+ bool take=!index||extrema_better(ulong(candidate),ulong(value),out.type,out.kind==81);
+ if(!take&&!extrema_better(ulong(value),ulong(candidate),out.type,out.kind==81)&&other<index)take=true;
+ if(take){value=candidate;index=other;}
+}
 kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device Partial *partials[[buffer(2)]],device const Out *out[[buffer(3)]],
  constant uint4 &meta[[buffer(4)]],constant ulong &groups[[buffer(5)]],
  uint2 group[[threadgroup_position_in_grid]],uint lane[[thread_index_in_threadgroup]]) {
  threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
- for(ulong row=group.x*256+lane;row<meta.x;row+=groups*256){ulong idx=out[group.y].slot*meta.z+row;
- if(v[idx]){++count;if(out[group.y].kind==10)sum+=long(x[idx]);}}
+ Out o=out[group.y];bool extrema=o.kind==80||o.kind==81;
+ for(ulong row=group.x*256+lane;row<meta.x;row+=groups*256){ulong idx=o.slot*meta.z+row;
+ if(v[idx]){if(extrema)extrema_merge(sum,count,long(x[idx]),long(row+1),o);
+ else{++count;if(o.kind==10)sum+=long(x[idx]);}}}
  sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
- for(uint stride=128;stride;stride/=2){if(lane<stride){sums[lane]+=sums[lane+stride];counts[lane]+=counts[lane+stride];}
+ for(uint stride=128;stride;stride/=2){if(lane<stride){
+ if(extrema){long a=sums[lane],b=counts[lane];extrema_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;}
+ else{sums[lane]+=sums[lane+stride];counts[lane]+=counts[lane+stride];}}
  threadgroup_barrier(mem_flags::mem_threadgroup);}
  if(lane==0)partials[group.y*groups+group.x]={sums[0],counts[0]};
 }
 kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *result[[buffer(1)]],
  device const Out *out[[buffer(2)]],constant uint4 &meta[[buffer(3)]],constant ulong &groups[[buffer(4)]],
  uint column[[thread_position_in_grid]]) {
- long sum=0,count=0;for(ulong i=0;i<groups;++i){sum+=partials[column*groups+i].total;count+=partials[column*groups+i].count;}
- if(out[column].kind==11){sum=count;count=1;}if(out[column].kind==90){sum=meta.x;count=1;}
+ long sum=0,count=0;Out o=out[column];bool extrema=o.kind==80||o.kind==81;
+ for(ulong i=0;i<groups;++i){Partial p=partials[column*groups+i];
+ if(extrema)extrema_merge(sum,count,p.total,p.count,o);else{sum+=p.total;count+=p.count;}}
+ if(o.kind==11){sum=count;count=1;}if(o.kind==90){sum=meta.x;count=1;}
  result[column]={sum,count};
 }
 )MSL";
@@ -1103,12 +1133,12 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
       if (!rows)
         continue;
       auto a = static_cast<Partial *>(result.contents)[i];
-      bool valid = o.reduction != DFM_SUM || a.count >= o.min_count;
-      if (o.dtype == DFM_INT32 || o.dtype == DFM_UINT32) {
-        uint32_t value = valid ? a.total : 0;
-        memcpy(o.values, &value, 4);
-      } else
-        memcpy(o.values, &a.total, 8);
+      bool valid = (o.reduction == DFM_MIN || o.reduction == DFM_MAX)
+                       ? a.count != 0
+                       : o.reduction != DFM_SUM || a.count >= o.min_count;
+      if (!valid)
+        a.total = 0;
+      memcpy(o.values, &a.total, width(o.dtype));
       o.validity[0] = valid;
       stats.download_bytes += width(o.dtype) + 1;
     } else {

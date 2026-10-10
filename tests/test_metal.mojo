@@ -1,4 +1,6 @@
 """Metal preflight is CPU-only; installed runtimes also execute parity checks."""
+from std.memory import bitcast
+
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit
 from dataframe.metal import MetalRuntime, metal_installed
@@ -373,6 +375,97 @@ def test_native_numeric_casts() raises:
             .filter(col("b"))
             .collect(accelerator=runtime)
         )
+
+
+def _native_extrema[D: DType]() raises:
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series(
+                "x", Column[Scalar[D]]([1, 0, 3, 2], [True, False, True, True])
+            )
+        ]
+    )
+    for count in range(5):
+        var query = (
+            frame.slice(0, count)
+            .lazy()
+            .select_exprs(
+                [
+                    col("x").min().alias("lo"),
+                    col("x").max().alias("hi"),
+                    col("x").count().alias("n"),
+                ]
+            )
+        )
+        assert_true(
+            query.collect(accelerator=runtime).equals(
+                query.collect(engine="cpu")
+            )
+        )
+    var filtered = (
+        frame.lazy()
+        .filter(col("x") > lit(Scalar[D](1)))
+        .select_exprs([col("x").min().alias("lo"), col("x").max().alias("hi")])
+    )
+    assert_true(
+        filtered.collect(accelerator=runtime).equals(
+            filtered.collect(engine="cpu")
+        )
+    )
+    var nulls = DataFrame(
+        [Series("x", Column[Scalar[D]]([1, 2], [False, False]))]
+    )
+    var empty = nulls.lazy().select_exprs(
+        [col("x").min().alias("lo"), col("x").max().alias("hi")]
+    )
+    assert_true(
+        empty.collect(accelerator=runtime).equals(empty.collect(engine="cpu"))
+    )
+
+
+def test_native_extrema_all_supported_types() raises:
+    if not metal_installed():
+        return
+    _native_extrema[DType.int8]()
+    _native_extrema[DType.int16]()
+    _native_extrema[DType.int32]()
+    _native_extrema[DType.int64]()
+    _native_extrema[DType.uint8]()
+    _native_extrema[DType.uint16]()
+    _native_extrema[DType.uint32]()
+    _native_extrema[DType.uint64]()
+    _native_extrema[DType.float32]()
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series("b", Column[Bool]([True, False, True], [True, True, False])),
+            Series("u", Column[UInt64]([UInt64.MAX, 0, UInt64.MAX - 1])),
+            Series("i", Column[Int8]([-128, 127, 0])),
+            Series(
+                "f",
+                Column[Float32](
+                    [bitcast[DType.float32](UInt32(0x7FC00000)), -0.0, 0.0]
+                ),
+            ),
+        ]
+    )
+    var query = frame.lazy().select_exprs(
+        [
+            col("b").min().alias("bmin"),
+            col("b").max().alias("bmax"),
+            col("u").min().alias("umin"),
+            col("u").max().alias("umax"),
+            col("i").min().alias("imin"),
+            col("i").max().alias("imax"),
+            col("i").sum().alias("isum"),
+            col("f").min().alias("fmin"),
+            col("f").max().alias("fmax"),
+        ]
+    )
+    assert_true(
+        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
 
 
 def main() raises:

@@ -297,5 +297,24 @@ def test_mixed_types_and_casts_are_backend_opt_in() raises:
         )
 
 
+def test_extrema_reductions_are_backend_opt_in() raises:
+    var frame = DataFrame([Series("x", Column[Float32]([1, 2]))])
+    var query = frame.lazy().select_exprs(
+        [col("x").min().alias("lo"), col("x").max().alias("hi")]
+    )
+    with assert_raises(contains="minimum and maximum are not supported"):
+        _ = lower_rows(query)
+    var native = RowCapabilities(
+        "native", float64=False, wide_integer=False, extrema=True
+    )
+    var plan = lower_rows(query, native)
+    assert_true(plan.reductions)
+    assert_equal(plan.outputs[0].dtype, DataType.FLOAT32)
+    assert_equal(plan.outputs[1].dtype, DataType.FLOAT32)
+    var wide = DataFrame([Series("x", Column[Float64]([1]))])
+    with assert_raises(contains="Float64 requires CPU"):
+        _ = lower_rows(wide.lazy().select(col("x").min()), native)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

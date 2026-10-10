@@ -42,6 +42,8 @@ from .expr import (
     IS_NULL,
     IS_NOT_NULL,
     SUM,
+    MIN,
+    MAX,
     COUNT,
     LEN,
 )
@@ -226,6 +228,7 @@ def _capabilities() -> RowCapabilities:
         extended_integers=True,
         mixed_types=True,
         casts=True,
+        extrema=True,
     )
 
 
@@ -275,6 +278,10 @@ def _op(op: Int) raises -> Int64:
         return 8
     if op == EQ:
         return 9
+    if op == MIN:
+        return 80
+    if op == MAX:
+        return 81
     if op == SUM:
         return 10
     if op == COUNT:
@@ -345,6 +352,8 @@ struct _Descriptors(Movable):
         self.node_types = List[Int64]()
         self.slot_types = List[Int64]()
         self.typed = False
+        for output in plan.outputs:
+            self.typed |= output.reduction == MIN or output.reduction == MAX
         for dtype in plan.node_dtypes:
             self.node_types.append(_type(dtype))
             self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
