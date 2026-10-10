@@ -10,6 +10,22 @@ from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.dtype import DataType
 from dataframe.expr import (
     Expr,
+    FLOORDIV,
+    MOD,
+    POW,
+    CLIP_LOW,
+    CLIP_HIGH,
+    FILL_NAN,
+    KEEP_NULLS,
+    ABS,
+    FLOOR,
+    CEIL,
+    ROUND,
+    IS_NAN,
+    IS_NOT_NAN,
+    IS_FINITE,
+    IS_INFINITE,
+    WHEN,
     COL,
     CAST,
     LIT_FLOAT,
@@ -126,6 +142,27 @@ def _program(
             )
         if not (
             op == COL
+            or (
+                capabilities.row_extras
+                and (
+                    op == FLOORDIV
+                    or op == MOD
+                    or op == POW
+                    or op == CLIP_LOW
+                    or op == CLIP_HIGH
+                    or op == FILL_NAN
+                    or op == KEEP_NULLS
+                    or op == ABS
+                    or op == FLOOR
+                    or op == CEIL
+                    or op == ROUND
+                    or op == IS_NAN
+                    or op == IS_NOT_NAN
+                    or op == IS_FINITE
+                    or op == IS_INFINITE
+                    or op == WHEN
+                )
+            )
             or (op == CAST and capabilities.casts)
             or op == LIT_INT
             or op == LIT_FLOAT
@@ -167,7 +204,18 @@ def _program(
             or right_type.is_decimal()
         )
         if logical and (
-            op == ADD or op == SUB or op == MUL or op == NEG or op == CAST
+            op == ABS
+            or op == FLOORDIV
+            or op == MOD
+            or op == POW
+            or op == FLOOR
+            or op == CEIL
+            or op == ROUND
+            or op == ADD
+            or op == SUB
+            or op == MUL
+            or op == NEG
+            or op == CAST
         ):
             capabilities.reject(
                 "logical", "logical arithmetic and casts require CPU execution"
@@ -183,11 +231,27 @@ def _program(
                     "logical",
                     "decimal comparisons require matching scales and storage widths",
                 )
-        if op == ADD or op == SUB or op == MUL or op == NEG:
+        if (
+            op == ADD
+            or op == SUB
+            or op == MUL
+            or op == NEG
+            or op == ABS
+            or op == FLOORDIV
+            or op == POW
+        ):
             capabilities.require_arithmetic(bound.dtypes[i])
         if (
             bound.dtypes[i].is_integer()
-            and (op == ADD or op == SUB or op == MUL or op == NEG)
+            and (
+                op == ADD
+                or op == SUB
+                or op == MUL
+                or op == NEG
+                or op == ABS
+                or op == FLOORDIV
+                or op == POW
+            )
             and bound.shapes[i] != ROWS
         ):
             capabilities.reject(
@@ -197,8 +261,25 @@ def _program(
             capabilities.reject(
                 "plan", "scalar strict casts require CPU execution"
             )
+        if (
+            op == ROUND
+            and bound.dtypes[i] == DataType.FLOAT32
+            and node.integer != 0
+        ):
+            capabilities.reject(
+                "precision",
+                "Float32 decimal rounding requires Float64 intermediate arithmetic",
+            )
+        if (op == FLOORDIV or op == MOD or op == POW) and bound.dtypes[
+            i
+        ].is_float():
+            capabilities.reject(
+                "precision",
+                "floating division, modulo, and power require CPU execution",
+            )
         var source = slots[bound.sources[i]] if op == COL else (
-            Int(node.integer) if op == CAST else -1
+            Int(node.integer) if op == CAST
+            or op == ROUND else (node.extra if op == WHEN else -1)
         )
         node_dtypes.append(bound.dtypes[i])
         code.append(Int64(op))
@@ -346,6 +427,9 @@ def lower_rows(
                         or part.op == SUB
                         or part.op == MUL
                         or part.op == NEG
+                        or part.op == ABS
+                        or part.op == FLOORDIV
+                        or part.op == POW
                     ):
                         # CPU predicate/projection/head pushdown can remove
                         # checked work. Keep the first integer subset at an

@@ -33,6 +33,18 @@ void error(char **p, const std::exception &e) {
   if (p)
     *p = strdup(e.what());
 }
+bool binaryOp(int64_t op) {
+  return op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_GT ||
+         op == DFM_EQ ||
+         ((op >= DFM_LT && op <= DFM_NE) ||
+          (op >= DFM_FLOORDIV && op <= DFM_CLIP_HIGH)) ||
+         (op >= DFM_AND && op <= DFM_KEEP_NULLS);
+}
+bool unaryOp(int64_t op) {
+  return op == DFM_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+         op == DFM_CEIL || op == DFM_ROUND ||
+         (op >= DFM_NOT && op <= DFM_IS_INFINITE);
+}
 int64_t add(int64_t a, int64_t b) {
   if (a < 0 || b < 0 || a > INT64_MAX - b)
     fail("Metal allocation size overflow");
@@ -215,24 +227,33 @@ Shape validate(const DFMRequest &r, bool storage = false) {
     s.filter |= v.filter;
     for (int64_t j = 0; j < v.nodes; ++j) {
       const auto *c = r.code + 4 * (v.start + j);
-      bool binary = c[0] == DFM_ADD || c[0] == DFM_SUB || c[0] == DFM_MUL ||
-                    (c[0] >= DFM_GT && c[0] <= DFM_EQ) ||
-                    (c[0] >= DFM_LT && c[0] <= DFM_NE) ||
-                    (c[0] >= DFM_AND && c[0] <= DFM_FILL_NULL);
-      bool unary = c[0] == DFM_CAST || c[0] == DFM_NEG ||
-                   (c[0] >= DFM_NOT && c[0] <= DFM_IS_NOT_NULL);
+      bool binary = binaryOp(c[0]);
+      bool unary = unaryOp(c[0]);
+      bool conditional = c[0] == DFM_WHEN;
       bool leaf = c[0] == DFM_COLUMN || c[0] == DFM_LITERAL_INT ||
                   c[0] == DFM_LITERAL_FLOAT || c[0] == DFM_LITERAL_BOOL ||
                   c[0] == DFM_LITERAL_NULL;
-      if ((!binary && !unary && !leaf) ||
-          ((binary || unary) && (c[1] < 0 || c[1] >= j)) ||
-          (binary && (c[2] < 0 || c[2] >= j)) ||
+      if ((!binary && !unary && !leaf && !conditional) ||
+          ((binary || unary || conditional) && (c[1] < 0 || c[1] >= j)) ||
+          ((binary || conditional) && (c[2] < 0 || c[2] >= j)) ||
+          (conditional && (c[3] < -1 || c[3] >= j)) ||
           (c[0] == DFM_COLUMN && (c[3] < 0 || c[3] >= v.slot)))
         fail("Invalid Metal expression bytecode");
       if (c[0] == DFM_CAST && (!typed(r) || (c[3] != 0 && c[3] != 1)))
         fail("Invalid Metal cast descriptor");
       if (c[0] == DFM_COLUMN && !defined[c[3]])
         fail("Metal expression references an undefined slot");
+      auto operand = (binary || unary || conditional)
+                         ? nodeType(r, v.start + c[1])
+                         : nodeType(r, v.start + j);
+      if ((c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
+          operand != DFM_FLOAT32)
+        fail("Metal floating classification requires Float32");
+      if ((c[0] == DFM_FLOORDIV || c[0] == DFM_MOD || c[0] == DFM_POW) &&
+          operand == DFM_FLOAT32)
+        fail("Metal floating operator requires CPU execution");
+      if (c[0] == DFM_ROUND && operand == DFM_FLOAT32 && c[3] != 0)
+        fail("Metal Float32 decimal rounding requires CPU execution");
       if (nodeType(r, v.start + j) != DFM_FLOAT32 && c[0] == DFM_LITERAL_FLOAT)
         fail("Floating literal requires native Float32 storage");
     }
@@ -252,9 +273,27 @@ Shape validate(const DFMRequest &r, bool storage = false) {
                        (c[0] >= DFM_LT && c[0] <= DFM_NE);
         bool logic = c[0] == DFM_AND || c[0] == DFM_OR || c[0] == DFM_XOR ||
                      c[0] == DFM_NOT;
-        bool nulltest = c[0] == DFM_IS_NULL || c[0] == DFM_IS_NOT_NULL;
+        bool nulltest = c[0] == DFM_IS_NULL || c[0] == DFM_IS_NOT_NULL ||
+                        (c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE);
         bool math = c[0] == DFM_ADD || c[0] == DFM_SUB || c[0] == DFM_MUL ||
-                    c[0] == DFM_NEG || c[0] == DFM_FILL_NULL;
+                    c[0] == DFM_NEG || c[0] == DFM_FILL_NULL ||
+                    c[0] == DFM_ABS || c[0] == DFM_FLOOR || c[0] == DFM_CEIL ||
+                    c[0] == DFM_ROUND || c[0] == DFM_FLOORDIV ||
+                    c[0] == DFM_MOD || c[0] == DFM_POW ||
+                    c[0] == DFM_CLIP_LOW || c[0] == DFM_CLIP_HIGH ||
+                    c[0] == DFM_FILL_NAN;
+        bool unaryMath = c[0] == DFM_NEG || c[0] == DFM_ABS ||
+                         c[0] == DFM_FLOOR || c[0] == DFM_CEIL ||
+                         c[0] == DFM_ROUND;
+        if (c[0] == DFM_WHEN &&
+            (r.node_types[v.start + c[1]] != DFM_BOOL ||
+             t != r.node_types[v.start + c[2]] ||
+             (c[3] >= 0 && t != r.node_types[v.start + c[3]])))
+          fail("Metal conditional dtype mismatch");
+        if (c[0] == DFM_KEEP_NULLS && t != r.node_types[v.start + c[2]])
+          fail("Metal validity selection dtype mismatch");
+        if (c[0] == DFM_FILL_NAN && t != DFM_FLOAT32)
+          fail("Metal fill NaN requires Float32");
         if ((compare || logic || nulltest) && t != DFM_BOOL)
           fail("Metal predicate dtype mismatch");
         if (logic &&
@@ -264,7 +303,7 @@ Shape validate(const DFMRequest &r, bool storage = false) {
         if ((compare || math) &&
             (r.node_types[v.start + c[1]] !=
                  (math ? t : r.node_types[v.start + c[2]]) ||
-             (c[0] != DFM_NEG &&
+             (!unaryMath &&
               r.node_types[v.start + c[1]] != r.node_types[v.start + c[2]])))
           fail("Metal numeric operand dtype mismatch");
       }
@@ -516,6 +555,25 @@ bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x0
     text += "bool checked_neg(T a,thread T &z){if(long(a)==" + lo +
             ")return false;z=-a;return true;}\n";
   }
+  if (dtype != DFM_FLOAT32) {
+    text += "bool checked_divmod(T a,T b,thread T &z,bool modulo){";
+    if (unsignedType(dtype))
+      text += "z=modulo?T(a%b):T(a/b);return true;}\n";
+    else
+      text += "if(b==T(-1)){if(modulo){z=0;return true;}return "
+              "checked_neg(a,z);}long "
+              "x=a,y=b,q=x/"
+              "y,r=x%y;if(r&&((r<0)!=(y<0))){--q;r+=y;}z=T(modulo?r:q);return "
+              "true;}\n";
+    text += "bool checked_pow(T a,T b,thread T &z){";
+    if (!unsignedType(dtype))
+      text += "if(b<0)return false;";
+    text += "ulong n=ulong(b);T "
+            "result=T(1),factor=a;while(n){if((n&1)&&!checked_mul(result,"
+            "factor,result))return "
+            "false;n>>=1;if(n&&!checked_mul(factor,factor,factor))return "
+            "false;}z=result;return true;}\n";
+  }
   return text;
 }
 std::string source(const DFMRequest &r) {
@@ -524,6 +582,25 @@ std::string source(const DFMRequest &r) {
                      "clang fp contract(off)\n";
   text += "struct Out { long slot; long kind; long minimum; long type; "
           "};\nstruct Partial { long total; long count; };\n";
+  text += R"MSL(
+bool float_compare(float a,float b,int op){
+ uint x=as_type<uint>(a),y=as_type<uint>(b),ax=x&0x7fffffffU,ay=y&0x7fffffffU;
+ if(ax>0x7f800000U||ay>0x7f800000U)return op==23;
+ bool equal=x==y||(ax==0&&ay==0);uint kx=(x&0x80000000U)?~x:(x^0x80000000U),ky=(y&0x80000000U)?~y:(y^0x80000000U);
+ if(op==9)return equal;if(op==23)return !equal;if(op==8)return !equal&&kx>ky;
+ if(op==20)return !equal&&kx<ky;if(op==21)return equal||kx>ky;return equal||kx<ky;
+}
+float float_integral(float x,int op){
+ uint bits=as_type<uint>(x),sign=bits&0x80000000U,ab=bits&0x7fffffffU;
+ int e=int((bits>>23)&255)-127;if(e>=23||ab==0)return x;
+ if(e<0){if(op==55)return as_type<float>(sign?0xbf800000U:sign);
+ if(op==56)return as_type<float>(sign?sign:0x3f800000U);
+ return as_type<float>(e==-1?(sign|0x3f800000U):sign);}
+ uint unit=1U<<(23-e),rest=bits&(unit-1),whole=bits&~(unit-1);
+ if(rest&&((op==55&&sign)||(op==56&&!sign)||(op==57&&rest>=unit/2)))whole+=unit;
+ return as_type<float>(whole);
+}
+)MSL";
   if (typed(r)) {
     text += "typedef ulong T;\n";
     std::array<bool, 11> used{};
@@ -651,6 +728,32 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
     for (int64_t k = first; k <= end; ++k) {
       auto &s = r.steps[k];
       auto prefix = "s" + std::to_string(k) + "_";
+      std::vector<std::string> active(s.nodes);
+      active.back() = "true";
+      auto observe = [&](int64_t node, const std::string &mask) {
+        if (node < 0 || active[node] == "true")
+          return;
+        if (mask == "true" || active[node].empty())
+          active[node] = mask;
+        else
+          active[node] = "(" + active[node] + "||" + mask + ")";
+      };
+      for (int64_t j = s.nodes - 1; j >= 0; --j) {
+        if (active[j].empty())
+          continue;
+        auto c = r.code + 4 * (s.start + j);
+        if (c[0] == DFM_WHEN) {
+          observe(c[1], active[j]);
+          auto id = prefix + std::to_string(c[1]);
+          auto yes = "(v" + id + "&&a" + id + "!=0)";
+          observe(c[2], "(" + active[j] + "&&" + yes + ")");
+          observe(c[3], "(" + active[j] + "&&!" + yes + ")");
+        } else if (binaryOp(c[0]) || unaryOp(c[0])) {
+          observe(c[1], active[j]);
+          if (binaryOp(c[0]))
+            observe(c[2], active[j]);
+        }
+      }
       for (int64_t j = 0; j < s.nodes; ++j) {
         auto *c = r.code + 4 * (s.start + j);
         auto op = c[0];
@@ -665,6 +768,11 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
         text += typename_ + " a" + id + "=" + typename_ + "(0);bool v" + id +
                 "=true;";
         std::string z = "a" + id, valid = "v" + id;
+        bool masked = active[j] != "true";
+        if (masked)
+          text += valid + "=false;if(" +
+                  (active[j].empty() ? std::string("false") : active[j]) +
+                  "){" + valid + "=true;";
         if (op == DFM_COLUMN) {
           if (local[c[3]]) {
             auto slot = std::to_string(c[3]);
@@ -690,7 +798,20 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
                                      "lit[" + std::to_string(s.start + j) + "]")
                             : "lit[" + std::to_string(s.start + j) + "]") +
                   ";";
-        else if (op == DFM_FILL_NULL)
+        else if (op == DFM_WHEN) {
+          auto yes = "(" + av + "&&" + a + "!=0)";
+          auto other = prefix + std::to_string(c[3]);
+          text += valid + "=" + yes + "?" + bv + ":" +
+                  (c[3] >= 0 ? "v" + other : "false") + ";";
+          text += z + "=" + yes + "?" + b + ":" +
+                  (c[3] >= 0 ? "a" + other : typename_ + "(0)") + ";";
+        } else if (op == DFM_KEEP_NULLS)
+          text += valid + "=" + av + "&&" + bv + ";" + z + "=" + b + ";";
+        else if (op == DFM_FILL_NAN) {
+          auto nan = "((as_type<uint>(" + a + ")&0x7fffffffU)>0x7f800000U)";
+          text += valid + "=" + av + "&&(!" + nan + "||" + bv + ");" + z + "=" +
+                  nan + "?" + b + ":" + a + ";";
+        } else if (op == DFM_FILL_NULL)
           text += valid + "=" + av + "||" + bv + ";" + z + "=" + av + "?" + a +
                   ":" + b + ";";
         else if (op == DFM_IS_NULL || op == DFM_IS_NOT_NULL)
@@ -703,11 +824,62 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
           text += valid + "=(" + av + "&&" + bv + ")||(" + av + "&&" + a +
                   decisive + "T(0))||(" + bv + "&&" + b + decisive + "T(0));";
         } else {
-          bool unary = op == DFM_NEG || op == DFM_NOT;
+          bool unary = unaryOp(op);
           text += valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid +
                   "){";
-          if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL ||
-              op == DFM_NEG) {
+          if (op >= DFM_IS_NAN && op <= DFM_IS_INFINITE) {
+            auto bits = "(as_type<uint>(" + a + ")&0x7fffffffU)";
+            auto test = op == DFM_IS_NAN       ? bits + ">0x7f800000U"
+                        : op == DFM_IS_NOT_NAN ? bits + "<=0x7f800000U"
+                        : op == DFM_IS_FINITE  ? bits + "<0x7f800000U"
+                                               : bits + "==0x7f800000U";
+            text += z + "=uchar(" + test + ");";
+          } else if (op == DFM_FLOOR || op == DFM_CEIL || op == DFM_ROUND) {
+            text += z + "=" +
+                    (dtype == DFM_FLOAT32 ? "float_integral(" + a + "," +
+                                                std::to_string(op) + ")"
+                                          : a) +
+                    ";";
+          } else if (op == DFM_ABS) {
+            if (dtype == DFM_FLOAT32)
+              text +=
+                  z + "=as_type<float>(as_type<uint>(" + a + ")&0x7fffffffU);";
+            else if (unsignedType(dtype))
+              text += z + "=" + a + ";";
+            else
+              text += "if(" + a + "<0){if(!" +
+                      (typed(r) ? "d" + std::to_string(dtype) + "::"
+                                : std::string()) +
+                      "checked_neg(" + a + "," + z +
+                      "))atomic_fetch_min_explicit(error," +
+                      std::to_string(s.start + j + 1) +
+                      "u,memory_order_relaxed);}else " + z + "=" + a + ";";
+          } else if (op == DFM_FLOORDIV || op == DFM_MOD || op == DFM_POW) {
+            auto helper =
+                (typed(r) ? "d" + std::to_string(dtype) + "::" : std::string());
+            if (op != DFM_POW)
+              text += "if(" + b + "==0)" + valid + "=false;else ";
+            else if (!unsignedType(dtype))
+              text += "if(" + b + "<0)atomic_fetch_min_explicit(error," +
+                      std::to_string(0x10000000UL + s.start + j + 1) +
+                      "u,memory_order_relaxed);else ";
+            text += "if(!" + helper +
+                    (op == DFM_POW ? "checked_pow(" : "checked_divmod(") + a +
+                    "," + b + "," + z +
+                    (op == DFM_POW   ? std::string()
+                     : op == DFM_MOD ? ",true"
+                                     : ",false") +
+                    "))atomic_fetch_min_explicit(error," +
+                    std::to_string(s.start + j + 1) +
+                    "u,memory_order_relaxed);";
+          } else if (op == DFM_CLIP_LOW || op == DFM_CLIP_HIGH) {
+            auto compare = dtype == DFM_FLOAT32
+                               ? "float_compare(" + a + "," + b + "," +
+                                     (op == DFM_CLIP_LOW ? "20" : "8") + ")"
+                               : a + (op == DFM_CLIP_LOW ? "<" : ">") + b;
+            text += z + "=" + compare + "?" + b + ":" + a + ";";
+          } else if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL ||
+                     op == DFM_NEG) {
             auto name = op == DFM_ADD   ? "add"
                         : op == DFM_SUB ? "sub"
                         : op == DFM_MUL ? "mul"
@@ -737,17 +909,14 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
             }
             if (nodeType(r, s.start + c[1]) == DFM_FLOAT32 && op != DFM_NOT &&
                 op != DFM_XOR)
-              text +=
-                  "if(!" + (typed(r) ? std::string("d1::") : std::string()) +
-                  "native_operand(" + a + ")||!" +
-                  (typed(r) ? std::string("d1::") : std::string()) +
-                  "native_operand(" + b + "))atomic_fetch_min_explicit(error," +
-                  std::to_string(0x80000000UL + s.start + j + 1) +
-                  "u,memory_order_relaxed);else ";
+              expr = "float_compare(" + a + "," + b + "," + std::to_string(op) +
+                     ")";
             text += z + "=T(" + expr + ");";
           }
           text += "}";
         }
+        if (masked)
+          text += "}";
         text += "\n";
       }
       auto last = prefix + std::to_string(s.nodes - 1);
@@ -1108,6 +1277,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     if (fault & 0x80000000u)
       fail("Metal unsupported [precision]: Float32 subnormal arithmetic or "
            "underflow requires CPU execution");
+    if (fault & 0x10000000U)
+      fail("Integer power requires a nonnegative exponent");
     fail("Integer overflow in Metal row expression");
   }
   start = Clock::now();
