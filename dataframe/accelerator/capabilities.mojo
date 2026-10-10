@@ -1,0 +1,74 @@
+"""Backend capabilities for bound row plans; no device imports or discovery."""
+from dataframe.dtype import DataType
+from dataframe.expr import SUM, COUNT, MEAN, LEN
+
+
+struct RowCapabilities(Copyable):
+    """Semantic capabilities, independent of storage and device availability.
+
+    Defaults describe the existing NVIDIA row subset. A native Metal provider
+    disables Float64 and wide integer accumulation. Float32 input alone does
+    not make sum/mean eligible: their shared accumulator contract is Float64.
+    """
+
+    var backend: String
+    var float64: Bool
+    var wide_integer: Bool
+    var int64_arithmetic: Bool
+
+    def __init__(
+        out self,
+        backend: String = "accelerator",
+        *,
+        float64: Bool = True,
+        wide_integer: Bool = True,
+        int64_arithmetic: Bool = True,
+    ):
+        self.backend = backend
+        self.float64 = float64
+        self.wide_integer = wide_integer
+        self.int64_arithmetic = int64_arithmetic
+
+    def reject(self, category: String, reason: String) raises:
+        raise Error(self.backend + " unsupported [" + category + "]: " + reason)
+
+    def require_dtype(self, dtype: DataType) raises:
+        if dtype == DataType.FLOAT64 and not self.float64:
+            self.reject("dtype", "Float64 requires CPU execution")
+        if (
+            dtype != DataType.FLOAT32
+            and dtype != DataType.FLOAT64
+            and dtype != DataType.INT32
+            and dtype != DataType.INT64
+            and dtype != DataType.BOOL
+        ):
+            self.reject("dtype", "row input dtype is not supported")
+
+    def require_arithmetic(self, dtype: DataType) raises:
+        if dtype == DataType.INT64 and not self.int64_arithmetic:
+            self.reject(
+                "arithmetic", "checked Int64 arithmetic requires CPU execution"
+            )
+
+    def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
+        if op == COUNT or op == LEN:
+            return
+        if op == MEAN and not self.float64:
+            self.reject("accumulator", "mean requires Float64 arithmetic")
+        if op == SUM:
+            if dtype.is_float() and not self.float64:
+                self.reject(
+                    "accumulator", "floating sum requires Float64 accumulation"
+                )
+            if dtype == DataType.INT64 and not self.wide_integer:
+                self.reject(
+                    "accumulator", "Int64 sum requires exact wide accumulation"
+                )
+            if (
+                dtype == DataType.INT32
+                and not self.wide_integer
+                and rows > Int(Int32.MAX)
+            ):
+                self.reject(
+                    "accumulator", "Int32 sum exceeds the exact Int64 row bound"
+                )
