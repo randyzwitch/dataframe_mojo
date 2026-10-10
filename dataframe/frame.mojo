@@ -2256,8 +2256,10 @@ struct DataFrame(Copyable, Sized, Writable):
             var use_left = List[Bool](capacity=len(left_rows))
             for i in left_rows:
                 use_left.append(i >= 0)
-            columns[c] = choose(use_left, columns[c], from_right[j]).renamed(
-                self._columns[c].name()
+            columns[c] = (
+                choose(use_left, columns[c], from_right[j])
+                .with_dtype(self._columns[c].dtype())
+                .renamed(self._columns[c].name())
             )
         for k in range(len(right_output)):
             columns.append(

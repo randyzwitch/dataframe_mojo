@@ -34,4 +34,6 @@ jobs:
       - name: Validate native ABI and execute when a GPU is exposed
         # Hosted VMs may expose no Metal device. The suite still validates the
         # ABI and pure preflight, and explicitly reports execution as skipped.
-        run: python3 native/dfmetal/test_native.py
+        run: |
+          python3 native/dfmetal/test_native.py
+          python3 native/dfmetal/test_join.py

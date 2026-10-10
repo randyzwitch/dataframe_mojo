@@ -2,7 +2,16 @@
 from std.memory import bitcast
 
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, Series, col, lit, when
+from dataframe import (
+    Column,
+    DataFrame,
+    Series,
+    LazyFrame,
+    col,
+    lit,
+    when,
+    scan_csv,
+)
 from dataframe.dtype import DataType
 from dataframe.expr import Expr
 from dataframe.metal import MetalRuntime, metal_installed
@@ -1175,6 +1184,291 @@ def test_native_additional_reductions() raises:
             logical_query.collect(engine="cpu")
         )
     )
+
+
+def test_join_preflight_does_not_open_devices_or_read_files() raises:
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 2])),
+            Series("x", Column[Float32]([3, 4])),
+        ]
+    )
+    var query = frame.lazy().join(frame.lazy(), "k")
+    assert_true("Metal native joins; 1 joins" in runtime.describe(query))
+    var wide = DataFrame(
+        [Series("k", Column[Int32]([1])), Series("bad", Column[Float64]([2]))]
+    )
+    with assert_raises(contains="Float64 requires CPU"):
+        _ = frame.lazy().join(wide.lazy(), "k").collect(accelerator=runtime)
+    with assert_raises(contains="in-memory scans"):
+        _ = (
+            frame.lazy()
+            .join(scan_csv("/nonexistent/metal-preflight-join.csv"), "k")
+            .collect(accelerator=runtime)
+        )
+    var checked = frame.lazy().with_columns((col("k") + 1).alias("k"))
+    with assert_raises(contains="terminal projections"):
+        _ = frame.lazy().join(checked, "k").collect(accelerator=runtime)
+
+
+def _join_column[
+    D: DType
+](
+    name: String, var values: List[Scalar[D]], valid: List[Bool]
+) raises -> Series:
+    comptime if D == DType.bool:
+        var booleans = List[Bool]()
+        for value in values:
+            booleans.append(Bool(value))
+        return Series(name, Column[Bool](booleans^, valid))
+    else:
+        return Series(name, Column[Scalar[D]](values^, valid))
+
+
+def _native_join[D: DType]() raises:
+    var keys = List[Scalar[D]]()
+    var payload = List[Scalar[D]]()
+    var bools = List[Bool]()
+    var ids = List[Int32]()
+    var valid = List[Bool]()
+    var payload_valid = List[Bool]()
+    for i in range(521):
+        var key = Scalar[D](i % 7)
+        comptime if D == DType.float32:
+            if i % 17 == 3:
+                key = Scalar[D](bitcast[DType.float32](UInt32(0x7FC00011)))
+            elif i % 17 == 4:
+                key = Scalar[D](bitcast[DType.float32](UInt32(0xFFC00077)))
+            elif i % 17 == 5:
+                key = -0.0
+            elif i % 17 == 6:
+                key = Scalar[D](bitcast[DType.float32](UInt32(1)))
+        keys.append(key)
+        payload.append(Scalar[D](i % 13))
+        bools.append(i % 3 == 0)
+        ids.append(Int32(i))
+        valid.append(i % 11 != 2)
+        payload_valid.append(i % 19 != 7)
+    var left = DataFrame(
+        [
+            _join_column[D]("k", keys.copy(), valid),
+            _join_column[D]("v", payload.copy(), payload_valid),
+            Series("b", Column[Bool](bools.copy(), valid)),
+            Series("id", Column[Int32](ids.copy())),
+        ]
+    ).slice(5, 257)
+    var right = DataFrame(
+        [
+            _join_column[D]("rk", keys^, valid),
+            _join_column[D]("v", payload^, payload_valid),
+            Series("b", Column[Bool](bools^, valid)),
+            Series("id", Column[Int32](ids^)),
+        ]
+    ).slice(5, 129)
+    var runtime = MetalRuntime()
+    for how in List[String](
+        ["inner", "left", "right", "full", "semi", "anti", "cross"]
+    ):
+        for coalesce in List[Bool]([True, False]):
+            var query: LazyFrame
+            if how == "cross":
+                query = left.lazy().join(right.lazy(), how="cross")
+            else:
+                query = left.lazy().join(
+                    right.lazy(),
+                    left_on=["k", "b"],
+                    right_on=["rk", "b"],
+                    how=how,
+                    coalesce=coalesce,
+                )
+            var measured = query.profile(accelerator=runtime)
+            assert_true(measured[0].equals(query.collect(engine="cpu")))
+            assert_equal(measured[1].height(), 1)
+            assert_equal(
+                measured[1].column("synchronizations").int64()._get(0), Int64(2)
+            )
+            assert_true(
+                measured[1].column("query_wall_ms").float64()._get(0) >= 0
+            )
+            for limit in List[Int]([0, 1, 29]):
+                var head = query.head(limit)
+                assert_true(
+                    head.collect(accelerator=runtime).equals(
+                        head.collect(engine="cpu")
+                    )
+                )
+            for empty_side in range(2):
+                var l = left.clear() if empty_side == 0 else left.copy()
+                var r = right.clear() if empty_side == 1 else right.copy()
+                var empty: LazyFrame
+                if how == "cross":
+                    empty = l.lazy().join(r.lazy(), how="cross")
+                else:
+                    empty = l.lazy().join(
+                        r.lazy(),
+                        left_on=["k", "b"],
+                        right_on=["rk", "b"],
+                        how=how,
+                        coalesce=coalesce,
+                    )
+                assert_true(
+                    empty.collect(accelerator=runtime).equals(
+                        empty.collect(engine="cpu")
+                    )
+                )
+
+
+def test_native_join_types_nulls_order_and_empty_inputs() raises:
+    if not metal_installed():
+        return
+    _native_join[DType.float32]()
+    _native_join[DType.int8]()
+    _native_join[DType.int16]()
+    _native_join[DType.int32]()
+    _native_join[DType.int64]()
+    _native_join[DType.uint8]()
+    _native_join[DType.uint16]()
+    _native_join[DType.uint32]()
+    _native_join[DType.uint64]()
+    _native_join[DType.bool]()
+
+
+def test_native_join_dag_regions_and_logical_types() raises:
+    if not metal_installed():
+        return
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Int32]([1, 2, 1, 3, 4], [True, True, True, False, True]),
+            ),
+            Series("x", Column[Float32]([1, 2, 3, 4, 5])),
+        ]
+    )
+    var left = frame.lazy().with_columns(
+        (col("x") + lit(Float32(1))).alias("x")
+    )
+    var right = frame.lazy().filter(col("x") >= 2)
+    var joined = left.join(right, "k", how="full")
+    var query = (
+        joined.filter(col("x").is_not_null())
+        .select_exprs(
+            [
+                col("k"),
+                (
+                    col("x").fill_null(lit(Float32(0)))
+                    + col("x_right").fill_null(lit(Float32(0)))
+                ).alias("total"),
+            ]
+        )
+        .sort("total")
+    )
+    var measured = query.profile(accelerator=runtime)
+    assert_true(measured[0].equals(query.collect(engine="cpu")))
+    assert_equal(measured[1].height(), 4)
+    assert_equal(
+        measured[1].column("synchronizations").int64()._get(2), Int64(2)
+    )
+    var grouped = joined.group_by("k", maintain_order=True).agg(
+        [col("x").min(), col("x_right").max()]
+    )
+    assert_true(
+        grouped.collect(accelerator=runtime).equals(
+            grouped.collect(engine="cpu")
+        )
+    )
+    var nested = (
+        frame.lazy()
+        .join(frame.lazy(), "k")
+        .join(frame.lazy(), "k", suffix="_last")
+        .select_exprs([col("k"), col("x"), col("x_last")])
+    )
+    assert_true(
+        nested.collect(accelerator=runtime).equals(nested.collect(engine="cpu"))
+    )
+    var scalar = (
+        frame.lazy()
+        .select_exprs([col("k").min().alias("k"), col("x").first().alias("x")])
+        .join(frame.lazy(), "k")
+    )
+    assert_true(
+        scalar.collect(accelerator=runtime).equals(scalar.collect(engine="cpu"))
+    )
+    var logical = DataFrame(
+        [
+            Series(
+                "date", Column[Int64]([1, 2, 3], [True, False, True])
+            ).with_dtype(DataType.DATE),
+            Series(
+                "decimal", Column[Int32]([100, 200, 300], [True, True, False])
+            ).with_dtype(DataType.decimal(9, 2, 32)),
+        ]
+    )
+    for key in List[String](["date", "decimal"]):
+        for how in List[String](
+            ["inner", "left", "right", "full", "semi", "anti", "cross"]
+        ):
+            var q = logical.lazy().join(
+                logical.lazy(), key, how=how
+            ) if how != "cross" else logical.lazy().join(
+                logical.lazy(), how="cross"
+            )
+            var actual = q.collect(accelerator=runtime)
+            var expected = q.collect(engine="cpu")
+            if not actual.equals(expected):
+                print("Logical join mismatch:", key, how)
+                print(actual)
+                print(expected)
+            assert_true(actual.equals(expected))
+
+
+def test_native_join_budget_and_large_fanout_head() raises:
+    if not metal_installed():
+        return
+    var ids = List[Int32]()
+    for i in range(40000):
+        ids.append(Int32(i))
+    var frame = DataFrame([Series("id", Column[Int32](ids^))])
+    var query = frame.lazy().join(frame.lazy(), how="cross").head(513)
+    var runtime = MetalRuntime(memory_limit_bytes=8 * 1024 * 1024)
+    var measured = query.profile(accelerator=runtime)
+    assert_equal(measured[0].height(), 513)
+    assert_equal(
+        measured[1].column("synchronizations").int64()._get(0), Int64(2)
+    )
+    assert_true(
+        measured[1].column("peak_requested_bytes").int64()._get(0)
+        < 8 * 1024 * 1024
+    )
+    for i in range(513):
+        assert_equal(measured[0].column("id").int32()._get(i), Int32(0))
+        assert_equal(measured[0].column("id_right").int32()._get(i), Int32(i))
+    with assert_raises(contains="memory budget"):
+        _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
+    var projected = (
+        frame.lazy()
+        .join(frame.lazy(), how="cross")
+        .select_exprs([col("id"), col("id_right")])
+        .head(513)
+    )
+    var projection = projected.profile(accelerator=runtime)
+    assert_true(projection[0].equals(measured[0]))
+    assert_equal(projection[1].height(), 2)
+    assert_equal(
+        projection[1].column("synchronizations").int64()._get(0), Int64(2)
+    )
+    assert_equal(
+        projection[1].column("synchronizations").int64()._get(1), Int64(1)
+    )
+    var after_head = (
+        frame.lazy()
+        .join(frame.lazy(), how="cross")
+        .head(513)
+        .select_exprs([col("id"), col("id_right")])
+    )
+    assert_true(after_head.collect(accelerator=runtime).equals(measured[0]))
 
 
 def main() raises:

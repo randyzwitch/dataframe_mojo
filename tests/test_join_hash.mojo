@@ -709,6 +709,42 @@ def test_sliced_build_keys_hash_and_index_from_their_offset() raises:
     _check_sliced_build[DType.uint16]()
 
 
+def test_full_join_coalescing_preserves_temporal_key_metadata() raises:
+    for dtype in [
+        DataType.DATE,
+        DataType.datetime("ms"),
+        DataType.duration("us"),
+    ]:
+        var left = DataFrame(
+            [
+                Series(
+                    "k", Column[Int64]([1, 0, 3], [True, False, True])
+                ).with_dtype(dtype),
+            ]
+        )
+        var right = DataFrame(
+            [
+                Series(
+                    "k", Column[Int64]([3, 4, 0], [True, True, False])
+                ).with_dtype(dtype),
+            ]
+        )
+        var expected = DataFrame(
+            [
+                Series(
+                    "k",
+                    Column[Int64](
+                        [1, 0, 3, 4, 0], [True, False, True, True, False]
+                    ),
+                ).with_dtype(dtype),
+            ]
+        )
+        assert_true(left.join(right, "k", how="full").equals(expected))
+        var separate = left.join(right, "k", how="full", coalesce=False)
+        assert_equal(separate.column("k").dtype(), dtype)
+        assert_equal(separate.column("k_right").dtype(), dtype)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 

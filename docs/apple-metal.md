@@ -76,6 +76,34 @@ Checked integer arithmetic currently
 requires terminal projections without head, matching the shared planner's
 observable-overflow boundary.
 
+
+Inner, left, right, full, semi, anti, and cross joins run matching and output
+gathering on the GPU. Keys can use the supported native and fixed logical types;
+paired logical dtypes must match. Null keys do not match. Float32 NaNs form one
+matching class, and signed zeros compare equal. Duplicate matches retain build
+input order: inner/left/full probe left rows in order, right joins probe right
+rows in order, and full joins append unmatched right rows in original order.
+Key coalescing and suffix collisions follow the CPU API, including separate
+key columns for full joins with `coalesce=False`.
+
+The complete join DAG is bound before device initialization. Supported row
+regions can feed a join and follow its result, including further joins and
+grouped or scalar reductions. Intermediate regions currently materialize CPU
+columns and stage them again for their next consumer. These boundaries appear
+in profiles; a multi-region join query is not a single resident submission.
+Checked integer arithmetic, strict casts, and checked Int32/UInt32 sums in
+join inputs require CPU execution because those inputs are not terminal
+observable boundaries. Pure expressions and bounded Int8/Int16/UInt8/UInt16
+sums can feed a join. Each join supports at most 64 combined input columns,
+64 output columns, and Int32.MAX rows per input and output.
+
+A final head immediately above a join or above pure projections of its rows
+bounds the join output allocation, even when its full match count is larger
+than Int32.MAX. Match counts and prefix offsets
+use native 64-bit integers. Head is not pushed through filters, sorts, or
+aggregations. Strings, categorical dictionaries, and nested join columns are
+not yet supported by this native path.
+
 Temporal and Decimal32/64 columns retain their complete logical metadata
 through projection, stable filtering, null tests, fill-null, counts, and
 extrema. Comparisons use the native physical integer representation; decimal
@@ -145,7 +173,8 @@ on CPU until matched end-to-end cost evidence is available.
 
 ## Memory, synchronization, and profiles
 
-The wrapper and native library use ABI version 2; rebuild the optional library
+Row requests use ABI version 2. Joins add a separate version 1 two-phase
+interface without changing row request layouts; rebuild the optional library
 when upgrading. Homogeneous plans retain their original native-width matrices.
 Mixed plans and extrema reductions store each value as an exact 64-bit word,
 with generated native operations for each expression dtype. Numeric inputs are staged at their original
@@ -153,8 +182,10 @@ width and packed on the GPU. Output words are copied into the matching CPU
 column width after synchronization; CPU code does not evaluate expressions.
 
 The native bridge uses documented Metal shared-storage buffers with the default
-CPU cache mode. It stages input bytes once, queues all dependent kernels, waits
-once, and copies the final result into CPU-owned columns. Shared memory still
+CPU cache mode. A row region stages input bytes once, queues all dependent
+kernels, waits once, and copies its result into CPU-owned columns. A join stages
+its inputs once and uses two waits: matching determines cardinality, then a
+second submission gathers and packs the output. Shared memory still
 requires synchronization; CPU code never reads an in-flight GPU result.
 
 Consecutive projection steps, including the next filter predicate, execute in
@@ -174,13 +205,27 @@ working-set headroom. Planning descriptors, compiler/cache allocations, allocato
 rounding, retained source columns, and unrelated process memory are outside this
 payload estimate; it is not an operating-system memory limit.
 
+
+Join preflight estimates the known matching buffers without assuming a
+Cartesian-sized result. The GPU sorts build indices and finds each probe's
+matching range. Full joins scan range-coverage differences and compact unmatched
+build rows in original order. After the first wait, the runtime checks the
+complete matching-plus-output peak against the payload budget and maximum
+buffer length before the caller allocates CPU result columns. It checks current
+headroom again before output submission. Budget failure can therefore occur
+after matching, while caller outputs remain untouched. Estimates and profile
+peaks are per region; retained CPU inputs and intermediate frames are outside
+the requested payload estimate.
+
 Profiles report observed launch and wait counts; upload/download traffic;
 requested shared/result bytes; pipeline cache hits and compilation time;
 staging-copy, submission-and-wait, and result-copy time; and the complete Metal
-command-buffer GPU interval when available. `gpu_ms` is null if Metal supplies no
-valid interval. It is not a sum of isolated kernel durations. Whole-query
+command-buffer GPU interval when available. For joins, `gpu_ms` sums the two
+command-buffer intervals. `gpu_ms` is null if Metal supplies no valid interval. It is not a sum of isolated kernel durations. Whole-query
 `wall_ms` includes binding, initialization, compilation, allocation, staging,
-execution, and result construction. `runtime_build_id` fingerprints the native
+execution, and result construction for a resident row query. Join DAG profiles
+have one row per executed region, with per-region `wall_ms`; `query_wall_ms`
+reports the complete DAG duration including preflight and materialization. `runtime_build_id` fingerprints the native
 source, ABI, compiler, SDK, and build flags.
 
 Submission errors propagate. The bridge drains committed work before releasing
@@ -191,6 +236,8 @@ GPU fault. Output owners and source owners remain alive across that boundary.
 
 ```sh
 python3 native/dfmetal/test_native.py
+python3 native/dfmetal/test_join.py
+pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
 ```
 
@@ -202,3 +249,12 @@ literals, checked integer overflow, cancelled Int32 sums, memory rejection,
 Float32 operator rounding, exceptional floating values, subnormal precision
 rejection, cache reuse, and long fused projection chains across multiple filter
 boundaries with live branches and pruned temporary gathers.
+
+The join ABI fixtures cover seven join styles and ten native types, composite
+nullable keys, non-byte-aligned Boolean windows, empty sides, all-null keys,
+large scans, bounded large fanout, exact key payloads, budget rejection before
+both submissions, output-metadata rejection, and session ownership. Public
+parity cases also cover nested joins, row regions on both sides, post-join
+grouping and sorting, scalar reduction inputs, logical metadata, and profiling
+of the two synchronization points. Hosted macOS VMs still run pure ABI
+validation when no GPU is exposed.

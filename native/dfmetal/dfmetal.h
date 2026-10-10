@@ -93,7 +93,8 @@ typedef struct DFMStep {
   int64_t start;
   int64_t nodes;
   int64_t slot;
-  int64_t filter; // 0 projection, 1 stable filter, 2 stable sort, 3 grouped reduction.
+  int64_t filter; // 0 projection, 1 stable filter, 2 stable sort, 3 grouped
+                  // reduction.
   int64_t gather_start;
   int64_t gather_count;
 } DFMStep;
@@ -166,6 +167,36 @@ typedef struct DFMDeviceInfo {
   int64_t unified_memory;
 } DFMDeviceInfo;
 
+// Versioned two-phase join interface; row request ABI remains unchanged.
+#define DFM_JOIN_ABI_VERSION 1
+
+typedef struct DFMJoinInput {
+  DFMInput input;
+  int64_t side; // 0 left, 1 right.
+} DFMJoinInput;
+typedef struct DFMJoinKey {
+  int64_t left, right; // Indices into the input descriptors.
+} DFMJoinKey;
+typedef struct DFMJoinOutput {
+  void *values;
+  uint8_t *validity;
+  int64_t dtype;
+  int64_t left, right;  // Input indices; -1 for a missing source.
+  int64_t prefer_right; // Right joins retain the right key even on matches.
+} DFMJoinOutput;
+typedef struct DFMJoinRequest {
+  int64_t abi_version;
+  int64_t left_rows, right_rows;
+  int64_t input_count, key_count, output_count;
+  int64_t how;   // inner, left, right, full, semi, anti, cross = 0..6.
+  int64_t limit; // -1 or final head.
+  int64_t memory_budget_bytes;
+  int64_t profiling;
+  const DFMJoinInput *inputs;
+  const DFMJoinKey *keys;
+  const DFMJoinOutput *outputs; // Storage pointers may be null during prepare.
+} DFMJoinRequest;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -191,6 +222,16 @@ DFM_API int32_t dfm_plan_cached(void *context, const DFMRequest *request,
 // Returns 0 on success or 1 with an allocated error message; free via dfm_free.
 DFM_API int32_t dfm_execute(void *context, const DFMRequest *request,
                             DFMStats *stats, char **error);
+// Estimate the known matching payload without device initialization. Actual
+// output allocations are checked separately after GPU matching determines size.
+DFM_API int32_t dfm_join_estimate(const DFMJoinRequest *request,
+                                  DFMMemory *memory, char **error);
+DFM_API int32_t dfm_join_prepare(void *context, const DFMJoinRequest *request,
+                                 void **session, DFMStats *stats, char **error);
+DFM_API int32_t dfm_join_finish(void *session, const DFMJoinOutput *outputs,
+                                int64_t output_count, DFMStats *stats,
+                                char **error);
+DFM_API void dfm_join_release(void *session);
 DFM_API void dfm_free(void *pointer);
 
 #ifdef __cplusplus

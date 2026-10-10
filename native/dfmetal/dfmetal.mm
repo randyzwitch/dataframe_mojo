@@ -687,6 +687,23 @@ bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x0
   }
   return text;
 }
+std::string orderingSource() {
+  return R"MSL(
+bool extrema_better(ulong a,ulong b,long type,bool maximum) {
+ if(type==1){uint x=uint(a),y=uint(b),ax=x&0x7fffffffU,ay=y&0x7fffffffU;
+ bool nx=ax>0x7f800000U,ny=ay>0x7f800000U;
+ if(nx||ny)return nx!=ny&&(maximum?nx:ny);
+ if(ax==0&&ay==0)return false;
+ uint kx=(x&0x80000000U)?~x:(x^0x80000000U);
+ uint ky=(y&0x80000000U)?~y:(y^0x80000000U);
+ return maximum?kx>ky:kx<ky;}
+ if(type==2||type==3||type==5||type==6)
+ return maximum?long(a)>long(b):long(a)<long(b);
+ return maximum?a>b:a<b;
+}
+)MSL";
+}
+
 std::string groupSource(const DFMRequest &r, const Layout &layout) {
   std::string text;
   for (int64_t i = 0; i < r.step_count; ++i) {
@@ -869,18 +886,9 @@ kernel void pack_rows(device const T *x[[buffer(0)]],device const uchar *v[[buff
 // Extrema retain the earliest selected row on ties. Partial.count is row+1
 // for extrema and the valid count for sum/count; zero denotes no candidate.
 // Compare Float32 encodings to preserve subnormal ordering without FTZ.
-bool extrema_better(ulong a,ulong b,long type,bool maximum) {
- if(type==1){uint x=uint(a),y=uint(b),ax=x&0x7fffffffU,ay=y&0x7fffffffU;
- bool nx=ax>0x7f800000U,ny=ay>0x7f800000U;
- if(nx||ny)return nx!=ny&&(maximum?nx:ny);
- if(ax==0&&ay==0)return false;
- uint kx=(x&0x80000000U)?~x:(x^0x80000000U);
- uint ky=(y&0x80000000U)?~y:(y^0x80000000U);
- return maximum?kx>ky:kx<ky;}
- if(type==2||type==3||type==5||type==6)
- return maximum?long(a)>long(b):long(a)<long(b);
- return maximum?a>b:a<b;
-}
+)MSL";
+  text += orderingSource();
+  text += R"MSL(
 bool candidate_better(ulong a,ulong b,Out o){
  if((o.kind==95||o.kind==96)&&o.type==1){
   bool an=(uint(a)&0x7fffffffU)>0x7f800000U,bn=(uint(b)&0x7fffffffU)>0x7f800000U;
@@ -1841,3 +1849,5 @@ int32_t dfm_execute(void *p, const DFMRequest *r, DFMStats *stats, char **err) {
 }
 void dfm_free(void *p) { free(p); }
 }
+
+#include "dfmetal_join.inc"

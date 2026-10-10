@@ -12,6 +12,14 @@ from std.sys import CompilationTarget
 from std.time import perf_counter_ns
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.rows import RowPlan, lower_rows, ROW_SORT_KEY
+from .accelerator.joins import (
+    JoinDag,
+    DagTask,
+    DAG_ROWS,
+    DAG_JOIN,
+    has_join,
+    lower_join_dag,
+)
 from .arrow import _c_string, _read_c_string
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
@@ -82,6 +90,8 @@ comptime _Info = def(Int, Int, Int) thin abi("C") -> Int32
 comptime _Version = def() thin abi("C") -> Int64
 comptime _Count = def() thin abi("C") -> Int64
 comptime _Build = def() thin abi("C") -> Int
+comptime _JoinPrepare = def(Int, Int, Int, Int, Int) thin abi("C") -> Int32
+comptime _JoinFinish = def(Int, Int, Int64, Int, Int) thin abi("C") -> Int32
 
 
 def _create_call(callback: Int, device: Int, mut error: Int) -> Int:
@@ -409,6 +419,27 @@ def _input[T: DType](column: Column[Scalar[T]], dtype: Int64) -> List[Int64]:
     ]
 
 
+def _input_series(column: Series) raises -> List[Int64]:
+    if column.dtype() == DataType.BOOL:
+        var source = column.bool()
+        var offset = source.validity_offset()
+        var has_bits = len(source._bits[]) != 0
+        return [
+            Int64(Int(source.unsafe_values().unsafe_offset(offset // 8))),
+            Int64(
+                Int(source.unsafe_validity().unsafe_offset(offset // 8))
+            ) if has_bits else Int64(0),
+            Int64(4),
+            Int64(offset % 8),
+            Int64(has_bits),
+        ]
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if column.dtype().physical() == DataType.of(D):
+            return _input(column.numeric[D](), _type(column.dtype()))
+    raise Error("Metal unsupported input dtype")
+
+
 struct _Descriptors(Movable):
     var inputs: List[Int64]
     var code: List[Int64]
@@ -457,38 +488,7 @@ struct _Descriptors(Movable):
                 self.code[i + 3] = _op(Int(self.code[i + 3]))
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
-            if column.dtype() == DataType.BOOL:
-                var source = column.bool()
-                var offset = source.validity_offset()
-                var has_bits = len(source._bits[]) != 0
-                self.inputs.extend(
-                    [
-                        Int64(
-                            Int(
-                                source.unsafe_values().unsafe_offset(
-                                    offset // 8
-                                )
-                            )
-                        ),
-                        Int64(
-                            Int(
-                                source.unsafe_validity().unsafe_offset(
-                                    offset // 8
-                                )
-                            )
-                        ) if has_bits else Int64(0),
-                        Int64(4),
-                        Int64(offset % 8),
-                        Int64(has_bits),
-                    ]
-                )
-            else:
-                comptime for k in range(len(NUMERIC_DTYPES)):
-                    comptime D = NUMERIC_DTYPES[k]
-                    if column.dtype().physical() == DataType.of(D):
-                        self.inputs.extend(
-                            _input(column.numeric[D](), _type(column.dtype()))
-                        )
+            self.inputs.extend(_input_series(column))
         for step in plan.steps:
             self.steps.extend(
                 [
@@ -616,14 +616,52 @@ def _execute(
     for column in storage:
         columns.append(column.slice(0, Int(stats[8])))
     var result = DataFrame(columns^)
-    var report = ExecutionReport()
-    report.record(
+    var report = _native_report(
+        context,
+        device,
         plan.root,
         "RESIDENT ROW EXPRESSIONS",
-        "metal",
         plan.source.height(),
         result.height(),
-        algorithm="specialized_native_metal_stable_compaction",
+        stats,
+        info,
+        initialization_ns,
+        start,
+        "specialized_native_metal_stable_compaction",
+        "shared-buffer staging -> native Metal kernels -> synchronized CPU result",
+    )
+    return (result^, report^)
+
+
+def _native_report(
+    context: _Context,
+    device: Int,
+    root: Int,
+    label: String,
+    input_rows: Int,
+    output_rows: Int,
+    stats: List[Int64],
+    info: List[Int64],
+    initialization_ns: Int,
+    start: Int,
+    algorithm: String,
+    boundaries: String,
+    *,
+    build_rows: Int = 0,
+    builds: Int = 0,
+    build_side: String = "",
+) raises -> DataFrame:
+    var report = ExecutionReport()
+    report.record(
+        root,
+        label,
+        "metal",
+        input_rows,
+        output_rows,
+        algorithm=algorithm,
+        build_rows=build_rows,
+        builds=builds,
+        build_side=build_side,
         wall_ns=Int(perf_counter_ns() - start),
     )
     var fields = report.frame()._columns.copy()
@@ -681,15 +719,253 @@ def _execute(
     fields.append(
         Series(
             "boundaries",
-            Column[String](
+            Column[String]([boundaries]),
+        )
+    )
+    return DataFrame(fields^)
+
+
+struct _JoinDescriptors(Movable):
+    var inputs: List[Int64]
+    var keys: List[Int64]
+    var outputs: List[Int64]
+
+    def __init__(
+        out self, task: DagTask, left: DataFrame, right: DataFrame
+    ) raises:
+        self.inputs = List[Int64]()
+        self.keys = task.keys.copy()
+        self.outputs = List[Int64]()
+        for side in range(2):
+            var frame = left.copy() if side == 0 else right.copy()
+            for column in frame._columns:
+                self.inputs.extend(_input_series(column))
+                self.inputs.append(Int64(side))
+        for field in task.fields:
+            self.outputs.extend(
                 [
-                    "shared-buffer staging -> native Metal kernels ->"
-                    " synchronized CPU result"
+                    Int64(0),
+                    Int64(0),
+                    _type(field.dtype),
+                    Int64(field.left),
+                    Int64(field.right),
+                    Int64(field.prefer_right),
                 ]
+            )
+
+    def request(
+        self,
+        task: DagTask,
+        left: DataFrame,
+        right: DataFrame,
+        budget: Int,
+        profiling: Bool,
+    ) -> List[Int64]:
+        return [
+            Int64(1),
+            Int64(left.height()),
+            Int64(right.height()),
+            Int64(left.width() + right.width()),
+            Int64(len(self.keys) // 2),
+            Int64(len(task.fields)),
+            Int64(task.how),
+            Int64(task.limit),
+            Int64(budget),
+            Int64(profiling),
+            Int64(Int(self.inputs.unsafe_ptr())),
+            Int64(Int(self.keys.unsafe_ptr())),
+            Int64(Int(self.outputs.unsafe_ptr())),
+        ]
+
+
+@fieldwise_init
+struct _JoinSession(Movable):
+    var address: Int
+    var release: Int
+
+    def __deinit__(deinit self):
+        if self.address:
+            var callback = self.release
+            Pointer(to=callback).unsafe_bitcast[_Release]()[](self.address)
+
+
+def _join_prepare_call(
+    callback: Int,
+    context: Int,
+    request: List[Int64],
+    mut session: Int,
+    mut stats: List[Int64],
+    mut error: Int,
+) -> Int32:
+    return Pointer(to=callback).unsafe_bitcast[_JoinPrepare]()[](
+        context,
+        Int(request.unsafe_ptr()),
+        Int(Pointer(to=session)),
+        Int(stats.unsafe_ptr()),
+        Int(Pointer(to=error)),
+    )
+
+
+def _join_finish_call(
+    callback: Int,
+    session: Int,
+    outputs: List[Int64],
+    mut stats: List[Int64],
+    mut error: Int,
+) -> Int32:
+    return Pointer(to=callback).unsafe_bitcast[_JoinFinish]()[](
+        session,
+        Int(outputs.unsafe_ptr()),
+        Int64(len(outputs) // 6),
+        Int(stats.unsafe_ptr()),
+        Int(Pointer(to=error)),
+    )
+
+
+def _execute_join(
+    task: DagTask,
+    left: DataFrame,
+    right: DataFrame,
+    device: Int,
+    budget: Int,
+    profiling: Bool,
+    start: Int,
+) raises -> Tuple[DataFrame, DataFrame]:
+    var descriptors = _JoinDescriptors(task, left, right)
+    var request = descriptors.request(task, left, right, budget, profiling)
+    var library = _Library()
+    # Resolve the additive join API before opening a device. Row ABI 2 stays
+    # compatible with row-only runtimes; joins require these four symbols.
+    var estimate = library.symbol("dfm_join_estimate")
+    var prepare = library.symbol("dfm_join_prepare")
+    var finish = library.symbol("dfm_join_finish")
+    var release = library.symbol("dfm_join_release")
+    var memory = List[Int64](length=8, fill=0)
+    var error = 0
+    var status = _estimate_call(estimate, request, memory, error)
+    library.check(status, error)
+    if budget >= 0 and Int(memory[2]) > budget:
+        raise Error("Metal join exceeds memory budget before submission")
+    var initialized = perf_counter_ns()
+    var context = _Context(library^, device)
+    var initialization_ns = Int(perf_counter_ns() - initialized)
+    var info = List[Int64](length=6, fill=0)
+    status = _info_call(context.library.info, context.address, info, error)
+    context.library.check(status, error)
+    var stats = List[Int64](length=17, fill=0)
+    var address = 0
+    status = _join_prepare_call(
+        prepare, context.address, request, address, stats, error
+    )
+    context.library.check(status, error)
+    var session = _JoinSession(address, release)
+    # Prepare has checked the complete peak, including these CPU columns,
+    # after matching determines output size and before any caller allocation.
+    var storage = List[Series]()
+    for i in range(len(task.fields)):
+        var field = task.fields[i].copy()
+        var column = _allocate_output(field.name, field.dtype, Int(stats[8]))
+        var pointers = _output_addresses(column)
+        descriptors.outputs[6 * i] = Int64(pointers[0])
+        descriptors.outputs[6 * i + 1] = Int64(pointers[1])
+        storage.append(column^)
+    status = _join_finish_call(
+        finish, session.address, descriptors.outputs, stats, error
+    )
+    # FFI addresses carry no Mojo origins. Keep all metadata alive through
+    # both synchronous calls; the native session owns staged input payloads.
+    _ = session^
+    _ = descriptors^
+    _ = request^
+    context.library.check(status, error)
+    var result = DataFrame(storage^, height=Int(stats[8]))
+    var report = _native_report(
+        context,
+        device,
+        task.root,
+        "JOIN",
+        left.height(),
+        result.height(),
+        stats,
+        info,
+        initialization_ns,
+        start,
+        "native_metal_sorted_join",
+        "CPU input columns -> GPU matching -> cardinality synchronization -> GPU output gather -> synchronized CPU result",
+        build_rows=left.height() if task.how == 2 else right.height(),
+        builds=1,
+        build_side="left" if task.how == 2 else "right",
+    )
+    return (result^, report^)
+
+
+def _execute_join_dag(
+    dag: JoinDag,
+    device: Int,
+    budget: Int,
+    profiling: Bool,
+    query_start: Int,
+) raises -> Tuple[DataFrame, DataFrame]:
+    var values = List[DataFrame]()
+    var report = DataFrame(List[Series]())
+    var uses = List[Int](length=len(dag.tasks), fill=0)
+    for task in dag.tasks:
+        if task.source >= 0:
+            uses[task.source] += 1
+        if task.kind == DAG_JOIN:
+            uses[task.right] += 1
+    for index in range(len(dag.tasks)):
+        var task = dag.tasks[index].copy()
+        var start = Int(perf_counter_ns())
+        if task.kind == DAG_JOIN:
+            var joined = _execute_join(
+                task,
+                values[task.source],
+                values[task.right],
+                device,
+                budget,
+                profiling,
+                start,
+            )
+            values.append(joined[0].copy())
+            report = joined[1].copy() if report.width() == 0 else report.vstack(
+                joined[1]
+            )
+        else:
+            if task.source >= 0:
+                task.query._frames[0] = values[task.source].copy()
+            var plan = lower_rows(
+                task.query, _capabilities(), terminal_boundary=task.terminal
+            )
+            plan.root = task.root
+            if len(task.query._nodes) == 1:
+                # A scan only retains selected source columns. It needs no
+                # expression evaluation or GPU round trip before the join.
+                values.append(plan.source.copy())
+            else:
+                var region = _execute(plan, device, budget, profiling, start)
+                values.append(region[0].copy())
+                report = region[
+                    1
+                ].copy() if report.width() == 0 else report.vstack(region[1])
+        if task.source >= 0:
+            uses[task.source] -= 1
+            if uses[task.source] == 0:
+                values[task.source] = DataFrame(List[Series]())
+        if task.kind == DAG_JOIN:
+            uses[task.right] -= 1
+            if uses[task.right] == 0:
+                values[task.right] = DataFrame(List[Series]())
+    var elapsed = Float64(Int(perf_counter_ns()) - query_start) / 1e6
+    report = report.with_column(
+        Series(
+            "query_wall_ms",
+            Column[Float64](
+                List[Float64](length=report.height(), fill=elapsed)
             ),
         )
     )
-    return (result^, DataFrame(fields^))
+    return (values[dag.root].copy(), report^)
 
 
 struct MetalRuntime(AcceleratorBackend):
@@ -732,11 +1008,28 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
         var start = Int(perf_counter_ns())
+        if has_join(query):
+            var dag = lower_join_dag(query, _capabilities())
+            if dag.joins:
+                return _execute_join_dag(
+                    dag, self._device, self._budget, profiling, start
+                )
         var plan = lower_rows(query, _capabilities())
         return _execute(plan, self._device, self._budget, profiling, start)
 
     def describe(self, query: LazyFrame) -> String:
         try:
+            if has_join(query):
+                var dag = lower_join_dag(query, _capabilities())
+                return (
+                    "ENGINE accel: Metal native joins; "
+                    + String(dag.joins)
+                    + " joins, "
+                    + String(len(dag.tasks))
+                    + " regions; joins use two synchronizations with CPU materialization between regions; optional runtime "
+                    + ("present" if metal_installed() else "missing")
+                    + "\n"
+                )
             var plan = lower_rows(query, _capabilities())
             return (
                 "ENGINE accel: Metal native row expressions; "
