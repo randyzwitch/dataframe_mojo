@@ -65,9 +65,11 @@ from dataframe.lazy import (
     FILTER,
     SLICE,
     DROP,
+    SORT,
 )
 from dataframe.series import Series
 
+comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
 comptime ROW_MAX_STEPS = 64
@@ -82,6 +84,7 @@ struct RowStep(Copyable):
     var filter: Bool
     var gather_start: Int
     var gather_count: Int
+    var order: Bool
 
 
 @fieldwise_init
@@ -320,6 +323,7 @@ def lower_rows(
             and kind != WITH_COLUMNS
             and kind != FILTER
             and kind != DROP
+            and (kind != SORT or not capabilities.order)
         ):
             capabilities.reject(
                 "plan",
@@ -389,6 +393,44 @@ def lower_rows(
             capabilities.reject(
                 "plan", "only final head may follow resident reductions"
             )
+        if node.kind == SORT:
+            if len(node.names) == 0:
+                continue
+            if len(node.flags) != 2 * len(node.names):
+                raise Error("sort needs direction and null placement per key")
+            var start = len(literals)
+            for i in range(len(node.names)):
+                var found = -1
+                for j in range(len(schema)):
+                    if schema[j].name() == node.names[i]:
+                        found = j
+                if found < 0:
+                    raise Error("Unknown column: " + node.names[i])
+                code.extend(
+                    [
+                        Int64(ROW_SORT_KEY),
+                        Int64(slots[found]),
+                        Int64(node.flags[i]),
+                        Int64(node.flags[len(node.names) + i]),
+                    ]
+                )
+                literals.append(0)
+                node_dtypes.append(schema[found].dtype())
+            var gather_start = len(gathers)
+            for slot in slots:
+                gathers.append(Int64(slot))
+            steps.append(
+                RowStep(
+                    start,
+                    len(node.names),
+                    0,
+                    False,
+                    gather_start,
+                    len(slots),
+                    True,
+                )
+            )
+            continue
         if node.kind == DROP:
             var keep_schema = List[Series]()
             var keep_slots = List[Int]()
@@ -531,6 +573,7 @@ def lower_rows(
                     node.kind == FILTER,
                     gather_start,
                     len(slots),
+                    False,
                 )
             )
             if reduction >= 0:
@@ -598,6 +641,10 @@ def lower_rows(
             outputs.append(
                 RowOutput(schema[i].name(), schema[i].dtype(), slots[i], -1, 0)
             )
+    if len(steps) > ROW_MAX_STEPS:
+        capabilities.reject(
+            "plan", "resident region supports at most 64 device steps"
+        )
     if len(outputs) == 0:
         capabilities.reject(
             "plan", "resident region requires at least one output column"
