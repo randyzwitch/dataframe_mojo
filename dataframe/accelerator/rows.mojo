@@ -66,9 +66,13 @@ from dataframe.lazy import (
     SLICE,
     DROP,
     SORT,
+    AGG,
 )
 from dataframe.series import Series
 
+comptime ROW_GROUP_HEADER = 1002
+comptime ROW_GROUP_KEY = 1003
+comptime ROW_GROUP_OUTPUT = 1004
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -85,6 +89,7 @@ struct RowStep(Copyable):
     var gather_start: Int
     var gather_count: Int
     var order: Bool
+    var grouped: Bool
 
 
 @fieldwise_init
@@ -324,6 +329,7 @@ def lower_rows(
             and kind != FILTER
             and kind != DROP
             and (kind != SORT or not capabilities.order)
+            and (kind != AGG or not capabilities.grouped)
         ):
             capabilities.reject(
                 "plan",
@@ -428,6 +434,7 @@ def lower_rows(
                     gather_start,
                     len(slots),
                     True,
+                    False,
                 )
             )
             continue
@@ -447,6 +454,22 @@ def lower_rows(
             schema = keep_schema^
             slots = keep_slots^
             continue
+        var group_keys = List[Int]()
+        if node.kind == AGG:
+            if len(node.names) == 0:
+                raise Error("group_by requires at least one key")
+            var key_names = List[String]()
+            for name in node.names:
+                if name in key_names:
+                    raise Error("Duplicate group key: " + name)
+                key_names.append(name)
+                var found = -1
+                for j in range(len(schema)):
+                    if schema[j].name() == name:
+                        found = j
+                if found < 0:
+                    raise Error("Unknown column: " + name)
+                group_keys.append(found)
         var projected = List[Series]()
         var projected_slots = List[Int]()
         var aggregate_outputs = List[RowOutput]()
@@ -481,7 +504,7 @@ def lower_rows(
                                 "plan",
                                 "checked integer arithmetic requires terminal projections without head",
                             )
-                    if part.op == SUM and limit >= 0:
+                    if part.op == SUM and limit >= 0 and node.kind != AGG:
                         capabilities.reject(
                             "plan",
                             "integer sum with final head requires CPU execution",
@@ -510,7 +533,9 @@ def lower_rows(
                 or last.op == MEAN
                 or last.op == LEN
             ):
-                if node.kind != SELECT or bound.shapes[last.left] != ROWS:
+                if (node.kind != SELECT and node.kind != AGG) or bound.shapes[
+                    last.left
+                ] != ROWS:
                     capabilities.reject(
                         "plan",
                         "reductions require a row expression in final select",
@@ -520,6 +545,19 @@ def lower_rows(
                     bound.dtypes[last.left], reduction, frame.height()
                 )
                 capabilities.require_dtype(result_dtype)
+                if (
+                    node.kind == AGG
+                    and reduction == SUM
+                    and (
+                        result_dtype == DataType.INT32
+                        or result_dtype == DataType.UINT32
+                    )
+                    and (k != 0 or limit >= 0)
+                ):
+                    capabilities.reject(
+                        "plan",
+                        "checked grouped sums require terminal aggregation without head",
+                    )
                 min_count = last.min_count
                 count -= 1
                 if last.left != count - 1:
@@ -574,6 +612,7 @@ def lower_rows(
                     gather_start,
                     len(slots),
                     False,
+                    False,
                 )
             )
             if reduction >= 0:
@@ -593,6 +632,105 @@ def lower_rows(
         if node.kind == FILTER:
             if len(node.exprs) != 1:
                 capabilities.reject("plan", "filter requires one predicate")
+            continue
+        if node.kind == AGG:
+            if len(aggregate_outputs) != len(node.exprs):
+                capabilities.reject(
+                    "plan", "group aggregation requires reductions"
+                )
+            if next_slot + 3 + len(aggregate_outputs) > ROW_MAX_SLOTS:
+                capabilities.reject(
+                    "plan", "group aggregation exceeds 64 value slots"
+                )
+            var index_slot = next_slot
+            var start_slot = next_slot + 1
+            var first_slot = next_slot + 2
+            next_slot += 3
+            slot_dtypes.extend([DataType.INT64, DataType.INT64, DataType.INT64])
+            var start = len(literals)
+            code.extend(
+                [
+                    Int64(ROW_GROUP_HEADER),
+                    Int64(len(group_keys)),
+                    Int64(start_slot),
+                    Int64(first_slot),
+                ]
+            )
+            literals.append(0)
+            node_dtypes.append(DataType.INT64)
+            var grouped_schema = List[Series]()
+            var grouped_slots = List[Int]()
+            var group_names = List[String]()
+            for key in group_keys:
+                code.extend(
+                    [
+                        Int64(ROW_GROUP_KEY),
+                        Int64(slots[key]),
+                        Int64(0),
+                        Int64(0),
+                    ]
+                )
+                literals.append(0)
+                node_dtypes.append(schema[key].dtype())
+                grouped_schema.append(
+                    _empty(schema[key].name(), schema[key].dtype())
+                )
+                grouped_slots.append(slots[key])
+                group_names.append(schema[key].name())
+            for output in aggregate_outputs:
+                if output.name in group_names:
+                    raise Error("Duplicate group output name: " + output.name)
+                group_names.append(output.name)
+                code.extend(
+                    [
+                        Int64(ROW_GROUP_OUTPUT),
+                        Int64(output.slot),
+                        Int64(next_slot),
+                        Int64(output.reduction),
+                    ]
+                )
+                literals.append(bitcast[DType.float64](Int64(output.min_count)))
+                node_dtypes.append(output.dtype)
+                slot_dtypes.append(output.dtype)
+                grouped_schema.append(_empty(output.name, output.dtype))
+                grouped_slots.append(next_slot)
+                next_slot += 1
+            steps.append(
+                RowStep(
+                    start,
+                    1 + len(group_keys) + len(aggregate_outputs),
+                    index_slot,
+                    False,
+                    0,
+                    0,
+                    False,
+                    True,
+                )
+            )
+            if node.maintain_order:
+                var order_start = len(literals)
+                code.extend(
+                    [Int64(ROW_SORT_KEY), Int64(first_slot), Int64(0), Int64(0)]
+                )
+                literals.append(0)
+                node_dtypes.append(DataType.INT64)
+                var gather_start = len(gathers)
+                for slot in grouped_slots:
+                    gathers.append(Int64(slot))
+                steps.append(
+                    RowStep(
+                        order_start,
+                        1,
+                        0,
+                        False,
+                        gather_start,
+                        len(grouped_slots),
+                        True,
+                        False,
+                    )
+                )
+            schema = grouped_schema^
+            slots = grouped_slots^
             continue
         if has_aggregate:
             if len(aggregate_outputs) != len(node.exprs):

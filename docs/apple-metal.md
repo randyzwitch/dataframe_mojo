@@ -85,6 +85,21 @@ execution. Decimal sums retain the CPU contract of Decimal128 accumulation
 and require CPU execution; Decimal128 storage is not yet supported by this
 row backend.
 
+Grouped aggregation supports multiple keys with minimum, maximum, count,
+length, and the supported integer sums. Null keys form a group; Float32 NaNs
+form one equality class, and signed zeros compare equal. `maintain_order=True`
+returns groups in first-seen order, while rows within each group retain their
+input order. The default group order is key order. Projections, filtering,
+sorting, further grouping, and final reductions can follow a grouped result
+without returning intermediate data to the CPU. Checked Int32/UInt32 grouped
+sums currently require terminal aggregation without head.
+
+The GPU sorts row indices, marks group boundaries, and builds group ranges.
+Each group reduction uses a 256-thread workgroup; GPU-produced dispatch
+arguments schedule only the observed groups. Preflight includes these arguments
+and all temporary slots. Grouping requires at least one key, matching the CPU
+API.
+
 Minimum and maximum preserve the input dtype, ignore nulls, and return null
 for empty or all-null inputs. NaNs order above numeric values, so maximum
 returns NaN if any valid value is NaN; minimum returns NaN only when every
@@ -107,7 +122,7 @@ use native encodings and support subnormals. This guard is conservative: a tiny 
 to zero can also require CPU execution. There is no arithmetic emulation or
 automatic retry after submission.
 
-Float64 inputs, floating sum/mean, and Int64/UInt64 sums require CPU execution. Their
+Float64 inputs, floating sum/mean, and Int64/UInt64 or duration sums require CPU execution. Their
 precision contracts need hardware types Apple GPUs do not supply. The backend
 does not emulate Float64 or wide integer accumulation. Forced accelerator
 execution rejects these statically unsupported plans before submission.

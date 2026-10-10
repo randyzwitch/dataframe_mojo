@@ -138,16 +138,30 @@ struct Layout {
     for (int64_t i = 0; i < r.input_count; ++i)
       keep(i);
     for (int64_t first = 0; first < r.step_count;) {
-      if (r.steps[first].filter == 2) {
+      if (r.steps[first].filter >= 2) {
         ends.push_back(first);
-        for (int64_t j = 0; j < r.steps[first].nodes; ++j)
-          keep(r.code[4 * (r.steps[first].start + j) + 1]);
+        auto &step = r.steps[first];
+        if (step.filter == 2) {
+          for (int64_t j = 0; j < step.nodes; ++j)
+            keep(r.code[4 * (step.start + j) + 1]);
+        } else {
+          keep(step.slot);
+          auto header = r.code + 4 * step.start;
+          keep(header[2]);
+          keep(header[3]);
+          for (int64_t j = 1; j < step.nodes; ++j) {
+            auto c = r.code + 4 * (step.start + j);
+            keep(c[1]);
+            if (c[0] == DFM_GROUP_OUTPUT)
+              keep(c[2]);
+          }
+        }
         ++first;
         continue;
       }
       int64_t end = first;
       while (end + 1 < r.step_count && !r.steps[end].filter &&
-             r.steps[end + 1].filter != 2)
+             r.steps[end + 1].filter < 2)
         ++end;
       ends.push_back(end);
       std::array<bool, 64> local{};
@@ -170,7 +184,7 @@ struct Layout {
 struct Shape {
   int64_t cap, packed, blocks, bitmap, matrix, validity, literal, outputBits,
       partial;
-  bool filter, order;
+  bool filter, order, grouped;
 };
 Shape validate(const DFMRequest &r, bool storage = false) {
   if (r.abi_version != DFM_ABI_VERSION)
@@ -231,8 +245,53 @@ Shape validate(const DFMRequest &r, bool storage = false) {
         (v.filter != 2 && v.slot < r.input_count) || v.slot < 0 ||
         v.slot >= r.slots || v.gather_start < 0 || v.gather_count < 0 ||
         add(v.gather_start, v.gather_count) > r.gather_count ||
-        (v.filter < 0 || v.filter > 2))
+        (v.filter < 0 || v.filter > 3))
       fail("Invalid Metal expression step");
+    if (v.filter == 3) {
+      if (!typed(r) || v.gather_count || v.nodes < 1)
+        fail("Invalid Metal group storage");
+      auto h = r.code + 4 * v.start;
+      if (h[0] != DFM_GROUP_HEADER || h[1] < 0 || h[1] >= v.nodes ||
+          h[2] < r.input_count || h[2] >= r.slots || h[3] < r.input_count ||
+          h[3] >= r.slots || h[2] == h[3] || h[2] == v.slot || h[3] == v.slot)
+        fail("Invalid Metal group header");
+      if (defined[v.slot] || defined[h[2]] || defined[h[3]] ||
+          slotType(r, v.slot) != DFM_INT64 || slotType(r, h[2]) != DFM_INT64 ||
+          slotType(r, h[3]) != DFM_INT64)
+        fail("Invalid Metal group temporary slots");
+      std::array<bool, 64> targets{};
+      for (int64_t j = 1; j < v.nodes; ++j) {
+        auto c = r.code + 4 * (v.start + j);
+        if (c[1] < 0 || c[1] >= r.slots || !defined[c[1]])
+          fail("Metal group references an undefined slot");
+        if (j <= h[1]) {
+          if (c[0] != DFM_GROUP_KEY || c[2] || c[3] ||
+              r.node_types[v.start + j] != slotType(r, c[1]))
+            fail("Invalid Metal group key");
+        } else {
+          if (c[0] != DFM_GROUP_OUTPUT || c[2] < r.input_count ||
+              c[2] >= r.slots || defined[c[2]] || targets[c[2]] ||
+              c[2] == v.slot || c[2] == h[2] || c[2] == h[3])
+            fail("Invalid Metal group output");
+          auto t = slotType(r, c[1]), out = slotType(r, c[2]);
+          bool count = c[3] == DFM_COUNT || c[3] == DFM_LEN,
+               extrema = c[3] == DFM_MIN || c[3] == DFM_MAX;
+          if (count ? out != DFM_INT64
+                    : (extrema ? out != t
+                               : (c[3] != DFM_SUM || !sumSupported(t) ||
+                                  out != sumType(t))))
+            fail("Unsupported Metal grouped reduction precision");
+          if (r.node_types[v.start + j] != out || r.literals[v.start + j] < 0)
+            fail("Invalid Metal group output metadata");
+          targets[c[2]] = true;
+        }
+      }
+      for (int64_t j = 0; j < r.slots; ++j)
+        defined[j] |= targets[j];
+      defined[v.slot] = defined[h[2]] = defined[h[3]] = true;
+      s.order = s.grouped = true;
+      continue;
+    }
     if (v.filter == 2) {
       if (!typed(r) || v.slot != 0)
         fail("Metal sort requires typed storage");
@@ -367,7 +426,8 @@ Shape validate(const DFMRequest &r, bool storage = false) {
                           : DFM_INT64))
         fail("Invalid Metal reduction dtype");
     }
-    if (storage && (r.rows || r.reductions) && (!v.values || !v.validity))
+    if (storage && (r.rows || r.reductions || s.grouped) &&
+        (!v.values || !v.validity))
       fail("Missing Metal output storage");
   }
   auto layout = Layout(r);
@@ -397,6 +457,8 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
     account(mul(s.cap, 4));
     account(mul(s.order ? s.cap : s.blocks, 4));
   }
+  if (s.grouped)
+    account(16);
   account(s.bitmap);
   account(s.literal);
   account(s.outputBits);
@@ -420,9 +482,11 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
     auto t = r.outputs[i].dtype;
     m.result_bytes =
         add(m.result_bytes,
-            r.reductions ? width(t) + 1
-                         : add(t == DFM_BOOL ? s.packed : mul(r.rows, width(t)),
-                               s.packed));
+            r.reductions
+                ? width(t) + 1
+                : add(t == DFM_BOOL ? s.packed
+                                    : mul(s.grouped ? s.cap : r.rows, width(t)),
+                      s.packed));
   }
   m.peak_bytes = add(m.shared_bytes, m.result_bytes);
   auto layout = Layout(r);
@@ -434,6 +498,8 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
       else
         for (int64_t stride = 1; stride < s.cap; stride *= 2)
           ++m.launches;
+      if (r.steps[i].filter == 3)
+        m.launches += 5;
       for (int64_t j = 0; j < r.steps[i].gather_count; ++j)
         m.launches +=
             layout.physical[r.gathers[r.steps[i].gather_start + j]] >= 0;
@@ -608,6 +674,105 @@ bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x0
   }
   return text;
 }
+std::string groupSource(const DFMRequest &r, const Layout &layout) {
+  std::string text;
+  for (int64_t i = 0; i < r.step_count; ++i) {
+    auto &step = r.steps[i];
+    if (step.filter != 3)
+      continue;
+    auto h = r.code + 4 * step.start;
+    auto keys = h[1];
+    auto name = std::to_string(i);
+    auto index = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
+    auto starts = std::to_string(layout.physical[h[2]]) + "UL*meta.z";
+    auto first = layout.physical[h[3]];
+    text += "bool group_equal" + name +
+            "(uint a,uint b,device const T *x,device const uchar *v,constant "
+            "uint4 &meta){";
+    for (int64_t j = 0; j < keys; ++j) {
+      auto c = r.code + 4 * (step.start + 1 + j);
+      auto slot = std::to_string(layout.physical[c[1]]) + "UL*meta.z";
+      auto type = std::to_string(slotType(r, c[1]));
+      text += "{ulong ai=" + slot + "+a,bi=" + slot +
+              "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return "
+              "false;if(av&&(extrema_better(x[ai],x[bi]," +
+              type + ",false)||extrema_better(x[bi],x[ai]," + type +
+              ",false)))return false;}";
+    }
+    text += "return true;}\n";
+    text +=
+        "kernel void group_mark" + name +
+        "(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],device const "
+        "uint *index[[buffer(2)]],constant uint4 &meta[[buffer(3)]],uint "
+        "row[[thread_position_in_grid]]){if(row>=meta.x)return;x[" +
+        index + "+row]=index[row];x[" + starts + "+row]=row==0||!group_equal" +
+        name + "(index[row-1],index[row],x,v,meta);v[" + starts + "+row]=1;}\n";
+    text +=
+        "kernel void group_offsets" + name +
+        "(device uint *blocks[[buffer(0)]],device uint4 "
+        "&meta[[buffer(1)]]){uint total=0;for(uint "
+        "i=0;i<(meta.x+255)/256;++i){uint "
+        "count=blocks[i];blocks[i]=total;total+=count;}meta.y=meta.x;meta.x=" +
+        std::string(keys ? "total" : "max(1U,total)") + ";}\n";
+    text += "kernel void group_starts" + name +
+            "(device T *x[[buffer(0)]],device const uchar "
+            "*v[[buffer(1)]],device const uint *rank[[buffer(2)]],device const "
+            "uint *blocks[[buffer(3)]],constant uint4 "
+            "&meta[[buffer(4)]],device uint *args[[buffer(5)]],uint "
+            "row[[thread_position_in_grid]]){if(row==0){args[0]=max(1U,meta.x);"
+            "args[1]=" +
+            std::to_string(step.nodes) + ";args[2]=1;if(meta.y==0)x[" + starts +
+            "]=0;}if(row>=meta.y)return;uint a=uint(x[" + index +
+            "+row]);if(row==0||!group_equal" + name + "(uint(x[" + index +
+            "+row-1]),a,x,v,meta))x[" + starts +
+            "+rank[row]+blocks[row/256]]=row;}\n";
+    // step.nodes = keys + aggregates + header; header corresponds to first-seen
+    // output.
+    text +=
+        "kernel void group_reduce" + name +
+        "(device const T *x[[buffer(0)]],device const uchar "
+        "*v[[buffer(1)]],device T *y[[buffer(2)]],device uchar "
+        "*w[[buffer(3)]],constant uint4 &meta[[buffer(4)]],device atomic_uint "
+        "*error[[buffer(5)]],device const T *lit[[buffer(6)]],uint2 "
+        "group[[threadgroup_position_in_grid]],uint "
+        "lane[[thread_index_in_threadgroup]]){if(group.x>=meta.x)return;uint "
+        "begin=uint(x[" +
+        starts + "+group.x]),end=group.x+1<meta.x?uint(x[" + starts +
+        "+group.x+1]):meta.y;Out o;long target;switch(group.y){";
+    text += "case 0:o={0,204,0,3};target=" + std::to_string(first) + ";break;";
+    for (int64_t j = 1; j < step.nodes; ++j) {
+      auto c = r.code + 4 * (step.start + j);
+      bool key = j <= keys;
+      auto target = layout.physical[key ? c[1] : c[2]];
+      text += "case " + std::to_string(j) + ":o={" +
+              std::to_string(layout.physical[c[1]]) + "," +
+              std::to_string(key ? -1 : c[3]) + ",long(lit[" +
+              std::to_string(step.start + j) + "])," +
+              std::to_string(slotType(r, c[1])) +
+              "};target=" + std::to_string(target) + ";break;";
+    }
+    text +=
+        R"MSL(default:return;}ulong to=ulong(target)*meta.z+group.x;
+ if(o.kind==-1){if(lane==0){uint row=uint(x[)MSL" +
+        index +
+        R"MSL(+begin]);y[to]=x[ulong(o.slot)*meta.z+row];w[to]=v[ulong(o.slot)*meta.z+row];}return;}
+ threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
+ bool first=o.kind==204,extrema=first||o.kind==80||o.kind==81;Out comparison=o;if(first)comparison.kind=80;
+ for(uint at=begin+lane;at<end;at+=256){uint row=uint(x[)MSL" +
+        index + R"MSL(+at]);ulong idx=ulong(o.slot)*meta.z+row;
+ if(first)extrema_merge(sum,count,long(row),long(row+1),comparison);
+ else if(v[idx]){if(extrema)extrema_merge(sum,count,long(x[idx]),long(row+1),comparison);else{++count;if(o.kind==10)sum+=long(x[idx]);}}}
+ sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
+ for(uint stride=128;stride;stride/=2){if(lane<stride){if(extrema){long a=sums[lane],b=counts[lane];extrema_merge(a,b,sums[lane+stride],counts[lane+stride],comparison);sums[lane]=a;counts[lane]=b;}else{sums[lane]+=sums[lane+stride];counts[lane]+=counts[lane+stride];}}threadgroup_barrier(mem_flags::mem_threadgroup);}
+ if(lane==0){sum=sums[0];count=counts[0];bool valid=extrema?count>0:count>=o.minimum;
+ if(o.kind==11){sum=count;valid=true;}if(o.kind==90){sum=end-begin;valid=true;}
+ if(o.kind==10&&valid&&((o.type==2&&(sum<(-2147483647L-1L)||sum>2147483647L))||(o.type==9&&(sum<0||ulong(sum)>4294967295UL))))atomic_fetch_min_explicit(error,0xF0000000U,memory_order_relaxed);
+ y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);}}
+)MSL";
+  }
+  return text;
+}
+
 std::string source(const DFMRequest &r) {
   auto layout = Layout(r);
   std::string text = "#include <metal_stdlib>\nusing namespace metal;\n#pragma "
@@ -739,6 +904,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
  if(row>=meta.x)return;ulong target=slot*meta.z+row,source=slot*meta.z+index[row];y[target]=x[source];w[target]=v[source];
 }
 )MSL";
+  text += groupSource(r, layout);
   if (typed(r))
     for (int64_t i = 0; i < r.input_count; ++i) {
       auto t = r.inputs[i].dtype;
@@ -758,14 +924,16 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
       text += "v[at]=p.w==ulong(-1)?1:uchar((bits[p.w+bit/8]>>(bit%8))&1); }\n";
     }
   for (int64_t i = 0; i < r.step_count; ++i)
-    if (r.steps[i].filter == 2) {
+    if (r.steps[i].filter >= 2) {
       auto &step = r.steps[i];
       auto name = std::to_string(i);
       text += "bool order_less" + name +
               "(uint a,uint b,device const T *x,device const uchar *v,constant "
               "uint4 &meta){";
-      for (int64_t j = 0; j < step.nodes; ++j) {
-        auto key = r.code + 4 * (step.start + j);
+      auto keyCount =
+          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes;
+      for (int64_t j = 0; j < keyCount; ++j) {
+        auto key = r.code + 4 * (step.start + j + (step.filter == 3));
         auto slot = std::to_string(layout.physical[key[1]]) + "UL*meta.z";
         text += "{ulong ai=" + slot + "+a,bi=" + slot +
                 "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return " +
@@ -800,7 +968,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
     }
   int64_t first = 0;
   for (auto end : layout.ends) {
-    if (r.steps[end].filter == 2) {
+    if (r.steps[end].filter >= 2) {
       first = end + 1;
       continue;
     }
@@ -1138,6 +1306,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     rank = b.make(mul(shape.cap, 4));
     blocks = b.make(mul(shape.order ? shape.cap : shape.blocks, 4));
   }
+  id<MTLBuffer> groupArgs = shape.grouped ? b.make(16) : nil;
   auto bitmap = b.make(shape.bitmap), literal = b.make(shape.literal),
        bits = b.make(shape.outputBits), partial = b.make(shape.partial);
   auto out = b.make(mul(r.output_count, 32)), meta = b.make(16),
@@ -1192,6 +1361,10 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     memcpy(&floating, r.literals + i, 8);
     auto op = r.code[4 * i];
     auto dtype = nodeType(r, i);
+    if (op == DFM_GROUP_OUTPUT) {
+      memcpy(static_cast<char *>(literal.contents) + i * 8, &integer, 8);
+      continue;
+    }
     if (dtype == DFM_FLOAT32) {
       float value = op == DFM_LITERAL_INT ? float(integer) : float(floating);
       if (typed(r)) {
@@ -1263,7 +1436,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   }
   for (auto i : layout.ends) {
     auto &step = r.steps[i];
-    if (step.filter == 2) {
+    if (step.filter >= 2) {
       auto orderA = rank, orderB = blocks;
       buffer(0, orderA);
       buffer(1, meta);
@@ -1278,6 +1451,48 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
         bytes(5, &span, 4);
         dispatch("order_merge" + std::to_string(i), shape.cap);
         std::swap(orderA, orderB);
+      }
+      if (step.filter == 3) {
+        auto name = std::to_string(i);
+        buffer(0, x);
+        buffer(1, v);
+        buffer(2, orderA);
+        buffer(3, meta);
+        dispatch("group_mark" + name, shape.cap);
+        auto h = r.code + 4 * step.start;
+        uint64_t flag = layout.physical[h[2]];
+        buffer(0, x);
+        buffer(1, v);
+        buffer(2, rank);
+        buffer(3, blocks);
+        buffer(4, meta);
+        bytes(5, &flag, 8);
+        dispatch("rank_rows", shape.cap, 1, true);
+        buffer(0, blocks);
+        buffer(1, meta);
+        dispatch("group_offsets" + name, 1);
+        buffer(0, x);
+        buffer(1, v);
+        buffer(2, rank);
+        buffer(3, blocks);
+        buffer(4, meta);
+        buffer(5, groupArgs);
+        dispatch("group_starts" + name, shape.cap);
+        buffer(0, x);
+        buffer(1, v);
+        buffer(2, y);
+        buffer(3, w);
+        buffer(4, meta);
+        buffer(5, arithmeticError);
+        buffer(6, literal);
+        [encoder setComputePipelineState:p->kernels.at("group_reduce" + name)];
+        [encoder dispatchThreadgroupsWithIndirectBuffer:groupArgs
+                                   indirectBufferOffset:0
+                                  threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        ++launches;
+        std::swap(x, y);
+        std::swap(v, w);
+        continue;
       }
       for (int64_t j = 0; j < step.gather_count; ++j) {
         auto physical = layout.physical[r.gathers[step.gather_start + j]];
@@ -1388,6 +1603,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
         int64_t((drain.command.GPUEndTime - drain.command.GPUStartTime) * 1e9);
   uint32_t fault = *static_cast<uint32_t *>(arithmeticError.contents);
   if (fault != UINT32_MAX) {
+    if (fault == 0xF0000000U)
+      fail("Integer overflow in Metal grouped sum");
     if (fault & 0x20000000u)
       fail("Metal unsupported [precision]: integer to Float32 double-rounding "
            "boundary requires CPU execution");
