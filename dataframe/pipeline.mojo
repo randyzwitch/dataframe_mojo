@@ -16,6 +16,7 @@ from std.atomic import Atomic
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer
 from std.sys import size_of
+from std.time import perf_counter_ns
 
 from .bool_column import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
@@ -50,6 +51,7 @@ from .frame import (
     concat,
 )
 from .indexed_reduce import _reduce_floats, _reduce_ints
+from .join_hash import PreparedHashIndex
 from .row_encode import encodable
 from .gather import can_filter_aligned_chunks, true_rows
 from .huge_pages import huge_list
@@ -64,6 +66,9 @@ comptime STEP_FILTER = 0
 comptime STEP_SELECT = 1
 comptime STEP_WITH_COLUMNS = 2
 comptime STEP_DROP = 3
+# A hash join against a build frame prepared before the pipeline runs
+# (the index is shared by every worker): the morsel is the probe side.
+comptime STEP_JOIN = 4
 # Hash parts of a worker's grouped state (DuckDB's radix bits): 16 tables
 # of a few thousand groups each while inserting; while collecting, one
 # gather per morsel and part, so few parts keep that cheap.
@@ -79,6 +84,14 @@ struct Step(Copyable, Movable):
     var kind: Int
     var exprs: List[Expr]
     var names: List[String]
+    # STEP_JOIN: the build frame and index (an offset into the lists the
+    # pipeline is given), the right keys (`names` are the left keys), the
+    # join kind, the suffix and whether keys coalesce.
+    var join: Int
+    var right_keys: List[String]
+    var how: Int
+    var suffix: String
+    var coalesce: Bool
 
 
 def _reads(exprs: List[Expr]) -> Optional[List[String]]:
@@ -275,13 +288,47 @@ struct Morsel(Movable):
         self.frame = DataFrame(kept^, height=height)
         self.compact = kept_compact^
 
-    def apply(mut self, step: Step, batch_size: Int) raises:
+    def join(
+        mut self,
+        step: Step,
+        joins: ArcPointer[List[DataFrame]],
+        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    ) raises:
+        """Probe the join's prepared index with this morsel's rows: the
+        output is the matched rows of both sides (DuckDB's `NextInnerJoin`
+        over one chunk; the probe runs on this worker alone)."""
+        var input = self.materialized()
+        var joined = input._join_impl(
+            joins[][step.join],
+            left_on=step.names,
+            right_on=step.right_keys,
+            how=step.how,
+            suffix=step.suffix,
+            coalesce=step.coalesce,
+            prepared=indexes[][step.join],
+            workers=0,
+        )
+        self.count = joined.height()
+        self.compact = List[Bool](length=joined.width(), fill=True)
+        self.frame = joined^
+        self.mask = BoolColumn(List[Bool]())
+        self.selected = False
+
+    def apply(
+        mut self,
+        step: Step,
+        batch_size: Int,
+        joins: ArcPointer[List[DataFrame]],
+        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    ) raises:
         if step.kind == STEP_FILTER:
             self.filter(step.exprs[0], batch_size)
         elif step.kind == STEP_SELECT:
             self.select(step.exprs, batch_size)
         elif step.kind == STEP_WITH_COLUMNS:
             self.with_columns(step.exprs, batch_size)
+        elif step.kind == STEP_JOIN:
+            self.join(step, joins, indexes)
         else:
             self.drop(step.names)
 
@@ -940,6 +987,9 @@ struct _PipelineJob(Job):
     # group is a view; one across two is copied when a kernel reads it).
     var ranges: ArcPointer[List[Int]]
     var steps: List[Step]
+    # Build frames and prepared indexes of the join steps, shared.
+    var joins: ArcPointer[List[DataFrame]]
+    var indexes: ArcPointer[List[Optional[PreparedHashIndex]]]
     var expressions: List[Expr]
     # Group keys of a grouped reduce sink (none: ungrouped or materialize).
     var keys: List[String]
@@ -971,6 +1021,8 @@ struct _PipelineJob(Job):
         cursor: Int,
         ranges: ArcPointer[List[Int]],
         steps: List[Step],
+        joins: ArcPointer[List[DataFrame]],
+        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
         expressions: List[Expr],
         keys: List[String],
         ordered: Bool,
@@ -981,6 +1033,8 @@ struct _PipelineJob(Job):
         self.cursor = cursor
         self.ranges = ranges.copy()
         self.steps = steps.copy()
+        self.joins = joins.copy()
+        self.indexes = indexes.copy()
         self.expressions = expressions.copy()
         self.keys = keys.copy()
         self.ordered = ordered
@@ -995,7 +1049,9 @@ struct _PipelineJob(Job):
         self.reduction = List[_StreamReduction]()
         self.grouped = List[_GroupedSink]()
         self.rows = 0
-        self.counts = List[Int](length=2 * len(steps) + 1, fill=0)
+        # Rows fed, then each step's rows in and out, then each step's
+        # busy nanoseconds on this worker.
+        self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
 
     def run(mut self) raises:
         var count = len(self.ranges[]) // 2
@@ -1010,7 +1066,13 @@ struct _PipelineJob(Job):
             self.counts[0] += length
             for i in range(len(self.steps)):
                 self.counts[2 * i + 1] += morsel.height()
-                morsel.apply(self.steps[i], self.batch_size)
+                var began = Int(perf_counter_ns())
+                morsel.apply(
+                    self.steps[i], self.batch_size, self.joins, self.indexes
+                )
+                self.counts[2 * len(self.steps) + 1 + i] += (
+                    Int(perf_counter_ns()) - began
+                )
                 self.counts[2 * i + 2] += morsel.height()
                 if morsel.height() == 0:
                     break
@@ -1265,6 +1327,8 @@ def _morsel_ranges(
 def run_pipeline(
     frame: DataFrame,
     steps: List[Step],
+    joins: ArcPointer[List[DataFrame]],
+    indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
     expressions: List[Expr],
     keys: List[String],
     ordered: Bool,
@@ -1287,14 +1351,19 @@ def run_pipeline(
         _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
     )
     var cursor = _Cursor.new()
-    var jobs = List[_PipelineJob](capacity=workers)
-    for _ in range(max(1, workers)):
+    # One job per morsel at most: a tiny source (PDS-H q2's five-row
+    # region frame) runs on the caller, with no crew dispatch to wait on.
+    var job_count = max(1, min(workers, len(ranges[]) // 2))
+    var jobs = List[_PipelineJob](capacity=job_count)
+    for _ in range(job_count):
         jobs.append(
             _PipelineJob(
                 shared,
                 cursor.address,
                 ranges,
                 steps,
+                joins,
+                indexes,
                 expressions,
                 keys,
                 ordered,
@@ -1308,7 +1377,7 @@ def run_pipeline(
         cursor.free()
         raise e
     cursor.free()
-    counts = List[Int](length=2 * len(steps) + 1, fill=0)
+    counts = List[Int](length=3 * len(steps) + 1, fill=0)
     for j in range(len(jobs)):
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
@@ -1321,7 +1390,7 @@ def run_pipeline(
             var empty = frame.clear()
             for step in steps:
                 var morsel = Morsel(empty.copy(), 0)
-                morsel.apply(step, batch_size)
+                morsel.apply(step, batch_size, joins, indexes)
                 empty = morsel.materialized()
             return _StreamReduction(empty, expressions, keys).finish()
         if jobs[sink].grouped[0].collecting:
@@ -1368,7 +1437,10 @@ def run_pipeline(
                     swap(rows, jobs[j].grouped[0].collected)
                     while len(rows) > 0:
                         collected.append(rows.pop(0))
-                whole = concat(collected)
+                # One chunk per column (merged in parallel): the
+                # partitioned group-by copies chunked keys per chunk
+                # (#478), and the morsels' outputs are many small ones.
+                whole = concat(collected).rechunk()
             return whole.group_by(keys, maintain_order=ordered).agg(expressions)
         # Each worker's parts, part by part across the workers; every
         # worker splits into hash parts when any did.
@@ -1412,7 +1484,7 @@ def run_pipeline(
             var empty = frame.clear()
             for step in steps:
                 var morsel = Morsel(empty.copy(), 0)
-                morsel.apply(step, batch_size)
+                morsel.apply(step, batch_size, joins, indexes)
                 empty = morsel.materialized()
             return _StreamReduction(empty, expressions, List[String]()).finish()
         return merged[0].finish()
@@ -1437,7 +1509,7 @@ def run_pipeline(
         var empty = frame.clear()
         for step in steps:
             var morsel = Morsel(empty.copy(), 0)
-            morsel.apply(step, batch_size)
+            morsel.apply(step, batch_size, joins, indexes)
             empty = morsel.materialized()
         return empty^
     if len(parts) == 1:
