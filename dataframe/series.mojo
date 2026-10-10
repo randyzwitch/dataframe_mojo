@@ -475,6 +475,28 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
             whole._name, Column[Int128](values=values^, bits=bits^)
         ).with_dtype(DataType.decimal(dtype.precision(), dtype.scale()))
 
+    def _decimal64(self) raises -> Self:
+        """A decimal32 column widened to decimal64 with the same precision,
+        scale and nulls; anything else as it is. The decimal64 kernels
+        (typed compares, dense arithmetic) then cover it, where widening
+        to 128 bits sent it down the per-row path (TPC-DS decimal q13:
+        1.34x the DOUBLE variant)."""
+        var dtype = self.dtype()
+        if not dtype.is_decimal() or dtype.decimal_width() != 32:
+            return self.copy()
+        var whole = self.rechunk() if self.is_chunked() else self.copy()
+        var n = len(whole)
+        var values = List[Int64](unsafe_uninit_length=n)
+        var out = values.unsafe_ptr()
+        ref column = whole._data[Column[Int32]]
+        var source = column._ptr()
+        for i in range(n):
+            out[unsafe_offset=i] = Int64(source[unsafe_offset=i])
+        var bits = _copy_validity(column._bits[], column._offset, n)
+        return Self(
+            whole._name, Column[Int64](values=values^, bits=bits^)
+        ).with_dtype(DataType.decimal(dtype.precision(), dtype.scale(), 64))
+
     def _storage_dtype(self) -> DataType:
         """The physical DataType of the stored column."""
         comptime for i in range(len(NUMERIC_DTYPES)):
