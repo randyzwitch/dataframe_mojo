@@ -92,5 +92,55 @@ def test_rows_keep_their_width() raises:
     assert_equal(back.get(2).float64(), 0.3)
 
 
+def decimals(
+    name: String,
+    raw: List[Int],
+    valid: List[Bool],
+    scale: Int,
+    precision: Int = 38,
+) raises -> Series:
+    """A decimal(precision, scale) column of raw scaled values."""
+    var values = List[Int128]()
+    for v in raw:
+        values.append(Int128(v))
+    return Series(name, Column[Int128](values^, valid.copy())).with_dtype(
+        DataType.decimal(precision, scale)
+    )
+
+
+def test_running_sums_are_exact_decimals() raises:
+    # Running sums of a decimal column are exact at its scale and typed as
+    # SQL's SUM of it, at every width: decimal32 and decimal64 widen to
+    # decimal(38, scale), nulls are skipped and stay null.
+    var df = prices()
+    var sums = df.select_exprs(
+        [
+            col("price").cum_sum().alias("all"),
+            col("price").cum_sum().over("k").alias("by_k"),
+            col("price").cum_sum(reverse=True).alias("back"),
+            col("qty").cum_sum().alias("qty"),
+            col("price").cast(DataType.decimal(20, 2)).cum_sum().alias("wide"),
+        ]
+    )
+    var valid: List[Bool] = [True, True, True, True, False]
+    var every: List[Bool] = [True, True, True, True, True]
+    var expected = DataFrame(
+        [
+            decimals("all", [1999, 1749, 101749, 103748, 0], valid, 2),
+            decimals("by_k", [1999, -250, 101999, 103998, 0], valid, 2),
+            decimals("back", [103748, 101749, 101999, 1999, 0], valid, 2),
+            decimals("qty", [15, 22, 25, 40, 41], every, 1),
+            # decimal128 keeps its type, as its sum does.
+            decimals("wide", [1999, 1749, 101749, 103748, 0], valid, 2, 20),
+        ]
+    )
+    assert_true(sums.equals(expected))
+    # Windows that are not sums take the decimal values as Float64.
+    var means = df.select_exprs([col("price").rolling_mean(2).alias("m")])
+    assert_equal(means.column("m").dtype(), DataType.FLOAT64)
+    with assert_raises(contains="rolling_sum over a decimal"):
+        _ = df.select_exprs([col("price").rolling_sum(2)])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
