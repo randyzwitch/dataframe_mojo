@@ -13,6 +13,12 @@ enum DFMType {
   DFM_INT32 = 2,
   DFM_INT64 = 3,
   DFM_BOOL = 4,
+  DFM_INT8 = 5,
+  DFM_INT16 = 6,
+  DFM_UINT8 = 7,
+  DFM_UINT16 = 8,
+  DFM_UINT32 = 9,
+  DFM_UINT64 = 10,
 };
 
 // Fixed native opcodes. The Mojo wrapper translates the shared expression IR

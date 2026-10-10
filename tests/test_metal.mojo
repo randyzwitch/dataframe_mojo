@@ -158,6 +158,84 @@ def test_native_integer_precision_and_empty_results() raises:
     )
 
 
+def _native_extended_integer[D: DType]() raises:
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series(
+                "x",
+                Column[Scalar[D]](
+                    [
+                        Scalar[D](0),
+                        Scalar[D](1),
+                        Scalar[D](2),
+                        Scalar[D](3),
+                        Scalar[D](4),
+                    ],
+                    [True, False, True, True, True],
+                ),
+            )
+        ]
+    ).slice(1, 4)
+    var query = (
+        frame.lazy()
+        .filter(col("x") > lit(Scalar[D](2)))
+        .select_exprs(
+            [
+                (col("x") + lit(Scalar[D](1))).alias("y"),
+                (col("x") == lit(Scalar[D](3))).alias("flag"),
+            ]
+        )
+    )
+    assert_true(
+        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
+    var count = frame.lazy().select_exprs(
+        [col("x").count().alias("n"), col("x").len().alias("l")]
+    )
+    assert_true(
+        count.collect(accelerator=runtime).equals(count.collect(engine="cpu"))
+    )
+    comptime if D != DType.uint64:
+        var sum = frame.lazy().select(col("x").sum())
+        assert_true(
+            sum.collect(accelerator=runtime).equals(sum.collect(engine="cpu"))
+        )
+    var empty = frame.head(0).lazy().select(col("x"))
+    assert_true(
+        empty.collect(accelerator=runtime).equals(empty.collect(engine="cpu"))
+    )
+
+
+def test_native_extended_integer_widths() raises:
+    if not metal_installed():
+        return
+    _native_extended_integer[DType.int8]()
+    _native_extended_integer[DType.int16]()
+    _native_extended_integer[DType.uint8]()
+    _native_extended_integer[DType.uint16]()
+    _native_extended_integer[DType.uint32]()
+    _native_extended_integer[DType.uint64]()
+    var runtime = MetalRuntime()
+    var wide = DataFrame(
+        [Series("x", Column[UInt64]([UInt64.MAX, UInt64.MAX - 1]))]
+    )
+    var query = wide.lazy().select_exprs(
+        [col("x"), (col("x") == lit(UInt64.MAX)).alias("eq")]
+    )
+    assert_true(
+        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
+    with assert_raises(contains="overflow"):
+        _ = (
+            wide.lazy()
+            .select(col("x") + lit(UInt64(1)))
+            .collect(accelerator=runtime)
+        )
+    with assert_raises(contains="exact wide accumulation"):
+        _ = wide.lazy().select(col("x").sum()).collect(accelerator=runtime)
+
+
 def main() raises:
     var suite = TestSuite.discover_tests[__functions_in_module()]()
     suite^.run()
