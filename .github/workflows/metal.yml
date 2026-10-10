@@ -1,0 +1,37 @@
+name: Native Metal
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/metal.yml'
+      - 'native/dfmetal/**'
+      - 'dataframe/metal.mojo'
+      - 'dataframe/_accel_provider.mojo'
+      - 'dataframe/accelerator/**'
+      - 'tests/test_metal.mojo'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/metal.yml'
+      - 'native/dfmetal/**'
+      - 'dataframe/metal.mojo'
+      - 'dataframe/_accel_provider.mojo'
+      - 'dataframe/accelerator/**'
+      - 'tests/test_metal.mojo'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-metal:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build optional native runtime
+        run: bash native/dfmetal/build.sh
+      - name: Validate native ABI and execute when a GPU is exposed
+        # Hosted VMs may expose no Metal device. The suite still validates the
+        # ABI and pure preflight, and explicitly reports execution as skipped.
+        run: python3 native/dfmetal/test_native.py
