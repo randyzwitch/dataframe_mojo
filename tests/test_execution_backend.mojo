@@ -27,6 +27,9 @@ def test_cpu_and_auto_preserve_query_results() raises:
         assert_true(plan.fetch(1, engine=engine).equals(expected))
     assert_equal(plan.explain(), plan.explain(engine="auto"))
     assert_true("ENGINE cpu: auto uses CPU" in plan.explain(engine="auto"))
+    # Automatic diagnostics prepend a decision without changing the CPU plan.
+    assert_true(plan.explain().endswith(plan.explain(engine="cpu")))
+    assert_true(not plan.explain(engine="cpu").startswith("ENGINE "))
 
 
 def test_unavailable_backend_rejected_before_reading_source() raises:
