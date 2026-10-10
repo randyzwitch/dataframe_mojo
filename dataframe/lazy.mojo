@@ -1915,9 +1915,11 @@ struct LazyFrame(Copyable):
         optimize: Bool = True,
         streaming: Bool = True,
         batch_size: Int = 65536,
-        engine: String = "auto",
+        engine: String = "cpu",
     ) raises -> String:
-        """The (optimized) plan, one operator per line, root first.
+        """The (optimized) plan, one operator per line, root first. With
+        `engine="auto"` (what `collect` uses), an `ENGINE` line naming the
+        selected engine and why comes first.
 
         Streaming annotations show batch-capable operators, aggregate state
         and materialization boundaries. streaming=False omits annotations.
