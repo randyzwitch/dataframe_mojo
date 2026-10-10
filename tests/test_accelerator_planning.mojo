@@ -370,5 +370,25 @@ def test_additional_row_operators_are_backend_opt_in() raises:
         )
 
 
+def test_sort_lowering_is_backend_opt_in() raises:
+    var frame = DataFrame(
+        [
+            Series("x", Column[Int32]([2, 1])),
+            Series("id", Column[Int64]([0, 1])),
+        ]
+    )
+    var query = frame.lazy().sort("x").select(col("id"))
+    with assert_raises(contains="row-local steps"):
+        _ = lower_rows(query)
+    var native = RowCapabilities("native", mixed_types=True, order=True)
+    var plan = lower_rows(query, native)
+    assert_true(plan.steps[0].order)
+    assert_equal(plan.steps[0].nodes, 1)
+    assert_equal(plan.steps[0].gather_count, 2)
+    assert_equal(plan.outputs[0].dtype, DataType.INT64)
+    with assert_raises(contains="Unknown column"):
+        _ = lower_rows(frame.lazy().sort("missing"), native)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
