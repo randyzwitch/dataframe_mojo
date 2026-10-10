@@ -190,7 +190,17 @@ once. The main thread does no per-morsel work.
   worker's morsels by hash and builds per partition (Polars'
   `BuildState`), and a probe-side selection instead of a gather for
   joins that keep most rows.
-- **Top-k and sort**: thread-local heaps or sorted runs, combined once.
+- **Top-k**: each thread keeps its morsels' output rows as candidates and
+  folds them to the k best once they pass a few thousand rows; after a
+  fold it publishes its k-th first-key value into a bound shared by
+  every thread through two atomics, and before each morsel adopts the
+  tightest, narrowing the morsel to the rows that can still enter the
+  top k when at most one in eight can (DuckDB's top-n heap boundary
+  shared across threads). Candidates carry their place in the source as
+  a hidden last sort key, so ties come out as a stable sort of the whole
+  input would place them; the finish sorts all threads' candidates once.
+- **Sort**: still the materialize sink followed by the eager sort; sorted
+  runs per thread merged once remain to do.
 - **Unique**: a hash aggregate with no reductions.
 
 ### Order
