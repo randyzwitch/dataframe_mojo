@@ -886,11 +886,15 @@ struct PreparedHashIndex(Copyable):
             distance //= self.stride
         return Int(distance) if distance < UInt64(right_count) else -1
 
-    def probe(self, left_keys: List[Series]) raises -> _HashIndex:
+    def probe(
+        self, left_keys: List[Series], workers: Int = 0
+    ) raises -> _HashIndex:
+        """The probe of `left_keys`, split over `workers` ranges (0: by
+        the row count; 1 on a pipeline worker, where the crew is busy)."""
         var left = List[Series](capacity=len(left_keys))
         for key in left_keys:
             left.append(key.rechunk() if key.is_chunked() else key.copy())
-        var workers = worker_count(len(left[0]))
+        var lanes = workers if workers > 0 else worker_count(len(left[0]))
         if len(left) == 1 and _is_int_key(left[0]):
             # Hash fixed-width probe keys as they are read by the workers.
             # No row-sized hash buffer or separate hashing/histogram pass.
@@ -900,16 +904,16 @@ struct PreparedHashIndex(Copyable):
                 ArcPointer(List[UInt64]()),
                 self.indexes.copy(),
                 self.fold,
-                workers,
+                lanes,
             )
-        var hashes = Partitioner(left, workers)
+        var hashes = Partitioner(left, lanes)
         return _HashIndex(
             left^,
             self.right.copy(),
             ArcPointer(hashes^.into_hashes()),
             self.indexes.copy(),
             self.fold,
-            workers,
+            lanes,
         )
 
 
@@ -1079,7 +1083,10 @@ def direct_hash_semi_anti_rows(
 
 
 def prepared_hash_semi_anti_rows(
-    left_keys: List[Series], prepared: PreparedHashIndex, keep_matches: Bool
+    left_keys: List[Series],
+    prepared: PreparedHashIndex,
+    keep_matches: Bool,
+    workers: Int = 0,
 ) raises -> List[Int]:
     if prepared.progression:
         trace_path("join.progression_membership")
@@ -1098,7 +1105,7 @@ def prepared_hash_semi_anti_rows(
             if matched == keep_matches:
                 rows.append(i)
         return rows^
-    var index = prepared.probe(left_keys)
+    var index = prepared.probe(left_keys, workers)
     var bounds = partitions(len(index.left[0]), index.workers, 1)
     var jobs = List[_HashProbeJob](capacity=index.workers)
     for worker in range(index.workers):
@@ -1218,6 +1225,7 @@ def prepared_hash_join_rows(
     prepared: PreparedHashIndex,
     include_unmatched: Bool,
     omit_identity: Bool = False,
+    workers: Int = 0,
 ) raises -> Tuple[List[Int], List[Int], Bool]:
     if prepared.progression:
         trace_path("join.progression_prepared")
@@ -1237,11 +1245,11 @@ def prepared_hash_join_rows(
                 left_rows.append(i)
                 right_rows.append(first)
         return (left_rows^, right_rows^, False)
-    var index = prepared.probe(left_keys)
-    var workers = index.workers
-    var bounds = partitions(len(index.left[0]), workers, 1)
-    var jobs = List[_HashProbeJob](capacity=workers)
-    for worker in range(workers):
+    var index = prepared.probe(left_keys, workers)
+    var lanes = index.workers
+    var bounds = partitions(len(index.left[0]), lanes, 1)
+    var jobs = List[_HashProbeJob](capacity=lanes)
+    for worker in range(lanes):
         jobs.append(
             _HashProbeJob(
                 index.left,

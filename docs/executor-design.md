@@ -176,10 +176,20 @@ once. The main thread does no per-morsel work.
   strings under a filter or projection still takes the eager route; the
   fix is a row-layout key store with the strings' bytes, as DuckDB's
   aggregate hash table keeps them.
-- **Hash join build**: each thread appends its morsels' key and payload
-  rows to a local collection partitioned by hash; the table is built per
-  partition over all threads' rows (`_HashBuildJob` over the partition),
-  as Polars' `BuildState` does. The probe operator reads it.
+- **Hash join**: the build side is a sub-plan collected before the
+  pipeline runs (its own pipelines), rechunked once, and indexed with
+  `prepare_hash_index` (parallel over buckets); the index is shared by
+  every worker. The probe is a step: a worker probes the index with its
+  morsel's rows on its own thread and gathers the matched rows of both
+  sides in one piece, which is the next step's morsel (DuckDB's
+  `PhysicalHashJoin::ExecuteInternal` on one chunk, Polars' probe task).
+  Inner, left, semi and anti joins run this way under every sink except
+  a grouped sink that must keep first-occurrence order, since a morsel's
+  output rows carry no unique position in the join's left-major order.
+  Still to do from the design: a build sink that partitions each
+  worker's morsels by hash and builds per partition (Polars'
+  `BuildState`), and a probe-side selection instead of a gather for
+  joins that keep most rows.
 - **Top-k and sort**: thread-local heaps or sorted runs, combined once.
 - **Unique**: a hash aggregate with no reductions.
 

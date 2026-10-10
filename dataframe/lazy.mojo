@@ -40,6 +40,7 @@ from .parquet import _ParquetBatches
 from .pipeline import (
     STEP_DROP,
     STEP_FILTER,
+    STEP_JOIN,
     STEP_SELECT,
     STEP_WITH_COLUMNS,
     Step,
@@ -964,8 +965,12 @@ def _filter_keeps(
     return Optional(names^)
 
 
-def _pipeline_steps(operations: List[PlanNode]) -> Bool:
-    """Whether every operation is a row-local step a pipeline runs."""
+def _pipeline_steps(
+    operations: List[PlanNode], indexes: List[Optional[PreparedHashIndex]]
+) -> Bool:
+    """Whether every operation is a step a pipeline runs: a row-local
+    step, or an inner, left, semi or anti join whose build index was
+    prepared (its morsels probe the shared index on their own worker)."""
     for node in operations:
         if (
             node.kind == FILTER
@@ -973,6 +978,11 @@ def _pipeline_steps(operations: List[PlanNode]) -> Bool:
             or node.kind == WITH_COLUMNS
         ):
             if not _row_local(node.exprs):
+                return False
+        elif node.kind == JOIN:
+            if node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]:
+                return False
+            if node.offset >= len(indexes) or not indexes[node.offset]:
                 return False
         elif node.kind != DROP:
             return False
@@ -989,7 +999,20 @@ def _steps_of(operations: List[PlanNode]) -> List[Step]:
             kind = STEP_SELECT
         elif node.kind == WITH_COLUMNS:
             kind = STEP_WITH_COLUMNS
-        steps.append(Step(kind, node.exprs.copy(), node.names.copy()))
+        elif node.kind == JOIN:
+            kind = STEP_JOIN
+        steps.append(
+            Step(
+                kind,
+                node.exprs.copy(),
+                node.names.copy(),
+                node.offset,
+                node.right_keys.copy(),
+                node.how,
+                node.names2[0] if len(node.names2) > 0 else String(""),
+                node.coalesce,
+            )
+        )
     return steps^
 
 
@@ -2210,6 +2233,15 @@ struct LazyFrame(Copyable):
                         )
                         plan._nodes[cursor].right = len(plan._nodes) - 1
                     return plan._execute(index, False, True, batch_size)
+                # The build frame in one chunk per column, once: a probe
+                # gathers the build's payload through `take_parallel`,
+                # which rechunks a chunked column every time it is
+                # called, once per morsel or batch (PDS-H q2's 159K-row
+                # build with five string columns: 3.8 ms a probe).
+                for column in built._columns:
+                    if column.is_chunked():
+                        built = built.rechunk()
+                        break
                 joins.append(built^)
                 if not prepared and node.how != JOIN_CROSS and len(node.names):
                     ref build = joins[len(joins) - 1]
@@ -2274,14 +2306,18 @@ struct LazyFrame(Copyable):
         # thread-owned pipeline (#538), grouped or not, unless the
         # reduction counts distinct values (per-group sets, which the
         # eager partitioned group-by handles on every worker, #336).
+        # Joins run in the pipeline as probe steps; a grouped sink that
+        # must keep first-occurrence order does not take them, since a
+        # morsel's output rows carry no unique position in the join's
+        # left-major order.
         var piped = (
             self._nodes[cursor].kind == SCAN_FRAME
-            and len(joins) == 0
             and top < 0
             and limit < 0
             and skip == 0
-            and _pipeline_steps(operations)
+            and _pipeline_steps(operations, indexes)
             and not _counts_distinct(expressions)
+            and (len(joins) == 0 or len(keys) == 0 or not ordered)
         )
         # A grouped sink either inserts rows into per-worker group tables
         # (few groups among 4,096 sampled key rows, fixed-width keys) or
@@ -2308,10 +2344,20 @@ struct LazyFrame(Copyable):
             for name in used:
                 if not fixed:
                     break
-                if name not in source_frame.columns():
-                    # Made by a step: its dtype is not known here.
-                    continue
-                var dtype = source_frame.column(name).dtype()
+                var dtype = DataType.INT64
+                if name in source_frame.columns():
+                    dtype = source_frame.column(name).dtype()
+                else:
+                    # A join's build column, or made by a step (then its
+                    # dtype is not known here).
+                    var found = False
+                    for build in joins:
+                        if name in build.columns():
+                            dtype = build.column(name).dtype()
+                            found = True
+                            break
+                    if not found:
+                        continue
                 if (
                     dtype.is_nested()
                     or dtype.is_decimal()
@@ -2577,6 +2623,8 @@ struct LazyFrame(Copyable):
             var piped_result = run_pipeline(
                 input,
                 _steps_of(operations),
+                shared_joins,
+                shared_indexes,
                 expressions,
                 keys,
                 ordered,
@@ -2595,6 +2643,7 @@ struct LazyFrame(Copyable):
                         "pipeline",
                         piped_counts[2 * k + 1],
                         piped_counts[2 * k + 2],
+                        busy_ns=piped_counts[2 * len(operations) + 1 + k],
                     )
                     into_terminal = piped_counts[2 * k + 2]
                 var wall = Int(perf_counter_ns()) - began

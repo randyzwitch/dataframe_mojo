@@ -74,6 +74,7 @@ from .aggregate import Reducer
 from .sampling import sample_size, sample_indices
 from .mask_filter import filter_columns
 from .gather import (
+    _RechunkJob,
     SORTED_GATHER_MIN_CHUNKS,
     take_parallel,
     take_sorted_chunked,
@@ -274,10 +275,27 @@ struct DataFrame(Copyable, Sized, Writable):
         self._height = inferred
 
     def rechunk(self) raises -> Self:
-        """Return one contiguous array per column, copying only chunked data."""
+        """Return one contiguous array per column, copying only chunked
+        data; chunked columns merge in parallel, one job each (a 159K-row
+        join build with five string columns: 1 ms serial)."""
+        var jobs = List[_RechunkJob]()
+        var at = List[Int]()
+        for c in range(self.width()):
+            if self._columns[c].is_chunked():
+                jobs.append(_RechunkJob(self._columns[c]))
+                at.append(c)
+        if len(jobs) > 1:
+            run_jobs(jobs)
+        elif len(jobs) == 1:
+            jobs[0].run()
         var columns = List[Series](capacity=self.width())
-        for column in self._columns:
-            columns.append(column.rechunk())
+        var next = 0
+        for c in range(self.width()):
+            if next < len(at) and at[next] == c:
+                columns.append(jobs[next].result.copy())
+                next += 1
+            else:
+                columns.append(self._columns[c].copy())
         return Self(columns^, height=self._height)
 
     def height(self) -> Int:
@@ -1569,6 +1587,7 @@ struct DataFrame(Copyable, Sized, Writable):
         prepared: Optional[PreparedHashIndex] = None,
         range_filtered: Bool = False,
         keep_order: Bool = True,
+        workers: Int = 0,
     ) raises -> Self:
         """`keep_order=False` lets an inner join emit its pairs in whatever
         order its probe produced them, for a caller whose consumers ignore
@@ -1735,16 +1754,24 @@ struct DataFrame(Copyable, Sized, Writable):
             var sources = List[Series](capacity=len(left_keys))
             for k in left_keys:
                 sources.append(self._columns[k].copy())
+            # `workers` > 0 fixes the probe and gather lanes: a pipeline
+            # worker joins its morsel alone, and gathers in one piece, so
+            # no later merge of per-lane string pieces (PDS-H q2: 13.9 ms
+            # against 11.6 with lanes per morsel).
             if how == JOIN_SEMI or how == JOIN_ANTI:
                 return self._filter_rows(
                     prepared_hash_semi_anti_rows(
-                        sources, prepared.value(), how == JOIN_SEMI
+                        sources, prepared.value(), how == JOIN_SEMI, workers
                     )
                 )
             var pairs = prepared_hash_join_rows(
-                sources, prepared.value(), how == JOIN_LEFT, omit_identity=True
+                sources,
+                prepared.value(),
+                how == JOIN_LEFT,
+                omit_identity=True,
+                workers=workers,
             )
-            var workers = worker_count(len(pairs[1]))
+            var lanes = workers if workers > 0 else worker_count(len(pairs[1]))
             var columns = self._columns.copy()
             var identity = pairs[2] or len(pairs[0]) == self.height()
             if identity and not pairs[2]:
@@ -1761,7 +1788,7 @@ struct DataFrame(Copyable, Sized, Writable):
             swap(right_rows, pairs[1])
             if not identity:
                 columns = take_parallel(
-                    columns^, left_rows^, workers, or_null=False
+                    columns^, left_rows^, lanes, or_null=False
                 )
             var right_sources = List[Series]()
             for c in right_output:
@@ -1769,7 +1796,7 @@ struct DataFrame(Copyable, Sized, Writable):
             var gathered = take_parallel(
                 right_sources,
                 right_rows^,
-                workers,
+                lanes,
                 or_null=how == JOIN_LEFT,
             )
             for k in range(len(right_output)):

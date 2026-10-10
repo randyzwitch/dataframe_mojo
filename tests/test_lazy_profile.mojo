@@ -61,7 +61,7 @@ def test_streaming_join_builds_once_and_counts_rows() raises:
             joins += 1
             assert_equal(report.item(r, "builds").int64(), 1)
             assert_equal(report.item(r, "executions").int64(), 1)
-            assert_equal(report.item(r, "executor").string(), "streaming")
+            assert_equal(report.item(r, "executor").string(), "pipeline")
             assert_equal(report.item(r, "build_side").string(), "right")
             assert_true(
                 report.item(r, "algorithm").string()
