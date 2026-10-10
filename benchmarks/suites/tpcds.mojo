@@ -1009,6 +1009,292 @@ def q66_warehouse_months(
     )
 
 
+def q47_neighbours(
+    t: Dict[String, DataFrame],
+    sales: String,
+    prefix: String,
+    place: String,
+    sales_key: String,
+    place_key: String,
+    names: List[String],
+) raises -> LazyFrame:
+    """Monthly sales of a category, brand and place around 1999 (q47, q57),
+    with the year's monthly average and the months ranked within the
+    place; each 1999 month beside the one ranked before and after it, kept
+    when it is more than 10% off the average. Adds `diff`, the first sort
+    key."""
+    var keys: List[String] = ["i_category", "i_brand"]
+    for name in names:
+        keys.append(name)
+    var year_keys = keys.copy()
+    year_keys.append("d_year")
+    var group_keys = year_keys.copy()
+    group_keys.append("d_moy")
+    var months = (
+        t["item"]
+        .lazy()
+        .join(
+            t[sales].lazy(),
+            left_on=["i_item_sk"],
+            right_on=[prefix + "_item_sk"],
+        )
+        .join(
+            t["date_dim"]
+            .lazy()
+            .filter(
+                (col("d_year") == lit(Int64(1999)))
+                | (
+                    (col("d_year") == lit(Int64(1998)))
+                    & (col("d_moy") == lit(Int64(12)))
+                )
+                | (
+                    (col("d_year") == lit(Int64(2000)))
+                    & (col("d_moy") == lit(Int64(1)))
+                )
+            )
+            .select(["d_date_sk", "d_year", "d_moy"]),
+            left_on=[prefix + "_sold_date_sk"],
+            right_on=["d_date_sk"],
+        )
+        .join(
+            t[place].lazy(),
+            left_on=[sales_key],
+            right_on=[place_key],
+        )
+        .group_by(group_keys)
+        .agg([col(prefix + "_sales_price").sum(min_count=1).alias("sum_sales")])
+        .with_columns(
+            [
+                col("sum_sales")
+                .cast(DataType.FLOAT64)
+                .mean()
+                .over(year_keys)
+                .alias("avg_monthly_sales"),
+                # ORDER BY d_year, d_moy as one key: months are 1 to 12.
+                (col("d_year") * lit(Int64(100)) + col("d_moy"))
+                .rank(method="min")
+                .over(keys)
+                .alias("rn"),
+            ]
+        )
+    )
+    var lag_keys = List[String]()
+    var lead_keys = List[String]()
+    var lag = List[Expr]()
+    var lead = List[Expr]()
+    for key in keys:
+        lag_keys.append("lag_" + key)
+        lead_keys.append("lead_" + key)
+        lag.append(col(key).alias("lag_" + key))
+        lead.append(col(key).alias("lead_" + key))
+    lag_keys.append("lag_rn")
+    lead_keys.append("lead_rn")
+    lag.append((col("rn") + lit(Int64(1))).alias("lag_rn"))
+    lead.append((col("rn") - lit(Int64(1))).alias("lead_rn"))
+    lag.append(col("sum_sales").alias("psum"))
+    lead.append(col("sum_sales").alias("nsum"))
+    var rank_keys = keys.copy()
+    rank_keys.append("rn")
+    var sales_value = col("sum_sales").cast(DataType.FLOAT64)
+    var shown = List[Expr]()
+    for key in group_keys:
+        shown.append(col(key))
+    shown.append(col("avg_monthly_sales"))
+    shown.append(col("sum_sales"))
+    shown.append(col("psum"))
+    shown.append(col("nsum"))
+    shown.append((sales_value - col("avg_monthly_sales")).alias("diff"))
+    return (
+        months.join(
+            months.select_exprs(lag), left_on=rank_keys, right_on=lag_keys
+        )
+        .join(months.select_exprs(lead), left_on=rank_keys, right_on=lead_keys)
+        .filter(
+            (col("d_year") == lit(Int64(1999)))
+            & (col("avg_monthly_sales") > lit(0.0))
+            & (
+                (sales_value - col("avg_monthly_sales")).abs()
+                / col("avg_monthly_sales")
+                > lit(0.1)
+            )
+        )
+        .select_exprs(shown)
+    )
+
+
+def q47_sorted(
+    frame: LazyFrame, names: List[String], diff_nulls_first: Bool
+) raises -> LazyFrame:
+    """Sort by `diff`, then the shown columns (nulls last), and show those."""
+    var by: List[String] = ["diff"]
+    for name in names:
+        by.append(name)
+    var nulls_last = List[Bool](length=len(by), fill=True)
+    nulls_last[0] = not diff_nulls_first
+    return (
+        frame.sort(
+            by,
+            descending=List[Bool](length=len(by), fill=False),
+            nulls_last=nulls_last,
+        )
+        .head(100)
+        .select(names)
+    )
+
+
+def q49_channel(
+    t: Dict[String, DataFrame],
+    channel: String,
+    sales: String,
+    returns: String,
+    sale_keys: List[String],
+    return_keys: List[String],
+    s: String,
+    r: String,
+    returned_amount: String,
+) raises -> LazyFrame:
+    """One channel's items (q49) of December 2001 among the ten best by
+    return ratio or by currency ratio, over sales with a large return."""
+    ref sold = t[sales]
+    ref back = t[returns]
+    var quantity = s + "_quantity"
+    var returned = r + "_return_quantity"
+    var paid = s + "_net_paid"
+    return (
+        sold.lazy()
+        .join(back.lazy(), left_on=sale_keys, right_on=return_keys, how="left")
+        .filter(
+            (col(returned_amount) > like(back, returned_amount, "10000"))
+            & (col(s + "_net_profit") > like(sold, s + "_net_profit", "1"))
+            & (col(paid) > like(sold, paid, "0"))
+            & (col(quantity) > lit(Int64(0)))
+        )
+        .join(
+            dates(
+                t,
+                (col("d_year") == lit(Int64(2001)))
+                & (col("d_moy") == lit(Int64(12))),
+                "d_sk",
+            ),
+            left_on=[s + "_sold_date_sk"],
+            right_on=["d_sk"],
+        )
+        .group_by([s + "_item_sk"])
+        .agg(
+            [
+                coalesce([col(returned), lit(Int64(0))])
+                .sum(min_count=1)
+                .alias("returned"),
+                coalesce([col(quantity), lit(Int64(0))])
+                .sum(min_count=1)
+                .alias("sold"),
+                coalesce(
+                    [col(returned_amount), like(back, returned_amount, "0")]
+                )
+                .sum(min_count=1)
+                .alias("returned_amount"),
+                coalesce([col(paid), like(sold, paid, "0")])
+                .sum(min_count=1)
+                .alias("paid"),
+            ]
+        )
+        .with_columns(
+            [
+                (
+                    col("returned").cast(DataType.FLOAT64)
+                    / col("sold").cast(DataType.FLOAT64)
+                ).alias("return_ratio"),
+                (
+                    col("returned_amount").cast(DataType.FLOAT64)
+                    / col("paid").cast(DataType.FLOAT64)
+                ).alias("currency_ratio"),
+            ]
+        )
+        .with_columns(
+            [
+                col("return_ratio").rank(method="min").alias("return_rank"),
+                col("currency_ratio").rank(method="min").alias("currency_rank"),
+            ]
+        )
+        .filter(
+            (col("return_rank") <= lit(Int64(10)))
+            | (col("currency_rank") <= lit(Int64(10)))
+        )
+        .select_exprs(
+            [
+                lit(channel).alias("channel"),
+                col(s + "_item_sk").alias("item"),
+                col("return_ratio"),
+                col("return_rank"),
+                col("currency_rank"),
+            ]
+        )
+    )
+
+
+def q51_cumulative(
+    t: Dict[String, DataFrame], sales: String, prefix: String, name: String
+) raises -> LazyFrame:
+    """One channel's sales (q51) per item and day of 1200-1211 with the
+    item's running total up to that day. SQL's running SUM skips nulls and
+    is null until a value is seen, so a day of only null prices keeps the
+    total so far: running sum of the day totals (zero when none), null
+    while the running count of prices is zero."""
+    var item = prefix + "_item_sk"
+    var price = prefix + "_sales_price"
+    var daily = (
+        t[sales]
+        .lazy()
+        .filter(col(item).is_not_null())
+        .join(
+            t["date_dim"]
+            .lazy()
+            .filter(
+                col("d_month_seq").is_between(
+                    lit(Int64(1200)), lit(Int64(1211))
+                )
+            )
+            .select(["d_date_sk", "d_date"]),
+            left_on=[prefix + "_sold_date_sk"],
+            right_on=["d_date_sk"],
+        )
+        .group_by([item, "d_date"])
+        .agg(
+            [
+                col(price).sum().alias("day_total"),
+                col(price).count().alias("day_count"),
+            ]
+        )
+    )
+    return ascending(daily, [item, "d_date"]).select_exprs(
+        [
+            col(item).alias("item_sk"),
+            col("d_date"),
+            when(col("day_count").cum_sum().over(item) > lit(Int64(0)))
+            .then(col("day_total").cum_sum().over(item))
+            .end()
+            .alias(name),
+        ]
+    )
+
+
+def q51_running_max(value: String, name: String) -> Expr:
+    """SQL's running MAX by item: skips nulls, null until a value is seen.
+    A null row takes the item's smallest value, which cannot raise the
+    running max."""
+    return (
+        when(col(value).cum_count().over("item_sk") > lit(Int64(0)))
+        .then(
+            col(value)
+            .fill_null(col(value).min().over("item_sk"))
+            .cum_max()
+            .over("item_sk")
+        )
+        .end()
+        .alias(name)
+    )
+
+
 def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
     return plan(q, t).collect()
 
@@ -5347,6 +5633,195 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
             )
         )
         return ascending(grouped, keys, nulls_first=True).head(100)
+    if q == "q44":
+        # Store 4's items with an average profit above 90% of its average
+        # on sales without an address, ten best beside ten worst by rank.
+        ref sales = t["store_sales"]
+        var profit = col("ss_net_profit").cast(DataType.FLOAT64)
+        var baseline = (
+            sales.lazy()
+            .filter(
+                (col("ss_store_sk") == lit(Int64(4)))
+                & col("ss_addr_sk").is_null()
+            )
+            .group_by(["ss_store_sk"])
+            .agg([profit.mean().alias("baseline")])
+            .select(["baseline"])
+        )
+        var items = (
+            sales.lazy()
+            .filter(col("ss_store_sk") == lit(Int64(4)))
+            .group_by(["ss_item_sk"])
+            .agg([profit.mean().alias("rank_col")])
+            .join(baseline, how="cross")
+            .filter(col("rank_col") > lit(0.9) * col("baseline"))
+        )
+        var best = (
+            items.with_columns(
+                [col("rank_col").rank(method="min").alias("rnk")]
+            )
+            .filter(col("rnk") < lit(Int64(11)))
+            .select_exprs([col("ss_item_sk").alias("best_sk"), col("rnk")])
+        )
+        var worst = (
+            items.with_columns(
+                [
+                    col("rank_col")
+                    .rank(method="min", descending=True)
+                    .alias("worst_rnk")
+                ]
+            )
+            .filter(col("worst_rnk") < lit(Int64(11)))
+            .select_exprs(
+                [col("ss_item_sk").alias("worst_sk"), col("worst_rnk")]
+            )
+        )
+        var paired = (
+            best.join(worst, left_on=["rnk"], right_on=["worst_rnk"])
+            .join(
+                t["item"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("i_item_sk").alias("best_item"),
+                        col("i_product_name").alias("best_performing"),
+                    ]
+                ),
+                left_on=["best_sk"],
+                right_on=["best_item"],
+            )
+            .join(
+                t["item"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("i_item_sk").alias("worst_item"),
+                        col("i_product_name").alias("worst_performing"),
+                    ]
+                ),
+                left_on=["worst_sk"],
+                right_on=["worst_item"],
+            )
+            .select(["rnk", "best_performing", "worst_performing"])
+        )
+        return ascending(paired, ["rnk"]).head(100)
+    if q == "q47":
+        var shown: List[String] = [
+            "i_category",
+            "i_brand",
+            "s_store_name",
+            "s_company_name",
+            "d_year",
+            "d_moy",
+            "avg_monthly_sales",
+            "sum_sales",
+            "psum",
+            "nsum",
+        ]
+        var found = q47_neighbours(
+            t,
+            "store_sales",
+            "ss",
+            "store",
+            "ss_store_sk",
+            "s_store_sk",
+            ["s_store_name", "s_company_name"],
+        )
+        return q47_sorted(found, shown, diff_nulls_first=False)
+    if q == "q57":
+        var shown: List[String] = [
+            "i_category",
+            "i_brand",
+            "cc_name",
+            "d_year",
+            "d_moy",
+            "avg_monthly_sales",
+            "sum_sales",
+            "psum",
+            "nsum",
+        ]
+        var found = q47_neighbours(
+            t,
+            "catalog_sales",
+            "cs",
+            "call_center",
+            "cs_call_center_sk",
+            "cc_call_center_sk",
+            ["cc_name"],
+        )
+        return q47_sorted(found, shown, diff_nulls_first=True)
+    if q == "q51":
+        var both = q51_cumulative(t, "web_sales", "ws", "web_sales").join(
+            q51_cumulative(t, "store_sales", "ss", "store_sales"),
+            on=["item_sk", "d_date"],
+            how="full",
+        )
+        # The running maxima follow d_date within each item: sort, then
+        # window over the item, which keeps that order.
+        var found = (
+            ascending(both, ["item_sk", "d_date"])
+            .with_columns(
+                [
+                    q51_running_max("web_sales", "web_cumulative"),
+                    q51_running_max("store_sales", "store_cumulative"),
+                ]
+            )
+            .filter(col("web_cumulative") > col("store_cumulative"))
+            .select(
+                [
+                    "item_sk",
+                    "d_date",
+                    "web_sales",
+                    "store_sales",
+                    "web_cumulative",
+                    "store_cumulative",
+                ]
+            )
+        )
+        return ascending(found, ["item_sk", "d_date"], nulls_first=True).head(
+            100
+        )
+    if q == "q49":
+        var web = q49_channel(
+            t,
+            "web",
+            "web_sales",
+            "web_returns",
+            ["ws_order_number", "ws_item_sk"],
+            ["wr_order_number", "wr_item_sk"],
+            "ws",
+            "wr",
+            "wr_return_amt",
+        )
+        var catalog = q49_channel(
+            t,
+            "catalog",
+            "catalog_sales",
+            "catalog_returns",
+            ["cs_order_number", "cs_item_sk"],
+            ["cr_order_number", "cr_item_sk"],
+            "cs",
+            "cr",
+            "cr_return_amount",
+        )
+        var store = q49_channel(
+            t,
+            "store",
+            "store_sales",
+            "store_returns",
+            ["ss_ticket_number", "ss_item_sk"],
+            ["sr_ticket_number", "sr_item_sk"],
+            "ss",
+            "sr",
+            "sr_return_amt",
+        )
+        # UNION: UNION ALL, then distinct rows.
+        var union = web.concat(catalog).concat(store).unique()
+        return ascending(
+            union,
+            ["channel", "return_rank", "currency_rank", "item"],
+            nulls_first=True,
+        ).head(100)
     raise unsupported("not translated")
 
 

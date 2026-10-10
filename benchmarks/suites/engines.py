@@ -4259,6 +4259,279 @@ def tpcds_polars(t, q):
             .sort(keys, nulls_last=False)
             .head(100)
         )
+    elif q == "q44":
+        profit = col("ss_net_profit").cast(pl.Float64)
+        baseline = (
+            c["store_sales"]
+            .filter((col("ss_store_sk") == 4) & col("ss_addr_sk").is_null())
+            .group_by("ss_store_sk")
+            .agg(profit.mean().alias("baseline"))
+            .select("baseline")
+        )
+        items = (
+            c["store_sales"]
+            .filter(col("ss_store_sk") == 4)
+            .group_by("ss_item_sk")
+            .agg(profit.mean().alias("rank_col"))
+            .join(baseline, how="cross")
+            .filter(col("rank_col") > 0.9 * col("baseline"))
+        )
+        best = (
+            items.with_columns(col("rank_col").rank(method="min").alias("rnk"))
+            .filter(col("rnk") < 11)
+            .select(col("ss_item_sk").alias("best_sk"), "rnk")
+        )
+        worst = (
+            items.with_columns(
+                col("rank_col").rank(method="min", descending=True).alias("worst_rnk")
+            )
+            .filter(col("worst_rnk") < 11)
+            .select(col("ss_item_sk").alias("worst_sk"), "worst_rnk")
+        )
+        out = (
+            best.join(worst, left_on="rnk", right_on="worst_rnk")
+            .join(
+                c["item"].select(
+                    col("i_item_sk").alias("best_item"),
+                    col("i_product_name").alias("best_performing"),
+                ),
+                left_on="best_sk",
+                right_on="best_item",
+            )
+            .join(
+                c["item"].select(
+                    col("i_item_sk").alias("worst_item"),
+                    col("i_product_name").alias("worst_performing"),
+                ),
+                left_on="worst_sk",
+                right_on="worst_item",
+            )
+            .select("rnk", "best_performing", "worst_performing")
+            .sort("rnk", nulls_last=True)
+            .head(100)
+        )
+    elif q == "q47" or q == "q57":
+        if q == "q47":
+            sales, p, place, sales_key, place_key = (
+                "store_sales", "ss", "store", "ss_store_sk", "s_store_sk",
+            )  # fmt: skip
+            names = ["s_store_name", "s_company_name"]
+        else:
+            sales, p, place, sales_key, place_key = (
+                "catalog_sales", "cs", "call_center", "cs_call_center_sk",
+                "cc_call_center_sk",
+            )  # fmt: skip
+            names = ["cc_name"]
+        keys = ["i_category", "i_brand"] + names
+        year_keys = keys + ["d_year"]
+        months = (
+            c["item"]
+            .join(c[sales], left_on="i_item_sk", right_on=p + "_item_sk")
+            .join(
+                c["date_dim"]
+                .filter(
+                    (col("d_year") == 1999)
+                    | ((col("d_year") == 1998) & (col("d_moy") == 12))
+                    | ((col("d_year") == 2000) & (col("d_moy") == 1))
+                )
+                .select("d_date_sk", "d_year", "d_moy"),
+                left_on=p + "_sold_date_sk",
+                right_on="d_date_sk",
+            )
+            .join(c[place], left_on=sales_key, right_on=place_key)
+            .group_by(year_keys + ["d_moy"])
+            .agg(sql_sum(col(p + "_sales_price")).alias("sum_sales"))
+            .with_columns(
+                col("sum_sales")
+                .cast(pl.Float64)
+                .mean()
+                .over(year_keys)
+                .alias("avg_monthly_sales"),
+                (col("d_year") * 100 + col("d_moy"))
+                .rank(method="min")
+                .over(keys)
+                .cast(pl.Int64)
+                .alias("rn"),
+            )
+        )
+        lag = months.select(
+            *[col(k).alias("lag_" + k) for k in keys],
+            (col("rn") + 1).alias("lag_rn"),
+            col("sum_sales").alias("psum"),
+        )
+        lead = months.select(
+            *[col(k).alias("lead_" + k) for k in keys],
+            (col("rn") - 1).alias("lead_rn"),
+            col("sum_sales").alias("nsum"),
+        )
+        value = col("sum_sales").cast(pl.Float64)
+        shown = year_keys + ["d_moy", "avg_monthly_sales", "sum_sales", "psum", "nsum"]
+        out = (
+            months.join(
+                lag,
+                left_on=keys + ["rn"],
+                right_on=["lag_" + k for k in keys] + ["lag_rn"],
+            )
+            .join(
+                lead,
+                left_on=keys + ["rn"],
+                right_on=["lead_" + k for k in keys] + ["lead_rn"],
+            )
+            .filter(
+                (col("d_year") == 1999)
+                & (col("avg_monthly_sales") > 0)
+                & (
+                    (value - col("avg_monthly_sales")).abs() / col("avg_monthly_sales")
+                    > 0.1
+                )
+            )
+            .with_columns((value - col("avg_monthly_sales")).alias("diff"))
+            .sort(
+                ["diff"] + shown,
+                nulls_last=[q == "q47"] + [True] * len(shown),
+            )
+            .head(100)
+            .select(shown)
+        )
+    elif q == "q51":
+
+        def cumulative(sales, p, name):
+            item, price = p + "_item_sk", p + "_sales_price"
+            return (
+                c[sales]
+                .filter(col(item).is_not_null())
+                .join(
+                    c["date_dim"]
+                    .filter(col("d_month_seq").is_between(1200, 1211))
+                    .select("d_date_sk", "d_date"),
+                    left_on=p + "_sold_date_sk",
+                    right_on="d_date_sk",
+                )
+                .group_by(item, "d_date")
+                .agg(
+                    col(price).sum().alias("day_total"),
+                    col(price).count().alias("day_count"),
+                )
+                .sort([item, "d_date"], nulls_last=True)
+                .select(
+                    col(item).alias("item_sk"),
+                    "d_date",
+                    pl.when(col("day_count").cum_sum().over(item) > 0)
+                    .then(col("day_total").cum_sum().over(item))
+                    .alias(name),
+                )
+            )
+
+        def running_max(value, name):
+            return (
+                pl.when(col(value).cum_count().over("item_sk") > 0)
+                .then(
+                    col(value)
+                    .fill_null(col(value).min().over("item_sk"))
+                    .cum_max()
+                    .over("item_sk")
+                )
+                .alias(name)
+            )
+
+        shown = [
+            "item_sk", "d_date", "web_sales", "store_sales",
+            "web_cumulative", "store_cumulative",
+        ]  # fmt: skip
+        out = (
+            cumulative("web_sales", "ws", "web_sales")
+            .join(
+                cumulative("store_sales", "ss", "store_sales"),
+                on=["item_sk", "d_date"],
+                how="full",
+                coalesce=True,
+            )
+            .sort(["item_sk", "d_date"], nulls_last=True)
+            .with_columns(
+                running_max("web_sales", "web_cumulative"),
+                running_max("store_sales", "store_cumulative"),
+            )
+            .filter(col("web_cumulative") > col("store_cumulative"))
+            .select(shown)
+            .sort(["item_sk", "d_date"], nulls_last=False)
+            .head(100)
+        )
+    elif q == "q49":
+
+        def channel(name, sales, returns, sale_keys, return_keys, s, r, amount):
+            quantity, paid = s + "_quantity", s + "_net_paid"
+            returned = r + "_return_quantity"
+            return (
+                c[sales]
+                .join(c[returns], left_on=sale_keys, right_on=return_keys, how="left")
+                .filter(
+                    (col(amount) > 10000)
+                    & (col(s + "_net_profit") > 1)
+                    & (col(paid) > 0)
+                    & (col(quantity) > 0)
+                )
+                .join(
+                    dates((col("d_year") == 2001) & (col("d_moy") == 12), "d_sk"),
+                    left_on=s + "_sold_date_sk",
+                    right_on="d_sk",
+                )
+                .group_by(s + "_item_sk")
+                .agg(
+                    sql_sum(col(returned).fill_null(0)).alias("returned"),
+                    sql_sum(col(quantity).fill_null(0)).alias("sold"),
+                    sql_sum(col(amount).fill_null(0)).alias("returned_amount"),
+                    sql_sum(col(paid).fill_null(0)).alias("paid"),
+                )
+                .with_columns(
+                    (
+                        col("returned").cast(pl.Float64) / col("sold").cast(pl.Float64)
+                    ).alias("return_ratio"),
+                    (
+                        col("returned_amount").cast(pl.Float64)
+                        / col("paid").cast(pl.Float64)
+                    ).alias("currency_ratio"),
+                )
+                .with_columns(
+                    col("return_ratio").rank(method="min").alias("return_rank"),
+                    col("currency_ratio").rank(method="min").alias("currency_rank"),
+                )
+                .filter((col("return_rank") <= 10) | (col("currency_rank") <= 10))
+                .select(
+                    pl.lit(name).alias("channel"),
+                    col(s + "_item_sk").alias("item"),
+                    "return_ratio",
+                    "return_rank",
+                    "currency_rank",
+                )
+            )
+
+        out = (
+            pl.concat(
+                [
+                    channel(
+                        "web", "web_sales", "web_returns",
+                        ["ws_order_number", "ws_item_sk"],
+                        ["wr_order_number", "wr_item_sk"], "ws", "wr", "wr_return_amt",
+                    ),
+                    channel(
+                        "catalog", "catalog_sales", "catalog_returns",
+                        ["cs_order_number", "cs_item_sk"],
+                        ["cr_order_number", "cr_item_sk"], "cs", "cr",
+                        "cr_return_amount",
+                    ),
+                    channel(
+                        "store", "store_sales", "store_returns",
+                        ["ss_ticket_number", "ss_item_sk"],
+                        ["sr_ticket_number", "sr_item_sk"], "ss", "sr", "sr_return_amt",
+                    ),
+                ]  # fmt: skip
+            )
+            .unique()
+            .sort(
+                ["channel", "return_rank", "currency_rank", "item"], nulls_last=False
+            )
+            .head(100)
+        )
     else:
         raise NotImplementedError("unsupported: not translated")
     return out.collect()
