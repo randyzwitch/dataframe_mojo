@@ -9,7 +9,15 @@ operation), then the 13 with exactly one more SELECT (a derived table or
 a subquery) and still no window, rollup, set operation, EXISTS or WITH,
 then the 7 with several such subqueries under the same exclusions, then
 the 5 that add only EXISTS or NOT EXISTS, then the 7 whose WITH clause
-defines one table, under the same exclusions.
+defines one table, under the same exclusions. Then (#564) the 23 with set
+operations or several WITH tables but no window or rollup, and the 11 with
+window functions but no rollup. UNION ALL is `LazyFrame.concat`, UNION is
+concat then `unique`; INTERSECT and EXCEPT (q38, q87) tag each input's
+distinct rows and sum the tags per row, since SQL compares null values as
+equal there and joins never match null keys. SQL RANK is
+`rank(method="min")`, a window over a partition `.over`, and a running
+window (q51) a sort followed by a cumulative op `.over` the partition.
+The 10 left use ROLLUP or GROUPING (#564 phase 3).
 Any other query reports `unsupported: not translated`, so it is counted in
 every report instead of dropped. The same queries run on both data variants
 (bench_suites.py): money columns as Float64, or as declared decimals, where
