@@ -86,7 +86,8 @@ and require CPU execution; Decimal128 storage is not yet supported by this
 row backend.
 
 Grouped aggregation supports multiple keys with minimum, maximum, count,
-length, and the supported integer sums. Null keys form a group; Float32 NaNs
+length, first, last, null count, arg-min/arg-max, Boolean any/all, and the
+supported integer sums. Null keys form a group; Float32 NaNs
 form one equality class, and signed zeros compare equal. `maintain_order=True`
 returns groups in first-seen order, while rows within each group retain their
 input order. The default group order is key order. Projections, filtering,
@@ -106,6 +107,15 @@ returns NaN if any valid value is NaN; minimum returns NaN only when every
 valid value is NaN. Equal values retain the earliest selected row, including
 signed zeros. Float32 extrema compare native encodings and preserve subnormal
 values without arithmetic emulation.
+
+First and last preserve the input dtype and select a row even when it is null;
+empty inputs produce null. Null count returns Int64. Boolean any/all support
+both ignoring nulls and Kleene null propagation; empty any is false and empty
+all is true. Arg-min and arg-max return UInt32 positions, skip nulls, prefer
+numeric values over NaNs, and retain the first tie. If every valid value is
+NaN, the first valid NaN supplies the position. Positions are within the group
+for grouped aggregation and within the selected input for scalar reductions.
+These reductions also run on the GPU after filtering or sorting.
 
 Count and length return Int64. Int8, Int16, UInt8, and UInt16 sums return Int64.
 Int32 and UInt32 sums retain their input dtype with a final range check. These

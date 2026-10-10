@@ -55,6 +55,13 @@ from dataframe.expr import (
     COUNT,
     MEAN,
     LEN,
+    FIRST,
+    LAST,
+    ANY,
+    ALL,
+    NULL_COUNT,
+    ARG_MIN,
+    ARG_MAX,
 )
 from dataframe.frame import DataFrame
 from dataframe.lazy import (
@@ -527,6 +534,13 @@ def lower_rows(
             ref last = bound.expr._nodes[count - 1]
             if (
                 last.op == MIN
+                or last.op == FIRST
+                or last.op == LAST
+                or last.op == ANY
+                or last.op == ALL
+                or last.op == NULL_COUNT
+                or last.op == ARG_MIN
+                or last.op == ARG_MAX
                 or last.op == MAX
                 or last.op == SUM
                 or last.op == COUNT
@@ -558,7 +572,10 @@ def lower_rows(
                         "plan",
                         "checked grouped sums require terminal aggregation without head",
                     )
-                min_count = last.min_count
+                min_count = (
+                    Int(last.integer) if reduction == ANY
+                    or reduction == ALL else last.min_count
+                )
                 count -= 1
                 if last.left != count - 1:
                     capabilities.reject(

@@ -321,8 +321,71 @@ def check_group_preflight_without_device():
         lib.dfm_free(err)
         code[index] = before
 
+    literals[2] = -1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    lib.dfm_free(err)
+    literals[2] = 0
+
 
 check_group_preflight_without_device()
+
+
+def check_additional_reduction_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 1, 0, 0))
+    slots = (I * 1)(1)
+    outputs = (Output * 1)(Output(None, None, 9, 0, 95, 0))
+    request = Request(
+        2,
+        0,
+        0,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        -1,
+        1,
+        0,
+        -1,
+        ptr(inputs),
+        None,
+        None,
+        None,
+        None,
+        ptr(outputs),
+        None,
+        ptr(slots),
+    )
+    for op, outtype in [(83, 1), (84, 1), (93, 3), (95, 9), (96, 9)]:
+        outputs[0].reduction, outputs[0].dtype = op, outtype
+        memory, err = Memory(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        assert memory.result == ({1: 4, 3: 8, 9: 4}[outtype]) + 1
+    outputs[0].dtype = 3
+    outputs[0].reduction = 95
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    lib.dfm_free(err)
+    inputs[0].dtype = slots[0] = 4
+    outputs[0].dtype = 4
+    for op in (91, 92):
+        outputs[0].reduction = op
+        for ignore in (0, 1):
+            outputs[0].min_count = ignore
+            err = P()
+            check(
+                lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
+            )
+        outputs[0].min_count = 2
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        lib.dfm_free(err)
+
+
+check_additional_reduction_preflight_without_device()
 
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
@@ -1855,6 +1918,223 @@ def test_grouped_errors_preserve_row_fault_priority():
 
 
 test_grouped_errors_preserve_row_fault_priority()
+
+
+def test_additional_reductions():
+    def run(t, n, grouped, all_null=False, all_nan=False, all_valid=False):
+        scalar = SCALARS[t]
+        if t == 1:
+            pool = [
+                float("nan"),
+                0.0,
+                -0.0,
+                1.0,
+                -1.0,
+                1.401298464324817e-45,
+                float("inf"),
+                -float("inf"),
+            ]
+            if all_nan:
+                pool = [float("nan")]
+        elif t == 4:
+            pool = [False, True]
+        elif t in (7, 8, 9, 10):
+            pool = [0, (1 << (C.sizeof(scalar) * 8)) - 1, 1, 2]
+        else:
+            high = (1 << (C.sizeof(scalar) * 8 - 1)) - 1
+            pool = [-high - 1, high, 0, -1, 1]
+        values = [pool[(i * 7) % len(pool)] for i in range(n)]
+        keys = [(i * 7) % 11 for i in range(n)]
+        bools = [i % 5 == 0 for i in range(n)]
+        vv = [not all_null and (all_valid or i % 13 != 0) for i in range(n)]
+        kv = [i % 17 != 3 for i in range(n)]
+        bv = [not all_null and (all_valid or i % 7 != 0) for i in range(n)]
+        va = packed(values, 5) if t == 4 else (scalar * max(1, n))(*values)
+        ka = (C.c_int32 * max(1, n))(*keys)
+        ba = packed(bools, 5)
+        vb, kb, bb = packed(vv, 5), packed(kv, 5), packed(bv, 5)
+        inputs = (Input * 3)(
+            Input(ptr(ka), ptr(kb), 2, 5, 1),
+            Input(ptr(va), ptr(vb), t, 5, 1),
+            Input(ptr(ba), ptr(bb), 4, 5, 1),
+        )
+        specs = [
+            (1, 83, t, 0),
+            (1, 84, t, 0),
+            (1, 93, 3, 0),
+            (1, 95, 9, 0),
+            (1, 96, 9, 0),
+            (2, 91, 4, 1),
+            (2, 92, 4, 1),
+            (2, 91, 4, 0),
+            (2, 92, 4, 0),
+        ]
+        slots = [2, t, 4]
+        nodes = []
+        nt = []
+        words = []
+        step_list = []
+        gather_list = []
+        outs = []
+        if grouped:
+            slots += [3, 3, 3]
+            nodes = [(201, 1, 4, 5), (202, 0, 0, 0)]
+            nt = [3, 2]
+            words = [0, 0]
+            outs = [(0, 2, -1, 0)]
+            for source, kind, outtype, param in specs:
+                target = len(slots)
+                slots.append(outtype)
+                nodes.append((203, source, target, kind))
+                nt.append(outtype)
+                words.append(param)
+                outs.append((target, outtype, -1, 0))
+            size = len(nodes)
+            nodes.append((200, 5, 0, 0))
+            nt.append(3)
+            words.append(0)
+            gather_list = [slot for slot, t, kind, param in outs]
+            step_list = [
+                Step(0, size, 3, 3, 0, 0),
+                Step(size, 1, 0, 2, 0, len(gather_list)),
+            ]
+        else:
+            outs = [
+                (source, outtype, kind, param) for source, kind, outtype, param in specs
+            ]
+        code = (I * len([x for node in nodes for x in node]))(
+            *[x for node in nodes for x in node]
+        )
+        literals = (I * len(words))(*words)
+        types = (I * len(nt))(*nt)
+        st = (I * len(slots))(*slots)
+        steps = (Step * len(step_list))(*step_list)
+        gathers = (I * len(gather_list))(*gather_list)
+        cap = max(1, n) if grouped else 1
+        arrays = [
+            packed([False] * cap) if outtype == 4 else (SCALARS[outtype] * cap)()
+            for slot, outtype, kind, param in outs
+        ]
+        bits = [packed([False] * cap) for _ in outs]
+        output = (Output * len(outs))(
+            *[
+                Output(ptr(a), ptr(b), outtype, slot, kind, param)
+                for (slot, outtype, kind, param), a, b in zip(outs, arrays, bits)
+            ]
+        )
+        req = Request(
+            2,
+            n,
+            0,
+            len(slots),
+            3,
+            len(code),
+            len(words),
+            len(steps),
+            len(gathers),
+            len(outs),
+            -1,
+            0 if grouped else 1,
+            1,
+            -1,
+            ptr(inputs),
+            ptr(code),
+            ptr(literals),
+            ptr(steps),
+            ptr(gathers),
+            ptr(output),
+            ptr(types),
+            ptr(st),
+        )
+        groups = {}
+        if grouped:
+            for i in range(n):
+                groups.setdefault(keys[i] if kv[i] else None, []).append(i)
+        else:
+            groups[()] = list(range(n))
+        expected = []
+        for key, rows in groups.items():
+            record = [(key, key is not None)] if grouped else []
+            for source, kind, outtype, param in specs:
+                good = [
+                    (pos, row)
+                    for pos, row in enumerate(rows)
+                    if (vv if source == 1 else bv)[row]
+                ]
+                if kind in (83, 84):
+                    at = rows[0 if kind == 83 else -1] if rows else 0
+                    record.append((values[at] if rows else 0, bool(rows) and vv[at]))
+                elif kind == 93:
+                    record.append((len(rows) - len(good), True))
+                elif kind in (95, 96):
+                    numeric = [
+                        (pos, row)
+                        for pos, row in good
+                        if not (t == 1 and math.isnan(values[row]))
+                    ]
+                    choices = numeric or good
+                    chosen = (
+                        (max if kind == 96 else min)(
+                            choices, key=lambda pair: values[pair[1]]
+                        )
+                        if choices
+                        else (0, 0)
+                    )
+                    record.append((chosen[0], bool(choices)))
+                else:
+                    yes = any(bools[row] for pos, row in good)
+                    no = any(not bools[row] for pos, row in good)
+                    unknown = len(good) != len(rows)
+                    record.append(
+                        (
+                            yes if kind == 91 else not no,
+                            bool(param) or not unknown or (yes if kind == 91 else no),
+                        )
+                    )
+            expected.append(record)
+        memory, stats, err = Memory(), Stats(), P()
+        check(lib.dfm_estimate(C.byref(req), C.byref(memory), C.byref(err)), err)
+        check(lib.dfm_execute(ctx, C.byref(req), C.byref(stats), C.byref(err)), err)
+        assert stats.rows == len(expected), (t, n, grouped, stats.rows, len(expected))
+        assert stats.waits == 1 and memory.shared == stats.memory.shared
+        assert memory.launches == stats.memory.launches
+        for c, ((slot, outtype, kind, param), a, b) in enumerate(
+            zip(outs, arrays, bits)
+        ):
+            actual = unpack(a, stats.rows) if outtype == 4 else list(a)[: stats.rows]
+            valid = unpack(b, stats.rows)
+            for row, record in enumerate(expected):
+                value, ok = record[c]
+                assert valid[row] == ok, (t, n, grouped, c, row, valid[row], ok)
+                if ok:
+                    assert (
+                        outtype == 1 and math.isnan(value) and math.isnan(actual[row])
+                    ) or actual[row] == value, (
+                        t,
+                        n,
+                        grouped,
+                        c,
+                        row,
+                        actual[row],
+                        value,
+                    )
+                    if outtype == 1 and value == 0:
+                        assert C.string_at(
+                            C.byref(C.c_float(actual[row])), 4
+                        ) == C.string_at(C.byref(C.c_float(value)), 4)
+
+    for t in range(1, 11):
+        for grouped in (False, True):
+            for n in (0, 1, 7, 521):
+                run(t, n, grouped)
+            run(t, 521, grouped, all_null=True)
+            run(t, 521, grouped, all_valid=True)
+    for grouped in (False, True):
+        run(1, 521, grouped, all_nan=True)
+    run(3, 262401, False)
+
+
+test_additional_reductions()
 
 lib.dfm_context_release(ctx)
 print(

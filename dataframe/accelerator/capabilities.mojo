@@ -1,6 +1,20 @@
 """Backend capabilities for bound row plans; no device imports or discovery."""
 from dataframe.dtype import DataType
-from dataframe.expr import SUM, COUNT, MEAN, LEN, MIN, MAX
+from dataframe.expr import (
+    SUM,
+    COUNT,
+    MEAN,
+    LEN,
+    MIN,
+    MAX,
+    FIRST,
+    LAST,
+    ANY,
+    ALL,
+    NULL_COUNT,
+    ARG_MIN,
+    ARG_MAX,
+)
 
 
 struct RowCapabilities(Copyable):
@@ -15,6 +29,7 @@ struct RowCapabilities(Copyable):
     var float64: Bool
     var wide_integer: Bool
     var int64_arithmetic: Bool
+    var extra_reductions: Bool
     var grouped: Bool
     var order: Bool
     var row_extras: Bool
@@ -39,6 +54,7 @@ struct RowCapabilities(Copyable):
         row_extras: Bool = False,
         order: Bool = False,
         grouped: Bool = False,
+        extra_reductions: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -52,6 +68,7 @@ struct RowCapabilities(Copyable):
         self.row_extras = row_extras
         self.order = order
         self.grouped = grouped
+        self.extra_reductions = extra_reductions
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)
@@ -84,6 +101,21 @@ struct RowCapabilities(Copyable):
             )
 
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
+        if (
+            op == FIRST
+            or op == LAST
+            or op == ANY
+            or op == ALL
+            or op == NULL_COUNT
+            or op == ARG_MIN
+            or op == ARG_MAX
+        ):
+            if not self.extra_reductions:
+                self.reject(
+                    "reduction", "additional reductions are not supported"
+                )
+            self.require_dtype(dtype)
+            return
         if op == MIN or op == MAX:
             if not self.extrema:
                 self.reject(
