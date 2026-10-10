@@ -1,0 +1,11 @@
+_dfm_abi_version
+_dfm_build_id
+_dfm_device_count
+_dfm_context_create
+_dfm_context_retain
+_dfm_context_release
+_dfm_context_info
+_dfm_estimate
+_dfm_plan_cached
+_dfm_execute
+_dfm_free
