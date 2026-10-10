@@ -262,7 +262,7 @@ Own equal-length, uniquely named columns; transformations copy storage.
 - `def __init__(out self, var columns: List[Series], *, height: Int = Int(-1))`
 - `def __getitem__(self, name: String) -> Series`
 - `def rechunk(self) -> Self`
-  Return one contiguous array per column, copying only chunked data.
+  Return one contiguous array per column, copying only chunked data; chunked columns merge in parallel, one job each (a 159K-row join build with five string columns: 1 ms serial).
 - `def height(self) -> Int`
 - `def write_to(self, mut writer: T)`
 - `def to_string(self, *, max_rows: Int = Int(10), max_columns: Int = Int(12), max_string_length: Int = Int(32)) -> String`
@@ -984,8 +984,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Collect, and report what each plan node did (#439).
 - `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> String`
   Describe provider capability without submitting device work.
-- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> String`
-  The (optimized) plan, one operator per line, root first.
+- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "cpu") -> String`
+  The (optimized) plan, one operator per line, root first. With `engine="auto"` (what `collect` uses), an `ENGINE` line naming the selected engine and why comes first.
 - `def fetch[B: AcceleratorBackend](self, n: Int = Int(5), *, accelerator: B, engine: String = "accel") -> DataFrame`
   Collect the first n rows using an explicit provider.
 - `def fetch(self, n: Int = Int(5), *, engine: String = "auto") -> DataFrame`
