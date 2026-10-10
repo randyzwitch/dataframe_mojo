@@ -36,6 +36,8 @@ from dataframe.expr import (
     FILL_NULL,
     NEG,
     SUM,
+    MIN,
+    MAX,
     COUNT,
     MEAN,
     LEN,
@@ -352,7 +354,9 @@ def lower_rows(
             var row_shape = bound.shape() == ROWS
             ref last = bound.expr._nodes[count - 1]
             if (
-                last.op == SUM
+                last.op == MIN
+                or last.op == MAX
+                or last.op == SUM
                 or last.op == COUNT
                 or last.op == MEAN
                 or last.op == LEN

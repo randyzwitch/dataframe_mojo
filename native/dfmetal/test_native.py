@@ -1,4 +1,5 @@
 """Exercise the optional native ABI on an Apple Silicon host after build.sh."""
+
 import ctypes as C
 import sys
 import math
@@ -121,9 +122,7 @@ def unpack(bits, n):
     return [bool(bits[i // 8] & (1 << (i % 8))) for i in range(n)]
 
 
-lib = C.CDLL(
-    sys.argv[1] if len(sys.argv) > 1 else "build/dfmetal/libdfmetal.dylib"
-)
+lib = C.CDLL(sys.argv[1] if len(sys.argv) > 1 else "build/dfmetal/libdfmetal.dylib")
 lib.dfm_context_create.argtypes = [I, I, C.POINTER(P)]
 lib.dfm_context_create.restype = P
 lib.dfm_context_release.argtypes = [P]
@@ -150,11 +149,7 @@ def check(status, err):
 
 
 assert C.sizeof(Input) == 40 and C.sizeof(Step) == 48 and C.sizeof(Output) == 48
-assert (
-    C.sizeof(Request) == 176
-    and C.sizeof(Memory) == 64
-    and C.sizeof(Stats) == 136
-)
+assert C.sizeof(Request) == 176 and C.sizeof(Memory) == 64 and C.sizeof(Stats) == 136
 lib.dfm_abi_version.restype = I
 lib.dfm_device_count.restype = I
 assert lib.dfm_abi_version() == 2
@@ -164,6 +159,8 @@ err = P()
 assert lib.dfm_estimate(C.byref(bad), C.byref(memory), C.byref(err)) == 1
 assert b"ABI version mismatch" in C.string_at(err)
 lib.dfm_free(err)
+
+
 # Pure fusion preflight must run even on CI VMs without a Metal device.
 # Descriptor-only estimates never dereference caller data or output storage.
 def check_fusion_preflight_without_device():
@@ -264,9 +261,7 @@ def execute(
 ):
     scalar = SCALARS[dtype]
     n = len(values)
-    data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(
-        *values
-    )
+    data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(*values)
     validity = packed(valid, offset) if valid is not None else None
     inputs = (Input * 1)(
         Input(
@@ -297,8 +292,9 @@ def execute(
     words = []
     for node, value in zip(programs, lit):
         words.append(
-            C.c_uint64(int(value)).value if node[0]
-            == 1 else C.cast(
+            C.c_uint64(int(value)).value
+            if node[0] == 1
+            else C.cast(
                 C.pointer(C.c_double(value)), C.POINTER(C.c_uint64)
             ).contents.value
         )
@@ -306,8 +302,10 @@ def execute(
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
     out_type = (
-        (dtype if dtype in (2, 9) else 3) if reduction == 10 else 3
-    ) if reduction >= 0 else (4 if output_bool else dtype)
+        ((dtype if dtype in (2, 9) else 3) if reduction == 10 else 3)
+        if reduction >= 0
+        else (4 if output_bool else dtype)
+    )
     out_scalar = SCALARS[out_type]
     result = (out_scalar * max(1, n))()
     bits = (C.c_uint8 * max(1, (n + 7) // 8))()
@@ -348,9 +346,7 @@ def execute(
     for repeat in range(repeats):
         stats = Stats()
         err = P()
-        status = lib.dfm_execute(
-            ctx, C.byref(request), C.byref(stats), C.byref(err)
-        )
+        status = lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
         if expect_error:
             assert status, expect_error
             message = C.string_at(err).decode()
@@ -368,8 +364,7 @@ def execute(
         if repeat:
             assert stats.cache_hit and stats.compile_ns == 0
     return (
-        unpack(result, stats.rows) if out_type
-        == 4 else list(result)[: stats.rows],
+        unpack(result, stats.rows) if out_type == 4 else list(result)[: stats.rows],
         unpack(bits, stats.rows),
         stats,
     )
@@ -444,9 +439,7 @@ for dtype, lo, hi in [
             [0, b, 0],
             expect_error="overflow",
         )
-    execute(
-        [lo], dtype, [col, (50, 0, -1, -1)], [0, 0], expect_error="overflow"
-    )
+    execute([lo], dtype, [col, (50, 0, -1, -1)], [0, 0], expect_error="overflow")
     for op, a, b, expected in [
         (5, hi, -1, hi - 1),
         (6, lo, -1, lo + 1),
@@ -475,9 +468,9 @@ for n in [0, 1, 257, 10001]:
             values, 2, [col], [0], valid=valid, reduction=reduction
         )
         expected = (
-            sum(x for x, v in zip(values, valid) if v) if reduction
-            == 10 else sum(valid) if reduction
-            == 11 else n
+            sum(x for x, v in zip(values, valid) if v)
+            if reduction == 10
+            else sum(valid) if reduction == 11 else n
         )
         assert result == [expected] and bits == [True]
 result, bits, _ = execute(
@@ -488,9 +481,9 @@ execute([2**31 - 1, 1], 2, [col], [0], reduction=10, expect_error="overflow")
 result, bits, _ = execute([2**31 - 1, 1, -1], 2, [col], [0], reduction=10)
 assert result == [2**31 - 1]
 execute([1.0], 1, [col], [0.0], budget=0, expect_error="memory budget")
-execute(
-    [1.0], 1, [col], [0.0], reduction=10, expect_error="accumulator precision"
-)
+execute([1.0], 1, [col], [0.0], reduction=10, expect_error="accumulator precision")
+
+
 # Separate Float32 multiply/add rounding must survive source specialization.
 def f32(x):
     return C.c_float(x).value
@@ -512,16 +505,12 @@ assert result == expected, "Float32 multiply/add contraction changed rounding"
 result, bits, _ = execute(
     [math.nan, math.inf, -math.inf, -0.0], 1, [col, (50, 0, -1, -1)], [0.0, 0.0]
 )
-assert (
-    math.isnan(result[0]) and result[1] == -math.inf and result[2] == math.inf
-)
+assert math.isnan(result[0]) and result[1] == -math.inf and result[2] == math.inf
 assert math.copysign(1, result[3]) == 1
 tiny = 2.0**-149
 result, bits, _ = execute([tiny, -tiny, 0.0], 1, [col], [0.0])
 assert result == [tiny, -tiny, 0.0]
-result, bits, _ = execute(
-    [tiny, -tiny, 0.0], 1, [col, (50, 0, -1, -1)], [0.0, 0.0]
-)
+result, bits, _ = execute([tiny, -tiny, 0.0], 1, [col, (50, 0, -1, -1)], [0.0, 0.0])
 assert result == [-tiny, tiny, -0.0]
 for op, a, b in [
     (5, tiny, tiny),
@@ -537,6 +526,8 @@ for op, a, b in [
         output_bool=op == 8,
         expect_error="subnormal",
     )
+
+
 # Two filter boundaries retain an early branch and the original input while
 # pruning the other 30 temporary projections from shared storage and gathers.
 def check_fused_boundaries():
@@ -566,9 +557,7 @@ def check_fused_boundaries():
             start = len(programs)
             programs += [(0, -1, -1, current), (1, -1, -1, -1), (8, 0, 1, -1)]
             literals += [0, 5 if stage == 15 else 25, 0]
-            steps.append(
-                Step(start, 3, slots, 1, len(gathers), len(live_columns))
-            )
+            steps.append(Step(start, 3, slots, 1, len(gathers), len(live_columns)))
             gathers += live_columns
             slots += 1
             expected = [
@@ -611,14 +600,10 @@ def check_fused_boundaries():
         ptr(outputs),
     )
     memory, stats, err = Memory(), Stats(), P()
-    check(
-        lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
-    )
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
     for _ in range(2):
         check(
-            lib.dfm_execute(
-                ctx, C.byref(request), C.byref(stats), C.byref(err)
-            ),
+            lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
             err,
         )
         assert stats.rows == len(expected)
@@ -687,9 +672,7 @@ for dtype, lo, hi in [
     assert result == [hi] and bits == [True]
     for op in (5, 6, 7):
         samples = [(0, 0), (hi, 0), (hi, 1), (hi, hi), (lo, 1), (lo, lo)]
-        samples += [
-            (random.randint(lo, hi), random.randint(lo, hi)) for _ in range(8)
-        ]
+        samples += [(random.randint(lo, hi), random.randint(lo, hi)) for _ in range(8)]
         for a, b in samples:
             expected = a + b if op == 5 else a - b if op == 6 else a * b
             if lo <= expected <= hi:
@@ -735,9 +718,7 @@ for dtype, lo, hi in [
         output_bool=True,
     )
     assert result == [True, False] and all(bits)
-    result, bits, _ = execute(
-        values, dtype, [col], [0], valid=valid, reduction=11
-    )
+    result, bits, _ = execute(values, dtype, [col], [0], valid=valid, reduction=11)
     assert result == [sum(valid)] and bits == [True]
     if dtype != 10:
         result, bits, _ = execute([1, 2, 3], dtype, [col], [0], reduction=10)
@@ -800,10 +781,11 @@ def test_typed_rows():
             programs += [(2 if t == 1 else 1, -1, -1, -1), (5, 0, 1, -1)]
             node_types += [t, t]
             words += [
-                C.cast(C.pointer(C.c_double(1.0)), C.POINTER(C.c_uint64))[
-                    0
-                ] if t
-                == 1 else 1,
+                (
+                    C.cast(C.pointer(C.c_double(1.0)), C.POINTER(C.c_uint64))[0]
+                    if t == 1
+                    else 1
+                ),
                 0,
             ]
         slot = len(slots)
@@ -845,9 +827,7 @@ def test_typed_rows():
         ptr(st),
     )
     memory, stats, err = Memory(), Stats(), P()
-    check(
-        lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
-    )
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
     check(
         lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
         err,
@@ -857,8 +837,7 @@ def test_typed_rows():
     assert stats.memory.peak == memory.peak
     for j, t in enumerate(types):
         result = (
-            unpack(results[j], stats.rows) if t
-            == 4 else list(results[j])[: stats.rows]
+            unpack(results[j], stats.rows) if t == 4 else list(results[j])[: stats.rows]
         )
         expected = [values[t][i] + (t not in [3, 4, 10]) for i in selected]
         assert result == expected, (t, result[:10], expected[:10])
@@ -943,9 +922,7 @@ def test_numeric_casts():
             steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
             result = (SCALARS[target] * n)()
             valid = (C.c_uint8 * ((n + 7) // 8))()
-            outputs = (Output * 1)(
-                Output(ptr(result), ptr(valid), target, 1, -1, 0)
-            )
+            outputs = (Output * 1)(Output(ptr(result), ptr(valid), target, 1, -1, 0))
             nt, st = (I * 2)(source, target), (I * 2)(source, target)
             request = Request(
                 2,
@@ -973,9 +950,7 @@ def test_numeric_casts():
             )
             stats, err = Stats(), P()
             check(
-                lib.dfm_execute(
-                    ctx, C.byref(request), C.byref(stats), C.byref(err)
-                ),
+                lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
                 err,
             )
             got = unpack(result, n) if target == 4 else list(result)
@@ -991,9 +966,13 @@ def test_numeric_casts():
                 else:
                     width = C.sizeof(SCALARS[target]) * 8
                     unsigned = target in [7, 8, 9, 10]
-                    lo, hi = (0, 2**width - 1) if unsigned else (
-                        -(2 ** (width - 1)),
-                        2 ** (width - 1) - 1,
+                    lo, hi = (
+                        (0, 2**width - 1)
+                        if unsigned
+                        else (
+                            -(2 ** (width - 1)),
+                            2 ** (width - 1) - 1,
+                        )
                     )
                     fits = not (source == 1 and not math.isfinite(x))
                     expected = math.trunc(x) if fits else 0
@@ -1001,9 +980,7 @@ def test_numeric_casts():
                 expected_valid.append(fits)
                 if fits:
                     assert got[i] == expected or (
-                        target == 1
-                        and math.isnan(got[i])
-                        and math.isnan(expected)
+                        target == 1 and math.isnan(got[i]) and math.isnan(expected)
                     ), (source, target, i, x, got[i], expected)
             assert validity == expected_valid, (
                 source,
@@ -1065,6 +1042,136 @@ def test_numeric_casts():
 
 
 test_numeric_casts()
+
+
+def test_extrema():
+    types = {
+        1: C.c_float,
+        2: C.c_int32,
+        3: C.c_int64,
+        4: C.c_uint8,
+        5: C.c_int8,
+        6: C.c_int16,
+        7: C.c_uint8,
+        8: C.c_uint16,
+        9: C.c_uint32,
+        10: C.c_uint64,
+    }
+
+    def check(dtype, values, valid=None, offset=5):
+        ctype = types[dtype]
+        n = len(values)
+        if valid is None:
+            valid = [True] * n
+        bitmap = (C.c_uint8 * ((n + offset + 7) // 8))()
+        for i, yes in enumerate(valid):
+            if yes:
+                bitmap[(i + offset) // 8] |= 1 << ((i + offset) % 8)
+        if dtype == 4:
+            data = (C.c_uint8 * ((n + offset + 7) // 8))()
+            for i, x in enumerate(values):
+                if x:
+                    data[(i + offset) // 8] |= 1 << ((i + offset) % 8)
+        else:
+            data = (ctype * n)(*values)
+        inputs = (Input * 1)(Input(ptr(data), ptr(bitmap), dtype, offset, 1))
+        # Padding detects writes wider than the physical output dtype.
+        results = [(C.c_uint8 * 24)(*([0xA5] * 24)) for _ in range(2)]
+        bits = [(C.c_uint8 * 1)() for _ in range(2)]
+        outputs = (Output * 2)(
+            *[
+                Output(C.addressof(results[i]) + 8, ptr(bits[i]), dtype, 0, 80 + i, 0)
+                for i in range(2)
+            ]
+        )
+        slots = (I * 1)(dtype)
+        request = Request(
+            2,
+            n,
+            0,
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            2,
+            -1,
+            1,
+            0,
+            -1,
+            ptr(inputs),
+            None,
+            None,
+            None,
+            None,
+            ptr(outputs),
+            None,
+            ptr(slots),
+        )
+        stats, err = Stats(), P()
+        rc = lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+        assert rc == 0, C.string_at(err) if err else rc
+        chosen = [x for x, yes in zip(values, valid) if yes]
+        for i in range(2):
+            assert bool(bits[i][0] & 1) == bool(chosen), (dtype, i, chosen)
+            size = C.sizeof(ctype)
+            assert list(results[i][:8]) == [0xA5] * 8
+            assert list(results[i][8 + size :]) == [0xA5] * (16 - size), (
+                dtype,
+                i,
+                list(results[i]),
+            )
+            if not chosen:
+                continue
+            key = lambda x: (
+                (math.isnan(x), 0 if math.isnan(x) else x) if dtype == 1 else x
+            )
+            expected = (min if i == 0 else max)(chosen, key=key)
+            got = ctype.from_address(C.addressof(results[i]) + 8).value
+            if dtype == 1 and math.isnan(expected):
+                assert math.isnan(got)
+            elif dtype == 1:
+                assert C.string_at(C.byref(ctype(got)), size) == C.string_at(
+                    C.byref(ctype(expected)), size
+                ), (got, expected)
+            else:
+                assert got == expected, (dtype, i, got, expected)
+
+    rng = random.Random(811)
+    for dtype, ctype in types.items():
+        if dtype == 1:
+            values = [rng.uniform(-100, 100) for _ in range(521)]
+            values = [ctype(x).value for x in values]
+        elif dtype == 4:
+            values = [bool(rng.randrange(2)) for _ in range(521)]
+        else:
+            bits = C.sizeof(ctype) * 8
+            signed = dtype in (2, 3, 5, 6)
+            lo = -(1 << (bits - 1)) if signed else 0
+            hi = (1 << (bits - 1)) - 1 if signed else (1 << bits) - 1
+            values = [lo, hi] + [rng.randint(lo, hi) for _ in range(519)]
+        check(dtype, values, [i % 7 != 3 for i in range(521)])
+        check(dtype, [])
+        check(dtype, values, [False] * 521)
+    float_bits = lambda u: C.cast(C.pointer(C.c_uint32(u)), C.POINTER(C.c_float))[0]
+    for values in (
+        [float("nan"), 3.0, -2.0],
+        [float("nan")] * 521,
+        [0.0, -0.0] * 300,
+        [-0.0, 0.0] * 300,
+        [float_bits(1), float_bits(0x80000001), 0.0],
+        [float("inf"), float("-inf")],
+    ):
+        check(1, values)
+    # Exercise strided partials after the 1024-group dispatch cap.
+    values = [0.0] * 262401
+    values[256] = -0.0
+    values[0] = -0.0
+    check(1, values)
+
+
+test_extrema()
 
 lib.dfm_context_release(ctx)
 print(
