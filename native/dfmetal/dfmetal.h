@@ -5,7 +5,7 @@
 
 // The Mojo wrapper passes addresses of these structs; no C++ or Objective-C
 // object crosses the ABI. Bump the version when layouts or meanings change.
-#define DFM_ABI_VERSION 1
+#define DFM_ABI_VERSION 2
 #define DFM_API __attribute__((visibility("default")))
 
 enum DFMType {
@@ -48,6 +48,7 @@ enum DFMOp {
   DFM_NOT = 60,
   DFM_IS_NULL = 61,
   DFM_IS_NOT_NULL = 62,
+  DFM_CAST = 79,
   DFM_MIN = 80,
   DFM_MAX = 81,
   DFM_LEN = 90,
@@ -82,7 +83,7 @@ typedef struct DFMOutput {
 typedef struct DFMRequest {
   int64_t abi_version;
   int64_t rows;
-  int64_t dtype; // Common numeric physical type, never Float64.
+  int64_t dtype; // Common numeric type, or zero for typed 64-bit word storage.
   int64_t slots;
   int64_t input_count;
   int64_t code_words;
@@ -100,6 +101,9 @@ typedef struct DFMRequest {
   const DFMStep *steps;
   const int64_t *gathers;
   const DFMOutput *outputs;
+  const int64_t *node_types; // Required for typed storage; one per node.
+  const int64_t
+      *slot_types; // Required for typed storage; one per logical slot.
 } DFMRequest;
 
 typedef struct DFMMemory {

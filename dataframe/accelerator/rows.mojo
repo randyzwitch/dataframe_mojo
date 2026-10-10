@@ -13,6 +13,7 @@ from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     Expr,
     COL,
+    CAST,
     LIT_FLOAT,
     LIT_INT,
     LIT_BOOL,
@@ -82,6 +83,8 @@ struct RowPlan(Movable):
     var dtype: DataType
     var code: List[Int64]
     var literals: List[Float64]
+    var node_dtypes: List[DataType]
+    var slot_dtypes: List[DataType]
     var gathers: List[Int64]
     var steps: List[RowStep]
     var outputs: List[RowOutput]
@@ -108,6 +111,7 @@ def _program(
     dtype: DataType,
     mut code: List[Int64],
     mut literals: List[Float64],
+    mut node_dtypes: List[DataType],
     capabilities: RowCapabilities,
 ) raises:
     if count < 1 or count > ROW_MAX_NODES:
@@ -117,12 +121,18 @@ def _program(
     for i in range(count):
         ref node = bound.expr._nodes[i]
         var op = node.op
-        if bound.dtypes[i] != dtype and bound.dtypes[i] != DataType.BOOL:
+        capabilities.require_dtype(bound.dtypes[i])
+        if (
+            not capabilities.mixed_types
+            and bound.dtypes[i] != dtype
+            and bound.dtypes[i] != DataType.BOOL
+        ):
             capabilities.reject(
                 "plan", "mixed numeric dtypes or unsupported intermediate dtype"
             )
         if not (
             op == COL
+            or (op == CAST and capabilities.casts)
             or op == LIT_INT
             or op == LIT_FLOAT
             or op == LIT_BOOL
@@ -149,16 +159,23 @@ def _program(
                 "plan", "resident expression operation " + op_name(op)
             )
         if op == ADD or op == SUB or op == MUL or op == NEG:
-            capabilities.require_arithmetic(dtype)
+            capabilities.require_arithmetic(bound.dtypes[i])
         if (
-            dtype.is_integer()
+            bound.dtypes[i].is_integer()
             and (op == ADD or op == SUB or op == MUL or op == NEG)
             and bound.shapes[i] != ROWS
         ):
             capabilities.reject(
                 "plan", "scalar integer arithmetic requires CPU execution"
             )
-        var source = slots[bound.sources[i]] if op == COL else -1
+        if op == CAST and node.integer and bound.shapes[i] != ROWS:
+            capabilities.reject(
+                "plan", "scalar strict casts require CPU execution"
+            )
+        var source = slots[bound.sources[i]] if op == COL else (
+            Int(node.integer) if op == CAST else -1
+        )
+        node_dtypes.append(bound.dtypes[i])
         code.append(Int64(op))
         code.append(Int64(node.left))
         code.append(Int64(node.right))
@@ -234,18 +251,27 @@ def lower_rows(
                 "plan", "chunked input; rechunk before accelerator execution"
             )
         if type != DataType.BOOL:
-            if dtype != DataType.BOOL and dtype != type:
+            if (
+                not capabilities.mixed_types
+                and dtype != DataType.BOOL
+                and dtype != type
+            ):
                 capabilities.reject(
                     "plan",
                     "resident source numeric columns must share one dtype",
                 )
-            dtype = type
+            if dtype == DataType.BOOL:
+                dtype = type
         slots.append(i)
     if dtype == DataType.BOOL:
         # Internal physical representation only; public columns remain Bool.
         dtype = DataType.FLOAT32
     var code = List[Int64]()
     var literals = List[Float64]()
+    var node_dtypes = List[DataType]()
+    var slot_dtypes = List[DataType]()
+    for column in schema:
+        slot_dtypes.append(column.dtype())
     var gathers = List[Int64]()
     var steps = List[RowStep]()
     var outputs = List[RowOutput]()
@@ -287,8 +313,9 @@ def lower_rows(
                     )
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
-            if dtype.is_integer():
-                for part in bound.expr._nodes:
+            for part_index in range(len(bound.expr._nodes)):
+                if bound.dtypes[part_index].is_integer():
+                    ref part = bound.expr._nodes[part_index]
                     if (
                         part.op == ADD
                         or part.op == SUB
@@ -308,6 +335,16 @@ def lower_rows(
                             "plan",
                             "integer sum with final head requires CPU execution",
                         )
+            for part in bound.expr._nodes:
+                if (
+                    part.op == CAST
+                    and part.integer
+                    and (k != 0 or node.kind == FILTER or limit >= 0)
+                ):
+                    capabilities.reject(
+                        "plan",
+                        "strict casts require terminal projections without head",
+                    )
             var count = len(bound.expr._nodes)
             var result_dtype = bound.dtypes[count - 1]
             var reduction = -1
@@ -326,7 +363,9 @@ def lower_rows(
                         "reductions require a row expression in final select",
                     )
                 reduction = last.op
-                capabilities.require_reduction(dtype, reduction, frame.height())
+                capabilities.require_reduction(
+                    bound.dtypes[last.left], reduction, frame.height()
+                )
                 min_count = last.min_count
                 count -= 1
                 if last.left != count - 1:
@@ -334,9 +373,11 @@ def lower_rows(
                         "plan",
                         "reduction must consume the complete row expression",
                     )
-                if (reduction == SUM or reduction == MEAN) and bound.dtypes[
-                    last.left
-                ] != dtype:
+                if (
+                    (reduction == SUM or reduction == MEAN)
+                    and bound.dtypes[last.left] != dtype
+                    and not capabilities.mixed_types
+                ):
                     capabilities.reject(
                         "plan",
                         "resident numeric reduction requires the common numeric input dtype",
@@ -355,7 +396,17 @@ def lower_rows(
                     "plan", "resident region supports at most 64 value slots"
                 )
             var start = len(literals)
-            _program(bound, count, slots, dtype, code, literals, capabilities)
+            _program(
+                bound,
+                count,
+                slots,
+                dtype,
+                code,
+                literals,
+                node_dtypes,
+                capabilities,
+            )
+            slot_dtypes.append(bound.dtypes[count - 1])
             var gather_start = len(gathers)
             if node.kind == FILTER:
                 for slot in slots:
@@ -444,6 +495,8 @@ def lower_rows(
         dtype,
         code^,
         literals^,
+        node_dtypes^,
+        slot_dtypes^,
         gathers^,
         steps^,
         outputs^,

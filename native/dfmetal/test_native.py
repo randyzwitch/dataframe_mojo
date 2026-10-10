@@ -59,7 +59,16 @@ class Request(C.Structure):
         ]
     ] + [
         (x, P)
-        for x in ["inputs", "code", "literals", "steps", "gathers", "outputs"]
+        for x in [
+            "inputs",
+            "code",
+            "literals",
+            "steps",
+            "gathers",
+            "outputs",
+            "node_types",
+            "slot_types",
+        ]
     ]
 
 
@@ -142,13 +151,13 @@ def check(status, err):
 
 assert C.sizeof(Input) == 40 and C.sizeof(Step) == 48 and C.sizeof(Output) == 48
 assert (
-    C.sizeof(Request) == 160
+    C.sizeof(Request) == 176
     and C.sizeof(Memory) == 64
     and C.sizeof(Stats) == 136
 )
 lib.dfm_abi_version.restype = I
 lib.dfm_device_count.restype = I
-assert lib.dfm_abi_version() == 1
+assert lib.dfm_abi_version() == 2
 bad = Request()
 memory = Memory()
 err = P()
@@ -170,7 +179,7 @@ def check_fusion_preflight_without_device():
     step_array = (Step * count)(*steps)
     outputs = (Output * 1)(Output(None, None, 2, count, -1, 0))
     request = Request(
-        1,
+        2,
         0,
         2,
         count + 1,
@@ -306,7 +315,7 @@ def execute(
         Output(ptr(result), ptr(bits), out_type, slot, reduction, minimum)
     )
     request = Request(
-        1,
+        2,
         n,
         1 if dtype == 4 else dtype,
         slot + 1,
@@ -580,7 +589,7 @@ def check_fused_boundaries():
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * len(gathers))(*gathers)
     request = Request(
-        1,
+        2,
         n,
         2,
         slots,
@@ -743,6 +752,320 @@ for dtype, lo, hi in [
             expect_error="accumulator precision",
         )
 execute([2**32 - 1, 1], 9, [col], [0], reduction=10, expect_error="overflow")
+
+
+def test_typed_rows():
+    # Each input retains its native width; a UInt64 predicate compacts all
+    # columns, including Float32, signed minima, UInt64 maxima and Bool bits.
+    n = 259
+    offset = 5
+    types = list(SCALARS)
+    values = {}
+    arrays = []
+    validities = []
+    inputs_list = []
+    for t in types:
+        if t == 1:
+            vs = [float(i % 19) / 4 for i in range(n)]
+        elif t == 10:
+            vs = [2**64 - 1 if i % 3 else 2**63 for i in range(n)]
+        elif t == 3:
+            vs = [-(2**63) + i for i in range(n)]
+        elif t == 4:
+            vs = [bool(i % 2) for i in range(n)]
+        else:
+            vs = [i % 67 for i in range(n)]
+        values[t] = vs
+        data = packed(vs, offset) if t == 4 else (SCALARS[t] * n)(*vs)
+        valid = packed([i % 13 != 0 for i in range(n)], offset)
+        arrays.append(data)
+        validities.append(valid)
+        inputs_list.append(Input(ptr(data), ptr(valid), t, offset, 1))
+    inputs = (Input * len(types))(*inputs_list)
+    programs = [(0, -1, -1, types.index(10)), (1, -1, -1, -1), (8, 0, 1, -1)]
+    node_types = [10, 10, 4]
+    words = [0, 2**63, 0]
+    slots = types + [4]
+    steps_list = [Step(0, 3, len(types), 1, 0, len(types))]
+    gather = (I * len(types))(*range(len(types)))
+    outputs_list, results, bitmaps = [], [], []
+    for col_index, t in enumerate(types):
+        start = len(words)
+        # Preserve the two 64-bit boundary columns and packed Boolean.
+        increment = t not in [3, 4, 10]
+        programs += [(0, -1, -1, col_index)]
+        node_types += [t]
+        words += [0]
+        if increment:
+            programs += [(2 if t == 1 else 1, -1, -1, -1), (5, 0, 1, -1)]
+            node_types += [t, t]
+            words += [
+                C.cast(C.pointer(C.c_double(1.0)), C.POINTER(C.c_uint64))[
+                    0
+                ] if t
+                == 1 else 1,
+                0,
+            ]
+        slot = len(slots)
+        slots.append(t)
+        steps_list.append(Step(start, 3 if increment else 1, slot, 0, 0, 0))
+        result = (SCALARS[t] * n)()
+        bitmap = (C.c_uint8 * ((n + 7) // 8))()
+        results.append(result)
+        bitmaps.append(bitmap)
+        outputs_list.append(Output(ptr(result), ptr(bitmap), t, slot, -1, 0))
+    code = (I * (4 * len(words)))(*[v for node in programs for v in node])
+    literals = (C.c_uint64 * len(words))(*words)
+    steps = (Step * len(steps_list))(*steps_list)
+    outputs = (Output * len(outputs_list))(*outputs_list)
+    nt = (I * len(node_types))(*node_types)
+    st = (I * len(slots))(*slots)
+    request = Request(
+        2,
+        n,
+        0,
+        len(slots),
+        len(types),
+        len(code),
+        len(words),
+        len(steps),
+        len(gather),
+        len(outputs),
+        -1,
+        0,
+        1,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(literals),
+        ptr(steps),
+        ptr(gather),
+        ptr(outputs),
+        ptr(nt),
+        ptr(st),
+    )
+    memory, stats, err = Memory(), Stats(), P()
+    check(
+        lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
+    )
+    check(
+        lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
+        err,
+    )
+    selected = [i for i in range(n) if i % 13 != 0 and i % 3 != 0]
+    assert stats.rows == len(selected)
+    assert stats.memory.peak == memory.peak
+    for j, t in enumerate(types):
+        result = (
+            unpack(results[j], stats.rows) if t
+            == 4 else list(results[j])[: stats.rows]
+        )
+        expected = [values[t][i] + (t not in [3, 4, 10]) for i in selected]
+        assert result == expected, (t, result[:10], expected[:10])
+        assert unpack(bitmaps[j], stats.rows) == [True] * stats.rows
+    # ABI validation rejects mismatched metadata before creating pipelines.
+    nt[0] = 2
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"dtype mismatch" in C.string_at(err)
+    lib.dfm_free(err)
+    # Mixed scans have no expression nodes and need no node type array.
+    request.step_count = request.literal_count = request.code_words = 0
+    request.node_types = None
+    request.slots = len(types)
+    for j, t in enumerate(types):
+        outputs[j].slot = j
+    err = P()
+    check(
+        lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
+        err,
+    )
+    assert stats.rows == n
+    for j, t in enumerate(types):
+        result = unpack(results[j], n) if t == 4 else list(results[j])
+        validity = unpack(bitmaps[j], n)
+        assert validity == [i % 13 != 0 for i in range(n)]
+        assert all(result[i] == values[t][i] for i in range(n) if validity[i])
+
+
+test_typed_rows()
+
+
+def test_numeric_casts():
+    source_values = {
+        1: [
+            -float("inf"),
+            -129.5,
+            -128.5,
+            -1.5,
+            -0.0,
+            0.0,
+            1e-45,
+            0.5,
+            1.5,
+            127.75,
+            255.0,
+            2**31,
+            2**63,
+            2**64,
+            float("inf"),
+            float("nan"),
+        ],
+        2: [-(2**31), -129, -128, -1, 0, 1, 127, 128, 255, 256, 2**31 - 1],
+        3: [
+            -(2**63),
+            -(2**53) - 1,
+            -129,
+            -1,
+            0,
+            1,
+            2**53 + 1,
+            2**63 - 1,
+        ],
+        4: [False, True],
+        5: [-128, -1, 0, 1, 127],
+        6: [-32768, -129, -1, 0, 255, 32767],
+        7: [0, 1, 127, 128, 255],
+        8: [0, 1, 255, 256, 65535],
+        9: [0, 1, 65535, 2**31, 2**32 - 1],
+        10: [0, 1, 2**53 + 1, 2**63, 2**64 - 1],
+    }
+    for source in SCALARS:
+        values = source_values[source]
+        n = len(values)
+        data = packed(values) if source == 4 else (SCALARS[source] * n)(*values)
+        # Compare the exactly representable input, rather than Python doubles.
+        actual = values if source == 4 else list(data)
+        for target in SCALARS:
+            inputs = (Input * 1)(Input(ptr(data), None, source, 0, 0))
+            code = (I * 8)(0, -1, -1, 0, 79, 0, -1, 0)
+            literals = (C.c_uint64 * 2)()
+            steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+            result = (SCALARS[target] * n)()
+            valid = (C.c_uint8 * ((n + 7) // 8))()
+            outputs = (Output * 1)(
+                Output(ptr(result), ptr(valid), target, 1, -1, 0)
+            )
+            nt, st = (I * 2)(source, target), (I * 2)(source, target)
+            request = Request(
+                2,
+                n,
+                0,
+                2,
+                1,
+                8,
+                2,
+                1,
+                0,
+                1,
+                -1,
+                0,
+                0,
+                -1,
+                ptr(inputs),
+                ptr(code),
+                ptr(literals),
+                ptr(steps),
+                None,
+                ptr(outputs),
+                ptr(nt),
+                ptr(st),
+            )
+            stats, err = Stats(), P()
+            check(
+                lib.dfm_execute(
+                    ctx, C.byref(request), C.byref(stats), C.byref(err)
+                ),
+                err,
+            )
+            got = unpack(result, n) if target == 4 else list(result)
+            validity = unpack(valid, n)
+            expected_valid = []
+            for i, x in enumerate(actual):
+                if target == 4:
+                    fits = not (source == 1 and math.isnan(x))
+                    expected = bool(x)
+                elif target == 1:
+                    fits = True
+                    expected = C.c_float(float(x)).value
+                else:
+                    width = C.sizeof(SCALARS[target]) * 8
+                    unsigned = target in [7, 8, 9, 10]
+                    lo, hi = (0, 2**width - 1) if unsigned else (
+                        -(2 ** (width - 1)),
+                        2 ** (width - 1) - 1,
+                    )
+                    fits = not (source == 1 and not math.isfinite(x))
+                    expected = math.trunc(x) if fits else 0
+                    fits = fits and lo <= expected <= hi
+                expected_valid.append(fits)
+                if fits:
+                    assert got[i] == expected or (
+                        target == 1
+                        and math.isnan(got[i])
+                        and math.isnan(expected)
+                    ), (source, target, i, x, got[i], expected)
+            assert validity == expected_valid, (
+                source,
+                target,
+                validity,
+                expected_valid,
+            )
+            if not all(expected_valid):
+                code[7] = 1
+                err = P()
+                assert lib.dfm_execute(
+                    ctx, C.byref(request), C.byref(stats), C.byref(err)
+                )
+                assert b"strict cast failed" in C.string_at(err), (
+                    source,
+                    target,
+                    C.string_at(err),
+                )
+                lib.dfm_free(err)
+    # A value just below a Float32 halfway point can round via Float64 to
+    # that point. This is a native precision boundary, never a silent mismatch.
+    source, target = 10, 1
+    data = (C.c_uint64 * 1)(2**63 + 2**39 - 1)
+    inputs = (Input * 1)(Input(ptr(data), None, source, 0, 0))
+    code = (I * 8)(0, -1, -1, 0, 79, 0, -1, 0)
+    literals = (C.c_uint64 * 2)()
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    result, valid = (C.c_float * 1)(), (C.c_uint8 * 1)()
+    outputs = (Output * 1)(Output(ptr(result), ptr(valid), target, 1, -1, 0))
+    nt, st = (I * 2)(source, target), (I * 2)(source, target)
+    request = Request(
+        2,
+        1,
+        0,
+        2,
+        1,
+        8,
+        2,
+        1,
+        0,
+        1,
+        -1,
+        0,
+        0,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(literals),
+        ptr(steps),
+        None,
+        ptr(outputs),
+        ptr(nt),
+        ptr(st),
+    )
+    stats, err = Stats(), P()
+    assert lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+    assert b"double-rounding boundary" in C.string_at(err), C.string_at(err)
+    lib.dfm_free(err)
+
+
+test_numeric_casts()
+
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"
