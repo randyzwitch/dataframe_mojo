@@ -44,15 +44,63 @@ int64_t mul(int64_t a, int64_t b) {
   return a * b;
 }
 int64_t width(int64_t t) {
-  if (t == DFM_FLOAT32 || t == DFM_INT32)
+  if (t == DFM_FLOAT32 || t == DFM_INT32 || t == DFM_UINT32)
     return 4;
-  if (t == DFM_INT64)
+  if (t == DFM_INT64 || t == DFM_UINT64)
     return 8;
-  if (t == DFM_BOOL)
+  if (t == DFM_INT16 || t == DFM_UINT16)
+    return 2;
+  if (t == DFM_BOOL || t == DFM_INT8 || t == DFM_UINT8)
     return 1;
   fail("Metal unsupported dtype");
   return 0;
 }
+bool unsignedType(int64_t t) {
+  return t == DFM_UINT8 || t == DFM_UINT16 || t == DFM_UINT32 || t == DFM_UINT64;
+}
+bool sumSupported(int64_t t) {
+  return t != DFM_FLOAT32 && t != DFM_INT64 && t != DFM_UINT64 && t != DFM_BOOL;
+}
+int64_t sumType(int64_t t) {
+  return t == DFM_INT32 || t == DFM_UINT32 ? t : DFM_INT64;
+}
+// A segment ends at a stable filter boundary. Values produced and consumed
+// inside one segment stay in per-thread variables; only boundary-live slots
+// occupy shared memory. Logical ABI slot identifiers remain unchanged.
+struct Layout {
+  std::array<int64_t, 64> physical;
+  std::vector<int64_t> ends;
+  int64_t slots = 0;
+  explicit Layout(const DFMRequest &r) {
+    physical.fill(-1);
+    auto keep = [&](int64_t slot) {
+      if (physical[slot] < 0)
+        physical[slot] = slots++;
+    };
+    for (int64_t i = 0; i < r.input_count; ++i)
+      keep(i);
+    for (int64_t first = 0; first < r.step_count;) {
+      int64_t end = first;
+      while (end + 1 < r.step_count && !r.steps[end].filter)
+        ++end;
+      ends.push_back(end);
+      std::array<bool, 64> local{};
+      for (int64_t k = first; k <= end; ++k) {
+        for (int64_t j = 0; j < r.steps[k].nodes; ++j) {
+          auto *c = r.code + 4 * (r.steps[k].start + j);
+          if (c[0] == DFM_COLUMN && !local[c[3]])
+            keep(c[3]);
+        }
+        local[r.steps[k].slot] = true;
+      }
+      if (r.steps[end].filter)
+        keep(r.steps[end].slot);
+      first = end + 1;
+    }
+    for (int64_t i = 0; i < r.output_count; ++i)
+      keep(r.outputs[i].slot);
+  }
+};
 struct Shape {
   int64_t cap, packed, blocks, bitmap, matrix, validity, literal, outputBits,
       partial;
@@ -69,8 +117,9 @@ Shape validate(const DFMRequest &r, bool storage = false) {
       r.gather_count > 4096 || r.limit < -1 || r.memory_budget_bytes < -1 ||
       (r.reductions != 0 && r.reductions != 1))
     fail("Invalid Metal request shape");
-  if (r.dtype != DFM_FLOAT32 && r.dtype != DFM_INT32 && r.dtype != DFM_INT64)
-    fail("Metal requires native Float32, Int32 or Int64 storage");
+  width(r.dtype);
+  if (r.dtype == DFM_BOOL)
+    fail("Metal common storage must be numeric");
   if (!r.inputs || !r.outputs || (r.step_count && !r.steps) ||
       (r.literal_count && (!r.code || !r.literals)) ||
       (r.gather_count && !r.gathers))
@@ -95,6 +144,9 @@ Shape validate(const DFMRequest &r, bool storage = false) {
     if (v.has_validity)
       s.bitmap = add(s.bitmap, bytes);
   }
+  std::array<bool, 64> defined{};
+  for (int64_t i = 0; i < r.input_count; ++i)
+    defined[i] = true;
   for (int64_t i = 0; i < r.step_count; ++i) {
     const auto &v = r.steps[i];
     if (v.start < 0 || v.nodes < 1 || v.nodes > 64 ||
@@ -120,8 +172,16 @@ Shape validate(const DFMRequest &r, bool storage = false) {
           (binary && (c[2] < 0 || c[2] >= j)) ||
           (c[0] == DFM_COLUMN && (c[3] < 0 || c[3] >= v.slot)))
         fail("Invalid Metal expression bytecode");
+      if (c[0] == DFM_COLUMN && !defined[c[3]])
+        fail("Metal expression references an undefined slot");
       if (r.dtype != DFM_FLOAT32 && c[0] == DFM_LITERAL_FLOAT)
         fail("Floating literal requires native Float32 storage");
+    }
+    defined[v.slot] = true;
+    for (int64_t j = 0; j < v.gather_count; ++j) {
+      auto slot = r.gathers[v.gather_start + j];
+      if (slot < 0 || slot >= r.slots || !defined[slot])
+        fail("Metal gather references an undefined slot");
     }
   }
   for (int64_t i = 0; i < r.gather_count; ++i)
@@ -130,23 +190,24 @@ Shape validate(const DFMRequest &r, bool storage = false) {
   for (int64_t i = 0; i < r.output_count; ++i) {
     const auto &v = r.outputs[i];
     width(v.dtype);
-    if (v.slot < 0 || v.slot >= r.slots || v.min_count < 0)
+    if (v.slot < 0 || v.slot >= r.slots || v.min_count < 0 || !defined[v.slot])
       fail("Invalid Metal output descriptor");
     if (!r.reductions) {
       if (v.reduction != -1 || (v.dtype != r.dtype && v.dtype != DFM_BOOL))
         fail("Invalid Metal row output");
     } else {
       if (v.reduction != DFM_COUNT && v.reduction != DFM_LEN &&
-          !(v.reduction == DFM_SUM && r.dtype == DFM_INT32))
+          !(v.reduction == DFM_SUM && sumSupported(r.dtype)))
         fail("Metal reduction requires unsupported accumulator precision");
-      if (v.dtype != (v.reduction == DFM_SUM ? DFM_INT32 : DFM_INT64))
+      if (v.dtype != (v.reduction == DFM_SUM ? sumType(r.dtype) : DFM_INT64))
         fail("Invalid Metal reduction dtype");
     }
     if (storage && (r.rows || r.reductions) && (!v.values || !v.validity))
       fail("Missing Metal output storage");
   }
-  s.matrix = mul(mul(s.cap, r.slots), width(r.dtype));
-  s.validity = mul(s.cap, r.slots);
+  auto layout = Layout(r);
+  s.matrix = mul(mul(s.cap, layout.slots), width(r.dtype));
+  s.validity = mul(s.cap, layout.slots);
   s.literal = std::max<int64_t>(1, mul(r.literal_count, width(r.dtype)));
   s.outputBits = mul(mul(s.packed, r.output_count), 2);
   s.partial =
@@ -195,10 +256,15 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
                                s.packed));
   }
   m.peak_bytes = add(m.shared_bytes, m.result_bytes);
-  m.launches = r.input_count + r.step_count + (r.reductions ? 2 : 1);
+  auto layout = Layout(r);
+  m.launches = r.input_count + layout.ends.size() + (r.reductions ? 2 : 1);
   for (int64_t i = 0; i < r.step_count; ++i)
-    if (r.steps[i].filter)
-      m.launches += 2 + r.steps[i].gather_count;
+    if (r.steps[i].filter) {
+      m.launches += 2;
+      for (int64_t j = 0; j < r.steps[i].gather_count; ++j)
+        m.launches +=
+            layout.physical[r.gathers[r.steps[i].gather_start + j]] >= 0;
+    }
   return m;
 }
 struct Pipelines {
@@ -218,12 +284,18 @@ struct Context {
 std::mutex defaultMutex;
 Context *defaultContext = nullptr;
 std::string source(const DFMRequest &r) {
+  auto layout = Layout(r);
   std::string text = "#include <metal_stdlib>\nusing namespace metal;\n#pragma "
                      "clang fp contract(off)\n";
   text += std::string("typedef ") +
           (r.dtype == DFM_FLOAT32 ? "float"
            : r.dtype == DFM_INT32 ? "int"
-                                  : "long") +
+           : r.dtype == DFM_INT8 ? "char"
+           : r.dtype == DFM_INT16 ? "short"
+           : r.dtype == DFM_UINT8 ? "uchar"
+           : r.dtype == DFM_UINT16 ? "ushort"
+           : r.dtype == DFM_UINT32 ? "uint"
+           : r.dtype == DFM_UINT64 ? "ulong" : "long") +
           " T;\n";
   text += R"MSL(
 struct Out { long slot; long kind; long minimum; long type; };
@@ -255,11 +327,19 @@ return !(zb&&zb<0x00800000u)&&!(zb==0&&ab&&bb);
 bool checked_neg(T a,thread T &z){z=as_type<float>(as_type<uint>(a)^0x80000000u);return true;}
 bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x00800000u;}
 )MSL";
+  } else if (unsignedType(r.dtype)) {
+    std::string hi = r.dtype == DFM_UINT8 ? "255UL" :
+                     r.dtype == DFM_UINT16 ? "65535UL" :
+                     r.dtype == DFM_UINT32 ? "4294967295UL" : "18446744073709551615UL";
+    text += "const ulong hi=" + hi + ";ulong x=a,y=b;if(x>hi-y)return false;z=T(x+y);return true;}\n";
+    text += "bool checked_sub(T a,T b,thread T &z){if(a<b)return false;z=T(a-b);return true;}\n";
+    text += "bool checked_mul(T a,T b,thread T &z){const ulong hi=" + hi + ";ulong x=a,y=b,u=x*y;if(mulhi(x,y)!=0||u>hi)return false;z=T(u);return true;}\n";
+    text += "bool checked_neg(T a,thread T &z){if(a)return false;z=0;return true;}\n";
   } else {
-    std::string lo = r.dtype == DFM_INT32 ? "(-2147483647L-1L)"
+    std::string lo = r.dtype == DFM_INT8 ? "(-127L-1L)" : r.dtype == DFM_INT16 ? "(-32767L-1L)" : r.dtype == DFM_INT32 ? "(-2147483647L-1L)"
                                           : "(-9223372036854775807L-1L)";
     std::string hi =
-        r.dtype == DFM_INT32 ? "2147483647L" : "9223372036854775807L";
+        r.dtype == DFM_INT8 ? "127L" : r.dtype == DFM_INT16 ? "32767L" : r.dtype == DFM_INT32 ? "2147483647L" : "9223372036854775807L";
     text += "const long lo=" + lo + ",hi=" + hi +
             ";long x=a,y=b;if((y>0&&x>hi-y)||(y<0&&x<lo-y))return "
             "false;z=T(x+y);return true;}\n";
@@ -336,88 +416,109 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
  result[column]={sum,count};
 }
 )MSL";
-  for (int64_t k = 0; k < r.step_count; ++k) {
-    auto &s = r.steps[k];
-    text += "kernel void project" + std::to_string(k) +
+  int64_t first = 0;
+  for (auto end : layout.ends) {
+    std::array<bool, 64> local{};
+    text += "kernel void project" + std::to_string(end) +
             "(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],device "
             "const T *lit[[buffer(2)]],constant uint4 "
             "&meta[[buffer(3)]],device atomic_uint *error[[buffer(4)]],uint "
             "row[[thread_position_in_grid]]){if(row>=meta.x)return;\n";
-    for (int64_t j = 0; j < s.nodes; ++j) {
-      auto *c = r.code + 4 * (s.start + j);
-      auto op = c[0];
-      auto id = std::to_string(j);
-      std::string a = "a" + std::to_string(c[1]),
-                  b = "a" + std::to_string(c[2]);
-      std::string av = "v" + std::to_string(c[1]),
-                  bv = "v" + std::to_string(c[2]);
-      text += "T a" + id + "=T(0);bool v" + id + "=true;";
-      std::string z = "a" + id, valid = "v" + id;
-      if (op == DFM_COLUMN) {
-        auto idx = std::to_string(c[3]) + "UL*meta.z+row";
-        text += z + "=x[" + idx + "];" + valid + "=v[" + idx + "]!=0;";
-      } else if (op == DFM_LITERAL_NULL)
-        text += valid + "=false;";
-      else if (op == DFM_LITERAL_INT || op == DFM_LITERAL_FLOAT ||
-               op == DFM_LITERAL_BOOL)
-        text += z + "=lit[" + std::to_string(s.start + j) + "];";
-      else if (op == DFM_FILL_NULL)
-        text += valid + "=" + av + "||" + bv + ";" + z + "=" + av + "?" + a +
-                ":" + b + ";";
-      else if (op == DFM_IS_NULL || op == DFM_IS_NOT_NULL)
-        text += z + "=T(" + (op == DFM_IS_NULL ? "!" : "") + av + ");";
-      else if (op == DFM_AND || op == DFM_OR) {
-        bool isAnd = op == DFM_AND;
-        auto symbol = isAnd ? "&&" : "||";
-        auto decisive = isAnd ? "==" : "!=";
-        text += z + "=T((" + a + "!=T(0))" + symbol + "(" + b + "!=T(0)));";
-        text += valid + "=(" + av + "&&" + bv + ")||(" + av + "&&" + a +
-                decisive + "T(0))||(" + bv + "&&" + b + decisive + "T(0));";
-      } else {
-        bool unary = op == DFM_NEG || op == DFM_NOT;
-        text +=
-            valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid + "){";
-        if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_NEG) {
-          auto name = op == DFM_ADD   ? "add"
-                      : op == DFM_SUB ? "sub"
-                      : op == DFM_MUL ? "mul"
-                                      : "neg";
-          text += "if(!checked_" + std::string(name) + "(" + a + "," +
-                  (unary ? "" : b + ",") + z +
-                  "))atomic_fetch_min_explicit(error," +
-                  std::to_string((r.dtype == DFM_FLOAT32 ? 0x80000000UL : 0UL) +
-                                 s.start + j + 1) +
-                  "u,memory_order_relaxed);";
-        } else {
-          std::string expr;
-          if (op == DFM_NOT)
-            expr = "!(" + a + "!=T(0))";
-          else {
-            auto symbol = op == DFM_GT   ? ">"
-                          : op == DFM_EQ ? "=="
-                          : op == DFM_LT ? "<"
-                          : op == DFM_GE ? ">="
-                          : op == DFM_LE ? "<="
-                          : op == DFM_NE ? "!="
-                                         : "!=";
-            expr = op == DFM_XOR ? "((" + a + "!=T(0))!=(" + b + "!=T(0)))"
-                                 : a + symbol + b;
+    for (int64_t k = first; k <= end; ++k) {
+      auto &s = r.steps[k];
+      auto prefix = "s" + std::to_string(k) + "_";
+      for (int64_t j = 0; j < s.nodes; ++j) {
+        auto *c = r.code + 4 * (s.start + j);
+        auto op = c[0];
+        auto id = prefix + std::to_string(j);
+        std::string a = "a" + prefix + std::to_string(c[1]),
+                    b = "a" + prefix + std::to_string(c[2]);
+        std::string av = "v" + prefix + std::to_string(c[1]),
+                    bv = "v" + prefix + std::to_string(c[2]);
+        text += "T a" + id + "=T(0);bool v" + id + "=true;";
+        std::string z = "a" + id, valid = "v" + id;
+        if (op == DFM_COLUMN) {
+          if (local[c[3]]) {
+            auto slot = std::to_string(c[3]);
+            text += z + "=slot" + slot + ";" + valid + "=valid" + slot + ";";
+          } else {
+            auto idx = std::to_string(layout.physical[c[3]]) + "UL*meta.z+row";
+            text += z + "=x[" + idx + "];" + valid + "=v[" + idx + "]!=0;";
           }
-          if (r.dtype == DFM_FLOAT32 && op != DFM_NOT && op != DFM_XOR)
-            text += "if(!native_operand(" + a + ")||!native_operand(" + b +
-                    "))atomic_fetch_min_explicit(error," +
-                    std::to_string(0x80000000UL + s.start + j + 1) +
-                    "u,memory_order_relaxed);else ";
-          text += z + "=T(" + expr + ");";
+        } else if (op == DFM_LITERAL_NULL)
+          text += valid + "=false;";
+        else if (op == DFM_LITERAL_INT || op == DFM_LITERAL_FLOAT ||
+                 op == DFM_LITERAL_BOOL)
+          text += z + "=lit[" + std::to_string(s.start + j) + "];";
+        else if (op == DFM_FILL_NULL)
+          text += valid + "=" + av + "||" + bv + ";" + z + "=" + av + "?" + a +
+                  ":" + b + ";";
+        else if (op == DFM_IS_NULL || op == DFM_IS_NOT_NULL)
+          text += z + "=T(" + (op == DFM_IS_NULL ? "!" : "") + av + ");";
+        else if (op == DFM_AND || op == DFM_OR) {
+          bool isAnd = op == DFM_AND;
+          auto symbol = isAnd ? "&&" : "||";
+          auto decisive = isAnd ? "==" : "!=";
+          text += z + "=T((" + a + "!=T(0))" + symbol + "(" + b + "!=T(0)));";
+          text += valid + "=(" + av + "&&" + bv + ")||(" + av + "&&" + a +
+                  decisive + "T(0))||(" + bv + "&&" + b + decisive + "T(0));";
+        } else {
+          bool unary = op == DFM_NEG || op == DFM_NOT;
+          text += valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid +
+                  "){";
+          if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL ||
+              op == DFM_NEG) {
+            auto name = op == DFM_ADD   ? "add"
+                        : op == DFM_SUB ? "sub"
+                        : op == DFM_MUL ? "mul"
+                                        : "neg";
+            text +=
+                "if(!checked_" + std::string(name) + "(" + a + "," +
+                (unary ? "" : b + ",") + z +
+                "))atomic_fetch_min_explicit(error," +
+                std::to_string((r.dtype == DFM_FLOAT32 ? 0x80000000UL : 0UL) +
+                               s.start + j + 1) +
+                "u,memory_order_relaxed);";
+          } else {
+            std::string expr;
+            if (op == DFM_NOT)
+              expr = "!(" + a + "!=T(0))";
+            else {
+              auto symbol = op == DFM_GT   ? ">"
+                            : op == DFM_EQ ? "=="
+                            : op == DFM_LT ? "<"
+                            : op == DFM_GE ? ">="
+                            : op == DFM_LE ? "<="
+                            : op == DFM_NE ? "!="
+                                           : "!=";
+              expr = op == DFM_XOR ? "((" + a + "!=T(0))!=(" + b + "!=T(0)))"
+                                   : a + symbol + b;
+            }
+            if (r.dtype == DFM_FLOAT32 && op != DFM_NOT && op != DFM_XOR)
+              text += "if(!native_operand(" + a + ")||!native_operand(" + b +
+                      "))atomic_fetch_min_explicit(error," +
+                      std::to_string(0x80000000UL + s.start + j + 1) +
+                      "u,memory_order_relaxed);else ";
+            text += z + "=T(" + expr + ");";
+          }
+          text += "}";
         }
-        text += "}";
+        text += "\n";
       }
-      text += "\n";
+      auto last = prefix + std::to_string(s.nodes - 1);
+      auto slot = std::to_string(s.slot);
+      text += std::string(local[s.slot] ? "slot" : "T slot") + slot + "=a" +
+              last + ";" + (local[s.slot] ? "valid" : "bool valid") + slot +
+              "=v" + last + ";\n";
+      local[s.slot] = true;
+      if (layout.physical[s.slot] >= 0) {
+        auto idx = std::to_string(layout.physical[s.slot]) + "UL*meta.z+row";
+        text += "x[" + idx + "]=slot" + slot + ";v[" + idx + "]=uchar(valid" +
+                slot + ");\n";
+      }
     }
-    auto last = std::to_string(s.nodes - 1);
-    auto idx = std::to_string(s.slot) + "UL*meta.z+row";
-    text +=
-        "x[" + idx + "]=a" + last + ";v[" + idx + "]=uchar(v" + last + ");}\n";
+    text += "}\n";
+    first = end + 1;
   }
   return text;
 }
@@ -495,6 +596,7 @@ struct Partial {
 };
 void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   auto shape = validate(r, true);
+  auto layout = Layout(r);
   stats = {};
   stats.gpu_ns = -1;
   stats.memory = estimate(r, shape);
@@ -544,7 +646,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     auto &input = r.inputs[i];
     int64_t size = (r.rows + input.bit_offset + 7) / 8;
     std::array<uint64_t, 4> params{
-        static_cast<uint64_t>(i), static_cast<uint64_t>(input.bit_offset),
+        static_cast<uint64_t>(layout.physical[i]),
+        static_cast<uint64_t>(input.bit_offset),
         static_cast<uint64_t>(input.dtype == DFM_BOOL), UINT64_MAX};
     // Bitmap offsets are absolute; buffer bindings stay naturally aligned.
     if (input.dtype == DFM_BOOL)
@@ -555,7 +658,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
                size);
       offset += size;
     } else if (r.rows)
-      memcpy(static_cast<char *>(x.contents) + i * shape.cap * width(r.dtype),
+      memcpy(static_cast<char *>(x.contents) +
+                 layout.physical[i] * shape.cap * width(r.dtype),
              input.values, r.rows * width(r.dtype));
     if (input.has_validity) {
       params[3] = offset;
@@ -577,20 +681,26 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
       memcpy(static_cast<char *>(literal.contents) + i * 4, &value, 4);
     } else {
       int64_t value = op == DFM_LITERAL_BOOL ? int64_t(floating) : integer;
-      if (op == DFM_LITERAL_INT && r.dtype == DFM_INT32 &&
-          (value < INT32_MIN || value > INT32_MAX))
-        fail("Metal Int32 literal overflow");
-      if (r.dtype == DFM_INT32) {
-        int32_t narrow = value;
-        memcpy(static_cast<char *>(literal.contents) + i * 4, &narrow, 4);
-      } else
-        memcpy(static_cast<char *>(literal.contents) + i * 8, &value, 8);
+      auto bytes = width(r.dtype);
+      uint64_t bits = uint64_t(value);
+      if (op == DFM_LITERAL_INT && bytes < 8) {
+        if (unsignedType(r.dtype)) {
+          if (bits > ((uint64_t(1) << (bytes * 8)) - 1))
+            fail("Metal unsigned literal overflow");
+        } else {
+          int64_t hi = (int64_t(1) << (bytes * 8 - 1)) - 1;
+          if (value < -hi - 1 || value > hi)
+            fail("Metal signed literal overflow");
+        }
+      }
+      memcpy(static_cast<char *>(literal.contents) + i * bytes, &bits, bytes);
     }
   }
   auto *descriptors = static_cast<GPUOut *>(out.contents);
   for (int64_t i = 0; i < r.output_count; ++i)
-    descriptors[i] = {r.outputs[i].slot, r.outputs[i].reduction,
-                      r.outputs[i].min_count, r.outputs[i].dtype};
+    descriptors[i] = {layout.physical[r.outputs[i].slot],
+                      r.outputs[i].reduction, r.outputs[i].min_count,
+                      r.outputs[i].dtype};
   stats.staging_copy_ns = ns(start);
   Drain drain{[c.queue commandBuffer]};
   if (!drain.command)
@@ -629,7 +739,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     offset += ((r.rows + input.bit_offset + 7) / 8) *
               ((input.dtype == DFM_BOOL) + input.has_validity);
   }
-  for (int64_t i = 0; i < r.step_count; ++i) {
+  for (auto i : layout.ends) {
     auto &step = r.steps[i];
     buffer(0, x);
     buffer(1, v);
@@ -638,7 +748,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     buffer(4, arithmeticError);
     dispatch("project" + std::to_string(i), shape.cap);
     if (step.filter) {
-      uint64_t slot = step.slot;
+      uint64_t slot = layout.physical[step.slot];
       buffer(0, x);
       buffer(1, v);
       buffer(2, rank);
@@ -650,8 +760,10 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
       buffer(1, meta);
       dispatch("block_offsets", 1);
       for (int64_t j = 0; j < step.gather_count; ++j) {
-        uint64_t params[2] = {
-            slot, static_cast<uint64_t>(r.gathers[step.gather_start + j])};
+        auto physical = layout.physical[r.gathers[step.gather_start + j]];
+        if (physical < 0)
+          continue;
+        uint64_t params[2] = {slot, static_cast<uint64_t>(physical)};
         buffer(0, x);
         buffer(1, v);
         buffer(2, y);
@@ -736,8 +848,11 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     for (int64_t i = 0; i < r.output_count; ++i)
       if (r.outputs[i].reduction == DFM_SUM &&
           values[i].count >= r.outputs[i].min_count &&
-          (values[i].total < INT32_MIN || values[i].total > INT32_MAX))
-        fail("Integer overflow in Metal Int32 sum");
+          ((r.outputs[i].dtype == DFM_INT32 &&
+            (values[i].total < INT32_MIN || values[i].total > INT32_MAX)) ||
+           (r.outputs[i].dtype == DFM_UINT32 &&
+            (values[i].total < 0 || uint64_t(values[i].total) > UINT32_MAX))))
+        fail("Integer overflow in Metal sum");
   }
   for (int64_t i = 0; i < r.output_count; ++i) {
     auto &o = r.outputs[i];
@@ -746,8 +861,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
         continue;
       auto a = static_cast<Partial *>(result.contents)[i];
       bool valid = o.reduction != DFM_SUM || a.count >= o.min_count;
-      if (o.dtype == DFM_INT32) {
-        int32_t value = valid ? a.total : 0;
+      if (o.dtype == DFM_INT32 || o.dtype == DFM_UINT32) {
+        uint32_t value = valid ? a.total : 0;
         memcpy(o.values, &value, 4);
       } else
         memcpy(o.values, &a.total, 8);
@@ -762,9 +877,10 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
       int64_t size = o.dtype == DFM_BOOL ? packed : rows * width(o.dtype);
       if (size)
         memcpy(o.values,
-               o.dtype == DFM_BOOL ? base + shape.packed
-                                   : static_cast<uint8_t *>(x.contents) +
-                                         o.slot * shape.cap * width(r.dtype),
+               o.dtype == DFM_BOOL
+                   ? base + shape.packed
+                   : static_cast<uint8_t *>(x.contents) +
+                         layout.physical[o.slot] * shape.cap * width(r.dtype),
                size);
       stats.download_bytes += packed + size;
     }

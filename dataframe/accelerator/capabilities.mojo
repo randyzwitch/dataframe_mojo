@@ -15,6 +15,7 @@ struct RowCapabilities(Copyable):
     var float64: Bool
     var wide_integer: Bool
     var int64_arithmetic: Bool
+    var extended_integers: Bool
 
     def __init__(
         out self,
@@ -23,11 +24,13 @@ struct RowCapabilities(Copyable):
         float64: Bool = True,
         wide_integer: Bool = True,
         int64_arithmetic: Bool = True,
+        extended_integers: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
         self.wide_integer = wide_integer
         self.int64_arithmetic = int64_arithmetic
+        self.extended_integers = extended_integers
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)
@@ -35,6 +38,8 @@ struct RowCapabilities(Copyable):
     def require_dtype(self, dtype: DataType) raises:
         if dtype == DataType.FLOAT64 and not self.float64:
             self.reject("dtype", "Float64 requires CPU execution")
+        if self.extended_integers and dtype.is_integer():
+            return
         if (
             dtype != DataType.FLOAT32
             and dtype != DataType.FLOAT64
@@ -60,9 +65,12 @@ struct RowCapabilities(Copyable):
                 self.reject(
                     "accumulator", "floating sum requires Float64 accumulation"
                 )
-            if dtype == DataType.INT64 and not self.wide_integer:
+            if (
+                dtype == DataType.INT64 or dtype == DataType.UINT64
+            ) and not self.wide_integer:
                 self.reject(
-                    "accumulator", "Int64 sum requires exact wide accumulation"
+                    "accumulator",
+                    dtype.name() + " sum requires exact wide accumulation",
                 )
             if (
                 dtype == DataType.INT32

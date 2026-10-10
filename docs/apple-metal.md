@@ -44,8 +44,8 @@ runtime data; changing those does not require recompiling an identical shader.
 
 ## Native precision and supported operations
 
-Sources must be contiguous in-memory Float32, Int32, Int64, or packed Bool
-columns; numeric columns share one dtype. Sliced numeric and bitmap windows are
+Sources must be contiguous in-memory Float32, any signed or unsigned integer
+width (8, 16, 32, or 64 bits), or packed Bool columns; numeric columns share one dtype. Sliced numeric and bitmap windows are
 supported. Expressions support literals, add/subtract/multiply/negate,
 comparisons, Kleene Boolean logic, null tests, and fill-null. Projection,
 with-columns, drop, stable filtering, and final head remain resident until the
@@ -53,8 +53,9 @@ result is copied to ordinary CPU columns. Checked integer arithmetic currently
 requires terminal projections without head, matching the shared planner's
 observable-overflow boundary.
 
-Count and length return Int64. Int32 sum uses an exact Int64 accumulator, with an
-Int32 range check on the final result. The initial input has at most Int32.MAX
+Count and length return Int64. Int8, Int16, UInt8, and UInt16 sums return Int64.
+Int32 and UInt32 sums retain their input dtype with a final range check. These
+sums use an exact Int64 accumulator. The initial input has at most Int32.MAX
 rows, so this accumulator cannot overflow even when partial sums cancel. Sum's
 `min_count` is retained. Float32 row arithmetic preserves separate operator
 rounding for supported operations and disables shader contraction and unsafe math
@@ -66,7 +67,7 @@ their bits. This guard is conservative: a tiny product that would correctly roun
 to zero can also require CPU execution. There is no arithmetic emulation or
 automatic retry after submission.
 
-Float64 inputs, floating sum/mean, and Int64 sum require CPU execution. Their
+Float64 inputs, floating sum/mean, and Int64/UInt64 sums require CPU execution. Their
 precision contracts need hardware types Apple GPUs do not supply. The backend
 does not emulate Float64 or wide integer accumulation. Forced accelerator
 execution rejects these statically unsupported plans before submission.
@@ -80,7 +81,15 @@ CPU cache mode. It stages input bytes once, queues all dependent kernels, waits
 once, and copies the final result into CPU-owned columns. Shared memory still
 requires synchronization; CPU code never reads an in-flight GPU result.
 
-Preflight counts each requested shared buffer once, both matrices when filtering,
+Consecutive projection steps, including the next filter predicate, execute in
+one specialized kernel. Intermediate expression values stay in thread-local
+variables. Shared matrices hold input columns, final outputs, filter predicates,
+and values needed after a filter boundary. Dead temporary slots are omitted from
+stable gathers. Operator rounding, validity, and precision/overflow guards remain
+in the fused expression sequence.
+
+Preflight uses this same physical slot layout and counts each requested shared
+buffer once, both matrices when filtering,
 prefix ranks and block offsets, bitmap windows, typed literals, output bitmaps,
 reduction partials/results, GPU descriptors, metadata, and error storage. It also
 counts the worst-case CPU result allocation. Checked arithmetic rejects size
@@ -115,4 +124,5 @@ cases run when the optional library is present. Cases include non-byte-aligned
 slices, nulls, Boolean logic, stable filtering, empty outputs, exact Int64
 literals, checked integer overflow, cancelled Int32 sums, memory rejection,
 Float32 operator rounding, exceptional floating values, subnormal precision
-rejection, and cache reuse.
+rejection, cache reuse, and long fused projection chains across multiple filter
+boundaries with live branches and pruned temporary gathers.

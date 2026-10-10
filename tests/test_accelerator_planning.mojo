@@ -209,5 +209,52 @@ def test_memory_launch_dimensions_are_backend_owned() raises:
         _ = row_memory(plan, max_blocks=0)
 
 
+def _extended_integer_plan[D: DType]() raises:
+    var frame = DataFrame(
+        [Series("x", Column[Scalar[D]]([Scalar[D](1), Scalar[D](2)]))]
+    )
+    var capabilities = RowCapabilities(
+        "native-integer",
+        float64=False,
+        wide_integer=False,
+        extended_integers=True,
+    )
+    var query = frame.lazy().select((col("x") + lit(Scalar[D](1))).alias("y"))
+    var plan = lower_rows(query, capabilities)
+    assert_equal(plan.dtype, DataType.of(D))
+    assert_equal(plan.outputs[0].dtype, DataType.of(D))
+    var counted = lower_rows(
+        frame.lazy().select(col("x").count()), capabilities
+    )
+    assert_equal(counted.outputs[0].dtype, DataType.INT64)
+
+
+def test_extended_integer_lowering_is_backend_opt_in() raises:
+    _extended_integer_plan[DType.int8]()
+    _extended_integer_plan[DType.int16]()
+    _extended_integer_plan[DType.uint8]()
+    _extended_integer_plan[DType.uint16]()
+    _extended_integer_plan[DType.uint32]()
+    _extended_integer_plan[DType.uint64]()
+    var narrow = DataFrame([Series("x", Column[Int8]([1, 2]))])
+    with assert_raises(contains="dtype"):
+        _ = lower_rows(narrow.lazy().select(col("x")))
+    var capabilities = RowCapabilities(
+        "native-integer",
+        float64=False,
+        wide_integer=False,
+        extended_integers=True,
+    )
+    var sum = lower_rows(narrow.lazy().select(col("x").sum()), capabilities)
+    assert_equal(sum.outputs[0].dtype, DataType.INT64)
+    var unsigned = DataFrame([Series("x", Column[UInt64]([0]))])
+    var literal = lower_rows(
+        unsigned.lazy().select(col("x") + lit(UInt64.MAX)), capabilities
+    )
+    assert_equal(bitcast[DType.uint64](literal.literals[1]), UInt64.MAX)
+    with assert_raises(contains="uint64 sum requires exact wide accumulation"):
+        _ = lower_rows(unsigned.lazy().select(col("x").sum()), capabilities)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

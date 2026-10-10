@@ -155,6 +155,63 @@ err = P()
 assert lib.dfm_estimate(C.byref(bad), C.byref(memory), C.byref(err)) == 1
 assert b"ABI version mismatch" in C.string_at(err)
 lib.dfm_free(err)
+# Pure fusion preflight must run even on CI VMs without a Metal device.
+# Descriptor-only estimates never dereference caller data or output storage.
+def check_fusion_preflight_without_device():
+    count = 32
+    inputs = (Input * 1)(Input(None, None, 2, 0, 0))
+    programs = []
+    steps = []
+    for i in range(count):
+        programs += [(0, -1, -1, i), (1, -1, -1, -1), (5, 0, 1, -1)]
+        steps.append(Step(3 * i, 3, i + 1, 0, 0, 0))
+    code = (I * (4 * len(programs)))(*[x for node in programs for x in node])
+    literals = (I * len(programs))()
+    step_array = (Step * count)(*steps)
+    outputs = (Output * 1)(Output(None, None, 2, count, -1, 0))
+    request = Request(
+        1,
+        0,
+        2,
+        count + 1,
+        1,
+        len(code),
+        len(literals),
+        count,
+        0,
+        1,
+        -1,
+        0,
+        0,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(literals),
+        ptr(step_array),
+        None,
+        ptr(outputs),
+    )
+    for rows in [0, 1, 8388608]:
+        request.rows = rows
+        memory, err = Memory(), P()
+        check(
+            lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)),
+            err,
+        )
+        assert memory.launches == 3
+        assert memory.capacity == max(1, rows)
+        # A long chain reserves input and final output, not 33 full columns.
+        assert memory.shared < 11 * max(1, rows) + 1024
+        assert memory.peak == memory.shared + memory.result
+    step_array[0].slot = 2
+    code[3] = 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"undefined slot" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+check_fusion_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
@@ -165,6 +222,20 @@ if not ctx:
     check(1, err)
 
 # All request-owned buffers stay alive until the synchronous call returns.
+SCALARS = {
+    1: C.c_float,
+    2: C.c_int32,
+    3: I,
+    4: C.c_uint8,
+    5: C.c_int8,
+    6: C.c_int16,
+    7: C.c_uint8,
+    8: C.c_uint16,
+    9: C.c_uint32,
+    10: C.c_uint64,
+}
+
+
 def execute(
     values,
     dtype,
@@ -182,7 +253,7 @@ def execute(
     expect_error=None,
     repeats=1
 ):
-    scalar = {1: C.c_float, 2: C.c_int32, 3: I, 4: C.c_uint8}[dtype]
+    scalar = SCALARS[dtype]
     n = len(values)
     data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(
         *values
@@ -217,7 +288,7 @@ def execute(
     words = []
     for node, value in zip(programs, lit):
         words.append(
-            C.c_uint64(value).value if node[0]
+            C.c_uint64(int(value)).value if node[0]
             == 1 else C.cast(
                 C.pointer(C.c_double(value)), C.POINTER(C.c_uint64)
             ).contents.value
@@ -225,10 +296,10 @@ def execute(
     literal = (C.c_uint64 * len(words))(*words)
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
-    out_type = (2 if reduction == 10 else 3) if reduction >= 0 else (
-        4 if output_bool else dtype
-    )
-    out_scalar = {1: C.c_float, 2: C.c_int32, 3: I, 4: C.c_uint8}[out_type]
+    out_type = (
+        (dtype if dtype in (2, 9) else 3) if reduction == 10 else 3
+    ) if reduction >= 0 else (4 if output_bool else dtype)
+    out_scalar = SCALARS[out_type]
     result = (out_scalar * max(1, n))()
     bits = (C.c_uint8 * max(1, (n + 7) // 8))()
     outputs = (Output * 1)(
@@ -457,6 +528,221 @@ for op, a, b in [
         output_bool=op == 8,
         expect_error="subnormal",
     )
+# Two filter boundaries retain an early branch and the original input while
+# pruning the other 30 temporary projections from shared storage and gathers.
+def check_fused_boundaries():
+    n = 4097
+    data = (C.c_int32 * n)(*[i % 71 - 35 for i in range(n)])
+    valid = [i % 13 != 0 for i in range(n)]
+    validity = packed(valid)
+    inputs = (Input * 1)(Input(ptr(data), ptr(validity), 2, 0, 1))
+    programs, literals, steps, gathers = [], [], [], []
+    slots = 1
+    current = 0
+    live_columns = [0]
+    expected = [(data[i], data[i], valid[i]) for i in range(n)]
+    early = -1
+    for stage in range(32):
+        start = len(programs)
+        programs += [(0, -1, -1, current), (1, -1, -1, -1), (5, 0, 1, -1)]
+        literals += [0, 1, 0]
+        steps.append(Step(start, 3, slots, 0, len(gathers), 0))
+        current = slots
+        live_columns.append(slots)
+        slots += 1
+        expected = [(x, y + 1, v) for x, y, v in expected]
+        if stage == 9:
+            early = current
+        if stage in (15, 31):
+            start = len(programs)
+            programs += [(0, -1, -1, current), (1, -1, -1, -1), (8, 0, 1, -1)]
+            literals += [0, 5 if stage == 15 else 25, 0]
+            steps.append(
+                Step(start, 3, slots, 1, len(gathers), len(live_columns))
+            )
+            gathers += live_columns
+            slots += 1
+            expected = [
+                (x, y, v)
+                for x, y, v in expected
+                if v and y > (5 if stage == 15 else 25)
+            ]
+    arrays = [(C.c_int32 * n)() for _ in range(3)]
+    bitmaps = [(C.c_uint8 * ((n + 7) // 8))() for _ in range(3)]
+    outputs = (Output * 3)(
+        *[
+            Output(ptr(a), ptr(b), 2, slot, -1, 0)
+            for a, b, slot in zip(arrays, bitmaps, [0, early, current])
+        ]
+    )
+    code = (I * (4 * len(programs)))(*[x for node in programs for x in node])
+    words = (I * len(literals))(*literals)
+    step_array = (Step * len(steps))(*steps)
+    gather_array = (I * len(gathers))(*gathers)
+    request = Request(
+        1,
+        n,
+        2,
+        slots,
+        1,
+        len(code),
+        len(words),
+        len(steps),
+        len(gathers),
+        3,
+        -1,
+        0,
+        1,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(words),
+        ptr(step_array),
+        ptr(gather_array),
+        ptr(outputs),
+    )
+    memory, stats, err = Memory(), Stats(), P()
+    check(
+        lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
+    )
+    for _ in range(2):
+        check(
+            lib.dfm_execute(
+                ctx, C.byref(request), C.byref(stats), C.byref(err)
+            ),
+            err,
+        )
+        assert stats.rows == len(expected)
+        assert list(arrays[0])[: stats.rows] == [x for x, y, v in expected]
+        assert list(arrays[1])[: stats.rows] == [x + 10 for x, y, v in expected]
+        assert list(arrays[2])[: stats.rows] == [y for x, y, v in expected]
+        assert all(all(unpack(b, stats.rows)) for b in bitmaps)
+        assert stats.memory.shared == memory.shared
+        assert stats.memory.launches == memory.launches
+        assert memory.launches < len(steps)
+        assert memory.shared < n * slots * 5
+
+    # A pruned temporary still contributes checked-arithmetic errors.
+    data[1] = 2147483647
+    err = P()
+    assert lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+    assert b"Integer overflow" in C.string_at(err)
+    lib.dfm_free(err)
+    data[1] = 0
+    # Undefined logical slots cannot become negative physical addresses.
+    step_array[0].slot = 2
+    code[3] = 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"undefined slot" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+check_fused_boundaries()
+# Every native width exercises exact literals, checked arithmetic, stable
+# compaction with offset validity, comparisons, and reduction storage.
+for dtype, lo, hi in [
+    (5, -128, 127),
+    (6, -32768, 32767),
+    (7, 0, 255),
+    (8, 0, 65535),
+    (9, 0, 2**32 - 1),
+    (10, 0, 2**64 - 1),
+]:
+    arithmetic = [col, (1, -1, -1, -1), (5, 0, 1, -1)]
+    result, bits, _ = execute([hi - 1], dtype, arithmetic, [0, 1, 0])
+    assert result == [hi] and bits == [True], (dtype, result)
+    execute([hi], dtype, arithmetic, [0, 1, 0], expect_error="overflow")
+    execute(
+        [lo],
+        dtype,
+        [col, (1, -1, -1, -1), (6, 0, 1, -1)],
+        [0, 1, 0],
+        expect_error="overflow",
+    )
+    execute(
+        [hi],
+        dtype,
+        [col, (1, -1, -1, -1), (7, 0, 1, -1)],
+        [0, 2, 0],
+        expect_error="overflow",
+    )
+    execute(
+        [lo if lo else 1],
+        dtype,
+        [col, (50, 0, -1, -1)],
+        [0, 0],
+        expect_error="overflow",
+    )
+    result, bits, _ = execute([0], dtype, arithmetic, [0, hi, 0])
+    assert result == [hi] and bits == [True]
+    for op in (5, 6, 7):
+        samples = [(0, 0), (hi, 0), (hi, 1), (hi, hi), (lo, 1), (lo, lo)]
+        samples += [
+            (random.randint(lo, hi), random.randint(lo, hi)) for _ in range(8)
+        ]
+        for a, b in samples:
+            expected = a + b if op == 5 else a - b if op == 6 else a * b
+            if lo <= expected <= hi:
+                result, bits, _ = execute(
+                    [a],
+                    dtype,
+                    [col, (1, -1, -1, -1), (op, 0, 1, -1)],
+                    [0, b, 0],
+                )
+                assert result == [expected] and bits == [True], (
+                    dtype,
+                    op,
+                    a,
+                    b,
+                    result,
+                )
+            else:
+                execute(
+                    [a],
+                    dtype,
+                    [col, (1, -1, -1, -1), (op, 0, 1, -1)],
+                    [0, b, 0],
+                    expect_error="overflow",
+                )
+    values = [0, 1, hi] * 257
+    valid = [i % 7 != 0 for i in range(len(values))]
+    result, bits, _ = execute(
+        values,
+        dtype,
+        [col],
+        [0],
+        valid=valid,
+        offset=5,
+        filter_nodes=[col, (1, -1, -1, -1), (8, 0, 1, -1)],
+    )
+    assert result == [x for x, v in zip(values, valid) if v and x > 0]
+    assert all(bits)
+    result, bits, _ = execute(
+        [hi, hi - 1],
+        dtype,
+        [col, (1, -1, -1, -1), (9, 0, 1, -1)],
+        [0, hi, 0],
+        output_bool=True,
+    )
+    assert result == [True, False] and all(bits)
+    result, bits, _ = execute(
+        values, dtype, [col], [0], valid=valid, reduction=11
+    )
+    assert result == [sum(valid)] and bits == [True]
+    if dtype != 10:
+        result, bits, _ = execute([1, 2, 3], dtype, [col], [0], reduction=10)
+        assert result == [6] and bits == [True]
+    else:
+        execute(
+            [1],
+            dtype,
+            [col],
+            [0],
+            reduction=10,
+            expect_error="accumulator precision",
+        )
+execute([2**32 - 1, 1], 9, [col], [0], reduction=10, expect_error="overflow")
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"

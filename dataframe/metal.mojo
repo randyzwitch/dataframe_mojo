@@ -15,7 +15,7 @@ from .accelerator.rows import RowPlan, lower_rows
 from .arrow import _c_string, _read_c_string
 from .bool_column import BoolColumn
 from .column import Column
-from .dtype import DataType
+from .dtype import DataType, NUMERIC_DTYPES
 from .execution_report import ExecutionReport
 from .expr import (
     COL,
@@ -149,7 +149,8 @@ struct _Library(Movable):
                 break
         if not path:
             raise Error(
-                "Metal runtime is not installed; run native/dfmetal/build.sh or set DATAFRAME_METAL_LIBRARY"
+                "Metal runtime is not installed; run native/dfmetal/build.sh or"
+                " set DATAFRAME_METAL_LIBRARY"
             )
         var name = _c_string(path)
         # Darwin RTLD_NOW | RTLD_NODELETE. Every open is balanced by close;
@@ -217,7 +218,9 @@ struct _Context(Movable):
 
 
 def _capabilities() -> RowCapabilities:
-    return RowCapabilities("Metal", float64=False, wide_integer=False)
+    return RowCapabilities(
+        "Metal", float64=False, wide_integer=False, extended_integers=True
+    )
 
 
 def _type(dtype: DataType) raises -> Int64:
@@ -229,6 +232,18 @@ def _type(dtype: DataType) raises -> Int64:
         return 3
     if dtype == DataType.BOOL:
         return 4
+    if dtype == DataType.INT8:
+        return 5
+    if dtype == DataType.INT16:
+        return 6
+    if dtype == DataType.UINT8:
+        return 7
+    if dtype == DataType.UINT16:
+        return 8
+    if dtype == DataType.UINT32:
+        return 9
+    if dtype == DataType.UINT64:
+        return 10
     raise Error("Metal unsupported dtype")
 
 
@@ -344,12 +359,13 @@ struct _Descriptors(Movable):
                         Int64(has_bits),
                     ]
                 )
-            elif column.dtype() == DataType.FLOAT32:
-                self.inputs.extend(_input(column.float32(), 1))
-            elif column.dtype() == DataType.INT32:
-                self.inputs.extend(_input(column.int32(), 2))
             else:
-                self.inputs.extend(_input(column.int64(), 3))
+                comptime for k in range(len(NUMERIC_DTYPES)):
+                    comptime D = NUMERIC_DTYPES[k]
+                    if column.dtype() == DataType.of(D):
+                        self.inputs.extend(
+                            _input(column.numeric[D](), _type(column.dtype()))
+                        )
         for step in plan.steps:
             self.steps.extend(
                 [
@@ -564,7 +580,8 @@ def _execute[
             "boundaries",
             Column[String](
                 [
-                    "shared-buffer staging -> native Metal kernels -> synchronized CPU result"
+                    "shared-buffer staging -> native Metal kernels ->"
+                    " synchronized CPU result"
                 ]
             ),
         )
@@ -588,7 +605,8 @@ struct MetalRuntime(AcceleratorBackend):
     ) raises:
         if device_id < 0 or memory_limit_bytes < -1:
             raise Error(
-                "Metal requires nonnegative device_id and memory_limit_bytes >= -1"
+                "Metal requires nonnegative device_id and memory_limit_bytes"
+                " >= -1"
             )
         self._device = device_id
         self._budget = memory_limit_bytes
@@ -612,17 +630,14 @@ struct MetalRuntime(AcceleratorBackend):
     ) raises -> Tuple[DataFrame, DataFrame]:
         var start = Int(perf_counter_ns())
         var plan = lower_rows(query, _capabilities())
-        if plan.dtype == DataType.FLOAT32:
-            return _execute[DType.float32](
-                plan, self._device, self._budget, profiling, start
-            )
-        if plan.dtype == DataType.INT32:
-            return _execute[DType.int32](
-                plan, self._device, self._budget, profiling, start
-            )
-        return _execute[DType.int64](
-            plan, self._device, self._budget, profiling, start
-        )
+        comptime for k in range(len(NUMERIC_DTYPES)):
+            comptime D = NUMERIC_DTYPES[k]
+            comptime if D != DType.float64:
+                if plan.dtype == DataType.of(D):
+                    return _execute[D](
+                        plan, self._device, self._budget, profiling, start
+                    )
+        raise Error("Metal unsupported dtype")
 
     def describe(self, query: LazyFrame) -> String:
         try:

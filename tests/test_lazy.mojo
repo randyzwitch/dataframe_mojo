@@ -449,5 +449,52 @@ def test_shared_subplans_run_once_and_match() raises:
     )
 
 
+def test_filter_stays_above_a_window() raises:
+    # A rank (or any window or aggregate) in a with_columns depends on the
+    # rows present: a filter above it must not move below it, even when it
+    # reads none of the columns the with_columns makes. Ranks of the first
+    # day of each month among all days of the year are 1, 32, 60, ...
+    var days = List[Int64]()
+    var months = List[Int64]()
+    var doms = List[Int64]()
+    var lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    var day = 0
+    for m in range(12):
+        for d in range(lengths[m]):
+            days.append(Int64(day))
+            months.append(Int64(m + 1))
+            doms.append(Int64(d + 1))
+            day += 1
+    var frame = DataFrame(
+        [
+            Series("day", Column[Int64](days^)),
+            Series("month", Column[Int64](months^)),
+            Series("dom", Column[Int64](doms^)),
+        ]
+    )
+    var plan = (
+        frame.lazy()
+        .with_columns([col("day").rank(method="min").alias("rn")])
+        .filter(col("dom") == lit(Int64(1)))
+    )
+    var expected = frame.with_columns(
+        [col("day").rank(method="min").alias("rn")]
+    ).filter(col("dom") == lit(Int64(1)))
+    for streaming in [False, True]:
+        assert_true(plan.collect(streaming=streaming).equals(expected))
+    assert_equal(expected.item(1, "rn").int64(), 32)
+    assert_true(
+        plan.explain(streaming=False).startswith("FILTER\n  WITH_COLUMNS")
+    )
+    # Partitioned: a filter on another column stays above `.over` too.
+    var over = (
+        frame.lazy()
+        .with_columns([col("dom").max().over("month").alias("last_day")])
+        .filter(col("day") < lit(Int64(40)))
+        .collect()
+    )
+    assert_equal(over.item(35, "last_day").int64(), 28)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

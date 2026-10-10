@@ -1,0 +1,1032 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "recorded_at_utc": "2026-10-10T15:50:52.833371+00:00",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "cpu": "Apple M1",
+    "physical_cores": "8",
+    "memory_bytes": "17179869184",
+    "git_commit": "1a4dfa9e30899ad12615c9c1b20009f794106895",
+    "engine_status": "",
+    "benchmark_status": "?? benchmarks/bench_metal.mojo\n?? scripts/bench_metal.py",
+    "mojo_version": "Mojo 1.2.0.dev2026092105 (e9569894)",
+    "xcode": "Xcode 26.6\nBuild version 17F113",
+    "sdk": "26.5",
+    "compile_flags": [
+      "-O3",
+      "-I",
+      "."
+    ],
+    "dataframe_threads": 8,
+    "binary_sha256": "737e7949de292e4e355a3784d480d5fdd312d793b0271532da324b159ca0ef0d",
+    "source_sha256": "5f31b5a9fea05aae68e5cc4c68932a7c467837d635035910751f8c2a74191330",
+    "driver_sha256": "74f8bcab599ec483d2f8f682ba4b354681c2a6b4c6ce91a07ea2ca581b033d55",
+    "library_sha256": {
+      "metal": "bbd16bc0605befbee090dff44ead764400dd9d30cbff320b0740fde357e57d30"
+    },
+    "environment": {},
+    "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
+    "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
+    "data": "Deterministic 1024-value numeric distribution. Base cycles; sorted uses monotone Float32 bins (Int32 sum uses mapped bins); nulls permutes bins with fixed LCG constants and marks exactly every twentieth row invalid. Float32 values are exact multiples of 1/1024; Int32 values are bin modulo 17 minus 8.",
+    "limitations": [
+      "No external-suite coverage claimed; joins, group-by, Float64 and floating reductions are outside these cases.",
+      "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
+      "CPU and GPU share host memory and power limits; short timings can vary with scheduler and thermal state.",
+      "Native profile is a separate warm collection after timed samples; its GPU interval is not a caller-wall substitute.",
+      "Workload exposure: chain32 was used during fusion development; other cases broaden mechanism coverage without a holdout claim."
+    ]
+  },
+  "selection": {
+    "rows": [
+      4097
+    ],
+    "workloads": [
+      "projection",
+      "expression16",
+      "chain32",
+      "filter_half",
+      "filter_sparse",
+      "count",
+      "int_sum"
+    ],
+    "variants": [
+      "base",
+      "sorted",
+      "nulls"
+    ],
+    "rounds": 1,
+    "reps": 2
+  },
+  "runs": [
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "projection",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-projection-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 126000,
+          "metal_ns": 304000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 141000,
+          "metal_ns": 288000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16921,
+        "download_bytes": 16901,
+        "shared_buffer_bytes": 42582,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 59483,
+        "kernel_launches": 3,
+        "synchronizations": 1,
+        "wall_ms": 0.258,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.003125,
+        "submit_wait_ms": 0.156666,
+        "result_copy_ms": 0.002125,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.015499
+      },
+      "first_use_ns": {
+        "cpu": 979000,
+        "metal": 64223000
+      },
+      "workers": 8,
+      "output_rows": 4097,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "projection",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-projection-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 128000,
+          "metal_ns": 421000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 127000,
+          "metal_ns": 402000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16921,
+        "download_bytes": 16901,
+        "shared_buffer_bytes": 42582,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 59483,
+        "kernel_launches": 3,
+        "synchronizations": 1,
+        "wall_ms": 0.342,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.003333,
+        "submit_wait_ms": 0.2325,
+        "result_copy_ms": 0.002584,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.021625
+      },
+      "first_use_ns": {
+        "cpu": 254000,
+        "metal": 10997000
+      },
+      "workers": 8,
+      "output_rows": 4097,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "projection",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-projection-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 144000,
+          "metal_ns": 390000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 147000,
+          "metal_ns": 379000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16921,
+        "download_bytes": 16901,
+        "shared_buffer_bytes": 42582,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 59483,
+        "kernel_launches": 3,
+        "synchronizations": 1,
+        "wall_ms": 0.345,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.005958,
+        "submit_wait_ms": 0.241125,
+        "result_copy_ms": 0.002916,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.022083
+      },
+      "first_use_ns": {
+        "cpu": 276000,
+        "metal": 10790000
+      },
+      "workers": 8,
+      "output_rows": 4097,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "expression16",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-expression16-base.txt",
+      "status": "unsupported",
+      "error": "stack trace was not collected. Enable stack trace collection with environment variable `MODULAR_DEBUG=stack-trace-on-error`\nUnhandled exception caught during execution: Metal unsupported [plan]: expression must contain 1 to 64 row-local nodes\n",
+      "exit_code": 1
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "expression16",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-expression16-sorted.txt",
+      "status": "unsupported",
+      "error": "stack trace was not collected. Enable stack trace collection with environment variable `MODULAR_DEBUG=stack-trace-on-error`\nUnhandled exception caught during execution: Metal unsupported [plan]: expression must contain 1 to 64 row-local nodes\n",
+      "exit_code": 1
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "expression16",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-expression16-nulls.txt",
+      "status": "unsupported",
+      "error": "stack trace was not collected. Enable stack trace collection with environment variable `MODULAR_DEBUG=stack-trace-on-error`\nUnhandled exception caught during execution: Metal unsupported [plan]: expression must contain 1 to 64 row-local nodes\n",
+      "exit_code": 1
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "chain32",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-chain32-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1663000,
+          "metal_ns": 579000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1657000,
+          "metal_ns": 536000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 17541,
+        "download_bytes": 16901,
+        "shared_buffer_bytes": 43202,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 60103,
+        "kernel_launches": 3,
+        "synchronizations": 1,
+        "wall_ms": 0.709,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.004625,
+        "submit_wait_ms": 0.456459,
+        "result_copy_ms": 0.002375,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.068375
+      },
+      "first_use_ns": {
+        "cpu": 1808000,
+        "metal": 80171000
+      },
+      "workers": 8,
+      "output_rows": 4097,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "chain32",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-chain32-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1641000,
+          "metal_ns": 593000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1639000,
+          "metal_ns": 874000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 17541,
+        "download_bytes": 16901,
+        "shared_buffer_bytes": 43202,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 60103,
+        "kernel_launches": 3,
+        "synchronizations": 1,
+        "wall_ms": 0.529,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.004625,
+        "submit_wait_ms": 0.290209,
+        "result_copy_ms": 0.002834,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.069124
+      },
+      "first_use_ns": {
+        "cpu": 1790000,
+        "metal": 10962000
+      },
+      "workers": 8,
+      "output_rows": 4097,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "chain32",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-chain32-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1658000,
+          "metal_ns": 811000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1664000,
+          "metal_ns": 505000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 17541,
+        "download_bytes": 16901,
+        "shared_buffer_bytes": 43202,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 60103,
+        "kernel_launches": 3,
+        "synchronizations": 1,
+        "wall_ms": 0.774,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.007583,
+        "submit_wait_ms": 0.525042,
+        "result_copy_ms": 0.00475,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.080499
+      },
+      "first_use_ns": {
+        "cpu": 1798000,
+        "metal": 10916000
+      },
+      "workers": 8,
+      "output_rows": 4097,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "filter_half",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-filter_half-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 131000,
+          "metal_ns": 366000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 134000,
+          "metal_ns": 362000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16925,
+        "download_bytes": 8432,
+        "shared_buffer_bytes": 140982,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 157883,
+        "kernel_launches": 7,
+        "synchronizations": 1,
+        "wall_ms": 0.295,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.00325,
+        "submit_wait_ms": 0.181083,
+        "result_copy_ms": 0.002041,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.030874
+      },
+      "first_use_ns": {
+        "cpu": 775000,
+        "metal": 72690000
+      },
+      "workers": 8,
+      "output_rows": 2044,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "filter_half",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-filter_half-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 126000,
+          "metal_ns": 366000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 125000,
+          "metal_ns": 313000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16925,
+        "download_bytes": 8432,
+        "shared_buffer_bytes": 140982,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 157883,
+        "kernel_launches": 7,
+        "synchronizations": 1,
+        "wall_ms": 0.309,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.003125,
+        "submit_wait_ms": 0.191125,
+        "result_copy_ms": 0.001667,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.030999
+      },
+      "first_use_ns": {
+        "cpu": 399000,
+        "metal": 11443000
+      },
+      "workers": 8,
+      "output_rows": 2044,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "filter_half",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-filter_half-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 152000,
+          "metal_ns": 347000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 146000,
+          "metal_ns": 335000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16925,
+        "download_bytes": 8011,
+        "shared_buffer_bytes": 140982,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 157883,
+        "kernel_launches": 7,
+        "synchronizations": 1,
+        "wall_ms": 0.36,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.00325,
+        "submit_wait_ms": 0.242208,
+        "result_copy_ms": 0.002625,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.031249
+      },
+      "first_use_ns": {
+        "cpu": 323000,
+        "metal": 10868000
+      },
+      "workers": 8,
+      "output_rows": 1942,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "filter_sparse",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-filter_sparse-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 133000,
+          "metal_ns": 412000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 132000,
+          "metal_ns": 418000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16925,
+        "download_bytes": 165,
+        "shared_buffer_bytes": 140982,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 157883,
+        "kernel_launches": 7,
+        "synchronizations": 1,
+        "wall_ms": 0.372,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.006834,
+        "submit_wait_ms": 0.2525,
+        "result_copy_ms": 0.002208,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.041291
+      },
+      "first_use_ns": {
+        "cpu": 318000,
+        "metal": 11041000
+      },
+      "workers": 8,
+      "output_rows": 40,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "filter_sparse",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-filter_sparse-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 136000,
+          "metal_ns": 396000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 129000,
+          "metal_ns": 443000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16925,
+        "download_bytes": 165,
+        "shared_buffer_bytes": 140982,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 157883,
+        "kernel_launches": 7,
+        "synchronizations": 1,
+        "wall_ms": 0.373,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.003333,
+        "submit_wait_ms": 0.257125,
+        "result_copy_ms": 0.001792,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.041458
+      },
+      "first_use_ns": {
+        "cpu": 317000,
+        "metal": 10933000
+      },
+      "workers": 8,
+      "output_rows": 40,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "filter_sparse",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-filter_sparse-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 145000,
+          "metal_ns": 330000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 133000,
+          "metal_ns": 332000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16925,
+        "download_bytes": 153,
+        "shared_buffer_bytes": 140982,
+        "host_result_bytes": 16901,
+        "peak_requested_bytes": 157883,
+        "kernel_launches": 7,
+        "synchronizations": 1,
+        "wall_ms": 0.387,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.004209,
+        "submit_wait_ms": 0.270667,
+        "result_copy_ms": 0.001792,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.041416
+      },
+      "first_use_ns": {
+        "cpu": 317000,
+        "metal": 11028000
+      },
+      "workers": 8,
+      "output_rows": 37,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "count",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-count-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 134000,
+          "metal_ns": 400000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 123000,
+          "metal_ns": 391000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16921,
+        "download_bytes": 18,
+        "shared_buffer_bytes": 183581,
+        "host_result_bytes": 18,
+        "peak_requested_bytes": 183599,
+        "kernel_launches": 8,
+        "synchronizations": 1,
+        "wall_ms": 0.311,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.003416,
+        "submit_wait_ms": 0.188,
+        "result_copy_ms": 0.000208,
+        "initialization_ms": 0.001,
+        "gpu_ms": 0.037249
+      },
+      "first_use_ns": {
+        "cpu": 489000,
+        "metal": 65723000
+      },
+      "workers": 8,
+      "output_rows": 1,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "count",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-count-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 141000,
+          "metal_ns": 450000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 129000,
+          "metal_ns": 394000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16921,
+        "download_bytes": 18,
+        "shared_buffer_bytes": 183581,
+        "host_result_bytes": 18,
+        "peak_requested_bytes": 183599,
+        "kernel_launches": 8,
+        "synchronizations": 1,
+        "wall_ms": 0.409,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.007625,
+        "submit_wait_ms": 0.281,
+        "result_copy_ms": 0.000416,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.053625
+      },
+      "first_use_ns": {
+        "cpu": 331000,
+        "metal": 11103000
+      },
+      "workers": 8,
+      "output_rows": 1,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "count",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-count-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 155000,
+          "metal_ns": 379000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 140000,
+          "metal_ns": 354000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16921,
+        "download_bytes": 18,
+        "shared_buffer_bytes": 183581,
+        "host_result_bytes": 18,
+        "peak_requested_bytes": 183599,
+        "kernel_launches": 8,
+        "synchronizations": 1,
+        "wall_ms": 0.311,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.003125,
+        "submit_wait_ms": 0.18925,
+        "result_copy_ms": 0.000208,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.037125
+      },
+      "first_use_ns": {
+        "cpu": 321000,
+        "metal": 10856000
+      },
+      "workers": 8,
+      "output_rows": 1,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "int_sum",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-int_sum-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 117000,
+          "metal_ns": 441000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 105000,
+          "metal_ns": 329000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16905,
+        "download_bytes": 5,
+        "shared_buffer_bytes": 42853,
+        "host_result_bytes": 5,
+        "peak_requested_bytes": 42858,
+        "kernel_launches": 4,
+        "synchronizations": 1,
+        "wall_ms": 0.274,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.00325,
+        "submit_wait_ms": 0.170417,
+        "result_copy_ms": 0.000208,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.019958
+      },
+      "first_use_ns": {
+        "cpu": 273000,
+        "metal": 61298000
+      },
+      "workers": 8,
+      "output_rows": 1,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "int_sum",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-int_sum-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 173000,
+          "metal_ns": 370000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 116000,
+          "metal_ns": 408000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16905,
+        "download_bytes": 5,
+        "shared_buffer_bytes": 42853,
+        "host_result_bytes": 5,
+        "peak_requested_bytes": 42858,
+        "kernel_launches": 4,
+        "synchronizations": 1,
+        "wall_ms": 0.378,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.004042,
+        "submit_wait_ms": 0.257708,
+        "result_copy_ms": 0.000208,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.029666
+      },
+      "first_use_ns": {
+        "cpu": 194000,
+        "metal": 11001000
+      },
+      "workers": 8,
+      "output_rows": 1,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 4097,
+      "workload": "int_sum",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        1.84130859375,
+        2.22802734375,
+        2.2421875
+      ],
+      "log": "0-metal-4097-int_sum-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 101000,
+          "metal_ns": 398000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 138000,
+          "metal_ns": 367000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 16905,
+        "download_bytes": 5,
+        "shared_buffer_bytes": 42853,
+        "host_result_bytes": 5,
+        "peak_requested_bytes": 42858,
+        "kernel_launches": 4,
+        "synchronizations": 1,
+        "wall_ms": 0.359,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.003583,
+        "submit_wait_ms": 0.232875,
+        "result_copy_ms": 0.000209,
+        "initialization_ms": 0.001,
+        "gpu_ms": 0.022041
+      },
+      "first_use_ns": {
+        "cpu": 215000,
+        "metal": 10840000
+      },
+      "workers": 8,
+      "output_rows": 1,
+      "runtime_build_id": "282188200d8c0fca6a758933bbf92b9ad634b0dd7f71d66e2859ee2ac90504a4",
+      "validated": true,
+      "status": "ok"
+    }
+  ]
+}
