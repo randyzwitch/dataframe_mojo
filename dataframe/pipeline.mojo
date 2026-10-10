@@ -19,8 +19,40 @@ from std.sys import size_of
 
 from .bool_column import BoolColumn, both_true, true_count
 from .expr import COL, SELECTOR, Expr
-from .frame import DataFrame, _StreamReduction, concat
+from .aggregate import Reducer
+from .binding import BoundExpr, bind
+from .column import Column
+from .dtype import DataType, NUMERIC_DTYPES
+from .execution import _ReduceJob, _new_reducer
+from .expr import (
+    COUNT,
+    FIRST,
+    LAST,
+    LEN,
+    MAX,
+    MEAN,
+    MIN,
+    N_UNIQUE,
+    NULL_COUNT,
+    STD,
+    SUM,
+    VAR,
+    is_reduction,
+    subtree,
+)
+from .frame import (
+    DataFrame,
+    _StreamReduction,
+    _equality_words,
+    _expand_struct_keys,
+    _finish_parts,
+    _word_hash,
+    concat,
+)
+from .indexed_reduce import _reduce_floats, _reduce_ints
+from .row_encode import encodable
 from .gather import can_filter_aligned_chunks, true_rows
+from .huge_pages import huge_list
 from .mask_filter import filter_columns
 from .parallel import Job, run_jobs
 from .series import Series
@@ -32,6 +64,14 @@ comptime STEP_FILTER = 0
 comptime STEP_SELECT = 1
 comptime STEP_WITH_COLUMNS = 2
 comptime STEP_DROP = 3
+# Hash parts of a worker's grouped state (DuckDB's radix bits): 16 tables
+# of a few thousand groups each while inserting; while collecting, one
+# gather per morsel and part, so few parts keep that cheap.
+comptime _PART_BITS = 4
+# Groups a worker holds in one table before splitting it into
+# 2^_PART_BITS parts: a few groups (ClickBench q7's eight) pay nothing
+# per part and morsel, many fit the parts' tables in cache.
+comptime _SPLIT_GROUPS = 4096
 
 
 @fieldwise_init
@@ -289,6 +329,606 @@ struct _Cursor(Copyable, Movable):
         _ = external_call["free", NoneType](self.address)
 
 
+def _plain_op(op: Int) -> Bool:
+    """A reduction `_reduce_ints`/`_reduce_floats` update in place."""
+    return op in [
+        SUM,
+        MEAN,
+        MIN,
+        MAX,
+        COUNT,
+        FIRST,
+        LAST,
+        STD,
+        VAR,
+        N_UNIQUE,
+        NULL_COUNT,
+    ]
+
+
+def _plain_column(column: Series) -> Bool:
+    """A numeric, non-decimal column those updates read."""
+    if column.dtype().is_decimal() or column.dtype().is_categorical():
+        return False
+    comptime for t in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[t]
+        if column._data.isa[Column[Scalar[D]]]():
+            return True
+    return False
+
+
+def _plain_reduction(bound: BoundExpr, columns: List[Series]) -> Int:
+    """The source column of a reduction `_reduce_ints`/`_reduce_floats`
+    update in place (`col op` over a numeric, non-decimal column), or -1."""
+    ref nodes = bound.expr._nodes
+    if len(nodes) != 2 or nodes[0].op != COL:
+        return -1
+    if not _plain_op(nodes[1].op):
+        return -1
+    var source = bound.sources[0]
+    if source < 0 or not _plain_column(columns[source]):
+        return -1
+    return source
+
+
+def _update_plain(
+    mut reducer: Reducer,
+    column: Series,
+    rows: Pointer[Int, _],
+    ids: Pointer[Int, _],
+    n: Int,
+    op: Int,
+) raises:
+    comptime for t in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[t]
+        if column._data.isa[Column[Scalar[D]]]():
+            comptime if D.is_floating_point():
+                _reduce_floats[D](
+                    reducer, column._data[Column[Scalar[D]]], rows, ids, n, op
+                )
+            else:
+                _reduce_ints[D](
+                    reducer, column._data[Column[Scalar[D]]], rows, ids, n, op
+                )
+            return
+    raise Error("grouped pipeline: unexpected column storage")
+
+
+struct _PartIndex(Movable):
+    """Group ids of one hash part by the partitioner's key hash and key
+    words: an open-addressing slot table of ids, each group's hash and
+    words stored once. A probe compares the hash, then the words through
+    pointers; no key is hashed again and nothing is bounds-checked per
+    row. `_KeyIndex` served the same purpose at 100 to 180 ns a probe."""
+
+    var slots: List[Int32]
+    var hashes: List[UInt64]
+    var words: List[List[Int]]
+    var count: Int
+
+    def __init__(out self, width: Int):
+        self.slots = huge_list(1024, Int32(-1))
+        self.hashes = List[UInt64]()
+        self.words = List[List[Int]](capacity=width)
+        for _ in range(width):
+            self.words.append(List[Int]())
+        self.count = 0
+
+    def _grow(mut self):
+        var capacity = 2 * len(self.slots)
+        self.slots = huge_list(capacity, Int32(-1))
+        var table = self.slots.unsafe_ptr()
+        var mask = capacity - 1
+        var hashes = self.hashes.unsafe_ptr()
+        for id in range(self.count):
+            var slot = Int(hashes[unsafe_offset=id]) & mask
+            while table[unsafe_offset=slot] >= 0:
+                slot = (slot + 1) & mask
+            table[unsafe_offset=slot] = Int32(id)
+
+    @always_inline
+    def find_or_insert(
+        mut self, hash: UInt64, ptrs: List[Int], width: Int, row: Int
+    ) -> Int:
+        """The id of the key at `row` of the word buffers `ptrs`, added as
+        the next id if new; True in the second value when added."""
+        if 2 * (self.count + 1) > len(self.slots):
+            self._grow()
+        var table = self.slots.unsafe_ptr()
+        var mask = len(self.slots) - 1
+        var slot = Int(hash) & mask
+        var hashes = self.hashes.unsafe_ptr()
+        while True:
+            var id = Int(table[unsafe_offset=slot])
+            if id < 0:
+                table[unsafe_offset=slot] = Int32(self.count)
+                self.hashes.append(hash)
+                for w in range(width):
+                    self.words[w].append(
+                        Pointer[Int, MutAnyOrigin](unsafe_from_address=ptrs[w])[
+                            unsafe_offset=row
+                        ]
+                    )
+                self.count += 1
+                return self.count - 1
+            if hashes[unsafe_offset=id] == hash:
+                var same = True
+                for w in range(width):
+                    var stored = self.words[w].unsafe_ptr()[unsafe_offset=id]
+                    var mine = Pointer[Int, MutAnyOrigin](
+                        unsafe_from_address=ptrs[w]
+                    )[unsafe_offset=row]
+                    if stored != mine:
+                        same = False
+                        break
+                if same:
+                    return id
+            slot = (slot + 1) & mask
+
+
+struct _GroupPart(Movable):
+    """One hash part of a worker's inserted groups: their keys in an
+    index, reducer states, first rows, and key values (the rows that
+    introduced them, taken from each morsel)."""
+
+    var index: _PartIndex
+    var states: List[Reducer]
+    var firsts: List[Int]
+    var keys: List[DataFrame]
+
+    def __init__(out self, width: Int):
+        self.index = _PartIndex(width)
+        self.states = List[Reducer]()
+        self.firsts = List[Int]()
+        self.keys = List[DataFrame]()
+
+    def absorb(mut self, var other: Self, width: Int) raises:
+        """Merge another worker's groups of the same hash part: each is
+        probed by its stored hash and words, new ones appended, states
+        merged by id, first rows the earliest."""
+        var n = other.index.count
+        if n == 0:
+            return
+        var ptrs = List[Int](capacity=width)
+        for w in range(width):
+            ptrs.append(Int(other.index.words[w].unsafe_ptr()))
+        var mapping = List[Int](capacity=n)
+        var fresh = List[Int]()
+        var before = self.index.count
+        for g in range(n):
+            var id = self.index.find_or_insert(
+                other.index.hashes[g], ptrs, width, g
+            )
+            mapping.append(id)
+            if id >= before + len(fresh):
+                fresh.append(g)
+                self.firsts.append(other.firsts[g])
+            elif other.firsts[g] < self.firsts[id]:
+                self.firsts[id] = other.firsts[g]
+        if len(fresh) > 0:
+            var keys: DataFrame
+            if len(other.keys) == 1:
+                keys = other.keys[0].copy()
+            else:
+                keys = concat(other.keys)
+            self.keys.append(keys.take(fresh))
+        var count = self.index.count
+        for e in range(len(self.states)):
+            self.states[e].grow(count)
+            self.states[e].merge(other.states[e], groups=mapping)
+
+    def into_state(
+        mut self,
+        names: List[String],
+        dtypes: List[DataType],
+        outputs: List[Expr],
+        schema: DataFrame,
+    ) raises -> _StreamReduction:
+        var keys: DataFrame
+        if len(self.keys) == 0:
+            keys = schema.copy()
+        elif len(self.keys) == 1:
+            keys = self.keys[0].copy()
+        else:
+            keys = concat(self.keys)
+        var reducers = List[Reducer]()
+        swap(reducers, self.states)
+        var firsts = List[Int]()
+        swap(firsts, self.firsts)
+        return _StreamReduction(
+            keys=keys^,
+            states=reducers^,
+            names=names,
+            dtypes=dtypes,
+            outputs=outputs,
+            grouped=True,
+            firsts=firsts^,
+            rows=0,
+        )
+
+
+struct _GroupedSink(Movable):
+    """A worker's grouped reduce sink, in one of two modes the plan picks
+    for every worker alike from a sample of the keys.
+
+    Few groups: every morsel's rows are hashed on their keys, bucketed by
+    hash part, and inserted into that part's index; the reducer states of
+    plain reductions update in place per row, other reductions reduce the
+    part's rows into a local state merged by id. No state is built per
+    morsel: DuckDB's thread-local aggregate table, radix-partitioned.
+
+    Many groups: the morsels' rows are kept as they come, and the finish
+    runs the eager partitioned group-by over all the workers' rows: one
+    scatter of every row into buckets and cache-local bucket encodes,
+    which inserting rows one at a time into tables that outgrow the
+    caches does not match (ClickBench q32, 10M groups: 850 ms inserted
+    against 300 scattered). Polars' streaming group-by and DuckDB's sink
+    partition and finalize the same way once their tables grow. When the
+    steps only filter, what is kept is each morsel's selection over the
+    source frame, and the rows are gathered once at the finish (late
+    materialization); otherwise the morsels' output frames.
+    """
+
+    var names: List[String]
+    var dtypes: List[DataType]
+    var outputs: List[Expr]
+    var expressions: List[Expr]
+    # One reducer state per reduction node, in the order the template's
+    # outputs name them: the state's expression and node.
+    var state_exprs: List[Int]
+    var state_nodes: List[Int]
+    var key_names: List[String]
+    var key_schema: DataFrame
+    var parts: List[_GroupPart]
+    var count: Int
+    var collecting: Bool
+    var collected: List[DataFrame]
+    var batch_size: Int
+    # Selections over the source frame: a morsel's offset, length and
+    # mask (an empty mask: every row of the morsel).
+    var offsets: List[Int]
+    var lengths: List[Int]
+    var masks: List[BoolColumn]
+    var width: Int
+    # Scratch for a morsel's rows, kept across morsels: fresh lists of
+    # this size are returned to the kernel by the allocator and faulted
+    # in again every morsel.
+    var part_of: List[Int]
+    var order: List[Int]
+    var ids: List[Int]
+
+    def __init__(
+        out self,
+        sample: DataFrame,
+        expressions: List[Expr],
+        keys: List[String],
+        collecting: Bool,
+        batch_size: Int,
+    ) raises:
+        var empty = sample.clear()
+        var template = _StreamReduction(empty, expressions, keys)
+        self.names = template.names.copy()
+        self.dtypes = template.dtypes.copy()
+        self.outputs = template.outputs.copy()
+        self.expressions = expressions.copy()
+        self.state_exprs = List[Int]()
+        self.state_nodes = List[Int]()
+        for e in range(len(expressions)):
+            for i in range(len(expressions[e]._nodes)):
+                if is_reduction(expressions[e]._nodes[i].op):
+                    self.state_exprs.append(e)
+                    self.state_nodes.append(i)
+        self.key_names = keys.copy()
+        var key_columns = _expand_struct_keys(empty._subset_keys(keys))
+        self.key_schema = DataFrame(key_columns.copy(), height=0)
+        self.count = 0
+        self.collecting = collecting
+        self.collected = List[DataFrame]()
+        self.batch_size = batch_size
+        self.offsets = List[Int]()
+        self.lengths = List[Int]()
+        self.masks = List[BoolColumn]()
+        self.width = (
+            len(_equality_words(key_columns)) if len(key_columns) > 0 else 0
+        )
+        self.part_of = List[Int]()
+        self.order = List[Int]()
+        self.ids = List[Int]()
+        self.parts = List[_GroupPart](capacity=1 << _PART_BITS)
+        if not collecting:
+            self.parts.append(self._empty_part(empty))
+
+    def _empty_part(self, sample: DataFrame) raises -> _GroupPart:
+        """A part with one empty state per expression, so the workers'
+        parts merge expression by expression."""
+        var part = _GroupPart(self.width)
+        for s in range(len(self.state_exprs)):
+            var bound = bind(
+                self.expressions[self.state_exprs[s]], sample._columns
+            )
+            part.states.append(
+                _new_reducer(bound, bound.expr._nodes[self.state_nodes[s]], 0)
+            )
+        return part^
+
+    def _repartition(mut self, sample: DataFrame) raises:
+        """Split the single part into 2^_PART_BITS by the groups' stored
+        hashes, the hashes every row's part is taken from."""
+        var whole = self.parts.pop(0)
+        var keys: DataFrame
+        if len(whole.keys) == 0:
+            keys = self.key_schema.copy()
+        elif len(whole.keys) == 1:
+            keys = whole.keys[0].copy()
+        else:
+            keys = concat(whole.keys).rechunk()
+        var n = keys.height()
+        var count = 1 << _PART_BITS
+        var members = List[List[Int]](length=count, fill=List[Int]())
+        var shift = UInt64(64 - _PART_BITS)
+        for g in range(n):
+            members[Int(whole.index.hashes[g] >> shift)].append(g)
+        var ptrs = List[Int](capacity=self.width)
+        for w in range(self.width):
+            ptrs.append(Int(whole.index.words[w].unsafe_ptr()))
+        for p in range(count):
+            var part = self._empty_part(sample)
+            if len(members[p]) > 0:
+                var part_keys = keys.take(members[p])
+                for g in members[p]:
+                    _ = part.index.find_or_insert(
+                        whole.index.hashes[g], ptrs, self.width, g
+                    )
+                    part.firsts.append(whole.firsts[g])
+                part.keys.append(part_keys^)
+                for s in range(len(part.states)):
+                    part.states[s].grow(len(members[p]))
+                    part.states[s].merge(whole.states[s], sources=members[p])
+            self.parts.append(part^)
+
+    def select(mut self, offset: Int, length: Int, mask: BoolColumn):
+        """Keep a filter-only morsel's selection over the source frame."""
+        self.offsets.append(offset)
+        self.lengths.append(length)
+        self.masks.append(mask.copy())
+
+    def absorb(mut self, input: DataFrame, offset: Int) raises -> Bool:
+        """Take the morsel's rows (frame rows `offset` on). False, with
+        nothing taken, when the keys cannot be partitioned (nested)."""
+        if self.collecting:
+            self.collected.append(input.copy())
+            return True
+        var key_columns = _expand_struct_keys(
+            input._subset_keys(self.key_names)
+        )
+        for column in key_columns:
+            if column.dtype().is_nested() or not encodable(column):
+                return False
+        var n = input.height()
+        if n == 0:
+            return True
+        if len(self.parts) == 1 and self.count >= _SPLIT_GROUPS:
+            self._repartition(input)
+        var part_count = len(self.parts)
+        var shift = UInt64(64 - _PART_BITS)
+        if len(self.part_of) < n:
+            self.part_of = List[Int](unsafe_uninit_length=n)
+            self.order = List[Int](unsafe_uninit_length=n)
+            self.ids = List[Int](unsafe_uninit_length=n)
+        ref part_of = self.part_of
+        var starts = List[Int](length=part_count + 1, fill=0)
+        # The words define key equality; their hash is the index's hash
+        # and, by its top bits, the row's part, so the same key lands in
+        # the same part with the same hash on every worker and morsel.
+        var words = _equality_words(key_columns)
+        var row_hashes = List[UInt64](capacity=n)
+        for r in range(n):
+            row_hashes.append(_word_hash(words, r))
+        var hashes_ptr = row_hashes.unsafe_ptr()
+        var parts_ptr = part_of.unsafe_ptr()
+        var starts_ptr = starts.unsafe_ptr()
+        if part_count == 1:
+            for r in range(n):
+                parts_ptr[unsafe_offset=r] = 0
+            starts[1] = n
+        else:
+            for r in range(n):
+                var p = Int(hashes_ptr[unsafe_offset=r] >> shift)
+                parts_ptr[unsafe_offset=r] = p
+                starts_ptr[unsafe_offset=p + 1] += 1
+        for p in range(part_count):
+            starts[p + 1] += starts[p]
+        var cursor = starts.copy()
+        var cursor_ptr = cursor.unsafe_ptr()
+        ref order = self.order
+        var order_ptr = order.unsafe_ptr()
+        for r in range(n):
+            var p = parts_ptr[unsafe_offset=r]
+            var at = cursor_ptr[unsafe_offset=p]
+            order_ptr[unsafe_offset=at] = r
+            cursor_ptr[unsafe_offset=p] = at + 1
+        ref ids = self.ids
+        var rows_ptr = order.unsafe_ptr()
+        var ids_ptr = ids.unsafe_ptr()
+        # Each expression bound to this morsel's columns once; the plain
+        # reductions' source columns found once.
+        var bounds = List[BoundExpr](capacity=len(self.expressions))
+        var sources = List[Int](capacity=len(self.expressions))
+        for e in range(len(self.expressions)):
+            bounds.append(bind(self.expressions[e], input._columns))
+            sources.append(_plain_reduction(bounds[e], input._columns))
+        # A plain reduction of a computed input (`(price * (1 - discount))
+        # .sum()`): the input evaluated once over the morsel's rows, then
+        # the same in-place update as a column's. Otherwise each part
+        # gathers its rows and runs the general reduce job (PDS-H q15 at
+        # 600K rows: 3.4 ms against 1.7).
+        var computed = List[Series](capacity=len(self.state_exprs))
+        var has_computed = List[Bool](capacity=len(self.state_exprs))
+        for s in range(len(self.state_exprs)):
+            var e = self.state_exprs[s]
+            ref node = bounds[e].expr._nodes[self.state_nodes[s]]
+            has_computed.append(False)
+            computed.append(input._columns[0].slice(0, 0))
+            if sources[e] >= 0 or node.op == LEN or node.left < 0:
+                continue
+            if not _plain_op(node.op) or node.right >= 0:
+                continue
+            var evaluated = input.select_exprs(
+                [
+                    subtree(self.expressions[e], node.left).alias(
+                        "__pipeline_input"
+                    )
+                ],
+                batch_size=self.batch_size,
+            )
+            if evaluated.height() != n or not _plain_column(
+                evaluated._columns[0]
+            ):
+                continue
+            computed[s] = evaluated._columns[0].copy()
+            has_computed[s] = True
+        var ptrs = List[Int](capacity=self.width)
+        for w in range(self.width):
+            ptrs.append(Int(words[w].unsafe_ptr()))
+        for p in range(part_count):
+            var lo = starts[p]
+            var hi = starts[p + 1]
+            if hi == lo:
+                continue
+            ref part = self.parts[p]
+            var before = part.index.count
+            var fresh = List[Int]()
+            for k in range(lo, hi):
+                var r = rows_ptr[unsafe_offset=k]
+                var id = part.index.find_or_insert(
+                    hashes_ptr[unsafe_offset=r], ptrs, self.width, r
+                )
+                ids_ptr[unsafe_offset=k] = id
+                if id >= before + len(fresh):
+                    fresh.append(r)
+                    part.firsts.append(offset + r)
+            var count = part.index.count
+            self.count += count - before
+            if len(fresh) > 0:
+                var columns = List[Series](capacity=len(key_columns))
+                for column in key_columns:
+                    columns.append(column.take(fresh))
+                part.keys.append(DataFrame(columns^, height=len(fresh)))
+            for s in range(len(self.state_exprs)):
+                var e = self.state_exprs[s]
+                ref node = bounds[e].expr._nodes[self.state_nodes[s]]
+                part.states[s].grow(count)
+                if node.op == LEN:
+                    var counts = part.states[s].counts.unsafe_ptr()
+                    for k in range(lo, hi):
+                        counts[unsafe_offset=ids_ptr[unsafe_offset=k]] += 1
+                    continue
+                var source = sources[e]
+                if source >= 0:
+                    _update_plain(
+                        part.states[s],
+                        input._columns[source],
+                        rows_ptr.unsafe_offset(lo),
+                        ids_ptr.unsafe_offset(lo),
+                        hi - lo,
+                        node.op,
+                    )
+                    continue
+                if has_computed[s]:
+                    _update_plain(
+                        part.states[s],
+                        computed[s],
+                        rows_ptr.unsafe_offset(lo),
+                        ids_ptr.unsafe_offset(lo),
+                        hi - lo,
+                        node.op,
+                    )
+                    continue
+                # Any other reduction: the part's rows reduced into a local
+                # state over the same ids, merged into the part's by id.
+                var selected = List[Int](capacity=hi - lo)
+                var local_ids = List[Int](capacity=hi - lo)
+                for k in range(lo, hi):
+                    selected.append(order[k])
+                    local_ids.append(ids[k])
+                var local = input.take(selected)
+                var job = _ReduceJob[8](
+                    bind(self.expressions[e], local._columns),
+                    local._columns,
+                    List[Series](),
+                    node,
+                    0,
+                    local.height(),
+                    4096,
+                    True,
+                    ArcPointer(local_ids^),
+                    count,
+                )
+                job.run()
+                part.states[s].merge(job^.into_reducer())
+        # Read through pointers above; destroyed here, not at their last
+        # named use.
+        _ = words^
+        _ = row_hashes^
+        _ = cursor^
+        return True
+
+    def into_parts(
+        mut self, sample: DataFrame, split: Bool
+    ) raises -> List[_GroupPart]:
+        """The inserted parts, in part order, for combining: one when no
+        worker's table grew past the split (small aggregates combine
+        and finish as one table, as DuckDB's do before they partition),
+        otherwise 2^_PART_BITS, so every worker's parts line up."""
+        if split and len(self.parts) == 1:
+            self._repartition(sample)
+        var parts = List[_GroupPart]()
+        swap(parts, self.parts)
+        return parts^
+
+
+struct _PartJob(Job):
+    """Finish some hash parts: merge the workers' parts of each through
+    the first one's index (stored hashes and words, nothing encoded
+    again). Parts never share a key, so they finish independently."""
+
+    var parts: List[List[_GroupPart]]
+    var states: List[_StreamReduction]
+    var width: Int
+    var names: List[String]
+    var dtypes: List[DataType]
+    var outputs: List[Expr]
+    var schema: DataFrame
+
+    def __init__(
+        out self,
+        width: Int,
+        names: List[String],
+        dtypes: List[DataType],
+        outputs: List[Expr],
+        schema: DataFrame,
+    ):
+        self.parts = List[List[_GroupPart]]()
+        self.states = List[_StreamReduction]()
+        self.width = width
+        self.names = names.copy()
+        self.dtypes = dtypes.copy()
+        self.outputs = outputs.copy()
+        self.schema = schema.copy()
+
+    def run(mut self) raises:
+        while len(self.parts) > 0:
+            var workers = self.parts.pop(0)
+            var base = workers.pop(0)
+            while len(workers) > 0:
+                base.absorb(workers.pop(0), self.width)
+            self.states.append(
+                base.into_state(
+                    self.names, self.dtypes, self.outputs, self.schema
+                )
+            )
+
+
 struct _PipelineJob(Job):
     """One worker's run of the pipeline: morsels from the shared cursor
     through every step into this worker's own sink state."""
@@ -301,12 +941,26 @@ struct _PipelineJob(Job):
     var ranges: ArcPointer[List[Int]]
     var steps: List[Step]
     var expressions: List[Expr]
+    # Group keys of a grouped reduce sink (none: ungrouped or materialize).
+    var keys: List[String]
+    var ordered: Bool
+    # Grouped sink: inserted into part tables, or collected for the
+    # eager partitioned group-by (the plan decides for every worker).
+    var insert: Bool
+    # Every step is a filter: a collecting sink keeps the morsels'
+    # selections over the source frame rather than their rows.
+    var filter_only: Bool
     var batch_size: Int
     # Materialize sink: the morsels' frames and their sequence numbers.
     var parts: List[DataFrame]
     var sequences: List[Int]
-    # Reduce sink: this worker's merged state.
+    # Reduce sink: this worker's merged state (ungrouped: one state;
+    # grouped keys the key index cannot word-encode: one state per hash
+    # part, merged from each morsel's state).
     var reduction: List[_StreamReduction]
+    # Grouped sink: rows inserted straight into per-part key indexes and
+    # reducer states (`_GroupedSink`).
+    var grouped: List[_GroupedSink]
     var rows: Int
     # Rows fed, then each step's input and output rows, for the report.
     var counts: List[Int]
@@ -318,6 +972,9 @@ struct _PipelineJob(Job):
         ranges: ArcPointer[List[Int]],
         steps: List[Step],
         expressions: List[Expr],
+        keys: List[String],
+        ordered: Bool,
+        insert: Bool,
         batch_size: Int,
     ):
         self.frame = frame.copy()
@@ -325,10 +982,18 @@ struct _PipelineJob(Job):
         self.ranges = ranges.copy()
         self.steps = steps.copy()
         self.expressions = expressions.copy()
+        self.keys = keys.copy()
+        self.ordered = ordered
+        self.insert = insert
+        self.filter_only = True
+        for step in steps:
+            if step.kind != STEP_FILTER:
+                self.filter_only = False
         self.batch_size = batch_size
         self.parts = List[DataFrame]()
         self.sequences = List[Int]()
         self.reduction = List[_StreamReduction]()
+        self.grouped = List[_GroupedSink]()
         self.rows = 0
         self.counts = List[Int](length=2 * len(steps) + 1, fill=0)
 
@@ -351,24 +1016,171 @@ struct _PipelineJob(Job):
                     break
             if morsel.height() == 0:
                 continue
+            if (
+                len(self.keys) > 0
+                and len(self.expressions) > 0
+                and not self.insert
+                and self.filter_only
+            ):
+                if len(self.grouped) == 0:
+                    self.grouped.append(
+                        _GroupedSink(
+                            morsel.frame,
+                            self.expressions,
+                            self.keys,
+                            True,
+                            self.batch_size,
+                        )
+                    )
+                if morsel.selected:
+                    self.grouped[0].select(offset, length, morsel.mask)
+                else:
+                    self.grouped[0].select(
+                        offset, length, BoolColumn(List[Bool]())
+                    )
+                self.rows += morsel.height()
+                continue
             if len(self.expressions) > 0:
                 var reads = _reads(self.expressions)
                 var input: DataFrame
                 if reads:
-                    input = morsel._compact_frame(reads.take())
+                    var names = reads.take()
+                    for key in self.keys:
+                        if key not in names:
+                            names.append(key)
+                    input = morsel._compact_frame(names)
                 else:
                     input = morsel.materialized()
-                var state = _StreamReduction(
-                    input, self.expressions, List[String]()
-                )
+                if len(self.keys) > 0 and len(self.reduction) == 0:
+                    # Rows go straight into this worker's per-part key
+                    # indexes and reducer states (DuckDB's thread-local
+                    # partitioned aggregate table), when the keys encode
+                    # as words; otherwise each morsel's state is split
+                    # into parts and merged below.
+                    if len(self.grouped) == 0:
+                        self.grouped.append(
+                            _GroupedSink(
+                                input,
+                                self.expressions,
+                                self.keys,
+                                not self.insert,
+                                self.batch_size,
+                            )
+                        )
+                    if self.grouped[0].absorb(input, offset):
+                        self.rows += input.height()
+                        continue
+                    if self.grouped[0].count > 0:
+                        raise Error(
+                            "grouped pipeline: keys stopped partitioning"
+                        )
+                    self.grouped = List[_GroupedSink]()
+                # Group first rows are the frame's rows, so first-occurrence
+                # order survives morsels taken out of order.
+                var state = _StreamReduction(input, self.expressions, self.keys)
+                state.shift_firsts(offset)
                 self.rows += state.rows
-                if len(self.reduction) == 0:
-                    self.reduction.append(state^)
+                if len(self.keys) == 0:
+                    if len(self.reduction) == 0:
+                        self.reduction.append(state^)
+                    else:
+                        self.reduction[0].merge(state)
+                elif len(self.reduction) == 0:
+                    # The worker's state is kept in hash parts, so every
+                    # morsel's groups go into tables small enough to stay
+                    # in cache; one table over all the worker's groups
+                    # cost ClickBench q32 (10M groups) 280 ns a probe.
+                    self.reduction = state.split(_PART_BITS)
                 else:
-                    self.reduction[0].merge(state)
+                    var pieces = state.split(_PART_BITS)
+                    var p = 0
+                    while len(pieces) > 0:
+                        var piece = pieces.pop(0)
+                        if piece.group_count() > 0:
+                            var batch = List[_StreamReduction]()
+                            batch.append(piece^)
+                            self.reduction[p].merge_all(batch, parallel=False)
+                        p += 1
             else:
                 self.parts.append(morsel.materialized())
                 self.sequences.append(morsel.sequence)
+
+
+def _bits_at(address: Int, count: Int, bit: Int, n: Int) -> UInt64:
+    """`n` (at most 64) bits of a `count`-byte bitmap from `bit` on, bit
+    0 lowest; bits past the bitmap read as zero."""
+    var bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address)
+    var byte = bit >> 3
+    var shift = bit & 7
+    var low = UInt64(0)
+    if byte + 8 <= count:
+        low = Pointer[UInt64, MutAnyOrigin](
+            unsafe_from_address=address + byte
+        )[]
+    else:
+        for b in range(8):
+            if byte + b < count:
+                low |= UInt64(bytes[unsafe_offset=byte + b]) << UInt64(8 * b)
+    var word = low >> UInt64(shift)
+    if shift > 0 and byte + 8 < count:
+        word |= UInt64(bytes[unsafe_offset=byte + 8]) << UInt64(64 - shift)
+    if n < 64:
+        word &= (UInt64(1) << UInt64(n)) - 1
+    return word
+
+
+def _or_bits_at(address: Int, count: Int, bit: Int, word: UInt64):
+    """OR `word`'s bits into a `count`-byte bitmap from `bit` on."""
+    var bytes = Pointer[UInt8, MutAnyOrigin](unsafe_from_address=address)
+    var byte = bit >> 3
+    var shift = bit & 7
+    var low = word << UInt64(shift)
+    for b in range(8):
+        if byte + b < count:
+            bytes[unsafe_offset=byte + b] |= UInt8(low >> UInt64(8 * b))
+    if shift > 0 and byte + 8 < count:
+        bytes[unsafe_offset=byte + 8] |= UInt8(word >> UInt64(64 - shift))
+
+
+def _merged_mask(
+    offsets: List[Int],
+    lengths: List[Int],
+    masks: List[BoolColumn],
+    height: Int,
+) raises -> BoolColumn:
+    """One mask over `height` rows from morsel selections: each morsel's
+    rows [offset, offset + length) set as its mask says (an empty mask:
+    every row), 64 bits at a time whatever the alignment of either."""
+    var count = (height + 7) // 8
+    var values = List[UInt8](length=count, fill=0)
+    var bits = Int(values.unsafe_ptr())
+    for m in range(len(offsets)):
+        var low = offsets[m]
+        var length = lengths[m]
+        ref mask = masks[m]
+        var pos = 0
+        if len(mask) == 0:
+            while pos < length:
+                var n = min(64, length - pos)
+                var word = (
+                    UInt64.MAX if n == 64 else (UInt64(1) << UInt64(n)) - 1
+                )
+                _or_bits_at(bits, count, low + pos, word)
+                pos += n
+            continue
+        var source = Int(mask._data[].unsafe_ptr())
+        var source_count = len(mask._data[])
+        var valid = Int(mask._bits[].unsafe_ptr())
+        var valid_count = len(mask._bits[])
+        while pos < length:
+            var n = min(64, length - pos)
+            var word = _bits_at(source, source_count, mask._offset + pos, n)
+            if valid_count > 0:
+                word &= _bits_at(valid, valid_count, mask._offset + pos, n)
+            if word != 0:
+                _or_bits_at(bits, count, low + pos, word)
+            pos += n
+    return BoolColumn(values=values^, bits=List[UInt8](), length=height)
 
 
 def _morsel_ranges(
@@ -454,15 +1266,21 @@ def run_pipeline(
     frame: DataFrame,
     steps: List[Step],
     expressions: List[Expr],
+    keys: List[String],
+    ordered: Bool,
+    insert: Bool,
     workers: Int,
     morsel_rows: Int,
     batch_size: Int,
     mut counts: List[Int],
 ) raises -> DataFrame:
     """Run the steps over `frame` in morsels on `workers` threads, into a
-    materialize sink, or a reduce sink when `expressions` are ungrouped
-    reductions over the steps' output. `counts` receives the rows fed,
-    then each step's input and output rows."""
+    materialize sink, or a reduce sink when `expressions` are reductions
+    over the steps' output, grouped by `keys` when given (`ordered`: groups
+    in first-occurrence order; `insert`: rows go into per-worker group
+    tables rather than being collected for the eager partitioned
+    group-by). `counts` receives the rows fed, then each step's input and
+    output rows."""
     trace_path("pipeline.run")
     var shared = ArcPointer(frame.copy())
     var ranges = ArcPointer(
@@ -473,7 +1291,15 @@ def run_pipeline(
     for _ in range(max(1, workers)):
         jobs.append(
             _PipelineJob(
-                shared, cursor.address, ranges, steps, expressions, batch_size
+                shared,
+                cursor.address,
+                ranges,
+                steps,
+                expressions,
+                keys,
+                ordered,
+                insert,
+                batch_size,
             )
         )
     try:
@@ -486,6 +1312,92 @@ def run_pipeline(
     for j in range(len(jobs)):
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
+    if len(expressions) > 0 and len(keys) > 0:
+        var sink = -1
+        for j in range(len(jobs)):
+            if len(jobs[j].grouped) > 0:
+                sink = j
+        if sink < 0:
+            var empty = frame.clear()
+            for step in steps:
+                var morsel = Morsel(empty.copy(), 0)
+                morsel.apply(step, batch_size)
+                empty = morsel.materialized()
+            return _StreamReduction(empty, expressions, keys).finish()
+        if jobs[sink].grouped[0].collecting:
+            # Every worker's rows, grouped once by the eager partitioned
+            # group-by: one scatter of the rows into buckets, each encoded
+            # on its own worker.
+            # Only the columns the keys and expressions read are gathered
+            # and grouped; the steps may have read others.
+            var whole: DataFrame
+            if len(steps) == 0 or jobs[sink].filter_only:
+                var source = frame.copy()
+                var reads = _reads(expressions)
+                if reads:
+                    var names = keys.copy()
+                    for name in reads.take():
+                        if name not in names:
+                            names.append(name)
+                    source = frame.select(names)
+                if len(steps) == 0:
+                    whole = source^
+                else:
+                    # The morsels' selections as one mask over the source
+                    # frame, gathered once.
+                    var offsets = List[Int]()
+                    var lengths = List[Int]()
+                    var masks = List[BoolColumn]()
+                    for j in range(len(jobs)):
+                        if len(jobs[j].grouped) == 0:
+                            continue
+                        ref kept = jobs[j].grouped[0]
+                        for m in range(len(kept.offsets)):
+                            offsets.append(kept.offsets[m])
+                            lengths.append(kept.lengths[m])
+                            masks.append(kept.masks[m].copy())
+                    whole = source.filter(
+                        _merged_mask(offsets, lengths, masks, frame.height())
+                    )
+            else:
+                var collected = List[DataFrame]()
+                for j in range(len(jobs)):
+                    if len(jobs[j].grouped) == 0:
+                        continue
+                    var rows = List[DataFrame]()
+                    swap(rows, jobs[j].grouped[0].collected)
+                    while len(rows) > 0:
+                        collected.append(rows.pop(0))
+                whole = concat(collected)
+            return whole.group_by(keys, maintain_order=ordered).agg(expressions)
+        # Each worker's parts, part by part across the workers; every
+        # worker splits into hash parts when any did.
+        var split = False
+        for j in range(len(jobs)):
+            if len(jobs[j].grouped) > 0 and len(jobs[j].grouped[0].parts) > 1:
+                split = True
+        var parts = List[List[_GroupPart]]()
+        for j in range(len(jobs)):
+            if len(jobs[j].grouped) == 0:
+                continue
+            var pieces = jobs[j].grouped[0].into_parts(frame.clear(), split)
+            var p = 0
+            while len(pieces) > 0:
+                if len(parts) <= p:
+                    parts.append(List[_GroupPart]())
+                parts[p].append(pieces.pop(0))
+                p += 1
+        ref meta = jobs[sink].grouped[0]
+        return _combine_grouped(
+            parts^,
+            meta.width,
+            meta.names,
+            meta.dtypes,
+            meta.outputs,
+            meta.key_schema,
+            ordered,
+            workers,
+        )
     if len(expressions) > 0:
         var merged = List[_StreamReduction]()
         for j in range(len(jobs)):
@@ -531,3 +1443,44 @@ def run_pipeline(
     if len(parts) == 1:
         return parts[0].copy()
     return concat(parts)
+
+
+def _combine_grouped(
+    var parts: List[List[_GroupPart]],
+    width: Int,
+    names: List[String],
+    dtypes: List[DataType],
+    outputs: List[Expr],
+    schema: DataFrame,
+    ordered: Bool,
+    workers: Int,
+) raises -> DataFrame:
+    """Combine the workers' inserted parts, the same hash parts on every
+    worker: the parts of one hash merge on their own worker (they never
+    share a key) and finish in parallel, interleaved by first occurrence
+    when `ordered`. DuckDB combines its thread-local aggregate tables
+    partition by partition the same way."""
+    var count = len(parts)
+    var job_count = max(1, min(workers, count))
+    var jobs = List[_PartJob](capacity=job_count)
+    for _ in range(job_count):
+        jobs.append(_PartJob(width, names, dtypes, outputs, schema))
+    for p in range(count):
+        jobs[p % job_count].parts.append(parts.pop(0))
+    run_jobs(jobs)
+    var merged = List[_StreamReduction](capacity=count)
+    for p in range(count):
+        merged.append(jobs[p % job_count].states.pop(0))
+    if ordered:
+        for p in range(count):
+            merged[p].order_by_firsts()
+        return _finish_parts(merged^)
+    var frames = List[DataFrame](capacity=count)
+    for p in range(count):
+        if merged[p].group_count() > 0:
+            frames.append(merged[p].finish())
+    if len(frames) == 0:
+        return merged[0].finish()
+    if len(frames) == 1:
+        return frames[0].copy()
+    return concat(frames)
