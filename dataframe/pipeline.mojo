@@ -1311,6 +1311,7 @@ struct _PipelineJob(Job):
             self.top_nulls_last,
             self.top,
             1,
+            False,
         )
         self.candidate_rows = merged.height()
         if self.bounded:
@@ -1484,9 +1485,16 @@ def _top_rows(
     nulls_last: List[Bool],
     k: Int,
     threads: Int,
+    by_place: Bool,
 ) raises -> DataFrame:
-    """The k best candidate rows in order, ties by their place in the
-    source. With several keys, the rows are first cut to those whose first
+    """The k best candidate rows in order. The selection is stable, so ties
+    keep the candidates' order; `by_place` sorts ties by the hidden source
+    place instead, for candidates from several workers. A worker's own
+    candidates are already in source order (it takes morsels in sequence
+    order and a fold keeps tied rows in order), so its folds leave the
+    place out: as a second key it turned a one-string-key sort into a
+    two-key one, which the packed selection does not take, and ranked
+    every string per fold (ClickBench q25: 32 -> 250 ms). With several keys, the rows are first cut to those whose first
     key is at or better than the k-th best first key (a numeric key, no
     null there): later keys only settle ties, so ranking a string key over
     every candidate (what a multi-key selection does) is spared for all
@@ -1503,6 +1511,10 @@ def _top_rows(
             var kept = bound.rows(pool)
             if kept:
                 pool = pool.take(kept.value())
+    if not by_place:
+        return pool.take(
+            pool._arg_sort_head(names, descending, nulls_last, k, threads)
+        )
     return pool.take(
         pool._arg_sort_head(
             _with_order(names),
@@ -1901,7 +1913,7 @@ def run_pipeline(
         # their place in the source.
         var merged = parts[0].copy() if len(parts) == 1 else concat(parts)
         merged = _top_rows(
-            merged, top_names, top_descending, top_nulls_last, top, 0
+            merged, top_names, top_descending, top_nulls_last, top, 0, True
         )
         return merged.drop([_ORDER_COLUMN])
     if len(parts) == 1:
