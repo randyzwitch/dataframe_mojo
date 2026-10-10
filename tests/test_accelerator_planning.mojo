@@ -256,5 +256,46 @@ def test_extended_integer_lowering_is_backend_opt_in() raises:
         _ = lower_rows(unsigned.lazy().select(col("x").sum()), capabilities)
 
 
+def test_mixed_types_and_casts_are_backend_opt_in() raises:
+    var frame = DataFrame(
+        [
+            Series("f", Column[Float32]([1, 2])),
+            Series("u", Column[UInt64]([1, UInt64.MAX])),
+            Series("n", Column[Int8]([1, 2])),
+        ]
+    )
+    var native = RowCapabilities(
+        "typed",
+        float64=False,
+        wide_integer=False,
+        extended_integers=True,
+        mixed_types=True,
+        casts=True,
+    )
+    var query = frame.lazy().select_exprs([col("f"), col("u"), col("n")])
+    var plan = lower_rows(query, native)
+    assert_equal(len(plan.slot_dtypes), plan.slots)
+    assert_equal(len(plan.node_dtypes), len(plan.literals))
+    assert_equal(plan.outputs[1].dtype, DataType.UINT64)
+    with assert_raises():
+        _ = lower_rows(query)
+    var casted = lower_rows(
+        frame.lazy().select(col("u").cast("int32", strict=False)), native
+    )
+    assert_equal(casted.outputs[0].dtype, DataType.INT32)
+    assert_equal(
+        casted.slot_dtypes[len(casted.slot_dtypes) - 1], DataType.INT32
+    )
+    with assert_raises(contains="Float64 requires CPU"):
+        _ = lower_rows(frame.lazy().select(col("u").cast("float64")), native)
+    with assert_raises(contains="terminal projections"):
+        _ = lower_rows(
+            frame.lazy()
+            .with_columns((col("n") + lit(Int8(1))).alias("n"))
+            .filter(col("f") > 1),
+            native,
+        )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

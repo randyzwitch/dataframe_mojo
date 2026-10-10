@@ -15,6 +15,8 @@ struct RowCapabilities(Copyable):
     var float64: Bool
     var wide_integer: Bool
     var int64_arithmetic: Bool
+    var casts: Bool
+    var mixed_types: Bool
     var extended_integers: Bool
 
     def __init__(
@@ -25,12 +27,16 @@ struct RowCapabilities(Copyable):
         wide_integer: Bool = True,
         int64_arithmetic: Bool = True,
         extended_integers: Bool = False,
+        mixed_types: Bool = False,
+        casts: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
         self.wide_integer = wide_integer
         self.int64_arithmetic = int64_arithmetic
         self.extended_integers = extended_integers
+        self.mixed_types = mixed_types
+        self.casts = casts
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)

@@ -45,9 +45,14 @@ runtime data; changing those does not require recompiling an identical shader.
 ## Native precision and supported operations
 
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
-width (8, 16, 32, or 64 bits), or packed Bool columns; numeric columns share one dtype. Sliced numeric and bitmap windows are
-supported. Expressions support literals, add/subtract/multiply/negate,
-comparisons, Kleene Boolean logic, null tests, and fill-null. Projection,
+width (8, 16, 32, or 64 bits), or packed Bool columns. Mixed numeric dtypes
+retain their native types through expressions, filtering, and materialization.
+Sliced numeric and bitmap windows are supported. Expressions support literals, add/subtract/multiply/negate,
+comparisons, Kleene Boolean logic, null tests, fill-null, and explicit casts
+among these numeric and Boolean types. Out-of-range casts and NaN-to-Bool
+conversions raise in strict mode and become null in non-strict mode. Nulls stay
+null. Strict casts currently require terminal projections without head.
+Projection,
 with-columns, drop, stable filtering, and final head remain resident until the
 result is copied to ordinary CPU columns. Checked integer arithmetic currently
 requires terminal projections without head, matching the shared planner's
@@ -71,10 +76,21 @@ Float64 inputs, floating sum/mean, and Int64/UInt64 sums require CPU execution. 
 precision contracts need hardware types Apple GPUs do not supply. The backend
 does not emulate Float64 or wide integer accumulation. Forced accelerator
 execution rejects these statically unsupported plans before submission.
-Value-dependent Float32 precision failures are reported during execution. Automatic selection remains
+Integer-to-Float32 casts use native conversion. The CPU cast contract rounds
+through Float64 first; a small region around Float32 halfway points above
+2**53 can therefore double-round differently. Kernels detect that region and
+require CPU execution without emulating Float64. Value-dependent precision
+failures are reported during execution. Automatic selection remains
 on CPU until matched end-to-end cost evidence is available.
 
 ## Memory, synchronization, and profiles
+
+The wrapper and native library use ABI version 2; rebuild the optional library
+when upgrading. Homogeneous plans retain their original native-width matrices.
+Mixed plans store each value as an exact 64-bit word, with generated native
+operations for each expression dtype. Numeric inputs are staged at their original
+width and packed on the GPU. Output words are copied into the matching CPU
+column width after synchronization; CPU code does not evaluate expressions.
 
 The native bridge uses documented Metal shared-storage buffers with the default
 CPU cache mode. It stages input bytes once, queues all dependent kernels, waits

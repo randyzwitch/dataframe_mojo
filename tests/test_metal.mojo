@@ -236,6 +236,145 @@ def test_native_extended_integer_widths() raises:
         _ = wide.lazy().select(col("x").sum()).collect(accelerator=runtime)
 
 
+def test_native_mixed_types_preserve_values_and_output_dtypes() raises:
+    if not metal_installed():
+        return
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series(
+                "f",
+                Column[Float32](
+                    [0.25, 1.5, 2.75, 4, 5.5], [True, True, False, True, True]
+                ),
+            ),
+            Series(
+                "u",
+                Column[UInt64]([UInt64.MAX, 1, UInt64.MAX - 1, 2, UInt64.MAX]),
+            ),
+            Series("n", Column[Int8]([-128, -2, 0, 2, 126])),
+            Series("b", Column[Bool]([True, False, True, False, True])),
+        ]
+    )
+    var query = (
+        frame.lazy()
+        .filter(col("u") > lit(UInt64(2)))
+        .select_exprs(
+            [
+                (col("f") + 1).alias("plus"),
+                col("u"),
+                (col("n") + lit(Int8(1))).alias("n"),
+                col("b"),
+                (col("u") == lit(UInt64.MAX)).alias("max"),
+            ]
+        )
+    )
+    var result = query.profile(accelerator=runtime)
+    assert_true(result[0].equals(query.collect(engine="cpu")))
+    assert_equal(result[1].column("executor").string()._get(0), "metal")
+    assert_equal(result[0].column("u").uint64()._get(0), UInt64.MAX)
+    var counts = frame.lazy().select_exprs(
+        [
+            col("f").count().alias("f"),
+            col("u").count().alias("u"),
+            col("n").sum().alias("n"),
+        ]
+    )
+    assert_true(
+        counts.collect(accelerator=runtime).equals(counts.collect(engine="cpu"))
+    )
+    var empty = (
+        frame.slice(0, 0)
+        .lazy()
+        .select_exprs([col("f"), col("u"), col("n"), col("b")])
+    )
+    assert_true(
+        empty.collect(accelerator=runtime).equals(empty.collect(engine="cpu"))
+    )
+    var overflow = (
+        DataFrame(
+            [
+                Series("f", Column[Float32]([1])),
+                Series("n", Column[Int8]([127])),
+            ]
+        )
+        .lazy()
+        .select_exprs([col("f"), col("n") + lit(Int8(1))])
+    )
+    with assert_raises(contains="overflow"):
+        _ = overflow.collect(accelerator=runtime)
+    # The observable checked boundary depends on each expression dtype,
+    # including when the first physical column is Float32.
+    var unsafe = (
+        frame.lazy()
+        .with_columns((col("n") + lit(Int8(1))).alias("n"))
+        .filter(col("f") > 1)
+    )
+    with assert_raises(contains="terminal projections"):
+        _ = unsafe.collect(accelerator=runtime)
+
+
+def test_native_numeric_casts() raises:
+    if not metal_installed():
+        return
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series(
+                "x",
+                Column[Float32](
+                    [-128.5, -0.5, 1.5, 255.0], [True, True, False, True]
+                ),
+            ),
+            Series("u", Column[UInt64]([UInt64.MAX, 0, 128, 255])),
+            Series("b", Column[Bool]([True, False, True, False])),
+        ]
+    )
+    var query = frame.lazy().select_exprs(
+        [
+            col("x").cast("int8", strict=False).alias("i8"),
+            col("x").cast("uint8", strict=False).alias("u8"),
+            col("x").cast("bool").alias("truth"),
+            col("u").cast("int64", strict=False).alias("i64"),
+            col("u").cast("float32").alias("f32"),
+            col("b").cast("uint64").alias("u64"),
+        ]
+    )
+    assert_true(
+        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
+    var filtered = (
+        frame.lazy()
+        .with_columns(col("x").cast("uint8", strict=False).alias("casted"))
+        .filter(col("casted") > lit(UInt8(0)))
+        .select_exprs([col("casted"), col("u")])
+    )
+    assert_true(
+        filtered.collect(accelerator=runtime).equals(
+            filtered.collect(engine="cpu")
+        )
+    )
+    with assert_raises(contains="strict cast failed"):
+        _ = (
+            frame.lazy()
+            .select(col("u").cast("int64"))
+            .collect(accelerator=runtime)
+        )
+    with assert_raises(contains="Float64 requires CPU"):
+        _ = (
+            frame.lazy()
+            .select(col("u").cast("float64"))
+            .collect(accelerator=runtime)
+        )
+    with assert_raises(contains="strict casts require terminal"):
+        _ = (
+            frame.lazy()
+            .with_columns(col("u").cast("int64").alias("i"))
+            .filter(col("b"))
+            .collect(accelerator=runtime)
+        )
+
+
 def main() raises:
     var suite = TestSuite.discover_tests[__functions_in_module()]()
     suite^.run()
