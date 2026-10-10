@@ -4438,6 +4438,13 @@ struct LazyFrame(Copyable):
             # select of plain columns changes none, so it checks only that
             # (below); with_columns may replace what it names.
             if below.kind == WITH_COLUMNS:
+                # A window or aggregate over the input (a rank, a sum over
+                # a partition) depends on which rows are there: filtering
+                # first changes its values even for rows the filter keeps
+                # (TPC-DS q47 ranked months after `d_year = 1999` was
+                # pushed below the rank, so every rank shifted by one).
+                if not _row_local(below.exprs):
+                    return -1
                 var produced = _output_names(below.exprs)
                 for name in reads.value():
                     for p in produced:
