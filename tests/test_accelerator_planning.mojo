@@ -9,6 +9,7 @@ from dataframe import (
     col,
     lit,
     scan_csv,
+    when,
 )
 from dataframe.accelerator.memory import (
     row_memory,
@@ -348,6 +349,25 @@ def test_fixed_logical_types_are_backend_opt_in() raises:
     var wide = DataFrame([Series.full_null("x", DataType.decimal(38, 2), 1)])
     with assert_raises(contains="Decimal128 requires CPU"):
         _ = lower_rows(wide.lazy().select(col("x")), native)
+
+
+def test_additional_row_operators_are_backend_opt_in() raises:
+    var frame = DataFrame([Series("x", Column[Int32]([1, 2]))])
+    var query = frame.lazy().select(
+        when(col("x") > 1).then(col("x").abs()).otherwise(col("x") // 2)
+    )
+    with assert_raises(contains="resident expression operation"):
+        _ = lower_rows(query)
+    var native = RowCapabilities("native", row_extras=True, mixed_types=True)
+    var plan = lower_rows(query, native)
+    assert_equal(plan.outputs[0].dtype, DataType.INT32)
+    var floats = DataFrame([Series("x", Column[Float32]([1, 2]))])
+    with assert_raises(contains="Float64 intermediate"):
+        _ = lower_rows(floats.lazy().select(col("x").round(2)), native)
+    with assert_raises(contains="floating division"):
+        _ = lower_rows(
+            floats.lazy().select(col("x") // lit(Float32(2))), native
+        )
 
 
 def main() raises:
