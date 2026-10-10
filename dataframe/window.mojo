@@ -40,7 +40,7 @@ from .string_column import StringColumn
 from .nested_column import StructColumn
 from .parse import parse_float64
 from .aggregate import quantile_of
-from .decimal import pow10
+from .decimal import check_limit, pow10, precision_limit
 from .reductions import WideInt
 from .series import Series, sort_indices
 from .rank import rank_numeric
@@ -83,8 +83,12 @@ def _numeric(input: Series, row: Int) -> Float64:
 
 
 def _is_narrow(dtype: DataType) -> Bool:
+    """A numeric type the window kernels widen to Int64 or Float64 first;
+    not a decimal, whose values are scaled integers (decimal sums run in
+    128 bits at their scale, other windows over decimals in Float64)."""
     return (
         dtype.is_numeric()
+        and not dtype.is_decimal()
         and dtype != DataType.INT64
         and (dtype != DataType.FLOAT64)
     )
@@ -147,6 +151,20 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
     if input.is_chunked():
         return window_op(node, input.rechunk(), ids)
     var op_code = node.op
+    if input.dtype().is_decimal():
+        if op_code == CUM_SUM:
+            return _decimal_cum_sum(input, ids, node.min_count == 1)
+        if op_code == ROLLING_SUM:
+            raise Error(
+                "rolling_sum over a decimal column is not supported yet;"
+                " cast it to Float64 first"
+            )
+        if (
+            op_code == ROLLING_MEAN
+            or op_code == ROLLING_STD
+            or op_code == ROLLING_VAR
+        ):
+            return window_op(node, _as_float(input), ids)
     if (op_code == ROLLING_STD or op_code == ROLLING_VAR) and _is_narrow(
         input.dtype()
     ):
@@ -274,6 +292,30 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                     if last >= 0 and (limit < 0 or distance <= limit):
                         source[row] = last
     return input.take_or_null(source)
+
+
+def _decimal_cum_sum(
+    input: Series, ids: List[Int], reverse: Bool
+) raises -> Series:
+    """A running sum of a decimal column within each partition, exact in
+    128 bits at the input's scale, typed as SQL's SUM of it (decimal(38,
+    scale) for a decimal32 or decimal64 input); nulls are skipped and stay
+    null. A running total past 38 digits raises."""
+    var wide = input._decimal128()
+    ref column = wide._data[Column[Int128]]
+    var n = len(column)
+    var valid = validity(input)
+    var target = input.dtype().sum_type()
+    var limit = precision_limit(target.precision())
+    var values = List[Int128](length=n, fill=0)
+    for rows in partitions(n, ids):
+        var total = Int128(0)
+        for row in _ordered(rows, reverse):
+            if not valid[row]:
+                continue
+            total = check_limit(total + column._get(row), limit, target)
+            values[row] = total
+    return Series("", Column[Int128](values^, valid)).with_dtype(target)
 
 
 def _as_float(input: Series) raises -> Series:
