@@ -1426,11 +1426,12 @@ def binary[
                 "", _fill_null(a._data[Column[Int32]], b._data[Column[Int32]])
             ).with_dtype(a.dtype())
     # decimal64 operands go to the decimal kernels at their width, which
-    # widen what they do not cover; decimal32 operands are widened here.
+    # widen what they do not cover; decimal32 operands are widened to 64
+    # bits here, where the typed compares and dense arithmetic apply.
     if (left.dtype().is_decimal() and left.dtype().decimal_width() == 32) or (
         right.dtype().is_decimal() and right.dtype().decimal_width() == 32
     ):
-        return binary[op, width](left._decimal128(), right._decimal128(), mask)
+        return binary[op, width](left._decimal64(), right._decimal64(), mask)
     comptime if is_logical(op):
         return _logical_bits[op](
             left._data[BoolColumn], right._data[BoolColumn]
