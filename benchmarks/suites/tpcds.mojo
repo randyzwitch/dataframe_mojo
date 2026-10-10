@@ -657,6 +657,358 @@ def returners(
     )
 
 
+def q4_year_total(
+    t: Dict[String, DataFrame],
+    sales: String,
+    prefix: String,
+    customer_key: String,
+    total: Expr,
+    sale_type: String,
+    keys: List[String],
+    names: List[String],
+    years: List[Int],
+) raises -> LazyFrame:
+    """One channel's rows of the year_total table of q4, q11 and q74: a
+    customer's sales total per year, grouped by `keys` and renamed to
+    `names`, tagged with `sale_type`. With `years`, only those years."""
+    var days = t["date_dim"].lazy()
+    if len(years) > 0:
+        days = days.filter(col("d_year").is_in(ints(years)))
+    var shown = List[Expr]()
+    for i in range(len(keys)):
+        shown.append(col(keys[i]).alias(names[i]))
+    shown.append(col("year_total"))
+    shown.append(lit(sale_type).alias("sale_type"))
+    return (
+        t[sales]
+        .lazy()
+        .join(
+            t["customer"].lazy(),
+            left_on=[customer_key],
+            right_on=["c_customer_sk"],
+        )
+        .join(
+            days.select(["d_date_sk", "d_year"]),
+            left_on=[prefix + "_sold_date_sk"],
+            right_on=["d_date_sk"],
+        )
+        .group_by(keys)
+        .agg([total.sum(min_count=1).alias("year_total")])
+        .select_exprs(shown)
+    )
+
+
+def q4_channel_year(
+    year_total: LazyFrame,
+    sale_type: String,
+    year: Int,
+    year_name: String,
+    tag: String,
+    first: Bool,
+) raises -> LazyFrame:
+    """One alias of year_total in q4, q11 and q74 (t_s_firstyear, ...):
+    the rows of one channel and year, keyed by `<tag>_id` with the total
+    as `<tag>_total`; a first year keeps only positive totals."""
+    var keep = (col("sale_type") == sale_type) & (
+        col(year_name) == lit(Int64(year))
+    )
+    if first:
+        keep = keep & (col("year_total").cast(DataType.FLOAT64) > lit(0.0))
+    return year_total.filter(keep).select_exprs(
+        [
+            col("customer_id").alias(tag + "_id"),
+            col("year_total").cast(DataType.FLOAT64).alias(tag + "_total"),
+        ]
+    )
+
+
+def q23_channel(
+    t: Dict[String, DataFrame],
+    sales: String,
+    prefix: String,
+    frequent: LazyFrame,
+    best: LazyFrame,
+    price_type: DataType,
+) raises -> LazyFrame:
+    """One channel's sales in February 2000 of frequent items to the best
+    store customers, summed by customer name (q23)."""
+    return (
+        t[sales]
+        .lazy()
+        .join(
+            dates(
+                t,
+                (col("d_year") == 2000) & (col("d_moy") == 2),
+                "d_sk",
+            ),
+            left_on=[prefix + "_sold_date_sk"],
+            right_on=["d_sk"],
+        )
+        .join(
+            frequent,
+            left_on=[prefix + "_item_sk"],
+            right_on=["item_sk"],
+        )
+        .join(
+            best,
+            left_on=[prefix + "_bill_customer_sk"],
+            right_on=["best_sk"],
+        )
+        .join(
+            t["customer"]
+            .lazy()
+            .select(["c_customer_sk", "c_last_name", "c_first_name"]),
+            left_on=[prefix + "_bill_customer_sk"],
+            right_on=["c_customer_sk"],
+        )
+        .with_columns(
+            [
+                (
+                    col(prefix + "_quantity").cast(price_type)
+                    * col(prefix + "_list_price")
+                ).alias("value")
+            ]
+        )
+        .group_by(["c_last_name", "c_first_name"])
+        .agg([col("value").sum(min_count=1).alias("sales")])
+    )
+
+
+def q27_no_text() -> Expr:
+    """A null string literal: the SQL's NULL AS s_state (q27)."""
+    from dataframe import null
+
+    return null(DataType.STRING)
+
+
+def q33_channel_totals(
+    t: Dict[String, DataFrame],
+    sales: String,
+    prefix: String,
+    address: String,
+    key: String,
+    chosen: Expr,
+    days: Expr,
+) raises -> LazyFrame:
+    """One channel's sales per `key` (q33, q56, q60): items whose `key` is
+    among the `chosen` items' keys, sold in `days` to an address at GMT-5."""
+    var keys = (
+        t["item"].lazy().filter(chosen).select_exprs([col(key).alias("k_in")])
+    )
+    var items = (
+        t["item"]
+        .lazy()
+        .select(["i_item_sk", key])
+        .join(keys, left_on=[key], right_on=["k_in"], how="semi")
+    )
+    ref places = t["customer_address"]
+    return (
+        t[sales]
+        .lazy()
+        .join(
+            dates(t, days, "d_sk"),
+            left_on=[prefix + "_sold_date_sk"],
+            right_on=["d_sk"],
+        )
+        .join(
+            places.lazy().filter(
+                col("ca_gmt_offset") == like(places, "ca_gmt_offset", "-5")
+            ),
+            left_on=[address],
+            right_on=["ca_address_sk"],
+        )
+        .join(items, left_on=[prefix + "_item_sk"], right_on=["i_item_sk"])
+        .group_by([key])
+        .agg(
+            [
+                col(prefix + "_ext_sales_price")
+                .sum(min_count=1)
+                .alias("total_sales")
+            ]
+        )
+    )
+
+
+def q33_union_totals(
+    t: Dict[String, DataFrame], key: String, chosen: Expr, days: Expr
+) raises -> LazyFrame:
+    """The store, catalog and web totals per `key`, UNION ALL, summed."""
+    return (
+        q33_channel_totals(
+            t, "store_sales", "ss", "ss_addr_sk", key, chosen, days
+        )
+        .concat(
+            q33_channel_totals(
+                t, "catalog_sales", "cs", "cs_bill_addr_sk", key, chosen, days
+            )
+        )
+        .concat(
+            q33_channel_totals(
+                t, "web_sales", "ws", "ws_bill_addr_sk", key, chosen, days
+            )
+        )
+        .group_by([key])
+        .agg([col("total_sales").sum(min_count=1).alias("total_sales")])
+    )
+
+
+def q38_channel_tags(t: Dict[String, DataFrame]) raises -> LazyFrame:
+    """The distinct (last name, first name, date) of each channel's buyers
+    in months 1200 to 1211, tagged 1 (store), 2 (catalog) or 4 (web), then
+    the sum of tags per triple (q38, q87). SQL INTERSECT and EXCEPT match
+    null names as equal, as grouping does and a join does not."""
+    var keys: List[String] = ["c_last_name", "c_first_name", "d_date"]
+    var tables: List[String] = ["store_sales", "catalog_sales", "web_sales"]
+    var date_keys: List[String] = [
+        "ss_sold_date_sk",
+        "cs_sold_date_sk",
+        "ws_sold_date_sk",
+    ]
+    var buyer_keys: List[String] = [
+        "ss_customer_sk",
+        "cs_bill_customer_sk",
+        "ws_bill_customer_sk",
+    ]
+    var days = (
+        t["date_dim"]
+        .lazy()
+        .filter(
+            col("d_month_seq").is_between(lit(Int64(1200)), lit(Int64(1211)))
+        )
+        .select(["d_date_sk", "d_date"])
+    )
+    var people = (
+        t["customer"]
+        .lazy()
+        .select(["c_customer_sk", "c_last_name", "c_first_name"])
+    )
+    var tagged = List[LazyFrame]()
+    for i in range(3):
+        tagged.append(
+            t[tables[i]]
+            .lazy()
+            .join(days, left_on=[date_keys[i]], right_on=["d_date_sk"])
+            .join(people, left_on=[buyer_keys[i]], right_on=["c_customer_sk"])
+            .select(keys)
+            .unique()
+            .with_columns([lit(Int64(1 << i)).alias("tag")])
+        )
+    return (
+        tagged[0]
+        .concat(tagged[1])
+        .concat(tagged[2])
+        .group_by(keys)
+        .agg([col("tag").sum().alias("tags")])
+    )
+
+
+def q66_warehouse_months(
+    t: Dict[String, DataFrame],
+    sales: String,
+    prefix: String,
+    price: String,
+    paid: String,
+) raises -> LazyFrame:
+    """One channel's 2001 sales and net paid by warehouse and month, for
+    orders in the time window shipped by DHL or BARIAN (q66)."""
+    ref frame = t[sales]
+    # Money times quantity: decimals combine only with decimals, so the
+    # quantity is read as DuckDB reads a BIGINT there, as decimal(18,0).
+    var counted = DataType.FLOAT64
+    if frame.column(price).dtype().is_decimal():
+        counted = DataType.decimal(18, 0, 64)
+    var quantity = col(prefix + "_quantity").cast(counted)
+    var zero = like(frame, price, "0") * lit(Int64(0)).cast(counted)
+    var months: List[String] = [
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "may",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "oct",
+        "nov",
+        "dec",
+    ]
+    var keys: List[String] = [
+        "w_warehouse_name",
+        "w_warehouse_sq_ft",
+        "w_city",
+        "w_county",
+        "w_state",
+        "w_country",
+        "d_year",
+    ]
+    var sums = List[Expr]()
+    for i in range(12):
+        sums.append(
+            when(col("d_moy") == i + 1)
+            .then(col(price) * quantity)
+            .otherwise(zero)
+            .sum(min_count=1)
+            .alias(months[i] + "_sales")
+        )
+    for i in range(12):
+        sums.append(
+            when(col("d_moy") == i + 1)
+            .then(col(paid) * quantity)
+            .otherwise(zero)
+            .sum(min_count=1)
+            .alias(months[i] + "_net")
+        )
+    var shown = List[Expr]()
+    for i in range(6):
+        shown.append(col(keys[i]))
+    shown.append(lit("DHL,BARIAN").alias("ship_carriers"))
+    shown.append(col("d_year").alias("year_"))
+    for i in range(12):
+        shown.append(col(months[i] + "_sales"))
+    for i in range(12):
+        shown.append(col(months[i] + "_net"))
+    return (
+        frame.lazy()
+        .join(
+            t["warehouse"].lazy(),
+            left_on=[prefix + "_warehouse_sk"],
+            right_on=["w_warehouse_sk"],
+        )
+        .join(
+            t["date_dim"]
+            .lazy()
+            .filter(col("d_year") == 2001)
+            .select(["d_date_sk", "d_year", "d_moy"]),
+            left_on=[prefix + "_sold_date_sk"],
+            right_on=["d_date_sk"],
+        )
+        .join(
+            t["time_dim"]
+            .lazy()
+            .filter(
+                col("t_time").is_between(
+                    lit(Int64(30838)), lit(Int64(30838 + 28800))
+                )
+            )
+            .select(["t_time_sk"]),
+            left_on=[prefix + "_sold_time_sk"],
+            right_on=["t_time_sk"],
+        )
+        .join(
+            t["ship_mode"]
+            .lazy()
+            .filter(col("sm_carrier").is_in(["DHL", "BARIAN"]))
+            .select(["sm_ship_mode_sk"]),
+            left_on=[prefix + "_ship_mode_sk"],
+            right_on=["sm_ship_mode_sk"],
+        )
+        .group_by(keys)
+        .agg(sums)
+        .select_exprs(shown)
+    )
+
+
 def query(q: String, t: Dict[String, DataFrame]) raises -> DataFrame:
     return plan(q, t).collect()
 
@@ -2955,6 +3307,2046 @@ def plan(q: String, t: Dict[String, DataFrame]) raises -> LazyFrame:
                 ]
             )
         )
+    if q == "q12" or q == "q20" or q == "q98":
+        # Each item's revenue in a month of three categories, and its share
+        # of its class's revenue: sum(sum(x)) OVER (PARTITION BY i_class).
+        var sales = String("web_sales")
+        var prefix = String("ws")
+        if q == "q20":
+            sales = "catalog_sales"
+            prefix = "cs"
+        elif q == "q98":
+            sales = "store_sales"
+            prefix = "ss"
+        var categories: List[String] = ["Sports", "Books", "Home"]
+        var revenue = col("itemrevenue").cast(DataType.FLOAT64)
+        var grouped = (
+            t[sales]
+            .lazy()
+            .join(
+                t["item"].lazy().filter(col("i_category").is_in(categories)),
+                left_on=[prefix + "_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .join(
+                dates(
+                    t,
+                    col("d_date").is_between(
+                        date_lit("1999-02-22"), date_lit("1999-03-24")
+                    ),
+                    "d_sk",
+                ),
+                left_on=[prefix + "_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .group_by(
+                [
+                    "i_item_id",
+                    "i_item_desc",
+                    "i_category",
+                    "i_class",
+                    "i_current_price",
+                ]
+            )
+            .agg(
+                [
+                    col(prefix + "_ext_sales_price")
+                    .sum(min_count=1)
+                    .alias("itemrevenue")
+                ]
+            )
+            .with_columns(
+                (
+                    revenue
+                    * lit(100.0)
+                    / revenue.sum(min_count=1).over("i_class")
+                ).alias("revenueratio")
+            )
+        )
+        var sorted = ascending(
+            grouped,
+            [
+                "i_category",
+                "i_class",
+                "i_item_id",
+                "i_item_desc",
+                "revenueratio",
+            ],
+            nulls_first=q != "q12",
+        )
+        if q == "q98":
+            return sorted^
+        return sorted.head(100)
+    if q == "q53" or q == "q63" or q == "q89":
+        # Store sales of chosen items summed per group, kept where the sum
+        # is more than 10% away from avg(sum(x)) over a coarser partition.
+        def q53_names(values: List[String]) -> List[String]:
+            return values.copy()
+
+        var items: Expr
+        var days: Expr
+        var keys: List[String]
+        var partition: List[String]
+        var average = String("avg_monthly_sales")
+        if q == "q89":
+            days = col("d_year") == 1999
+            items = (
+                col("i_category").is_in(
+                    q53_names(["Books", "Electronics", "Sports"])
+                )
+                & col("i_class").is_in(
+                    q53_names(["computers", "stereo", "football"])
+                )
+            ) | (
+                col("i_category").is_in(q53_names(["Men", "Jewelry", "Women"]))
+                & col("i_class").is_in(
+                    q53_names(["shirts", "birdal", "dresses"])
+                )
+            )
+            keys = [
+                "i_category",
+                "i_class",
+                "i_brand",
+                "s_store_name",
+                "s_company_name",
+                "d_moy",
+            ]
+            partition = [
+                "i_category",
+                "i_brand",
+                "s_store_name",
+                "s_company_name",
+            ]
+        else:
+            days = col("d_month_seq").is_between(
+                lit(Int64(1200)), lit(Int64(1211))
+            )
+            items = (
+                col("i_category").is_in(
+                    q53_names(["Books", "Children", "Electronics"])
+                )
+                & col("i_class").is_in(
+                    q53_names(
+                        ["personal", "portable", "reference", "self-help"]
+                    )
+                )
+                & col("i_brand").is_in(
+                    q53_names(
+                        [
+                            "scholaramalgamalg #14",
+                            "scholaramalgamalg #7",
+                            "exportiunivamalg #9",
+                            "scholaramalgamalg #9",
+                        ]
+                    )
+                )
+            ) | (
+                col("i_category").is_in(q53_names(["Women", "Music", "Men"]))
+                & col("i_class").is_in(
+                    q53_names(
+                        ["accessories", "classical", "fragrances", "pants"]
+                    )
+                )
+                & col("i_brand").is_in(
+                    q53_names(
+                        [
+                            "amalgimporto #1",
+                            "edu packscholar #1",
+                            "exportiimporto #1",
+                            "importoamalg #1",
+                        ]
+                    )
+                )
+            )
+            if q == "q53":
+                keys = ["i_manufact_id", "d_qoy"]
+                partition = ["i_manufact_id"]
+                average = "avg_quarterly_sales"
+            else:
+                keys = ["i_manager_id", "d_moy"]
+                partition = ["i_manager_id"]
+        var store = t["store"].lazy()
+        if q != "q89":
+            store = store.select(["s_store_sk"])
+        var total = col("sum_sales").cast(DataType.FLOAT64)
+        var mean = col(average)
+        var grouped = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["item"].lazy().filter(items),
+                left_on=["ss_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .join(
+                t["date_dim"]
+                .lazy()
+                .filter(days)
+                .select_exprs(
+                    [
+                        col("d_date_sk").alias("d_sk"),
+                        col(keys[len(keys) - 1]),
+                    ]
+                ),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(store, left_on=["ss_store_sk"], right_on=["s_store_sk"])
+            .group_by(keys)
+            .agg([col("ss_sales_price").sum(min_count=1).alias("sum_sales")])
+            .with_columns(total.mean().over(partition).alias(average))
+        )
+        if q == "q89":
+            var kept = grouped.filter(
+                (mean != lit(0.0)) & ((total - mean).abs() / mean > lit(0.1))
+            ).with_columns((total - mean).alias("q89_gap"))
+            return (
+                ascending(
+                    kept,
+                    [
+                        "q89_gap",
+                        "s_store_name",
+                        "i_category",
+                        "i_class",
+                        "i_brand",
+                        "s_company_name",
+                        "d_moy",
+                        "sum_sales",
+                        average,
+                    ],
+                )
+                .head(100)
+                .drop(["q89_gap"])
+            )
+        var kept = grouped.filter(
+            (mean > lit(0.0)) & ((total - mean).abs() / mean > lit(0.1))
+        ).select([partition[0], "sum_sales", average])
+        var order: List[String] = [average, "sum_sales", partition[0]]
+        if q == "q63":
+            order = [partition[0], average, "sum_sales"]
+        return ascending(kept, order).head(100)
+    if q == "q31":
+        # Sales by county and quarter for each channel; each WITH table is
+        # one plan, filtered to a quarter of 2000 in each of its three uses.
+        def q31_channel(
+            t: Dict[String, DataFrame],
+            sales: String,
+            date_key: String,
+            address_key: String,
+            amount: String,
+        ) raises -> LazyFrame:
+            return (
+                t[sales]
+                .lazy()
+                .join(
+                    t["date_dim"]
+                    .lazy()
+                    .select(["d_date_sk", "d_qoy", "d_year"]),
+                    left_on=[date_key],
+                    right_on=["d_date_sk"],
+                )
+                .join(
+                    t["customer_address"]
+                    .lazy()
+                    .select(["ca_address_sk", "ca_county"]),
+                    left_on=[address_key],
+                    right_on=["ca_address_sk"],
+                )
+                .group_by(["ca_county", "d_qoy", "d_year"])
+                .agg(
+                    [
+                        col(amount)
+                        .sum(min_count=1)
+                        .cast(DataType.FLOAT64)
+                        .alias("total")
+                    ]
+                )
+            )
+
+        var ss = q31_channel(
+            t,
+            "store_sales",
+            "ss_sold_date_sk",
+            "ss_addr_sk",
+            "ss_ext_sales_price",
+        )
+        var ws = q31_channel(
+            t,
+            "web_sales",
+            "ws_sold_date_sk",
+            "ws_bill_addr_sk",
+            "ws_ext_sales_price",
+        )
+
+        def q31_quarter(
+            frame: LazyFrame, quarter: Int, name: String
+        ) raises -> LazyFrame:
+            return frame.filter(
+                (col("d_qoy") == quarter) & (col("d_year") == 2000)
+            ).select_exprs(
+                [
+                    col("ca_county").alias(name + "_county"),
+                    col("d_year").alias(name + "_year"),
+                    col("total").alias(name),
+                ]
+            )
+
+        var paired = (
+            q31_quarter(ss, 1, "ss1")
+            .join(
+                q31_quarter(ss, 2, "ss2").select(["ss2_county", "ss2"]),
+                left_on=["ss1_county"],
+                right_on=["ss2_county"],
+            )
+            .join(
+                q31_quarter(ss, 3, "ss3").select(["ss3_county", "ss3"]),
+                left_on=["ss1_county"],
+                right_on=["ss3_county"],
+            )
+            .join(
+                q31_quarter(ws, 1, "ws1").select(["ws1_county", "ws1"]),
+                left_on=["ss1_county"],
+                right_on=["ws1_county"],
+            )
+            .join(
+                q31_quarter(ws, 2, "ws2").select(["ws2_county", "ws2"]),
+                left_on=["ss1_county"],
+                right_on=["ws2_county"],
+            )
+            .join(
+                q31_quarter(ws, 3, "ws3").select(["ws3_county", "ws3"]),
+                left_on=["ss1_county"],
+                right_on=["ws3_county"],
+            )
+            # The SQL's CASE gives null for a total that is not positive,
+            # and a comparison with null keeps nothing.
+            .filter(
+                (col("ws1") > 0.0)
+                & (col("ss1") > 0.0)
+                & (col("ws2") / col("ws1") > col("ss2") / col("ss1"))
+                & (col("ws2") > 0.0)
+                & (col("ss2") > 0.0)
+                & (col("ws3") / col("ws2") > col("ss3") / col("ss2"))
+            )
+            .select_exprs(
+                [
+                    col("ss1_county").alias("ca_county"),
+                    col("ss1_year").alias("d_year"),
+                    (col("ws2") / col("ws1")).alias("web_q1_q2_increase"),
+                    (col("ss2") / col("ss1")).alias("store_q1_q2_increase"),
+                    (col("ws3") / col("ws2")).alias("web_q2_q3_increase"),
+                    (col("ss3") / col("ss2")).alias("store_q2_q3_increase"),
+                ]
+            )
+        )
+        return ascending(paired, ["ca_county"])
+    if q == "q58" or q == "q83":
+        # Revenue (q58) or returned quantity (q83) by item id in each of
+        # three channels on the days of chosen weeks, for items found in
+        # all three. The days are one plan used by each channel.
+        var weeks: LazyFrame
+        if q == "q58":
+            weeks = (
+                t["date_dim"]
+                .lazy()
+                .filter(col("d_date") == date_lit("2000-01-03"))
+                .select_exprs([col("d_week_seq").alias("week")])
+            )
+        else:
+            weeks = (
+                t["date_dim"]
+                .lazy()
+                .filter(
+                    (col("d_date") == date_lit("2000-06-30"))
+                    | (col("d_date") == date_lit("2000-09-27"))
+                    | (col("d_date") == date_lit("2000-11-17"))
+                )
+                .select_exprs([col("d_week_seq").alias("week")])
+            )
+        var week_days = (
+            t["date_dim"]
+            .lazy()
+            .join(weeks, left_on=["d_week_seq"], right_on=["week"], how="semi")
+            .select_exprs([col("d_date").alias("day")])
+        )
+        var days = (
+            t["date_dim"]
+            .lazy()
+            .join(week_days, left_on=["d_date"], right_on=["day"], how="semi")
+            .select_exprs([col("d_date_sk").alias("d_sk")])
+        )
+
+        def q58_channel(
+            t: Dict[String, DataFrame],
+            days: LazyFrame,
+            sales: String,
+            item_key: String,
+            date_key: String,
+            amount: String,
+            name: String,
+        ) raises -> LazyFrame:
+            return (
+                t[sales]
+                .lazy()
+                .join(
+                    t["item"].lazy().select(["i_item_sk", "i_item_id"]),
+                    left_on=[item_key],
+                    right_on=["i_item_sk"],
+                )
+                .join(days, left_on=[date_key], right_on=["d_sk"])
+                .group_by(["i_item_id"])
+                .agg([col(amount).sum(min_count=1).alias(name)])
+                .select_exprs([col("i_item_id").alias(name + "_id"), col(name)])
+            )
+
+        var first: LazyFrame
+        var second: LazyFrame
+        var third: LazyFrame
+        var names: List[String]
+        if q == "q58":
+            names = ["ss_item_rev", "cs_item_rev", "ws_item_rev"]
+            first = q58_channel(
+                t,
+                days,
+                "store_sales",
+                "ss_item_sk",
+                "ss_sold_date_sk",
+                "ss_ext_sales_price",
+                names[0],
+            )
+            second = q58_channel(
+                t,
+                days,
+                "catalog_sales",
+                "cs_item_sk",
+                "cs_sold_date_sk",
+                "cs_ext_sales_price",
+                names[1],
+            )
+            third = q58_channel(
+                t,
+                days,
+                "web_sales",
+                "ws_item_sk",
+                "ws_sold_date_sk",
+                "ws_ext_sales_price",
+                names[2],
+            )
+        else:
+            names = ["sr_item_qty", "cr_item_qty", "wr_item_qty"]
+            first = q58_channel(
+                t,
+                days,
+                "store_returns",
+                "sr_item_sk",
+                "sr_returned_date_sk",
+                "sr_return_quantity",
+                names[0],
+            )
+            second = q58_channel(
+                t,
+                days,
+                "catalog_returns",
+                "cr_item_sk",
+                "cr_returned_date_sk",
+                "cr_return_quantity",
+                names[1],
+            )
+            third = q58_channel(
+                t,
+                days,
+                "web_returns",
+                "wr_item_sk",
+                "wr_returned_date_sk",
+                "wr_return_quantity",
+                names[2],
+            )
+        var joined = first.join(
+            second, left_on=[names[0] + "_id"], right_on=[names[1] + "_id"]
+        ).join(third, left_on=[names[0] + "_id"], right_on=[names[2] + "_id"])
+        var a = col(names[0]).cast(DataType.FLOAT64)
+        var b = col(names[1]).cast(DataType.FLOAT64)
+        var c = col(names[2]).cast(DataType.FLOAT64)
+        var shown = List[Expr]()
+        shown.append(col(names[0] + "_id").alias("item_id"))
+        var values: List[Expr] = [a.copy(), b.copy(), c.copy()]
+        var labels: List[String] = ["ss_dev", "cs_dev", "ws_dev"]
+        if q == "q83":
+            labels = ["sr_dev", "cr_dev", "wr_dev"]
+        if q == "q58":
+            # The exact sum is cast once; the SQL divides decimals as
+            # doubles.
+            var average = (col(names[0]) + col(names[1]) + col(names[2])).cast(
+                DataType.FLOAT64
+            ) / lit(3.0)
+            joined = joined.filter(
+                a.is_between(lit(0.9) * b, lit(1.1) * b)
+                & a.is_between(lit(0.9) * c, lit(1.1) * c)
+                & b.is_between(lit(0.9) * a, lit(1.1) * a)
+                & b.is_between(lit(0.9) * c, lit(1.1) * c)
+                & c.is_between(lit(0.9) * a, lit(1.1) * a)
+                & c.is_between(lit(0.9) * b, lit(1.1) * b)
+            )
+            for i in range(3):
+                shown.append(col(names[i]))
+                shown.append(
+                    (values[i] / average * lit(100.0)).alias(labels[i])
+                )
+            shown.append(average.alias("average"))
+        else:
+            var total = (col(names[0]) + col(names[1]) + col(names[2])).cast(
+                DataType.FLOAT64
+            )
+            for i in range(3):
+                shown.append(col(names[i]))
+                shown.append(
+                    (values[i] / total / lit(3.0) * lit(100.0)).alias(labels[i])
+                )
+            shown.append((total / lit(3.0)).alias("average"))
+        return ascending(
+            joined.select_exprs(shown), ["item_id", names[0]], nulls_first=True
+        ).head(100)
+    if q == "q64":
+        # Items whose catalog list price total is more than twice what was
+        # refunded on them (cs_ui), then returned store sales of those items
+        # by store, addresses and years (cross_sales), paired 1999 to 2000.
+        ref catalog = t["catalog_sales"]
+        var refunded = (
+            col("cr_refunded_cash")
+            + col("cr_reversed_charge")
+            + col("cr_store_credit")
+        )
+        var cs_ui = (
+            catalog.lazy()
+            .join(
+                t["catalog_returns"].lazy(),
+                left_on=["cs_item_sk", "cs_order_number"],
+                right_on=["cr_item_sk", "cr_order_number"],
+            )
+            .group_by(["cs_item_sk"])
+            .agg(
+                [
+                    col("cs_ext_list_price").sum(min_count=1).alias("sale"),
+                    refunded.sum(min_count=1).alias("refund"),
+                ]
+            )
+            .filter(
+                col("sale")
+                > like(catalog, "cs_ext_list_price", "2") * col("refund")
+            )
+            .select(["cs_item_sk"])
+        )
+
+        def q64_years(name: String) raises -> List[Expr]:
+            return [
+                col("d_date_sk").alias(name + "_sk"),
+                col("d_year").alias(name),
+            ]
+
+        def q64_address(prefix: String) raises -> List[Expr]:
+            return [
+                col("ca_address_sk").alias(prefix + "_address_sk"),
+                col("ca_street_number").alias(prefix + "_street_number"),
+                col("ca_street_name").alias(prefix + "_street_name"),
+                col("ca_city").alias(prefix + "_city"),
+                col("ca_zip").alias(prefix + "_zip"),
+            ]
+
+        var band = (
+            t["household_demographics"]
+            .lazy()
+            .select(["hd_demo_sk", "hd_income_band_sk"])
+            .join(
+                t["income_band"].lazy().select(["ib_income_band_sk"]),
+                left_on=["hd_income_band_sk"],
+                right_on=["ib_income_band_sk"],
+            )
+        )
+        var keys: List[String] = [
+            "product_name",
+            "ss_item_sk",
+            "store_name",
+            "store_zip",
+            "b_street_number",
+            "b_street_name",
+            "b_city",
+            "b_zip",
+            "c_street_number",
+            "c_street_name",
+            "c_city",
+            "c_zip",
+            "syear",
+            "fsyear",
+            "s2year",
+        ]
+        var cross_sales = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["store_returns"]
+                .lazy()
+                .select(["sr_item_sk", "sr_ticket_number"]),
+                left_on=["ss_item_sk", "ss_ticket_number"],
+                right_on=["sr_item_sk", "sr_ticket_number"],
+            )
+            .join(cs_ui, left_on=["ss_item_sk"], right_on=["cs_item_sk"])
+            .join(
+                t["item"]
+                .lazy()
+                .filter(
+                    col("i_color").is_in(
+                        [
+                            "purple",
+                            "burlywood",
+                            "indian",
+                            "spring",
+                            "floral",
+                            "medium",
+                        ]
+                    )
+                    & between(t["item"], "i_current_price", "64", "74")
+                    & between(t["item"], "i_current_price", "65", "79")
+                )
+                .select_exprs(
+                    [
+                        col("i_item_sk").alias("item_sk"),
+                        col("i_product_name").alias("product_name"),
+                    ]
+                ),
+                left_on=["ss_item_sk"],
+                right_on=["item_sk"],
+            )
+            .join(
+                t["date_dim"].lazy().select_exprs(q64_years("syear")),
+                left_on=["ss_sold_date_sk"],
+                right_on=["syear_sk"],
+            )
+            .join(
+                t["store"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("s_store_sk"),
+                        col("s_store_name").alias("store_name"),
+                        col("s_zip").alias("store_zip"),
+                    ]
+                ),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                t["customer"]
+                .lazy()
+                .select(
+                    [
+                        "c_customer_sk",
+                        "c_current_cdemo_sk",
+                        "c_current_hdemo_sk",
+                        "c_current_addr_sk",
+                        "c_first_sales_date_sk",
+                        "c_first_shipto_date_sk",
+                    ]
+                ),
+                left_on=["ss_customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .join(
+                t["customer_demographics"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("cd_demo_sk").alias("cd1_sk"),
+                        col("cd_marital_status").alias("cd1_marital"),
+                    ]
+                ),
+                left_on=["ss_cdemo_sk"],
+                right_on=["cd1_sk"],
+            )
+            .join(
+                t["customer_demographics"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("cd_demo_sk").alias("cd2_sk"),
+                        col("cd_marital_status").alias("cd2_marital"),
+                    ]
+                ),
+                left_on=["c_current_cdemo_sk"],
+                right_on=["cd2_sk"],
+            )
+            .filter(col("cd1_marital") != col("cd2_marital"))
+            .join(
+                t["promotion"].lazy().select(["p_promo_sk"]),
+                left_on=["ss_promo_sk"],
+                right_on=["p_promo_sk"],
+            )
+            .join(
+                band.select_exprs([col("hd_demo_sk").alias("hd1_sk")]),
+                left_on=["ss_hdemo_sk"],
+                right_on=["hd1_sk"],
+            )
+            .join(
+                band.select_exprs([col("hd_demo_sk").alias("hd2_sk")]),
+                left_on=["c_current_hdemo_sk"],
+                right_on=["hd2_sk"],
+            )
+            .join(
+                t["customer_address"].lazy().select_exprs(q64_address("b")),
+                left_on=["ss_addr_sk"],
+                right_on=["b_address_sk"],
+            )
+            .join(
+                t["customer_address"].lazy().select_exprs(q64_address("c")),
+                left_on=["c_current_addr_sk"],
+                right_on=["c_address_sk"],
+            )
+            .join(
+                t["date_dim"].lazy().select_exprs(q64_years("fsyear")),
+                left_on=["c_first_sales_date_sk"],
+                right_on=["fsyear_sk"],
+            )
+            .join(
+                t["date_dim"].lazy().select_exprs(q64_years("s2year")),
+                left_on=["c_first_shipto_date_sk"],
+                right_on=["s2year_sk"],
+            )
+            .group_by(keys)
+            .agg(
+                [
+                    col("ss_item_sk").len().alias("cnt"),
+                    col("ss_wholesale_cost").sum(min_count=1).alias("s1"),
+                    col("ss_list_price").sum(min_count=1).alias("s2"),
+                    col("ss_coupon_amt").sum(min_count=1).alias("s3"),
+                ]
+            )
+        )
+        var cs2 = cross_sales.filter(col("syear") == 2000).select_exprs(
+            [
+                col("ss_item_sk").alias("item_sk2"),
+                col("store_name").alias("store_name2"),
+                col("store_zip").alias("store_zip2"),
+                col("s1").alias("s12"),
+                col("s2").alias("s22"),
+                col("s3").alias("s32"),
+                col("syear").alias("syear2"),
+                col("cnt").alias("cnt2"),
+            ]
+        )
+        var paired = (
+            cross_sales.filter(col("syear") == 1999)
+            .join(
+                cs2,
+                left_on=["ss_item_sk", "store_name", "store_zip"],
+                right_on=["item_sk2", "store_name2", "store_zip2"],
+            )
+            .filter(col("cnt2") <= col("cnt"))
+            .select_exprs(
+                [
+                    col("product_name"),
+                    col("store_name"),
+                    col("store_zip"),
+                    col("b_street_number"),
+                    col("b_street_name"),
+                    col("b_city"),
+                    col("b_zip"),
+                    col("c_street_number"),
+                    col("c_street_name"),
+                    col("c_city"),
+                    col("c_zip"),
+                    col("syear").alias("cs1syear"),
+                    col("cnt").alias("cs1cnt"),
+                    col("s1").alias("s11"),
+                    col("s2").alias("s21"),
+                    col("s3").alias("s31"),
+                    col("s12"),
+                    col("s22"),
+                    col("s32"),
+                    col("syear2").alias("syear"),
+                    col("cnt2").alias("cnt"),
+                ]
+            )
+        )
+        return ascending(
+            paired, ["product_name", "store_name", "cnt", "s11", "s12"]
+        )
+    if q == "q78":
+        # Store sales of 2000 that were not returned, by year, item and
+        # customer, beside the same customer's unreturned web and catalog
+        # purchases of that item that year. LEFT JOIN ... IS NULL on the
+        # returns is an anti join.
+        def q78_channel(
+            t: Dict[String, DataFrame],
+            sales: String,
+            returns: String,
+            sale_keys: List[String],
+            return_keys: List[String],
+            date_key: String,
+            item_key: String,
+            customer_key: String,
+            prefix: String,
+            side: String,
+        ) raises -> LazyFrame:
+            return (
+                t[sales]
+                .lazy()
+                .join(
+                    t[returns].lazy().select(return_keys),
+                    left_on=sale_keys,
+                    right_on=return_keys,
+                    how="anti",
+                )
+                .join(
+                    t["date_dim"].lazy().select(["d_date_sk", "d_year"]),
+                    left_on=[date_key],
+                    right_on=["d_date_sk"],
+                )
+                .group_by(["d_year", item_key, customer_key])
+                .agg(
+                    [
+                        col(prefix + "_quantity")
+                        .sum(min_count=1)
+                        .alias(side + "_qty"),
+                        col(prefix + "_wholesale_cost")
+                        .sum(min_count=1)
+                        .alias(side + "_wc"),
+                        col(prefix + "_sales_price")
+                        .sum(min_count=1)
+                        .alias(side + "_sp"),
+                    ]
+                )
+                .select_exprs(
+                    [
+                        col("d_year").alias(side + "_sold_year"),
+                        col(item_key).alias(side + "_item_sk"),
+                        col(customer_key).alias(side + "_customer_sk"),
+                        col(side + "_qty"),
+                        col(side + "_wc"),
+                        col(side + "_sp"),
+                    ]
+                )
+            )
+
+        var ws = q78_channel(
+            t,
+            "web_sales",
+            "web_returns",
+            ["ws_order_number", "ws_item_sk"],
+            ["wr_order_number", "wr_item_sk"],
+            "ws_sold_date_sk",
+            "ws_item_sk",
+            "ws_bill_customer_sk",
+            "ws",
+            "ws",
+        )
+        var cs = q78_channel(
+            t,
+            "catalog_sales",
+            "catalog_returns",
+            ["cs_order_number", "cs_item_sk"],
+            ["cr_order_number", "cr_item_sk"],
+            "cs_sold_date_sk",
+            "cs_item_sk",
+            "cs_bill_customer_sk",
+            "cs",
+            "cs",
+        )
+        var ss = q78_channel(
+            t,
+            "store_sales",
+            "store_returns",
+            ["ss_ticket_number", "ss_item_sk"],
+            ["sr_ticket_number", "sr_item_sk"],
+            "ss_sold_date_sk",
+            "ss_item_sk",
+            "ss_customer_sk",
+            "ss",
+            "ss",
+        )
+        ref web = t["web_sales"]
+        var zero_wc = like(web, "ws_wholesale_cost", "0")
+        var zero_sp = like(web, "ws_sales_price", "0")
+        var other_qty = coalesce([col("ws_qty"), lit(Int64(0))]) + coalesce(
+            [col("cs_qty"), lit(Int64(0))]
+        )
+        var combined = (
+            ss.join(
+                ws,
+                left_on=["ss_sold_year", "ss_item_sk", "ss_customer_sk"],
+                right_on=["ws_sold_year", "ws_item_sk", "ws_customer_sk"],
+                how="left",
+            )
+            .join(
+                cs,
+                left_on=["ss_sold_year", "ss_item_sk", "ss_customer_sk"],
+                right_on=["cs_sold_year", "cs_item_sk", "cs_customer_sk"],
+                how="left",
+            )
+            .filter(
+                (
+                    (coalesce([col("ws_qty"), lit(Int64(0))]) > 0)
+                    | (coalesce([col("cs_qty"), lit(Int64(0))]) > 0)
+                )
+                & (col("ss_sold_year") == 2000)
+            )
+            .select_exprs(
+                [
+                    col("ss_sold_year"),
+                    col("ss_item_sk"),
+                    col("ss_customer_sk"),
+                    (
+                        col("ss_qty").cast(DataType.FLOAT64)
+                        / other_qty.cast(DataType.FLOAT64)
+                    )
+                    .round(2)
+                    .alias("ratio"),
+                    col("ss_qty").alias("store_qty"),
+                    col("ss_wc").alias("store_wholesale_cost"),
+                    col("ss_sp").alias("store_sales_price"),
+                    other_qty.alias("other_chan_qty"),
+                    (
+                        coalesce([col("ws_wc"), zero_wc.copy()])
+                        + coalesce([col("cs_wc"), zero_wc.copy()])
+                    ).alias("other_chan_wholesale_cost"),
+                    (
+                        coalesce([col("ws_sp"), zero_sp.copy()])
+                        + coalesce([col("cs_sp"), zero_sp.copy()])
+                    ).alias("other_chan_sales_price"),
+                ]
+            )
+        )
+        return ordered(
+            combined,
+            [
+                "ss_sold_year",
+                "ss_item_sk",
+                "ss_customer_sk",
+                "store_qty",
+                "store_wholesale_cost",
+                "store_sales_price",
+                "other_chan_qty",
+                "other_chan_wholesale_cost",
+                "other_chan_sales_price",
+                "ratio",
+            ],
+            [False, False, False, True, True, True, False, False, False, False],
+        ).head(100)
+    if q == "q97":
+        # Distinct (customer, item) pairs bought in the store and from the
+        # catalog in one year, counted by which side of a full join holds
+        # them. The right keys stay separate (coalesce=False) so each
+        # side's IS NOT NULL reads its own key, as in the SQL.
+        var year = dates(
+            t,
+            col("d_month_seq").is_between(lit(Int64(1200)), lit(Int64(1211))),
+            "d_sk",
+        )
+        var ssci = (
+            t["store_sales"]
+            .lazy()
+            .join(year, left_on=["ss_sold_date_sk"], right_on=["d_sk"])
+            .select_exprs(
+                [
+                    col("ss_customer_sk").alias("customer_sk"),
+                    col("ss_item_sk").alias("item_sk"),
+                ]
+            )
+            .unique()
+        )
+        var csci = (
+            t["catalog_sales"]
+            .lazy()
+            .join(year, left_on=["cs_sold_date_sk"], right_on=["d_sk"])
+            .select_exprs(
+                [
+                    col("cs_bill_customer_sk").alias("c_customer_sk"),
+                    col("cs_item_sk").alias("c_item_sk"),
+                ]
+            )
+            .unique()
+        )
+        var store = col("customer_sk").is_not_null()
+        var catalog = col("c_customer_sk").is_not_null()
+        return (
+            ssci.join(
+                csci,
+                left_on=["customer_sk", "item_sk"],
+                right_on=["c_customer_sk", "c_item_sk"],
+                how="full",
+                coalesce=False,
+            )
+            .select_exprs(
+                [
+                    one_if(store & ~catalog)
+                    .sum(min_count=1)
+                    .alias("store_only"),
+                    one_if(~store & catalog)
+                    .sum(min_count=1)
+                    .alias("catalog_only"),
+                    one_if(store & catalog)
+                    .sum(min_count=1)
+                    .alias("store_and_catalog"),
+                ]
+            )
+            .head(100)
+        )
+    if q == "q2":
+        # Web and catalog sales (UNION ALL) summed by week and weekday,
+        # each week of 2001 beside the week 53 later. As the SQL has it,
+        # each week's row joins every one of its days in the year.
+        var days: List[String] = [
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+        ]
+        var short: List[String] = [
+            "sun",
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri",
+            "sat",
+        ]
+        var wscs = (
+            t["web_sales"]
+            .lazy()
+            .select_exprs(
+                [
+                    col("ws_sold_date_sk").alias("sold_date_sk"),
+                    col("ws_ext_sales_price").alias("sales_price"),
+                ]
+            )
+            .concat(
+                t["catalog_sales"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("cs_sold_date_sk").alias("sold_date_sk"),
+                        col("cs_ext_sales_price").alias("sales_price"),
+                    ]
+                )
+            )
+        )
+        var sums = List[Expr]()
+        for i in range(7):
+            sums.append(
+                when(col("d_day_name") == days[i])
+                .then(col("sales_price"))
+                .end()
+                .sum(min_count=1)
+                .alias(short[i] + "_sales")
+            )
+        var wswscs = (
+            wscs.join(
+                t["date_dim"]
+                .lazy()
+                .select(["d_date_sk", "d_week_seq", "d_day_name"]),
+                left_on=["sold_date_sk"],
+                right_on=["d_date_sk"],
+            )
+            .group_by(["d_week_seq"])
+            .agg(sums)
+        )
+        var y_cols: List[Expr] = [col("d_week_seq").alias("d_week_seq1")]
+        var z_cols: List[Expr] = [
+            (col("d_week_seq") - lit(Int64(53))).alias("week_before")
+        ]
+        for i in range(7):
+            y_cols.append(col(short[i] + "_sales").alias(short[i] + "_sales1"))
+            z_cols.append(col(short[i] + "_sales").alias(short[i] + "_sales2"))
+        var y = wswscs.join(
+            t["date_dim"]
+            .lazy()
+            .filter(col("d_year") == 2001)
+            .select_exprs([col("d_week_seq").alias("week")]),
+            left_on=["d_week_seq"],
+            right_on=["week"],
+        ).select_exprs(y_cols)
+        var z = wswscs.join(
+            t["date_dim"]
+            .lazy()
+            .filter(col("d_year") == 2002)
+            .select_exprs([col("d_week_seq").alias("week")]),
+            left_on=["d_week_seq"],
+            right_on=["week"],
+        ).select_exprs(z_cols)
+        var shown: List[Expr] = [col("d_week_seq1")]
+        for i in range(7):
+            # The SQL leaves the seventh ratio unnamed.
+            var name = "r" + String(i + 1)
+            shown.append(
+                (
+                    col(short[i] + "_sales1").cast(DataType.FLOAT64)
+                    / col(short[i] + "_sales2").cast(DataType.FLOAT64)
+                )
+                .round(2)
+                .alias(name)
+            )
+        var paired = y.join(
+            z, left_on=["d_week_seq1"], right_on=["week_before"]
+        ).select_exprs(shown)
+        return ascending(paired, ["d_week_seq1"], nulls_first=True)
+    if q == "q4" or q == "q11" or q == "q74":
+        # year_total is a UNION ALL of per-channel yearly totals, read once
+        # per alias of the SQL's self join.
+        var keys: List[String] = [
+            "c_customer_id",
+            "c_first_name",
+            "c_last_name",
+            "c_preferred_cust_flag",
+            "c_birth_country",
+            "c_login",
+            "c_email_address",
+            "d_year",
+        ]
+        var names: List[String] = [
+            "customer_id",
+            "customer_first_name",
+            "customer_last_name",
+            "customer_preferred_cust_flag",
+            "customer_birth_country",
+            "customer_login",
+            "customer_email_address",
+            "dyear",
+        ]
+        var years = List[Int]()
+        var year_name = "dyear"
+        if q == "q74":
+            keys = ["c_customer_id", "c_first_name", "c_last_name", "d_year"]
+            names = [
+                "customer_id",
+                "customer_first_name",
+                "customer_last_name",
+                "year_",
+            ]
+            years = [2001, 2002]
+            year_name = "year_"
+        var store_total: Expr
+        var web_total: Expr
+        if q == "q4":
+            # DuckDB divides decimals as doubles.
+            store_total = (
+                (
+                    col("ss_ext_list_price")
+                    - col("ss_ext_wholesale_cost")
+                    - col("ss_ext_discount_amt")
+                    + col("ss_ext_sales_price")
+                ).cast(DataType.FLOAT64)
+            ) / lit(2.0)
+            web_total = (
+                (
+                    col("ws_ext_list_price")
+                    - col("ws_ext_wholesale_cost")
+                    - col("ws_ext_discount_amt")
+                    + col("ws_ext_sales_price")
+                ).cast(DataType.FLOAT64)
+            ) / lit(2.0)
+        elif q == "q11":
+            store_total = col("ss_ext_list_price") - col("ss_ext_discount_amt")
+            web_total = col("ws_ext_list_price") - col("ws_ext_discount_amt")
+        else:
+            store_total = col("ss_net_paid")
+            web_total = col("ws_net_paid")
+        var year_total = q4_year_total(
+            t,
+            "store_sales",
+            "ss",
+            "ss_customer_sk",
+            store_total,
+            "s",
+            keys,
+            names,
+            years,
+        )
+        if q == "q4":
+            year_total = year_total.concat(
+                q4_year_total(
+                    t,
+                    "catalog_sales",
+                    "cs",
+                    "cs_bill_customer_sk",
+                    (
+                        (
+                            col("cs_ext_list_price")
+                            - col("cs_ext_wholesale_cost")
+                            - col("cs_ext_discount_amt")
+                            + col("cs_ext_sales_price")
+                        ).cast(DataType.FLOAT64)
+                    )
+                    / lit(2.0),
+                    "c",
+                    keys,
+                    names,
+                    years,
+                )
+            )
+        year_total = year_total.concat(
+            q4_year_total(
+                t,
+                "web_sales",
+                "ws",
+                "ws_bill_customer_sk",
+                web_total,
+                "w",
+                keys,
+                names,
+                years,
+            )
+        )
+        var shown: List[String] = [
+            "customer_id",
+            "customer_first_name",
+            "customer_last_name",
+        ]
+        if q != "q74":
+            shown.append("customer_preferred_cust_flag")
+        var second_cols: List[Expr] = [
+            col("customer_id").alias("s2_id"),
+            col("year_total").cast(DataType.FLOAT64).alias("s2_total"),
+        ]
+        for name in shown:
+            second_cols.append(col(name))
+        var found = (
+            q4_channel_year(year_total, "s", 2001, year_name, "s1", True)
+            .join(
+                year_total.filter(
+                    (col("sale_type") == "s")
+                    & (col(year_name) == lit(Int64(2002)))
+                ).select_exprs(second_cols),
+                left_on=["s1_id"],
+                right_on=["s2_id"],
+            )
+            .join(
+                q4_channel_year(year_total, "w", 2001, year_name, "w1", True),
+                left_on=["s1_id"],
+                right_on=["w1_id"],
+            )
+            .join(
+                q4_channel_year(year_total, "w", 2002, year_name, "w2", False),
+                left_on=["s1_id"],
+                right_on=["w2_id"],
+            )
+        )
+        var web_growth = col("w2_total") / col("w1_total")
+        var store_growth = col("s2_total") / col("s1_total")
+        if q == "q4":
+            found = (
+                found.join(
+                    q4_channel_year(
+                        year_total, "c", 2001, year_name, "c1", True
+                    ),
+                    left_on=["s1_id"],
+                    right_on=["c1_id"],
+                )
+                .join(
+                    q4_channel_year(
+                        year_total, "c", 2002, year_name, "c2", False
+                    ),
+                    left_on=["s1_id"],
+                    right_on=["c2_id"],
+                )
+                .filter(
+                    (col("c2_total") / col("c1_total") > store_growth)
+                    & (col("c2_total") / col("c1_total") > web_growth)
+                )
+            )
+        else:
+            found = found.filter(web_growth > store_growth)
+        var by = shown.copy()
+        if q == "q74":
+            by = ["customer_id"]
+        return ascending(found.select(shown), by, nulls_first=True).head(100)
+    if q == "q8":
+        var listed = List[Expr]()
+        for code in """
+            24128 76232 65084 87816 83926 77556 20548 26231 43848 15126 91137
+            61265 98294 25782 17920 18426 98235 40081 84093 28577 55565 17183
+            54601 67897 22752 86284 18376 38607 45200 21756 29741 96765 23932
+            89360 29839 25989 28898 91068 72550 10390 18845 47770 82636 41367
+            76638 86198 81312 37126 39192 88424 72175 81426 53672 10445 42666
+            66864 66708 41248 48583 82276 18842 78890 49448 14089 38122 34425
+            79077 19849 43285 39861 66162 77610 13695 99543 83444 83041 12305
+            57665 68341 25003 57834 62878 49130 81096 18840 27700 23470 50412
+            21195 16021 76107 71954 68309 18119 98359 64544 10336 86379 27068
+            39736 98569 28915 24206 56529 57647 54917 42961 91110 63981 14922
+            36420 23006 67467 32754 30903 20260 31671 51798 72325 85816 68621
+            13955 36446 41766 68806 16725 15146 22744 35850 88086 51649 18270
+            52867 39972 96976 63792 11376 94898 13595 10516 90225 58943 39371
+            94945 28587 96576 57855 28488 26105 83933 25858 34322 44438 73171
+            30122 34102 22685 71256 78451 54364 13354 45375 40558 56458 28286
+            45266 47305 69399 83921 26233 11101 15371 69913 35942 15882 25631
+            24610 44165 99076 33786 70738 26653 14328 72305 62496 22152 10144
+            64147 48425 14663 21076 18799 30450 63089 81019 68893 24996 51200
+            51211 45692 92712 70466 79994 22437 25280 38935 71791 73134 56571
+            14060 19505 72425 56575 74351 68786 51650 20004 18383 76614 11634
+            18906 15765 41368 73241 76698 78567 97189 28545 76231 75691 22246
+            51061 90578 56691 68014 51103 94167 57047 14867 73520 15734 63435
+            25733 35474 24676 94627 53535 17879 15559 53268 59166 11928 59402
+            33282 45721 43933 68101 33515 36634 71286 19736 58058 55253 67473
+            41918 19515 36495 19430 22351 77191 91393 49156 50298 87501 18652
+            53179 18767 63193 23968 65164 68880 21286 72823 58470 67301 13394
+            31016 70372 67030 40604 24317 45748 39127 26065 77721 31029 31880
+            60576 24671 45549 13376 50016 33123 19769 22927 97789 46081 72151
+            15723 46136 51949 68100 96888 64528 14171 79777 28709 11489 25103
+            32213 78668 22245 15798 27156 37930 62971 21337 51622 67853 10567
+            38415 15455 58263 42029 60279 37125 56240 88190 50308 26859 64457
+            89091 82136 62377 36233 63837 58078 17043 30010 60099 28810 98025
+            29178 87343 73273 30469 64034 39516 86057 21309 90257 67875 40162
+            11356 73650 61810 72013 30431 22461 19512 13375 55307 30625 83849
+            68908 26689 96451 38193 46820 88885 84935 69035 83144 47537 56616
+            94983 48033 69952 25486 61547 27385 61860 58048 56910 16807 17871
+            35258 31387 35458 35576
+        """.split():
+            listed.append(lit(String(code)))
+        var five = col("ca_zip").str().slice(0, 5)
+        # INTERSECT: the listed zips that more than 10 preferred customers
+        # live at, once each.
+        var crowded = (
+            t["customer_address"]
+            .lazy()
+            .join(
+                t["customer"]
+                .lazy()
+                .filter(col("c_preferred_cust_flag") == "Y"),
+                left_on=["ca_address_sk"],
+                right_on=["c_current_addr_sk"],
+            )
+            .group_by(["ca_zip"])
+            .agg([col("ca_zip").len().alias("cnt")])
+            .filter(col("cnt") > 10)
+            .select_exprs([five.alias("crowded_zip")])
+        )
+        var v1 = (
+            t["customer_address"]
+            .lazy()
+            .filter(five.is_in(listed))
+            .select_exprs([five.alias("ca_zip")])
+            .join(
+                crowded,
+                left_on=["ca_zip"],
+                right_on=["crowded_zip"],
+                how="semi",
+            )
+            .unique()
+            .select_exprs([col("ca_zip").str().slice(0, 2).alias("v1_zip2")])
+        )
+        var grouped = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                dates(
+                    t,
+                    (col("d_qoy") == 2) & (col("d_year") == 1998),
+                    "d_sk",
+                ),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["store"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("s_store_sk"),
+                        col("s_store_name"),
+                        col("s_zip").str().slice(0, 2).alias("s_zip2"),
+                    ]
+                ),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(v1, left_on=["s_zip2"], right_on=["v1_zip2"])
+            .group_by(["s_store_name"])
+            .agg(
+                [
+                    col("ss_net_profit")
+                    .sum(min_count=1)
+                    .alias("sum(ss_net_profit)")
+                ]
+            )
+        )
+        return ascending(grouped, ["s_store_name"]).head(100)
+    if q == "q23":
+        var price_type = t["store_sales"].column("ss_sales_price").dtype()
+        var four_years = col("d_year").is_in(ints([2000, 2001, 2002, 2003]))
+        var store_value = col("ss_quantity").cast(price_type) * col(
+            "ss_sales_price"
+        )
+        # Items sold more than 4 times on one day; an item appears once per
+        # such day, and the joins below match each of those rows.
+        var frequent = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["date_dim"]
+                .lazy()
+                .filter(four_years)
+                .select(["d_date_sk", "d_date"]),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_date_sk"],
+            )
+            .join(
+                t["item"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("i_item_desc").str().slice(0, 30).alias("itemdesc"),
+                        col("i_item_sk"),
+                    ]
+                ),
+                left_on=["ss_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .group_by(["itemdesc", "ss_item_sk", "d_date"])
+            .agg([col("ss_item_sk").len().alias("cnt")])
+            .filter(col("cnt") > 4)
+            .select_exprs([col("ss_item_sk").alias("item_sk")])
+        )
+        var max_store_sales = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["customer"].lazy().select(["c_customer_sk"]),
+                left_on=["ss_customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .join(
+                dates(t, four_years, "d_sk"),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .with_columns([store_value.alias("value")])
+            .group_by(["ss_customer_sk"])
+            .agg([col("value").sum(min_count=1).alias("csales")])
+            .select_exprs([col("csales").max().alias("tpcds_cmax")])
+        )
+        var best = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["customer"].lazy().select(["c_customer_sk"]),
+                left_on=["ss_customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .with_columns([store_value.alias("value")])
+            .group_by(["ss_customer_sk"])
+            .agg([col("value").sum(min_count=1).alias("ssales")])
+            .join(max_store_sales, how="cross")
+            .filter(
+                col("ssales").cast(DataType.FLOAT64)
+                > lit(0.5) * col("tpcds_cmax").cast(DataType.FLOAT64)
+            )
+            .select_exprs([col("ss_customer_sk").alias("best_sk")])
+        )
+        var list_type = t["catalog_sales"].column("cs_list_price").dtype()
+
+        var both = q23_channel(
+            t, "catalog_sales", "cs", frequent, best, list_type
+        ).concat(q23_channel(t, "web_sales", "ws", frequent, best, list_type))
+        return ascending(
+            both, ["c_last_name", "c_first_name", "sales"], nulls_first=True
+        ).head(100)
+    if q == "q27":
+        # The SQL's UNION ALL form of a rollup: by item and state, by item,
+        # and over all rows.
+        var results = (
+            t["store_sales"]
+            .lazy()
+            .join(
+                t["customer_demographics"]
+                .lazy()
+                .filter(
+                    (col("cd_gender") == "M")
+                    & (col("cd_marital_status") == "S")
+                    & (col("cd_education_status") == "College")
+                )
+                .select(["cd_demo_sk"]),
+                left_on=["ss_cdemo_sk"],
+                right_on=["cd_demo_sk"],
+            )
+            .join(
+                dates(t, col("d_year") == 2002, "d_sk"),
+                left_on=["ss_sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["store"]
+                .lazy()
+                .filter(col("s_state") == "TN")
+                .select(["s_store_sk", "s_state"]),
+                left_on=["ss_store_sk"],
+                right_on=["s_store_sk"],
+            )
+            .join(
+                t["item"].lazy().select(["i_item_sk", "i_item_id"]),
+                left_on=["ss_item_sk"],
+                right_on=["i_item_sk"],
+            )
+        )
+        var averages: List[Expr] = [
+            col("ss_quantity").mean().alias("agg1"),
+            col("ss_list_price").mean().alias("agg2"),
+            col("ss_coupon_amt").mean().alias("agg3"),
+            col("ss_sales_price").mean().alias("agg4"),
+        ]
+        var shown: List[Expr] = [
+            col("i_item_id"),
+            col("s_state"),
+            col("g_state"),
+            col("agg1"),
+            col("agg2"),
+            col("agg3"),
+            col("agg4"),
+        ]
+        var by_state = (
+            results.group_by(["i_item_id", "s_state"])
+            .agg(averages)
+            .with_columns([lit(Int64(0)).alias("g_state")])
+            .select_exprs(shown)
+        )
+        var by_item = (
+            results.group_by(["i_item_id"])
+            .agg(averages)
+            .with_columns(
+                [
+                    q27_no_text().alias("s_state"),
+                    lit(Int64(1)).alias("g_state"),
+                ]
+            )
+            .select_exprs(shown)
+        )
+        var overall = (
+            results.select_exprs(averages)
+            .with_columns(
+                [
+                    q27_no_text().alias("i_item_id"),
+                    q27_no_text().alias("s_state"),
+                    lit(Int64(1)).alias("g_state"),
+                ]
+            )
+            .select_exprs(shown)
+        )
+        return ascending(
+            by_state.concat(by_item).concat(overall),
+            ["i_item_id", "s_state"],
+            nulls_first=True,
+        ).head(100)
+    if q == "q33":
+        var found = q33_union_totals(
+            t,
+            "i_manufact_id",
+            col("i_category") == "Electronics",
+            (col("d_year") == 1998) & (col("d_moy") == 5),
+        )
+        return ascending(found, ["total_sales"]).head(100)
+    if q == "q56":
+        var found = q33_union_totals(
+            t,
+            "i_item_id",
+            col("i_color").is_in(["slate", "blanched", "burnished"]),
+            (col("d_year") == 2001) & (col("d_moy") == 2),
+        )
+        return ascending(
+            found, ["total_sales", "i_item_id"], nulls_first=True
+        ).head(100)
+    if q == "q60":
+        var found = q33_union_totals(
+            t,
+            "i_item_id",
+            col("i_category") == "Music",
+            (col("d_year") == 1998) & (col("d_moy") == 9),
+        )
+        return ascending(found, ["i_item_id", "total_sales"]).head(100)
+    if q == "q38" or q == "q87":
+        # INTERSECT keeps the triples every channel has (tags 1+2+4);
+        # store EXCEPT catalog EXCEPT web the ones only the store has.
+        var wanted = 7 if q == "q38" else 1
+        return (
+            q38_channel_tags(t)
+            .filter(col("tags") == wanted)
+            .select_exprs([col("tags").len().alias("count_star()")])
+        )
+    if q == "q54":
+        var channel_sales = (
+            t["catalog_sales"]
+            .lazy()
+            .select_exprs(
+                [
+                    col("cs_sold_date_sk").alias("sold_date_sk"),
+                    col("cs_bill_customer_sk").alias("customer_sk"),
+                    col("cs_item_sk").alias("item_sk"),
+                ]
+            )
+            .concat(
+                t["web_sales"]
+                .lazy()
+                .select_exprs(
+                    [
+                        col("ws_sold_date_sk").alias("sold_date_sk"),
+                        col("ws_bill_customer_sk").alias("customer_sk"),
+                        col("ws_item_sk").alias("item_sk"),
+                    ]
+                )
+            )
+        )
+        var my_customers = (
+            channel_sales.join(
+                t["item"]
+                .lazy()
+                .filter(
+                    (col("i_category") == "Women")
+                    & (col("i_class") == "maternity")
+                )
+                .select(["i_item_sk"]),
+                left_on=["item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .join(
+                dates(
+                    t, (col("d_moy") == 12) & (col("d_year") == 1998), "d_sk"
+                ),
+                left_on=["sold_date_sk"],
+                right_on=["d_sk"],
+            )
+            .join(
+                t["customer"]
+                .lazy()
+                .select(["c_customer_sk", "c_current_addr_sk"]),
+                left_on=["customer_sk"],
+                right_on=["c_customer_sk"],
+            )
+            .select_exprs(
+                [
+                    col("customer_sk").alias("c_customer_sk"),
+                    col("c_current_addr_sk"),
+                ]
+            )
+            .unique()
+        )
+        # The two scalar subqueries: the month after December 1998 and
+        # the third month after it, as one row crossed with date_dim.
+        var bounds = (
+            t["date_dim"]
+            .lazy()
+            .filter((col("d_year") == 1998) & (col("d_moy") == 12))
+            .select_exprs(
+                [
+                    (col("d_month_seq") + lit(Int64(1))).alias("low_seq"),
+                    (col("d_month_seq") + lit(Int64(3))).alias("high_seq"),
+                ]
+            )
+            .unique()
+        )
+        var months = (
+            t["date_dim"]
+            .lazy()
+            .select(["d_date_sk", "d_month_seq"])
+            .join(bounds, how="cross")
+            .filter(
+                (col("d_month_seq") >= col("low_seq"))
+                & (col("d_month_seq") <= col("high_seq"))
+            )
+            .select_exprs([col("d_date_sk").alias("m_sk")])
+        )
+        var segments = (
+            my_customers.join(
+                t["store_sales"]
+                .lazy()
+                .select(
+                    ["ss_customer_sk", "ss_sold_date_sk", "ss_ext_sales_price"]
+                ),
+                left_on=["c_customer_sk"],
+                right_on=["ss_customer_sk"],
+            )
+            .join(months, left_on=["ss_sold_date_sk"], right_on=["m_sk"])
+            .join(
+                t["customer_address"]
+                .lazy()
+                .select(["ca_address_sk", "ca_county", "ca_state"]),
+                left_on=["c_current_addr_sk"],
+                right_on=["ca_address_sk"],
+            )
+            .join(
+                t["store"].lazy().select(["s_county", "s_state"]),
+                left_on=["ca_county", "ca_state"],
+                right_on=["s_county", "s_state"],
+            )
+            .group_by(["c_customer_sk"])
+            .agg([col("ss_ext_sales_price").sum(min_count=1).alias("revenue")])
+            .select_exprs(
+                [
+                    (col("revenue").cast(DataType.FLOAT64) / lit(50.0))
+                    .round()
+                    .cast(DataType.INT32)
+                    .alias("segment")
+                ]
+            )
+            .group_by(["segment"])
+            .agg([col("segment").len().alias("num_customers")])
+            .select_exprs(
+                [
+                    col("segment"),
+                    col("num_customers"),
+                    (col("segment") * lit(Int32(50))).alias("segment_base"),
+                ]
+            )
+        )
+        return ascending(
+            segments,
+            ["segment", "num_customers", "segment_base"],
+            nulls_first=True,
+        ).head(100)
+    if q == "q66":
+        var months: List[String] = [
+            "jan",
+            "feb",
+            "mar",
+            "apr",
+            "may",
+            "jun",
+            "jul",
+            "aug",
+            "sep",
+            "oct",
+            "nov",
+            "dec",
+        ]
+        var keys: List[String] = [
+            "w_warehouse_name",
+            "w_warehouse_sq_ft",
+            "w_city",
+            "w_county",
+            "w_state",
+            "w_country",
+            "ship_carriers",
+            "year_",
+        ]
+        var sums = List[Expr]()
+        for i in range(12):
+            var name = months[i] + "_sales"
+            sums.append(col(name).sum(min_count=1).alias(name))
+        var area = col("w_warehouse_sq_ft").cast(DataType.FLOAT64)
+        for i in range(12):
+            sums.append(
+                (col(months[i] + "_sales").cast(DataType.FLOAT64) / area)
+                .sum(min_count=1)
+                .alias(months[i] + "_sales_per_sq_foot")
+            )
+        for i in range(12):
+            var name = months[i] + "_net"
+            sums.append(col(name).sum(min_count=1).alias(name))
+        var grouped = (
+            q66_warehouse_months(
+                t, "web_sales", "ws", "ws_ext_sales_price", "ws_net_paid"
+            )
+            .concat(
+                q66_warehouse_months(
+                    t,
+                    "catalog_sales",
+                    "cs",
+                    "cs_sales_price",
+                    "cs_net_paid_inc_tax",
+                )
+            )
+            .group_by(keys)
+            .agg(sums)
+        )
+        return ascending(grouped, ["w_warehouse_name"], nulls_first=True).head(
+            100
+        )
+    if q == "q71":
+        var prefixes: List[String] = ["ws", "cs", "ss"]
+        var tables: List[String] = ["web_sales", "catalog_sales", "store_sales"]
+        var days = dates(
+            t, (col("d_moy") == 11) & (col("d_year") == 1999), "d_sk"
+        )
+        var parts = List[LazyFrame]()
+        for i in range(3):
+            var p = prefixes[i]
+            parts.append(
+                t[tables[i]]
+                .lazy()
+                .join(days, left_on=[p + "_sold_date_sk"], right_on=["d_sk"])
+                .select_exprs(
+                    [
+                        col(p + "_ext_sales_price").alias("ext_price"),
+                        col(p + "_sold_date_sk").alias("sold_date_sk"),
+                        col(p + "_item_sk").alias("sold_item_sk"),
+                        col(p + "_sold_time_sk").alias("time_sk"),
+                    ]
+                )
+            )
+        var grouped = (
+            parts[0]
+            .concat(parts[1])
+            .concat(parts[2])
+            .join(
+                t["item"].lazy().filter(col("i_manager_id") == 1),
+                left_on=["sold_item_sk"],
+                right_on=["i_item_sk"],
+            )
+            .join(
+                t["time_dim"]
+                .lazy()
+                .filter(col("t_meal_time").is_in(["breakfast", "dinner"])),
+                left_on=["time_sk"],
+                right_on=["t_time_sk"],
+            )
+            .group_by(["i_brand", "i_brand_id", "t_hour", "t_minute"])
+            .agg([col("ext_price").sum(min_count=1).alias("ext_price")])
+            .select_exprs(
+                [
+                    col("i_brand_id").alias("brand_id"),
+                    col("i_brand").alias("brand"),
+                    col("t_hour"),
+                    col("t_minute"),
+                    col("ext_price"),
+                ]
+            )
+        )
+        return ordered(
+            grouped,
+            ["ext_price", "brand_id", "t_hour"],
+            [True, False, False],
+            nulls_first=True,
+        )
+    if q == "q75":
+        var prefixes: List[String] = ["cs", "ss", "ws"]
+        var tables: List[String] = ["catalog_sales", "store_sales", "web_sales"]
+        var returns: List[String] = [
+            "catalog_returns",
+            "store_returns",
+            "web_returns",
+        ]
+        var sale_keys: List[String] = [
+            "cs_order_number",
+            "ss_ticket_number",
+            "ws_order_number",
+        ]
+        var return_keys: List[String] = [
+            "cr_order_number",
+            "sr_ticket_number",
+            "wr_order_number",
+        ]
+        var return_items: List[String] = [
+            "cr_item_sk",
+            "sr_item_sk",
+            "wr_item_sk",
+        ]
+        var return_counts: List[String] = [
+            "cr_return_quantity",
+            "sr_return_quantity",
+            "wr_return_quantity",
+        ]
+        var return_amounts: List[String] = [
+            "cr_return_amount",
+            "sr_return_amt",
+            "wr_return_amt",
+        ]
+        var keys: List[String] = [
+            "d_year",
+            "i_brand_id",
+            "i_class_id",
+            "i_category_id",
+            "i_manufact_id",
+        ]
+        var books = (
+            t["item"]
+            .lazy()
+            .filter(col("i_category") == "Books")
+            .select(
+                [
+                    "i_item_sk",
+                    "i_brand_id",
+                    "i_class_id",
+                    "i_category_id",
+                    "i_manufact_id",
+                ]
+            )
+        )
+        var details = List[LazyFrame]()
+        for i in range(3):
+            var p = prefixes[i]
+            ref back = t[returns[i]]
+            var no_count = lit(Int64(0)).cast(
+                back.column(return_counts[i]).dtype()
+            )
+            details.append(
+                t[tables[i]]
+                .lazy()
+                .join(books, left_on=[p + "_item_sk"], right_on=["i_item_sk"])
+                .join(
+                    t["date_dim"].lazy().select(["d_date_sk", "d_year"]),
+                    left_on=[p + "_sold_date_sk"],
+                    right_on=["d_date_sk"],
+                )
+                .join(
+                    back.lazy().select(
+                        [
+                            return_keys[i],
+                            return_items[i],
+                            return_counts[i],
+                            return_amounts[i],
+                        ]
+                    ),
+                    left_on=[sale_keys[i], p + "_item_sk"],
+                    right_on=[return_keys[i], return_items[i]],
+                    how="left",
+                )
+                .select_exprs(
+                    [
+                        col("d_year"),
+                        col("i_brand_id"),
+                        col("i_class_id"),
+                        col("i_category_id"),
+                        col("i_manufact_id"),
+                        (
+                            col(p + "_quantity")
+                            - coalesce([col(return_counts[i]), no_count.copy()])
+                        ).alias("sales_cnt"),
+                        (
+                            col(p + "_ext_sales_price")
+                            - coalesce(
+                                [
+                                    col(return_amounts[i]),
+                                    like(back, return_amounts[i], "0"),
+                                ]
+                            )
+                        ).alias("sales_amt"),
+                    ]
+                )
+            )
+        var all_sales = (
+            details[0]
+            .concat(details[1])
+            .concat(details[2])
+            .unique()
+            .group_by(keys)
+            .agg(
+                [
+                    col("sales_cnt").sum(min_count=1).alias("sales_cnt"),
+                    col("sales_amt").sum(min_count=1).alias("sales_amt"),
+                ]
+            )
+        )
+        var prev_yr = all_sales.filter(col("d_year") == 2001).select_exprs(
+            [
+                col("d_year").alias("prev_year"),
+                col("i_brand_id").alias("p_brand_id"),
+                col("i_class_id").alias("p_class_id"),
+                col("i_category_id").alias("p_category_id"),
+                col("i_manufact_id").alias("p_manufact_id"),
+                col("sales_cnt").alias("prev_yr_cnt"),
+                col("sales_amt").alias("prev_yr_amt"),
+            ]
+        )
+        var compared = (
+            all_sales.filter(col("d_year") == 2002)
+            .join(
+                prev_yr,
+                left_on=[
+                    "i_brand_id",
+                    "i_class_id",
+                    "i_category_id",
+                    "i_manufact_id",
+                ],
+                right_on=[
+                    "p_brand_id",
+                    "p_class_id",
+                    "p_category_id",
+                    "p_manufact_id",
+                ],
+            )
+            .filter(
+                col("sales_cnt").cast(DataType.FLOAT64)
+                / col("prev_yr_cnt").cast(DataType.FLOAT64)
+                < lit(0.9)
+            )
+            .select_exprs(
+                [
+                    col("prev_year"),
+                    col("d_year").alias("year_"),
+                    col("i_brand_id"),
+                    col("i_class_id"),
+                    col("i_category_id"),
+                    col("i_manufact_id"),
+                    col("prev_yr_cnt"),
+                    col("sales_cnt").alias("curr_yr_cnt"),
+                    (col("sales_cnt") - col("prev_yr_cnt")).alias(
+                        "sales_cnt_diff"
+                    ),
+                    (col("sales_amt") - col("prev_yr_amt")).alias(
+                        "sales_amt_diff"
+                    ),
+                ]
+            )
+        )
+        return ascending(compared, ["sales_cnt_diff", "sales_amt_diff"]).head(
+            100
+        )
+    if q == "q76":
+        var channels: List[String] = ["store", "web", "catalog"]
+        var missing: List[String] = [
+            "ss_store_sk",
+            "ws_ship_customer_sk",
+            "cs_ship_addr_sk",
+        ]
+        var tables: List[String] = ["store_sales", "web_sales", "catalog_sales"]
+        var prefixes: List[String] = ["ss", "ws", "cs"]
+        var keys: List[String] = [
+            "channel",
+            "col_name",
+            "d_year",
+            "d_qoy",
+            "i_category",
+        ]
+        var parts = List[LazyFrame]()
+        for i in range(3):
+            var p = prefixes[i]
+            parts.append(
+                t[tables[i]]
+                .lazy()
+                .filter(col(missing[i]).is_null())
+                .join(
+                    t["date_dim"]
+                    .lazy()
+                    .select(["d_date_sk", "d_year", "d_qoy"]),
+                    left_on=[p + "_sold_date_sk"],
+                    right_on=["d_date_sk"],
+                )
+                .join(
+                    t["item"].lazy().select(["i_item_sk", "i_category"]),
+                    left_on=[p + "_item_sk"],
+                    right_on=["i_item_sk"],
+                )
+                .select_exprs(
+                    [
+                        lit(channels[i]).alias("channel"),
+                        lit(missing[i]).alias("col_name"),
+                        col("d_year"),
+                        col("d_qoy"),
+                        col("i_category"),
+                        col(p + "_ext_sales_price").alias("ext_sales_price"),
+                    ]
+                )
+            )
+        var grouped = (
+            parts[0]
+            .concat(parts[1])
+            .concat(parts[2])
+            .group_by(keys)
+            .agg(
+                [
+                    col("channel").len().alias("sales_cnt"),
+                    col("ext_sales_price").sum(min_count=1).alias("sales_amt"),
+                ]
+            )
+        )
+        return ascending(grouped, keys, nulls_first=True).head(100)
     raise unsupported("not translated")
 
 
