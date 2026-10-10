@@ -1,0 +1,463 @@
+"""Exercise the optional native ABI on an Apple Silicon host after build.sh."""
+import ctypes as C
+import sys
+import math
+import random
+
+I = C.c_int64
+P = C.c_void_p
+
+
+class Input(C.Structure):
+    _fields_ = [
+        ("values", P),
+        ("validity", P),
+        ("dtype", I),
+        ("offset", I),
+        ("has_validity", I),
+    ]
+
+
+class Step(C.Structure):
+    _fields_ = [
+        (x, I)
+        for x in [
+            "start",
+            "nodes",
+            "slot",
+            "filter",
+            "gather_start",
+            "gather_count",
+        ]
+    ]
+
+
+class Output(C.Structure):
+    _fields_ = [("values", P), ("validity", P)] + [
+        (x, I) for x in ["dtype", "slot", "reduction", "min_count"]
+    ]
+
+
+class Request(C.Structure):
+    _fields_ = [
+        (x, I)
+        for x in [
+            "abi",
+            "rows",
+            "dtype",
+            "slots",
+            "input_count",
+            "code_words",
+            "literal_count",
+            "step_count",
+            "gather_count",
+            "output_count",
+            "limit",
+            "reductions",
+            "profiling",
+            "budget",
+        ]
+    ] + [
+        (x, P)
+        for x in ["inputs", "code", "literals", "steps", "gathers", "outputs"]
+    ]
+
+
+class Memory(C.Structure):
+    _fields_ = [
+        (x, I)
+        for x in [
+            "shared",
+            "result",
+            "peak",
+            "upload",
+            "launches",
+            "blocks",
+            "capacity",
+            "packed",
+        ]
+    ]
+
+
+class Stats(C.Structure):
+    _fields_ = [("memory", Memory)] + [
+        (x, I)
+        for x in [
+            "rows",
+            "download",
+            "waits",
+            "cache_hit",
+            "compile_ns",
+            "stage_ns",
+            "submit_ns",
+            "copy_ns",
+            "gpu_ns",
+        ]
+    ]
+
+
+def ptr(x):
+    return C.cast(x, P)
+
+
+def packed(values, offset=0):
+    out = (C.c_uint8 * max(1, (len(values) + offset + 7) // 8))()
+    for i, v in enumerate(values):
+        if v:
+            out[(i + offset) // 8] |= 1 << ((i + offset) % 8)
+    return out
+
+
+def unpack(bits, n):
+    return [bool(bits[i // 8] & (1 << (i % 8))) for i in range(n)]
+
+
+lib = C.CDLL(
+    sys.argv[1] if len(sys.argv) > 1 else "build/dfmetal/libdfmetal.dylib"
+)
+lib.dfm_context_create.argtypes = [I, I, C.POINTER(P)]
+lib.dfm_context_create.restype = P
+lib.dfm_context_release.argtypes = [P]
+lib.dfm_execute.argtypes = [
+    P,
+    C.POINTER(Request),
+    C.POINTER(Stats),
+    C.POINTER(P),
+]
+lib.dfm_estimate.argtypes = [
+    C.POINTER(Request),
+    C.POINTER(Memory),
+    C.POINTER(P),
+]
+lib.dfm_plan_cached.argtypes = [P, C.POINTER(Request), C.POINTER(P)]
+lib.dfm_free.argtypes = [P]
+
+
+def check(status, err):
+    if status:
+        message = C.string_at(err).decode() if err else "missing native error"
+        lib.dfm_free(err)
+        raise RuntimeError(message)
+
+
+assert C.sizeof(Input) == 40 and C.sizeof(Step) == 48 and C.sizeof(Output) == 48
+assert (
+    C.sizeof(Request) == 160
+    and C.sizeof(Memory) == 64
+    and C.sizeof(Stats) == 136
+)
+lib.dfm_abi_version.restype = I
+lib.dfm_device_count.restype = I
+assert lib.dfm_abi_version() == 1
+bad = Request()
+memory = Memory()
+err = P()
+assert lib.dfm_estimate(C.byref(bad), C.byref(memory), C.byref(err)) == 1
+assert b"ABI version mismatch" in C.string_at(err)
+lib.dfm_free(err)
+print("Native Metal ABI and pure request validation: PASS")
+if lib.dfm_device_count() == 0:
+    print("Native Metal execution: SKIP (no GPU exposed on this host)")
+    sys.exit(0)
+err = P()
+ctx = lib.dfm_context_create(0, 0, C.byref(err))
+if not ctx:
+    check(1, err)
+
+# All request-owned buffers stay alive until the synchronous call returns.
+def execute(
+    values,
+    dtype,
+    nodes,
+    literals,
+    *,
+    valid=None,
+    offset=0,
+    filter_nodes=None,
+    output_bool=False,
+    reduction=-1,
+    minimum=0,
+    limit=-1,
+    budget=-1,
+    expect_error=None,
+    repeats=1
+):
+    scalar = {1: C.c_float, 2: C.c_int32, 3: I, 4: C.c_uint8}[dtype]
+    n = len(values)
+    data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(
+        *values
+    )
+    validity = packed(valid, offset) if valid is not None else None
+    inputs = (Input * 1)(
+        Input(
+            ptr(data),
+            ptr(validity) if validity is not None else None,
+            dtype,
+            offset,
+            valid is not None,
+        )
+    )
+    programs = []
+    steps = []
+    gathers = []
+    lit = []
+    slot = 1
+    if filter_nodes:
+        programs += filter_nodes
+        lit += [0.0] * len(filter_nodes)
+        steps.append(Step(0, len(filter_nodes), slot, 1, 0, 1))
+        gathers.append(0)
+        slot += 1
+    start = len(lit)
+    programs += nodes
+    lit += literals
+    steps.append(Step(start, len(nodes), slot, 0, len(gathers), 0))
+    code = (I * (4 * len(programs)))(*[x for node in programs for x in node])
+    # Int literals are supplied as Python integers and use raw signed bits.
+    words = []
+    for node, value in zip(programs, lit):
+        words.append(
+            C.c_uint64(value).value if node[0]
+            == 1 else C.cast(
+                C.pointer(C.c_double(value)), C.POINTER(C.c_uint64)
+            ).contents.value
+        )
+    literal = (C.c_uint64 * len(words))(*words)
+    step_array = (Step * len(steps))(*steps)
+    gather_array = (I * max(1, len(gathers)))(*gathers)
+    out_type = (2 if reduction == 10 else 3) if reduction >= 0 else (
+        4 if output_bool else dtype
+    )
+    out_scalar = {1: C.c_float, 2: C.c_int32, 3: I, 4: C.c_uint8}[out_type]
+    result = (out_scalar * max(1, n))()
+    bits = (C.c_uint8 * max(1, (n + 7) // 8))()
+    outputs = (Output * 1)(
+        Output(ptr(result), ptr(bits), out_type, slot, reduction, minimum)
+    )
+    request = Request(
+        1,
+        n,
+        1 if dtype == 4 else dtype,
+        slot + 1,
+        1,
+        len(code),
+        len(words),
+        len(steps),
+        len(gathers),
+        1,
+        limit,
+        reduction >= 0,
+        1,
+        budget,
+        ptr(inputs),
+        ptr(code),
+        ptr(literal),
+        ptr(step_array),
+        ptr(gather_array),
+        ptr(outputs),
+    )
+    memory = Memory()
+    err = P()
+    status = lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    if status and expect_error:
+        message = C.string_at(err).decode()
+        lib.dfm_free(err)
+        assert expect_error in message, message
+        return
+    check(status, err)
+    for repeat in range(repeats):
+        stats = Stats()
+        err = P()
+        status = lib.dfm_execute(
+            ctx, C.byref(request), C.byref(stats), C.byref(err)
+        )
+        if expect_error:
+            assert status, expect_error
+            message = C.string_at(err).decode()
+            lib.dfm_free(err)
+            assert expect_error in message, message
+            return
+        check(status, err)
+        assert stats.memory.peak == memory.peak
+        assert stats.memory.launches == memory.launches, (
+            stats.memory.launches,
+            memory.launches,
+        )
+        assert stats.waits == 1
+        assert lib.dfm_plan_cached(ctx, C.byref(request), C.byref(err)) == 1
+        if repeat:
+            assert stats.cache_hit and stats.compile_ns == 0
+    return (
+        unpack(result, stats.rows) if out_type
+        == 4 else list(result)[: stats.rows],
+        unpack(bits, stats.rows),
+        stats,
+    )
+
+
+col = (0, -1, -1, 0)
+for n in [0, 1, 7, 8, 9, 255, 256, 257, 1023, 4097]:
+    vals = [float(i % 37 - 18) for i in range(n)]
+    valid = [i % 5 != 0 for i in range(n)]
+    result, bits, stats = execute(
+        vals,
+        1,
+        [col, (2, -1, -1, -1), (5, 0, 1, -1)],
+        [0.0, 1.25, 0.0],
+        valid=valid,
+        offset=3,
+        repeats=2,
+    )
+    assert bits == valid
+    assert all(a == b + 1.25 for a, b, v in zip(result, vals, valid) if v)
+    pred = [col, (2, -1, -1, -1), (8, 0, 1, -1)]
+    result, bits, stats = execute(
+        vals,
+        1,
+        [col],
+        [0.0],
+        valid=valid,
+        offset=5,
+        filter_nodes=pred,
+        limit=19,
+    )
+    expected = [x for x, v in zip(vals, valid) if v and x > 0][:19]
+    assert result == expected and bits == [True] * len(expected), (
+        n,
+        result,
+        expected,
+    )
+
+# Packed Boolean source and null logic use non-byte-aligned slice windows.
+values = [True, False, True, False, False, True, True, False, True] * 33
+valid = [i % 3 != 0 for i in range(len(values))]
+result, bits, _ = execute(
+    values,
+    4,
+    [col, (3, -1, -1, -1), (30, 0, 1, -1)],
+    [0.0, 0.0, 0.0],
+    valid=valid,
+    offset=7,
+    output_bool=True,
+)
+assert result == [False] * len(values) and all(bits)
+result, bits, _ = execute(
+    values,
+    4,
+    [col, (3, -1, -1, -1), (31, 0, 1, -1)],
+    [0.0, 1.0, 0.0],
+    valid=valid,
+    offset=1,
+    output_bool=True,
+)
+assert result == [True] * len(values) and all(bits)
+
+for dtype, lo, hi in [
+    (2, -(2**31), 2**31 - 1),
+    (3, -(2**63), 2**63 - 1),
+]:
+    for op, a, b in [(5, hi, 1), (6, lo, 1), (7, lo, -1)]:
+        execute(
+            [a],
+            dtype,
+            [col, (1, -1, -1, -1), (op, 0, 1, -1)],
+            [0, b, 0],
+            expect_error="overflow",
+        )
+    execute(
+        [lo], dtype, [col, (50, 0, -1, -1)], [0, 0], expect_error="overflow"
+    )
+    for op, a, b, expected in [
+        (5, hi, -1, hi - 1),
+        (6, lo, -1, lo + 1),
+        (7, lo, 1, lo),
+        (7, hi, 0, 0),
+    ]:
+        result, bits, _ = execute(
+            [a], dtype, [col, (1, -1, -1, -1), (op, 0, 1, -1)], [0, b, 0]
+        )
+        assert result == [expected] and bits == [True]
+    # Invalid rows must never trigger checked overflow.
+    result, bits, _ = execute(
+        [hi],
+        dtype,
+        [col, (1, -1, -1, -1), (5, 0, 1, -1)],
+        [0, 1, 0],
+        valid=[False],
+    )
+    assert bits == [False]
+
+for n in [0, 1, 257, 10001]:
+    values = [i % 100 - 50 for i in range(n)]
+    valid = [i % 7 != 0 for i in range(n)]
+    for reduction in [10, 11, 90]:
+        result, bits, _ = execute(
+            values, 2, [col], [0], valid=valid, reduction=reduction
+        )
+        expected = (
+            sum(x for x, v in zip(values, valid) if v) if reduction
+            == 10 else sum(valid) if reduction
+            == 11 else n
+        )
+        assert result == [expected] and bits == [True]
+result, bits, _ = execute(
+    [1, 2], 2, [col], [0], valid=[False, False], reduction=10, minimum=1
+)
+assert bits == [False]
+execute([2**31 - 1, 1], 2, [col], [0], reduction=10, expect_error="overflow")
+result, bits, _ = execute([2**31 - 1, 1, -1], 2, [col], [0], reduction=10)
+assert result == [2**31 - 1]
+execute([1.0], 1, [col], [0.0], budget=0, expect_error="memory budget")
+execute(
+    [1.0], 1, [col], [0.0], reduction=10, expect_error="accumulator precision"
+)
+# Separate Float32 multiply/add rounding must survive source specialization.
+def f32(x):
+    return C.c_float(x).value
+
+
+rng = random.Random(815)
+values = [f32(rng.uniform(-10000, 10000)) for _ in range(4097)]
+a = f32(1.0001)
+b = f32(0.0001)
+result, bits, _ = execute(
+    values,
+    1,
+    [col, (2, -1, -1, -1), (7, 0, 1, -1), (2, -1, -1, -1), (5, 2, 3, -1)],
+    [0.0, a, 0.0, b, 0.0],
+)
+expected = [f32(f32(x * a) + b) for x in values]
+assert result == expected, "Float32 multiply/add contraction changed rounding"
+# Safe arithmetic must preserve exceptional values and signed zero.
+result, bits, _ = execute(
+    [math.nan, math.inf, -math.inf, -0.0], 1, [col, (50, 0, -1, -1)], [0.0, 0.0]
+)
+assert (
+    math.isnan(result[0]) and result[1] == -math.inf and result[2] == math.inf
+)
+assert math.copysign(1, result[3]) == 1
+tiny = 2.0**-149
+result, bits, _ = execute([tiny, -tiny, 0.0], 1, [col], [0.0])
+assert result == [tiny, -tiny, 0.0]
+result, bits, _ = execute(
+    [tiny, -tiny, 0.0], 1, [col, (50, 0, -1, -1)], [0.0, 0.0]
+)
+assert result == [-tiny, tiny, -0.0]
+for op, a, b in [
+    (5, tiny, tiny),
+    (6, 2.0**-126, f32(2.0**-126 + tiny)),
+    (7, 1e-20, 1e-20),
+    (8, tiny, 0.0),
+]:
+    execute(
+        [a],
+        1,
+        [col, (2, -1, -1, -1), (op, 0, 1, -1)],
+        [0.0, b, 0.0],
+        output_bool=op == 8,
+        expect_error="subnormal",
+    )
+lib.dfm_context_release(ctx)
+print(
+    "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"
+)

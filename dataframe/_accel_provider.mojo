@@ -1,27 +1,54 @@
-"""CPU distribution's provider slot; optional builds register a backend here.
+"""Default provider slot with optional native Metal discovery.
 
-This module must not import accelerator packages. The optional package builder
-replaces it in a temporary source tree, never in the checked-out CPU sources.
+Presence checks do not open a driver. CPU collection never initializes Metal.
+The optional NVIDIA package builder can replace this module in its staged tree.
 """
 from .frame import DataFrame
 from .lazy import LazyFrame
+from std.os import getenv
+from .metal import MetalRuntime, metal_installed
 
 
 def installed() -> Bool:
-    return False
+    return metal_installed()
+
+
+def _runtime() raises -> MetalRuntime:
+    var device = 0
+    var limit = -1
+    var configured_device = getenv("DATAFRAME_ACCEL_DEVICE")
+    var configured_limit = getenv("DATAFRAME_ACCEL_MEMORY_LIMIT")
+    if configured_device:
+        device = Int(configured_device)
+        if device < 0:
+            raise Error("DATAFRAME_ACCEL_DEVICE must be nonnegative")
+    if configured_limit:
+        limit = Int(configured_limit)
+        if limit < 0:
+            raise Error("DATAFRAME_ACCEL_MEMORY_LIMIT must be nonnegative")
+    return MetalRuntime(device, memory_limit_bytes=limit)
 
 
 def execute(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+    if installed():
+        return _runtime().execute(plan)
     raise Error(
         "Accelerator provider is not installed; use the optional GPU package or accelerator=runtime"
     )
 
 
 def describe(plan: LazyFrame) -> String:
+    if installed():
+        try:
+            return _runtime().describe(plan)
+        except error:
+            return "ENGINE accel: " + String(error) + "\n"
     return "ENGINE accel: Accelerator provider is not installed; use the optional GPU package or accelerator=runtime\n"
 
 
 def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
+    if installed():
+        return _runtime().execute_profiled(plan)
     return execute(plan)
 
 
@@ -32,6 +59,11 @@ def select_auto(
     batch_size: Int,
 ) -> Tuple[String, String]:
     """Select before execution; optional providers own capability and cost gates."""
+    if installed():
+        return (
+            "cpu",
+            "auto uses CPU; Metal has no matched end-to-end cost evidence",
+        )
     return ("cpu", "auto uses CPU; accelerator provider is not installed")
 
 
