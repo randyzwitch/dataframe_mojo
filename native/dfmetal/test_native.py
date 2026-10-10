@@ -155,6 +155,63 @@ err = P()
 assert lib.dfm_estimate(C.byref(bad), C.byref(memory), C.byref(err)) == 1
 assert b"ABI version mismatch" in C.string_at(err)
 lib.dfm_free(err)
+# Pure fusion preflight must run even on CI VMs without a Metal device.
+# Descriptor-only estimates never dereference caller data or output storage.
+def check_fusion_preflight_without_device():
+    count = 32
+    inputs = (Input * 1)(Input(None, None, 2, 0, 0))
+    programs = []
+    steps = []
+    for i in range(count):
+        programs += [(0, -1, -1, i), (1, -1, -1, -1), (5, 0, 1, -1)]
+        steps.append(Step(3 * i, 3, i + 1, 0, 0, 0))
+    code = (I * (4 * len(programs)))(*[x for node in programs for x in node])
+    literals = (I * len(programs))()
+    step_array = (Step * count)(*steps)
+    outputs = (Output * 1)(Output(None, None, 2, count, -1, 0))
+    request = Request(
+        1,
+        0,
+        2,
+        count + 1,
+        1,
+        len(code),
+        len(literals),
+        count,
+        0,
+        1,
+        -1,
+        0,
+        0,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(literals),
+        ptr(step_array),
+        None,
+        ptr(outputs),
+    )
+    for rows in [0, 1, 8388608]:
+        request.rows = rows
+        memory, err = Memory(), P()
+        check(
+            lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)),
+            err,
+        )
+        assert memory.launches == 3
+        assert memory.capacity == max(1, rows)
+        # A long chain reserves input and final output, not 33 full columns.
+        assert memory.shared < 11 * max(1, rows) + 1024
+        assert memory.peak == memory.shared + memory.result
+    step_array[0].slot = 2
+    code[3] = 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"undefined slot" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+check_fusion_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
