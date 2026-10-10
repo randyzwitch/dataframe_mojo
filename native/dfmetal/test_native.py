@@ -222,6 +222,20 @@ if not ctx:
     check(1, err)
 
 # All request-owned buffers stay alive until the synchronous call returns.
+SCALARS = {
+    1: C.c_float,
+    2: C.c_int32,
+    3: I,
+    4: C.c_uint8,
+    5: C.c_int8,
+    6: C.c_int16,
+    7: C.c_uint8,
+    8: C.c_uint16,
+    9: C.c_uint32,
+    10: C.c_uint64,
+}
+
+
 def execute(
     values,
     dtype,
@@ -239,7 +253,7 @@ def execute(
     expect_error=None,
     repeats=1
 ):
-    scalar = {1: C.c_float, 2: C.c_int32, 3: I, 4: C.c_uint8}[dtype]
+    scalar = SCALARS[dtype]
     n = len(values)
     data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(
         *values
@@ -274,7 +288,7 @@ def execute(
     words = []
     for node, value in zip(programs, lit):
         words.append(
-            C.c_uint64(value).value if node[0]
+            C.c_uint64(int(value)).value if node[0]
             == 1 else C.cast(
                 C.pointer(C.c_double(value)), C.POINTER(C.c_uint64)
             ).contents.value
@@ -282,10 +296,10 @@ def execute(
     literal = (C.c_uint64 * len(words))(*words)
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
-    out_type = (2 if reduction == 10 else 3) if reduction >= 0 else (
-        4 if output_bool else dtype
-    )
-    out_scalar = {1: C.c_float, 2: C.c_int32, 3: I, 4: C.c_uint8}[out_type]
+    out_type = (
+        (dtype if dtype in (2, 9) else 3) if reduction == 10 else 3
+    ) if reduction >= 0 else (4 if output_bool else dtype)
+    out_scalar = SCALARS[out_type]
     result = (out_scalar * max(1, n))()
     bits = (C.c_uint8 * max(1, (n + 7) // 8))()
     outputs = (Output * 1)(
@@ -625,6 +639,110 @@ def check_fused_boundaries():
 
 
 check_fused_boundaries()
+# Every native width exercises exact literals, checked arithmetic, stable
+# compaction with offset validity, comparisons, and reduction storage.
+for dtype, lo, hi in [
+    (5, -128, 127),
+    (6, -32768, 32767),
+    (7, 0, 255),
+    (8, 0, 65535),
+    (9, 0, 2**32 - 1),
+    (10, 0, 2**64 - 1),
+]:
+    arithmetic = [col, (1, -1, -1, -1), (5, 0, 1, -1)]
+    result, bits, _ = execute([hi - 1], dtype, arithmetic, [0, 1, 0])
+    assert result == [hi] and bits == [True], (dtype, result)
+    execute([hi], dtype, arithmetic, [0, 1, 0], expect_error="overflow")
+    execute(
+        [lo],
+        dtype,
+        [col, (1, -1, -1, -1), (6, 0, 1, -1)],
+        [0, 1, 0],
+        expect_error="overflow",
+    )
+    execute(
+        [hi],
+        dtype,
+        [col, (1, -1, -1, -1), (7, 0, 1, -1)],
+        [0, 2, 0],
+        expect_error="overflow",
+    )
+    execute(
+        [lo if lo else 1],
+        dtype,
+        [col, (50, 0, -1, -1)],
+        [0, 0],
+        expect_error="overflow",
+    )
+    result, bits, _ = execute([0], dtype, arithmetic, [0, hi, 0])
+    assert result == [hi] and bits == [True]
+    for op in (5, 6, 7):
+        samples = [(0, 0), (hi, 0), (hi, 1), (hi, hi), (lo, 1), (lo, lo)]
+        samples += [
+            (random.randint(lo, hi), random.randint(lo, hi)) for _ in range(8)
+        ]
+        for a, b in samples:
+            expected = a + b if op == 5 else a - b if op == 6 else a * b
+            if lo <= expected <= hi:
+                result, bits, _ = execute(
+                    [a],
+                    dtype,
+                    [col, (1, -1, -1, -1), (op, 0, 1, -1)],
+                    [0, b, 0],
+                )
+                assert result == [expected] and bits == [True], (
+                    dtype,
+                    op,
+                    a,
+                    b,
+                    result,
+                )
+            else:
+                execute(
+                    [a],
+                    dtype,
+                    [col, (1, -1, -1, -1), (op, 0, 1, -1)],
+                    [0, b, 0],
+                    expect_error="overflow",
+                )
+    values = [0, 1, hi] * 257
+    valid = [i % 7 != 0 for i in range(len(values))]
+    result, bits, _ = execute(
+        values,
+        dtype,
+        [col],
+        [0],
+        valid=valid,
+        offset=5,
+        filter_nodes=[col, (1, -1, -1, -1), (8, 0, 1, -1)],
+    )
+    assert result == [x for x, v in zip(values, valid) if v and x > 0]
+    assert all(bits)
+    result, bits, _ = execute(
+        [hi, hi - 1],
+        dtype,
+        [col, (1, -1, -1, -1), (9, 0, 1, -1)],
+        [0, hi, 0],
+        output_bool=True,
+    )
+    assert result == [True, False] and all(bits)
+    result, bits, _ = execute(
+        values, dtype, [col], [0], valid=valid, reduction=11
+    )
+    assert result == [sum(valid)] and bits == [True]
+    if dtype != 10:
+        result, bits, _ = execute([1, 2, 3], dtype, [col], [0], reduction=10)
+        assert result == [6] and bits == [True]
+    else:
+        execute(
+            [1],
+            dtype,
+            [col],
+            [0],
+            reduction=10,
+            expect_error="accumulator precision",
+        )
+execute([2**32 - 1, 1], 9, [col], [0], reduction=10, expect_error="overflow")
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"
