@@ -147,6 +147,8 @@ comptime SCAN_PARQUET = 11
 comptime EXPLODE = 12
 comptime UNNEST = 13
 comptime ASOF = 14
+# UNION ALL of two plans: the left input's rows, then the right's.
+comptime CONCAT = 15
 
 
 @fieldwise_init
@@ -1185,6 +1187,34 @@ struct LazyFrame(Copyable):
 
     def drop(self, names: List[String]) -> Self:
         return self._push(_plan_node(DROP, names=names))
+
+    def concat(self, other: Self) -> Self:
+        """This plan's rows followed by `other`'s (SQL UNION ALL), as one
+        plan: both inputs are optimized with the rest of it, and a column
+        selection above reaches both scans. The inputs must have the same
+        column names and types; `other`'s columns are taken in this plan's
+        order. SQL UNION is `concat` followed by `unique`."""
+        var result = self.copy()
+        var left_root = len(result._nodes) - 1
+        var shift = len(result._nodes)
+        var frame_shift = len(result._frames)
+        for frame in other._frames:
+            result._frames.append(frame.copy())
+        for schema in other._schemas:
+            result._schemas.append(schema.copy())
+        for node in other._nodes:
+            var copied = node.copy()
+            if copied.left >= 0:
+                copied.left += shift
+            if copied.right >= 0:
+                copied.right += shift
+            if _is_scan(copied.kind):
+                copied.offset += frame_shift
+            result._nodes.append(copied^)
+        result._nodes.append(
+            _plan_node(CONCAT, left_root, len(result._nodes) - 1)
+        )
+        return result^
 
     def explode(self, columns: List[String]) -> Self:
         """One row per list element; see DataFrame.explode."""
@@ -3083,6 +3113,27 @@ struct LazyFrame(Copyable):
                 coalesce=node.coalesce,
                 keep_order=not free,
             )
+        if node.kind == CONCAT:
+            var right = self._execute(node.right, empty, streaming, batch_size)
+            var names = input.columns()
+            var other = right.columns()
+            if len(other) != len(names):
+                raise Error(
+                    "concat: inputs have "
+                    + String(len(names))
+                    + " and "
+                    + String(len(other))
+                    + " columns"
+                )
+            for name in names:
+                if name not in other:
+                    raise Error("concat: right input has no column " + name)
+            # The right input's columns in the left's order; `concat`
+            # checks the types.
+            var parts = List[DataFrame]()
+            parts.append(input^)
+            parts.append(right.select(names))
+            return concat(parts)
         if node.kind == SORT:
             var n = len(node.names)
             var descending = List[Bool]()
@@ -4646,6 +4697,7 @@ struct LazyFrame(Copyable):
                 or node.kind == JOIN
                 or node.kind == EXPLODE
                 or node.kind == UNNEST
+                or node.kind == CONCAT
             )
             if node.kind == UNNEST:
                 reads.append(node.text)
@@ -4813,6 +4865,8 @@ struct LazyFrame(Copyable):
             label = "EXPLODE " + _joined(node.names)
         elif node.kind == UNNEST:
             label = "UNNEST " + node.text
+        elif node.kind == CONCAT:
+            label = "CONCAT"
         else:
             label = "DROP " + _joined(node.names)
         return label^

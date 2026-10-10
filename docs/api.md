@@ -952,6 +952,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
 - `def limit(self, n: Int = Int(5)) -> Self`
 - `def unique(self, subset: List[String] = List(), *, keep: String = "any", maintain_order: Bool = False) -> Self`
 - `def drop(self, names: List[String]) -> Self`
+- `def concat(self, other: Self) -> Self`
+  This plan's rows followed by `other`'s (SQL UNION ALL), as one plan: both inputs are optimized with the rest of it, and a column selection above reaches both scans. The inputs must have the same column names and types; `other`'s columns are taken in this plan's order. SQL UNION is `concat` followed by `unique`.
 - `def explode(self, columns: List[String]) -> Self`
   One row per list element; see DataFrame.explode.
 - `def explode(self, column: String) -> Self`
