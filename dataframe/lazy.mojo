@@ -40,6 +40,7 @@ from .parquet import _ParquetBatches
 from .pipeline import (
     STEP_DROP,
     STEP_FILTER,
+    STEP_JOIN,
     STEP_SELECT,
     STEP_WITH_COLUMNS,
     Step,
@@ -56,6 +57,8 @@ from ._accel_provider import (
 )
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
+    ARG_MAX,
+    ARG_MIN,
     SUM,
     COUNT,
     MIN,
@@ -962,8 +965,12 @@ def _filter_keeps(
     return Optional(names^)
 
 
-def _pipeline_steps(operations: List[PlanNode]) -> Bool:
-    """Whether every operation is a row-local step a pipeline runs."""
+def _pipeline_steps(
+    operations: List[PlanNode], indexes: List[Optional[PreparedHashIndex]]
+) -> Bool:
+    """Whether every operation is a step a pipeline runs: a row-local
+    step, or an inner, left, semi or anti join whose build index was
+    prepared (its morsels probe the shared index on their own worker)."""
     for node in operations:
         if (
             node.kind == FILTER
@@ -971,6 +978,11 @@ def _pipeline_steps(operations: List[PlanNode]) -> Bool:
             or node.kind == WITH_COLUMNS
         ):
             if not _row_local(node.exprs):
+                return False
+        elif node.kind == JOIN:
+            if node.how not in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI]:
+                return False
+            if node.offset >= len(indexes) or not indexes[node.offset]:
                 return False
         elif node.kind != DROP:
             return False
@@ -987,7 +999,20 @@ def _steps_of(operations: List[PlanNode]) -> List[Step]:
             kind = STEP_SELECT
         elif node.kind == WITH_COLUMNS:
             kind = STEP_WITH_COLUMNS
-        steps.append(Step(kind, node.exprs.copy(), node.names.copy()))
+        elif node.kind == JOIN:
+            kind = STEP_JOIN
+        steps.append(
+            Step(
+                kind,
+                node.exprs.copy(),
+                node.names.copy(),
+                node.offset,
+                node.right_keys.copy(),
+                node.how,
+                node.names2[0] if len(node.names2) > 0 else String(""),
+                node.coalesce,
+            )
+        )
     return steps^
 
 
@@ -1854,7 +1879,8 @@ struct LazyFrame(Copyable):
         """Collect, and report what each plan node did (#439).
 
         The result, then one row per executed node in node order: `node`,
-        `operator` (its `explain` label), `executor` ("streaming" or
+        `operator` (its `explain` label), `executor` ("pipeline" for
+        steps run as thread-owned pipelines over morsels, "streaming" or
         "eager"), `algorithm` and `build_side` for joins, `input_rows`
         (read from the left or probe input), `build_rows` (the right input
         a join indexed), `output_rows`, `builds` (indexes built),
@@ -1915,9 +1941,11 @@ struct LazyFrame(Copyable):
         optimize: Bool = True,
         streaming: Bool = True,
         batch_size: Int = 65536,
-        engine: String = "auto",
+        engine: String = "cpu",
     ) raises -> String:
-        """The (optimized) plan, one operator per line, root first.
+        """The (optimized) plan, one operator per line, root first. With
+        `engine="auto"` (what `collect` uses), an `ENGINE` line naming the
+        selected engine and why comes first.
 
         Streaming annotations show batch-capable operators, aggregate state
         and materialization boundaries. streaming=False omits annotations.
@@ -2205,6 +2233,15 @@ struct LazyFrame(Copyable):
                         )
                         plan._nodes[cursor].right = len(plan._nodes) - 1
                     return plan._execute(index, False, True, batch_size)
+                # The build frame in one chunk per column, once: a probe
+                # gathers the build's payload through `take_parallel`,
+                # which rechunks a chunked column every time it is
+                # called, once per morsel or batch (PDS-H q2's 159K-row
+                # build with five string columns: 3.8 ms a probe).
+                for column in built._columns:
+                    if column.is_chunked():
+                        built = built.rechunk()
+                        break
                 joins.append(built^)
                 if not prepared and node.how != JOIN_CROSS and len(node.names):
                     ref build = joins[len(joins) - 1]
@@ -2265,11 +2302,83 @@ struct LazyFrame(Copyable):
             return None
         operations.reverse()
         operation_nodes.reverse()
+        # Row-local steps and a reduction over an in-memory frame run as a
+        # thread-owned pipeline (#538), grouped or not, unless the
+        # reduction counts distinct values (per-group sets, which the
+        # eager partitioned group-by handles on every worker, #336).
+        # Joins run in the pipeline as probe steps; a grouped sink that
+        # must keep first-occurrence order does not take them, since a
+        # morsel's output rows carry no unique position in the join's
+        # left-major order.
+        var piped = (
+            self._nodes[cursor].kind == SCAN_FRAME
+            and top < 0
+            and limit < 0
+            and skip == 0
+            and _pipeline_steps(operations, indexes)
+            and not _counts_distinct(expressions)
+            and (len(joins) == 0 or len(keys) == 0 or not ordered)
+        )
+        # A grouped sink either inserts rows into per-worker group tables
+        # (few groups among 4,096 sampled key rows, fixed-width keys) or
+        # keeps the morsels' rows for the eager partitioned group-by at
+        # the finish. The finish gathers kept rows once over the whole
+        # frame; strings gathered that way cost more than the eager
+        # route's per-chunk filter (ClickBench q12: 85 ms against 48), so
+        # with steps, a collecting plan is piped only when every column
+        # it groups or reduces is fixed-width.
+        var insert = False
+        if piped and len(keys) > 0:
+            var frame = self._nodes[cursor].offset
+            ref source_frame = self._frames[frame]
+            var fixed = True
+            var used = keys.copy()
+            for expression in expressions:
+                var reads = _references(expression)
+                if not reads:
+                    fixed = False
+                    break
+                for name in reads.value():
+                    if name not in used:
+                        used.append(name)
+            for name in used:
+                if not fixed:
+                    break
+                var dtype = DataType.INT64
+                if name in source_frame.columns():
+                    dtype = source_frame.column(name).dtype()
+                else:
+                    # A join's build column, or made by a step (then its
+                    # dtype is not known here).
+                    var found = False
+                    for build in joins:
+                        if name in build.columns():
+                            dtype = build.column(name).dtype()
+                            found = True
+                            break
+                    if not found:
+                        continue
+                if (
+                    dtype.is_nested()
+                    or dtype.is_decimal()
+                    or dtype.physical() == DataType.STRING
+                ):
+                    fixed = False
+            if not fixed and len(operations) > 0:
+                piped = False
+            elif fixed and not _order_sensitive(expressions):
+                # Sampled only when the mode is still open: the sample
+                # takes and encodes 4,096 key rows (a millisecond on
+                # strings, an eighth of ClickBench q38).
+                var sampled = self._sampled_groups(keys, frame)
+                var sample = min(source_frame.height(), 4096)
+                insert = sampled >= 0 and 4 * sampled <= sample
         # Grouped aggregations over an in-memory frame, filtered or
         # projected at most: whether the eager group-by is faster.
         var eager = False
         if (
-            len(expressions)
+            not piped
+            and len(expressions)
             and self._nodes[cursor].kind == SCAN_FRAME
             and _row_steps_only(operations)
         ):
@@ -2508,53 +2617,49 @@ struct LazyFrame(Copyable):
         # ungrouped reduce sink run as a thread-owned pipeline (#538): each
         # worker takes morsels from a shared cursor and runs every step on
         # them; nothing is held, judged or merged on the main thread.
-        if (
-            source.kind == SCAN_FRAME
-            and len(csv) == 0
-            and len(parquet) == 0
-            and len(shared_joins[]) == 0
-            and top < 0
-            and limit < 0
-            and skip == 0
-            and len(keys) == 0
-            and _pipeline_steps(operations)
-        ):
+        if piped and len(csv) == 0 and len(parquet) == 0:
             var began = Int(perf_counter_ns())
             var piped_counts = List[Int]()
-            var piped = run_pipeline(
+            var piped_result = run_pipeline(
                 input,
                 _steps_of(operations),
+                shared_joins,
+                shared_indexes,
                 expressions,
+                keys,
+                ordered,
+                insert,
                 workers,
                 rows_per_batch,
                 batch_size,
                 piped_counts,
             )
             if counting:
-                self._record(cursor, "streaming", 0, piped_counts[0])
+                self._record(cursor, "pipeline", 0, piped_counts[0])
                 var into_terminal = piped_counts[0]
                 for k in range(len(operations)):
                     self._record(
                         operation_nodes[k],
-                        "streaming",
+                        "pipeline",
                         piped_counts[2 * k + 1],
                         piped_counts[2 * k + 2],
+                        busy_ns=piped_counts[2 * len(operations) + 1 + k],
                     )
                     into_terminal = piped_counts[2 * k + 2]
                 var wall = Int(perf_counter_ns()) - began
                 if index != cursor and (index not in operation_nodes):
                     self._record(
                         index,
-                        "streaming",
+                        "pipeline",
                         into_terminal,
-                        piped.height(),
+                        piped_result.height(),
                         wall_ns=wall,
                     )
                 else:
                     self._record(
-                        index, "streaming", 0, 0, executions=0, wall_ns=wall
+                        index, "pipeline", 0, 0, executions=0, wall_ns=wall
                     )
-            return piped^
+            return piped_result^
         # An in-memory input hands each round four batches a worker, which
         # the pool claims as workers free up, so uneven batches balance.
         # Batches decoded from a file are held until their round ends, so
@@ -4856,6 +4961,18 @@ def _filters(operations: List[PlanNode]) -> Bool:
     for operation in operations:
         if operation.kind == FILTER:
             return True
+    return False
+
+
+def _order_sensitive(expressions: List[Expr]) -> Bool:
+    """Whether a reduction's answer depends on the order rows arrive
+    (first, last, the position of a minimum or maximum): its states
+    merge by row order, which workers taking morsels from a shared
+    cursor do not keep."""
+    for expression in expressions:
+        for node in expression._nodes:
+            if node.op in [FIRST, LAST, ARG_MIN, ARG_MAX]:
+                return True
     return False
 
 
