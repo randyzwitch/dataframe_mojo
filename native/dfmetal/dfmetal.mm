@@ -44,14 +44,25 @@ int64_t mul(int64_t a, int64_t b) {
   return a * b;
 }
 int64_t width(int64_t t) {
-  if (t == DFM_FLOAT32 || t == DFM_INT32)
+  if (t == DFM_FLOAT32 || t == DFM_INT32 || t == DFM_UINT32)
     return 4;
-  if (t == DFM_INT64)
+  if (t == DFM_INT64 || t == DFM_UINT64)
     return 8;
-  if (t == DFM_BOOL)
+  if (t == DFM_INT16 || t == DFM_UINT16)
+    return 2;
+  if (t == DFM_BOOL || t == DFM_INT8 || t == DFM_UINT8)
     return 1;
   fail("Metal unsupported dtype");
   return 0;
+}
+bool unsignedType(int64_t t) {
+  return t == DFM_UINT8 || t == DFM_UINT16 || t == DFM_UINT32 || t == DFM_UINT64;
+}
+bool sumSupported(int64_t t) {
+  return t != DFM_FLOAT32 && t != DFM_INT64 && t != DFM_UINT64 && t != DFM_BOOL;
+}
+int64_t sumType(int64_t t) {
+  return t == DFM_INT32 || t == DFM_UINT32 ? t : DFM_INT64;
 }
 // A segment ends at a stable filter boundary. Values produced and consumed
 // inside one segment stay in per-thread variables; only boundary-live slots
@@ -106,8 +117,9 @@ Shape validate(const DFMRequest &r, bool storage = false) {
       r.gather_count > 4096 || r.limit < -1 || r.memory_budget_bytes < -1 ||
       (r.reductions != 0 && r.reductions != 1))
     fail("Invalid Metal request shape");
-  if (r.dtype != DFM_FLOAT32 && r.dtype != DFM_INT32 && r.dtype != DFM_INT64)
-    fail("Metal requires native Float32, Int32 or Int64 storage");
+  width(r.dtype);
+  if (r.dtype == DFM_BOOL)
+    fail("Metal common storage must be numeric");
   if (!r.inputs || !r.outputs || (r.step_count && !r.steps) ||
       (r.literal_count && (!r.code || !r.literals)) ||
       (r.gather_count && !r.gathers))
@@ -185,9 +197,9 @@ Shape validate(const DFMRequest &r, bool storage = false) {
         fail("Invalid Metal row output");
     } else {
       if (v.reduction != DFM_COUNT && v.reduction != DFM_LEN &&
-          !(v.reduction == DFM_SUM && r.dtype == DFM_INT32))
+          !(v.reduction == DFM_SUM && sumSupported(r.dtype)))
         fail("Metal reduction requires unsupported accumulator precision");
-      if (v.dtype != (v.reduction == DFM_SUM ? DFM_INT32 : DFM_INT64))
+      if (v.dtype != (v.reduction == DFM_SUM ? sumType(r.dtype) : DFM_INT64))
         fail("Invalid Metal reduction dtype");
     }
     if (storage && (r.rows || r.reductions) && (!v.values || !v.validity))
@@ -278,7 +290,12 @@ std::string source(const DFMRequest &r) {
   text += std::string("typedef ") +
           (r.dtype == DFM_FLOAT32 ? "float"
            : r.dtype == DFM_INT32 ? "int"
-                                  : "long") +
+           : r.dtype == DFM_INT8 ? "char"
+           : r.dtype == DFM_INT16 ? "short"
+           : r.dtype == DFM_UINT8 ? "uchar"
+           : r.dtype == DFM_UINT16 ? "ushort"
+           : r.dtype == DFM_UINT32 ? "uint"
+           : r.dtype == DFM_UINT64 ? "ulong" : "long") +
           " T;\n";
   text += R"MSL(
 struct Out { long slot; long kind; long minimum; long type; };
@@ -310,11 +327,19 @@ return !(zb&&zb<0x00800000u)&&!(zb==0&&ab&&bb);
 bool checked_neg(T a,thread T &z){z=as_type<float>(as_type<uint>(a)^0x80000000u);return true;}
 bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x00800000u;}
 )MSL";
+  } else if (unsignedType(r.dtype)) {
+    std::string hi = r.dtype == DFM_UINT8 ? "255UL" :
+                     r.dtype == DFM_UINT16 ? "65535UL" :
+                     r.dtype == DFM_UINT32 ? "4294967295UL" : "18446744073709551615UL";
+    text += "const ulong hi=" + hi + ";ulong x=a,y=b;if(x>hi-y)return false;z=T(x+y);return true;}\n";
+    text += "bool checked_sub(T a,T b,thread T &z){if(a<b)return false;z=T(a-b);return true;}\n";
+    text += "bool checked_mul(T a,T b,thread T &z){const ulong hi=" + hi + ";ulong x=a,y=b,u=x*y;if(mulhi(x,y)!=0||u>hi)return false;z=T(u);return true;}\n";
+    text += "bool checked_neg(T a,thread T &z){if(a)return false;z=0;return true;}\n";
   } else {
-    std::string lo = r.dtype == DFM_INT32 ? "(-2147483647L-1L)"
+    std::string lo = r.dtype == DFM_INT8 ? "(-127L-1L)" : r.dtype == DFM_INT16 ? "(-32767L-1L)" : r.dtype == DFM_INT32 ? "(-2147483647L-1L)"
                                           : "(-9223372036854775807L-1L)";
     std::string hi =
-        r.dtype == DFM_INT32 ? "2147483647L" : "9223372036854775807L";
+        r.dtype == DFM_INT8 ? "127L" : r.dtype == DFM_INT16 ? "32767L" : r.dtype == DFM_INT32 ? "2147483647L" : "9223372036854775807L";
     text += "const long lo=" + lo + ",hi=" + hi +
             ";long x=a,y=b;if((y>0&&x>hi-y)||(y<0&&x<lo-y))return "
             "false;z=T(x+y);return true;}\n";
@@ -656,14 +681,19 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
       memcpy(static_cast<char *>(literal.contents) + i * 4, &value, 4);
     } else {
       int64_t value = op == DFM_LITERAL_BOOL ? int64_t(floating) : integer;
-      if (op == DFM_LITERAL_INT && r.dtype == DFM_INT32 &&
-          (value < INT32_MIN || value > INT32_MAX))
-        fail("Metal Int32 literal overflow");
-      if (r.dtype == DFM_INT32) {
-        int32_t narrow = value;
-        memcpy(static_cast<char *>(literal.contents) + i * 4, &narrow, 4);
-      } else
-        memcpy(static_cast<char *>(literal.contents) + i * 8, &value, 8);
+      auto bytes = width(r.dtype);
+      uint64_t bits = uint64_t(value);
+      if (op == DFM_LITERAL_INT && bytes < 8) {
+        if (unsignedType(r.dtype)) {
+          if (bits > ((uint64_t(1) << (bytes * 8)) - 1))
+            fail("Metal unsigned literal overflow");
+        } else {
+          int64_t hi = (int64_t(1) << (bytes * 8 - 1)) - 1;
+          if (value < -hi - 1 || value > hi)
+            fail("Metal signed literal overflow");
+        }
+      }
+      memcpy(static_cast<char *>(literal.contents) + i * bytes, &bits, bytes);
     }
   }
   auto *descriptors = static_cast<GPUOut *>(out.contents);
@@ -818,8 +848,11 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     for (int64_t i = 0; i < r.output_count; ++i)
       if (r.outputs[i].reduction == DFM_SUM &&
           values[i].count >= r.outputs[i].min_count &&
-          (values[i].total < INT32_MIN || values[i].total > INT32_MAX))
-        fail("Integer overflow in Metal Int32 sum");
+          ((r.outputs[i].dtype == DFM_INT32 &&
+            (values[i].total < INT32_MIN || values[i].total > INT32_MAX)) ||
+           (r.outputs[i].dtype == DFM_UINT32 &&
+            (values[i].total < 0 || uint64_t(values[i].total) > UINT32_MAX))))
+        fail("Integer overflow in Metal sum");
   }
   for (int64_t i = 0; i < r.output_count; ++i) {
     auto &o = r.outputs[i];
@@ -828,8 +861,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
         continue;
       auto a = static_cast<Partial *>(result.contents)[i];
       bool valid = o.reduction != DFM_SUM || a.count >= o.min_count;
-      if (o.dtype == DFM_INT32) {
-        int32_t value = valid ? a.total : 0;
+      if (o.dtype == DFM_INT32 || o.dtype == DFM_UINT32) {
+        uint32_t value = valid ? a.total : 0;
         memcpy(o.values, &value, 4);
       } else
         memcpy(o.values, &a.total, 8);

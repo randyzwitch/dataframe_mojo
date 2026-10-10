@@ -9,7 +9,7 @@ from .capabilities import RowCapabilities
 from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.bool_column import BoolColumn
 from dataframe.column import Column
-from dataframe.dtype import DataType
+from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     Expr,
     COL,
@@ -92,14 +92,10 @@ struct RowPlan(Movable):
 
 
 def _empty(name: String, dtype: DataType) raises -> Series:
-    if dtype == DataType.FLOAT32:
-        return Series(name, Column[Float32](List[Float32]()))
-    if dtype == DataType.FLOAT64:
-        return Series(name, Column[Float64](List[Float64]()))
-    if dtype == DataType.INT32:
-        return Series(name, Column[Int32](List[Int32]()))
-    if dtype == DataType.INT64:
-        return Series(name, Column[Int64](List[Int64]()))
+    comptime for i in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[i]
+        if dtype == DataType.of(D):
+            return Series(name, Column[Scalar[D]](List[Scalar[D]]()))
     if dtype == DataType.BOOL:
         return Series(name, BoolColumn(List[Bool]()))
     raise Error("Unsupported row schema dtype")
@@ -233,17 +229,6 @@ def lower_rows(
     for i in range(len(schema)):
         var type = schema[i].dtype()
         capabilities.require_dtype(type)
-        if (
-            type != DataType.FLOAT32
-            and type != DataType.FLOAT64
-            and type != DataType.INT32
-            and type != DataType.INT64
-            and type != DataType.BOOL
-        ):
-            capabilities.reject(
-                "plan",
-                "resident source dtype must be Float32, Float64, Int32, Int64 or Bool",
-            )
         if schema[i].is_chunked():
             capabilities.reject(
                 "plan", "chunked input; rechunk before accelerator execution"
