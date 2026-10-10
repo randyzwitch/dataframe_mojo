@@ -61,6 +61,13 @@ from .expr import (
     MAX,
     COUNT,
     LEN,
+    FIRST,
+    LAST,
+    ANY,
+    ALL,
+    NULL_COUNT,
+    ARG_MIN,
+    ARG_MAX,
 )
 from .frame import DataFrame
 from .lazy import AcceleratorBackend, LazyFrame
@@ -249,6 +256,7 @@ def _capabilities() -> RowCapabilities:
         row_extras=True,
         order=True,
         grouped=True,
+        extra_reductions=True,
     )
 
 
@@ -277,6 +285,16 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if (
+        op == FIRST
+        or op == LAST
+        or op == ANY
+        or op == ALL
+        or op == NULL_COUNT
+        or op == ARG_MIN
+        or op == ARG_MAX
+    ):
+        return Int64(op)
     if op == ROW_GROUP_HEADER:
         return 201
     if op == ROW_GROUP_KEY:
@@ -415,7 +433,17 @@ struct _Descriptors(Movable):
         for step in plan.steps:
             self.typed |= step.order or step.grouped
         for output in plan.outputs:
-            self.typed |= output.reduction == MIN or output.reduction == MAX
+            self.typed |= (
+                output.reduction == MIN
+                or output.reduction == MAX
+                or output.reduction == FIRST
+                or output.reduction == LAST
+                or output.reduction == ANY
+                or output.reduction == ALL
+                or output.reduction == NULL_COUNT
+                or output.reduction == ARG_MIN
+                or output.reduction == ARG_MAX
+            )
         for dtype in plan.node_dtypes:
             self.node_types.append(_type(dtype))
             self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
