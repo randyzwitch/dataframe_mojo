@@ -518,7 +518,12 @@ def cast_series(
         if source == target:
             return input.copy()
         raise Error("Geometry casts require explicit WKB import/export")
-    if source.is_decimal() and target == DataType.FLOAT64 and len(mask) == 0:
+    if source.is_decimal() and target == DataType.FLOAT64:
+        # Under a mask too: the conversion cannot fail on an inactive row,
+        # and its result there goes unread, so every row converts through
+        # the pointer. The row path under a `when` mask cost TPC-DS
+        # decimal q9 (fifteen conditional means of cast columns) 51 ms
+        # against 3 for the DOUBLE variant.
         return _decimal_to_float(input)
     if source.is_categorical() or target.is_categorical():
         # Categoricals convert through their values (#106): decode, cast
