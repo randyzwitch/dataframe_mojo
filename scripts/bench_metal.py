@@ -19,7 +19,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 WORKLOADS = [
     "projection",
-    "expression16",
+    "expression15",
     "chain32",
     "filter_half",
     "filter_sparse",
@@ -86,7 +86,7 @@ def metadata(binary, libraries, threads):
         },
         "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
         "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
-        "data": "Deterministic 1024-value numeric distribution. Base cycles; sorted uses monotone Float32 bins (Int32 sum uses mapped bins); nulls permutes bins with fixed LCG constants and marks exactly every twentieth row invalid. Float32 values are exact multiples of 1/1024; Int32 values are bin modulo 17 minus 8.",
+        "data": "Deterministic 1024-value numeric distribution. Base cycles; sorted uses monotone Float32 or Int32 bins; nulls permutes bins with fixed LCG constants and marks exactly every twentieth row invalid. Float32 values are exact multiples of 1/1024; Int32 values are bin modulo 17 minus 8.",
         "limitations": [
             "No external-suite coverage claimed; joins, group-by, Float64 and floating reductions are outside these cases.",
             "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",

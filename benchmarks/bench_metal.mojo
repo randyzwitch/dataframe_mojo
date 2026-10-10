@@ -20,13 +20,13 @@ def make_frame(n: Int, variant: String, integer: Bool) raises -> DataFrame:
         for i in range(n):
             var key = i % 1024
             if variant == "sorted":
-                key = i * 1024 // n
+                key = i * 17 // n
             elif variant == "nulls":
                 key = Int(
                     (UInt32(i) * UInt32(1664525) + UInt32(1013904223))
                     % UInt32(1024)
                 )
-            values[i] = Int32(key % 17 - 8)
+            values[i] = Int32(key - 8 if variant == "sorted" else key % 17 - 8)
         return DataFrame([Series("x", Column[Int32](values^, validity^))])
     var values = List[Float32](length=n, fill=0)
     for i in range(n):
@@ -51,9 +51,9 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
                     (col("x") * lit(Float32(1.0001))) + lit(Float32(0.0001))
                 ).alias("x")
             )
-    elif workload == "expression16":
+    elif workload == "expression15":
         var expression = col("x")
-        for _ in range(16):
+        for _ in range(15):
             expression = expression * lit(Float32(1.0001)) + lit(
                 Float32(0.0001)
             )
