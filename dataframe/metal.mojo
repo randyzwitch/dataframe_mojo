@@ -19,6 +19,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .execution_report import ExecutionReport
 from .expr import (
     COL,
+    CAST,
     LIT_INT,
     LIT_FLOAT,
     LIT_BOOL,
@@ -164,7 +165,7 @@ struct _Library(Movable):
                 + _read_c_string(external_call["dlerror", Int]())
             )
         var version = self.symbol("dfm_abi_version")
-        if Pointer(to=version).unsafe_bitcast[_Version]()[]() != 1:
+        if Pointer(to=version).unsafe_bitcast[_Version]()[]() != 2:
             raise Error("Metal ABI version mismatch; rebuild native/dfmetal")
         self.create = self.symbol("dfm_context_create")
         self.release = self.symbol("dfm_context_release")
@@ -219,7 +220,12 @@ struct _Context(Movable):
 
 def _capabilities() -> RowCapabilities:
     return RowCapabilities(
-        "Metal", float64=False, wide_integer=False, extended_integers=True
+        "Metal",
+        float64=False,
+        wide_integer=False,
+        extended_integers=True,
+        mixed_types=True,
+        casts=True,
     )
 
 
@@ -249,6 +255,8 @@ def _type(dtype: DataType) raises -> Int64:
 
 def _op(op: Int) raises -> Int64:
     # The native ABI has its own versioned opcodes.
+    if op == CAST:
+        return 79
     if op == COL:
         return 0
     if op == LIT_INT:
@@ -323,6 +331,9 @@ struct _Descriptors(Movable):
     var gathers: List[Int64]
     var steps: List[Int64]
     var outputs: List[Int64]
+    var node_types: List[Int64]
+    var slot_types: List[Int64]
+    var typed: Bool
 
     def __init__(out self, plan: RowPlan) raises:
         self.inputs = List[Int64]()
@@ -331,7 +342,17 @@ struct _Descriptors(Movable):
         self.gathers = plan.gathers.copy()
         self.steps = List[Int64]()
         self.outputs = List[Int64]()
+        self.node_types = List[Int64]()
+        self.slot_types = List[Int64]()
+        self.typed = False
+        for dtype in plan.node_dtypes:
+            self.node_types.append(_type(dtype))
+            self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
+        for dtype in plan.slot_dtypes:
+            self.slot_types.append(_type(dtype))
+            self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
         for i in range(0, len(self.code), 4):
+            self.typed |= self.code[i] == CAST
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
             if column.dtype() == DataType.BOOL:
@@ -394,9 +415,9 @@ struct _Descriptors(Movable):
         self, plan: RowPlan, budget: Int, profiling: Bool
     ) raises -> List[Int64]:
         return [
-            Int64(1),
+            Int64(2),
             Int64(plan.source.height()),
-            _type(plan.dtype),
+            Int64(0) if self.typed else _type(plan.dtype),
             Int64(plan.slots),
             Int64(plan.source.width()),
             Int64(len(self.code)),
@@ -414,58 +435,53 @@ struct _Descriptors(Movable):
             Int64(Int(self.steps.unsafe_ptr())),
             Int64(Int(self.gathers.unsafe_ptr())),
             Int64(Int(self.outputs.unsafe_ptr())),
+            Int64(Int(self.node_types.unsafe_ptr())) if self.typed else Int64(
+                0
+            ),
+            Int64(Int(self.slot_types.unsafe_ptr())) if self.typed else Int64(
+                0
+            ),
         ]
 
 
-struct _Result[D: DType](Movable):
-    var values: List[Scalar[Self.D]]
-    var counts: List[Int64]
-    var bools: List[UInt8]
-    var bits: List[UInt8]
-
-    def __init__(out self, dtype: DataType, capacity: Int):
-        self.values = List[Scalar[Self.D]]()
-        self.counts = List[Int64]()
-        self.bools = List[UInt8]()
-        self.bits = List[UInt8](length=(capacity + 7) // 8, fill=0)
-        if dtype == DataType.BOOL:
-            self.bools = List[UInt8](length=(capacity + 7) // 8, fill=0)
-        elif dtype == DataType.INT64 and Self.D != DType.int64:
-            self.counts = List[Int64](length=capacity, fill=0)
-        else:
-            self.values = List[Scalar[Self.D]](length=capacity, fill=0)
-
-    def address(self, dtype: DataType) -> Int:
-        if dtype == DataType.BOOL:
-            return Int(self.bools.unsafe_ptr())
-        if dtype == DataType.INT64 and Self.D != DType.int64:
-            return Int(self.counts.unsafe_ptr())
-        return Int(self.values.unsafe_ptr())
-
-    def finish(
-        deinit self, name: String, dtype: DataType, rows: Int
-    ) raises -> Series:
-        self.bits.resize((rows + 7) // 8, 0)
-        if dtype == DataType.BOOL:
-            self.bools.resize((rows + 7) // 8, 0)
+def _allocate_output(
+    name: String, dtype: DataType, capacity: Int
+) raises -> Series:
+    var bits = List[UInt8](length=(capacity + 7) // 8, fill=0)
+    if dtype == DataType.BOOL:
+        return Series(
+            name,
+            BoolColumn(
+                values=List[UInt8](length=(capacity + 7) // 8, fill=0),
+                bits=bits^,
+                length=capacity,
+            ),
+        )
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if dtype == DataType.of(D):
             return Series(
                 name,
-                BoolColumn(values=self.bools^, bits=self.bits^, length=rows),
+                Column[Scalar[D]](
+                    values=List[Scalar[D]](length=capacity, fill=0), bits=bits^
+                ),
             )
-        if dtype == DataType.INT64 and Self.D != DType.int64:
-            self.counts.resize(rows, 0)
-            return Series(
-                name, Column[Int64](values=self.counts^, bits=self.bits^)
-            )
-        self.values.resize(rows, 0)
-        return Series(
-            name, Column[Scalar[Self.D]](values=self.values^, bits=self.bits^)
-        )
+    raise Error("Metal unsupported output dtype")
 
 
-def _execute[
-    D: DType
-](
+def _output_addresses(column: Series) raises -> Tuple[Int, Int]:
+    if column.dtype() == DataType.BOOL:
+        var value = column.bool()
+        return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if column.dtype() == DataType.of(D):
+            var value = column.numeric[D]()
+            return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
+    raise Error("Metal unsupported output dtype")
+
+
+def _execute(
     plan: RowPlan, device: Int, budget: Int, profiling: Bool, start: Int
 ) raises -> Tuple[DataFrame, DataFrame]:
     var descriptors = _Descriptors(plan)
@@ -489,13 +505,14 @@ def _execute[
     if Int(memory[2]) > headroom:
         raise Error("Metal request exceeds current working set headroom")
     var capacity = 1 if plan.reductions else plan.source.height()
-    var storage = List[_Result[D]]()
+    var storage = List[Series]()
     for i in range(len(plan.outputs)):
-        var output = _Result[D](plan.outputs[i].dtype, capacity)
-        descriptors.outputs[6 * i] = Int64(
-            output.address(plan.outputs[i].dtype)
+        var output = _allocate_output(
+            plan.outputs[i].name, plan.outputs[i].dtype, capacity
         )
-        descriptors.outputs[6 * i + 1] = Int64(Int(output.bits.unsafe_ptr()))
+        var addresses = _output_addresses(output)
+        descriptors.outputs[6 * i] = Int64(addresses[0])
+        descriptors.outputs[6 * i + 1] = Int64(addresses[1])
         storage.append(output^)
     var stats = List[Int64](length=17, fill=0)
     var execute = context.library.execute
@@ -506,12 +523,8 @@ def _execute[
     _ = request^
     context.library.check(status, error)
     var columns = List[Series]()
-    for i in range(len(plan.outputs)):
-        var output = storage.pop(0)
-        columns.append(
-            output
-            ^.finish(plan.outputs[i].name, plan.outputs[i].dtype, Int(stats[8]))
-        )
+    for column in storage:
+        columns.append(column.slice(0, Int(stats[8])))
     var result = DataFrame(columns^)
     var report = ExecutionReport()
     report.record(
@@ -630,14 +643,7 @@ struct MetalRuntime(AcceleratorBackend):
     ) raises -> Tuple[DataFrame, DataFrame]:
         var start = Int(perf_counter_ns())
         var plan = lower_rows(query, _capabilities())
-        comptime for k in range(len(NUMERIC_DTYPES)):
-            comptime D = NUMERIC_DTYPES[k]
-            comptime if D != DType.float64:
-                if plan.dtype == DataType.of(D):
-                    return _execute[D](
-                        plan, self._device, self._budget, profiling, start
-                    )
-        raise Error("Metal unsupported dtype")
+        return _execute(plan, self._device, self._budget, profiling, start)
 
     def describe(self, query: LazyFrame) -> String:
         try:
