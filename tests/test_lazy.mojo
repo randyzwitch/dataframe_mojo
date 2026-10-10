@@ -97,12 +97,14 @@ def test_matches_eager_chains() raises:
 
 
 def test_predicate_pushdown_rules() raises:
+    # These assertions inspect the CPU logical plan. Default explain also
+    # reports automatic placement; backend diagnostics have their own tests.
     var df = frame()
     var pushed = (
         df.lazy()
         .with_columns((col("v") * lit(Int64(2))).alias("v2"))
         .filter(col("k").eq(lit(String("a"))))
-        .explain(streaming=False)
+        .explain(streaming=False, engine="cpu")
     )
     assert_equal(pushed, "WITH_COLUMNS v2\n  FILTER\n    SCAN frame\n")
     # A filter on a produced column must stay above its producer.
@@ -110,12 +112,16 @@ def test_predicate_pushdown_rules() raises:
         df.lazy()
         .with_columns((col("v") * lit(Int64(2))).alias("v2"))
         .filter(col("v2") > lit(Int64(4)))
-        .explain(streaming=False)
+        .explain(streaming=False, engine="cpu")
     )
     assert_equal(kept, "FILTER\n  WITH_COLUMNS v2\n    SCAN frame\n")
     # Never past a slice: that would change which rows survive.
     var sliced = df.lazy().head(3).filter(col("v") > lit(Int64(1)))
-    assert_true(sliced.explain(streaming=False).startswith("FILTER\n  SLICE"))
+    assert_true(
+        sliced.explain(streaming=False, engine="cpu").startswith(
+            "FILTER\n  SLICE"
+        )
+    )
     assert_true(
         sliced.collect().equals(df.head(3).filter(col("v") > lit(Int64(1))))
     )
@@ -126,7 +132,7 @@ def test_predicate_pushdown_rules() raises:
         .filter(col("label").eq(lit(String("A"))))
     )
     assert_equal(
-        inner.explain(streaming=False),
+        inner.explain(streaming=False, engine="cpu"),
         "JOIN inner on k\n  SCAN frame\n  FILTER\n    SCAN frame\n",
     )
     var left = (
@@ -134,9 +140,17 @@ def test_predicate_pushdown_rules() raises:
         .join(other().lazy(), "k", "left")
         .filter(col("label").eq(lit(String("A"))))
     )
-    assert_true(left.explain(streaming=False).startswith("FILTER\n  JOIN left"))
+    assert_true(
+        left.explain(streaming=False, engine="cpu").startswith(
+            "FILTER\n  JOIN left"
+        )
+    )
     var sorted = df.lazy().sort(["w"]).filter(col("v") > lit(Int64(2)))
-    assert_true(sorted.explain(streaming=False).startswith("SORT w\n  FILTER"))
+    assert_true(
+        sorted.explain(streaming=False, engine="cpu").startswith(
+            "SORT w\n  FILTER"
+        )
+    )
     assert_true(
         sorted.collect().equals(df.sort(["w"]).filter(col("v") > lit(Int64(2))))
     )
@@ -154,7 +168,7 @@ def test_predicate_pushdown_rules() raises:
             & col("k").ne(lit(String("b")))
         )
     )
-    var keyed_plan = keyed.explain(streaming=False)
+    var keyed_plan = keyed.explain(streaming=False, engine="cpu")
     assert_true(keyed_plan.startswith("FILTER\n  GROUP_BY"), keyed_plan)
     assert_true("GROUP_BY k AGG s, m\n    FILTER\n" in keyed_plan, keyed_plan)
     same(
@@ -174,7 +188,9 @@ def test_predicate_pushdown_rules() raises:
         .filter(col("v").is_null() | (col("v") > lit(Int64(3))))
     )
     assert_true(
-        nulls_first.explain(streaming=False).startswith("GROUP_BY"),
+        nulls_first.explain(streaming=False, engine="cpu").startswith(
+            "GROUP_BY"
+        ),
     )
     same(
         nulls_first,
@@ -189,7 +205,9 @@ def test_predicate_pushdown_rules() raises:
         .filter(col("v") >= col("v").max())
     )
     assert_true(
-        not_row_local.explain(streaming=False).startswith("FILTER\n  GROUP_BY")
+        not_row_local.explain(streaming=False, engine="cpu").startswith(
+            "FILTER\n  GROUP_BY"
+        )
     )
     same(
         not_row_local,
@@ -199,7 +217,9 @@ def test_predicate_pushdown_rules() raises:
     )
     var whole_column = df.lazy().sort(["w"]).filter(col("w") > col("w").mean())
     assert_true(
-        whole_column.explain(streaming=False).startswith("FILTER\n  SORT")
+        whole_column.explain(streaming=False, engine="cpu").startswith(
+            "FILTER\n  SORT"
+        )
     )
     assert_true(
         whole_column.collect().equals(
@@ -224,7 +244,7 @@ def test_projection_and_slice_pushdown_into_csv() raises:
     write_csv(frame(), PATH)
     var q = scan_csv(PATH).select(["k", "v"]).head(2)
     assert_equal(
-        q.explain(streaming=False),
+        q.explain(streaming=False, engine="cpu"),
         "SELECT k, v\n  SLICE 0 2\n    SCAN CSV "
         + PATH
         + " [project k, v] [n_rows 2]\n",
@@ -232,7 +252,7 @@ def test_projection_and_slice_pushdown_into_csv() raises:
     assert_true(q.collect().equals(frame().select(["k", "v"]).head(2)))
     # A slice is not pushed below an aggregate projection.
     var agg = scan_csv(PATH).select(col("v").sum()).head(1)
-    assert_true(agg.explain(streaming=False).startswith("SLICE"))
+    assert_true(agg.explain(streaming=False, engine="cpu").startswith("SLICE"))
     assert_equal(agg.collect().item().int64(), Int64(18))
     var schema = CsvSchema(
         [
@@ -247,7 +267,11 @@ def test_projection_and_slice_pushdown_into_csv() raises:
         .filter(col("w") > lit(Float64(2)))
         .select(["note"])
     )
-    assert_true(typed.explain(streaming=False).endswith("[project w, note]\n"))
+    assert_true(
+        typed.explain(streaming=False, engine="cpu").endswith(
+            "[project w, note]\n"
+        )
+    )
     assert_equal(typed.collect().height(), 4)
     assert_true(
         typed.collect().equals(
