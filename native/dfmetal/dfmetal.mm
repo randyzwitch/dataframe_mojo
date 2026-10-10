@@ -53,6 +53,43 @@ int64_t width(int64_t t) {
   fail("Metal unsupported dtype");
   return 0;
 }
+// A segment ends at a stable filter boundary. Values produced and consumed
+// inside one segment stay in per-thread variables; only boundary-live slots
+// occupy shared memory. Logical ABI slot identifiers remain unchanged.
+struct Layout {
+  std::array<int64_t, 64> physical;
+  std::vector<int64_t> ends;
+  int64_t slots = 0;
+  explicit Layout(const DFMRequest &r) {
+    physical.fill(-1);
+    auto keep = [&](int64_t slot) {
+      if (physical[slot] < 0)
+        physical[slot] = slots++;
+    };
+    for (int64_t i = 0; i < r.input_count; ++i)
+      keep(i);
+    for (int64_t first = 0; first < r.step_count;) {
+      int64_t end = first;
+      while (end + 1 < r.step_count && !r.steps[end].filter)
+        ++end;
+      ends.push_back(end);
+      std::array<bool, 64> local{};
+      for (int64_t k = first; k <= end; ++k) {
+        for (int64_t j = 0; j < r.steps[k].nodes; ++j) {
+          auto *c = r.code + 4 * (r.steps[k].start + j);
+          if (c[0] == DFM_COLUMN && !local[c[3]])
+            keep(c[3]);
+        }
+        local[r.steps[k].slot] = true;
+      }
+      if (r.steps[end].filter)
+        keep(r.steps[end].slot);
+      first = end + 1;
+    }
+    for (int64_t i = 0; i < r.output_count; ++i)
+      keep(r.outputs[i].slot);
+  }
+};
 struct Shape {
   int64_t cap, packed, blocks, bitmap, matrix, validity, literal, outputBits,
       partial;
@@ -95,6 +132,9 @@ Shape validate(const DFMRequest &r, bool storage = false) {
     if (v.has_validity)
       s.bitmap = add(s.bitmap, bytes);
   }
+  std::array<bool, 64> defined{};
+  for (int64_t i = 0; i < r.input_count; ++i)
+    defined[i] = true;
   for (int64_t i = 0; i < r.step_count; ++i) {
     const auto &v = r.steps[i];
     if (v.start < 0 || v.nodes < 1 || v.nodes > 64 ||
@@ -120,8 +160,16 @@ Shape validate(const DFMRequest &r, bool storage = false) {
           (binary && (c[2] < 0 || c[2] >= j)) ||
           (c[0] == DFM_COLUMN && (c[3] < 0 || c[3] >= v.slot)))
         fail("Invalid Metal expression bytecode");
+      if (c[0] == DFM_COLUMN && !defined[c[3]])
+        fail("Metal expression references an undefined slot");
       if (r.dtype != DFM_FLOAT32 && c[0] == DFM_LITERAL_FLOAT)
         fail("Floating literal requires native Float32 storage");
+    }
+    defined[v.slot] = true;
+    for (int64_t j = 0; j < v.gather_count; ++j) {
+      auto slot = r.gathers[v.gather_start + j];
+      if (slot < 0 || slot >= r.slots || !defined[slot])
+        fail("Metal gather references an undefined slot");
     }
   }
   for (int64_t i = 0; i < r.gather_count; ++i)
@@ -130,7 +178,7 @@ Shape validate(const DFMRequest &r, bool storage = false) {
   for (int64_t i = 0; i < r.output_count; ++i) {
     const auto &v = r.outputs[i];
     width(v.dtype);
-    if (v.slot < 0 || v.slot >= r.slots || v.min_count < 0)
+    if (v.slot < 0 || v.slot >= r.slots || v.min_count < 0 || !defined[v.slot])
       fail("Invalid Metal output descriptor");
     if (!r.reductions) {
       if (v.reduction != -1 || (v.dtype != r.dtype && v.dtype != DFM_BOOL))
@@ -145,8 +193,9 @@ Shape validate(const DFMRequest &r, bool storage = false) {
     if (storage && (r.rows || r.reductions) && (!v.values || !v.validity))
       fail("Missing Metal output storage");
   }
-  s.matrix = mul(mul(s.cap, r.slots), width(r.dtype));
-  s.validity = mul(s.cap, r.slots);
+  auto layout = Layout(r);
+  s.matrix = mul(mul(s.cap, layout.slots), width(r.dtype));
+  s.validity = mul(s.cap, layout.slots);
   s.literal = std::max<int64_t>(1, mul(r.literal_count, width(r.dtype)));
   s.outputBits = mul(mul(s.packed, r.output_count), 2);
   s.partial =
@@ -195,10 +244,15 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
                                s.packed));
   }
   m.peak_bytes = add(m.shared_bytes, m.result_bytes);
-  m.launches = r.input_count + r.step_count + (r.reductions ? 2 : 1);
+  auto layout = Layout(r);
+  m.launches = r.input_count + layout.ends.size() + (r.reductions ? 2 : 1);
   for (int64_t i = 0; i < r.step_count; ++i)
-    if (r.steps[i].filter)
-      m.launches += 2 + r.steps[i].gather_count;
+    if (r.steps[i].filter) {
+      m.launches += 2;
+      for (int64_t j = 0; j < r.steps[i].gather_count; ++j)
+        m.launches +=
+            layout.physical[r.gathers[r.steps[i].gather_start + j]] >= 0;
+    }
   return m;
 }
 struct Pipelines {
@@ -218,6 +272,7 @@ struct Context {
 std::mutex defaultMutex;
 Context *defaultContext = nullptr;
 std::string source(const DFMRequest &r) {
+  auto layout = Layout(r);
   std::string text = "#include <metal_stdlib>\nusing namespace metal;\n#pragma "
                      "clang fp contract(off)\n";
   text += std::string("typedef ") +
@@ -336,88 +391,109 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
  result[column]={sum,count};
 }
 )MSL";
-  for (int64_t k = 0; k < r.step_count; ++k) {
-    auto &s = r.steps[k];
-    text += "kernel void project" + std::to_string(k) +
+  int64_t first = 0;
+  for (auto end : layout.ends) {
+    std::array<bool, 64> local{};
+    text += "kernel void project" + std::to_string(end) +
             "(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],device "
             "const T *lit[[buffer(2)]],constant uint4 "
             "&meta[[buffer(3)]],device atomic_uint *error[[buffer(4)]],uint "
             "row[[thread_position_in_grid]]){if(row>=meta.x)return;\n";
-    for (int64_t j = 0; j < s.nodes; ++j) {
-      auto *c = r.code + 4 * (s.start + j);
-      auto op = c[0];
-      auto id = std::to_string(j);
-      std::string a = "a" + std::to_string(c[1]),
-                  b = "a" + std::to_string(c[2]);
-      std::string av = "v" + std::to_string(c[1]),
-                  bv = "v" + std::to_string(c[2]);
-      text += "T a" + id + "=T(0);bool v" + id + "=true;";
-      std::string z = "a" + id, valid = "v" + id;
-      if (op == DFM_COLUMN) {
-        auto idx = std::to_string(c[3]) + "UL*meta.z+row";
-        text += z + "=x[" + idx + "];" + valid + "=v[" + idx + "]!=0;";
-      } else if (op == DFM_LITERAL_NULL)
-        text += valid + "=false;";
-      else if (op == DFM_LITERAL_INT || op == DFM_LITERAL_FLOAT ||
-               op == DFM_LITERAL_BOOL)
-        text += z + "=lit[" + std::to_string(s.start + j) + "];";
-      else if (op == DFM_FILL_NULL)
-        text += valid + "=" + av + "||" + bv + ";" + z + "=" + av + "?" + a +
-                ":" + b + ";";
-      else if (op == DFM_IS_NULL || op == DFM_IS_NOT_NULL)
-        text += z + "=T(" + (op == DFM_IS_NULL ? "!" : "") + av + ");";
-      else if (op == DFM_AND || op == DFM_OR) {
-        bool isAnd = op == DFM_AND;
-        auto symbol = isAnd ? "&&" : "||";
-        auto decisive = isAnd ? "==" : "!=";
-        text += z + "=T((" + a + "!=T(0))" + symbol + "(" + b + "!=T(0)));";
-        text += valid + "=(" + av + "&&" + bv + ")||(" + av + "&&" + a +
-                decisive + "T(0))||(" + bv + "&&" + b + decisive + "T(0));";
-      } else {
-        bool unary = op == DFM_NEG || op == DFM_NOT;
-        text +=
-            valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid + "){";
-        if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_NEG) {
-          auto name = op == DFM_ADD   ? "add"
-                      : op == DFM_SUB ? "sub"
-                      : op == DFM_MUL ? "mul"
-                                      : "neg";
-          text += "if(!checked_" + std::string(name) + "(" + a + "," +
-                  (unary ? "" : b + ",") + z +
-                  "))atomic_fetch_min_explicit(error," +
-                  std::to_string((r.dtype == DFM_FLOAT32 ? 0x80000000UL : 0UL) +
-                                 s.start + j + 1) +
-                  "u,memory_order_relaxed);";
-        } else {
-          std::string expr;
-          if (op == DFM_NOT)
-            expr = "!(" + a + "!=T(0))";
-          else {
-            auto symbol = op == DFM_GT   ? ">"
-                          : op == DFM_EQ ? "=="
-                          : op == DFM_LT ? "<"
-                          : op == DFM_GE ? ">="
-                          : op == DFM_LE ? "<="
-                          : op == DFM_NE ? "!="
-                                         : "!=";
-            expr = op == DFM_XOR ? "((" + a + "!=T(0))!=(" + b + "!=T(0)))"
-                                 : a + symbol + b;
+    for (int64_t k = first; k <= end; ++k) {
+      auto &s = r.steps[k];
+      auto prefix = "s" + std::to_string(k) + "_";
+      for (int64_t j = 0; j < s.nodes; ++j) {
+        auto *c = r.code + 4 * (s.start + j);
+        auto op = c[0];
+        auto id = prefix + std::to_string(j);
+        std::string a = "a" + prefix + std::to_string(c[1]),
+                    b = "a" + prefix + std::to_string(c[2]);
+        std::string av = "v" + prefix + std::to_string(c[1]),
+                    bv = "v" + prefix + std::to_string(c[2]);
+        text += "T a" + id + "=T(0);bool v" + id + "=true;";
+        std::string z = "a" + id, valid = "v" + id;
+        if (op == DFM_COLUMN) {
+          if (local[c[3]]) {
+            auto slot = std::to_string(c[3]);
+            text += z + "=slot" + slot + ";" + valid + "=valid" + slot + ";";
+          } else {
+            auto idx = std::to_string(layout.physical[c[3]]) + "UL*meta.z+row";
+            text += z + "=x[" + idx + "];" + valid + "=v[" + idx + "]!=0;";
           }
-          if (r.dtype == DFM_FLOAT32 && op != DFM_NOT && op != DFM_XOR)
-            text += "if(!native_operand(" + a + ")||!native_operand(" + b +
-                    "))atomic_fetch_min_explicit(error," +
-                    std::to_string(0x80000000UL + s.start + j + 1) +
-                    "u,memory_order_relaxed);else ";
-          text += z + "=T(" + expr + ");";
+        } else if (op == DFM_LITERAL_NULL)
+          text += valid + "=false;";
+        else if (op == DFM_LITERAL_INT || op == DFM_LITERAL_FLOAT ||
+                 op == DFM_LITERAL_BOOL)
+          text += z + "=lit[" + std::to_string(s.start + j) + "];";
+        else if (op == DFM_FILL_NULL)
+          text += valid + "=" + av + "||" + bv + ";" + z + "=" + av + "?" + a +
+                  ":" + b + ";";
+        else if (op == DFM_IS_NULL || op == DFM_IS_NOT_NULL)
+          text += z + "=T(" + (op == DFM_IS_NULL ? "!" : "") + av + ");";
+        else if (op == DFM_AND || op == DFM_OR) {
+          bool isAnd = op == DFM_AND;
+          auto symbol = isAnd ? "&&" : "||";
+          auto decisive = isAnd ? "==" : "!=";
+          text += z + "=T((" + a + "!=T(0))" + symbol + "(" + b + "!=T(0)));";
+          text += valid + "=(" + av + "&&" + bv + ")||(" + av + "&&" + a +
+                  decisive + "T(0))||(" + bv + "&&" + b + decisive + "T(0));";
+        } else {
+          bool unary = op == DFM_NEG || op == DFM_NOT;
+          text += valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid +
+                  "){";
+          if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL ||
+              op == DFM_NEG) {
+            auto name = op == DFM_ADD   ? "add"
+                        : op == DFM_SUB ? "sub"
+                        : op == DFM_MUL ? "mul"
+                                        : "neg";
+            text +=
+                "if(!checked_" + std::string(name) + "(" + a + "," +
+                (unary ? "" : b + ",") + z +
+                "))atomic_fetch_min_explicit(error," +
+                std::to_string((r.dtype == DFM_FLOAT32 ? 0x80000000UL : 0UL) +
+                               s.start + j + 1) +
+                "u,memory_order_relaxed);";
+          } else {
+            std::string expr;
+            if (op == DFM_NOT)
+              expr = "!(" + a + "!=T(0))";
+            else {
+              auto symbol = op == DFM_GT   ? ">"
+                            : op == DFM_EQ ? "=="
+                            : op == DFM_LT ? "<"
+                            : op == DFM_GE ? ">="
+                            : op == DFM_LE ? "<="
+                            : op == DFM_NE ? "!="
+                                           : "!=";
+              expr = op == DFM_XOR ? "((" + a + "!=T(0))!=(" + b + "!=T(0)))"
+                                   : a + symbol + b;
+            }
+            if (r.dtype == DFM_FLOAT32 && op != DFM_NOT && op != DFM_XOR)
+              text += "if(!native_operand(" + a + ")||!native_operand(" + b +
+                      "))atomic_fetch_min_explicit(error," +
+                      std::to_string(0x80000000UL + s.start + j + 1) +
+                      "u,memory_order_relaxed);else ";
+            text += z + "=T(" + expr + ");";
+          }
+          text += "}";
         }
-        text += "}";
+        text += "\n";
       }
-      text += "\n";
+      auto last = prefix + std::to_string(s.nodes - 1);
+      auto slot = std::to_string(s.slot);
+      text += std::string(local[s.slot] ? "slot" : "T slot") + slot + "=a" +
+              last + ";" + (local[s.slot] ? "valid" : "bool valid") + slot +
+              "=v" + last + ";\n";
+      local[s.slot] = true;
+      if (layout.physical[s.slot] >= 0) {
+        auto idx = std::to_string(layout.physical[s.slot]) + "UL*meta.z+row";
+        text += "x[" + idx + "]=slot" + slot + ";v[" + idx + "]=uchar(valid" +
+                slot + ");\n";
+      }
     }
-    auto last = std::to_string(s.nodes - 1);
-    auto idx = std::to_string(s.slot) + "UL*meta.z+row";
-    text +=
-        "x[" + idx + "]=a" + last + ";v[" + idx + "]=uchar(v" + last + ");}\n";
+    text += "}\n";
+    first = end + 1;
   }
   return text;
 }
@@ -495,6 +571,7 @@ struct Partial {
 };
 void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   auto shape = validate(r, true);
+  auto layout = Layout(r);
   stats = {};
   stats.gpu_ns = -1;
   stats.memory = estimate(r, shape);
@@ -544,7 +621,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     auto &input = r.inputs[i];
     int64_t size = (r.rows + input.bit_offset + 7) / 8;
     std::array<uint64_t, 4> params{
-        static_cast<uint64_t>(i), static_cast<uint64_t>(input.bit_offset),
+        static_cast<uint64_t>(layout.physical[i]),
+        static_cast<uint64_t>(input.bit_offset),
         static_cast<uint64_t>(input.dtype == DFM_BOOL), UINT64_MAX};
     // Bitmap offsets are absolute; buffer bindings stay naturally aligned.
     if (input.dtype == DFM_BOOL)
@@ -555,7 +633,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
                size);
       offset += size;
     } else if (r.rows)
-      memcpy(static_cast<char *>(x.contents) + i * shape.cap * width(r.dtype),
+      memcpy(static_cast<char *>(x.contents) +
+                 layout.physical[i] * shape.cap * width(r.dtype),
              input.values, r.rows * width(r.dtype));
     if (input.has_validity) {
       params[3] = offset;
@@ -589,8 +668,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   }
   auto *descriptors = static_cast<GPUOut *>(out.contents);
   for (int64_t i = 0; i < r.output_count; ++i)
-    descriptors[i] = {r.outputs[i].slot, r.outputs[i].reduction,
-                      r.outputs[i].min_count, r.outputs[i].dtype};
+    descriptors[i] = {layout.physical[r.outputs[i].slot],
+                      r.outputs[i].reduction, r.outputs[i].min_count,
+                      r.outputs[i].dtype};
   stats.staging_copy_ns = ns(start);
   Drain drain{[c.queue commandBuffer]};
   if (!drain.command)
@@ -629,7 +709,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     offset += ((r.rows + input.bit_offset + 7) / 8) *
               ((input.dtype == DFM_BOOL) + input.has_validity);
   }
-  for (int64_t i = 0; i < r.step_count; ++i) {
+  for (auto i : layout.ends) {
     auto &step = r.steps[i];
     buffer(0, x);
     buffer(1, v);
@@ -638,7 +718,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     buffer(4, arithmeticError);
     dispatch("project" + std::to_string(i), shape.cap);
     if (step.filter) {
-      uint64_t slot = step.slot;
+      uint64_t slot = layout.physical[step.slot];
       buffer(0, x);
       buffer(1, v);
       buffer(2, rank);
@@ -650,8 +730,10 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
       buffer(1, meta);
       dispatch("block_offsets", 1);
       for (int64_t j = 0; j < step.gather_count; ++j) {
-        uint64_t params[2] = {
-            slot, static_cast<uint64_t>(r.gathers[step.gather_start + j])};
+        auto physical = layout.physical[r.gathers[step.gather_start + j]];
+        if (physical < 0)
+          continue;
+        uint64_t params[2] = {slot, static_cast<uint64_t>(physical)};
         buffer(0, x);
         buffer(1, v);
         buffer(2, y);
@@ -762,9 +844,10 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
       int64_t size = o.dtype == DFM_BOOL ? packed : rows * width(o.dtype);
       if (size)
         memcpy(o.values,
-               o.dtype == DFM_BOOL ? base + shape.packed
-                                   : static_cast<uint8_t *>(x.contents) +
-                                         o.slot * shape.cap * width(r.dtype),
+               o.dtype == DFM_BOOL
+                   ? base + shape.packed
+                   : static_cast<uint8_t *>(x.contents) +
+                         layout.physical[o.slot] * shape.cap * width(r.dtype),
                size);
       stats.download_bytes += packed + size;
     }
