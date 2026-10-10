@@ -5637,7 +5637,16 @@ struct GroupBy(Copyable):
                     "Aggregate output name collides with grouping key: "
                     + expression.expr._name
                 )
-        var workers = worker_count(self._frame.height())
+        # Hashing and encoding a key cost 50 to 80 ns a row, not the
+        # nanosecond of the scans `worker_count`'s floor is sized for, so
+        # the routes below divide at the partition floor: 75K rows of
+        # ClickBench q40 (35K groups) encoded whole on one thread took
+        # 3.5 ms while seven threads idled.
+        var height = self._frame.height()
+        var workers = max(
+            worker_count(height),
+            min(configured_workers(), height // _PARTITION_ROWS_PER_WORKER),
+        )
         var result: DataFrame
         # Keys are unchanged throughout this aggregation. Reuse the sampled
         # preference across hash, range and partitioned strategy selection.
