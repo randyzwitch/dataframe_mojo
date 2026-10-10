@@ -52,6 +52,18 @@ comparisons, Kleene Boolean logic, null tests, fill-null, and explicit casts
 among these numeric and Boolean types. Out-of-range casts and NaN-to-Bool
 conversions raise in strict mode and become null in non-strict mode. Nulls stay
 null. Strict casts currently require terminal projections without head.
+Integer expressions additionally support floor division, remainder, powers,
+absolute value, clipping, and integral rounding operations. Division and
+remainder by zero return null; signed floor division and remainder follow
+floor semantics. Float32 supports absolute value, floor, ceiling, rounding to
+a whole number, clipping, NaN filling, and NaN/finite/infinite predicates.
+Float32 decimal rounding, floating floor division/remainder/power, and
+transcendental functions still require CPU execution.
+
+Conditional `when/then/otherwise` expressions propagate an observation mask
+through each branch. Inactive branches do not raise integer overflow, strict
+cast, or precision errors. A null predicate selects the otherwise branch.
+
 Projection,
 with-columns, drop, stable filtering, and final head remain resident until the
 result is copied to ordinary CPU columns. Checked integer arithmetic currently
@@ -81,10 +93,11 @@ rows, so this accumulator cannot overflow even when partial sums cancel. Sum's
 `min_count` is retained. Float32 row arithmetic preserves separate operator
 rounding for supported operations and disables shader contraction and unsafe math
 optimizations. Metal can flush Float32 subnormal operands and results even in
-safe math mode ([Metal specification, sections 8.1 and 8.5](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)). Native kernels detect subnormal arithmetic/comparisons and
+safe math mode ([Metal specification, sections 8.1 and 8.5](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)). Native kernels detect subnormal arithmetic and
 potential underflow, then reject the result with a precision error after draining
 the command buffer. Copying subnormal values and flipping their sign preserve
-their bits. This guard is conservative: a tiny product that would correctly round
+their bits. Float32 comparisons, predicates, clipping, and integral rounding
+use native encodings and support subnormals. This guard is conservative: a tiny product that would correctly round
 to zero can also require CPU execution. There is no arithmetic emulation or
 automatic retry after submission.
 

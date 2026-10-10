@@ -18,6 +18,22 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .execution_report import ExecutionReport
 from .expr import (
     COL,
+    FLOORDIV,
+    MOD,
+    POW,
+    CLIP_LOW,
+    CLIP_HIGH,
+    FILL_NAN,
+    KEEP_NULLS,
+    ABS,
+    FLOOR,
+    CEIL,
+    ROUND,
+    IS_NAN,
+    IS_NOT_NAN,
+    IS_FINITE,
+    IS_INFINITE,
+    WHEN,
     CAST,
     LIT_INT,
     LIT_FLOAT,
@@ -229,6 +245,7 @@ def _capabilities() -> RowCapabilities:
         casts=True,
         extrema=True,
         fixed_logical=True,
+        row_extras=True,
     )
 
 
@@ -258,6 +275,38 @@ def _type(dtype: DataType) raises -> Int64:
 
 def _op(op: Int) raises -> Int64:
     # The native ABI has its own versioned opcodes.
+    if op == FLOORDIV:
+        return 25
+    if op == MOD:
+        return 26
+    if op == POW:
+        return 27
+    if op == CLIP_LOW:
+        return 28
+    if op == CLIP_HIGH:
+        return 29
+    if op == FILL_NAN:
+        return 34
+    if op == KEEP_NULLS:
+        return 35
+    if op == ABS:
+        return 51
+    if op == FLOOR:
+        return 55
+    if op == CEIL:
+        return 56
+    if op == ROUND:
+        return 57
+    if op == IS_NAN:
+        return 63
+    if op == IS_NOT_NAN:
+        return 64
+    if op == IS_FINITE:
+        return 65
+    if op == IS_INFINITE:
+        return 66
+    if op == WHEN:
+        return 100
     if op == CAST:
         return 79
     if op == COL:
@@ -362,7 +411,7 @@ struct _Descriptors(Movable):
             self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
             self.typed |= dtype != dtype.physical()
         for i in range(0, len(self.code), 4):
-            self.typed |= self.code[i] == CAST
+            self.typed |= self.code[i] == CAST or self.code[i] == WHEN
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
             if column.dtype() == DataType.BOOL:

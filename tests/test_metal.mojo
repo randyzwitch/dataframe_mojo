@@ -2,7 +2,7 @@
 from std.memory import bitcast
 
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
-from dataframe import Column, DataFrame, Series, col, lit
+from dataframe import Column, DataFrame, Series, col, lit, when
 from dataframe.dtype import DataType
 from dataframe.metal import MetalRuntime, metal_installed
 
@@ -563,6 +563,182 @@ def test_native_fixed_logical_types_preserve_metadata() raises:
         )
     with assert_raises(contains="Decimal128 accumulation"):
         _ = frame.lazy().select(col("a").sum()).collect(accelerator=runtime)
+
+
+def _native_integer_row_ops[D: DType]() raises:
+    var values = List[Scalar[D]]()
+    var divisors = List[Scalar[D]]()
+    comptime if D.is_signed():
+        values = [-7, -1, 0, 1, 7]
+        divisors = [3, -3, 0, -1, 2]
+    else:
+        values = [0, 1, 2, 7, 15]
+        divisors = [3, 3, 0, 1, 2]
+    var frame = DataFrame(
+        [
+            Series("x", Column[Scalar[D]](values^)),
+            Series("y", Column[Scalar[D]](divisors^)),
+        ]
+    )
+    var query = frame.lazy().select_exprs(
+        [
+            (col("x") // col("y")).alias("div"),
+            (col("x") % col("y")).alias("mod"),
+            col("x").pow(lit(Scalar[D](2))).alias("pow"),
+            col("x").abs().alias("abs"),
+            col("x").clip(lit(Scalar[D](0)), lit(Scalar[D](2))).alias("clip"),
+            col("x").floor().alias("floor"),
+            col("x").ceil().alias("ceil"),
+            col("x").round(3).alias("round"),
+        ]
+    )
+    var runtime = MetalRuntime()
+    assert_true(
+        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
+
+
+def test_native_additional_integer_operators() raises:
+    if not metal_installed():
+        return
+    _native_integer_row_ops[DType.int8]()
+    _native_integer_row_ops[DType.int16]()
+    _native_integer_row_ops[DType.int32]()
+    _native_integer_row_ops[DType.int64]()
+    _native_integer_row_ops[DType.uint8]()
+    _native_integer_row_ops[DType.uint16]()
+    _native_integer_row_ops[DType.uint32]()
+    _native_integer_row_ops[DType.uint64]()
+    var runtime = MetalRuntime()
+    var frame = DataFrame([Series("x", Column[Int8]([Int8.MIN]))])
+    with assert_raises(contains="overflow"):
+        _ = frame.lazy().select(col("x").abs()).collect(accelerator=runtime)
+    with assert_raises(contains="nonnegative exponent"):
+        _ = (
+            frame.lazy()
+            .select(col("x").pow(lit(Int8(-1))))
+            .collect(accelerator=runtime)
+        )
+    with assert_raises(contains="terminal projections"):
+        _ = (
+            frame.lazy()
+            .with_columns(col("x").abs().alias("abs"))
+            .filter(col("x") > lit(Int8(0)))
+            .collect(accelerator=runtime)
+        )
+
+
+def test_native_conditional_masks_preserve_observable_errors() raises:
+    if not metal_installed():
+        return
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series(
+                "p",
+                Column[Bool](
+                    [False, False, False, True], [True, True, False, True]
+                ),
+            ),
+            Series("n", Column[Int8]([127, -128, 1, 2])),
+            Series(
+                "u", Column[UInt64]([UInt64.MAX, UInt64.MAX, UInt64.MAX, 2])
+            ),
+            Series("f", Column[Float32]([1e-20, 1e-20, 1e-20, 1e20])),
+        ]
+    )
+    var query = frame.lazy().select_exprs(
+        [
+            when(col("p"))
+            .then(col("n").abs())
+            .otherwise(col("n"))
+            .alias("abs"),
+            when(col("p"))
+            .then(col("u").cast("int8"))
+            .otherwise(lit(Int8(0)))
+            .alias("cast"),
+            when(col("p"))
+            .then(col("f") * lit(Float32(1e-20)))
+            .otherwise(col("f"))
+            .alias("float"),
+            when(col("p")).then(col("n")).alias("nullable"),
+            when(col("p"))
+            .then(
+                when(col("n") > lit(Int8(1)))
+                .then(col("n") + lit(Int8(1)))
+                .otherwise(col("n"))
+            )
+            .otherwise(col("n"))
+            .alias("nested"),
+        ]
+    )
+    assert_true(
+        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
+    var bad = frame.lazy().select(
+        when(~col("p")).then(col("n").abs()).otherwise(col("n"))
+    )
+    with assert_raises(contains="overflow"):
+        _ = bad.collect(accelerator=runtime)
+
+
+def test_native_float_value_operations_and_subnormal_comparisons() raises:
+    if not metal_installed():
+        return
+    var runtime = MetalRuntime()
+    var tiny = bitcast[DType.float32](UInt32(1))
+    var frame = DataFrame(
+        [
+            Series(
+                "x",
+                Column[Float32](
+                    [
+                        tiny,
+                        -tiny,
+                        -0.0,
+                        0.0,
+                        0.5,
+                        -0.5,
+                        1.5,
+                        -1.5,
+                        bitcast[DType.float32](UInt32(0x7FC00000)),
+                        bitcast[DType.float32](UInt32(0x7F800000)),
+                        bitcast[DType.float32](UInt32(0xFF800000)),
+                    ]
+                ),
+            )
+        ]
+    )
+    var query = frame.lazy().select_exprs(
+        [
+            (col("x") > lit(Float32(0))).alias("positive"),
+            (col("x") < lit(Float32(0))).alias("negative"),
+            (col("x") == lit(Float32(0))).alias("zero"),
+            col("x").abs().alias("abs"),
+            col("x").floor().alias("floor"),
+            col("x").ceil().alias("ceil"),
+            col("x").round().alias("round"),
+            col("x").is_nan().alias("nan"),
+            col("x").is_not_nan().alias("not_nan"),
+            col("x").is_finite().alias("finite"),
+            col("x").is_infinite().alias("infinite"),
+            col("x").fill_nan(lit(Float32(2))).alias("fill"),
+            col("x").clip(lit(Float32(-1)), lit(Float32(1))).alias("clip"),
+        ]
+    )
+    assert_true(
+        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
+    var filtered = (
+        frame.lazy().filter(col("x") > lit(Float32(0))).select(col("x"))
+    )
+    assert_true(
+        filtered.collect(accelerator=runtime).equals(
+            filtered.collect(engine="cpu")
+        )
+    )
+    with assert_raises(contains="Float64 intermediate"):
+        _ = frame.lazy().select(col("x").round(2)).collect(accelerator=runtime)
 
 
 def main() raises:

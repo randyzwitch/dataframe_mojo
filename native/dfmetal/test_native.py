@@ -516,7 +516,6 @@ for op, a, b in [
     (5, tiny, tiny),
     (6, 2.0**-126, f32(2.0**-126 + tiny)),
     (7, 1e-20, 1e-20),
-    (8, tiny, 0.0),
 ]:
     execute(
         [a],
@@ -1172,6 +1171,195 @@ def test_extrema():
 
 
 test_extrema()
+
+
+def test_additional_row_ops():
+    for dtype in (2, 3, 5, 6, 7, 8, 9, 10):
+        signed = dtype in (2, 3, 5, 6)
+        values = ([-7, -1, 0, 1, 7] if signed else [0, 1, 2, 7, 15]) * 53
+        valid = [i % 7 != 2 for i in range(len(values))]
+        for denominator in ([3, -3] if signed else [3]):
+            for op in (25, 26):
+                result, bits, _ = execute(
+                    values,
+                    dtype,
+                    [col, (1, -1, -1, -1), (op, 0, 1, -1)],
+                    [0, denominator, 0],
+                    valid=valid,
+                    offset=5,
+                )
+                expected = [
+                    x // denominator if op == 25 else x % denominator for x in values
+                ]
+                assert bits == valid
+                assert all(
+                    not yes or x == y for x, y, yes in zip(result, expected, valid)
+                ), (dtype, op, result, expected)
+        _, bits, _ = execute(
+            values, dtype, [col, (1, -1, -1, -1), (25, 0, 1, -1)], [0, 0, 0]
+        )
+        assert not any(bits)
+        small = [-3, -2, 0, 2, 3] if signed else [0, 1, 2, 3, 4]
+        result, bits, _ = execute(
+            small, dtype, [col, (1, -1, -1, -1), (27, 0, 1, -1)], [0, 2, 0]
+        )
+        assert result == [x * x for x in small]
+        for op in (28, 29):
+            result, _, _ = execute(
+                values, dtype, [col, (1, -1, -1, -1), (op, 0, 1, -1)], [0, 2, 0]
+            )
+            assert result == [(max if op == 28 else min)(x, 2) for x in values]
+        for op in (51, 55, 56, 57):
+            result, _, _ = execute(values, dtype, [col, (op, 0, -1, 0)], [0, 0])
+            assert result == [abs(x) if op == 51 else x for x in values]
+        if signed:
+            minimum = -(1 << (C.sizeof(SCALARS[dtype]) * 8 - 1))
+            execute(
+                [minimum],
+                dtype,
+                [col, (51, 0, -1, -1)],
+                [0, 0],
+                expect_error="overflow",
+            )
+            execute(
+                [minimum],
+                dtype,
+                [col, (1, -1, -1, -1), (25, 0, 1, -1)],
+                [0, -1, 0],
+                expect_error="overflow",
+            )
+            result, _, _ = execute(
+                [minimum], dtype, [col, (1, -1, -1, -1), (26, 0, 1, -1)], [0, -1, 0]
+            )
+            assert result == [0]
+            execute(
+                [2],
+                dtype,
+                [col, (1, -1, -1, -1), (27, 0, 1, -1)],
+                [0, -1, 0],
+                expect_error="nonnegative exponent",
+            )
+            # Conditional masks suppress an otherwise observable ABS overflow.
+            result, _, _ = execute(
+                [minimum, -1, 0, 1],
+                dtype,
+                [
+                    col,
+                    (1, -1, -1, -1),
+                    (8, 0, 1, -1),
+                    col,
+                    (51, 3, -1, -1),
+                    col,
+                    (100, 2, 4, 5),
+                ],
+                [0, 0, 0, 0, 0, 0, 0],
+            )
+            assert result == [minimum, -1, 0, 1]
+    rng = random.Random(918)
+    from_bits = lambda x: C.cast(C.pointer(C.c_uint32(x)), C.POINTER(C.c_float))[0]
+    values = [
+        0.0,
+        -0.0,
+        2**-149,
+        -(2**-149),
+        math.inf,
+        -math.inf,
+        math.nan,
+        0.5,
+        -0.5,
+        1.5,
+        -1.5,
+    ] + [from_bits(rng.getrandbits(32)) for _ in range(521)]
+    operations = {
+        8: lambda x, y: x > y,
+        9: lambda x, y: x == y,
+        20: lambda x, y: x < y,
+        21: lambda x, y: x >= y,
+        22: lambda x, y: x <= y,
+        23: lambda x, y: x != y,
+    }
+    for bound in (0.0, 2**-149, -(2**-149), math.nan, math.inf, -math.inf):
+        for op, compare in operations.items():
+            result, _, _ = execute(
+                values,
+                1,
+                [col, (2, -1, -1, -1), (op, 0, 1, -1)],
+                [0, bound, 0],
+                output_bool=True,
+            )
+            assert result == [compare(x, bound) for x in values], (op, bound)
+    for op in (51, 55, 56, 57):
+        result, _, _ = execute(values, 1, [col, (op, 0, -1, 0)], [0, 0])
+        for x, y in zip(values, result):
+            if math.isnan(x):
+                assert math.isnan(y)
+                continue
+            if op == 51:
+                expected = abs(x)
+            elif math.isinf(x):
+                expected = x
+            else:
+                expected = float(
+                    math.floor(x)
+                    if op == 55
+                    else (
+                        math.ceil(x)
+                        if op == 56
+                        else math.floor(x + 0.5) if x >= 0 else math.ceil(x - 0.5)
+                    )
+                )
+                if expected == 0:
+                    expected = math.copysign(0.0, x)
+                expected = f32(expected)
+            assert C.string_at(C.byref(C.c_float(y)), 4) == C.string_at(
+                C.byref(C.c_float(expected)), 4
+            ), (op, x, y, expected)
+    for op in (63, 64, 65, 66):
+        result, _, _ = execute(
+            values, 1, [col, (op, 0, -1, -1)], [0, 0], output_bool=True
+        )
+        expected = [
+            (
+                math.isnan(x)
+                if op == 63
+                else (
+                    not math.isnan(x)
+                    if op == 64
+                    else math.isfinite(x) if op == 65 else math.isinf(x)
+                )
+            )
+            for x in values
+        ]
+        assert result == expected, op
+    result, _, _ = execute(
+        values, 1, [col, (2, -1, -1, -1), (34, 0, 1, -1)], [0, 3.5, 0]
+    )
+    assert all(y == 3.5 if math.isnan(x) else y == x for x, y in zip(values, result))
+    _, bits, _ = execute(values, 1, [col, (12, -1, -1, -1), (34, 0, 1, -1)], [0, 0, 0])
+    assert bits == [not math.isnan(x) for x in values]
+    for op in (28, 29):
+        result, _, _ = execute(
+            values, 1, [col, (2, -1, -1, -1), (op, 0, 1, -1)], [0, 0, 0]
+        )
+        for x, y in zip(values, result):
+            if math.isnan(x):
+                assert math.isnan(y)
+            else:
+                expected = 0.0 if (x < 0 if op == 28 else x > 0) else x
+                assert C.string_at(C.byref(C.c_float(y)), 4) == C.string_at(
+                    C.byref(C.c_float(expected)), 4
+                )
+    result, bits, _ = execute(
+        [1.0, 2.0, 3.0],
+        1,
+        [col, (2, -1, -1, -1), (35, 0, 1, -1)],
+        [0, 4.0, 0],
+        valid=[True, False, True],
+    )
+    assert bits == [True, False, True] and result[0] == result[2] == 4.0
+
+
+test_additional_row_ops()
 
 lib.dfm_context_release(ctx)
 print(
