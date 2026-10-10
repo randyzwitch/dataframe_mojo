@@ -390,5 +390,70 @@ def test_sort_lowering_is_backend_opt_in() raises:
         _ = lower_rows(frame.lazy().sort("missing"), native)
 
 
+def test_group_lowering_is_backend_opt_in() raises:
+    var frame = DataFrame(
+        [
+            Series("key", Column[Int32]([1, 2])),
+            Series("x", Column[Int8]([1, 2])),
+        ]
+    )
+    var query = (
+        frame.lazy()
+        .group_by("key", maintain_order=True)
+        .agg([col("x").sum().alias("sum"), col("x").min().alias("min")])
+    )
+    with assert_raises(contains="row-local steps"):
+        _ = lower_rows(query)
+    var native = RowCapabilities(
+        "native",
+        float64=False,
+        wide_integer=False,
+        extended_integers=True,
+        mixed_types=True,
+        grouped=True,
+        order=True,
+        extrema=True,
+    )
+    var plan = lower_rows(query, native)
+    assert_true(plan.steps[len(plan.steps) - 2].grouped)
+    assert_true(plan.steps[len(plan.steps) - 1].order)
+    assert_equal(plan.outputs[1].dtype, DataType.INT64)
+    assert_equal(plan.outputs[2].dtype, DataType.INT8)
+    var overflow = (
+        DataFrame(
+            [
+                Series("key", Column[Int32]([0, 0])),
+                Series("x", Column[Int32]([1, 2])),
+            ]
+        )
+        .lazy()
+        .group_by("key")
+        .agg(col("x").sum())
+        .head(1)
+    )
+    with assert_raises(contains="grouped sums"):
+        _ = lower_rows(overflow, native)
+
+
+def test_group_without_keys_matches_cpu_rejection() raises:
+    var frame = DataFrame([Series("x", Column[Int32]([1]))])
+    var native = RowCapabilities("native", grouped=True)
+    with assert_raises(contains="requires at least one key"):
+        _ = lower_rows(
+            frame.lazy().group_by(List[String]()).agg(col("x").count()), native
+        )
+
+
+def test_duration_sum_preserves_wide_accumulator_rejection() raises:
+    var frame = DataFrame(
+        [Series("x", Column[Int64]([1, 2])).with_dtype(DataType.duration("us"))]
+    )
+    var native = RowCapabilities(
+        "native", wide_integer=False, mixed_types=True, fixed_logical=True
+    )
+    with assert_raises(contains="exact wide accumulation"):
+        _ = lower_rows(frame.lazy().select(col("x").sum()), native)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
