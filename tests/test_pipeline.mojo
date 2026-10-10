@@ -1,6 +1,6 @@
 """Thread-owned pipelines give the eager result for row-local plans."""
 from std.testing import TestSuite, assert_equal, assert_true
-from dataframe import Column, DataFrame, Series, StringColumn, col, lit
+from dataframe import Column, DataFrame, Expr, Series, StringColumn, col, lit
 from dataframe.pipeline import _morsel_ranges
 
 
@@ -92,6 +92,61 @@ def test_pipeline_reductions_and_empty_results() raises:
         .collect(batch_size=1024)
     )
     assert_equal(none_counted.column("n").get(0).int64(), Int64(0))
+
+
+def test_grouped_reductions_match_eager_in_both_orders() raises:
+    # Few groups and many groups, plain and chunked frames, after a filter
+    # and a with_columns: the thread-owned grouped sink gives the eager
+    # group-by's result, in first-occurrence order when asked and as a
+    # set otherwise. Integer sums, so association order cannot matter.
+    for chunks in [1, 5]:
+        var t = table(60_011, chunks)
+        var few_keys: List[String] = ["s"]
+        var many_keys: List[String] = ["a", "s"]
+        for which in range(2):
+            var keys = few_keys.copy() if which == 0 else many_keys.copy()
+            var aggregates: List[Expr] = [
+                col("a").sum().alias("total"),
+                col("b").min().alias("low"),
+                col("a").len().alias("n"),
+            ]
+            var eager = (
+                t.filter(col("b") < 5.5)
+                .with_columns([(col("a") * 3).alias("a")])
+                .group_by(keys, maintain_order=True)
+                .agg(aggregates)
+            )
+            var ordered = (
+                t.lazy()
+                .filter(col("b") < 5.5)
+                .with_columns([(col("a") * 3).alias("a")])
+                .group_by(keys, maintain_order=True)
+                .agg(aggregates)
+                .collect(batch_size=1024)
+            )
+            assert_true(eager.equals(ordered))
+            var unordered = (
+                t.lazy()
+                .filter(col("b") < 5.5)
+                .with_columns([(col("a") * 3).alias("a")])
+                .group_by(keys)
+                .agg(aggregates)
+                .collect(batch_size=1024)
+            )
+            assert_equal(unordered.height(), eager.height())
+            var sort_keys = keys.copy()
+            assert_true(eager.sort(sort_keys).equals(unordered.sort(sort_keys)))
+    # Nothing survives the filter: an empty result with the schema.
+    var t = table(5_000, 2)
+    var none = (
+        t.lazy()
+        .filter(col("a") > 1000)
+        .group_by(["s"])
+        .agg([col("a").sum().alias("total")])
+        .collect(batch_size=1024)
+    )
+    assert_equal(none.height(), 0)
+    assert_equal(none.columns(), ["s", "total"])
 
 
 def test_morsel_ranges_never_cross_a_chunk() raises:

@@ -6806,6 +6806,44 @@ struct _StreamReduction(Movable):
     def group_count(self) -> Int:
         return self.keys.height()
 
+    def order_by_firsts(mut self) raises:
+        """Put the groups in first-occurrence order (states merged from
+        rows taken out of order hold them in merge order)."""
+        var n = self.keys.height()
+        if n < 2:
+            return
+        var sorted = True
+        for g in range(1, n):
+            if self.firsts[g] < self.firsts[g - 1]:
+                sorted = False
+                break
+        if sorted:
+            return
+        var order = sort_indices([self.firsts.copy()])
+        var firsts = List[Int](capacity=n)
+        for g in order:
+            firsts.append(self.firsts[g])
+        var states = List[Reducer](capacity=len(self.states))
+        for i in range(len(self.states)):
+            ref source = self.states[i]
+            var state = Reducer(
+                source.op,
+                source.input,
+                n,
+                source.min_count,
+                source.integer,
+                source.floating,
+                source.text,
+                source.logical,
+            )
+            state.merge(source, sources=order)
+            states.append(state^)
+        self.keys = self.keys.take(order)
+        self.firsts = firsts^
+        self.states = states^
+        self.index = _KeyIndex()
+        self.indexing = 0
+
     def shift_firsts(mut self, offset: Int):
         for i in range(len(self.firsts)):
             self.firsts[i] += offset
