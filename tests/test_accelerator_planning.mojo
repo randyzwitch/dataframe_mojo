@@ -455,5 +455,39 @@ def test_duration_sum_preserves_wide_accumulator_rejection() raises:
         _ = lower_rows(frame.lazy().select(col("x").sum()), native)
 
 
+def test_additional_reductions_are_backend_opt_in() raises:
+    var frame = DataFrame(
+        [
+            Series("x", Column[Float32]([1, 2])),
+            Series("b", Column[Bool]([True, False])),
+        ]
+    )
+    var native = RowCapabilities(
+        "native",
+        float64=False,
+        wide_integer=False,
+        extended_integers=True,
+        mixed_types=True,
+        extra_reductions=True,
+    )
+    var query = frame.lazy().select_exprs(
+        [
+            col("x").first().alias("first"),
+            col("x").arg_max().alias("arg"),
+            col("b").any(ignore_nulls=False).alias("any"),
+            col("x").null_count().alias("nulls"),
+        ]
+    )
+    with assert_raises(contains="additional reductions"):
+        _ = lower_rows(query, RowCapabilities("old", mixed_types=True))
+    var plan = lower_rows(query, native)
+    assert_true(plan.reductions)
+    assert_equal(plan.outputs[0].dtype, DataType.FLOAT32)
+    assert_equal(plan.outputs[1].dtype, DataType.UINT32)
+    assert_equal(plan.outputs[2].dtype, DataType.BOOL)
+    assert_equal(plan.outputs[2].min_count, 0)
+    assert_equal(plan.outputs[3].dtype, DataType.INT64)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -1023,6 +1023,160 @@ def test_native_grouped_reductions() raises:
         _ = overflow.collect(engine="cpu")
 
 
+def _native_extra_reductions[D: DType]() raises:
+    var values = List[Scalar[D]]()
+    var keys = List[Int32]()
+    var valid = List[Bool]()
+    for i in range(521):
+        values.append(Scalar[D](i % 13))
+        keys.append(Int32((i * 7) % 9))
+        valid.append(i % 11 != 2)
+    var frame = DataFrame(
+        [
+            Series("key", Column[Int32](keys^, valid)),
+            Series("x", Column[Scalar[D]](values^, valid)),
+        ]
+    )
+    var expressions: List[Expr] = [
+        col("x").first().alias("first"),
+        col("x").last().alias("last"),
+        col("x").null_count().alias("nulls"),
+        col("x").arg_min().alias("argmin"),
+        col("x").arg_max().alias("argmax"),
+    ]
+    var runtime = MetalRuntime()
+    var scalar = (
+        frame.slice(5, 513)
+        .lazy()
+        .filter(col("key") >= 2)
+        .select_exprs(expressions)
+    )
+    assert_true(
+        scalar.collect(accelerator=runtime).equals(scalar.collect(engine="cpu"))
+    )
+    var grouped = (
+        frame.slice(5, 513)
+        .lazy()
+        .group_by("key", maintain_order=True)
+        .agg(expressions)
+    )
+    assert_true(
+        grouped.collect(accelerator=runtime).equals(
+            grouped.collect(engine="cpu")
+        )
+    )
+    var empty = frame.slice(0, 0).lazy().select_exprs(expressions)
+    assert_true(
+        empty.collect(accelerator=runtime).equals(empty.collect(engine="cpu"))
+    )
+
+
+def test_native_additional_reductions() raises:
+    if not metal_installed():
+        return
+    _native_extra_reductions[DType.float32]()
+    _native_extra_reductions[DType.int8]()
+    _native_extra_reductions[DType.int16]()
+    _native_extra_reductions[DType.int32]()
+    _native_extra_reductions[DType.int64]()
+    _native_extra_reductions[DType.uint8]()
+    _native_extra_reductions[DType.uint16]()
+    _native_extra_reductions[DType.uint32]()
+    _native_extra_reductions[DType.uint64]()
+    var runtime = MetalRuntime()
+    var expressions: List[Expr] = [
+        col("b").any().alias("any"),
+        col("b").all().alias("all"),
+        col("b").any(ignore_nulls=False).alias("any_nulls"),
+        col("b").all(ignore_nulls=False).alias("all_nulls"),
+        col("b").first().alias("first"),
+        col("b").last().alias("last"),
+        col("b").null_count().alias("nulls"),
+        col("b").arg_min().alias("argmin"),
+        col("b").arg_max().alias("argmax"),
+    ]
+    for values in [
+        List[Bool](),
+        List[Bool]([False, True, False]),
+        List[Bool]([False, False, False]),
+        List[Bool]([True, True, True]),
+    ]:
+        var valid = List[Bool](length=len(values), fill=True)
+        if len(values) > 0:
+            valid[0] = False
+        var keys = List[Int32](length=len(values), fill=0)
+        var frame = DataFrame(
+            [
+                Series("key", Column[Int32](keys^)),
+                Series("b", Column[Bool](values.copy(), valid)),
+            ]
+        )
+        var scalar = frame.lazy().select_exprs(expressions)
+        assert_true(
+            scalar.collect(accelerator=runtime).equals(
+                scalar.collect(engine="cpu")
+            )
+        )
+        var grouped = frame.lazy().group_by("key").agg(expressions)
+        assert_true(
+            grouped.collect(accelerator=runtime).equals(
+                grouped.collect(engine="cpu")
+            )
+        )
+    var nan = bitcast[DType.float32](UInt32(0x7FC00000))
+    var special = DataFrame(
+        [
+            Series("key", Column[Int32]([0, 0, 1, 1, 2, 2])),
+            Series("x", Column[Float32]([nan, 1, nan, nan, -0.0, 0.0])),
+        ]
+    )
+    var arg_exprs: List[Expr] = [
+        col("x").arg_min().alias("argmin"),
+        col("x").arg_max().alias("argmax"),
+    ]
+    var grouped = (
+        special.lazy().group_by("key", maintain_order=True).agg(arg_exprs)
+    )
+    assert_true(
+        grouped.collect(accelerator=runtime).equals(
+            grouped.collect(engine="cpu")
+        )
+    )
+    assert_equal(
+        grouped.collect(accelerator=runtime).column("argmax").uint32()._get(0),
+        UInt32(1),
+    )
+    var logical = DataFrame(
+        [
+            Series("key", Column[Int32]([0, 0, 1])),
+            Series(
+                "date", Column[Int64]([1, 2, 3], [False, True, True])
+            ).with_dtype(DataType.DATE),
+            Series(
+                "decimal", Column[Int32]([100, 200, 300], [True, True, False])
+            ).with_dtype(DataType.decimal(9, 2, 32)),
+        ]
+    )
+    var logical_query = (
+        logical.lazy()
+        .group_by("key", maintain_order=True)
+        .agg(
+            [
+                col("date").first().alias("date_first"),
+                col("date").last().alias("date_last"),
+                col("decimal").first().alias("decimal_first"),
+                col("decimal").last().alias("decimal_last"),
+                col("decimal").null_count().alias("decimal_nulls"),
+            ]
+        )
+    )
+    assert_true(
+        logical_query.collect(accelerator=runtime).equals(
+            logical_query.collect(engine="cpu")
+        )
+    )
+
+
 def main() raises:
     var suite = TestSuite.discover_tests[__functions_in_module()]()
     suite^.run()

@@ -67,6 +67,13 @@ enum DFMOp {
   DFM_CAST = 79,
   DFM_MIN = 80,
   DFM_MAX = 81,
+  DFM_FIRST = 83,
+  DFM_LAST = 84,
+  DFM_ANY = 91,
+  DFM_ALL = 92,
+  DFM_NULL_COUNT = 93,
+  DFM_ARG_MIN = 95,
+  DFM_ARG_MAX = 96,
   DFM_LEN = 90,
   DFM_SORT_KEY = 200,
   DFM_GROUP_HEADER = 201,
@@ -97,7 +104,7 @@ typedef struct DFMOutput {
   int64_t dtype;
   int64_t slot;
   int64_t reduction; // -1 for row output.
-  int64_t min_count;
+  int64_t min_count; // Sum minimum; Boolean any/all ignore_nulls flag.
 } DFMOutput;
 
 typedef struct DFMRequest {
