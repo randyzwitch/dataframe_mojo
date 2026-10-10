@@ -25,7 +25,10 @@ def test_cpu_and_auto_preserve_query_results() raises:
                 )
         assert_true(plan.profile(engine=engine)[0].equals(expected))
         assert_true(plan.fetch(1, engine=engine).equals(expected))
-    assert_equal(plan.explain(), plan.explain(engine="auto"))
+    # The plan text alone by default; the ENGINE line when asked how
+    # automatic selection would place the plan.
+    assert_equal(plan.explain(), plan.explain(engine="cpu"))
+    assert_true("ENGINE" not in plan.explain())
     assert_true("ENGINE cpu: auto uses CPU" in plan.explain(engine="auto"))
     # Automatic diagnostics prepend a decision without changing the CPU plan.
     assert_true(plan.explain().endswith(plan.explain(engine="cpu")))

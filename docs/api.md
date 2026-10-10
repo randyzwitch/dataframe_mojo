@@ -984,8 +984,8 @@ A deferred query; build it with DataFrame.lazy() or scan_csv().
   Collect, and report what each plan node did (#439).
 - `def explain[B: AcceleratorBackend](self, *, accelerator: B, engine: String = "accel", optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536)) -> String`
   Describe provider capability without submitting device work.
-- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "auto") -> String`
-  The (optimized) plan, one operator per line, root first.
+- `def explain(self, *, optimize: Bool = True, streaming: Bool = True, batch_size: Int = Int(65536), engine: String = "cpu") -> String`
+  The (optimized) plan, one operator per line, root first. With `engine="auto"` (what `collect` uses), an `ENGINE` line naming the selected engine and why comes first.
 - `def fetch[B: AcceleratorBackend](self, n: Int = Int(5), *, accelerator: B, engine: String = "accel") -> DataFrame`
   Collect the first n rows using an explicit provider.
 - `def fetch(self, n: Int = Int(5), *, engine: String = "auto") -> DataFrame`
