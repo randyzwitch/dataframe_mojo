@@ -15,6 +15,7 @@ struct RowCapabilities(Copyable):
     var float64: Bool
     var wide_integer: Bool
     var int64_arithmetic: Bool
+    var order: Bool
     var row_extras: Bool
     var fixed_logical: Bool
     var extrema: Bool
@@ -35,6 +36,7 @@ struct RowCapabilities(Copyable):
         extrema: Bool = False,
         fixed_logical: Bool = False,
         row_extras: Bool = False,
+        order: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -46,6 +48,7 @@ struct RowCapabilities(Copyable):
         self.extrema = extrema
         self.fixed_logical = fixed_logical
         self.row_extras = row_extras
+        self.order = order
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)

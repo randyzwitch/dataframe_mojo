@@ -11,7 +11,7 @@ from std.os.path import exists
 from std.sys import CompilationTarget
 from std.time import perf_counter_ns
 from .accelerator.capabilities import RowCapabilities
-from .accelerator.rows import RowPlan, lower_rows
+from .accelerator.rows import RowPlan, lower_rows, ROW_SORT_KEY
 from .arrow import _c_string, _read_c_string
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
@@ -246,6 +246,7 @@ def _capabilities() -> RowCapabilities:
         extrema=True,
         fixed_logical=True,
         row_extras=True,
+        order=True,
     )
 
 
@@ -275,6 +276,8 @@ def _type(dtype: DataType) raises -> Int64:
 
 def _op(op: Int) raises -> Int64:
     # The native ABI has its own versioned opcodes.
+    if op == ROW_SORT_KEY:
+        return 200
     if op == FLOORDIV:
         return 25
     if op == MOD:
@@ -401,6 +404,8 @@ struct _Descriptors(Movable):
         self.node_types = List[Int64]()
         self.slot_types = List[Int64]()
         self.typed = False
+        for step in plan.steps:
+            self.typed |= step.order
         for output in plan.outputs:
             self.typed |= output.reduction == MIN or output.reduction == MAX
         for dtype in plan.node_dtypes:
@@ -452,9 +457,11 @@ struct _Descriptors(Movable):
                     Int64(step.start),
                     Int64(step.nodes),
                     Int64(step.slot),
-                    Int64(step.filter),
+                    Int64(2) if step.order else Int64(step.filter),
                     Int64(step.gather_start),
-                    Int64(step.gather_count if step.filter else 0),
+                    Int64(
+                        step.gather_count if step.filter or step.order else 0
+                    ),
                 ]
             )
         for output in plan.outputs:

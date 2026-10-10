@@ -515,6 +515,12 @@ def _native_fixed_logical(dtype: DataType) raises:
             filtered.collect(engine="cpu")
         )
     )
+    var ordered = frame.slice(1, 4).lazy().sort("x")
+    assert_true(
+        ordered.collect(accelerator=runtime).equals(
+            ordered.collect(engine="cpu")
+        )
+    )
     for n in range(6):
         var reduced = (
             frame.slice(0, n)
@@ -595,6 +601,12 @@ def _native_integer_row_ops[D: DType]() raises:
     var runtime = MetalRuntime()
     assert_true(
         query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
+    var ordered = frame.lazy().sort("x", descending=True)
+    assert_true(
+        ordered.collect(accelerator=runtime).equals(
+            ordered.collect(engine="cpu")
+        )
     )
 
 
@@ -739,6 +751,99 @@ def test_native_float_value_operations_and_subnormal_comparisons() raises:
     )
     with assert_raises(contains="Float64 intermediate"):
         _ = frame.lazy().select(col("x").round(2)).collect(accelerator=runtime)
+
+
+def test_native_stable_multikey_sort_between_resident_steps() raises:
+    if not metal_installed():
+        return
+    var xs = List[Float32]()
+    var us = List[UInt64]()
+    var bs = List[Bool]()
+    var ids = List[Int32]()
+    var xv = List[Bool]()
+    var uv = List[Bool]()
+    var bv = List[Bool]()
+    for i in range(521):
+        var x = Float32(i % 23 - 11)
+        if i % 29 == 0:
+            x = bitcast[DType.float32](UInt32(0x7FC00000))
+        elif i % 31 == 0:
+            x = bitcast[DType.float32](UInt32(1))
+        elif i % 37 == 0:
+            x = -0.0
+        xs.append(x)
+        us.append(UInt64.MAX - UInt64(i % 17))
+        bs.append(i % 2 == 0)
+        ids.append(Int32(i))
+        xv.append(i % 7 != 3)
+        uv.append(i % 13 != 2)
+        bv.append(i % 11 != 4)
+    var frame = DataFrame(
+        [
+            Series("x", Column[Float32](xs^, xv)),
+            Series("u", Column[UInt64](us^, uv)),
+            Series("b", Column[Bool](bs^, bv)),
+            Series("id", Column[Int32](ids^)),
+        ]
+    )
+    var runtime = MetalRuntime()
+    for descending in [False, True]:
+        for nulls_last in [False, True]:
+            var query = (
+                frame.slice(3, 515)
+                .lazy()
+                .sort(
+                    ["b", "x", "u"],
+                    descending=[descending, not descending, descending],
+                    nulls_last=[nulls_last, not nulls_last, nulls_last],
+                )
+                .select_exprs([col("id"), col("x"), col("u"), col("b")])
+            )
+            var measured = query.profile(accelerator=runtime)
+            assert_true(measured[0].equals(query.collect(engine="cpu")))
+            assert_equal(
+                measured[1].column("synchronizations").int64()._get(0), 1
+            )
+    var resident = (
+        frame.lazy()
+        .with_columns(col("x").abs().alias("key"))
+        .filter(col("id") >= 5)
+        .sort(
+            ["key", "u"],
+            descending=[False, True],
+            nulls_last=[True, False],
+        )
+        .filter(col("id") < 511)
+        .sort("u")
+        .select_exprs([col("id"), col("key"), col("u")])
+    )
+    assert_true(
+        resident.collect(accelerator=runtime).equals(
+            resident.collect(engine="cpu")
+        )
+    )
+    var terminal = resident.select_exprs(
+        [col("id"), (col("id") + lit(Int32(1))).alias("next")]
+    )
+    assert_true(
+        terminal.collect(accelerator=runtime).equals(
+            terminal.collect(engine="cpu")
+        )
+    )
+    var top = frame.lazy().sort("x", descending=True).select(col("id")).head(9)
+    assert_true(
+        top.collect(accelerator=runtime).equals(top.collect(engine="cpu"))
+    )
+    var empty = frame.slice(0, 0).lazy().sort("u").select(col("id"))
+    assert_true(
+        empty.collect(accelerator=runtime).equals(empty.collect(engine="cpu"))
+    )
+    var all_filtered = frame.lazy().filter(col("id") < 0).sort("x")
+    assert_true(
+        all_filtered.collect(accelerator=runtime).equals(
+            all_filtered.collect(engine="cpu")
+        )
+    )
 
 
 def main() raises:

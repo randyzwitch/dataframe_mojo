@@ -138,8 +138,16 @@ struct Layout {
     for (int64_t i = 0; i < r.input_count; ++i)
       keep(i);
     for (int64_t first = 0; first < r.step_count;) {
+      if (r.steps[first].filter == 2) {
+        ends.push_back(first);
+        for (int64_t j = 0; j < r.steps[first].nodes; ++j)
+          keep(r.code[4 * (r.steps[first].start + j) + 1]);
+        ++first;
+        continue;
+      }
       int64_t end = first;
-      while (end + 1 < r.step_count && !r.steps[end].filter)
+      while (end + 1 < r.step_count && !r.steps[end].filter &&
+             r.steps[end + 1].filter != 2)
         ++end;
       ends.push_back(end);
       std::array<bool, 64> local{};
@@ -162,7 +170,7 @@ struct Layout {
 struct Shape {
   int64_t cap, packed, blocks, bitmap, matrix, validity, literal, outputBits,
       partial;
-  bool filter;
+  bool filter, order;
 };
 Shape validate(const DFMRequest &r, bool storage = false) {
   if (r.abi_version != DFM_ABI_VERSION)
@@ -219,12 +227,32 @@ Shape validate(const DFMRequest &r, bool storage = false) {
   for (int64_t i = 0; i < r.step_count; ++i) {
     const auto &v = r.steps[i];
     if (v.start < 0 || v.nodes < 1 || v.nodes > 64 ||
-        add(v.start, v.nodes) > r.literal_count || v.slot < r.input_count ||
+        add(v.start, v.nodes) > r.literal_count ||
+        (v.filter != 2 && v.slot < r.input_count) || v.slot < 0 ||
         v.slot >= r.slots || v.gather_start < 0 || v.gather_count < 0 ||
         add(v.gather_start, v.gather_count) > r.gather_count ||
-        (v.filter != 0 && v.filter != 1))
+        (v.filter < 0 || v.filter > 2))
       fail("Invalid Metal expression step");
-    s.filter |= v.filter;
+    if (v.filter == 2) {
+      if (!typed(r) || v.slot != 0)
+        fail("Metal sort requires typed storage");
+      for (int64_t j = 0; j < v.nodes; ++j) {
+        auto c = r.code + 4 * (v.start + j);
+        if (c[0] != DFM_SORT_KEY || c[1] < 0 || c[1] >= r.slots ||
+            !defined[c[1]] || c[2] < 0 || c[2] > 1 || c[3] < 0 || c[3] > 1)
+          fail("Invalid Metal sort key descriptor");
+        if (r.node_types[v.start + j] != slotType(r, c[1]))
+          fail("Metal sort key dtype mismatch");
+      }
+      for (int64_t j = 0; j < v.gather_count; ++j) {
+        auto slot = r.gathers[v.gather_start + j];
+        if (slot < 0 || slot >= r.slots || !defined[slot])
+          fail("Metal sort gathers an undefined slot");
+      }
+      s.order = true;
+      continue;
+    }
+    s.filter |= v.filter == 1;
     for (int64_t j = 0; j < v.nodes; ++j) {
       const auto *c = r.code + 4 * (v.start + j);
       bool binary = binaryOp(c[0]);
@@ -363,11 +391,11 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
   };
   account(s.matrix);
   account(s.validity);
-  if (s.filter) {
+  if (s.filter || s.order) {
     account(s.matrix);
     account(s.validity);
     account(mul(s.cap, 4));
-    account(mul(s.blocks, 4));
+    account(mul(s.order ? s.cap : s.blocks, 4));
   }
   account(s.bitmap);
   account(s.literal);
@@ -401,7 +429,11 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
   m.launches = r.input_count + layout.ends.size() + (r.reductions ? 2 : 1);
   for (int64_t i = 0; i < r.step_count; ++i)
     if (r.steps[i].filter) {
-      m.launches += 2;
+      if (r.steps[i].filter == 1)
+        m.launches += 2;
+      else
+        for (int64_t stride = 1; stride < s.cap; stride *= 2)
+          ++m.launches;
       for (int64_t j = 0; j < r.steps[i].gather_count; ++j)
         m.launches +=
             layout.physical[r.gathers[r.steps[i].gather_start + j]] >= 0;
@@ -698,6 +730,14 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
  if(o.kind==11){sum=count;count=1;}if(o.kind==90){sum=meta.x;count=1;}
  result[column]={sum,count};
 }
+kernel void order_init(device uint *index[[buffer(0)]],constant uint4 &meta[[buffer(1)]],uint row[[thread_position_in_grid]]){
+ if(row<meta.x)index[row]=row;
+}
+kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
+ device T *y[[buffer(2)]],device uchar *w[[buffer(3)]],device const uint *index[[buffer(4)]],
+ constant uint4 &meta[[buffer(5)]],constant ulong &slot[[buffer(6)]],uint row[[thread_position_in_grid]]){
+ if(row>=meta.x)return;ulong target=slot*meta.z+row,source=slot*meta.z+index[row];y[target]=x[source];w[target]=v[source];
+}
 )MSL";
   if (typed(r))
     for (int64_t i = 0; i < r.input_count; ++i) {
@@ -717,8 +757,53 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
                 ";";
       text += "v[at]=p.w==ulong(-1)?1:uchar((bits[p.w+bit/8]>>(bit%8))&1); }\n";
     }
+  for (int64_t i = 0; i < r.step_count; ++i)
+    if (r.steps[i].filter == 2) {
+      auto &step = r.steps[i];
+      auto name = std::to_string(i);
+      text += "bool order_less" + name +
+              "(uint a,uint b,device const T *x,device const uchar *v,constant "
+              "uint4 &meta){";
+      for (int64_t j = 0; j < step.nodes; ++j) {
+        auto key = r.code + 4 * (step.start + j);
+        auto slot = std::to_string(layout.physical[key[1]]) + "UL*meta.z";
+        text += "{ulong ai=" + slot + "+a,bi=" + slot +
+                "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return " +
+                std::string(key[3] ? "av" : "!av") + ";if(av){";
+        if (slotType(r, key[1]) == DFM_FLOAT32)
+          text += "bool "
+                  "an=(uint(x[ai])&0x7fffffffU)>0x7f800000U,bn=(uint(x[bi])&"
+                  "0x7fffffffU)>0x7f800000U;if(an!=bn)return !an;";
+        auto type = std::to_string(slotType(r, key[1])),
+             maximum = std::string(key[2] ? "true" : "false");
+        text += "if(extrema_better(ulong(x[ai]),ulong(x[bi])," + type + "," +
+                maximum +
+                "))return true;if(extrema_better(ulong(x[bi]),ulong(x[ai])," +
+                type + "," + maximum + "))return false;}}";
+      }
+      text += "return a<b;}\n";
+      text +=
+          "kernel void order_merge" + name +
+          "(device const T *x[[buffer(0)]],device const uchar "
+          "*v[[buffer(1)]],device const uint *index[[buffer(2)]],device uint "
+          "*target[[buffer(3)]],constant uint4 &meta[[buffer(4)]],constant "
+          "uint &stride[[buffer(5)]],uint "
+          "row[[thread_position_in_grid]]){if(row>=meta.x)return;uint "
+          "base=(row/"
+          "(2*stride))*(2*stride),middle=min(base+stride,meta.x),end=min(base+"
+          "2*stride,meta.x);bool left=row<middle;uint "
+          "first=left?middle:base,lo=first,hi=left?end:middle,own=index[row];"
+          "while(lo<hi){uint mid=(lo+hi)/2;if(order_less" +
+          name +
+          "(index[mid],own,x,v,meta))lo=mid+1;else "
+          "hi=mid;}target[base+(row-(left?base:middle))+(lo-first)]=own;}\n";
+    }
   int64_t first = 0;
   for (auto end : layout.ends) {
+    if (r.steps[end].filter == 2) {
+      first = end + 1;
+      continue;
+    }
     std::array<bool, 64> local{};
     text += "kernel void project" + std::to_string(end) +
             "(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],device "
@@ -1034,7 +1119,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   for (int64_t bytes :
        {shape.matrix, shape.validity, shape.bitmap, shape.literal,
         shape.outputBits, shape.partial, mul(r.output_count, 32),
-        mul(shape.cap, 4), mul(shape.blocks, 4), int64_t(16)})
+        mul(shape.cap, 4), mul(shape.order ? shape.cap : shape.blocks, 4),
+        int64_t(16)})
     if (uint64_t(bytes) > c.device.maxBufferLength)
       fail("Metal request exceeds maximum buffer length before submission");
   auto src = source(r);
@@ -1046,11 +1132,11 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   Buffers b{c, {}};
   auto x = b.make(shape.matrix), v = b.make(shape.validity);
   id<MTLBuffer> y = nil, w = nil, rank = nil, blocks = nil;
-  if (shape.filter) {
+  if (shape.filter || shape.order) {
     y = b.make(shape.matrix);
     w = b.make(shape.validity);
     rank = b.make(mul(shape.cap, 4));
-    blocks = b.make(mul(shape.blocks, 4));
+    blocks = b.make(mul(shape.order ? shape.cap : shape.blocks, 4));
   }
   auto bitmap = b.make(shape.bitmap), literal = b.make(shape.literal),
        bits = b.make(shape.outputBits), partial = b.make(shape.partial);
@@ -1177,6 +1263,40 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   }
   for (auto i : layout.ends) {
     auto &step = r.steps[i];
+    if (step.filter == 2) {
+      auto orderA = rank, orderB = blocks;
+      buffer(0, orderA);
+      buffer(1, meta);
+      dispatch("order_init", shape.cap);
+      for (int64_t stride = 1; stride < shape.cap; stride *= 2) {
+        uint32_t span = stride;
+        buffer(0, x);
+        buffer(1, v);
+        buffer(2, orderA);
+        buffer(3, orderB);
+        buffer(4, meta);
+        bytes(5, &span, 4);
+        dispatch("order_merge" + std::to_string(i), shape.cap);
+        std::swap(orderA, orderB);
+      }
+      for (int64_t j = 0; j < step.gather_count; ++j) {
+        auto physical = layout.physical[r.gathers[step.gather_start + j]];
+        if (physical < 0)
+          continue;
+        uint64_t slot = physical;
+        buffer(0, x);
+        buffer(1, v);
+        buffer(2, y);
+        buffer(3, w);
+        buffer(4, orderA);
+        buffer(5, meta);
+        bytes(6, &slot, 8);
+        dispatch("order_gather", shape.cap);
+      }
+      std::swap(x, y);
+      std::swap(v, w);
+      continue;
+    }
     buffer(0, x);
     buffer(1, v);
     buffer(2, literal);

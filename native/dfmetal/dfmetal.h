@@ -68,6 +68,7 @@ enum DFMOp {
   DFM_MIN = 80,
   DFM_MAX = 81,
   DFM_LEN = 90,
+  DFM_SORT_KEY = 200,
 };
 
 typedef struct DFMInput {
@@ -82,7 +83,7 @@ typedef struct DFMStep {
   int64_t start;
   int64_t nodes;
   int64_t slot;
-  int64_t filter;
+  int64_t filter; // 0 projection, 1 stable filter, 2 stable sort.
   int64_t gather_start;
   int64_t gather_count;
 } DFMStep;

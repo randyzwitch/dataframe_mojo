@@ -66,7 +66,13 @@ cast, or precision errors. A null predicate selects the otherwise branch.
 
 Projection,
 with-columns, drop, stable filtering, and final head remain resident until the
-result is copied to ordinary CPU columns. Checked integer arithmetic currently
+result is copied to ordinary CPU columns. Stable sorting supports multiple keys
+with separate direction and null placement for each key. NaNs follow numeric
+values in either direction; equal keys retain their input order. Sorting can
+appear between projections and filters without materializing CPU columns.
+The GPU sorts row indices with a parallel merge sort and gathers the live
+columns. Preflight includes both index buffers and both value matrices.
+Checked integer arithmetic currently
 requires terminal projections without head, matching the shared planner's
 observable-overflow boundary.
 
