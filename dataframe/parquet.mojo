@@ -650,7 +650,7 @@ def _collect_stream(
         if codes:
             frames = _strings_with_codes(frames^)
         # The backend emits a schema-bearing empty batch for empty inputs.
-        var result = concat(frames)
+        var result = _narrow_decimals(concat(frames))
         _release_stream(stream)
         return result^
     except e:
@@ -854,3 +854,88 @@ struct _ParquetBatches(Movable):
             _release_imported(array, schema)
             _release_stream(self.stream)
             raise e^
+
+
+struct _NarrowDecimalJob(Job):
+    """One chunk of a decimal128 column rewritten at the smallest width
+    that holds its declared precision: decimal32 up to 9 digits,
+    decimal64 up to 18."""
+
+    var source: Series
+    var result: Series
+
+    def __init__(out self, source: Series):
+        self.source = source.copy()
+        self.result = source.copy()
+
+    def run(mut self) raises:
+        ref column = self.source._data[Column[Int128]]
+        var n = len(column)
+        var source = column._ptr()
+        var dtype = self.source.dtype()
+        if dtype.precision() <= 9:
+            var narrow = List[Int32](unsafe_uninit_length=n)
+            var out32 = narrow.unsafe_ptr()
+            for i in range(n):
+                out32[unsafe_offset=i] = Int32(source[unsafe_offset=i])
+            self.result = Series(
+                self.source.name(),
+                Column[Int32](values=narrow^, bits=column._bits[].copy()),
+            ).with_dtype(DataType.decimal(dtype.precision(), dtype.scale(), 32))
+            return
+        var values = List[Int64](unsafe_uninit_length=n)
+        var out = values.unsafe_ptr()
+        for i in range(n):
+            out[unsafe_offset=i] = Int64(source[unsafe_offset=i])
+        self.result = Series(
+            self.source.name(),
+            Column[Int64](values=values^, bits=column._bits[].copy()),
+        ).with_dtype(DataType.decimal(dtype.precision(), dtype.scale(), 64))
+
+
+def _narrow_decimals(frame: DataFrame) raises -> DataFrame:
+    """Decimal columns at the smallest width that holds their declared
+    precision (decimal32 up to 9 digits, decimal64 up to 18), as the
+    Arrow C++ reader's smallest-decimal option loads them (#472): the
+    Arrow C interface carries a Parquet DECIMAL(p, s) as decimal128
+    whatever its precision, and at 128 bits every kernel takes its
+    per-row path (PDS-H decimal q6: 32 ms against 6 for the DOUBLE
+    variant), while at 64 bits the typed compare and arithmetic kernels
+    apply, as DuckDB stores a DECIMAL of up to 18 digits in an int64.
+    One chunk a job."""
+    var jobs = List[_NarrowDecimalJob]()
+    var at = List[Int]()
+    var chunk_of = List[Int]()
+    for c in range(frame.width()):
+        ref column = frame._columns[c]
+        var dtype = column.dtype()
+        if (
+            not dtype.is_decimal()
+            or dtype.decimal_width() != 128
+            or dtype.precision() > 18
+        ):
+            continue
+        var chunks = column.chunks()
+        for k in range(len(chunks)):
+            if chunks[k]._data.isa[Column[Int128]]():
+                jobs.append(_NarrowDecimalJob(chunks[k]))
+                at.append(c)
+                chunk_of.append(k)
+    if len(jobs) == 0:
+        return frame.copy()
+    if len(jobs) == 1:
+        jobs[0].run()
+    else:
+        run_jobs(jobs)
+    var columns = frame._columns.copy()
+    var j = 0
+    while j < len(jobs):
+        var c = at[j]
+        var pieces = List[Series]()
+        while j < len(jobs) and at[j] == c:
+            pieces.append(jobs[j].result.copy())
+            j += 1
+        columns[c] = pieces[0].copy() if len(
+            pieces
+        ) == 1 else Series._from_chunks(pieces^)
+    return DataFrame(columns^, height=frame.height())
