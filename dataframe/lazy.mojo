@@ -2229,6 +2229,35 @@ struct LazyFrame(Copyable):
             return None
         operations.reverse()
         operation_nodes.reverse()
+        # Late materialization of group keys a join gathers from its build
+        # side (a dimension's names): each such key's build column becomes
+        # its values' codes, encoded once over the build frame, so the
+        # probe gathers an integer instead of a string for every joined
+        # row and the sink groups by integers; the result's codes become
+        # the values again for its few groups. TPC-DS q99 spent a third of
+        # its time gathering warehouse, ship mode and call center names
+        # into 287K joined rows that formed 90 groups.
+        var late_names = List[String]()
+        var late_builds = List[Int]()
+        if (
+            len(keys) > 0
+            and len(expressions) > 0
+            and len(joins) > 0
+            and not ordered
+            and top < 0
+            and self._nodes[cursor].kind == SCAN_FRAME
+        ):
+            var source_columns = self._frames[
+                self._nodes[cursor].offset
+            ].columns()
+            for name in keys:
+                var b = _late_key_build(
+                    name, source_columns, joins, operations, expressions
+                )
+                if b < 0:
+                    continue
+                late_names.append(name)
+                late_builds.append(b)
         # Row-local steps and a reduction over an in-memory frame run as a
         # thread-owned pipeline (#538), grouped or not, unless the
         # reduction counts distinct values (per-group sets, which the
@@ -2269,6 +2298,9 @@ struct LazyFrame(Copyable):
             for name in used:
                 if not fixed:
                     break
+                if name in late_names:
+                    # Grouped by codes if the plan inserts (below).
+                    continue
                 var dtype = DataType.INT64
                 if name in source_frame.columns():
                     dtype = source_frame.column(name).dtype()
@@ -2295,9 +2327,51 @@ struct LazyFrame(Copyable):
                 # Sampled only when the mode is still open: the sample
                 # takes and encodes 4,096 key rows (a millisecond on
                 # strings, an eighth of ClickBench q38).
-                var sampled = self._sampled_groups(keys, frame)
                 var sample = min(source_frame.height(), 4096)
-                insert = sampled >= 0 and 4 * sampled <= sample
+                # A key from a join's build side is not in the source to
+                # sample (and the source's key columns are not taken).
+                var sampled = -1 if len(late_names) > 0 else (
+                    self._sampled_groups(keys, frame)
+                )
+                if sampled >= 0:
+                    insert = 4 * sampled <= sample
+                else:
+                    # The groups' bound from where each key is stored,
+                    # held to the sampled rule's density: at most a
+                    # quarter of the sample's rows.
+                    var bound = _key_group_bound(
+                        keys, source_frame, joins, sample // 4
+                    )
+                    insert = bound >= 0
+        if len(late_names) > 0 and not (piped and insert):
+            # Coded keys pay only in the insert tables: collecting them
+            # for the finish's group-by ran slower than the eager route
+            # their strings take (TPC-DS q45 5.9 -> 13.4 ms, q24 40 -> 81),
+            # so those plans take the strings' route, as before.
+            if len(operations) > 0:
+                piped = False
+            late_names = List[String]()
+        var late_values = List[Series]()
+        var late_rows = List[List[Int]]()
+        for k in range(len(late_names)):
+            ref name = late_names[k]
+            var b = late_builds[k]
+            var values = joins[b].column(name).copy()
+            var columns: List[Series] = [values.copy()]
+            var groups = encode_rows(columns, nulls_equal=True)
+            # A null value gets a null code: a left join's missing build
+            # row is null too, and both are one null group.
+            var codes = List[Int64](capacity=len(groups.ids))
+            var valid = List[Bool](capacity=len(groups.ids))
+            var nulls = values.null_count() > 0
+            for r in range(len(groups.ids)):
+                codes.append(Int64(groups.ids[r]))
+                valid.append(not nulls or not values.get(r).is_null())
+            joins[b] = joins[b].with_column(
+                Series(name, Column[Int64](codes^, valid^))
+            )
+            late_values.append(values^)
+            late_rows.append(groups.representatives.copy())
         # Grouped aggregations over an in-memory frame, filtered or
         # projected at most: whether the eager group-by is faster.
         var eager = False
@@ -2573,6 +2647,21 @@ struct LazyFrame(Copyable):
             )
             if top > 0:
                 piped_result = piped_result.slice(skip, limit)
+            for i in range(len(late_names)):
+                # The groups' codes back to their values (a code is a
+                # representative build row; a left join's missing row is a
+                # null code and stays null).
+                var coded = piped_result.column(late_names[i]).copy()
+                var rows = List[Int](capacity=len(coded))
+                for r in range(len(coded)):
+                    var cell = coded.get(r)
+                    if cell.is_null():
+                        rows.append(-1)
+                    else:
+                        rows.append(late_rows[i][Int(cell.int64())])
+                piped_result = piped_result.with_column(
+                    late_values[i].take_or_null(rows).renamed(late_names[i])
+                )
             if counting:
                 self._record(cursor, "pipeline", 0, piped_counts[0])
                 var into_terminal = piped_counts[0]
@@ -4944,6 +5033,135 @@ def _order_sensitive(expressions: List[Expr]) -> Bool:
             if node.op in [FIRST, LAST, ARG_MIN, ARG_MAX]:
                 return True
     return False
+
+
+def _key_group_bound(
+    keys: List[String], source: DataFrame, builds: List[DataFrame], limit: Int
+) raises -> Int:
+    """An upper bound on the groups of `keys`, or -1 once it passes `limit`
+    or when a key is in no frame (made by a step). Keys held by one frame
+    count together, as that frame's distinct key rows; the frames' counts
+    multiply. A frame's height bounds its count for free, so frames are
+    taken smallest first and sampled (evenly spaced rows, a sample with
+    every row distinct standing for the whole height) only where the
+    height alone would pass the limit."""
+    # Each key's holder: -2 the source, else a build's index.
+    var holders = List[Int]()
+    for name in keys:
+        var holder = -1
+        if name in source.columns():
+            holder = -2
+        else:
+            for b in range(len(builds)):
+                if name in builds[b].columns():
+                    holder = b
+                    break
+        if holder == -1:
+            return -1
+        holders.append(holder)
+    var frames = List[Int]()
+    for h in holders:
+        if h not in frames:
+            frames.append(h)
+    # Smallest frame first.
+    var heights = List[Int]()
+    for h in frames:
+        heights.append(source.height() if h == -2 else builds[h].height())
+    for i in range(1, len(frames)):
+        var j = i
+        while j > 0 and heights[j - 1] > heights[j]:
+            heights.swap_elements(j - 1, j)
+            frames.swap_elements(j - 1, j)
+            j -= 1
+    var bound = 1
+    for f in range(len(frames)):
+        var height = heights[f]
+        var count = max(height, 1)
+        if bound * count > limit:
+            # Only whether this frame's count passes what is left of the
+            # limit matters, so the sample is twice that remainder: a
+            # sample with every row distinct ends the bound (q46's three
+            # source keys over 2.9M rows: six rows, not 4,096, whose
+            # strided reads took 1.3 ms).
+            var left = limit // bound
+            var sample = min(height, 4096, 2 * (left + 1))
+            var rows = List[Int](capacity=sample)
+            for k in range(sample):
+                rows.append(k * height // sample)
+            var picked = List[Series]()
+            for i in range(len(keys)):
+                if holders[i] != frames[f]:
+                    continue
+                if frames[f] == -2:
+                    picked.append(source.column(keys[i]).take(rows))
+                else:
+                    picked.append(builds[frames[f]].column(keys[i]).take(rows))
+            var distinct = encode_rows(picked, nulls_equal=True).count()
+            count = height if distinct == sample else max(distinct, 1)
+        bound *= count
+        if bound > limit:
+            return -1
+    return bound
+
+
+def _late_key_build(
+    name: String,
+    source_columns: List[String],
+    builds: List[DataFrame],
+    operations: List[PlanNode],
+    expressions: List[Expr],
+) raises -> Int:
+    """The build frame a group key `name` comes from when the key can be
+    grouped by its codes instead of its values: a String column of exactly
+    one inner or left join's build side, not in the source, not a join key,
+    read by no step or reduction (a plain pass-through select aside) and
+    made by none. -1 otherwise."""
+    if name in source_columns:
+        return -1
+    var holder = -1
+    for b in range(len(builds)):
+        if name in builds[b].columns():
+            if holder >= 0:
+                return -1
+            holder = b
+    if holder < 0:
+        return -1
+    if builds[holder].column(name).dtype() != DataType.STRING:
+        return -1
+    for expression in expressions:
+        var reads = _references(expression)
+        if not reads or name in reads.value():
+            return -1
+    for operation in operations:
+        if operation.kind == JOIN:
+            if name in operation.names:
+                return -1
+            if operation.offset == holder:
+                if operation.how != JOIN_INNER and operation.how != JOIN_LEFT:
+                    return -1
+                if name in operation.right_keys:
+                    return -1
+            continue
+        if operation.kind == DROP:
+            if name in operation.names:
+                return -1
+            continue
+        for e in operation.exprs:
+            # A select passing the column through unchanged is the one
+            # step that may read or name it.
+            var passes = (
+                operation.kind == SELECT
+                and len(e._nodes) == 1
+                and e._nodes[0].op == COL
+                and e._nodes[0].text == name
+                and e._name == name
+            )
+            if passes:
+                continue
+            var reads = _references(e)
+            if not reads or name in reads.value() or e._name == name:
+                return -1
+    return holder
 
 
 def _counts_distinct(expressions: List[Expr]) -> Bool:
