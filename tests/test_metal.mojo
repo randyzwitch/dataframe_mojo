@@ -4,6 +4,7 @@ from std.memory import bitcast
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit, when
 from dataframe.dtype import DataType
+from dataframe.expr import Expr
 from dataframe.metal import MetalRuntime, metal_installed
 
 
@@ -844,6 +845,182 @@ def test_native_stable_multikey_sort_between_resident_steps() raises:
             all_filtered.collect(engine="cpu")
         )
     )
+
+
+def _native_groups[D: DType]() raises:
+    var values = List[Scalar[D]]()
+    var keys = List[Int32]()
+    var valid = List[Bool]()
+    for i in range(521):
+        values.append(Scalar[D](i % 13))
+        keys.append(Int32((i * 7) % 9))
+        valid.append(i % 11 != 2)
+    var frame = DataFrame(
+        [
+            Series("key", Column[Int32](keys^, valid)),
+            Series("x", Column[Scalar[D]](values^, valid)),
+        ]
+    )
+    var runtime = MetalRuntime()
+    var expressions: List[Expr] = [
+        col("x").min().alias("lo"),
+        col("x").max().alias("hi"),
+        col("x").count().alias("count"),
+        col("x").len().alias("len"),
+    ]
+    for ordered in [False, True]:
+        var query = (
+            frame.slice(5, 513)
+            .lazy()
+            .group_by("key", maintain_order=ordered)
+            .agg(expressions)
+        )
+        if not ordered:
+            query = query.sort("key")
+        var measured = query.profile(accelerator=runtime)
+        assert_true(measured[0].equals(query.collect(engine="cpu")))
+        assert_equal(measured[1].column("synchronizations").int64()._get(0), 1)
+    var empty = frame.slice(0, 0).lazy().group_by("key").agg(expressions)
+    assert_true(
+        empty.collect(accelerator=runtime).equals(empty.collect(engine="cpu"))
+    )
+
+
+def test_native_grouped_reductions() raises:
+    if not metal_installed():
+        return
+    _native_groups[DType.float32]()
+    _native_groups[DType.int8]()
+    _native_groups[DType.int16]()
+    _native_groups[DType.int32]()
+    _native_groups[DType.int64]()
+    _native_groups[DType.uint8]()
+    _native_groups[DType.uint16]()
+    _native_groups[DType.uint32]()
+    _native_groups[DType.uint64]()
+    var runtime = MetalRuntime()
+    var nan = bitcast[DType.float32](UInt32(0x7FC00000))
+    var frame = DataFrame(
+        [
+            Series(
+                "key",
+                Column[Float32](
+                    [nan, 1, -0.0, nan, 0.0, 1, nan],
+                    [True, False, True, True, True, True, False],
+                ),
+            ),
+            Series(
+                "b",
+                Column[Bool](
+                    [True, True, False, False, True, False, True],
+                    [True, False, True, True, True, True, False],
+                ),
+            ),
+            Series(
+                "x",
+                Column[Int16](
+                    [10, 20, 30, 40, 50, 60, 70],
+                    [True, True, False, True, True, True, False],
+                ),
+            ),
+            Series("date", Column[Int64]([1, 2, 3, 4, 5, 6, 7])).with_dtype(
+                DataType.DATE
+            ),
+            Series(
+                "decimal", Column[Int32]([100, 200, 300, 400, 500, 600, 700])
+            ).with_dtype(DataType.decimal(9, 2, 32)),
+        ]
+    )
+    var query = (
+        frame.lazy()
+        .group_by(["key", "b"], maintain_order=True)
+        .agg(
+            [
+                col("x").sum().alias("sum"),
+                col("b").count().alias("bool_count"),
+                col("date").min().alias("date"),
+                col("decimal").max().alias("decimal"),
+            ]
+        )
+    )
+    assert_true(
+        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
+    )
+    var pipeline = (
+        query.filter(col("sum") > 0)
+        .sort("sum")
+        .select_exprs([col("sum"), col("date"), col("decimal")])
+        .head(3)
+    )
+    assert_true(
+        pipeline.collect(accelerator=runtime).equals(
+            pipeline.collect(engine="cpu")
+        )
+    )
+    var twice = query.group_by("date", maintain_order=True).agg(
+        col("sum").max()
+    )
+    assert_true(
+        twice.collect(accelerator=runtime).equals(twice.collect(engine="cpu"))
+    )
+    var final_reduction = query.select_exprs(
+        [
+            col("sum").min().alias("min_sum"),
+            col("decimal").max().alias("max_decimal"),
+        ]
+    )
+    assert_true(
+        final_reduction.collect(accelerator=runtime).equals(
+            final_reduction.collect(engine="cpu")
+        )
+    )
+    var empty_global = (
+        frame.slice(0, 0)
+        .lazy()
+        .group_by(List[String]())
+        .agg(
+            [
+                col("x").sum().alias("sum"),
+                col("x").len().alias("len"),
+                col("x").min().alias("min"),
+            ]
+        )
+    )
+    with assert_raises(contains="requires at least one key"):
+        _ = empty_global.collect(accelerator=runtime)
+    with assert_raises(contains="requires at least one key"):
+        _ = empty_global.collect(engine="cpu")
+    var keys_only = (
+        frame.lazy()
+        .group_by(["key", "b"], maintain_order=True)
+        .agg(List[Expr]())
+    )
+    assert_true(
+        keys_only.collect(accelerator=runtime).equals(
+            keys_only.collect(engine="cpu")
+        )
+    )
+    var global_query = frame.lazy().select(col("b").count())
+    assert_true(
+        global_query.collect(accelerator=runtime).equals(
+            global_query.collect(engine="cpu")
+        )
+    )
+    var overflow = (
+        DataFrame(
+            [
+                Series("key", Column[Int32]([0, 0])),
+                Series("x", Column[Int32]([Int32.MAX, 1])),
+            ]
+        )
+        .lazy()
+        .group_by("key")
+        .agg(col("x").sum())
+    )
+    with assert_raises(contains="overflow"):
+        _ = overflow.collect(accelerator=runtime)
+    with assert_raises(contains="overflow"):
+        _ = overflow.collect(engine="cpu")
 
 
 def main() raises:
