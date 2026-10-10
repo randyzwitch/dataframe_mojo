@@ -316,5 +316,39 @@ def test_extrema_reductions_are_backend_opt_in() raises:
         _ = lower_rows(wide.lazy().select(col("x").min()), native)
 
 
+def test_fixed_logical_types_are_backend_opt_in() raises:
+    var date = DataFrame(
+        [Series("x", Column[Int64]([0, 1])).with_dtype(DataType.DATE)]
+    )
+    with assert_raises(contains="row input dtype"):
+        _ = lower_rows(date.lazy().select(col("x")))
+    var native = RowCapabilities(
+        "native",
+        float64=False,
+        wide_integer=False,
+        mixed_types=True,
+        fixed_logical=True,
+        extrema=True,
+    )
+    var plan = lower_rows(date.lazy().select(col("x")), native)
+    assert_equal(plan.outputs[0].dtype, DataType.DATE)
+    var decimal = DataFrame(
+        [
+            Series("x", Column[Int32]([100, 200])).with_dtype(
+                DataType.decimal(9, 2, 32)
+            )
+        ]
+    )
+    var minimum = lower_rows(decimal.lazy().select(col("x").min()), native)
+    assert_equal(minimum.outputs[0].dtype, DataType.decimal(9, 2, 32))
+    with assert_raises(contains="Decimal128 accumulation"):
+        _ = lower_rows(decimal.lazy().select(col("x").sum()), native)
+    with assert_raises(contains="logical arithmetic and casts"):
+        _ = lower_rows(date.lazy().select(col("x") - col("x")), native)
+    var wide = DataFrame([Series.full_null("x", DataType.decimal(38, 2), 1)])
+    with assert_raises(contains="Decimal128 requires CPU"):
+        _ = lower_rows(wide.lazy().select(col("x")), native)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

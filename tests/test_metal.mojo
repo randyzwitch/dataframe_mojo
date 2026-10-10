@@ -3,6 +3,7 @@ from std.memory import bitcast
 
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, Series, col, lit
+from dataframe.dtype import DataType
 from dataframe.metal import MetalRuntime, metal_installed
 
 
@@ -466,6 +467,102 @@ def test_native_extrema_all_supported_types() raises:
     assert_true(
         query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
     )
+
+
+def _native_fixed_logical(dtype: DataType) raises:
+    var x = Series(
+        "x",
+        Column[Int64](
+            [-200, -100, 0, 100, 200], [True, False, True, True, False]
+        ),
+    )
+    var y = Series("y", Column[Int64]([200, 100, 1, 100, -200]))
+    if dtype.physical() == DataType.INT32:
+        x = Series(
+            "x",
+            Column[Int32](
+                [-200, -100, 0, 100, 200], [True, False, True, True, False]
+            ),
+        )
+        y = Series("y", Column[Int32]([200, 100, 1, 100, -200]))
+    x = x.with_dtype(dtype)
+    y = y.with_dtype(dtype)
+    var frame = DataFrame(
+        [x^, y^, Series("b", Column[Bool]([True, True, False, True, True]))]
+    )
+    var runtime = MetalRuntime()
+    var projected = (
+        frame.slice(1, 4)
+        .lazy()
+        .select_exprs(
+            [
+                col("x"),
+                col("x").fill_null(col("y")).alias("filled"),
+                col("x").is_null().alias("null"),
+                (col("x") <= col("y")).alias("cmp"),
+            ]
+        )
+    )
+    var result = projected.collect(accelerator=runtime)
+    assert_true(result.equals(projected.collect(engine="cpu")))
+    assert_equal(result.column("x").dtype(), dtype)
+    assert_equal(result.column("filled").dtype(), dtype)
+    var filtered = (
+        frame.lazy().filter(col("b")).select_exprs([col("x"), col("y")]).head(3)
+    )
+    assert_true(
+        filtered.collect(accelerator=runtime).equals(
+            filtered.collect(engine="cpu")
+        )
+    )
+    for n in range(6):
+        var reduced = (
+            frame.slice(0, n)
+            .lazy()
+            .select_exprs(
+                [
+                    col("x").min().alias("lo"),
+                    col("x").max().alias("hi"),
+                    col("x").count().alias("n"),
+                ]
+            )
+        )
+        assert_true(
+            reduced.collect(accelerator=runtime).equals(
+                reduced.collect(engine="cpu")
+            )
+        )
+
+
+def test_native_fixed_logical_types_preserve_metadata() raises:
+    if not metal_installed():
+        return
+    _native_fixed_logical(DataType.DATE)
+    _native_fixed_logical(DataType.TIME)
+    _native_fixed_logical(DataType.datetime("ns"))
+    _native_fixed_logical(DataType.datetime("us", "America/New_York"))
+    _native_fixed_logical(DataType.duration("ms"))
+    _native_fixed_logical(DataType.decimal(9, 2, 32))
+    _native_fixed_logical(DataType.decimal(18, 4, 64))
+    var runtime = MetalRuntime()
+    var frame = DataFrame(
+        [
+            Series("a", Column[Int32]([100])).with_dtype(
+                DataType.decimal(9, 2, 32)
+            ),
+            Series("b", Column[Int32]([100])).with_dtype(
+                DataType.decimal(9, 3, 32)
+            ),
+        ]
+    )
+    with assert_raises(contains="matching scales and storage widths"):
+        _ = (
+            frame.lazy()
+            .select(col("a") == col("b"))
+            .collect(accelerator=runtime)
+        )
+    with assert_raises(contains="Decimal128 accumulation"):
+        _ = frame.lazy().select(col("a").sum()).collect(accelerator=runtime)
 
 
 def main() raises:

@@ -7,9 +7,7 @@ before a provider context or device allocation is created.
 from std.memory import bitcast
 from .capabilities import RowCapabilities
 from dataframe.binding import bind, BoundExpr, ROWS, op_name
-from dataframe.bool_column import BoolColumn
-from dataframe.column import Column
-from dataframe.dtype import DataType, NUMERIC_DTYPES
+from dataframe.dtype import DataType
 from dataframe.expr import (
     Expr,
     COL,
@@ -97,13 +95,7 @@ struct RowPlan(Movable):
 
 
 def _empty(name: String, dtype: DataType) raises -> Series:
-    comptime for i in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[i]
-        if dtype == DataType.of(D):
-            return Series(name, Column[Scalar[D]](List[Scalar[D]]()))
-    if dtype == DataType.BOOL:
-        return Series(name, BoolColumn(List[Bool]()))
-    raise Error("Unsupported row schema dtype")
+    return Series.full_null(name, dtype, 0)
 
 
 def _program(
@@ -160,6 +152,37 @@ def _program(
             capabilities.reject(
                 "plan", "resident expression operation " + op_name(op)
             )
+        var left_type = (
+            bound.dtypes[node.left] if node.left >= 0 else bound.dtypes[i]
+        )
+        var right_type = (
+            bound.dtypes[node.right] if node.right >= 0 else left_type
+        )
+        var logical = (
+            bound.dtypes[i].is_temporal()
+            or bound.dtypes[i].is_decimal()
+            or left_type.is_temporal()
+            or left_type.is_decimal()
+            or right_type.is_temporal()
+            or right_type.is_decimal()
+        )
+        if logical and (
+            op == ADD or op == SUB or op == MUL or op == NEG or op == CAST
+        ):
+            capabilities.reject(
+                "logical", "logical arithmetic and casts require CPU execution"
+            )
+        if left_type.is_decimal() and (
+            op == GT or op == LT or op == GE or op == LE or op == EQ or op == NE
+        ):
+            if (
+                left_type.scale() != right_type.scale()
+                or left_type.physical() != right_type.physical()
+            ):
+                capabilities.reject(
+                    "logical",
+                    "decimal comparisons require matching scales and storage widths",
+                )
         if op == ADD or op == SUB or op == MUL or op == NEG:
             capabilities.require_arithmetic(bound.dtypes[i])
         if (
@@ -370,6 +393,7 @@ def lower_rows(
                 capabilities.require_reduction(
                     bound.dtypes[last.left], reduction, frame.height()
                 )
+                capabilities.require_dtype(result_dtype)
                 min_count = last.min_count
                 count -= 1
                 if last.left != count - 1:

@@ -13,7 +13,6 @@ from std.time import perf_counter_ns
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.rows import RowPlan, lower_rows
 from .arrow import _c_string, _read_c_string
-from .bool_column import BoolColumn
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .execution_report import ExecutionReport
@@ -229,29 +228,30 @@ def _capabilities() -> RowCapabilities:
         mixed_types=True,
         casts=True,
         extrema=True,
+        fixed_logical=True,
     )
 
 
 def _type(dtype: DataType) raises -> Int64:
-    if dtype == DataType.FLOAT32:
+    if dtype.physical() == DataType.FLOAT32:
         return 1
-    if dtype == DataType.INT32:
+    if dtype.physical() == DataType.INT32:
         return 2
-    if dtype == DataType.INT64:
+    if dtype.physical() == DataType.INT64:
         return 3
-    if dtype == DataType.BOOL:
+    if dtype.physical() == DataType.BOOL:
         return 4
-    if dtype == DataType.INT8:
+    if dtype.physical() == DataType.INT8:
         return 5
-    if dtype == DataType.INT16:
+    if dtype.physical() == DataType.INT16:
         return 6
-    if dtype == DataType.UINT8:
+    if dtype.physical() == DataType.UINT8:
         return 7
-    if dtype == DataType.UINT16:
+    if dtype.physical() == DataType.UINT16:
         return 8
-    if dtype == DataType.UINT32:
+    if dtype.physical() == DataType.UINT32:
         return 9
-    if dtype == DataType.UINT64:
+    if dtype.physical() == DataType.UINT64:
         return 10
     raise Error("Metal unsupported dtype")
 
@@ -360,6 +360,7 @@ struct _Descriptors(Movable):
         for dtype in plan.slot_dtypes:
             self.slot_types.append(_type(dtype))
             self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
+            self.typed |= dtype != dtype.physical()
         for i in range(0, len(self.code), 4):
             self.typed |= self.code[i] == CAST
             self.code[i] = _op(Int(self.code[i]))
@@ -392,7 +393,7 @@ struct _Descriptors(Movable):
             else:
                 comptime for k in range(len(NUMERIC_DTYPES)):
                     comptime D = NUMERIC_DTYPES[k]
-                    if column.dtype() == DataType.of(D):
+                    if column.dtype().physical() == DataType.of(D):
                         self.inputs.extend(
                             _input(column.numeric[D](), _type(column.dtype()))
                         )
@@ -456,26 +457,7 @@ struct _Descriptors(Movable):
 def _allocate_output(
     name: String, dtype: DataType, capacity: Int
 ) raises -> Series:
-    var bits = List[UInt8](length=(capacity + 7) // 8, fill=0)
-    if dtype == DataType.BOOL:
-        return Series(
-            name,
-            BoolColumn(
-                values=List[UInt8](length=(capacity + 7) // 8, fill=0),
-                bits=bits^,
-                length=capacity,
-            ),
-        )
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        if dtype == DataType.of(D):
-            return Series(
-                name,
-                Column[Scalar[D]](
-                    values=List[Scalar[D]](length=capacity, fill=0), bits=bits^
-                ),
-            )
-    raise Error("Metal unsupported output dtype")
+    return Series.full_null(name, dtype, capacity)
 
 
 def _output_addresses(column: Series) raises -> Tuple[Int, Int]:
@@ -484,7 +466,7 @@ def _output_addresses(column: Series) raises -> Tuple[Int, Int]:
         return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
-        if column.dtype() == DataType.of(D):
+        if column.dtype().physical() == DataType.of(D):
             var value = column.numeric[D]()
             return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
     raise Error("Metal unsupported output dtype")
