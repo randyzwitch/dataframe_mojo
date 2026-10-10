@@ -15,6 +15,7 @@ struct RowCapabilities(Copyable):
     var float64: Bool
     var wide_integer: Bool
     var int64_arithmetic: Bool
+    var fixed_logical: Bool
     var extrema: Bool
     var casts: Bool
     var mixed_types: Bool
@@ -31,6 +32,7 @@ struct RowCapabilities(Copyable):
         mixed_types: Bool = False,
         casts: Bool = False,
         extrema: Bool = False,
+        fixed_logical: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -40,6 +42,7 @@ struct RowCapabilities(Copyable):
         self.mixed_types = mixed_types
         self.casts = casts
         self.extrema = extrema
+        self.fixed_logical = fixed_logical
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)
@@ -47,6 +50,13 @@ struct RowCapabilities(Copyable):
     def require_dtype(self, dtype: DataType) raises:
         if dtype == DataType.FLOAT64 and not self.float64:
             self.reject("dtype", "Float64 requires CPU execution")
+        if self.fixed_logical:
+            if dtype.is_temporal():
+                return
+            if dtype.is_decimal():
+                if dtype.decimal_width() <= 64:
+                    return
+                self.reject("dtype", "Decimal128 requires CPU execution")
         if self.extended_integers and dtype.is_integer():
             return
         if (
@@ -77,6 +87,11 @@ struct RowCapabilities(Copyable):
         if op == MEAN and not self.float64:
             self.reject("accumulator", "mean requires Float64 arithmetic")
         if op == SUM:
+            if dtype.is_decimal() and not self.wide_integer:
+                self.reject(
+                    "accumulator",
+                    "decimal sum requires exact Decimal128 accumulation",
+                )
             if dtype.is_float() and not self.float64:
                 self.reject(
                     "accumulator", "floating sum requires Float64 accumulation"

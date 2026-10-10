@@ -45,7 +45,7 @@ runtime data; changing those does not require recompiling an identical shader.
 ## Native precision and supported operations
 
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
-width (8, 16, 32, or 64 bits), or packed Bool columns. Mixed numeric dtypes
+width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns. Mixed numeric dtypes
 retain their native types through expressions, filtering, and materialization.
 Sliced numeric and bitmap windows are supported. Expressions support literals, add/subtract/multiply/negate,
 comparisons, Kleene Boolean logic, null tests, fill-null, and explicit casts
@@ -57,6 +57,15 @@ with-columns, drop, stable filtering, and final head remain resident until the
 result is copied to ordinary CPU columns. Checked integer arithmetic currently
 requires terminal projections without head, matching the shared planner's
 observable-overflow boundary.
+
+Temporal and Decimal32/64 columns retain their complete logical metadata
+through projection, stable filtering, null tests, fill-null, counts, and
+extrema. Comparisons use the native physical integer representation; decimal
+comparisons currently require matching scales and storage widths. Logical
+arithmetic and casts are checked separately and currently require CPU
+execution. Decimal sums retain the CPU contract of Decimal128 accumulation
+and require CPU execution; Decimal128 storage is not yet supported by this
+row backend.
 
 Minimum and maximum preserve the input dtype, ignore nulls, and return null
 for empty or all-null inputs. NaNs order above numeric values, so maximum
