@@ -653,41 +653,62 @@ def _encode_dense_parts[
 def _encode_categorical[
     checked: Bool = False
 ](column: Column[UInt32], domain: Int, nulls_equal: Bool) raises -> RowKeys:
+    """`_encode_categorical_parts` over one contiguous column."""
+    var parts = List[Column[UInt32]]()
+    parts.append(column.copy())
+    return _encode_categorical_parts[checked](parts, domain, nulls_equal)
+
+
+def _encode_categorical_parts[
+    checked: Bool = False
+](
+    parts: List[Column[UInt32]], domain: Int, nulls_equal: Bool
+) raises -> RowKeys:
     """Ids by direct lookup on a categorical's codes, which already lie in
     [0, dictionary size): no hash and no range scan, as `_encode_dense_int64`
     does for small Int64 domains. Sorted H2O q1 grouped its coded string key
-    through the general path 27% slower than the strings."""
-    var n = len(column)
-    var codes = column._ptr()
-    var nulls = column.null_count() > 0
-    var bits = column._bits[].unsafe_ptr()
-    var bit_offset = column._offset
+    through the general path 27% slower than the strings. The key may arrive
+    as several chunks (a Parquet scan's row groups), read in place: since
+    #537 a chunked categorical key went to the generic dense encoder, whose
+    range scan with nulls cost H2O q1's id1 (5% nulls) 14.9 ms against
+    10.7."""
+    var n = 0
+    for part in parts:
+        n += len(part)
     var slots = List[Int](length=max(domain, 1), fill=-1)
     var table = slots.unsafe_ptr()
     var ids = List[Int](unsafe_uninit_length=n)
-    var out = ids.unsafe_ptr()
     var representatives = List[Int]()
     var null_id = -1
-    for i in range(n):
-        if nulls and not _validity_at(bits, bit_offset + i):
-            if nulls_equal:
-                if null_id < 0:
-                    null_id = len(representatives)
-                    representatives.append(i)
-                out[unsafe_offset=i] = null_id
-            else:
-                out[unsafe_offset=i] = -1
-            continue
-        var slot = Int(codes[unsafe_offset=i])
-        comptime if checked:
-            if slot >= domain:
-                raise Error("Categorical code exceeds its dictionary")
-        var id = table[unsafe_offset=slot]
-        if id < 0:
-            id = len(representatives)
-            table[unsafe_offset=slot] = id
-            representatives.append(i)
-        out[unsafe_offset=i] = id
+    var offset = 0
+    for part in parts:
+        var codes = part._ptr()
+        var nulls = part.null_count() > 0
+        var bits = part._bits[].unsafe_ptr()
+        var bit_offset = part._offset
+        var length = len(part)
+        var out = ids.unsafe_ptr().unsafe_offset(offset)
+        for i in range(length):
+            if nulls and not _validity_at(bits, bit_offset + i):
+                if nulls_equal:
+                    if null_id < 0:
+                        null_id = len(representatives)
+                        representatives.append(offset + i)
+                    out[unsafe_offset=i] = null_id
+                else:
+                    out[unsafe_offset=i] = -1
+                continue
+            var slot = Int(codes[unsafe_offset=i])
+            comptime if checked:
+                if slot >= domain:
+                    raise Error("Categorical code exceeds its dictionary")
+            var id = table[unsafe_offset=slot]
+            if id < 0:
+                id = len(representatives)
+                table[unsafe_offset=slot] = id
+                representatives.append(offset + i)
+            out[unsafe_offset=i] = id
+        offset += length
     return RowKeys(ids^, representatives^)
 
 
@@ -737,6 +758,21 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         raise Error("Row keys require at least one column")
     if len(keys) == 1 and keys[0]._data.isa[StringColumn]():
         return _encode_string_rows(keys[0], nulls_equal)
+    if (
+        len(keys) == 1
+        and keys[0].is_chunked()
+        and keys[0].dtype().is_categorical()
+        and keys[0].dtype().has_dictionary()
+        and len(keys[0].dtype().dictionary()[]) <= max(len(keys[0]), 4096)
+    ):
+        # A chunked categorical key by its codes, in place: no range scan
+        # (the codes lie in the dictionary) and no rechunk copy.
+        var parts = List[Column[UInt32]]()
+        for chunk in keys[0].chunks():
+            parts.append(chunk._data[Column[UInt32]].copy())
+        return _encode_categorical_parts[checked=True](
+            parts, len(keys[0].dtype().dictionary()[]), nulls_equal
+        )
     for key in keys:
         if key.is_chunked():
             if len(keys) == 1:
