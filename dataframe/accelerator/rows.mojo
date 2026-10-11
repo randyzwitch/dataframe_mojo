@@ -174,8 +174,12 @@ def _program(
                 and bound.dtypes[i].is_float()
             )
             or (
-                (op == DIV or op == FLOORDIV)
-                and capabilities.float_division
+                (
+                    (op == DIV or op == FLOORDIV)
+                    and capabilities.float_division
+                    or op == MOD
+                    and capabilities.float_modulo
+                )
                 and bound.dtypes[i] == DataType.FLOAT64
             )
             or (
@@ -271,6 +275,7 @@ def _program(
                         or op == NEG
                         or op == DIV
                         or op == FLOORDIV
+                        or op == MOD
                         or op == CAST
                         or op == FLOOR
                         or op == CEIL
@@ -383,8 +388,12 @@ def _program(
             (op == FLOORDIV or op == MOD or op == POW)
             and bound.dtypes[i].is_float()
             and not (
-                op == FLOORDIV
-                and capabilities.float_division
+                (
+                    op == FLOORDIV
+                    and capabilities.float_division
+                    or op == MOD
+                    and capabilities.float_modulo
+                )
                 and bound.dtypes[i] == DataType.FLOAT64
             )
         ):

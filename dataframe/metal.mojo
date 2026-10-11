@@ -316,6 +316,7 @@ def _capabilities() -> RowCapabilities:
         float64_emulated=True,
         float_division=True,
         float_rounding=True,
+        float_modulo=True,
         wide_integer=False,
         bounded_integer_sum=True,
         extended_integers=True,

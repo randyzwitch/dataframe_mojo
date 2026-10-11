@@ -88,7 +88,10 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
           op==10 ? f64_integral(a[i],55) : op==11 ? f64_integral(a[i],56) :
           op==12 ? f64_round(a[i]) : op==21 ? f64_integral(f64_div(a[i],b[i]),55) :
           op==22||op==23 ? f64_decimal_round(a[i],b[i],op==23) :
-          op==24 ? ulong(f64_to_float32(f64_round(f64_from_float32(uint(a[i]))))) : test_integer(a[i],op);
+          op==24 ? ulong(f64_to_float32(f64_round(f64_from_float32(uint(a[i]))))) :
+          op==25 ? f64_mod(a[i],b[i]) :
+          op==26 ? f64_fma(a[i],b[i],f64_mul(a[i],b[i])^0x8000000000000000UL) :
+          op==27 ? f64_fma(a[i],b[i],(a[i]>>31)|(a[i]<<33)) : test_integer(a[i],op);
 }
 )shader";
   NSError *error = nil;
@@ -105,7 +108,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
   id<MTLBuffer> b = [device newBufferWithBytes:right.data() length:bytes options:MTLResourceStorageModeShared];
   id<MTLBuffer> out = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
   size_t checked = 0;
-  for (uint op = 0; op < 25; ++op) {
+  for (uint op = 0; op < 28; ++op) {
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:pipeline];
@@ -132,6 +135,12 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
         if (!(std::isnan(x)||std::isinf(x)||std::abs(x)>=4503599627370496.0) && x<0) rounded=-rounded;
         expected=std::bit_cast<ulong>(rounded);
       }
+      if (op==25) {
+        volatile double quotient=std::trunc(x/y);
+        volatile double remainder=std::fma(-quotient,y,x);
+        double adjustment=((x<0)!=(y<0))&&remainder!=0?double(y):0.0;
+        expected=std::bit_cast<ulong>(remainder+adjustment);
+      }
       if (op==21) expected=std::bit_cast<ulong>(std::floor(x/y));
       if (op==22||op==23||op==24) {
         double original=op==24?double(std::bit_cast<float>(uint(left[i]))):double(x);
@@ -145,6 +154,8 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
         }
         expected=op==24?ulong(std::bit_cast<uint>(float(rounded))):std::bit_cast<ulong>(rounded);
       }
+      if (op==26) { volatile double product=x*y; expected=std::bit_cast<ulong>(std::fma(x,y,-product)); }
+      if (op==27) expected=std::bit_cast<ulong>(std::fma(x,y,std::bit_cast<double>((left[i]>>31)|(left[i]<<33))));
       if (op>=13 && op<21) {
         uint pair=(op-13)/2, width=pair<2?64:8;
         bool uns=(pair&1)!=0;
@@ -160,7 +171,10 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
                    op==10 ? f64_integral(left[i],55) : op==11 ? f64_integral(left[i],56) :
                    op==12 ? f64_round(left[i]) : op==21 ? f64_integral(f64_div(left[i],right[i]),55) :
                    op==22||op==23 ? f64_decimal_round(left[i],right[i],op==23) :
-                   op==24 ? ulong(f64_to_float32(f64_round(f64_from_float32(uint(left[i]))))) : test_integer(left[i],op);
+                   op==24 ? ulong(f64_to_float32(f64_round(f64_from_float32(uint(left[i]))))) :
+                   op==25 ? f64_mod(left[i],right[i]) :
+                   op==26 ? f64_fma(left[i],right[i],f64_mul(left[i],right[i])^0x8000000000000000UL) :
+                   op==27 ? f64_fma(left[i],right[i],(left[i]>>31)|(left[i]<<33)) : test_integer(left[i],op);
       bool narrow=op==9||op==24;
       bool nan = op>=13 && op<21 ? false : narrow ? (expected&0x7fffffffUL)>0x7f800000UL : f64_nan(expected);
       bool actualNan = narrow ? (host&0x7fffffffUL)>0x7f800000UL && (gpu[i]&0x7fffffffUL)>0x7f800000UL : f64_nan(host) && f64_nan(gpu[i]);
