@@ -273,6 +273,57 @@ def check_sort_preflight_without_device():
 
 check_sort_preflight_without_device()
 
+
+def check_group_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 2, 0, 0))
+    programs = [(201, 1, 2, 3), (202, 0, 0, 0), (203, 0, 4, 10)]
+    code = (I * 12)(*[x for node in programs for x in node])
+    literals = (I * 3)()
+    nt = (I * 3)(3, 2, 2)
+    st = (I * 5)(2, 3, 3, 3, 2)
+    steps = (Step * 1)(Step(0, 3, 1, 3, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 2, 4, -1, 0))
+    request = Request(
+        2,
+        0,
+        0,
+        5,
+        1,
+        12,
+        3,
+        1,
+        0,
+        1,
+        -1,
+        0,
+        0,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(literals),
+        ptr(steps),
+        None,
+        ptr(outputs),
+        ptr(nt),
+        ptr(st),
+    )
+    for n in (0, 1, 8388608):
+        request.rows = n
+        memory, err = Memory(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        assert memory.result == 4 * max(1, n) + (max(1, n) + 7) // 8
+        assert memory.launches == 8 + (max(1, n) - 1).bit_length()
+    for index, value in [(2, 0), (3, 2), (9, 1), (10, 3), (11, 11)]:
+        before = code[index]
+        code[index] = value
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        lib.dfm_free(err)
+        code[index] = before
+
+
+check_group_preflight_without_device()
+
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
@@ -1551,6 +1602,259 @@ def test_stable_sort():
 
 
 test_stable_sort()
+
+
+def test_grouped_reductions():
+    def run(dtype, n, key_count=2, unique=False):
+        scalar = SCALARS[dtype]
+        if dtype == 1:
+            pool = [0.0, -0.0, 1.0, float("nan"), 1.401298464324817e-45]
+            vals = [3.0, -0.0, 0.0, float("nan"), -1.401298464324817e-45]
+        elif dtype == 4:
+            pool, vals = [False, True], [True, False]
+        elif dtype in (7, 8, 9, 10):
+            high = (1 << (C.sizeof(scalar) * 8)) - 1
+            pool, vals = [0, 1, high], [0, 1, high, 2]
+        else:
+            high = (1 << (C.sizeof(scalar) * 8 - 1)) - 1
+            pool, vals = [0, 1, high, -high - 1], [-high - 1, high, 0, 2]
+        key = [i if unique else pool[(i * 7) % len(pool)] for i in range(n)]
+        value = [vals[(i // 3) % len(vals)] for i in range(n)]
+        second = [i % 3 == 0 for i in range(n)]
+        kv, vv, bv = (
+            [i % 11 != 2 for i in range(n)],
+            [i % 7 != 1 for i in range(n)],
+            [i % 13 != 3 for i in range(n)],
+        )
+        ka = packed(key, 5) if dtype == 4 else (scalar * max(1, n))(*key)
+        va = packed(value, 5) if dtype == 4 else (scalar * max(1, n))(*value)
+        ba = packed(second, 5)
+        kb, vb, bb = packed(kv, 5), packed(vv, 5), packed(bv, 5)
+        inputs = (Input * 3)(
+            Input(ptr(ka), ptr(kb), dtype, 5, 1),
+            Input(ptr(ba), ptr(bb), 4, 5, 1),
+            Input(ptr(va), ptr(vb), dtype, 5, 1),
+        )
+        slots = [dtype, 4, dtype, 3, 3, 3]
+        nodes = [(201, key_count, 4, 5)] + (
+            [(202, 0, 0, 0), (202, 1, 0, 0)] if key_count else []
+        )
+        nt = [3] + ([dtype, 4] if key_count else [])
+        words = [0] * len(nodes)
+        specs = [
+            (2, 11, 3, 0),
+            (2, 90, 3, 0),
+            (2, 80, dtype, 0),
+            (2, 81, dtype, 0),
+            (1, 11, 3, 0),
+        ]
+        if dtype not in (1, 3, 4, 10):
+            specs.append((2, 10, dtype if dtype in (2, 9) else 3, 3))
+        outs = [(0, dtype), (1, 4)] if key_count else []
+        for source, kind, outtype, minimum in specs:
+            target = len(slots)
+            slots.append(outtype)
+            outs.append((target, outtype))
+            nodes.append((203, source, target, kind))
+            nt.append(outtype)
+            words.append(minimum)
+        stepnodes = len(nodes)
+        # Preserve first appearance order after grouping.
+        nodes.append((200, 5, 0, 0))
+        nt.append(3)
+        words.append(0)
+        gathers = (I * len(outs))(*[slot for slot, t in outs])
+        steps = (Step * 2)(
+            Step(0, stepnodes, 3, 3, 0, 0), Step(stepnodes, 1, 0, 2, 0, len(outs))
+        )
+        code = (I * (4 * len(nodes)))(*[x for node in nodes for x in node])
+        literals = (I * len(words))(*words)
+        types = (I * len(nt))(*nt)
+        st = (I * len(slots))(*slots)
+        arrays = [
+            packed([False] * max(1, n)) if t == 4 else (SCALARS[t] * max(1, n))()
+            for _, t in outs
+        ]
+        bits = [packed([False] * max(1, n)) for _ in outs]
+        output = (Output * len(outs))(
+            *[
+                Output(ptr(a), ptr(b), t, slot, -1, 0)
+                for (slot, t), a, b in zip(outs, arrays, bits)
+            ]
+        )
+        req = Request(
+            2,
+            n,
+            0,
+            len(slots),
+            3,
+            len(code),
+            len(words),
+            2,
+            len(outs),
+            len(outs),
+            -1,
+            0,
+            1,
+            -1,
+            ptr(inputs),
+            ptr(code),
+            ptr(literals),
+            ptr(steps),
+            ptr(gathers),
+            ptr(output),
+            ptr(types),
+            ptr(st),
+        )
+        groups = {}
+        for i in range(n):
+            raw = key[i] if kv[i] else None
+            canon = "nan" if dtype == 1 and raw is not None and math.isnan(raw) else raw
+            k = (canon, second[i] if bv[i] else None) if key_count else ()
+            groups.setdefault(k, []).append(i)
+        if not key_count and not n:
+            groups[()] = []
+        expected = []
+        for rows in groups.values():
+            row = rows[0] if rows else 0
+            good = [i for i in rows if vv[i]]
+            rank_value = lambda i: (
+                (math.isnan(value[i]), value[i]) if dtype == 1 else value[i]
+            )
+            smallest = min(good, key=rank_value) if good else 0
+            largest = max(good, key=rank_value) if good else 0
+            record = [(key[row], kv[row]), (second[row], bv[row])] if key_count else []
+            record += [
+                (len(good), True),
+                (len(rows), True),
+                (value[smallest] if good else 0, bool(good)),
+                (value[largest] if good else 0, bool(good)),
+                (sum(bv[i] for i in rows), True),
+            ]
+            if len(specs) == 6:
+                record.append((sum(value[i] for i in good), len(good) >= 3))
+            expected.append(record)
+        stats, memory, err = Stats(), Memory(), P()
+        check(lib.dfm_estimate(C.byref(req), C.byref(memory), C.byref(err)), err)
+        # Large-width sample sums can intentionally overflow the narrow result.
+        overflow = False
+        if len(specs) == 6 and outs[-1][1] in (2, 9):
+            signed = outs[-1][1] == 2
+            lo, hi = (-(2**31), 2**31 - 1) if signed else (0, 2**32 - 1)
+            overflow = any(
+                valid and not lo <= v <= hi
+                for record in expected
+                for v, valid in [record[-1]]
+            )
+        status = lib.dfm_execute(ctx, C.byref(req), C.byref(stats), C.byref(err))
+        if overflow:
+            assert status and b"overflow" in C.string_at(err)
+            lib.dfm_free(err)
+            return
+        check(status, err)
+        assert stats.rows == len(expected), (dtype, n, stats.rows, len(expected))
+        assert stats.waits == 1 and stats.memory.shared == memory.shared
+        assert stats.memory.launches == memory.launches, (
+            stats.memory.launches,
+            memory.launches,
+        )
+        for c, ((slot, t), a, b) in enumerate(zip(outs, arrays, bits)):
+            actual = unpack(a, stats.rows) if t == 4 else list(a)[: stats.rows]
+            validity = unpack(b, stats.rows)
+            for row, record in enumerate(expected):
+                value0, valid = record[c]
+                assert validity[row] == valid, (dtype, n, c, row, validity[row], valid)
+                if valid:
+                    assert (
+                        t == 1 and math.isnan(value0) and math.isnan(actual[row])
+                    ) or actual[row] == value0, (dtype, n, c, row, actual[row], value0)
+                    if t == 1 and value0 == 0:
+                        assert C.string_at(
+                            C.byref(C.c_float(actual[row])), 4
+                        ) == C.string_at(C.byref(C.c_float(value0)), 4), (
+                            dtype,
+                            n,
+                            c,
+                            row,
+                            actual[row],
+                            value0,
+                        )
+
+    for t in range(1, 11):
+        for n in (0, 1, 7, 257, 1025):
+            run(t, n)
+    run(5, 0, 0)
+    run(5, 262401, 0)
+    run(3, 1025, 2, True)
+
+
+test_grouped_reductions()
+
+
+def test_grouped_errors_preserve_row_fault_priority():
+    n = 2
+    keys = (C.c_int32 * n)(0, 0)
+    bad = (C.c_float * n)(float("nan"), 0)
+    sums = (C.c_int32 * n)(2**31 - 1, 1)
+    inputs = (Input * 3)(
+        Input(ptr(keys), None, 2, 0, 0),
+        Input(ptr(bad), None, 1, 0, 0),
+        Input(ptr(sums), None, 2, 0, 0),
+    )
+    programs = [
+        (0, -1, -1, 1),
+        (79, 0, -1, 1),
+        (201, 1, 5, 6),
+        (202, 0, 0, 0),
+        (203, 3, 7, 10),
+        (203, 2, 8, 10),
+    ]
+    code = (I * 24)(*[v for node in programs for v in node])
+    words = (I * 6)()
+    nt = (I * 6)(1, 2, 3, 2, 2, 2)
+    st = (I * 9)(2, 1, 2, 2, 3, 3, 3, 2, 2)
+    steps = (Step * 2)(Step(0, 2, 3, 0, 0, 0), Step(2, 4, 4, 3, 0, 0))
+    arrays = [(C.c_int32 * n)(77, 77) for _ in range(2)]
+    bits = [packed([True] * n) for _ in range(2)]
+    outputs = (Output * 2)(
+        *[
+            Output(ptr(a), ptr(b), 2, slot, -1, 0)
+            for a, b, slot in zip(arrays, bits, [7, 8])
+        ]
+    )
+    req = Request(
+        2,
+        n,
+        0,
+        9,
+        3,
+        24,
+        6,
+        2,
+        0,
+        2,
+        -1,
+        0,
+        0,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(words),
+        ptr(steps),
+        None,
+        ptr(outputs),
+        ptr(nt),
+        ptr(st),
+    )
+    stats, err = Stats(), P()
+    assert lib.dfm_execute(ctx, C.byref(req), C.byref(stats), C.byref(err))
+    assert b"strict cast" in C.string_at(err), C.string_at(err)
+    lib.dfm_free(err)
+    assert all(list(a) == [77, 77] for a in arrays)
+    assert all(unpack(b, n) == [True, True] for b in bits)
+
+
+test_grouped_errors_preserve_row_fault_priority()
 
 lib.dfm_context_release(ctx)
 print(

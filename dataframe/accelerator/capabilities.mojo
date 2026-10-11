@@ -15,6 +15,7 @@ struct RowCapabilities(Copyable):
     var float64: Bool
     var wide_integer: Bool
     var int64_arithmetic: Bool
+    var grouped: Bool
     var order: Bool
     var row_extras: Bool
     var fixed_logical: Bool
@@ -37,6 +38,7 @@ struct RowCapabilities(Copyable):
         fixed_logical: Bool = False,
         row_extras: Bool = False,
         order: Bool = False,
+        grouped: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -49,6 +51,7 @@ struct RowCapabilities(Copyable):
         self.fixed_logical = fixed_logical
         self.row_extras = row_extras
         self.order = order
+        self.grouped = grouped
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)
@@ -103,7 +106,7 @@ struct RowCapabilities(Copyable):
                     "accumulator", "floating sum requires Float64 accumulation"
                 )
             if (
-                dtype == DataType.INT64 or dtype == DataType.UINT64
+                dtype.physical() == DataType.INT64 or dtype == DataType.UINT64
             ) and not self.wide_integer:
                 self.reject(
                     "accumulator",

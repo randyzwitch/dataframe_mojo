@@ -64,6 +64,7 @@ from .expr import (
 )
 from .frame import DataFrame
 from .lazy import AcceleratorBackend, LazyFrame
+from .accelerator.rows import ROW_GROUP_HEADER, ROW_GROUP_KEY, ROW_GROUP_OUTPUT
 from .series import Series
 
 comptime _Create = def(Int64, Int64, Int) thin abi("C") -> Int
@@ -247,6 +248,7 @@ def _capabilities() -> RowCapabilities:
         fixed_logical=True,
         row_extras=True,
         order=True,
+        grouped=True,
     )
 
 
@@ -275,6 +277,12 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if op == ROW_GROUP_HEADER:
+        return 201
+    if op == ROW_GROUP_KEY:
+        return 202
+    if op == ROW_GROUP_OUTPUT:
+        return 203
     # The native ABI has its own versioned opcodes.
     if op == ROW_SORT_KEY:
         return 200
@@ -405,7 +413,7 @@ struct _Descriptors(Movable):
         self.slot_types = List[Int64]()
         self.typed = False
         for step in plan.steps:
-            self.typed |= step.order
+            self.typed |= step.order or step.grouped
         for output in plan.outputs:
             self.typed |= output.reduction == MIN or output.reduction == MAX
         for dtype in plan.node_dtypes:
@@ -417,6 +425,8 @@ struct _Descriptors(Movable):
             self.typed |= dtype != dtype.physical()
         for i in range(0, len(self.code), 4):
             self.typed |= self.code[i] == CAST or self.code[i] == WHEN
+            if self.code[i] == ROW_GROUP_OUTPUT:
+                self.code[i + 3] = _op(Int(self.code[i + 3]))
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
             if column.dtype() == DataType.BOOL:
@@ -457,7 +467,9 @@ struct _Descriptors(Movable):
                     Int64(step.start),
                     Int64(step.nodes),
                     Int64(step.slot),
-                    Int64(2) if step.order else Int64(step.filter),
+                    Int64(3) if step.grouped else (
+                        Int64(2) if step.order else Int64(step.filter)
+                    ),
                     Int64(step.gather_start),
                     Int64(
                         step.gather_count if step.filter or step.order else 0
@@ -552,6 +564,9 @@ def _execute(
     if Int(memory[2]) > headroom:
         raise Error("Metal request exceeds current working set headroom")
     var capacity = 1 if plan.reductions else plan.source.height()
+    for step in plan.steps:
+        if step.grouped:
+            capacity = max(1, capacity)
     var storage = List[Series]()
     for i in range(len(plan.outputs)):
         var output = _allocate_output(
