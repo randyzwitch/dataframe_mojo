@@ -48,7 +48,7 @@ Sources must be contiguous in-memory Float32, any signed or unsigned integer
 width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns.
 Float64 columns use IEEE words throughout resident execution. Add, subtract,
 multiply, divide, floor division, comparisons, numeric/Boolean casts, absolute value, negation,
-floor/ceiling, whole-number rounding, classification, clipping, and NaN filling
+floor/ceiling, decimal rounding, classification, clipping, and NaN filling
 use integer-only binary64 primitives on the GPU. Basic arithmetic rounds to
 nearest with ties to even, preserves gradual underflow, and does not contract
 separate multiply/add operations. Float64 floor division matches the CPU
@@ -68,10 +68,13 @@ errors and may occur in child regions or before head.
 Integer expressions additionally support floor division, remainder, powers,
 absolute value, clipping, and integral rounding operations. Division and
 remainder by zero return null; signed floor division and remainder follow
-floor semantics. Float32 supports absolute value, floor, ceiling, rounding to
-a whole number, clipping, NaN filling, and NaN/finite/infinite predicates.
-Float32 decimal rounding and floor division, floating remainder/power, and
-transcendental functions still require CPU execution.
+floor semantics. Float32 supports absolute value, floor, ceiling, rounding, clipping, NaN
+filling, and NaN/finite/infinite predicates. Float32 and Float64 rounding at
+any decimal count uses binary64 emulation and follows the CPU half-away formula,
+including its large-value early return and every intermediate rounding step.
+The scalar power-of-ten scale is bound once using the CPU scalar formula; all
+row computation stays on the GPU. Float32 floor division, floating
+remainder/power, and transcendental functions still require CPU execution.
 
 Conditional `when/then/otherwise` expressions propagate an observation mask
 through each branch. Inactive branches do not raise integer overflow, strict
@@ -212,8 +215,9 @@ optimizations. Metal can flush Float32 subnormal operands and results even in
 safe math mode ([Metal specification, sections 8.1 and 8.5](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)). Native kernels detect subnormal arithmetic and
 potential underflow, then reject the result with a precision error after draining
 the command buffer. Copying subnormal values and flipping their sign preserve
-their bits. Float32 comparisons, predicates, clipping, and integral rounding
-use native encodings and support subnormals. This guard is conservative: a tiny product that would correctly round
+their bits. Float32 comparisons, predicates, clipping, floor, and ceiling use native
+encodings and support subnormals. Float32 rounding widens the encoding to
+emulated Float64, then narrows once, also preserving subnormal behavior. This guard is conservative: a tiny product that would correctly round
 to zero can also require CPU execution. These Float32 row operations retain
 native arithmetic and its conservative precision guard. There is no automatic CPU retry after submission.
 
@@ -347,15 +351,15 @@ buffers or returning an error; execution never retries the query on CPU after a
 GPU fault. Output owners and source owners remain alive across that boundary.
 
 Binary64 emulation and native Float32 kernels have different costs. Plans
-containing Float64 values, floating sum/mean, or Int64/UInt64-to-Float32
-conversions carry the separate `metal-emulated-float64-v1` calibration family.
+containing Float64 values, floating sum/mean or rounding, or
+Int64/UInt64-to-Float32 conversions carry the separate `metal-emulated-float64-v1` calibration family.
 Native-only calibration cannot select those plans. Without matching, validated
 end-to-end evidence, automatic placement stays on CPU. Future calibration may
 select emulation only when its conservative GPU estimate beats the CPU bound;
 forced accelerator execution remains available independently of that decision.
 
-Float64 decimal rounding, floating remainder/power,
-transcendentals, and variance/std are not yet supported by this subset.
+Floating remainder/power, transcendentals, and variance/std are not yet
+supported by this subset.
 
 ## Validation
 

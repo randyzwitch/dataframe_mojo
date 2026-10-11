@@ -315,6 +315,7 @@ def _capabilities() -> RowCapabilities:
         float64_storage=True,
         float64_emulated=True,
         float_division=True,
+        float_rounding=True,
         wide_integer=False,
         bounded_integer_sum=True,
         extended_integers=True,
@@ -566,6 +567,11 @@ struct _Descriptors(Movable):
                 or self.code[i] == WHEN
                 or self.code[i] == INT_IS_IN
                 or self.code[i] == ROW_SLICE
+                or (
+                    self.code[i] == ROUND
+                    and self.code[i + 3] != 0
+                    and plan.node_dtypes[i // 4].is_float()
+                )
             )
             if self.code[i] == ROW_GROUP_OUTPUT:
                 self.code[i + 3] = _op(Int(self.code[i + 3]))
@@ -1360,6 +1366,8 @@ struct MetalRuntime(AcceleratorBackend):
         var emulated = False
         for i in range(len(plan.node_dtypes)):
             if plan.node_dtypes[i] == DataType.FLOAT64:
+                emulated = True
+            if plan.node_dtypes[i].is_float() and plan.code[i * 4] == ROUND:
                 emulated = True
         for output in plan.outputs:
             emulated |= output.reduction == MEAN or (

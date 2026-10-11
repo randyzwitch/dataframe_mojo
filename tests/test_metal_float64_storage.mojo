@@ -143,7 +143,7 @@ def test_remaining_float64_operators_reject_before_device_initialization() raise
     var runtime = MetalRuntime(device_id=999999)
     for expression in List[Expr](
         [
-            col("f").round(2),
+            col("f").pow(lit(Float64(2))),
         ]
     ):
         with assert_raises(contains="Float64 requires CPU"):

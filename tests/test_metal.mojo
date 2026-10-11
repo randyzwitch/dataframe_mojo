@@ -24,10 +24,14 @@ def test_configuration_and_semantic_rejections_without_device() raises:
     var wide = DataFrame([Series("x", Column[Float64]([1, 2]))])
     assert_true(
         "Float64 requires CPU"
-        in runtime.describe(wide.lazy().select(col("x").round(2)))
+        in runtime.describe(wide.lazy().select(col("x").pow(lit(Float64(2)))))
     )
     with assert_raises(contains="Float64 requires CPU"):
-        _ = wide.lazy().select(col("x").round(2)).collect(accelerator=runtime)
+        _ = (
+            wide.lazy()
+            .select(col("x").pow(lit(Float64(2))))
+            .collect(accelerator=runtime)
+        )
     var narrow = DataFrame([Series("x", Column[Float32]([1, 2]))])
     with assert_raises(contains="unsupported reduction"):
         _ = narrow.lazy().select(col("x").var()).collect(accelerator=runtime)
@@ -759,8 +763,12 @@ def test_native_float_value_operations_and_subnormal_comparisons() raises:
             filtered.collect(engine="cpu")
         )
     )
-    with assert_raises(contains="Float64 intermediate"):
-        _ = frame.lazy().select(col("x").round(2)).collect(accelerator=runtime)
+    var rounded = frame.lazy().select(col("x").round(2))
+    assert_true(
+        rounded.collect(accelerator=runtime).equals(
+            rounded.collect(engine="cpu")
+        )
+    )
 
 
 def test_native_stable_multikey_sort_between_resident_steps() raises:
@@ -1203,7 +1211,10 @@ def test_join_preflight_does_not_open_devices_or_read_files() raises:
         _ = (
             frame.lazy()
             .join(
-                wide.lazy().with_columns(col("bad").round(2).alias("bad")), "k"
+                wide.lazy().with_columns(
+                    col("bad").pow(lit(Float64(2))).alias("bad")
+                ),
+                "k",
             )
             .collect(accelerator=runtime)
         )

@@ -235,4 +235,13 @@ inline ulong f64_round(ulong value) {
   ulong rounded = f64_integral(f64_add(f64_abs(value), 0x3fe0000000000000UL), 55);
   return value >> 63 && f64_abs(value) ? rounded ^ 0x8000000000000000UL : rounded;
 }
+inline ulong f64_decimal_round(ulong value, ulong scale, bool negative_decimals) {
+  // Match the CPU's original-value early return and every rounded binary64
+  // intermediate. The scale is a bound scalar constant, never row data.
+  if (f64_abs(value) >= 0x4330000000000000UL) return value;
+  ulong scaled = negative_decimals ? f64_div(value, scale) : f64_mul(value, scale);
+  ulong rounded = f64_integral(f64_add(f64_abs(scaled), 0x3fe0000000000000UL),55);
+  if (f64_less(scaled,0)) rounded ^= 0x8000000000000000UL;
+  return negative_decimals ? f64_mul(rounded,scale) : f64_div(rounded,scale);
+}
 )metal";

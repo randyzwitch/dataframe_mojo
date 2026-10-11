@@ -62,6 +62,9 @@ enum DFMOp {
   DFM_ABS = 51,
   DFM_FLOOR = 55,
   DFM_CEIL = 56,
+  // Unary ROUND: code[3] is decimals. For nonzero floating decimals,
+  // typed descriptors are required and literals[node] carries the bound
+  // binary64 encoding of 10**abs(decimals), including for Float32 operands.
   DFM_ROUND = 57,
   DFM_IS_NAN = 63,
   DFM_IS_NOT_NAN = 64,
