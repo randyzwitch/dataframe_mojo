@@ -20,15 +20,17 @@ from dataframe.expr import (
 struct RowCapabilities(Copyable):
     """Semantic capabilities, independent of storage and device availability.
 
-    Defaults describe the existing NVIDIA row subset. A native Metal provider
-    disables Float64 arithmetic and wide integer accumulation, with optional
-    range-guarded native integer sums. Float32 input alone does
-    not make sum/mean eligible: their shared accumulator contract is Float64.
+    Defaults describe the existing NVIDIA row subset. Metal distinguishes
+    integer-only Float64 emulation from native Float64, and uses optional
+    range-guarded native integer accumulation. Float32 sum/mean still requires
+    native or emulated Float64 accumulation.
     """
 
     var backend: String
     var float64: Bool
     var float64_storage: Bool
+    var float64_emulated: Bool
+    var float_division: Bool
     var wide_integer: Bool
     var bounded_integer_sum: Bool
     var int64_arithmetic: Bool
@@ -51,6 +53,8 @@ struct RowCapabilities(Copyable):
         *,
         float64: Bool = True,
         float64_storage: Bool = False,
+        float64_emulated: Bool = False,
+        float_division: Bool = False,
         wide_integer: Bool = True,
         bounded_integer_sum: Bool = False,
         int64_arithmetic: Bool = True,
@@ -70,6 +74,8 @@ struct RowCapabilities(Copyable):
         self.backend = backend
         self.float64 = float64
         self.float64_storage = float64_storage
+        self.float64_emulated = float64_emulated
+        self.float_division = float_division
         self.wide_integer = wide_integer
         self.bounded_integer_sum = bounded_integer_sum
         self.int64_arithmetic = int64_arithmetic
@@ -115,7 +121,11 @@ struct RowCapabilities(Copyable):
             self.reject("dtype", "row input dtype is not supported")
 
     def require_arithmetic(self, dtype: DataType) raises:
-        if dtype == DataType.FLOAT64 and not self.float64:
+        if (
+            dtype == DataType.FLOAT64
+            and not self.float64
+            and not self.float64_emulated
+        ):
             self.reject(
                 "precision", "Float64 requires CPU execution for arithmetic"
             )
@@ -125,7 +135,11 @@ struct RowCapabilities(Copyable):
             )
 
     def require_key(self, dtype: DataType) raises:
-        if dtype == DataType.FLOAT64 and not self.float64:
+        if (
+            dtype == DataType.FLOAT64
+            and not self.float64
+            and not self.float64_emulated
+        ):
             self.reject(
                 "precision",
                 "Float64 requires CPU execution for ordering and keys",
@@ -135,6 +149,7 @@ struct RowCapabilities(Copyable):
         if (
             dtype == DataType.FLOAT64
             and not self.float64
+            and not self.float64_emulated
             and (op == MIN or op == MAX or op == ARG_MIN or op == ARG_MAX)
         ):
             self.reject(
@@ -164,15 +179,32 @@ struct RowCapabilities(Copyable):
             return
         if op == COUNT or op == LEN:
             return
-        if op == MEAN and not self.float64:
+        if op == MEAN and dtype.is_decimal() and self.float64_emulated:
+            self.reject(
+                "logical", "decimal mean requires scaled Float64 conversion"
+            )
+        if op == MEAN and not self.float64 and not self.float64_emulated:
             self.reject("accumulator", "mean requires Float64 arithmetic")
+        if (
+            op == MEAN
+            and (dtype == DataType.INT64 or dtype == DataType.UINT64)
+            and not self.wide_integer
+            and not self.bounded_integer_sum
+        ):
+            self.reject(
+                "accumulator", "integer mean requires exact wide accumulation"
+            )
         if op == SUM:
             if dtype.is_decimal() and not self.wide_integer:
                 self.reject(
                     "accumulator",
                     "decimal sum requires exact Decimal128 accumulation",
                 )
-            if dtype.is_float() and not self.float64:
+            if (
+                dtype.is_float()
+                and not self.float64
+                and not self.float64_emulated
+            ):
                 self.reject(
                     "accumulator", "floating sum requires Float64 accumulation"
                 )

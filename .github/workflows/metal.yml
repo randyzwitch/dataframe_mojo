@@ -38,3 +38,4 @@ jobs:
           python3 native/dfmetal/test_native.py
           python3 native/dfmetal/test_join.py
           python3 native/dfmetal/test_resident.py
+          python3 native/dfmetal/test_float64.py

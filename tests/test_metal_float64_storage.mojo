@@ -138,36 +138,19 @@ def test_float64_payload_all_joins_groups_unique_and_concat() raises:
     )
 
 
-def test_float64_computation_remains_rejected_before_device_initialization() raises:
+def test_remaining_float64_operators_reject_before_device_initialization() raises:
     var frame = fixture()
     var runtime = MetalRuntime(device_id=999999)
     for expression in List[Expr](
         [
-            col("f") + lit(Float64(1)),
-            col("f") > lit(Float64(0)),
-            col("f").cast(DataType.INT64),
-            col("k").cast(DataType.FLOAT64),
-            col("f").min(),
-            col("f").max(),
-            col("f").arg_min(),
+            col("f").round(2),
         ]
     ):
         with assert_raises(contains="Float64 requires CPU"):
             _ = frame.lazy().select(expression).collect(accelerator=runtime)
-    for expression in List[Expr]([col("f").sum(), col("f").mean()]):
-        with assert_raises(contains="Float64"):
+    for expression in List[Expr]([col("f").var(), col("f").std()]):
+        with assert_raises(contains="unsupported"):
             _ = frame.lazy().select(expression).collect(accelerator=runtime)
-    with assert_raises(contains="Float64 requires CPU"):
-        _ = frame.lazy().sort("f").collect(accelerator=runtime)
-    with assert_raises(contains="Float64 requires CPU"):
-        _ = (
-            frame.lazy()
-            .group_by("f")
-            .agg([col("k").count().alias("n")])
-            .collect(accelerator=runtime)
-        )
-    with assert_raises(contains="Float64 requires CPU"):
-        _ = frame.lazy().join(frame.lazy(), on="f").collect(accelerator=runtime)
 
 
 def main() raises:

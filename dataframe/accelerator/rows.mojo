@@ -10,6 +10,7 @@ from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.dtype import DataType
 from dataframe.expr import (
     Expr,
+    DIV,
     FLOORDIV,
     MOD,
     POW,
@@ -167,6 +168,11 @@ def _program(
         if not (
             op == COL
             or (
+                op == DIV
+                and capabilities.float_division
+                and bound.dtypes[i] == DataType.FLOAT64
+            )
+            or (
                 capabilities.temporal_fields
                 and op >= DT_YEAR
                 and op <= DT_TRUNCATE
@@ -250,6 +256,34 @@ def _program(
                 or op == FILL_NULL
                 or op == KEEP_NULLS
                 or op == WHEN
+                or (
+                    capabilities.float64_emulated
+                    and (
+                        op == ADD
+                        or op == SUB
+                        or op == MUL
+                        or op == NEG
+                        or op == DIV
+                        or op == CAST
+                        or op == FLOOR
+                        or op == CEIL
+                        or (op == ROUND and node.integer == 0)
+                        or op == ABS
+                        or op == GT
+                        or op == LT
+                        or op == GE
+                        or op == LE
+                        or op == EQ
+                        or op == NE
+                        or op == IS_NAN
+                        or op == IS_NOT_NAN
+                        or op == IS_FINITE
+                        or op == IS_INFINITE
+                        or op == FILL_NAN
+                        or op == CLIP_LOW
+                        or op == CLIP_HIGH
+                    )
+                )
             )
         ):
             capabilities.reject(
@@ -317,7 +351,14 @@ def _program(
             capabilities.reject(
                 "plan", "scalar integer arithmetic requires CPU execution"
             )
-        if op == CAST and node.integer and bound.shapes[i] != ROWS:
+        if (
+            op == CAST
+            and node.integer
+            and bound.shapes[i] != ROWS
+            and not (
+                capabilities.float64_emulated and bound.dtypes[i].is_float()
+            )
+        ):
             capabilities.reject(
                 "plan", "scalar strict casts require CPU execution"
             )
@@ -652,10 +693,15 @@ def lower_rows(
                             "plan",
                             "integer sum with final head requires CPU execution",
                         )
-            for part in bound.expr._nodes:
+            for part_index in range(len(bound.expr._nodes)):
+                ref part = bound.expr._nodes[part_index]
                 if (
                     part.op == CAST
                     and part.integer
+                    and not (
+                        capabilities.float64_emulated
+                        and bound.dtypes[part_index].is_float()
+                    )
                     and (
                         not terminal_boundary
                         or k != 0

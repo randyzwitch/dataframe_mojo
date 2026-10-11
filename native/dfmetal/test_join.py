@@ -196,12 +196,11 @@ rejected(
 )
 inputs[1].input.dtype = 2
 inputs[0].input.dtype = inputs[1].input.dtype = 11
-rejected(
-    lambda e: lib.dfm_join_estimate(
-        C.byref(request), C.byref(memory), C.byref(e)
-    ),
-    b"Float64 join keys",
-)
+outputs[0].dtype = 11
+err = P()
+checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+assert memory.peak > 0
+outputs[0].dtype = 2
 inputs[0].input.dtype = inputs[1].input.dtype = 2
 keys[0].left = 1
 rejected(

@@ -40,9 +40,16 @@ def _model(fixed: Int, factor: String) -> String:
     )
 
 
-def _record(cpu: Int = 1000, device: Int = 100, failures: Int = 0) -> String:
+def _record(
+    cpu: Int = 1000,
+    device: Int = 100,
+    failures: Int = 0,
+    family: String = "Float32",
+) -> String:
     return (
-        '{"provider":"test","device":"gpu","runtime_build_id":"runtime","cpu_build_id":"cpu","host":"host","threads":1,"optimize":true,"streaming":true,"batch_size":64,"family":"Float32","expires_at":10000,"validated":true,"training_queries":10,"validation_queries":5,"distribution_coverage":"conservative-null-selectivity-envelope","safety_factor":1.5,"cpu":'
+        '{"provider":"test","device":"gpu","runtime_build_id":"runtime","cpu_build_id":"cpu","host":"host","threads":1,"optimize":true,"streaming":true,"batch_size":64,"family":'
+        + json_quote(family)
+        + ',"expires_at":10000,"validated":true,"training_queries":10,"validation_queries":5,"distribution_coverage":"conservative-null-selectivity-envelope","safety_factor":1.5,"cpu":'
         + _model(cpu, "0.9")
         + ',"accelerator":'
         + _model(device, "1.1")
@@ -109,6 +116,20 @@ def test_identity_memory_expiration_coverage_and_ambiguity_reject() raises:
     facts = _facts()
     facts.placement = "mixed"
     assert_equal(select_auto(facts, table, _key(), 100, 10).engine, "cpu")
+
+
+def test_float64_emulation_requires_its_own_calibration_and_measured_win() raises:
+    var facts = _facts()
+    facts.family += ";metal-emulated-float64-v1"
+    var old_native = select_auto(facts, _table(_record()), _key(), 100, 10)
+    assert_equal(old_native.engine, "cpu")
+    assert_true("no matching" in old_native.reason)
+    # A validated, expensive emulated path stays on CPU. A future measured
+    # GPU win remains eligible; this is cost policy, not a hardcoded ban.
+    var expensive = _table(_record(1000, 10000, 0, facts.family))
+    assert_equal(select_auto(facts, expensive, _key(), 100, 10).engine, "cpu")
+    var faster = _table(_record(1000, 100, 0, facts.family))
+    assert_equal(select_auto(facts, faster, _key(), 100, 10).engine, "accel")
 
 
 def test_cpu_features_count_work_without_values_or_query_mutation() raises:
