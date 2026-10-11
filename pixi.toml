@@ -60,7 +60,7 @@ build = "mkdir -p build && mojo build -I . examples/sales.mojo -o build/sales &&
 bench-csv = "mojo run -I . benchmarks/bench_csv.mojo"
 bench = "mojo run -I . benchmarks/bench_suite.mojo"
 bench-smoke = "BENCH_SMOKE=1 mojo run -I . benchmarks/bench_suite.mojo"
-package = "mkdir -p dist && mojo precompile dataframe -o dist/dataframe.mojoc"
+package = "python3 scripts/build_package.py --output dist"
 package-smoke = "bash scripts/package_smoke.sh"
 docs = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json docs/api.md"
 docs-check = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json --check"

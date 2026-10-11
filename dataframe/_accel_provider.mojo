@@ -3,6 +3,7 @@
 Presence checks do not open a driver. CPU collection never initializes Metal.
 The optional NVIDIA package builder can replace this module in its staged tree.
 """
+from .accelerator.cost import PlanEstimate, CalibrationKey
 from .frame import DataFrame
 from .lazy import LazyFrame
 from std.os import getenv
@@ -52,13 +53,30 @@ def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
     return execute(plan)
 
 
+def calibration_runtime() raises -> MetalRuntime:
+    """Explicit runtime factory for the provider-neutral benchmark driver."""
+    return _runtime()
+
+
+def calibration_key(
+    optimize: Bool, streaming: Bool, batch_size: Int
+) raises -> CalibrationKey:
+    """Provider metadata for the common calibration harness; no submission."""
+    raise Error("installed provider has no analytical calibration identity")
+
+
+def estimate_auto(plan: LazyFrame) raises -> PlanEstimate:
+    """Plan-time facts required by the provider-neutral calibration runner."""
+    raise Error("installed provider has no analytical plan estimate")
+
+
 def select_auto(
     plan: LazyFrame,
     optimize: Bool,
     streaming: Bool,
     batch_size: Int,
 ) -> Tuple[String, String]:
-    """Select before execution; optional providers own capability and cost gates."""
+    """Select before execution; providers supply facts to the shared analytical cost selector."""
     if installed():
         return (
             "cpu",

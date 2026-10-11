@@ -12,6 +12,7 @@ Without a report attached, the executors only test a flag.
 """
 from std.memory import ArcPointer
 
+from ._build_identity import CPU_BUILD_ID
 from .column import Column
 from .dtype import DataType
 from .frame import DataFrame
@@ -135,6 +136,12 @@ struct ExecutionReport(Movable):
             wall.append(Float64(item.wall_ns) / 1e6)
         return DataFrame(
             [
+                Series(
+                    "cpu_build_id",
+                    Column[String](
+                        List[String](length=len(ordered), fill=CPU_BUILD_ID)
+                    ),
+                ),
                 Series("node", Column[Int64](nodes^)),
                 Series("operator", Column[String](operators^)),
                 Series("executor", Column[String](executors^)),
