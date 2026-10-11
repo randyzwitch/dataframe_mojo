@@ -218,6 +218,61 @@ def check_fusion_preflight_without_device():
 
 
 check_fusion_preflight_without_device()
+
+
+def check_sort_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 2, 0, 0))
+    code = (I * 4)(200, 0, 0, 1)
+    literals = (I * 1)()
+    steps = (Step * 1)(Step(0, 1, 0, 2, 0, 1))
+    gathers = (I * 1)(0)
+    outputs = (Output * 1)(Output(None, None, 2, 0, -1, 0))
+    node_types, slot_types = (I * 1)(2), (I * 1)(2)
+    request = Request(
+        2,
+        513,
+        0,
+        1,
+        1,
+        4,
+        1,
+        1,
+        1,
+        1,
+        -1,
+        0,
+        0,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(literals),
+        ptr(steps),
+        ptr(gathers),
+        ptr(outputs),
+        ptr(node_types),
+        ptr(slot_types),
+    )
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.launches == 14
+    assert memory.shared >= 30 * 513
+    for field, value, message in ((2, 2, b"sort key"), (1, 1, b"sort key")):
+        old = code[field]
+        code[field] = value
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert message in C.string_at(err)
+        lib.dfm_free(err)
+        code[field] = old
+    node_types[0] = 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"sort key dtype" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+check_sort_preflight_without_device()
+
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
@@ -1360,6 +1415,142 @@ def test_additional_row_ops():
 
 
 test_additional_row_ops()
+
+
+def test_stable_sort():
+    from functools import cmp_to_key
+
+    def run(dtype, values, valid, descending, nulls_last):
+        n = len(values)
+        offset = 5
+        scalar = SCALARS[dtype]
+        data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(*values)
+        bitmap = packed(valid, offset)
+        ids = (I * max(1, n))(*range(n))
+        inputs = (Input * 2)(
+            Input(ptr(data), ptr(bitmap), dtype, offset, 1),
+            Input(ptr(ids), None, 3, 0, 0),
+        )
+        code = (I * 4)(200, 0, descending, nulls_last)
+        literals = (I * 1)()
+        steps = (Step * 1)(Step(0, 1, 0, 2, 0, 2))
+        gathers = (I * 2)(0, 1)
+        key = (scalar * max(1, n))()
+        order = (I * max(1, n))()
+        keybits, orderbits = packed([False] * n), packed([False] * n)
+        outputs = (Output * 2)(
+            Output(ptr(key), ptr(keybits), dtype, 0, -1, 0),
+            Output(ptr(order), ptr(orderbits), 3, 1, -1, 0),
+        )
+        nt, st = (I * 1)(dtype), (I * 2)(dtype, 3)
+        request = Request(
+            2,
+            n,
+            0,
+            2,
+            2,
+            4,
+            1,
+            1,
+            2,
+            2,
+            -1,
+            0,
+            1,
+            -1,
+            ptr(inputs),
+            ptr(code),
+            ptr(literals),
+            ptr(steps),
+            ptr(gathers),
+            ptr(outputs),
+            ptr(nt),
+            ptr(st),
+        )
+        memory, stats, err = Memory(), Stats(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+        assert stats.rows == n and stats.waits == 1
+        assert (
+            stats.memory.peak == memory.peak
+            and stats.memory.launches == memory.launches
+        )
+
+        def compare(a, b):
+            if valid[a] != valid[b]:
+                return (-1 if valid[a] else 1) * (1 if nulls_last else -1)
+            if not valid[a]:
+                return 0
+            x, y = values[a], values[b]
+            if dtype == 1 and (math.isnan(x) or math.isnan(y)):
+                c = 0 if math.isnan(x) and math.isnan(y) else 1 if math.isnan(x) else -1
+                return c  # NaNs follow numeric values in either direction.
+            else:
+                c = (x > y) - (x < y)
+            return -c if descending else c
+
+        expected = sorted(range(n), key=cmp_to_key(compare))
+        assert list(order)[:n] == expected, (
+            dtype,
+            n,
+            descending,
+            nulls_last,
+            list(order)[:n],
+            expected,
+        )
+        assert unpack(keybits, n) == [valid[i] for i in expected]
+        assert all(unpack(orderbits, n))
+        if dtype == 4:
+            assert unpack(key, n) == [bool(values[i]) for i in expected]
+        else:
+            size = C.sizeof(scalar)
+            for i, source in enumerate(expected):
+                assert C.string_at(C.addressof(key) + i * size, size) == C.string_at(
+                    C.addressof(data) + source * size, size
+                ), (dtype, i, source)
+
+    rng = random.Random(10001)
+    for dtype, scalar in SCALARS.items():
+        bits = C.sizeof(scalar) * 8
+        if dtype == 1:
+            from_bits = lambda x: C.cast(
+                C.pointer(C.c_uint32(x)), C.POINTER(C.c_float)
+            )[0]
+            values = [
+                0.0,
+                -0.0,
+                2**-149,
+                -(2**-149),
+                math.inf,
+                -math.inf,
+                math.nan,
+            ] * 75
+            values += [from_bits(rng.getrandbits(32)) for _ in range(80)]
+        elif dtype == 4:
+            values = [bool(rng.randrange(2)) for _ in range(605)]
+        elif dtype in (2, 3, 5, 6):
+            lo, hi = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+            values = [lo, hi] + [
+                rng.randint(-min(33, hi), min(33, hi)) for _ in range(603)
+            ]
+        else:
+            hi = (1 << bits) - 1
+            values = [0, hi] + [rng.randrange(17) for _ in range(603)]
+        for descending in (False, True):
+            for nulls_last in (False, True):
+                run(
+                    dtype,
+                    values,
+                    [i % 7 != 3 for i in range(len(values))],
+                    descending,
+                    nulls_last,
+                )
+        for n in (0, 1, 7, 8, 255, 256, 257, 513):
+            run(dtype, values[:n], [True] * n, False, True)
+        run(dtype, values[:257], [False] * 257, True, True)
+
+
+test_stable_sort()
 
 lib.dfm_context_release(ctx)
 print(
