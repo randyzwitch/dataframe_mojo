@@ -1,4 +1,5 @@
 """Order-dependent expressions and over() partitions."""
+from std.collections import Dict
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -429,6 +430,108 @@ def test_batch_independence_and_empty() raises:
     for size in range(1, 7):
         assert_true(df.select_exprs(exprs, batch_size=size).equals(reference))
     assert_equal(df.clear().select_exprs(exprs).height(), 0)
+
+
+def reference_running(
+    values: List[Float64],
+    valid: List[Bool],
+    parts: List[Int],
+    op: String,
+    reverse: Bool,
+) raises -> Tuple[List[Float64], List[Bool]]:
+    """Cumulative op per partition, row by row, as SQL defines it."""
+    var n = len(values)
+    var out = List[Float64](length=n, fill=0)
+    var out_valid = List[Bool](length=n, fill=False)
+    var state = Dict[Int, Float64]()
+    var counts = Dict[Int, Int]()
+    for step in range(n):
+        var i = n - 1 - step if reverse else step
+        var p = parts[i]
+        var count = counts.get(p, 0)
+        if valid[i]:
+            if count == 0:
+                state[p] = 0.0 if op == "sum" else values[i]
+            var cur = state[p]
+            if op == "sum":
+                cur += values[i]
+            elif op == "max":
+                cur = max(cur, values[i])
+            elif op == "min":
+                cur = min(cur, values[i])
+            state[p] = cur
+            counts[p] = count + 1
+        if op == "count":
+            out[i] = Float64(counts.get(p, 0))
+            out_valid[i] = True
+        elif valid[i]:
+            out[i] = state[p]
+            out_valid[i] = True
+    return (out^, out_valid^)
+
+
+def test_running_ops_match_a_row_by_row_reference() raises:
+    # Count, sum, min and max per partition, forward and reversed, over
+    # Int64 and Float64 values with nulls: the one-pass path gives the
+    # SQL running values (nulls stay null, count never null).
+    var n = 2_000
+    var ints = List[Int64](capacity=n)
+    var floats = List[Float64](capacity=n)
+    var valid = List[Bool](capacity=n)
+    var parts = List[Int64](capacity=n)
+    var part_ids = List[Int](capacity=n)
+    for i in range(n):
+        var v = Int64((i * 7919) % 211) - 100
+        ints.append(v)
+        floats.append(Float64(v) * 0.5)
+        valid.append(i % 7 != 3)
+        parts.append(Int64((i * 31) % 17))
+        part_ids.append((i * 31) % 17)
+    var as_float = List[Float64](capacity=n)
+    for v in ints:
+        as_float.append(Float64(v))
+    var df = DataFrame(
+        [
+            Series("p", Column[Int64](parts^)),
+            Series("i", Column[Int64](ints^, valid.copy())),
+            Series("f", Column[Float64](floats.copy(), valid.copy())),
+        ]
+    )
+    for reverse in [False, True]:
+        for op in ["sum", "max", "min", "count"]:
+            for name in ["i", "f"]:
+                var e: Expr
+                if op == "sum":
+                    e = col(name).cum_sum(reverse=reverse)
+                elif op == "max":
+                    e = col(name).cum_max(reverse=reverse)
+                elif op == "min":
+                    e = col(name).cum_min(reverse=reverse)
+                else:
+                    e = col(name).cum_count(reverse=reverse)
+                var got = df.select(e.over("p").alias("r"))["r"]
+                var source = as_float.copy() if name == "i" else floats.copy()
+                var want = reference_running(
+                    source, valid, part_ids, op, reverse
+                )
+                for r in range(n):
+                    var cell = got.get(r)
+                    assert_equal(cell.is_null(), not want[1][r])
+                    if want[1][r]:
+                        var value = (
+                            Float64(cell.int64()) if got.dtype()
+                            == DataType.INT64 else cell.float64()
+                        )
+                        assert_equal(value, want[0][r])
+    # A NaN keeps the ranked path, which orders it above every number.
+    var with_nan = DataFrame(
+        [Series("x", Column[Float64]([1.0, Float64.MAX, 0.0, 2.0]))]
+    )
+    var nan_frame = with_nan.with_columns(
+        [(col("x") / lit(0.0) * lit(0.0)).alias("x")]
+    )
+    var ranked = nan_frame.select(col("x").cum_max().alias("m"))
+    assert_equal(ranked.height(), 4)
 
 
 def main() raises:
