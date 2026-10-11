@@ -325,7 +325,13 @@ profiles. Native ABI, join, and resident suites passed on Apple Silicon, and all
 exercise the hash threshold on both sides, composite nullable keys, signed-zero
 and NaN equivalence, radix ordering, bounded fallback, and error recovery. These
 correctness results do not establish performance crossovers for the dispatch
-bounds.
+bounds. Matched M1 development measurements are now available in
+[`apple-metal-algorithms-m1-20261011`](../benchmarks/results/apple-metal-algorithms-m1-20261011/README.md):
+hash joins improve all selected cases, while grouping depends on cardinality
+and input order. Radix sorting is slower than the preserved merge path in all
+six selected cases. These bounds therefore remain structural eligibility bounds,
+not validated performance crossovers. Explicit Metal selection can regress for
+these mechanisms; the analytical automatic policy excludes them.
 
 String and categorical frame inputs use a query-wide ordered UInt32 dictionary.
 All inputs and string literals share the same mapping, so equality and ordering

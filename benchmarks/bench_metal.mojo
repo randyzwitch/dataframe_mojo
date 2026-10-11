@@ -10,6 +10,42 @@ from std.os import getenv
 from std.time import perf_counter_ns
 
 
+def make_algorithm_frame(
+    n: Int, variant: String, workload: String
+) raises -> DataFrame:
+    var keys = List[Int32](length=n, fill=0)
+    var ids = List[Int64](length=n, fill=0)
+    var values = List[Int32](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=True)
+    var value_valid = List[Bool](length=n, fill=True)
+    var cardinality = min(n, 1024) if workload == "group_hash" else max(
+        1, n // 2
+    )
+    for i in range(n):
+        keys[i] = Int32(
+            i * cardinality // n if variant
+            == "sorted" else (i * 37) % cardinality
+        )
+        ids[i] = Int64(i)
+        values[i] = Int32(i % 17 - 8)
+        if variant == "nulls":
+            valid[i] = i % 20 != 0
+            value_valid[i] = i % 13 != 0
+    if workload == "group_hash" or workload == "group_high":
+        return DataFrame(
+            [
+                Series("x", Column[Int32](keys^, valid^)),
+                Series("y", Column[Int32](values^, value_valid^)),
+            ]
+        )
+    return DataFrame(
+        [
+            Series("x", Column[Int32](keys^, valid^)),
+            Series("row", Column[Int64](ids^)),
+        ]
+    )
+
+
 def make_frame(
     n: Int, variant: String, integer: Bool, extra_column: Bool = False
 ) raises -> DataFrame:
@@ -92,6 +128,14 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
         )
     elif workload == "int_sum":
         query = query.select(col("x").sum().alias("s"))
+    elif workload == "sort_radix":
+        query = query.sort(["x"], nulls_last=True)
+    elif workload == "group_hash" or workload == "group_high":
+        query = query.group_by("x", maintain_order=True).agg(
+            [col("y").sum().alias("s"), col("y").count().alias("n")]
+        )
+    elif workload == "join_hash":
+        query = query.join(frame.lazy(), "x", how="left", suffix="_right")
     else:
         raise Error("Unknown Metal development workload")
     return query^
@@ -118,7 +162,15 @@ def main() raises:
     var gpu_first = getenv("BENCH_GPU_FIRST", "0") == "1"
     if n < 1 or reps < 1:
         raise Error("Rows and repetitions must be positive")
-    var frame = make_frame(
+    var algorithm = (
+        workload == "sort_radix"
+        or workload == "group_hash"
+        or workload == "group_high"
+        or workload == "join_hash"
+    )
+    var frame = make_algorithm_frame(
+        n, variant, workload
+    ) if algorithm else make_frame(
         n,
         variant,
         workload == "int_sum" or workload == "filtered_int_sum",
@@ -182,4 +234,9 @@ def main() raises:
             "PROFILE_F", "gpu_ms", profile[1].column("gpu_ms").float64()._get(0)
         )
     print("BUILD_ID", profile[1].column("runtime_build_id").string()._get(0))
+    print(
+        "PROFILE_S",
+        "algorithm",
+        profile[1].column("algorithm").string()._get(0),
+    )
     print("VALIDATED", True)

@@ -1,0 +1,25 @@
+Imported from /private/tmp/apple-final-validation/benchmarks/bench_metal.mojo:6:
+Imported from ./dataframe/__init__.mojo:7:
+Imported from ./dataframe/frame.mojo:98:
+Imported from ./dataframe/partition.mojo:34:
+./dataframe/huge_pages.mojo:46:29: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+def huge_uninit[T: Copyable & Movable](length: Int) -> List[T]:
+                            ^
+Imported from /private/tmp/apple-final-validation/benchmarks/bench_metal.mojo:6:
+Imported from ./dataframe/__init__.mojo:7:
+Imported from ./dataframe/frame.mojo:98:
+Imported from ./dataframe/partition.mojo:34:
+./dataframe/huge_pages.mojo:35:27: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+def huge_list[T: Copyable & Movable](length: Int, fill: T) -> List[T]:
+                          ^
+Included from /private/tmp/apple-final-validation/benchmarks/bench_metal.mojo:6:
+Included from ./dataframe/__init__.mojo:7:
+Included from ./dataframe/frame.mojo:72:
+./dataframe/execution.mojo:1706:21: warning: assignment to 'column_at' was never used; assign to '_' instead?
+    var column_at = -1
+                    ^
+Included from /private/tmp/apple-final-validation/benchmarks/bench_metal.mojo:6:
+Included from ./dataframe/__init__.mojo:12:
+./dataframe/lazy.mojo:844:27: warning: assignment to 'exprs' was never used; assign to '_' instead?
+    var exprs = List[Expr]()
+                          ^
