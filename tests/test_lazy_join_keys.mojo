@@ -249,5 +249,45 @@ def test_sort_with_a_direction_per_key() raises:
         )
 
 
+def test_left_join_keeps_the_right_key_without_coalesce() raises:
+    # The use #466 names: after a left join with coalesce=False, a null
+    # right key marks a row with no match. Eager, lazy and streaming agree,
+    # through a pipeline's probe step on a large left side.
+    var n = 50_000
+    var keys = List[Int64](capacity=n)
+    for i in range(n):
+        keys.append(Int64(i % 1000))
+    var sales = DataFrame([Series("item", Column[Int64](keys^))])
+    var promoted = List[Int64]()
+    for i in range(0, 1000, 3):
+        promoted.append(Int64(i))
+    var promotions = DataFrame([Series("p_item", Column[Int64](promoted^))])
+    var eager = sales.join(
+        promotions,
+        left_on=["item"],
+        right_on=["p_item"],
+        how="left",
+        coalesce=False,
+    )
+    assert_equal(eager.columns(), [String("item"), "p_item"])
+    var unmatched = eager.filter(col("p_item").is_null()).height()
+    assert_equal(unmatched, n - 50 * 334)
+    for streaming in [False, True]:
+        var lazy = (
+            sales.lazy()
+            .join(
+                promotions.lazy(),
+                left_on=["item"],
+                right_on=["p_item"],
+                how="left",
+                coalesce=False,
+            )
+            .filter(col("p_item").is_null())
+            .collect(streaming=streaming)
+        )
+        assert_equal(lazy.height(), unmatched)
+        assert_equal(lazy.columns(), [String("item"), "p_item"])
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
