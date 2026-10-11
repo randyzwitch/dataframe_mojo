@@ -323,7 +323,11 @@ def check_group_preflight_without_device():
             err,
         )
         assert memory.result == 4 * max(1, n) + (max(1, n) + 7) // 8
-        assert memory.launches == 8 + (max(1, n) - 1).bit_length()
+        expected_launches = 8 + (max(1, n) - 1).bit_length()
+        if n >= 4096:
+            passes = ((2 * n - 1).bit_length() + 3) // 4
+            expected_launches += 6 + 3 * passes
+        assert memory.launches == expected_launches
     for index, value in [(2, 0), (3, 2), (9, 1), (10, 3), (11, 11)]:
         before = code[index]
         code[index] = value
@@ -1624,7 +1628,7 @@ test_additional_row_ops()
 def test_stable_sort():
     from functools import cmp_to_key
 
-    def run(dtype, values, valid, descending, nulls_last):
+    def run(dtype, values, valid, descending, nulls_last, fallback=False):
         n = len(values)
         offset = 5
         scalar = SCALARS[dtype]
@@ -1678,6 +1682,15 @@ def test_stable_sort():
             lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)),
             err,
         )
+        expected_radix = n >= 65536 and dtype != 1
+        assert bool(lib.dfm_plan_features(C.byref(request), C.byref(err)) & 4) == expected_radix
+        if fallback:
+            assert expected_radix
+            # Remove exactly the optional radix workspace from the peak budget.
+            request.budget = memory.peak - (12 * n + 64 * ((n + 255) // 256) + 96)
+            assert lib.dfm_plan_features(C.byref(request), C.byref(err)) & 4 == 0
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+            assert memory.peak == request.budget
         check(
             lib.dfm_execute(
                 ctx, C.byref(request), C.byref(stats), C.byref(err)
@@ -1769,13 +1782,80 @@ def test_stable_sort():
         for n in (0, 1, 7, 8, 255, 256, 257, 513):
             run(dtype, values[:n], [True] * n, False, True)
         run(dtype, values[:257], [False] * 257, True, True)
+        # Algorithm threshold, partial blocks, and digit/sign boundaries.
+        for n in (65535, 65536, 65537):
+            large = (values * ((n + len(values) - 1) // len(values)))[:n]
+            run(dtype, large, [i % 7 != 3 for i in range(n)], False, True)
+        if dtype != 1:
+            n = 65537
+            large = (values * ((n + len(values) - 1) // len(values)))[:n]
+            for descending, nulls_last in ((True, False), (False, False), (True, True)):
+                run(dtype, large, [i % 7 != 3 for i in range(n)], descending, nulls_last)
+            run(dtype, large, [False] * n, True, True)
+            run(dtype, large, [True] * n, True, True, fallback=True)
+
 
 
 test_stable_sort()
 
 
+def test_radix_composite_after_filter():
+    from functools import cmp_to_key
+
+    n = 65537
+    first = [((i * 103) % 31) - 15 for i in range(n)]
+    second = [((i * 47) % 13) - 6 for i in range(n)]
+    valid = [[i % 11 != 0 for i in range(n)], [i % 7 != 0 for i in range(n)]]
+    arrays = [(C.c_int32 * n)(*first), (C.c_int32 * n)(*second), (I * n)(*range(n))]
+    bitmaps = [packed(v, 3) for v in valid]
+    inputs = (Input * 3)(Input(ptr(arrays[0]), ptr(bitmaps[0]), 2, 3, 1),
+        Input(ptr(arrays[1]), ptr(bitmaps[1]), 2, 3, 1), Input(ptr(arrays[2]), None, 3, 0, 0))
+    # Filter on an independent column, then sort mixed directions/null policies.
+    words = [0, -1, -1, 2, 1, -1, -1, -1, 8, 0, 1, -1,
+        200, 0, 0, 1, 200, 1, 1, 0]
+    code = (I * len(words))(*words)
+    literals = (I * 5)(0, n // 3, 0, 0, 0)
+    steps = (Step * 2)(Step(0, 3, 3, 1, 0, 3), Step(3, 2, 0, 2, 3, 3))
+    gathers = (I * 6)(0, 1, 2, 0, 1, 2)
+    result = (I * n)()
+    resultbits = packed([False] * n)
+    outputs = (Output * 1)(Output(ptr(result), ptr(resultbits), 3, 2, -1, 0))
+    nt, st = (I * 5)(3, 3, 4, 2, 2), (I * 4)(2, 2, 3, 4)
+    request = Request(2, n, 0, 4, 3, len(words), 5, 2, 6, 1, -1, 0, 1, -1,
+        ptr(inputs), ptr(code), ptr(literals), ptr(steps), ptr(gathers), ptr(outputs), ptr(nt), ptr(st))
+    memory, stats, err = Memory(), Stats(), P()
+    assert lib.dfm_plan_features(C.byref(request), C.byref(err)) & 4
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+
+    def compare(a, b):
+        for values, validity, descending, last in ((first, valid[0], False, True),
+                (second, valid[1], True, False)):
+            if validity[a] != validity[b]:
+                return (-1 if validity[a] else 1) * (1 if last else -1)
+            if validity[a]:
+                c = (values[a] > values[b]) - (values[a] < values[b])
+                if c:
+                    return -c if descending else c
+        return 0
+
+    expected = sorted(range(n // 3 + 1, n), key=cmp_to_key(compare))
+    assert stats.rows == len(expected)
+    assert list(result)[:stats.rows] == expected
+    assert all(unpack(resultbits, stats.rows))
+    assert stats.memory.peak == memory.peak
+    assert stats.memory.launches == memory.launches
+    # An empty filtered table uses indirect one-block dispatches safely.
+    literals[1] = n
+    check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+    assert stats.rows == 0
+
+
+test_radix_composite_after_filter()
+
+
 def test_grouped_reductions():
-    def run(dtype, n, key_count=2, unique=False):
+    def run(dtype, n, key_count=2, unique=False, fallback=False):
         scalar = SCALARS[dtype]
         if dtype == 1:
             pool = [0.0, -0.0, 1.0, float("nan"), 1.401298464324817e-45]
@@ -1917,6 +1997,13 @@ def test_grouped_reductions():
         check(
             lib.dfm_estimate(C.byref(req), C.byref(memory), C.byref(err)), err
         )
+        assert bool(lib.dfm_plan_features(C.byref(req), C.byref(err)) & 2) == (n >= 4096)
+        if fallback:
+            h = 1 << (2 * n - 1).bit_length()
+            req.budget = memory.peak - (12 * n + 64 * ((n + 255) // 256) + 96 + 4 * h)
+            assert lib.dfm_plan_features(C.byref(req), C.byref(err)) & 2 == 0
+            check(lib.dfm_estimate(C.byref(req), C.byref(memory), C.byref(err)), err)
+            assert memory.peak == req.budget
         # Large-width sample sums can intentionally overflow the narrow result.
         overflow = False
         if len(specs) == 6 and outs[-1][1] in (2, 9):
@@ -1985,11 +2072,13 @@ def test_grouped_reductions():
                         )
 
     for t in range(1, 11):
-        for n in (0, 1, 7, 257, 1025):
+        for n in (0, 1, 7, 257, 1025, 4095, 4096, 4097):
             run(t, n)
     run(5, 0, 0)
     run(5, 262401, 0)
     run(3, 1025, 2, True)
+    run(3, 4097, 2, True)
+    run(3, 4097, fallback=True)
 
 
 test_grouped_reductions()
@@ -2285,12 +2374,15 @@ def test_additional_reductions():
 
     for t in range(1, 11):
         for grouped in (False, True):
-            for n in (0, 1, 7, 521):
+            for n in (0, 1, 7, 521, 4097):
                 run(t, n, grouped)
             run(t, 521, grouped, all_null=True)
             run(t, 521, grouped, all_valid=True)
     for grouped in (False, True):
         run(1, 521, grouped, all_nan=True)
+    run(1, 4097, True, all_nan=True)
+    run(1, 4097, True, all_null=True)
+    run(4, 4097, True, all_valid=True)
     run(3, 262401, False)
 
 

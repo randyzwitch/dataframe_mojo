@@ -595,8 +595,12 @@ def _direct_filtered_reduction(plan: RowPlan) -> Bool:
     return filtered
 
 
-def _plan_features(library: _Library, request: List[Int64]) raises -> Int64:
-    var callback = library.optional_symbol("dfm_plan_features")
+def _plan_features(
+    library: _Library, request: List[Int64], join: Bool = False
+) raises -> Int64:
+    var callback = library.optional_symbol(
+        "dfm_join_plan_features" if join else "dfm_plan_features"
+    )
     if not callback:
         return 0
     var error = 0
@@ -675,7 +679,9 @@ def _execute(
         initialization_ns,
         start,
         "native_metal_predicate_reductions" if features
-        & 1 else "specialized_native_metal_stable_compaction",
+        & 1 else "native_metal_hash_groups" if features
+        & 2 else "native_metal_integer_radix_sort" if features
+        & 4 else "specialized_native_metal_stable_compaction",
         "shared-buffer staging -> native Metal kernels -> synchronized CPU result",
     )
     return (result^, report^)
@@ -1011,6 +1017,7 @@ def _execute_join_dag(
                 var parent = task.source if side == 0 else task.right
                 for column in range(values[parent].frame.width()):
                     refs.extend([Int64(values[parent].address), Int64(column)])
+            var join_features = _plan_features(scope.context.library, request, True)
             status = _resident_run_call(
                 scope.join,
                 scope.address,
@@ -1025,7 +1032,7 @@ def _execute_join_dag(
             _ = request^
             _ = refs^
             scope.context.library.check(status, error)
-            algorithm = "native_metal_resident_sorted_join"
+            algorithm = "native_metal_resident_hash_join" if join_features & 1 else "native_metal_resident_sorted_join"
             label = "JOIN"
         else:
             if task.source >= 0:
@@ -1051,8 +1058,13 @@ def _execute_join_dag(
                 input_rows = values[task.source].rows
                 input_bytes = values[task.source].retained
             request[1] = Int64(input_rows)
-            if _plan_features(scope.context.library, request) & 1:
+            var features = _plan_features(scope.context.library, request)
+            if features & 1:
                 algorithm = "native_metal_predicate_reductions"
+            elif features & 2:
+                algorithm = "native_metal_hash_groups"
+            elif features & 4:
+                algorithm = "native_metal_integer_radix_sort"
             var refs = List[Int64]()
             for name in plan.source.columns():
                 refs.extend(

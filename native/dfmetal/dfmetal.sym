@@ -13,6 +13,7 @@ _dfm_plan_cached
 _dfm_execute
 _dfm_free
 _dfm_join_estimate
+_dfm_join_plan_features
 _dfm_join_prepare
 _dfm_join_finish
 _dfm_join_release

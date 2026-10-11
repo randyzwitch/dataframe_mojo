@@ -136,12 +136,13 @@ std::string encode(int64_t t, const std::string &value) {
                           : "ulong(" + value + ")";
 }
 int64_t aligned(int64_t n) { return mul(add(n, 7) / 8, 8); }
+#include "dfmetal_order.inc"
 // A segment ends at a stable filter boundary. Values produced and consumed
 // inside one segment stay in per-thread variables; only boundary-live slots
 // occupy shared memory. Logical ABI slot identifiers remain unchanged.
 struct Layout {
   std::array<int64_t, 64> physical;
-  std::array<std::array<bool, 64>, 64> gathered{};
+  std::array<std::array<bool, 64>, 64> gathered{}, group_after{};
   std::vector<int64_t> ends;
   int64_t slots = 0;
   explicit Layout(const DFMRequest &r) {
@@ -207,6 +208,7 @@ struct Layout {
           gathered[i][slot] = live[slot];
         }
       if (step.filter == 3) {
+        group_after[i] = live;
         auto header = r.code + 4 * step.start;
         live[step.slot] = live[header[2]] = live[header[3]] = false;
         for (int64_t j = 1; j < step.nodes; ++j) {
@@ -235,8 +237,31 @@ struct Layout {
 struct Shape {
   int64_t cap, packed, blocks, bitmap, matrix, validity, literal, outputBits,
       partial;
-  bool filter, order, grouped;
+  bool filter, order, grouped, radixSort, hashGroups;
 };
+bool hashGroupCandidate(const DFMRequest &r, int64_t step) {
+  return typed(r) && r.steps[step].filter == 3 && hashCandidate(r.rows);
+}
+int64_t hashGroupPasses(const DFMRequest &r) {
+  int64_t bits = 0;
+  for (auto capacity = hashCapacity(r.rows); capacity > 1; capacity >>= 1) ++bits;
+  return (bits + 3) / 4;
+}
+int64_t radixPasses(const DFMRequest &r, int64_t step) {
+  if (!typed(r) || r.steps[step].filter != 2 || r.rows < 65536 || r.rows > 8388608)
+    return 0;
+  for (int64_t i = 0; i < step; ++i)
+    if (r.steps[i].filter == 3) return 0;
+  int64_t passes = 0;
+  const auto &v = r.steps[step];
+  for (int64_t j = 0; j < v.nodes; ++j) {
+    auto type = slotType(r, r.code[4 * (v.start + j) + 1]);
+    if (type == DFM_FLOAT32) return 0;
+    passes += 2 * width(type) + 1;
+  }
+  return passes <= 18 ? passes : 0;
+}
+DFMMemory estimate(const DFMRequest &, const Shape &, const DFMResidentInput *, bool, bool);
 bool directFilteredReduction(const DFMRequest &r) {
   if (!r.reductions || !r.steps || !r.outputs)
     return false;
@@ -514,6 +539,23 @@ Shape validate(const DFMRequest &r, bool storage = false,
           : 1;
   if (directFilteredReduction(r))
     s.filter = false;
+  for (int64_t i = 0; i < r.step_count; ++i) {
+    s.radixSort |= radixPasses(r, i) != 0;
+    s.hashGroups |= hashGroupCandidate(r, i);
+  }
+  if ((s.radixSort || s.hashGroups) && r.memory_budget_bytes >= 0) {
+    auto bound = s;
+    bound.bitmap = 0;
+    for (int64_t i = 0; i < r.input_count; ++i) {
+      auto &v = r.inputs[i];
+      auto bytes = (r.rows + v.bit_offset + 7) / 8;
+      if (v.dtype == DFM_BOOL) bound.bitmap = add(bound.bitmap, bytes);
+      else if (typed(r)) bound.bitmap = add(aligned(bound.bitmap), mul(r.rows, width(v.dtype)));
+      if (v.has_validity) bound.bitmap = add(bound.bitmap, bytes);
+    }
+    if (estimate(r, bound, nullptr, false, false).peak_bytes > r.memory_budget_bytes)
+      s.radixSort = s.hashGroups = false;
+  }
   return s;
 }
 DFMMemory estimate(const DFMRequest &r, const Shape &s,
@@ -536,6 +578,12 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
   }
   if (s.grouped)
     account(16);
+  if (s.radixSort || s.hashGroups) {
+    RadixShape radix(s.cap);
+    account(mul(radix.cap, 8)); account(mul(radix.cap, 4));
+    account(radix.histogram); account(64); account(32);
+  }
+  if (s.hashGroups) account(mul(hashCapacity(s.cap), 4));
   account(s.bitmap);
   account(s.literal);
   account(s.outputBits);
@@ -577,6 +625,16 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
     if (r.steps[i].filter && !directFilteredReduction(r)) {
       if (r.steps[i].filter == 1)
         m.launches += 2;
+      else if (s.hashGroups && hashGroupCandidate(r, i)) {
+        m.launches += 3 + 3 * hashGroupPasses(r);
+        // Restore the public key order on the reduced table, proportional to G.
+        m.launches += 2;
+        for (int64_t stride = 1; stride < s.cap; stride *= 2) ++m.launches;
+        for (int64_t slot = 0; slot < r.slots; ++slot)
+          m.launches += layout.group_after[i][slot];
+      }
+      else if (s.radixSort && radixPasses(r, i))
+        m.launches += 1 + 2 * r.steps[i].nodes + 3 * radixPasses(r, i);
       else
         for (int64_t stride = 1; stride < s.cap; stride *= 2)
           ++m.launches;
@@ -1121,7 +1179,34 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
  if(row>=meta.x)return;ulong target=slot*meta.z+row,source=slot*meta.z+index[row];y[target]=x[source];w[target]=v[source];
 }
 )MSL";
+  auto shape = validate(r);
+  if (shape.radixSort || shape.hashGroups) text += radixSource();
   text += groupSource(r, layout);
+  if (shape.hashGroups)
+    for (int64_t i = 0; i < r.step_count; ++i) {
+      if (!hashGroupCandidate(r, i)) continue;
+      const auto &step = r.steps[i];
+      auto name = std::to_string(i);
+      auto keys = r.code[4 * step.start + 1];
+      text += "kernel void group_hash" + name +
+        "(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],"
+        "device atomic_uint *owners[[buffer(2)]],device ulong *buckets[[buffer(3)]],"
+        "constant uint4 &meta[[buffer(4)]],uint row[[thread_position_in_grid]]){"
+        "if(row>=meta.x)return;ulong hash=0x9e3779b97f4a7c15UL;";
+      for (int64_t j = 0; j < keys; ++j) {
+        auto logical = r.code[4 * (step.start + 1 + j) + 1];
+        text += "{ulong at=" + std::to_string(layout.physical[logical]) +
+          "UL*meta.z+row;hash=key_hash(hash^(v[at]?canonical_key(ulong(x[at])," +
+          std::to_string(slotType(r, logical)) + "):0xd6e8feb86659fd93UL));}";
+      }
+      auto capacity = std::to_string(hashCapacity(r.rows)) + "U";
+      text += "uint bucket=uint(hash)&(" + capacity + "-1);for(uint probes=0;probes<" + capacity +
+        ";){uint owner=atomic_load_explicit(owners+bucket,memory_order_relaxed);"
+        "if(owner==0xffffffffU){uint empty=0xffffffffU;"
+        "if(atomic_compare_exchange_weak_explicit(owners+bucket,&empty,row,memory_order_relaxed,memory_order_relaxed)){buckets[row]=bucket;return;}"
+        "owner=empty;if(owner==0xffffffffU)continue;}if(group_equal" + name +
+        "(row,owner,x,v,meta)){buckets[row]=bucket;return;}bucket=(bucket+1)&(" + capacity + "-1);++probes;}}\n";
+    }
   if (typed(r))
     for (int64_t i = 0; i < r.input_count; ++i) {
       auto t = r.inputs[i].dtype;
@@ -1182,6 +1267,31 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           name +
           "(index[mid],own,x,v,meta))lo=mid+1;else "
           "hi=mid;}target[base+(row-(left?base:middle))+(lo-first)]=own;}\n";
+    }
+  if (shape.radixSort)
+    for (int64_t i = 0; i < r.step_count; ++i) {
+      if (!radixPasses(r, i)) continue;
+      auto &step = r.steps[i];
+      text += "kernel void sort_radix_keys" + std::to_string(i) +
+        "(device const ulong *x[[buffer(0)]],device const uchar *v[[buffer(1)]],"
+        "device ulong *keys[[buffer(2)]],constant uint4 &meta[[buffer(3)]],"
+        "constant uint2 &p[[buffer(4)]],uint row[[thread_position_in_grid]]){"
+        "if(row>=meta.x)return;switch(p.x){";
+      for (int64_t j = 0; j < step.nodes; ++j) {
+        auto key = r.code + 4 * (step.start + j);
+        auto type = slotType(r, key[1]);
+        int bits = 8 * width(type);
+        auto mask = bits == 64 ? "~0UL" : "((1UL<<" + std::to_string(bits) + ")-1UL)";
+        text += "case " + std::to_string(j) + ":{ulong at=" +
+          std::to_string(layout.physical[key[1]]) + "UL*meta.z+row;bool valid=v[at]!=0;"
+          "if(p.y){keys[row]=valid?" + std::string(key[3] ? "0UL:1UL" : "1UL:0UL") +
+          ";}else{ulong word=x[at]&" + mask + ";";
+        if (type == DFM_INT8 || type == DFM_INT16 || type == DFM_INT32 || type == DFM_INT64)
+          text += "word^=1UL<<" + std::to_string(bits-1) + ";";
+        if (key[2]) text += "word^=" + mask + ";";
+        text += "keys[row]=valid?word:0UL;}break;}";
+      }
+      text += "}}\n";
     }
   int64_t first = 0, previousFilter = -1;
   for (auto end : layout.ends) {
@@ -1604,6 +1714,13 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         int64_t(16)})
     if (uint64_t(bytes) > c.device.maxBufferLength)
       fail("Metal request exceeds maximum buffer length before submission");
+  RadixShape radixShape(shape.cap);
+  if (shape.radixSort || shape.hashGroups)
+    for (auto bytes : {mul(shape.cap, 8), mul(shape.cap, 4), radixShape.histogram, int64_t(64), int64_t(32)})
+      if (uint64_t(bytes) > c.device.maxBufferLength)
+        fail("Metal radix buffer exceeds maximum buffer length before submission");
+  if (shape.hashGroups && uint64_t(mul(hashCapacity(shape.cap), 4)) > c.device.maxBufferLength)
+    fail("Metal hash table exceeds maximum buffer length before submission");
   auto src = source(r);
   bool hit = false;
   auto start = Clock::now();
@@ -1619,6 +1736,12 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     rank = b.make(mul(shape.cap, 4));
     blocks = b.make(mul(shape.order ? shape.cap : shape.blocks, 4));
   }
+  id<MTLBuffer> radixKeys = nil, radixRanks = nil, radixHistogram = nil, radixTotals = nil, radixArgs = nil;
+  if (shape.radixSort || shape.hashGroups) {
+    radixKeys = b.make(mul(shape.cap, 8)); radixRanks = b.make(mul(shape.cap, 4));
+    radixHistogram = b.make(radixShape.histogram); radixTotals = b.make(64); radixArgs = b.make(32);
+  }
+  id<MTLBuffer> hashOwners = shape.hashGroups ? b.make(mul(hashCapacity(shape.cap), 4)) : nil;
   id<MTLBuffer> groupArgs = shape.grouped ? b.make(16) : nil;
   auto bitmap = b.make(shape.bitmap), literal = b.make(shape.literal),
        bits = b.make(shape.outputBits), partial = b.make(shape.partial);
@@ -1739,6 +1862,23 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
           threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
     ++launches;
   };
+  auto indirect = [&](const std::string &name) {
+    [encoder setComputePipelineState:p->kernels.at(name)];
+    [encoder dispatchThreadgroupsWithIndirectBuffer:radixArgs indirectBufferOffset:16
+      threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+    ++launches;
+  };
+  auto radixDigit = [&](id<MTLBuffer> __strong &orderA, id<MTLBuffer> __strong &orderB, uint32_t shift) {
+    buffer(0, orderA); buffer(1, radixKeys); buffer(2, radixRanks);
+    buffer(3, radixHistogram); buffer(4, radixArgs); bytes(5, &shift, 4);
+    indirect("radix_rank");
+    buffer(0, radixHistogram); buffer(1, radixTotals); buffer(2, radixArgs);
+    dispatch("radix_prefix", 16 * 256, 1, true);
+    buffer(0, orderA); buffer(1, orderB); buffer(2, radixKeys);
+    buffer(3, radixRanks); buffer(4, radixHistogram); buffer(5, radixTotals);
+    buffer(6, radixArgs); bytes(7, &shift, 4);
+    indirect("radix_scatter"); std::swap(orderA, orderB);
+  };
   offset = 0;
   for (int64_t i = 0; i < r.input_count; ++i) {
     if (refs && refs[i].table) {
@@ -1770,6 +1910,34 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
       buffer(0, orderA);
       buffer(1, meta);
       dispatch("order_init", shape.cap);
+      bool hashGroup = shape.hashGroups && hashGroupCandidate(r, i);
+      if (hashGroup) {
+        uint32_t capacity = hashCapacity(shape.cap), capacityBlocks = radixShape.blocks;
+        buffer(0, hashOwners); bytes(1, &capacity, 4);
+        dispatch("hash_owners_init", capacity);
+        buffer(0, meta); buffer(1, radixArgs); bytes(2, &capacityBlocks, 4);
+        dispatch("radix_args", 1);
+        buffer(0, x); buffer(1, v); buffer(2, hashOwners); buffer(3, radixKeys); buffer(4, meta);
+        indirect("group_hash" + std::to_string(i));
+        for (uint32_t digit = 0; digit < hashGroupPasses(r); ++digit)
+          radixDigit(orderA, orderB, digit * 4);
+      } else
+      if (shape.radixSort && radixPasses(r, i)) {
+        uint32_t capacityBlocks = radixShape.blocks;
+        buffer(0, meta); buffer(1, radixArgs); bytes(2, &capacityBlocks, 4);
+        dispatch("radix_args", 1);
+        for (int64_t key = step.nodes; key-- > 0;) {
+          for (uint32_t phase = 0; phase < 2; ++phase) {
+            uint32_t params[2] = {uint32_t(key), phase};
+            buffer(0, x); buffer(1, v); buffer(2, radixKeys); buffer(3, meta); bytes(4, params, 8);
+            indirect("sort_radix_keys" + std::to_string(i));
+            auto type = slotType(r, r.code[4 * (step.start + key) + 1]);
+            uint32_t bits = phase ? 4 : 8 * width(type);
+            for (uint32_t shift = 0; shift < bits; shift += 4)
+              radixDigit(orderA, orderB, shift);
+          }
+        }
+      } else
       for (int64_t stride = 1; stride < shape.cap; stride *= 2) {
         uint32_t span = stride;
         buffer(0, x);
@@ -1821,6 +1989,27 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         ++launches;
         std::swap(x, y);
         std::swap(v, w);
+        if (hashGroup) {
+          uint32_t capacityBlocks = radixShape.blocks;
+          buffer(0, meta); buffer(1, radixArgs); bytes(2, &capacityBlocks, 4);
+          dispatch("radix_args", 1);
+          orderA = rank; orderB = blocks;
+          buffer(0, orderA); buffer(1, meta); indirect("order_init");
+          for (int64_t stride = 1; stride < shape.cap; stride *= 2) {
+            uint32_t span = stride;
+            buffer(0, x); buffer(1, v); buffer(2, orderA); buffer(3, orderB);
+            buffer(4, meta); bytes(5, &span, 4);
+            indirect("order_merge" + name); std::swap(orderA, orderB);
+          }
+          for (int64_t logical = 0; logical < r.slots; ++logical) {
+            if (!layout.group_after[i][logical]) continue;
+            uint64_t slot = layout.physical[logical];
+            buffer(0, x); buffer(1, v); buffer(2, y); buffer(3, w);
+            buffer(4, orderA); buffer(5, meta); bytes(6, &slot, 8);
+            indirect("order_gather");
+          }
+          std::swap(x, y); std::swap(v, w);
+        }
         continue;
       }
       for (int64_t j = 0; j < step.gather_count; ++j) {
@@ -2181,8 +2370,8 @@ int64_t dfm_plan_features(const DFMRequest *r, char **err) {
   try {
     if (!r)
       fail("Missing Metal plan feature request");
-    validate(*r);
-    return directFilteredReduction(*r) ? 1 : 0;
+    auto shape = validate(*r);
+    return (directFilteredReduction(*r) ? 1 : 0) | (shape.radixSort ? 4 : 0) | (shape.hashGroups ? 2 : 0);
   } catch (const std::exception &e) {
     error(err, e);
     return -1;

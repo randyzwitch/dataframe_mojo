@@ -302,3 +302,26 @@ The resident suite checks row/join/row pipelines, multiple consumers, scalar
 handoffs, all native dtypes, empty and nullable inputs, exact UInt64 and Float32
 payloads, whole-query budget rejection, invalid output metadata, failure
 recovery, and tables that outlive the caller's query and context handles.
+
+Native grouping and joins now have bounded hash paths. Hash grouping preserves
+first-occurrence group order and verifies complete composite keys after hashing;
+hash joins preserve left and right duplicate order and every join type's null
+contract. Float32 hashes canonicalize signed zero and NaN equivalence while
+retaining the first original key payload in the output. Hash tables are limited
+to inputs between 4,096 and 8,388,608 rows. Sorted fallback remains available;
+explicit join budgets use that fallback.
+
+Integer sorting can use stable four-bit radix passes for 65,536 through
+8,388,608 input rows when the total key width requires at most 18 passes.
+Null placement, signed integer order, descending order, and stable multikey ties
+retain the public sort contract. Float32 keys and sorts following grouping use
+the merge path. If radix/group hash scratch would exceed an explicit row budget,
+the estimator and execution both select the bounded fallback.
+
+The additive plan-feature functions expose the selected native mechanism in
+profiles. Native ABI, join, and resident suites passed on Apple Silicon, and all
+19 public Mojo Metal tests passed with the rebuilt library loaded. New fixtures
+exercise the hash threshold on both sides, composite nullable keys, signed-zero
+and NaN equivalence, radix ordering, bounded fallback, and error recovery. These
+correctness results do not establish performance crossovers for the dispatch
+bounds.

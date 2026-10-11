@@ -268,7 +268,9 @@ DFM_API void dfm_resident_release(void *table);
 DFM_API int32_t dfm_estimate(const DFMRequest *request, DFMMemory *memory,
                              char **error);
 // Pure flags for the implementation selected by this runtime build. Bit zero
-// denotes predicate-aware scalar reduction without row compaction.
+// denotes predicate-aware scalar reduction without row compaction. Bit two
+// denotes bounded stable integer radix sorting (including mixed merge steps).
+// Bit one denotes bounded hash grouping with stable members and ordered keys.
 DFM_API int64_t dfm_plan_features(const DFMRequest *request, char **error);
 // Checks an existing cache without compiling or submitting GPU work.
 // Returns 1 if cached, 0 if missing, or -1 with an allocated error message.
@@ -282,6 +284,8 @@ DFM_API int32_t dfm_execute(void *context, const DFMRequest *request,
 // output allocations are checked separately after GPU matching determines size.
 DFM_API int32_t dfm_join_estimate(const DFMJoinRequest *request,
                                   DFMMemory *memory, char **error);
+// Pure implementation flags: bit zero denotes bounded hash lookup.
+DFM_API int64_t dfm_join_plan_features(const DFMJoinRequest *request, char **error);
 DFM_API int32_t dfm_join_prepare(void *context, const DFMJoinRequest *request,
                                  void **session, DFMStats *stats, char **error);
 DFM_API int32_t dfm_join_finish(void *session, const DFMJoinOutput *outputs,

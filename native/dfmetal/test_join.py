@@ -95,6 +95,8 @@ lib.dfm_join_estimate.argtypes = [
     C.POINTER(Memory),
     C.POINTER(P),
 ]
+lib.dfm_join_plan_features.argtypes = [C.POINTER(Request), C.POINTER(P)]
+lib.dfm_join_plan_features.restype = I
 lib.dfm_join_prepare.argtypes = [
     P,
     C.POINTER(Request),
@@ -388,6 +390,10 @@ def run(
         ptr(oa),
     )
     stats, err, session = Stats(), P(), P()
+    build = n if how == 2 else m
+    assert bool(lib.dfm_join_plan_features(C.byref(req), C.byref(err)) & 1) == (
+        how != 6 and budget in (-1, -2) and 4096 <= build <= 8388608
+    )
     if budget == -2:
         memory, err = Memory(), P()
         checked(
@@ -544,6 +550,15 @@ try:
             run(dtype, 17, 23, how, validity_absent=True)
             for limit in [0, 1, 29]:
                 run(dtype, 33, 41, how, limit=limit, second=False)
+    for dtype in SCALARS:
+        for how in range(6):
+            for build in (4095, 4096, 4097):
+                n, m = (build, 7) if how == 2 else (7, build)
+                run(dtype, n, m, how, limit=257)
+            n, m = (4097, 7) if how == 2 else (7, 4097)
+            run(dtype, n, m, how, limit=257, all_null=True)
+            run(dtype, n, m, how, limit=257, validity_absent=True)
+            run(dtype, n, m, how, limit=257, budget=64 * 1024 * 1024)
     # More than 1024 scan blocks and fanout much larger than the head result.
     run(10, 262401, 17, 3, limit=400000)
     run(1, 20000, 20000, 0, limit=257, second=False)
