@@ -772,54 +772,10 @@ struct _HashProbeJob(Job):
                     self.left_rows.append(i)
                     self.right_rows.append(-1)
             return
-        if (
-            len(self.left_keys) == 2
-            and self.left_keys[0]._data.isa[Column[Int64]]()
-            and self.left_keys[1]._data.isa[Column[Int64]]()
-        ):
-            ref left_first = self.left_keys[0]._data[Column[Int64]]
-            ref left_second = self.left_keys[1]._data[Column[Int64]]
-            ref right_first = self.right_keys[0]._data[Column[Int64]]
-            ref right_second = self.right_keys[1]._data[Column[Int64]]
-            if (
-                len(left_first._bits[]) == 0
-                and len(left_second._bits[]) == 0
-                and len(right_first._bits[]) == 0
-                and len(right_second._bits[]) == 0
-            ):
-                for i in range(self.start, self.end):
-                    var first = left_first._get(i)
-                    var second = left_second._get(i)
-                    var hash = self.left_hashes[][i]
-                    var bucket = Int(hash >> 56) >> self.fold
-                    ref index = self.buckets[][bucket]
-                    var cursor = _TagCursor(index, hash)
-                    var matched = False
-                    var position = cursor.next()
-                    while position >= 0:
-                        ref slot = index.slots[position]
-                        var j = Int(slot.row)
-                        if (
-                            hash == slot.key
-                            and first == right_first._get(j)
-                            and second == right_second._get(j)
-                        ):
-                            self.left_rows.append(i)
-                            self.right_rows.append(j)
-                            _append_duplicate_rows(
-                                index,
-                                Int(slot.next_position),
-                                i,
-                                self.left_rows,
-                                self.right_rows,
-                            )
-                            matched = True
-                            break
-                        position = cursor.next()
-                    if not matched and self.include_unmatched:
-                        self.left_rows.append(i)
-                        self.right_rows.append(-1)
-                return
+        # Two Int64 keys took a path of their own here, comparing raw
+        # values; the general comparison below measured faster (TPC-DS q93
+        # 17.9 -> 8.4 ms, q40 22.8 -> 17.4) once Parquet columns lost their
+        # all-valid bitmaps and reached it.
         for i in range(self.start, self.end):
             var hash = self.left_hashes[][i]
             var bucket = Int(hash >> 56) >> self.fold
