@@ -272,6 +272,9 @@ bool directFilteredReduction(const DFMRequest &r) {
   for (int64_t i = 0; i < r.step_count; ++i) {
     if (r.steps[i].filter >= 2)
       return false;
+    for (int64_t j = 0; j < r.steps[i].nodes; ++j)
+      if (r.code[4 * (r.steps[i].start + j)] == DFM_SLICE)
+        return false;
     filter |= r.steps[i].filter == 1;
   }
   for (int64_t i = 0; i < r.output_count; ++i)
@@ -352,7 +355,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if (!typed(r) || v.gather_count || v.nodes < 1)
         fail("Invalid Metal group storage");
       auto h = r.code + 4 * v.start;
-      if (h[0] != DFM_GROUP_HEADER || h[1] < 0 || h[1] >= v.nodes ||
+      if ((h[0] != DFM_GROUP_HEADER && h[0] != DFM_GROUP_HEADER_LAST) ||
+          h[1] < 0 || h[1] >= v.nodes ||
           h[2] < r.input_count || h[2] >= r.slots || h[3] < r.input_count ||
           h[3] >= r.slots || h[2] == h[3] || h[2] == v.slot || h[3] == v.slot)
         fail("Invalid Metal group header");
@@ -419,7 +423,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
       bool conditional = c[0] == DFM_WHEN;
       bool leaf = c[0] == DFM_COLUMN || c[0] == DFM_LITERAL_INT ||
                   c[0] == DFM_LITERAL_FLOAT || c[0] == DFM_LITERAL_BOOL ||
-                  c[0] == DFM_LITERAL_NULL;
+                  c[0] == DFM_LITERAL_NULL || c[0] == DFM_SLICE;
       if ((!binary && !unary && !leaf && !conditional) ||
           ((binary || unary || conditional) && (c[1] < 0 || c[1] >= j)) ||
           ((binary || conditional) && (c[2] < 0 || c[2] >= j)) ||
@@ -430,6 +434,16 @@ Shape validate(const DFMRequest &r, bool storage = false,
         fail("Invalid Metal cast descriptor");
       if (c[0] == DFM_COLUMN && !defined[c[3]])
         fail("Metal expression references an undefined slot");
+      if (c[0] == DFM_SLICE) {
+        if (!typed(r) || nodeType(r, v.start + j) != DFM_BOOL ||
+            c[1] < 0 || c[2] < 0 || c[1] >= r.literal_count || c[2] >= r.literal_count || c[3] != -1)
+          fail("Invalid Metal slice descriptor");
+        for (auto parameter : {c[1], c[2]})
+          if (r.code[4 * parameter] != DFM_LITERAL_INT || nodeType(r, parameter) != DFM_INT64)
+            fail("Invalid Metal slice parameter dtype");
+        if (int64_t(r.literals[c[2]]) < -1)
+          fail("Slice length must be nonnegative");
+      }
       auto operand = (binary || unary || conditional)
                          ? nodeType(r, v.start + c[1])
                          : nodeType(r, v.start + j);
@@ -927,6 +941,7 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
       continue;
     auto h = r.code + 4 * step.start;
     auto keys = h[1];
+    bool lastRepresentative = h[0] == DFM_GROUP_HEADER_LAST;
     auto name = std::to_string(i);
     auto index = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
     auto starts = std::to_string(layout.physical[h[2]]) + "UL*meta.z";
@@ -984,7 +999,8 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
         "begin=uint(x[" +
         starts + "+group.x]),end=group.x+1<meta.x?uint(x[" + starts +
         "+group.x+1]):meta.y;Out o;long target;switch(group.y){";
-    text += "case 0:o={0,204,0,3};target=" + std::to_string(first) + ";break;";
+    text += "case 0:o={0," + std::string(lastRepresentative ? "81" : "204") +
+            ",0,3};target=" + std::to_string(first) + ";break;";
     for (int64_t j = 1; j < step.nodes; ++j) {
       auto c = r.code + 4 * (step.start + j);
       bool key = j <= keys;
@@ -1000,9 +1016,10 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
         R"MSL(default:return;}ulong to=ulong(target)*meta.z+group.x;
  if(o.kind==-1){if(lane==0){uint row=uint(x[)MSL" +
         index +
-        R"MSL(+begin]);y[to]=x[ulong(o.slot)*meta.z+row];w[to]=v[ulong(o.slot)*meta.z+row];}return;}
+        "+" + std::string(lastRepresentative ? "end-1" : "begin") +
+        R"MSL(]);y[to]=x[ulong(o.slot)*meta.z+row];w[to]=v[ulong(o.slot)*meta.z+row];}return;}
  threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
- bool first=o.kind==204;
+ bool first=group.y==0;
  for(uint at=begin+lane;at<end;at+=256){uint row=uint(x[)MSL" +
         index + R"MSL(+at]);ulong idx=ulong(o.slot)*meta.z+row;
  if(first)state_add(sum,count,ulong(row),true,long(row),o);
@@ -1386,6 +1403,12 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                               : "x[" + idx + "]") +
                     ";" + valid + "=v[" + idx + "]!=0;";
           }
+        } else if (op == DFM_SLICE) {
+          text += "{long off=long(lit[" + std::to_string(c[1]) +
+                  "]),length=long(lit[" + std::to_string(c[2]) +
+                  "]),n=long(meta.x);long begin=off<0?max(n+off,0L):min(off,n);"
+                  "long count=length==-1?n-begin:min(length,n-begin);" + z +
+                  "=uchar(long(row)>=begin&&long(row)-begin<count);}";
         } else if (op == DFM_CAST) {
           text += valid + "=" + av + ";if(" + valid + "){" +
                   castExpression(r.node_types[s.start + c[1]], dtype, a, z,

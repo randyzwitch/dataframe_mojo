@@ -21,6 +21,7 @@ from ._build_identity import CPU_BUILD_ID
 from .parallel import configured_workers
 from .json_value import JsonValue
 from .accelerator.capabilities import RowCapabilities
+from .accelerator.sets import has_set_operations, lower_set_operations
 from .accelerator.dictionaries import (
     DictionaryCodes,
     has_dictionary_columns,
@@ -98,7 +99,13 @@ from .expr import (
 )
 from .frame import DataFrame
 from .lazy import AcceleratorBackend, LazyFrame
-from .accelerator.rows import ROW_GROUP_HEADER, ROW_GROUP_KEY, ROW_GROUP_OUTPUT
+from .accelerator.rows import (
+    ROW_GROUP_HEADER,
+    ROW_GROUP_HEADER_LAST,
+    ROW_SLICE,
+    ROW_GROUP_KEY,
+    ROW_GROUP_OUTPUT,
+)
 from .series import Series
 
 comptime _Create = def(Int64, Int64, Int) thin abi("C") -> Int
@@ -296,6 +303,7 @@ def _capabilities() -> RowCapabilities:
         order=True,
         grouped=True,
         extra_reductions=True,
+        slices=True,
     )
 
 
@@ -338,6 +346,10 @@ def _op(op: Int) raises -> Int64:
         return Int64(op)
     if op == ROW_GROUP_HEADER:
         return 201
+    if op == ROW_GROUP_HEADER_LAST:
+        return 205
+    if op == ROW_SLICE:
+        return 206
     if op == ROW_GROUP_KEY:
         return 202
     if op == ROW_GROUP_OUTPUT:
@@ -518,6 +530,7 @@ struct _Descriptors(Movable):
                 self.code[i] == CAST
                 or self.code[i] == WHEN
                 or self.code[i] == INT_IS_IN
+                or self.code[i] == ROW_SLICE
             )
             if self.code[i] == ROW_GROUP_OUTPUT:
                 self.code[i + 3] = _op(Int(self.code[i + 3]))
@@ -610,6 +623,9 @@ def _direct_filtered_reduction(plan: RowPlan) -> Bool:
     for step in plan.steps:
         if step.order or step.grouped:
             return False
+        for i in range(step.start, step.start + step.nodes):
+            if plan.code[4 * i] == ROW_SLICE:
+                return False
         filtered |= step.filter
     for output in plan.outputs:
         if (
@@ -1386,6 +1402,20 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
         var start = Int(perf_counter_ns())
+        if has_set_operations(query):
+            var executed = self._run(lower_set_operations(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
         if has_dictionary_columns(query):
             # Validate original string semantics before replacing values with
             # ordered codes. Schema execution reads no source rows.
@@ -1492,6 +1522,10 @@ struct MetalRuntime(AcceleratorBackend):
 
     def describe(self, query: LazyFrame) -> String:
         try:
+            if has_set_operations(query):
+                return "Metal resident set operations; " + self.describe(
+                    lower_set_operations(query)
+                )
             if has_dictionary_columns(query):
                 _ = query._execute(len(query._nodes) - 1, True)
                 var metadata = query.copy()
