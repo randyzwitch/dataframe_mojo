@@ -1,4 +1,5 @@
 """Thread-owned pipelines give the eager result for row-local plans."""
+from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_true
 from dataframe import Column, DataFrame, Expr, Series, StringColumn, col, lit
 from dataframe.pipeline import _morsel_ranges
@@ -193,6 +194,124 @@ def test_morsel_ranges_never_cross_a_chunk() raises:
     assert_equal(len(many) // 2, 50)
     var single = _morsel_ranges(table(100, 1), 2048, 4)
     assert_equal(len(single) // 2, 1)
+
+
+def test_string_keys_group_exactly_in_insert_tables() raises:
+    # Long strings sharing a 40-byte prefix (past the words' 24 bytes) and
+    # differing only at the end or in length, short ones, empty and null
+    # values: the insert tables give the eager group-by's groups, plain
+    # and chunked, filtered first, with a second integer key.
+    var common = "a long common prefix that every key shares: "
+    for chunks in [1, 4]:
+        var n = 60_011
+        var s = List[String](capacity=n)
+        var valid = List[Bool](capacity=n)
+        var a = List[Int64](capacity=n)
+        for i in range(n):
+            var k = i % 41
+            if k < 20:
+                s.append(common + String(k))
+            elif k < 30:
+                s.append(common + String(k) + "x" * (k - 19))
+            elif k < 39:
+                s.append("short" + String(k))
+            else:
+                s.append("")
+            valid.append(i % 53 != 7)
+            a.append(Int64(i % 3))
+        var whole = DataFrame(
+            [
+                Series("s", StringColumn(s, valid)),
+                Series("a", Column[Int64](a^)),
+            ]
+        )
+        var t = whole.copy()
+        if chunks > 1:
+            var columns = List[Series]()
+            for c in range(whole.width()):
+                var parts = List[Series]()
+                for k in range(chunks):
+                    var start = n * k // chunks
+                    var stop = n * (k + 1) // chunks
+                    parts.append(whole._columns[c].slice(start, stop - start))
+                columns.append(Series._from_chunks(parts^))
+            t = DataFrame(columns^)
+        var aggregates: List[Expr] = [
+            col("a").sum().alias("total"),
+            col("a").len().alias("n"),
+        ]
+        var one: List[String] = ["s"]
+        var two: List[String] = ["s", "a"]
+        for keys in [one.copy(), two.copy()]:
+            var eager = (
+                t.filter(col("a") >= 0)
+                .group_by(keys, maintain_order=True)
+                .agg(aggregates)
+            )
+            var unordered = (
+                t.lazy()
+                .filter(col("a") >= 0)
+                .group_by(keys)
+                .agg(aggregates)
+                .collect(batch_size=1024)
+            )
+            assert_equal(unordered.height(), eager.height())
+            assert_true(eager.sort(keys).equals(unordered.sort(keys)))
+
+
+def set_env(name: String, value: String):
+    var key = List[UInt8](name.as_bytes())
+    key.append(0)
+    var text = List[UInt8](value.as_bytes())
+    text.append(0)
+    _ = external_call["setenv", Int32](
+        Int(key.unsafe_ptr()), Int(text.unsafe_ptr()), Int32(1)
+    )
+    _ = key^
+    _ = text^
+
+
+def test_many_string_groups_flush_and_unique_keys_stay_eager() raises:
+    # 300 long keys, each 100 times, behind a filter, with tables split and
+    # flushed at 8 groups: the workers' flushed tables merge at the
+    # combine. Then keys that never repeat, which the planner leaves on the
+    # eager route. Both give the eager group-by's groups.
+    set_env("DATAFRAME_PIPELINE_FLUSH_GROUPS", "8")
+    var prefix = "a key long enough to be compared on its bytes: "
+    var n = 30_000
+    var repeated = List[String](capacity=n)
+    var unique = List[String](capacity=n)
+    var a = List[Int64](capacity=n)
+    for i in range(n):
+        repeated.append(prefix + String((i * 7919) % 300))
+        unique.append(prefix + String(i))
+        a.append(Int64(i % 5))
+    var t = DataFrame(
+        [
+            Series("r", StringColumn(repeated^)),
+            Series("u", StringColumn(unique^)),
+            Series("a", Column[Int64](a^)),
+        ]
+    )
+    for name in ["r", "u"]:
+        var keys: List[String] = [name]
+        var aggregates: List[Expr] = [
+            col("a").sum().alias("total"),
+            col("a").len().alias("n"),
+        ]
+        var eager = t.filter(col("a") >= 0).group_by(keys).agg(aggregates)
+        var piped = (
+            t.lazy()
+            .filter(col("a") >= 0)
+            .group_by(keys)
+            .agg(aggregates)
+            .collect(batch_size=1024)
+        )
+        assert_equal(piped.height(), eager.height())
+        assert_true(eager.sort(keys).equals(piped.sort(keys)))
+    _ = external_call["unsetenv", Int32](
+        Int("DATAFRAME_PIPELINE_FLUSH_GROUPS\0".unsafe_ptr())
+    )
 
 
 def main() raises:

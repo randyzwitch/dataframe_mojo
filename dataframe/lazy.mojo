@@ -2282,10 +2282,16 @@ struct LazyFrame(Copyable):
         # with steps, a collecting plan is piped only when every column
         # it groups or reduces is fixed-width.
         var insert = False
+        # String keys to insert, pending a sample of the narrowed input.
+        var strings_sampled = False
         if piped and len(keys) > 0:
             var frame = self._nodes[cursor].offset
             ref source_frame = self._frames[frame]
             var fixed = True
+            # String keys group exactly in the insert tables (a long
+            # string's bytes compared, `_PartIndex`); collected, they stay
+            # on the eager route (below).
+            var string_keys = False
             var used = keys.copy()
             for expression in expressions:
                 var reads = _references(expression)
@@ -2316,6 +2322,12 @@ struct LazyFrame(Copyable):
                     if not found:
                         continue
                 if (
+                    dtype.physical() == DataType.STRING
+                    and name in keys
+                    and not _key_read(name, expressions)
+                ):
+                    string_keys = True
+                elif (
                     dtype.is_nested()
                     or dtype.is_decimal()
                     or dtype.physical() == DataType.STRING
@@ -2331,9 +2343,22 @@ struct LazyFrame(Copyable):
                 # A key from a join's build side is not in the source to
                 # sample (and the source's key columns are not taken).
                 var sampled = -1 if len(late_names) > 0 else (
-                    self._sampled_groups(keys, frame)
+                    -1 if string_keys else self._sampled_groups(keys, frame)
                 )
-                if sampled >= 0:
+                if string_keys:
+                    # String keys insert behind a filter, which the eager
+                    # route pays for by gathering the kept rows' strings
+                    # (ClickBench q37: 22.7 -> 15.9 ms). Without one, the
+                    # eager route reads the keys in place, and inserting
+                    # many groups was slower (q16 119 -> 176 ms, q33 189
+                    # -> 235).
+                    # Whether the keys repeat is sampled once the input
+                    # is narrowed (below); a plan with joins keeps the
+                    # eager route, which would redo their builds if the
+                    # sample sent it back (TPC-DS q45: 5.9 -> 16.8 ms).
+                    insert = _filters(operations) and len(joins) == 0
+                    strings_sampled = insert
+                elif sampled >= 0:
                     insert = 4 * sampled <= sample
                 else:
                     # The groups' bound from where each key is stored,
@@ -2343,6 +2368,10 @@ struct LazyFrame(Copyable):
                         keys, source_frame, joins, sample // 4
                     )
                     insert = bound >= 0
+            if string_keys and not insert and len(operations) > 0:
+                # Collected strings gather slower than the eager route's
+                # per-chunk filter (ClickBench q12: 85 ms against 48).
+                piped = False
         if len(late_names) > 0 and not (piped and insert):
             # Coded keys pay only in the insert tables: collecting them
             # for the finish's group-by ran slower than the eager route
@@ -2494,6 +2523,12 @@ struct LazyFrame(Copyable):
                         operations[0].exprs = [remaining^]
         else:
             input = self._execute(cursor, False, True, batch_size)
+        if strings_sampled and not _keys_repeat(input, keys, operations):
+            # String keys that mostly differ: inserted, each would be a new
+            # group copied and combined (ClickBench q12's phrases: 62 ms
+            # against 49 on the eager route), and the eager route reads
+            # them once.
+            return None
         var workers = configured_workers()
         var pool = Pool(1)
         var pool_ready = False
@@ -5040,6 +5075,65 @@ def _order_sensitive(expressions: List[Expr]) -> Bool:
             if node.op in [FIRST, LAST, ARG_MIN, ARG_MAX]:
                 return True
     return False
+
+
+def _key_read(name: String, expressions: List[Expr]) -> Bool:
+    """Whether a reduction reads the key `name` (or any column)."""
+    for expression in expressions:
+        var reads = _references(expression)
+        if not reads or name in reads.value():
+            return True
+    return False
+
+
+def _keys_repeat(
+    input: DataFrame, keys: List[String], operations: List[PlanNode]
+) raises -> Bool:
+    """Whether the plan's grouping keys repeat: among the rows of eight
+    evenly spaced runs of 512 rows of `input` that pass the plan's leading
+    row-local filters, at most half as many distinct keys as rows. Runs,
+    not single rows, see the repeats a morsel does. False when too few
+    rows pass to say (under 64) or a filter reads what `input` lacks."""
+    var height = input.height()
+    if height == 0:
+        return False
+    var names = keys.copy()
+    var filters = List[Expr]()
+    for operation in operations:
+        if operation.kind != FILTER or not _row_local(operation.exprs):
+            break
+        filters.append(operation.exprs[0].copy())
+        var reads = _references(operation.exprs[0])
+        if not reads:
+            return False
+        for name in reads.value():
+            if name not in names:
+                names.append(name)
+    for name in names:
+        if name not in input.columns():
+            return False
+    var narrowed = input.select(names)
+    var runs = 8
+    var length = 512
+    var rows = List[Int]()
+    if height <= runs * length:
+        for r in range(height):
+            rows.append(r)
+    else:
+        for k in range(runs):
+            var start = k * (height - length) // (runs - 1)
+            for r in range(start, start + length):
+                rows.append(r)
+    var picked = narrowed.take(rows)
+    for f in filters:
+        picked = picked.filter(f)
+    if picked.height() < 64:
+        return False
+    var columns = List[Series](capacity=len(keys))
+    for name in keys:
+        columns.append(picked.column(name))
+    var distinct = encode_rows(columns, nulls_equal=True).count()
+    return 2 * distinct <= picked.height()
 
 
 def _key_group_bound(
