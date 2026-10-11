@@ -613,5 +613,69 @@ def test_integer_mean_preserves_exact_accumulation_before_float64_division() rai
         _ = unproved.lazy().select(col("i").mean()).collect(accelerator=runtime)
 
 
+def test_float64_remainder_extremes_filters_children_and_cost() raises:
+    var frame = fixture()
+    var query = frame.lazy().select(
+        (col("a") % lit(Float64(3))).alias("remainder")
+    )
+    var narrow = DataFrame([Series("x", Column[Float32]([1, 2]))])
+    with assert_raises(contains="floating division, modulo, and power"):
+        _ = (
+            narrow.lazy()
+            .select(col("x") % lit(Float32(3)))
+            .collect(accelerator=MetalRuntime(device_id=999999))
+        )
+    if not metal_installed():
+        return
+    assert_true(
+        "metal-emulated-float64-v1"
+        in MetalRuntime().estimate_auto(query).family
+    )
+    var paired = frame.lazy().select((col("a") % col("b")).alias("remainder"))
+    same(
+        paired.collect(accelerator=MetalRuntime()), paired.collect(engine="cpu")
+    )
+    var divisors: List[Float64] = [
+        0,
+        -0.0,
+        1,
+        -1,
+        3,
+        -3,
+        0.5,
+        bitcast[DType.float64](UInt64(1)),
+        bitcast[DType.float64](UInt64(0x7FF0000000000000)),
+        bitcast[DType.float64](UInt64(0xFFF0000000000000)),
+        bitcast[DType.float64](UInt64(0x7FF8000000000042)),
+    ]
+    for divisor in divisors:
+        var rem = col("a") % lit(divisor)
+        var sample = frame.lazy().select(rem.alias("remainder"))
+        same(
+            sample.collect(accelerator=MetalRuntime()),
+            sample.collect(engine="cpu"),
+        )
+        var child = frame.lazy().with_columns(rem.alias("remainder")).head(4)
+        same(
+            child.collect(accelerator=MetalRuntime()),
+            child.collect(engine="cpu"),
+        )
+        var filtered = frame.lazy().filter(rem.is_finite())
+        same(
+            filtered.collect(accelerator=MetalRuntime()),
+            filtered.collect(engine="cpu"),
+        )
+    var empty = (
+        frame.slice(0, 0)
+        .lazy()
+        .select((col("a") % lit(Float64(3))).alias("remainder"))
+    )
+    same(empty.collect(accelerator=MetalRuntime()), empty.collect(engine="cpu"))
+    same(
+        query.collect(engine="auto", accelerator=MetalRuntime()),
+        query.collect(engine="cpu"),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

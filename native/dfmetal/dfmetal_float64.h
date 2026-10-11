@@ -114,6 +114,81 @@ inline ulong f64_mul(ulong a, ulong b) {
   significand |= ulong((product.low << (64 - shift)) != 0);
   return f64_pack(sign, x.exponent + y.exponent + int(upper), significand);
 }
+inline F64Product f64_wide_jam(F64Product value, uint distance) {
+  if (!distance) return value;
+  ulong high=value.high, low=value.low;
+  if (distance < 64) {
+    value.high=high >> distance;
+    value.low=(low >> distance) | (high << (64-distance)) |
+              ulong((low << (64-distance)) != 0);
+  } else if (distance == 64) {
+    value.high=0; value.low=high | ulong(low != 0);
+  } else if (distance < 128) {
+    value.high=0;
+    value.low=(high >> (distance-64)) |
+              ulong(low != 0 || (high << (128-distance)) != 0);
+  } else {
+    value.high=0; value.low=ulong(high != 0 || low != 0);
+  }
+  return value;
+}
+inline ulong f64_fma(ulong a, ulong b, ulong c) {
+  if (f64_nan(a)) return f64_quiet(a);
+  if (f64_nan(b)) return f64_quiet(b);
+  if (f64_nan(c)) return f64_quiet(c);
+  ulong sign=(a^b)&0x8000000000000000UL;
+  ulong other_sign=c&0x8000000000000000UL;
+  if (f64_inf(a) || f64_inf(b)) {
+    if (!f64_abs(a) || !f64_abs(b) || (f64_inf(c) && sign != other_sign))
+      return f64_invalid();
+    return sign|0x7ff0000000000000UL;
+  }
+  if (f64_inf(c)) return c;
+  if (!f64_abs(a) || !f64_abs(b)) return f64_add(sign,c);
+  if (!f64_abs(c)) return f64_mul(a,b);
+  F64Parts x=f64_parts(a), y=f64_parts(b), z=f64_parts(c);
+  F64Product product=f64_product(x.significand,y.significand);
+  bool upper=(product.high&(1UL<<41)) != 0;
+  int exponent=x.exponent+y.exponent+int(upper);
+  uint shift=upper?15:16;
+  // Keep the exact 106-bit product and align the addend at bit 120.
+  // Extra low bits retain cancellation information and a sticky remainder.
+  product.high=(product.high<<shift)|(product.low>>(64-shift));
+  product.low <<= shift;
+  F64Product addend;
+  addend.high=z.significand<<4; addend.low=0;
+  if (exponent >= z.exponent)
+    addend=f64_wide_jam(addend,uint(exponent-z.exponent));
+  else {
+    product=f64_wide_jam(product,uint(z.exponent-exponent));
+    exponent=z.exponent;
+  }
+  if (sign == other_sign) {
+    ulong low=product.low+addend.low;
+    product.high += addend.high+ulong(low<product.low);
+    product.low=low;
+  } else {
+    if (product.high < addend.high ||
+        (product.high == addend.high && product.low < addend.low)) {
+      F64Product temporary=product; product=addend; addend=temporary;
+      sign=other_sign;
+    }
+    ulong borrow=ulong(product.low<addend.low);
+    product.low -= addend.low;
+    product.high -= addend.high+borrow;
+    if (!product.high && !product.low) return 0;
+  }
+  if (product.high >= (1UL<<57)) {
+    product=f64_wide_jam(product,1); ++exponent;
+  }
+  while (product.high < (1UL<<56)) {
+    product.high=(product.high<<1)|(product.low>>63);
+    product.low <<= 1; --exponent;
+  }
+  ulong significand=(product.high>>1) |
+                    ulong((product.high&1) != 0 || product.low != 0);
+  return f64_pack(sign,exponent,significand);
+}
 inline ulong f64_div(ulong a, ulong b) {
   if (f64_nan(a)) return f64_quiet(a);
   if (f64_nan(b)) return f64_quiet(b);
@@ -227,6 +302,19 @@ inline ulong f64_integral(ulong value, int op) {
   ulong rest = absolute & (unit - 1), whole = value & ~(unit - 1);
   if (rest && ((op == 55 && sign) || (op == 56 && !sign))) whole += unit;
   return whole;
+}
+inline ulong f64_mod(ulong a, ulong b) {
+  // Match the CPU SIMD operation sequence, including a rounded quotient,
+  // its truncation, fused multiply/subtract, and final addition of zero.
+  // This intentionally differs from native fmod for extreme quotients.
+  if (f64_nan(a)) return f64_quiet(a);
+  if (f64_nan(b)) return f64_quiet(b);
+  if (f64_inf(a) || !f64_abs(b)) return f64_invalid();
+  ulong quotient = f64_div(a,b);
+  quotient = f64_integral(quotient, quotient >> 63 ? 56 : 55);
+  ulong remainder = f64_fma(quotient^0x8000000000000000UL,b,a);
+  bool adjust = (f64_less(a,0) != f64_less(b,0)) && !f64_equal(remainder,0);
+  return f64_add(remainder, adjust ? b : 0UL);
 }
 inline ulong f64_round(ulong value) {
   // Match the CPU's floor(abs(x)+0.5) expression, including its intermediate
