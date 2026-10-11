@@ -216,6 +216,7 @@ def evaluate(table, records, training_ids):
         key = {k: calibration[k] for k in ("provider", "device", "runtime_build_id", "cpu_build_id", "host", "threads", "optimize", "streaming", "batch_size", "family")}
         heldout = [r for r in records if r["status"] == "ok" and r["case"]["role"] == "heldout" and r["key"] == key]
         covered_queries, good = set(), True
+        calibration_cases = []
         for record in heldout:
             if record["query_id"] in training_ids:
                 raise ValueError("training/held-out query leakage")
@@ -235,10 +236,21 @@ def evaluate(table, records, training_ids):
                 choose = covered and cpu > accelerator * calibration["safety_factor"]
                 chosen = observed_accel if choose else observed_cpu + planning
                 best = min(observed_cpu, raw_accel)
-                evaluation.append(dict(query_id=record["query_id"], case=record["case"], cold=cold, covered=covered, engine="accel" if choose else "cpu", cpu_lower_ns=cpu, accelerator_upper_ns=accelerator, observed_cpu_ns=observed_cpu, observed_accelerator_ns=observed_accel, regret_ns=chosen-best, regret_ratio=chosen/best, planning_ns=planning, engine_regret_ns=(raw_accel if choose else observed_cpu)-best, wrong_choice=(choose != (raw_accel < observed_cpu))))
+                calibration_cases.append(dict(query_id=record["query_id"], case=record["case"], cold=cold, covered=covered, engine="accel" if choose else "cpu", cpu_lower_ns=cpu, accelerator_upper_ns=accelerator, observed_cpu_ns=observed_cpu, observed_accelerator_ns=observed_accel, regret_ns=chosen-best, regret_ratio=chosen/best, planning_ns=planning, engine_regret_ns=(raw_accel if choose else observed_cpu)-best, wrong_choice=((raw_accel if choose else observed_cpu) > best), raw_accelerator_ns=raw_accel, oracle_ns=best, candidate_engine="accel" if choose else "cpu", candidate_regret_ns=chosen-best))
         calibration["validation_queries"] = len(covered_queries)
         calibration["validated"] = bool(good and len(covered_queries) >= 5)
-    return dict(cases=evaluation, maximum_regret_ratio=max((r["regret_ratio"] for r in evaluation), default=None), total_regret_ns=sum(r["regret_ns"] for r in evaluation), wrong_choices=sum(r["wrong_choice"] for r in evaluation), covered=sum(r["covered"] for r in evaluation), note="Named mechanisms were used in prior development. Query-held-out from this fit; no external-suite generalization claim. Fits and residual envelopes are frozen before validation.")
+        for case in calibration_cases:
+            case["calibration_validated"] = calibration["validated"]
+            # A rejected calibration never enables a device in the core policy.
+            # Preserve the proposed model's choice separately for diagnosis.
+            if not calibration["validated"]:
+                case["engine"] = "cpu"
+                case["regret_ns"] = case["observed_cpu_ns"] + case["planning_ns"] - case["oracle_ns"]
+                case["regret_ratio"] = (case["observed_cpu_ns"] + case["planning_ns"]) / case["oracle_ns"]
+                case["engine_regret_ns"] = case["observed_cpu_ns"] - case["oracle_ns"]
+                case["wrong_choice"] = case["observed_cpu_ns"] > case["oracle_ns"]
+            evaluation.append(case)
+    return dict(method="policy replay against explicit-engine wall samples plus measured preflight overhead; automatic-execution latency is not directly measured", cases=evaluation, maximum_regret_ratio=max((r["regret_ratio"] for r in evaluation), default=None), total_regret_ns=sum(r["regret_ns"] for r in evaluation), wrong_choices=sum(r["wrong_choice"] for r in evaluation), covered=sum(r["covered"] for r in evaluation), note="Named mechanisms were used in prior development. Query-held-out from this fit; no external-suite generalization claim. Fits and residual envelopes are frozen before validation.")
 
 
 def artifact_manifest(binary, package):

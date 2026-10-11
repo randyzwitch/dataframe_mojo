@@ -36,6 +36,21 @@ class CalibrationTests(unittest.TestCase):
         features["rows"] = 3
         self.assertIsNone(driver.predict(model, features))
 
+    def test_invalid_calibration_reports_cpu_instead_of_proposed_gpu(self):
+        key = dict(provider="test", device="gpu", runtime_build_id="runtime", cpu_build_id="cpu", host="host", threads=1, optimize=True, streaming=True, batch_size=64, family="Float32")
+        def model(fixed):
+            return dict(coefficients={name: fixed if name == "fixed" else 0 for name in driver.FEATURES}, minimum=dict.fromkeys(driver.FEATURES, 0), maximum=dict.fromkeys(driver.FEATURES, 2), residual_factor=1)
+        calibration = dict(key, safety_factor=1.5, cpu=model(1000), accelerator=model(1))
+        features = dict.fromkeys(driver.FEATURES, 1.0)
+        records = [dict(status="ok", key=key.copy(), query_id=str(i), case=dict(role="heldout"), cpu_features=features.copy(), accelerator_features=features.copy(), cold_ns=10, cold_planning_ns=5, samples=[dict(cpu_ns=100, accelerator_ns=10, planning_ns=5)]) for i in range(5)]
+        result = driver.evaluate(dict(records=[calibration]), records, set())
+        self.assertFalse(calibration["validated"])
+        self.assertEqual(calibration["validation_queries"], 5)
+        self.assertTrue(all(case["candidate_engine"] == "accel" for case in result["cases"]))
+        self.assertTrue(all(case["engine"] == "cpu" for case in result["cases"]))
+        self.assertTrue(all(case["regret_ns"] == 95 for case in result["cases"]))
+        self.assertIn("not directly measured", result["method"])
+
     def test_incomplete_or_unvalidated_output_is_rejected(self):
         with self.assertRaises(ValueError):
             driver.parse_run("VALIDATED False\n")
