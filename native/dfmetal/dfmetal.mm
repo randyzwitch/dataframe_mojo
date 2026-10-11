@@ -467,7 +467,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL && c[0] != DFM_FILL_NULL &&
           c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
           c[0] != DFM_ADD && c[0] != DFM_SUB && c[0] != DFM_MUL &&
-          c[0] != DFM_DIV && c[0] != DFM_CAST &&
+          c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_CAST &&
           c[0] != DFM_FLOOR && c[0] != DFM_CEIL && !(c[0] == DFM_ROUND && c[3] == 0) &&
           c[0] != DFM_NEG && c[0] != DFM_ABS &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE &&
@@ -1541,6 +1541,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
             else if (op == DFM_ABS) expression = "f64_abs(" + a + ")";
             else if (op == DFM_FLOOR || op == DFM_CEIL) expression = "f64_integral(" + a + "," + std::to_string(op) + ")";
             else if (op == DFM_ROUND) expression = "f64_round(" + a + ")";
+            else if (op == DFM_FLOORDIV) expression = "f64_integral(f64_div(" + a + "," + b + "),55)";
             else if (op == DFM_IS_NAN) expression = "f64_nan(" + a + ")";
             else if (op == DFM_IS_NOT_NAN) expression = "!f64_nan(" + a + ")";
             else if (op == DFM_IS_FINITE) expression = "(f64_abs(" + a + ")<0x7ff0000000000000UL)";

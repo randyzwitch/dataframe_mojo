@@ -47,11 +47,12 @@ runtime data; changing those does not require recompiling an identical shader.
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
 width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns.
 Float64 columns use IEEE words throughout resident execution. Add, subtract,
-multiply, divide, comparisons, numeric/Boolean casts, absolute value, negation,
+multiply, divide, floor division, comparisons, numeric/Boolean casts, absolute value, negation,
 floor/ceiling, whole-number rounding, classification, clipping, and NaN filling
 use integer-only binary64 primitives on the GPU. Basic arithmetic rounds to
 nearest with ties to even, preserves gradual underflow, and does not contract
-separate multiply/add operations. Integer true division produces Float64.
+separate multiply/add operations. Float64 floor division matches the CPU
+contract of flooring the rounded quotient. Integer true division produces Float64.
 Copying values preserves all bits, including NaN payloads and signed zero;
 arithmetic quiets NaNs, whose resulting sign/payload is not a portable CPU
 contract. Float64 keys, stable sorting, grouping, joins, distinct rows, extrema,
@@ -69,7 +70,7 @@ absolute value, clipping, and integral rounding operations. Division and
 remainder by zero return null; signed floor division and remainder follow
 floor semantics. Float32 supports absolute value, floor, ceiling, rounding to
 a whole number, clipping, NaN filling, and NaN/finite/infinite predicates.
-Float32 decimal rounding, floating floor division/remainder/power, and
+Float32 decimal rounding and floor division, floating remainder/power, and
 transcendental functions still require CPU execution.
 
 Conditional `when/then/otherwise` expressions propagate an observation mask
@@ -353,7 +354,7 @@ end-to-end evidence, automatic placement stays on CPU. Future calibration may
 select emulation only when its conservative GPU estimate beats the CPU bound;
 forced accelerator execution remains available independently of that decision.
 
-Float64 decimal rounding, floating floor division/remainder/power,
+Float64 decimal rounding, floating remainder/power,
 transcendentals, and variance/std are not yet supported by this subset.
 
 ## Validation
