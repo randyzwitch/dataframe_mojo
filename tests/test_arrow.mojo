@@ -240,6 +240,28 @@ def test_series_round_trip_and_release_once() raises:
         assert_true(failed)
 
 
+def test_all_valid_bitmap_is_dropped_on_import() raises:
+    # A validity buffer on an array with no nulls (as Parquet readers
+    # attach) comes back as no bitmap, so the kernels' bitmap-free paths
+    # apply; one null keeps it. Values and nulls survive both ways.
+    var valid = List[Bool](length=6, fill=True)
+    var all_valid = Series(
+        "k", Column[Int64]([4, 8, 15, 16, 23, 42], valid.copy())
+    )
+    valid[3] = False
+    var one_null = Series("k", Column[Int64]([4, 8, 15, 16, 23, 42], valid^))
+    for k in range(2):
+        var source = all_valid.copy() if k == 0 else one_null.copy()
+        var array = ArrowArray()
+        var schema = ArrowSchema()
+        export_arrow_series(source, array, schema)
+        var back = import_arrow_series(array, schema)
+        assert_true(back.equals(source))
+        ref column = back._data[Column[Int64]]
+        assert_equal(len(column._bits[]) == 0, k == 0)
+        assert_equal(back.null_count(), k)
+
+
 def test_unsupported_formats_raise_and_release() raises:
     var array = ArrowArray()
     var schema = ArrowSchema()

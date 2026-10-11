@@ -891,9 +891,14 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
         return _import_dictionary(array, schema, name)
     if array.dictionary != 0 or schema.dictionary != 0:
         raise Error("Arrow dictionary array without its dictionary")
-    var bits = List[UInt8]() if _buffer(array, 0) == 0 else _import_bits(
-        _buffer(array, 0), offset, length
-    )
+    # A validity buffer on an array with no nulls (Arrow says 0; -1 is
+    # unknown) is dropped: no bitmap is how a column says every row is
+    # valid, and the kernels' fast paths take it (Parquet readers attach
+    # one to every column, and a TPC-DS join key's checked per-row reads
+    # of it cost q84 8 ms).
+    var bits = List[UInt8]() if (
+        _buffer(array, 0) == 0 or array.null_count == 0
+    ) else _import_bits(_buffer(array, 0), offset, length)
     if format.startswith("d:"):
         # "d:precision,scale" is decimal128; a third field names the width.
         var parts = String(format[byte = 2 : format.byte_length()]).split(",")
