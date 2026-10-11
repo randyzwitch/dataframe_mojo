@@ -11,6 +11,9 @@ from std.os.path import exists
 from std.sys import CompilationTarget
 from std.time import perf_counter_ns
 from .accelerator.capabilities import RowCapabilities
+from .accelerator.dictionaries import (
+    DictionaryCodes, has_dictionary_columns, encode_query, restore_frame,
+)
 from .accelerator.rows import RowPlan, lower_rows, ROW_SORT_KEY
 from .accelerator.joins import (
     JoinDag,
@@ -1222,6 +1225,50 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
         var start = Int(perf_counter_ns())
+        if has_dictionary_columns(query):
+            # Validate original string semantics before replacing values with
+            # ordered codes. Schema execution reads no source rows.
+            var schema = query._execute(len(query._nodes) - 1, True)
+            var dictionary = DictionaryCodes(query)
+            var staging_bytes = dictionary.staging_bytes(query)
+            var budget = self._budget
+            if budget >= 0:
+                if staging_bytes > budget:
+                    raise Error("Metal dictionary staging exceeds payload budget")
+                budget -= staging_bytes
+            var encoded = encode_query(query, dictionary)
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            var staged_ns = Int(perf_counter_ns()) - start
+            var executed = runtime._run(encoded, profiling)
+            if self._budget >= 0:
+                if dictionary.restoration_bytes(executed[0], schema) > self._budget - staging_bytes:
+                    raise Error("Metal dictionary restoration exceeds payload budget")
+            var decode_start = Int(perf_counter_ns())
+            var result = restore_frame(executed[0], schema, dictionary)
+            var decoded_ns = Int(perf_counter_ns()) - decode_start
+            var report = executed[1].copy()
+            var elapsed = Float64(Int(perf_counter_ns()) - start) / 1e6
+            report = report.with_column(Series(
+                "query_wall_ms", Column[Float64](
+                    List[Float64](length=report.height(), fill=elapsed)
+                ),
+            ))
+            report = report.with_column(Series(
+                "dictionary_staging_bytes", Column[Int64](
+                    List[Int64](length=report.height(), fill=Int64(staging_bytes))
+                ),
+            ))
+            report = report.with_column(Series(
+                "dictionary_encode_ms", Column[Float64](
+                    List[Float64](length=report.height(), fill=Float64(staged_ns) / 1e6)
+                ),
+            ))
+            report = report.with_column(Series(
+                "dictionary_decode_ms", Column[Float64](
+                    List[Float64](length=report.height(), fill=Float64(decoded_ns) / 1e6)
+                ),
+            ))
+            return (result^, report^)
         if has_join(query):
             var dag = lower_join_dag(query, _capabilities())
             if dag.joins:
@@ -1233,6 +1280,11 @@ struct MetalRuntime(AcceleratorBackend):
 
     def describe(self, query: LazyFrame) -> String:
         try:
+            if has_dictionary_columns(query):
+                _ = query._execute(len(query._nodes) - 1, True)
+                var dictionary = DictionaryCodes(query)
+                var encoded = encode_query(query, dictionary)
+                return "Metal ordered dictionary staging; " + self.describe(encoded)
             if has_join(query):
                 var dag = lower_join_dag(query, _capabilities())
                 return (

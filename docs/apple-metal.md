@@ -325,3 +325,20 @@ exercise the hash threshold on both sides, composite nullable keys, signed-zero
 and NaN equivalence, radix ordering, bounded fallback, and error recovery. These
 correctness results do not establish performance crossovers for the dispatch
 bounds.
+
+String and categorical frame inputs use a query-wide ordered UInt32 dictionary.
+All inputs and string literals share the same mapping, so equality and ordering
+remain correct across independently encoded categorical inputs. Filtering,
+sorting, grouping, joins, and projection run on native codes; the final result
+restores String values or each output's original categorical dictionary. UTF-8
+values, empty strings, nulls, and unused categorical members retain their public
+semantics. Dictionary plans currently reject explicit casts.
+
+Encoding and decoding are host staging work. Profiles include
+`dictionary_staging_bytes`, `dictionary_encode_ms`, and `dictionary_decode_ms`;
+`query_wall_ms` includes both boundaries. An explicit payload budget reserves
+source code storage and dictionary bytes before native execution, and checks a
+conservative restoration bound before allocating decoded outputs. Cross-input
+categorical parity passed for all seven join types, including unmatched full
+join keys and nulls. The four public dictionary tests also cover string filter,
+sort, grouped sums, output metadata, profiling, and budget rejection.
