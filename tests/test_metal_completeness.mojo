@@ -197,7 +197,13 @@ def test_native_integer_membership_all_widths_exact_words() raises:
     comptime for d in range(len(TYPES)):
         comptime D = TYPES[d]
         var values: List[Scalar[D]] = [
-            0, 1, 2, Scalar[D].MAX, Scalar[D].MIN, 7, 2
+            0,
+            1,
+            2,
+            Scalar[D].MAX,
+            Scalar[D].MIN,
+            7,
+            2,
         ]
         var frame = DataFrame(
             [
