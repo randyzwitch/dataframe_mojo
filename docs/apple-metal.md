@@ -85,8 +85,10 @@ including its large-value early return and every intermediate rounding step.
 The scalar power-of-ten scale is bound once using the CPU scalar formula; all
 row computation stays on the GPU. Float32 floor division also uses binary64
 emulation: it rounds the quotient to Float32 before flooring, preserving the
-CPU result at integer boundaries and for subnormal inputs. Float32 remainder,
-floating power, and transcendental functions still require CPU execution.
+CPU result at integer boundaries and for subnormal inputs. Float32 remainder
+also preserves each binary32 rounding step, including a directly rounded fused
+multiply/subtract. Floating power and transcendental functions still require
+CPU execution.
 
 Conditional `when/then/otherwise` expressions propagate an observation mask
 through each branch. Inactive branches do not raise integer overflow, strict
@@ -376,14 +378,14 @@ buffers or returning an error; execution never retries the query on CPU after a
 GPU fault. Output owners and source owners remain alive across that boundary.
 
 Binary64 emulation and native Float32 kernels have different costs. Plans
-containing Float64 values, floating sum/mean, rounding, square root or floor division, or
+containing Float64 values, floating sum/mean, rounding, square root, floor division or remainder, or
 Int64/UInt64-to-Float32 conversions carry the separate `metal-emulated-float64-v1` calibration family.
 Native-only calibration cannot select those plans. Without matching, validated
 end-to-end evidence, automatic placement stays on CPU. Future calibration may
 select emulation only when its conservative GPU estimate beats the CPU bound;
 forced accelerator execution remains available independently of that decision.
 
-Floating power, Float32 remainder, transcendentals, and variance/std are not yet
+Floating power, transcendentals, and variance/std are not yet
 supported by this subset.
 
 ## Validation

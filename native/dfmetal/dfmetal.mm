@@ -491,7 +491,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if ((c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
           operand != DFM_FLOAT32 && operand != DFM_FLOAT64_STORAGE)
         fail("Metal floating classification requires Float32");
-      if ((c[0] == DFM_MOD || c[0] == DFM_POW) &&
+      if (c[0] == DFM_POW &&
           operand == DFM_FLOAT32)
         fail("Metal floating operator requires CPU execution");
       if (c[0] == DFM_ROUND && c[3] != 0 &&
@@ -1549,6 +1549,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                 : expression) + ";";
           } else if (op == DFM_FLOORDIV && operandType == DFM_FLOAT32) {
             text += z + "=as_type<float>(f32_floor_div(as_type<uint>(" + a + "),as_type<uint>(" + b + ")));";
+          } else if (op == DFM_MOD && operandType == DFM_FLOAT32) {
+            text += z + "=as_type<float>(f32_mod(as_type<uint>(" + a + "),as_type<uint>(" + b + ")));";
           } else if (operandType == DFM_FLOAT64_STORAGE) {
             std::string expression;
             if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL)

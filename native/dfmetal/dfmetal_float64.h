@@ -156,20 +156,48 @@ inline F64Product f64_wide_jam(F64Product value, uint distance) {
   }
   return value;
 }
-inline ulong f64_fma(ulong a, ulong b, ulong c) {
-  if (f64_nan(a)) return f64_quiet(a);
-  if (f64_nan(b)) return f64_quiet(b);
-  if (f64_nan(c)) return f64_quiet(c);
+// Round the extended significand directly to binary32. Rounding to binary64
+// first would lose the sticky bits needed at binary32 halfway boundaries.
+inline uint f32_pack(ulong sign, int exponent, ulong significand) {
+  uint sign32 = uint(sign >> 32);
+  if (!significand) return sign32;
+  while (significand >= (1UL << 56)) {
+    significand = f64_jam(significand, 1); ++exponent;
+  }
+  while (significand < (1UL << 55)) {
+    significand <<= 1; --exponent;
+  }
+  if (exponent < -126) {
+    significand = f64_jam(significand, uint(-126 - exponent));
+    exponent = -126;
+  }
+  uint rounded = uint(significand >> 32);
+  ulong tail = significand & 0xffffffffUL;
+  rounded += uint(tail > 0x80000000UL ||
+                  (tail == 0x80000000UL && (rounded & 1)));
+  if (rounded >= 0x01000000U) { rounded >>= 1; ++exponent; }
+  if (exponent > 127) return sign32 | 0x7f800000U;
+  uint encoded = rounded >= 0x00800000U ? uint(exponent + 127) : 0;
+  return sign32 | (encoded << 23) | (rounded & 0x007fffffU);
+}
+inline uint f64_to_float32(ulong value);
+inline ulong f64_fma_result(ulong value, bool narrow) {
+  return narrow ? ulong(f64_to_float32(value)) : value;
+}
+inline ulong f64_fma_core(ulong a, ulong b, ulong c, bool narrow) {
+  if (f64_nan(a)) return f64_fma_result(f64_quiet(a),narrow);
+  if (f64_nan(b)) return f64_fma_result(f64_quiet(b),narrow);
+  if (f64_nan(c)) return f64_fma_result(f64_quiet(c),narrow);
   ulong sign=(a^b)&0x8000000000000000UL;
   ulong other_sign=c&0x8000000000000000UL;
   if (f64_inf(a) || f64_inf(b)) {
     if (!f64_abs(a) || !f64_abs(b) || (f64_inf(c) && sign != other_sign))
-      return f64_invalid();
-    return sign|0x7ff0000000000000UL;
+      return f64_fma_result(f64_invalid(),narrow);
+    return f64_fma_result(sign|0x7ff0000000000000UL,narrow);
   }
-  if (f64_inf(c)) return c;
-  if (!f64_abs(a) || !f64_abs(b)) return f64_add(sign,c);
-  if (!f64_abs(c)) return f64_mul(a,b);
+  if (f64_inf(c)) return f64_fma_result(c,narrow);
+  if (!f64_abs(a) || !f64_abs(b)) return f64_fma_result(f64_add(sign,c),narrow);
+  if (!f64_abs(c)) return f64_fma_result(f64_mul(a,b),narrow);
   F64Parts x=f64_parts(a), y=f64_parts(b), z=f64_parts(c);
   F64Product product=f64_product(x.significand,y.significand);
   bool upper=(product.high&(1UL<<41)) != 0;
@@ -211,7 +239,11 @@ inline ulong f64_fma(ulong a, ulong b, ulong c) {
   }
   ulong significand=(product.high>>1) |
                     ulong((product.high&1) != 0 || product.low != 0);
-  return f64_pack(sign,exponent,significand);
+  return narrow ? ulong(f32_pack(sign,exponent,significand))
+                : f64_pack(sign,exponent,significand);
+}
+inline ulong f64_fma(ulong a, ulong b, ulong c) {
+  return f64_fma_core(a,b,c,false);
 }
 inline ulong f64_div(ulong a, ulong b) {
   if (f64_nan(a)) return f64_quiet(a);
@@ -332,6 +364,23 @@ inline uint f32_floor_div(uint a, uint b) {
   // from flooring a binary64 quotient near an integer boundary.
   uint quotient = f64_to_float32(f64_div(f64_from_float32(a), f64_from_float32(b)));
   return f64_to_float32(f64_integral(f64_from_float32(quotient), 55));
+}
+inline uint f32_fma(uint a, uint b, uint c) {
+  return uint(f64_fma_core(f64_from_float32(a),f64_from_float32(b),
+                           f64_from_float32(c),true));
+}
+inline uint f32_mod(uint a, uint b) {
+  ulong x = f64_from_float32(a), y = f64_from_float32(b);
+  if (f64_nan(x)) return a | 0x00400000U;
+  if (f64_nan(y)) return b | 0x00400000U;
+  if (f64_inf(x) || !f64_abs(y)) return 0x7fc00000U;
+  uint quotient = f64_to_float32(f64_div(x,y));
+  ulong whole = f64_from_float32(quotient);
+  whole = f64_integral(whole, whole >> 63 ? 56 : 55);
+  uint remainder = f32_fma(f64_to_float32(whole)^0x80000000U,b,a);
+  ulong result = f64_from_float32(remainder);
+  bool adjust = (f64_less(x,0) != f64_less(y,0)) && !f64_equal(result,0);
+  return f64_to_float32(f64_add(result,adjust ? y : 0UL));
 }
 inline ulong f64_mod(ulong a, ulong b) {
   // Match the CPU SIMD operation sequence, including a rounded quotient,

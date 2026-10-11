@@ -70,9 +70,11 @@ int main() { @autoreleasepool {
   std::vector<ulong> narrowBoundary = {
     0, 1, 2, 3, 0x007ffffeUL, 0x007fffffUL, 0x00800000UL, 0x00800001UL,
     0x3dcccccdUL, 0x3e99999aUL, 0x3f000000UL, 0x3f7fffffUL, 0x3f800000UL, 0x3f800001UL,
-    0x40000000UL, 0x40400000UL, 0x7f7fffffUL, 0x7f800000UL,
+    0x3f800800UL, 0x40000000UL, 0x40400000UL, 0x7f7fffffUL, 0x7f800000UL,
     0x7f800042UL, 0x7fc00042UL
   };
+  // (1 + 2^-12)^2 is exactly halfway between two binary32 values.
+  // FMA addends +/-2^-80 (ops 34/35) expose premature binary64 rounding.
   auto narrowCount=narrowBoundary.size();
   for (size_t i=0;i<narrowCount;++i) narrowBoundary.push_back(narrowBoundary[i]|0x80000000UL);
   for (auto a:narrowBoundary) for (auto b:narrowBoundary) {
@@ -124,7 +126,11 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
           op==27 ? f64_fma(a[i],b[i],(a[i]>>31)|(a[i]<<33)) :
           op==28 ? f64_sqrt(a[i]) :
           op==29 ? ulong(f64_to_float32(f64_sqrt(f64_from_float32(uint(a[i]))))) :
-          op==30 ? ulong(f32_floor_div(uint(a[i]),uint(b[i]))) : test_integer(a[i],op);
+          op==30 ? ulong(f32_floor_div(uint(a[i]),uint(b[i]))) :
+          op==31 ? ulong(f32_mod(uint(a[i]),uint(b[i]))) :
+          op==32 ? ulong(f32_fma(uint(a[i]),uint(b[i]),f64_to_float32(f64_mul(f64_from_float32(uint(a[i])),f64_from_float32(uint(b[i]))))^0x80000000U)) :
+          op==33 ? ulong(f32_fma(uint(a[i]),uint(b[i]),uint((a[i]>>13)|(a[i]<<19)))) :
+          op==34||op==35 ? ulong(f32_fma(uint(a[i]),uint(b[i]),op==34?0x17800000U:0x97800000U)) : test_integer(a[i],op);
 }
 )shader";
   NSError *error = nil;
@@ -141,7 +147,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
   id<MTLBuffer> b = [device newBufferWithBytes:right.data() length:bytes options:MTLResourceStorageModeShared];
   id<MTLBuffer> out = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
   size_t checked = 0;
-  for (uint op = 0; op < 31; ++op) {
+  for (uint op = 0; op < 36; ++op) {
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:pipeline];
@@ -189,6 +195,24 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
       }
       if (op==26) { volatile double product=x*y; expected=std::bit_cast<ulong>(std::fma(x,y,-product)); }
       if (op==30) { volatile float x32=std::bit_cast<float>(uint(left[i])), y32=std::bit_cast<float>(uint(right[i])); volatile float quotient=x32/y32; expected=std::bit_cast<uint>(std::floor(quotient)); }
+      if (op>=31 && op<=35) {
+        volatile float a32=std::bit_cast<float>(uint(left[i])), b32=std::bit_cast<float>(uint(right[i]));
+        float result;
+        if (op==31) {
+          volatile float quotient=a32/b32;
+          float whole=std::trunc(quotient);
+          float remainder=std::fma(-whole,b32,a32);
+          volatile float adjustment=(a32<0)!=(b32<0) && remainder!=0 ? float(b32) : 0.0f;
+          result=remainder+adjustment;
+          if (std::isnan(a32)||std::isnan(b32)||std::isinf(a32)||b32==0)
+            result=std::numeric_limits<float>::quiet_NaN();
+        } else if (op==32) {
+          volatile float product=a32*b32;
+          result=std::fma(a32,b32,-product);
+        } else if (op==33) result=std::fma(a32,b32,std::bit_cast<float>(uint((left[i]>>13)|(left[i]<<19))));
+        else result=std::fma(a32,b32,std::bit_cast<float>(op==34?0x17800000U:0x97800000U));
+        expected=std::bit_cast<uint>(result);
+      }
       if (op==29) expected=std::bit_cast<uint>(std::sqrt(std::bit_cast<float>(uint(left[i]))));
       if (op==28) expected=std::bit_cast<ulong>(std::sqrt(x));
       if (op==27) expected=std::bit_cast<ulong>(std::fma(x,y,std::bit_cast<double>((left[i]>>31)|(left[i]<<33))));
@@ -213,8 +237,12 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
                    op==27 ? f64_fma(left[i],right[i],(left[i]>>31)|(left[i]<<33)) :
                    op==28 ? f64_sqrt(left[i]) :
                    op==29 ? ulong(f64_to_float32(f64_sqrt(f64_from_float32(uint(left[i]))))) :
-                   op==30 ? ulong(f32_floor_div(uint(left[i]),uint(right[i]))) : test_integer(left[i],op);
-      bool narrow=op==9||op==24||op==29||op==30;
+                   op==30 ? ulong(f32_floor_div(uint(left[i]),uint(right[i]))) :
+                   op==31 ? ulong(f32_mod(uint(left[i]),uint(right[i]))) :
+                   op==32 ? ulong(f32_fma(uint(left[i]),uint(right[i]),f64_to_float32(f64_mul(f64_from_float32(uint(left[i])),f64_from_float32(uint(right[i]))))^0x80000000U)) :
+                   op==33 ? ulong(f32_fma(uint(left[i]),uint(right[i]),uint((left[i]>>13)|(left[i]<<19)))) :
+                   op==34||op==35 ? ulong(f32_fma(uint(left[i]),uint(right[i]),op==34?0x17800000U:0x97800000U)) : test_integer(left[i],op);
+      bool narrow=op==9||op==24||op==29||op==30||(op>=31&&op<=35);
       bool nan = op>=13 && op<21 ? false : narrow ? (expected&0x7fffffffUL)>0x7f800000UL : f64_nan(expected);
       bool actualNan = narrow ? (host&0x7fffffffUL)>0x7f800000UL && (gpu[i]&0x7fffffffUL)>0x7f800000UL : f64_nan(host) && f64_nan(gpu[i]);
       if ((nan ? !actualNan : host != expected || gpu[i] != expected)) {

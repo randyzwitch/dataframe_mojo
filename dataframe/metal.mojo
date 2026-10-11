@@ -1376,6 +1376,7 @@ struct MetalRuntime(AcceleratorBackend):
                 plan.code[i * 4] == ROUND
                 or plan.code[i * 4] == SQRT
                 or plan.code[i * 4] == FLOORDIV
+                or plan.code[i * 4] == MOD
             ):
                 emulated = True
         for output in plan.outputs:
