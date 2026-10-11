@@ -659,24 +659,25 @@ def lower_rows(
                     bound.dtypes[last.left], reduction, frame.height()
                 )
                 capabilities.require_dtype(result_dtype)
-                if (
-                    reduction == SUM
-                    and (
-                        result_dtype == DataType.INT32
-                        or result_dtype == DataType.UINT32
+                var checked_sum = (
+                    result_dtype == DataType.INT32
+                    or result_dtype == DataType.UINT32
+                    or (
+                        capabilities.bounded_integer_sum
+                        and (
+                            bound.dtypes[last.left].physical() == DataType.INT64
+                            or bound.dtypes[last.left] == DataType.UINT64
+                        )
                     )
-                    and not terminal_boundary
-                ):
+                )
+                if reduction == SUM and checked_sum and not terminal_boundary:
                     capabilities.reject(
                         "plan", "checked sums require a terminal boundary"
                     )
                 if (
                     node.kind == AGG
                     and reduction == SUM
-                    and (
-                        result_dtype == DataType.INT32
-                        or result_dtype == DataType.UINT32
-                    )
+                    and checked_sum
                     and (k != 0 or limit >= 0)
                 ):
                     capabilities.reject(

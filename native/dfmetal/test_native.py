@@ -562,11 +562,13 @@ def execute(
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
     out_type = (
-        (dtype if dtype in (2, 9) else 3) if reduction == 10 else 3
+        (dtype if dtype in (2, 9, 10) else 3) if reduction == 10 else 3
     ) if reduction >= 0 else (4 if output_bool else dtype)
     out_scalar = SCALARS[out_type]
     result = (out_scalar * max(1, n))()
     bits = (C.c_uint8 * max(1, (n + 7) // 8))()
+    if expect_error:
+        result[0], bits[0] = 19, 0xA5
     outputs = (Output * 1)(
         Output(ptr(result), ptr(bits), out_type, slot, reduction, minimum)
     )
@@ -612,6 +614,7 @@ def execute(
             message = C.string_at(err).decode()
             lib.dfm_free(err)
             assert expect_error in message, message
+            assert result[0] == 19 and bits[0] == 0xA5, "failed request mutated caller outputs"
             return
         check(status, err)
         assert stats.memory.peak == memory.peak
@@ -998,18 +1001,8 @@ for dtype, lo, hi in [
         values, dtype, [col], [0], valid=valid, reduction=11
     )
     assert result == [sum(valid)] and bits == [True]
-    if dtype != 10:
-        result, bits, _ = execute([1, 2, 3], dtype, [col], [0], reduction=10)
-        assert result == [6] and bits == [True]
-    else:
-        execute(
-            [1],
-            dtype,
-            [col],
-            [0],
-            reduction=10,
-            expect_error="accumulator precision",
-        )
+    result, bits, _ = execute([1, 2, 3], dtype, [col], [0], reduction=10)
+    assert result == [6] and bits == [True]
 execute([2**32 - 1, 1], 9, [col], [0], reduction=10, expect_error="overflow")
 
 
@@ -2858,6 +2851,40 @@ def test_opaque_float64_storage_and_rejection():
 
 
 test_opaque_float64_storage_and_rejection()
+
+
+def test_bounded_wide_sums():
+    for dtype in (3, 10):
+        high = (1 << (63 if dtype == 3 else 64)) - 1
+        for n in (0, 1, 257, 4097, 65537):
+            bound = high // max(1, n)
+            values = [bound if dtype == 10 or i % 3 else -bound for i in range(n)]
+            valid = [i % 11 != 2 for i in range(n)]
+            for minimum in (0, n + 1):
+                result, bits, _ = execute(values, dtype, [col], [0], valid=valid,
+                                          offset=5, reduction=10, minimum=minimum)
+                assert bits == [sum(valid) >= minimum]
+                if bits[0]:
+                    assert result == [sum(v for v, ok in zip(values, valid) if ok)]
+        result, bits, _ = execute([high], dtype, [col], [0], reduction=10)
+        assert result == [high] and bits == [True]
+        execute([high, 1], dtype, [col], [0], reduction=10,
+                expect_error="exact wide accumulation")
+        result, bits, _ = execute([high, high], dtype, [col], [0], valid=[False, False], reduction=10)
+        assert result == [0] and bits == [True]
+        # The predicate removes the value that cannot satisfy the bound.
+        result, bits, stats = execute([high, 0], dtype, [col], [0], reduction=10,
+                                      filter_nodes=[col, (1, -1, -1, -1), (20, 0, 1, -1)])
+        assert result == [0] and bits == [True] and stats.memory.launches == 5
+    result, bits, _ = execute([-(1 << 63)], 3, [col], [0], reduction=10)
+    assert result == [-(1 << 63)] and bits == [True]
+    execute([(1 << 63) - 1, -((1 << 63) - 1)], 3, [col], [0], reduction=10,
+            expect_error="exact wide accumulation")
+    result, bits, _ = execute([1, 2, 3], 3, [col], [0], reduction=10)
+    assert result == [6] and bits == [True]
+
+
+test_bounded_wide_sums()
 
 lib.dfm_context_release(ctx)
 print(

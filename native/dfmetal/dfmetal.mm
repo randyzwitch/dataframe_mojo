@@ -76,10 +76,10 @@ bool unsignedType(int64_t t) {
          t == DFM_UINT64;
 }
 bool sumSupported(int64_t t) {
-  return t != DFM_FLOAT32 && t != DFM_INT64 && t != DFM_UINT64 && t != DFM_BOOL && t != DFM_FLOAT64_STORAGE;
+  return t != DFM_FLOAT32 && t != DFM_BOOL && t != DFM_FLOAT64_STORAGE;
 }
 int64_t sumType(int64_t t) {
-  return t == DFM_INT32 || t == DFM_UINT32 ? t : DFM_INT64;
+  return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
   if (type == DFM_FLOAT64_STORAGE &&
@@ -1040,7 +1040,8 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
  for(uint at=begin+lane;at<end;at+=256){uint row=uint(x[)MSL" +
         index + R"MSL(+at]);ulong idx=ulong(o.slot)*meta.z+row;
  if(first)state_add(sum,count,ulong(row),true,long(row),o);
- else state_add(sum,count,x[idx],v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);}
+ else {if(v[idx]&&!sum_bound(x[idx],o,end-begin)){atomic_fetch_min_explicit(error,0xE0000000U,memory_order_relaxed);continue;}
+ state_add(sum,count,x[idx],v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);}}
  sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
  for(uint stride=128;stride;stride/=2){if(lane<stride){long a=sums[lane],b=counts[lane];state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;}threadgroup_barrier(mem_flags::mem_threadgroup);}
  if(lane==0){sum=sums[0];count=counts[0];state_finish(sum,count,o,end-begin);bool valid=state_valid(o,count);
@@ -1157,6 +1158,18 @@ bool candidate_better(ulong a,ulong b,Out o){
 }
 // First/last use signed (row+1): negative selects a null row; zero is empty.
 // Boolean states combine bits for true, false, and null without counting rows.
+// Each positive and negative subset must fit independently. This proves
+// every parallel partial and merge exact without a wider accumulator. A
+// failed proof is unsupported, even if cancellation could fit the result.
+bool sum_bound(ulong word,Out o,ulong rows){
+ if(o.kind!=10||(o.type!=3&&o.type!=10)||!rows)return true;
+ bool negative=o.type==3&&long(word)<0;
+ ulong maximum=o.type==10?~0UL:(negative?(1UL<<63):((1UL<<63)-1UL));
+// Variable 64-bit division here crashes the M1 grouped pipeline compiler.
+// A native high multiply checks the identical bound without division.
+ ulong magnitude=negative?0UL-word:word;
+ return mulhi(magnitude,rows)==0UL&&magnitude*rows<=maximum;
+}
 void state_merge(thread long &value,thread long &count,long other,long n,Out o){
  if(o.kind==83||o.kind==84){
   long at=count<0?-count:count,bt=n<0?-n:n;
@@ -1169,7 +1182,7 @@ void state_merge(thread long &value,thread long &count,long other,long n,Out o){
   if(take){value=other;count=n;}return;
  }
  if(o.kind==91||o.kind==92){value|=other;return;}
- value+=other;count+=n;
+ value=long(ulong(value)+ulong(other));count+=n;
 }
 void state_add(thread long &value,thread long &count,ulong word,bool valid,long row,Out o){
  if(o.kind==83||o.kind==84){state_merge(value,count,valid?long(word):0,valid?row+1:-(row+1),o);return;}
@@ -1177,7 +1190,7 @@ void state_add(thread long &value,thread long &count,ulong word,bool valid,long 
  if(o.kind==93){count+=!valid;return;}
  if(!valid)return;
  if(o.kind==80||o.kind==81||o.kind==95||o.kind==96||o.kind==204){state_merge(value,count,long(word),row+1,o);return;}
- ++count;if(o.kind==10)value+=long(word);
+ ++count;if(o.kind==10)value=long(ulong(value)+word);
 }
 void state_finish(thread long &value,thread long &count,Out o,long rows){
  if(o.kind==11||o.kind==93){value=count;count=1;}
@@ -1192,14 +1205,16 @@ void state_finish(thread long &value,thread long &count,Out o,long rows){
 bool state_valid(Out o,long count){return o.kind==10?count>=o.minimum:count>0;}
 kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device Partial *partials[[buffer(2)]],device const Out *out[[buffer(3)]],
- constant uint4 &meta[[buffer(4)]],constant ulong &groups[[buffer(5)]],
+ constant uint4 &meta[[buffer(4)]],constant ulong &groups[[buffer(5)]],device atomic_uint *error[[buffer(6)]],
  uint2 group[[threadgroup_position_in_grid]],uint lane[[thread_index_in_threadgroup]]) {
  threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
  Out o=out[group.y];
  for(ulong row=group.x*256+lane;row<meta.x;row+=groups*256){ulong idx=o.slot*meta.z+row;
  if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
  Out current=o;if(DIRECT_FILTERED_REDUCTION&&o.kind==90)current.kind=11;
- state_add(sum,count,read_word(x[idx]),DIRECT_FILTERED_REDUCTION&&o.kind==90?true:v[idx]!=0,long(row),current);}
+ ulong word=read_word(x[idx]);
+ if(v[idx]&&!sum_bound(word,current,meta.x)){atomic_fetch_min_explicit(error,0xE0000000U,memory_order_relaxed);continue;}
+ state_add(sum,count,word,DIRECT_FILTERED_REDUCTION&&o.kind==90?true:v[idx]!=0,long(row),current);}
  sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
  for(uint stride=128;stride;stride/=2){if(lane<stride){
  long a=sums[lane],b=counts[lane];state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;}
@@ -1620,7 +1635,7 @@ std::shared_ptr<Pipelines> pipelines(Context &c, const std::string &src,
     auto f = [p->library newFunctionWithName:name];
     auto state = [c.device newComputePipelineStateWithFunction:f error:&err];
     if (!state)
-      fail("Metal pipeline creation: " +
+      fail("Metal pipeline creation (" + std::string(name.UTF8String) + "): " +
            std::string(err ? err.localizedDescription.UTF8String
                            : "unknown compiler error"));
     if (state.maxTotalThreadsPerThreadgroup < 256)
@@ -2136,6 +2151,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     buffer(3, out);
     buffer(4, meta);
     bytes(5, &groups, 8);
+    buffer(6, arithmeticError);
     dispatch("reduce_rows", groups * 256, r.output_count, true);
   }
   id<MTLBuffer> result = nil;
@@ -2182,6 +2198,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         int64_t((drain.command.GPUEndTime - drain.command.GPUStartTime) * 1e9);
   uint32_t fault = *static_cast<uint32_t *>(arithmeticError.contents);
   if (fault != UINT32_MAX) {
+    if (fault == 0xE0000000U)
+      fail("Metal unsupported [accumulator]: cannot prove exact wide accumulation "
+           "within the native Int64/UInt64 range");
     if (fault == 0xF0000000U)
       fail("Integer overflow in Metal grouped sum");
     if (fault & 0x20000000u)
