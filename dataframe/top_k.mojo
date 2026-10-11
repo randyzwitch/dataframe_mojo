@@ -22,7 +22,7 @@ from .binding import BoundExpr
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
-from .expr import COL, LE, LIT_INT, LT, OVER, RANK, SEP
+from .expr import COL, LE, LIT_INT, LT, OVER, RANK, SEP, split_names
 from .hashing import encode_rows, encode_rows_parallel
 from .parallel import Job, run_jobs, worker_count
 from .partition import encode_partitioned, low_cardinality
@@ -257,10 +257,10 @@ def top_k_mask(
     var value = columns[bound.sources[column_node]].copy()
     var descending = nodes[nodes[found[1]].left].min_count == 1
     var keys = List[Series]()
-    for name in nodes[found[1]].text2.split(SEP):
+    for name in split_names(nodes[found[1]].text2):
         var matched = False
         for column in columns:
-            if column.name() == String(name):
+            if column.name() == name:
                 keys.append(column.copy())
                 matched = True
         if not matched:

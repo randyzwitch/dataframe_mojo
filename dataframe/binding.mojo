@@ -71,6 +71,7 @@ from .expr import (
     WHEN,
     SELECTOR,
     SEP,
+    split_names,
     CUM_SUM,
     CUM_COUNT,
     RANK,
@@ -499,8 +500,7 @@ def _reduction_dtype(node: Node, input: DataType) raises -> DataType:
     if op == MODE:
         return DataType.list(input)
     if op == VALUE_COUNTS:
-        var parts = node.text.split(SEP)
-        var names: List[String] = [String(parts[0]), String(parts[1])]
+        var names = split_names(node.text)
         if names[0] == names[1]:
             raise Error(
                 "value_counts count name must differ from the value name: "
@@ -990,7 +990,7 @@ def bind(
                 )
                 if (
                     node.text2.byte_length() > 0
-                    and len(node.text2.split(SEP)) != edge_count + 1
+                    and len(split_names(node.text2)) != edge_count + 1
                 ):
                     raise Error("labels must have one more value than breaks")
                 if (node.integer & 2) != 0:
@@ -1090,12 +1090,12 @@ def bind(
                 raise Error("Invalid over input")
             if node.text2.byte_length() == 0:
                 raise Error("over requires at least one partition column")
-            for part in node.text2.split(SEP):
+            for part in split_names(node.text2):
                 var found = False
                 for column in columns:
-                    found = found or column.name() == String(part)
+                    found = found or column.name() == part
                 if not found:
-                    raise Error("Unknown partition column: " + String(part))
+                    raise Error("Unknown partition column: " + part)
             if _reaches(nodes, node.left, MODE) or _reaches(
                 nodes, node.left, VALUE_COUNTS
             ):
