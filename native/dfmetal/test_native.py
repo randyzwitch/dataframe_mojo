@@ -483,7 +483,9 @@ def check_float32_floor_division_preflight_without_device():
                       ptr(outputs), ptr(nt), ptr(st))
     memory, err = Memory(), P()
     check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
-    for opcode in (26, 27):
+    code[4] = 26
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for opcode in (27,):
         code[4] = opcode
         err = P()
         assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
