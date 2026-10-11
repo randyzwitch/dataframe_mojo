@@ -157,9 +157,11 @@ the output logical dtype. All ms/us/ns datetime units, negative instants and
 nulls retain CPU semantics. Fixed-interval truncation supports storage-aligned
 positive intervals, including Monday-aligned whole weeks. Month/year truncation,
 zone-aware temporal operations, offsets and logical arithmetic/casts remain
-unsupported. Source-independent
-literal `strptime` expressions are folded before dictionary encoding, with
-the parsed temporal dtype retained. Row-valued parsing and binary String
+unsupported. Source-independent literal `strptime` expressions and casts to
+numeric, Decimal32/64, or temporal types are folded before dictionary encoding.
+The CPU scalar cast runs once per literal, with exact integer payloads and
+logical metadata retained; input rows stay on the GPU. Invalid strict literals
+and Decimal128 literals remain unsupported. Row-valued parsing and binary String
 concatenation reject before encoding, rather than binding text operations to
 integer dictionary codes.
 
