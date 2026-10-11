@@ -1563,8 +1563,13 @@ struct DataFrame(Copyable, Sized, Writable):
         left join followed by unmatched right rows in right order.
         Output: left columns, then right non-key columns, with suffix on
         names that collide with left names. Key columns keep left names and
-        take whichever side is present; with how="full" and coalesce=False,
-        right keys are kept as separate columns instead.
+        take whichever side is present. With coalesce=False (inner, left,
+        right and full joins), the right keys are kept as columns of their
+        own instead, after the left columns and suffixed where their names
+        collide, and the left keys keep the left side's values: a left
+        join's unmatched rows then have a null right key, as in Polars.
+        Semi and anti joins output left columns only, so the flag does not
+        apply to them.
         """
         return self._join_impl(
             right,
@@ -1710,7 +1715,9 @@ struct DataFrame(Copyable, Sized, Writable):
                 suffix=suffix,
                 coalesce=coalesce,
             ).drop(helpers)
-        var keep_right_keys = how == JOIN_FULL and not coalesce
+        var keep_right_keys = (
+            not coalesce and how != JOIN_SEMI and how != JOIN_ANTI
+        )
         var right_output = List[Int]()
         var right_names = List[String]()
         if how != JOIN_SEMI and how != JOIN_ANTI:
@@ -2153,6 +2160,26 @@ struct DataFrame(Copyable, Sized, Writable):
                         if not right_matched[j]:
                             left_rows.append(-1)
                             right_rows.append(j)
+        if how == JOIN_RIGHT and keep_right_keys:
+            # Right keys kept apart: every left column, keys included, as
+            # the left rows have them (null where none matched), then the
+            # right columns, keys among them.
+            var gather_workers = worker_count(len(left_rows))
+            var left_sources = List[Series](capacity=self.width())
+            for c in range(self.width()):
+                left_sources.append(self._columns[c].copy())
+            var columns = take_parallel(
+                left_sources^, left_rows.copy(), gather_workers, or_null=True
+            )
+            var right_sources = List[Series]()
+            for c in right_output:
+                right_sources.append(right._columns[c].copy())
+            var gathered = take_parallel(
+                right_sources, right_rows^, gather_workers, or_null=False
+            )
+            for k in range(len(right_output)):
+                columns.append(gathered[k].renamed(right_names[k]))
+            return Self(columns^, height=len(left_rows))
         if how == JOIN_RIGHT:
             # Every output row has a right row. Its key is the coalesced key
             # even when no left row matched, so never gather a left key or
