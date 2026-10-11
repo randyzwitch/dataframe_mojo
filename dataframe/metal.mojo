@@ -26,7 +26,9 @@ from .accelerator.dictionaries import (
     has_dictionary_columns,
     encode_query,
     restore_frame,
+    lower_dictionary_operations,
 )
+from .accelerator.memory import checked_add
 from .accelerator.rows import RowPlan, lower_rows, ROW_SORT_KEY
 from .accelerator.joins import (
     JoinDag,
@@ -58,6 +60,7 @@ from .expr import (
     IS_FINITE,
     IS_INFINITE,
     WHEN,
+    INT_IS_IN,
     CAST,
     LIT_INT,
     LIT_FLOAT,
@@ -321,6 +324,8 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if op == INT_IS_IN:
+        return 172
     if (
         op == FIRST
         or op == LAST
@@ -509,7 +514,11 @@ struct _Descriptors(Movable):
             self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
             self.typed |= dtype != dtype.physical()
         for i in range(0, len(self.code), 4):
-            self.typed |= self.code[i] == CAST or self.code[i] == WHEN
+            self.typed |= (
+                self.code[i] == CAST
+                or self.code[i] == WHEN
+                or self.code[i] == INT_IS_IN
+            )
             if self.code[i] == ROW_GROUP_OUTPUT:
                 self.code[i + 3] = _op(Int(self.code[i + 3]))
             self.code[i] = _op(Int(self.code[i]))
@@ -1381,8 +1390,12 @@ struct MetalRuntime(AcceleratorBackend):
             # Validate original string semantics before replacing values with
             # ordered codes. Schema execution reads no source rows.
             var schema = query._execute(len(query._nodes) - 1, True)
-            var dictionary = DictionaryCodes(query)
-            var staging_bytes = dictionary.staging_bytes(query)
+            var lowered = lower_dictionary_operations(query, self._budget)
+            var staged_query = lowered[0].copy()
+            var dictionary = DictionaryCodes(staged_query)
+            var staging_bytes = checked_add(
+                dictionary.staging_bytes(staged_query), lowered[1]
+            )
             var budget = self._budget
             if budget >= 0:
                 if staging_bytes > budget:
@@ -1390,7 +1403,7 @@ struct MetalRuntime(AcceleratorBackend):
                         "Metal dictionary staging exceeds payload budget"
                     )
                 budget -= staging_bytes
-            var encoded = encode_query(query, dictionary)
+            var encoded = encode_query(staged_query, dictionary)
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
             var staged_ns = Int(perf_counter_ns()) - start
             var executed = runtime._run(encoded, profiling)
@@ -1421,6 +1434,26 @@ struct MetalRuntime(AcceleratorBackend):
                     Column[Int64](
                         List[Int64](
                             length=report.height(), fill=Int64(staging_bytes)
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "dictionary_operation_tables",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(), fill=Int64(lowered[2])
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "dictionary_operation_staging_bytes",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(), fill=Int64(lowered[1])
                         )
                     ),
                 )
@@ -1464,8 +1497,10 @@ struct MetalRuntime(AcceleratorBackend):
                 var metadata = query.copy()
                 for i in range(len(metadata._frames)):
                     metadata._frames[i] = metadata._frames[i].slice(0, 0)
-                var dictionary = DictionaryCodes(metadata)
-                var encoded = encode_query(metadata, dictionary)
+                var lowered = lower_dictionary_operations(metadata)
+                var staged_query = lowered[0].copy()
+                var dictionary = DictionaryCodes(staged_query)
+                var encoded = encode_query(staged_query, dictionary)
                 return "Metal ordered dictionary staging; " + self.describe(
                     encoded
                 )

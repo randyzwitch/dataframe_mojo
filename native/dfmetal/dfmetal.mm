@@ -45,7 +45,7 @@ bool binaryOp(int64_t op) {
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return op == DFM_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+  return op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
          op == DFM_CEIL || op == DFM_ROUND ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
@@ -433,6 +433,15 @@ Shape validate(const DFMRequest &r, bool storage = false,
       auto operand = (binary || unary || conditional)
                          ? nodeType(r, v.start + c[1])
                          : nodeType(r, v.start + j);
+      if (c[0] == DFM_INT_IS_IN) {
+        if (!typed(r) || operand == DFM_FLOAT32 || operand == DFM_BOOL ||
+            nodeType(r, v.start + j) != DFM_BOOL || c[2] < 0 || c[3] < 0 ||
+            add(c[2], c[3]) > r.literal_count)
+          fail("Invalid Metal integer membership descriptor");
+        for (int64_t value = c[2]; value < c[2] + c[3]; ++value)
+          if (r.code[4 * value] != DFM_LITERAL_INT || nodeType(r, value) != operand)
+            fail("Metal integer membership literal dtype mismatch");
+      }
       if ((c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
           operand != DFM_FLOAT32)
         fail("Metal floating classification requires Float32");
@@ -1382,6 +1391,13 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                   castExpression(r.node_types[s.start + c[1]], dtype, a, z,
                                  valid, c[3] != 0, s.start + j + 1) +
                   "}";
+        } else if (op == DFM_INT_IS_IN) {
+          auto operand = nodeType(r, s.start + c[1]);
+          text += valid + "=" + av + ";if(" + valid + "){bool hit=false;";
+          text += "for(ulong member=0;member<" + std::to_string(c[3]) +
+                  "UL;++member)hit|=(" + a + "==" +
+                  decode(operand, "lit[" + std::to_string(c[2]) + "UL+member]") +
+                  ");" + z + "=uchar(hit);}";
         } else if (op == DFM_LITERAL_NULL)
           text += valid + "=false;";
         else if (op == DFM_LITERAL_INT || op == DFM_LITERAL_FLOAT ||

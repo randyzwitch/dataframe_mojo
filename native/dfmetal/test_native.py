@@ -2699,6 +2699,72 @@ def test_filter_gathers_only_columns_used_after_boundary():
 
 test_filter_gathers_only_columns_used_after_boundary()
 
+
+def test_integer_membership_exact_payload_and_descriptor_bounds():
+    for dtype in [2, 3, 5, 6, 7, 8, 9, 10]:
+        scalar = SCALARS[dtype]
+        bits = C.sizeof(scalar) * 8
+        unsigned = dtype in (7, 8, 9, 10)
+        low = 0 if unsigned else -(1 << (bits - 1))
+        high = (1 << (bits if unsigned else bits - 1)) - 1
+        values = [low, 0, 1, 2, high, low, high, 7, 1]
+        valid = [True, False, True, True, True, True, False, True, True]
+        data = (scalar * len(values))(*values)
+        bitmap = packed(valid, 3)
+        inputs = (Input * 1)(Input(ptr(data), ptr(bitmap), dtype, 3, 1))
+        # The executable program has two nodes. Three exact integer payloads
+        # live outside that range; the duplicate target is intentional.
+        code = (I * 20)(0, -1, -1, 0, 172, 0, 2, 3,
+                        1, -1, -1, -1, 1, -1, -1, -1, 1, -1, -1, -1)
+        words = (C.c_uint64 * 5)(0, 0, low & (2**64 - 1), high, high)
+        steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+        result = (C.c_uint8 * 2)()
+        output_valid = (C.c_uint8 * 2)()
+        outputs = (Output * 1)(Output(ptr(result), ptr(output_valid), 4, 1, -1, 0))
+        nt, st = (I * 5)(dtype, 4, dtype, dtype, dtype), (I * 2)(dtype, 4)
+        request = Request(2, len(values), 0, 2, 1, 20, 5, 1, 0, 1, -1, 0, 1, -1,
+                          ptr(inputs), ptr(code), ptr(words), ptr(steps), None,
+                          ptr(outputs), ptr(nt), ptr(st))
+        for repeat in range(2):
+            stats, err = Stats(), P()
+            check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+            assert unpack(output_valid, stats.rows) == valid
+            assert all(not ok or got == (value in {low, high}) for got, value, ok in zip(unpack(result, stats.rows), values, valid))
+            if repeat:
+                assert stats.cache_hit
+        for field, invalid in [(6, -1), (6, 5), (7, -1), (7, 4), (7, 2**63 - 1)]:
+            before = code[field]
+            code[field] = invalid
+            memory, err = Memory(), P()
+            status = lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert status
+            lib.dfm_free(err)
+            code[field] = before
+        nt[2] = 1
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        lib.dfm_free(err)
+        nt[2] = dtype
+        # Runtime values, not generated shader text: reuse the same pipeline
+        # with changed targets, then exercise empty sets and empty inputs.
+        words[2], words[3], words[4] = 1, 1, 1
+        stats, err = Stats(), P()
+        check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+        assert stats.cache_hit
+        assert all(not ok or got == (value == 1) for got, value, ok in zip(unpack(result, stats.rows), values, valid))
+        code[7] = 0
+        stats, err = Stats(), P()
+        check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+        assert unpack(output_valid, stats.rows) == valid
+        assert not any(unpack(result, stats.rows))
+        request.rows = 0
+        stats, err = Stats(), P()
+        check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+        assert stats.rows == 0
+
+
+test_integer_membership_exact_payload_and_descriptor_bounds()
+
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"
