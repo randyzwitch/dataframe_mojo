@@ -81,6 +81,8 @@ from dataframe.series import Series
 comptime ROW_GROUP_HEADER = 1002
 comptime ROW_GROUP_KEY = 1003
 comptime ROW_GROUP_OUTPUT = 1004
+comptime ROW_GROUP_HEADER_LAST = 1005
+comptime ROW_SLICE = 1006
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -346,11 +348,9 @@ def lower_rows(
         capabilities.reject("plan", "empty plan")
     var cursor = root
     var limit = -1
-    if query._nodes[cursor].kind == SLICE:
-        if query._nodes[cursor].offset != 0:
-            capabilities.reject(
-                "plan", "only final head is supported in a resident region"
-            )
+    if query._nodes[cursor].kind == SLICE and query._nodes[cursor].offset == 0:
+        if query._nodes[cursor].length < -1:
+            raise Error("Slice length must be nonnegative")
         limit = query._nodes[cursor].length
         cursor = query._nodes[cursor].left
     var chain = List[Int]()
@@ -361,6 +361,7 @@ def lower_rows(
             and kind != WITH_COLUMNS
             and kind != FILTER
             and kind != DROP
+            and (kind != SLICE or not capabilities.slices)
             and (kind != SORT or not capabilities.order)
             and (kind != AGG or not capabilities.grouped)
         ):
@@ -432,6 +433,46 @@ def lower_rows(
             capabilities.reject(
                 "plan", "only final head may follow resident reductions"
             )
+        if node.kind == SLICE:
+            if node.length < -1:
+                raise Error("Slice length must be nonnegative")
+            if next_slot >= ROW_MAX_SLOTS:
+                capabilities.reject("plan", "slice exceeds 64 value slots")
+            var start = len(literals)
+            code.extend(
+                [
+                    Int64(ROW_SLICE),
+                    Int64(start + 1),
+                    Int64(start + 2),
+                    Int64(-1),
+                ]
+            )
+            literals.append(0)
+            node_dtypes.append(DataType.BOOL)
+            # Runtime scalar parameters keep shader caching independent of
+            # offset and length. These two literal nodes are not evaluated.
+            for parameter in List[Int]([node.offset, node.length]):
+                code.extend([Int64(LIT_INT), Int64(-1), Int64(-1), Int64(-1)])
+                literals.append(bitcast[DType.float64](Int64(parameter)))
+                node_dtypes.append(DataType.INT64)
+            var gather_start = len(gathers)
+            for slot in slots:
+                gathers.append(Int64(slot))
+            slot_dtypes.append(DataType.BOOL)
+            steps.append(
+                RowStep(
+                    start,
+                    1,
+                    next_slot,
+                    True,
+                    gather_start,
+                    len(slots),
+                    False,
+                    False,
+                )
+            )
+            next_slot += 1
+            continue
         if node.kind == SORT:
             if len(node.names) == 0:
                 continue
@@ -714,7 +755,10 @@ def lower_rows(
             var start = len(literals)
             code.extend(
                 [
-                    Int64(ROW_GROUP_HEADER),
+                    Int64(
+                        ROW_GROUP_HEADER_LAST if len(node.flags)
+                        and node.flags[0] else ROW_GROUP_HEADER
+                    ),
                     Int64(len(group_keys)),
                     Int64(start_slot),
                     Int64(first_slot),

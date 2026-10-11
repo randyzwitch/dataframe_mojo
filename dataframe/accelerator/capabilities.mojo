@@ -38,6 +38,7 @@ struct RowCapabilities(Copyable):
     var casts: Bool
     var mixed_types: Bool
     var extended_integers: Bool
+    var slices: Bool
 
     def __init__(
         out self,
@@ -55,6 +56,7 @@ struct RowCapabilities(Copyable):
         order: Bool = False,
         grouped: Bool = False,
         extra_reductions: Bool = False,
+        slices: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -69,6 +71,7 @@ struct RowCapabilities(Copyable):
         self.order = order
         self.grouped = grouped
         self.extra_reductions = extra_reductions
+        self.slices = slices
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)

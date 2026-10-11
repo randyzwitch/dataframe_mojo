@@ -82,6 +82,12 @@ enum DFMOp {
   DFM_GROUP_HEADER = 201,
   DFM_GROUP_KEY = 202,
   DFM_GROUP_OUTPUT = 203,
+  // Distinct keep=last: gather key payloads from the last source row and
+  // retain that source position for stable result ordering.
+  DFM_GROUP_HEADER_LAST = 205,
+  // Bool predicate over current resident row positions. Operands name two
+  // Int64 literals containing offset and length; negative offsets count back.
+  DFM_SLICE = 206,
 };
 
 typedef struct DFMInput {

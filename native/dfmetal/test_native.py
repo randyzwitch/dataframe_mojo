@@ -1897,7 +1897,7 @@ test_radix_composite_after_filter()
 
 
 def test_grouped_reductions():
-    def run(dtype, n, key_count=2, unique=False, fallback=False):
+    def run(dtype, n, key_count=2, unique=False, fallback=False, last=False):
         scalar = SCALARS[dtype]
         if dtype == 1:
             pool = [0.0, -0.0, 1.0, float("nan"), 1.401298464324817e-45]
@@ -1928,7 +1928,7 @@ def test_grouped_reductions():
             Input(ptr(va), ptr(vb), dtype, 5, 1),
         )
         slots = [dtype, 4, dtype, 3, 3, 3]
-        nodes = [(201, key_count, 4, 5)] + (
+        nodes = [(205 if last else 201, key_count, 4, 5)] + (
             [(202, 0, 0, 0), (202, 1, 0, 0)] if key_count else []
         )
         nt = [3] + ([dtype, 4] if key_count else [])
@@ -2013,8 +2013,11 @@ def test_grouped_reductions():
         if not key_count and not n:
             groups[()] = []
         expected = []
-        for rows in groups.values():
-            row = rows[0] if rows else 0
+        ordered = list(groups.values())
+        if last:
+            ordered.sort(key=lambda rows: rows[-1] if rows else 0)
+        for rows in ordered:
+            row = rows[-1 if last else 0] if rows else 0
             good = [i for i in rows if vv[i]]
             rank_value = lambda i: (
                 (math.isnan(value[i]), value[i]) if dtype == 1 else value[i]
@@ -2121,6 +2124,10 @@ def test_grouped_reductions():
     run(3, 1025, 2, True)
     run(3, 4097, 2, True)
     run(3, 4097, fallback=True)
+    for t in range(1, 11):
+        for n in (0, 7, 257, 4097):
+            run(t, n, last=True)
+    run(3, 4097, fallback=True, last=True)
 
 
 test_grouped_reductions()
@@ -2764,6 +2771,47 @@ def test_integer_membership_exact_payload_and_descriptor_bounds():
 
 
 test_integer_membership_exact_payload_and_descriptor_bounds()
+
+
+def test_resident_slice_runtime_parameters():
+    for n in (0, 1, 17, 257):
+        values = (C.c_int32 * max(1, n))(*range(n))
+        validity = [i % 5 != 2 for i in range(n)]
+        valid = packed(validity)
+        inputs = (Input * 1)(Input(ptr(values), ptr(valid), 2, 0, 1))
+        code = (I * 12)(206, 1, 2, -1, 1, -1, -1, -1, 1, -1, -1, -1)
+        words = (I * 3)(0, 0, -1)
+        nt, st = (I * 3)(4, 3, 3), (I * 2)(2, 4)
+        steps, gathers = (Step * 1)(Step(0, 1, 1, 1, 0, 1)), (I * 1)(0)
+        output_values = (C.c_int32 * max(1, n))()
+        output_valid = packed([False] * max(1, n))
+        outputs = (Output * 1)(Output(ptr(output_values), ptr(output_valid), 2, 0, -1, 0))
+        request = Request(2, n, 0, 2, 1, 12, 3, 1, 1, 1, -1, 0, 1, -1,
+                          ptr(inputs), ptr(code), ptr(words), ptr(steps), ptr(gathers),
+                          ptr(outputs), ptr(nt), ptr(st))
+        for offset in (-(2**63), -300, -3, -1, 0, 1, 3, 300, 2**63-1):
+            for length in (-1, 0, 1, 300, 2**63-1):
+                words[1], words[2] = offset, length
+                begin = min(n, max(0, n + offset) if offset < 0 else offset)
+                count = n - begin if length == -1 else min(length, n - begin)
+                stats, err = Stats(), P()
+                check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+                assert stats.rows == count, (n, offset, length, stats.rows, count)
+                assert unpack(output_valid, count) == validity[begin:begin+count]
+                assert all(not validity[i] or output_values[i-begin] == i for i in range(begin, begin+count))
+        words[2] = -2
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Slice length" in C.string_at(err)
+        lib.dfm_free(err)
+        words[2] = -1
+        code[1] = 3
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        lib.dfm_free(err)
+
+
+test_resident_slice_runtime_parameters()
 
 lib.dfm_context_release(ctx)
 print(
