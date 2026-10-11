@@ -156,6 +156,7 @@ def select_auto(
             continue
         if (
             record.get("validated").text != "true"
+            or Int(record.get("validation_failures").text) != 0
             or Int(record.get("training_queries").text) < 5
             or Int(record.get("validation_queries").text) < 5
             or record.get("distribution_coverage").string()

@@ -103,7 +103,9 @@ Calibration records use `dataframe-analytical-cost-v1`, keyed by provider,
 device, runtime build, CPU build, host/affinity, workers, optimize/streaming/
 batch settings, and dtype family. They contain nonnegative coefficients,
 feature coverage bounds, residual envelopes, expiry and independent query
-validation counts. Unidentified builds, absent/stale/ambiguous records,
+validation counts and a zero failed-execution count. A held-out failure after
+estimate/identity emission invalidates that calibration identity; it cannot be
+hidden by the remaining successful cases. Unidentified builds, absent/stale/ambiguous records,
 extrapolation and unsupported candidates select CPU before submission. Device
 failures continue to propagate. CPU tails currently require additional cost
 terms and conservatively stay on CPU; region dynamic programming and learned

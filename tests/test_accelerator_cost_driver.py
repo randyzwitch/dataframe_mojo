@@ -51,6 +51,33 @@ class CalibrationTests(unittest.TestCase):
         self.assertTrue(all(case["regret_ns"] == 95 for case in result["cases"]))
         self.assertIn("not directly measured", result["method"])
 
+    def test_failed_heldout_execution_cannot_be_ignored(self):
+        key = dict(provider="test", device="gpu", runtime_build_id="runtime", cpu_build_id="cpu", host="host", threads=1, optimize=True, streaming=True, batch_size=64, family="Float32")
+        def model(fixed):
+            return dict(coefficients={name: fixed if name == "fixed" else 0 for name in driver.FEATURES}, minimum=dict.fromkeys(driver.FEATURES, 0), maximum=dict.fromkeys(driver.FEATURES, 2), residual_factor=1)
+        calibration = dict(key, safety_factor=1.5, cpu=model(50), accelerator=model(20))
+        features = dict.fromkeys(driver.FEATURES, 1.0)
+        records = [dict(status="ok", key=key.copy(), query_id=str(i), case=dict(role="heldout"), cpu_features=features.copy(), accelerator_features=features.copy(), cold_ns=10, cold_planning_ns=5, samples=[dict(cpu_ns=100, accelerator_ns=10, planning_ns=5)]) for i in range(5)]
+        records.append(dict(status="failed_or_unsupported", key=key.copy(), query_id="failed-parity", case=dict(role="heldout")))
+        driver.evaluate(dict(records=[calibration]), records, set())
+        self.assertFalse(calibration["validated"])
+        self.assertEqual(calibration["validation_failures"], 1)
+        self.assertEqual(calibration["validation_queries"], 5)
+
+    def test_failed_training_prevents_fitting_that_identity(self):
+        key = dict(provider="test", family="Float32")
+        records = [dict(status="ok", key=key.copy(), query_id=str(i), case=dict(role="train")) for i in range(5)]
+        records.append(dict(status="error", key=key.copy(), query_id="failed", case=dict(role="train")))
+        table = driver.fit(records)
+        self.assertEqual(table["records"], [])
+        self.assertEqual(table["rejected_keys"][0]["failures"], 1)
+
+    def test_partial_output_retains_identity_for_failure_invalidation(self):
+        result = driver.parse_run('KEY {"provider":"test","cpu_build_id":"cpu","runtime_build_id":"runtime"}\nPEAK 99\n', require_complete=False)
+        self.assertEqual(result["key"]["cpu_build_id"], "cpu")
+        self.assertEqual(result["peak_bytes"], 99)
+        self.assertFalse(result.get("parity", False))
+
     def test_incomplete_or_unvalidated_output_is_rejected(self):
         with self.assertRaises(ValueError):
             driver.parse_run("VALIDATED False\n")

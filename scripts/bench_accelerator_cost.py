@@ -75,7 +75,7 @@ def matrix(samples=192, seed=583):
     return [c for c in cases if c["role"] == "heldout" or case_id(c) not in heldout_ids]
 
 
-def parse_run(output):
+def parse_run(output, require_complete=True):
     record = {"cpu": [], "accelerator": [], "samples": [], "profile": {}}
     cpu_features, accelerator_features = {}, {}
     for line in output.splitlines():
@@ -101,13 +101,24 @@ def parse_run(output):
             record["profile"][name] = int(value)
         elif kind == "VALIDATED":
             record["parity"] = body.lower() == "true"
-    if not record.get("parity") or len(record["samples"]) < 5 or set(cpu_features) != set(FEATURES) or set(accelerator_features) != set(FEATURES):
-        raise ValueError("incomplete parity, timing or feature output")
-    for key in ("cpu_build_id", "runtime_build_id"):
-        if record["key"][key] == "development-source-no-calibration":
-            raise ValueError("calibration requires identified packages")
     record["cpu_features"] = cpu_features
     record["accelerator_features"] = accelerator_features
+    if not require_complete:
+        return record
+    if not record.get("parity") or len(record["samples"]) < 5 or set(cpu_features) != set(FEATURES) or set(accelerator_features) != set(FEATURES):
+        raise ValueError("incomplete parity, timing or feature output")
+    if "key" not in record or "cold_ns" not in record or "cold_planning_ns" not in record or "peak_bytes" not in record:
+        raise ValueError("incomplete calibration identity or cold observation")
+    if record["peak_bytes"] < 0 or any(not math.isfinite(value) or value < 0 for features in (cpu_features, accelerator_features) for value in features.values()):
+        raise ValueError("invalid calibration memory or feature values")
+    if record["cold_ns"] <= 0 or record["cold_planning_ns"] <= 0 or any(sample[name] <= 0 for sample in record["samples"] for name in ("cpu_ns", "accelerator_ns", "planning_ns")):
+        raise ValueError("calibration timings must be positive")
+    required_identity = ("provider", "device", "runtime_build_id", "cpu_build_id", "host", "threads", "optimize", "streaming", "batch_size", "family")
+    if not isinstance(record["key"], dict) or any(name not in record["key"] for name in required_identity):
+        raise ValueError("incomplete calibration identity fields")
+    for key in ("cpu_build_id", "runtime_build_id"):
+        if not record["key"][key] or record["key"][key] == "development-source-no-calibration":
+            raise ValueError("calibration requires identified packages")
     return record
 
 
@@ -129,6 +140,14 @@ def collect(binary, cases, output, table, reps, timeout):
                     record.update(parse_run(result.stdout), status="ok")
             except (subprocess.TimeoutExpired, ValueError) as error:
                 record.update(status="error", error=str(error))
+                if isinstance(error, subprocess.TimeoutExpired):
+                    record["stdout"] = (error.stdout or b"").decode(errors="replace") if isinstance(error.stdout, bytes) else (error.stdout or "")
+                    record["stderr"] = (error.stderr or b"").decode(errors="replace") if isinstance(error.stderr, bytes) else (error.stderr or "")
+            if record["status"] != "ok" and record.get("stdout"):
+                try:
+                    record.update(parse_run(record["stdout"], require_complete=False))
+                except (ValueError, KeyError) as error:
+                    record["partial_metadata_error"] = str(error)
             file.write(json.dumps(record, sort_keys=True) + "\n")
             file.flush()
             records.append(record)
@@ -194,12 +213,17 @@ def fit(records, ttl=86400):
     for record in records:
         if record["status"] == "ok" and record["case"]["role"] == "train":
             groups.setdefault(json.dumps(record["key"], sort_keys=True), []).append(record)
-    result = dict(format=FORMAT, memory_fraction=.8, records=[])
+    result = dict(format=FORMAT, memory_fraction=.8, records=[], rejected_keys=[])
     for identity, group in groups.items():
+        key = json.loads(identity)
+        failures = [r for r in records if r["status"] != "ok" and r["case"]["role"] == "train" and r.get("key") == key]
+        if failures:
+            result["rejected_keys"].append(dict(key=key, reason="training execution or parity failed", failures=len(failures)))
+            continue
         queries = {r["query_id"] for r in group}
         if len(queries) < 5:
             continue
-        result["records"].append(dict(json.loads(identity), expires_at=int(time.time()) + ttl, validated=False, training_queries=len(queries), validation_queries=0, distribution_coverage="conservative-null-selectivity-envelope", safety_factor=1.5, cpu=fit_model(group, "cpu"), accelerator=fit_model(group, "accelerator")))
+        result["records"].append(dict(json.loads(identity), expires_at=int(time.time()) + ttl, validated=False, training_queries=len(queries), validation_queries=0, validation_failures=0, distribution_coverage="conservative-null-selectivity-envelope", safety_factor=1.5, cpu=fit_model(group, "cpu"), accelerator=fit_model(group, "accelerator")))
     return result
 
 
@@ -215,7 +239,9 @@ def evaluate(table, records, training_ids):
     for calibration in table["records"]:
         key = {k: calibration[k] for k in ("provider", "device", "runtime_build_id", "cpu_build_id", "host", "threads", "optimize", "streaming", "batch_size", "family")}
         heldout = [r for r in records if r["status"] == "ok" and r["case"]["role"] == "heldout" and r["key"] == key]
-        covered_queries, good = set(), True
+        failures = [r for r in records if r["status"] != "ok" and r["case"]["role"] == "heldout" and r.get("key") == key]
+        calibration["validation_failures"] = len(failures)
+        covered_queries, good = set(), not failures
         calibration_cases = []
         for record in heldout:
             if record["query_id"] in training_ids:

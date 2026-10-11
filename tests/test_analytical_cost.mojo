@@ -38,12 +38,14 @@ def _model(fixed: Int, factor: String) -> String:
     )
 
 
-def _record(cpu: Int = 1000, device: Int = 100) -> String:
+def _record(cpu: Int = 1000, device: Int = 100, failures: Int = 0) -> String:
     return (
         '{"provider":"test","device":"gpu","runtime_build_id":"runtime","cpu_build_id":"cpu","host":"host","threads":1,"optimize":true,"streaming":true,"batch_size":64,"family":"Float32","expires_at":10000,"validated":true,"training_queries":10,"validation_queries":5,"distribution_coverage":"conservative-null-selectivity-envelope","safety_factor":1.5,"cpu":'
         + _model(cpu, "0.9")
         + ',"accelerator":'
         + _model(device, "1.1")
+        + ',"validation_failures":'
+        + String(failures)
         + "}"
     )
 
@@ -82,6 +84,12 @@ def test_shared_comparison_explains_both_bounds_and_the_largest_term() raises:
 
 
 def test_identity_memory_expiration_coverage_and_ambiguity_reject() raises:
+    assert_equal(
+        select_auto(
+            _facts(), _table(_record(1000, 100, 1)), _key(), 100, 10
+        ).engine,
+        "cpu",
+    )
     var facts = _facts()
     var table = _table(_record())
     var key = _key()
