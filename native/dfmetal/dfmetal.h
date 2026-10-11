@@ -60,6 +60,7 @@ enum DFMOp {
   DFM_FILL_NAN = 34,
   DFM_KEEP_NULLS = 35,
   DFM_ABS = 51,
+  DFM_SQRT = 52,
   DFM_FLOOR = 55,
   DFM_CEIL = 56,
   // Unary ROUND: code[3] is decimals. For nonzero floating decimals,

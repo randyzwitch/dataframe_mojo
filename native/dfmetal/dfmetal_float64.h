@@ -57,6 +57,30 @@ inline ulong f64_pack(ulong sign, int exponent, ulong significand) {
   ulong encoded = rounded >= 0x0010000000000000UL ? ulong(exponent + 1023) : 0;
   return sign | (encoded << 52) | (rounded & 0x000fffffffffffffUL);
 }
+inline ulong f64_sqrt(ulong a) {
+  if (f64_nan(a)) return f64_quiet(a);
+  if (!f64_abs(a)) return a;
+  if (a >> 63) return f64_invalid();
+  if (f64_inf(a)) return a;
+  F64Parts p = f64_parts(a);
+  if (p.exponent & 1) { p.significand <<= 1; --p.exponent; }
+  // Extract the 53 root digits of significand * 2^52, two radicand
+  // bits at a time. The radicand is 106 bits; root and remainder fit ulong.
+  ulong high = p.significand >> 12, low = p.significand << 52;
+  ulong root = 0, remainder = 0;
+  for (int digit = 52; digit >= 0; --digit) {
+    uint shift = uint(digit * 2);
+    ulong pair = (shift >= 64 ? high >> (shift - 64) : low >> shift) & 3;
+    remainder = (remainder << 2) | pair;
+    ulong trial = (root << 2) | 1;
+    root <<= 1;
+    if (remainder >= trial) { remainder -= trial; ++root; }
+  }
+  // (root + 1/2)^2 has a quarter fractional bit, so an integer
+  // radicand cannot tie. Compare the exact remainder to root to round.
+  root += ulong(remainder > root);
+  return f64_pack(0, p.exponent / 2, root << 3);
+}
 inline ulong f64_add(ulong a, ulong b) {
   if (f64_nan(a)) return f64_quiet(a);
   if (f64_nan(b)) return f64_quiet(b);

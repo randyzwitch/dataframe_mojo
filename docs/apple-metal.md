@@ -47,7 +47,7 @@ runtime data; changing those does not require recompiling an identical shader.
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
 width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns.
 Float64 columns use IEEE words throughout resident execution. Add, subtract,
-multiply, divide, floor division, remainder, comparisons, numeric/Boolean casts,
+multiply, divide, floor division, remainder, square root, comparisons, numeric/Boolean casts,
 absolute value, negation,
 floor/ceiling, decimal rounding, classification, clipping, and NaN filling
 use integer-only binary64 primitives on the GPU. Basic arithmetic rounds to
@@ -57,7 +57,12 @@ contract of flooring the rounded quotient. Remainder (`%`) matches the CPU SIMD
 sequence: truncate the rounded quotient, use the CPU’s fused multiply/subtract, and adjust
 for differing operand signs. It preserves each binary64 intermediate, including
 the CPU's positive-zero results and NaNs for infinite divisors. This differs from
-native `fmod` for extreme quotients. Integer true division produces Float64.
+native `fmod` for extreme quotients. Square root is correctly rounded using an
+integer root and exact remainder; negative operands produce NaNs, signed zeros
+retain their sign, and subnormal inputs do not flush to zero. Integer square
+roots first convert to Float64, matching the CPU result type. Float32 square
+root computes in emulated binary64 and rounds back to Float32, including for
+subnormal inputs. Integer true division produces Float64.
 Copying values preserves all bits, including NaN payloads and signed zero;
 arithmetic quiets NaNs, whose resulting sign/payload is not a portable CPU
 contract. Float64 keys, stable sorting, grouping, joins, distinct rows, extrema,
@@ -369,7 +374,7 @@ buffers or returning an error; execution never retries the query on CPU after a
 GPU fault. Output owners and source owners remain alive across that boundary.
 
 Binary64 emulation and native Float32 kernels have different costs. Plans
-containing Float64 values, floating sum/mean or rounding, or
+containing Float64 values, floating sum/mean, rounding or square root, or
 Int64/UInt64-to-Float32 conversions carry the separate `metal-emulated-float64-v1` calibration family.
 Native-only calibration cannot select those plans. Without matching, validated
 end-to-end evidence, automatic placement stays on CPU. Future calibration may
