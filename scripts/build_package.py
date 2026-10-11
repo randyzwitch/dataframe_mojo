@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Stage a CPU-identified dataframe package without editing the source tree."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -23,6 +24,13 @@ def build(output: Path) -> None:
         shutil.copyfile(stage / "dataframe.mojoc", output / "dataframe.mojoc.tmp")
         (output / "dataframe.mojoc.tmp").replace(output / "dataframe.mojoc")
     (output / "cpu-build.json").write_text(json.dumps({"cpu_build_id": identity, "mojo": compiler}, indent=2) + "\n")
+    revision = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", "HEAD"], text=True).strip()
+    dirty = bool(subprocess.check_output(["git", "-C", str(ROOT), "status", "--porcelain", "dataframe", "scripts/build_package.py", "scripts/build_identity.py", "pixi.lock"], text=True).strip())
+    metadata = {"provider": "core-with-optional-native-metal", "cpu_build_id": identity,
+                "engine_revision": revision, "core_revision": revision,
+                "engine_dirty": dirty, "core_dirty": dirty, "mojo": compiler,
+                "packages": {"dataframe.mojoc": hashlib.sha256((output / "dataframe.mojoc").read_bytes()).hexdigest()}}
+    (output / "provider.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
 
 if __name__ == "__main__":

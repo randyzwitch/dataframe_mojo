@@ -106,6 +106,10 @@ class Stats(C.Structure):
     ]
 
 
+class ProbeInfo(C.Structure):
+    _fields_ = [(x, I) for x in ("registry", "recommended", "allocated", "unified", "cached", "reclaimable", "max_buffer")] + [("host", C.c_char_p)]
+
+
 def ptr(x):
     return C.cast(x, P)
 
@@ -439,6 +443,44 @@ print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
     sys.exit(0)
+lib.dfm_probe.argtypes = [I, C.POINTER(Request), C.POINTER(ProbeInfo), C.POINTER(P)]
+lib.dfm_probe.restype = C.c_int32
+metadata = ProbeInfo()
+err = P()
+check(lib.dfm_probe(0, None, C.byref(metadata), C.byref(err)), err)
+assert C.sizeof(ProbeInfo) == 64 and metadata.recommended > 0
+assert metadata.max_buffer > 0 and metadata.unified == 1
+assert metadata.cached == 0 and metadata.reclaimable == 0
+assert b"model=" in metadata.host and b"os=" in metadata.host
+before = metadata.allocated
+for _ in range(10):
+    check(lib.dfm_probe(0, None, C.byref(metadata), C.byref(err)), err)
+    assert metadata.allocated == before and metadata.cached == 0
+assert lib.dfm_probe(-1, None, C.byref(metadata), C.byref(err)) != 0
+assert b"device index unavailable" in C.string_at(err)
+lib.dfm_free(err)
+probe_ctx = lib.dfm_context_create(0, 1, C.byref(err))
+if not probe_ctx:
+    check(1, err)
+probe_values = (C.c_float * 1)(7)
+probe_result = (C.c_float * 1)()
+probe_bits = (C.c_uint8 * 1)()
+probe_inputs = (Input * 1)(Input(ptr(probe_values), None, 1, 0, 0))
+probe_code = (I * 4)(0, -1, -1, 0)
+probe_literals = (I * 1)(0)
+probe_steps = (Step * 1)(Step(0, 1, 1, 0, 0, 0))
+probe_outputs = (Output * 1)(Output(ptr(probe_result), ptr(probe_bits), 1, 1, -1, 0))
+probe_request = Request(2, 1, 1, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                        ptr(probe_inputs), ptr(probe_code), ptr(probe_literals),
+                        ptr(probe_steps), None, ptr(probe_outputs), None, None)
+check(lib.dfm_probe(0, C.byref(probe_request), C.byref(metadata), C.byref(err)), err)
+assert metadata.cached == 0
+probe_stats = Stats()
+check(lib.dfm_execute(probe_ctx, C.byref(probe_request), C.byref(probe_stats), C.byref(err)), err)
+check(lib.dfm_probe(0, C.byref(probe_request), C.byref(metadata), C.byref(err)), err)
+assert probe_result[0] == 7 and metadata.cached == 1 and metadata.reclaimable > 0
+lib.dfm_context_release(probe_ctx)
+print("Native Metal metadata-only probe and exact plan cache state: PASS")
 err = P()
 ctx = lib.dfm_context_create(0, 0, C.byref(err))
 if not ctx:

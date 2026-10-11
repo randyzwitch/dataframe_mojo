@@ -13,6 +13,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <sys/sysctl.h>
+#include <unistd.h>
 
 #ifndef DFM_BUILD_ID
 #define DFM_BUILD_ID "development"
@@ -22,6 +24,7 @@ static_assert(sizeof(DFMOutput) == 48 && sizeof(DFMRequest) == 176);
 static_assert(sizeof(DFMMemory) == 64 && sizeof(DFMStats) == 136);
 static_assert(sizeof(DFMDeviceInfo) == 48);
 static_assert(sizeof(DFMWorkspaceInfo) == 40);
+static_assert(sizeof(DFMProbeInfo) == 64);
 namespace {
 using Clock = std::chrono::steady_clock;
 int64_t ns(Clock::time_point start) {
@@ -2239,6 +2242,56 @@ const char *dfm_build_id() { return DFM_BUILD_ID; }
 int64_t dfm_device_count() {
   @autoreleasepool {
     return MTLCopyAllDevices().count;
+  }
+}
+int32_t dfm_probe(int64_t device_id, const DFMRequest *request,
+                  DFMProbeInfo *info, char **err) {
+  if (err) *err = nullptr;
+  @autoreleasepool {
+    try {
+      if (!info) fail("Missing Metal metadata probe output");
+      if (request) validate(*request);
+      auto devices = MTLCopyAllDevices();
+      if (device_id < 0 || device_id >= int64_t(devices.count))
+        fail("Metal device index unavailable");
+      id<MTLDevice> device = devices[device_id];
+      int64_t cached = 0, idle = 0;
+      {
+        std::lock_guard<std::mutex> lock(defaultMutex);
+        if (device_id == 0 && defaultContext) {
+          auto &c = *defaultContext;
+          {
+            std::lock_guard<std::mutex> workspaceLock(c.workspace_mutex);
+            idle = c.idle_bytes;
+          }
+          if (request) {
+            auto src = source(*request);
+            std::lock_guard<std::mutex> cacheLock(c.mutex);
+            cached = c.cache.count(src) ? 1 : 0;
+          }
+        }
+      }
+      char model[256] = {}, hostname[256] = {};
+      size_t modelSize = sizeof(model);
+      if (sysctlbyname("hw.model", model, &modelSize, nullptr, 0) != 0 ||
+          gethostname(hostname, sizeof(hostname) - 1) != 0)
+        fail("Cannot identify Apple calibration host");
+      auto process = NSProcessInfo.processInfo;
+      static thread_local std::string host;
+      host = std::string(hostname) + ";model=" + model +
+          ";memory=" + std::to_string(process.physicalMemory) +
+          ";processors=" + std::to_string(process.activeProcessorCount) +
+          ";os=" + process.operatingSystemVersionString.UTF8String +
+          ";lowPower=" + std::to_string(process.lowPowerModeEnabled) +
+          ";thermal=" + std::to_string(process.thermalState);
+      *info = {device.registryID, int64_t(device.recommendedMaxWorkingSetSize),
+               int64_t(device.currentAllocatedSize), int64_t(device.hasUnifiedMemory),
+               cached, idle, int64_t(device.maxBufferLength), host.c_str()};
+      return 0;
+    } catch (const std::exception &e) {
+      error(err, e);
+      return 1;
+    }
   }
 }
 void *dfm_context_create(int64_t device_id, int64_t reuse_default, char **err) {

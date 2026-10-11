@@ -5,11 +5,17 @@ and Int64 sum remain CPU operations because their accumulators require more
 precision than Apple GPU hardware provides. No arithmetic is emulated.
 """
 from std.ffi import external_call
+from std.math import isfinite
 from std.memory import Pointer
 from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
 from std.time import perf_counter_ns
+from .accelerator.cost import PlanEstimate, CalibrationKey, select_auto as select_cost
+from .accelerator.cpu_work import cpu_features
+from ._build_identity import CPU_BUILD_ID
+from .parallel import configured_workers
+from .json_value import JsonValue
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.dictionaries import (
     DictionaryCodes, has_dictionary_columns, encode_query, restore_frame,
@@ -89,6 +95,7 @@ comptime _Create = def(Int64, Int64, Int) thin abi("C") -> Int
 comptime _Release = def(Int) thin abi("C") -> None
 comptime _Execute = def(Int, Int, Int, Int) thin abi("C") -> Int32
 comptime _Estimate = def(Int, Int, Int) thin abi("C") -> Int32
+comptime _Probe = def(Int64, Int, Int, Int) thin abi("C") -> Int32
 comptime _Info = def(Int, Int, Int) thin abi("C") -> Int32
 comptime _Version = def() thin abi("C") -> Int64
 comptime _Count = def() thin abi("C") -> Int64
@@ -1185,6 +1192,33 @@ def _execute_join_dag(
     return (result^, report^)
 
 
+def _probe_metadata(
+    library: _Library, device: Int, request: List[Int64]
+) raises -> List[Int64]:
+    var callback = library.symbol("dfm_probe")
+    var info = List[Int64](length=8, fill=0)
+    var error = 0
+    var status = Pointer(to=callback).unsafe_bitcast[_Probe]()[](
+        Int64(device), Int(request.unsafe_ptr()) if len(request) else 0,
+        Int(info.unsafe_ptr()), Int(Pointer(to=error)),
+    )
+    library.check(status, error)
+    return info^
+
+
+def _metal_calibration_key(
+    library: _Library, metadata: List[Int64], optimize: Bool,
+    streaming: Bool, batch_size: Int,
+) -> CalibrationKey:
+    var callback = library.build
+    var native_id = _read_c_string(Pointer(to=callback).unsafe_bitcast[_Build]()[]())
+    return CalibrationKey(
+        "metal", "registry=" + String(metadata[0]) + ";unified=" + String(metadata[3]),
+        native_id^, CPU_BUILD_ID, _read_c_string(Int(metadata[7])),
+        configured_workers(), optimize, streaming, batch_size,
+    )
+
+
 struct MetalRuntime(AcceleratorBackend):
     """Apple Metal provider; copies retain configuration, native default cache is shared.
 
@@ -1212,6 +1246,69 @@ struct MetalRuntime(AcceleratorBackend):
         var library = _Library()
         var callback = library.count
         return Int(Pointer(to=callback).unsafe_bitcast[_Count]()[]())
+
+    def estimate_auto(self, query: LazyFrame) raises -> PlanEstimate:
+        """Bound numeric row work; never read values or submit device work."""
+        var work = cpu_features(query)
+        var plan = lower_rows(query, _capabilities())
+        var descriptors = _Descriptors(plan)
+        var request = descriptors.request(plan, self._budget, False)
+        var library = _Library()
+        var memory = List[Int64](length=8, fill=0)
+        var error = 0
+        var status = _estimate_call(library.estimate, request, memory, error)
+        library.check(status, error)
+        var metadata = _probe_metadata(library, self._device, request)
+        # The request stores raw ABI addresses without Mojo origins.
+        # Retain every descriptor buffer through both synchronous FFI calls.
+        _ = descriptors^
+        _ = request^
+        var device = work[0].copy()
+        device[8] = Float64(memory[4])
+        device[9] = 1
+        device[10] = Float64(memory[3])
+        device[11] = Float64(memory[1])
+        device[12] = Float64(memory[2])
+        device[13] = Float64(metadata[4] == 0)
+        device[14] = 0
+        return PlanEstimate(work[0].copy(), device^, Int(memory[2]), work[1].copy(), "accel")
+
+    def calibration_key(
+        self, optimize: Bool, streaming: Bool, batch_size: Int
+    ) raises -> CalibrationKey:
+        var library = _Library()
+        var metadata = _probe_metadata(library, self._device, List[Int64]())
+        return _metal_calibration_key(library, metadata, optimize, streaming, batch_size)
+
+    def select_auto(
+        self, query: LazyFrame, optimize: Bool, streaming: Bool, batch_size: Int
+    ) -> Tuple[String, String]:
+        try:
+            var path = getenv("DATAFRAME_ACCEL_COST_TABLE")
+            if not path:
+                return ("cpu", "auto uses CPU; no analytical calibration configured")
+            if CPU_BUILD_ID == "development-source-no-calibration":
+                return ("cpu", "automatic calibration requires an identified CPU/provider package")
+            var facts = self.estimate_auto(query)
+            if self._budget >= 0 and facts.peak_bytes > self._budget:
+                return ("cpu", "estimated Metal payload exceeds configured memory limit")
+            var table: JsonValue
+            with open(path, "r") as file:
+                table = JsonValue(file.read())
+            var fraction = Float64(table.get("memory_fraction").text)
+            if not isfinite(fraction) or fraction <= 0 or fraction > 1:
+                return ("cpu", "invalid automatic memory headroom fraction")
+            var library = _Library()
+            var metadata = _probe_metadata(library, self._device, List[Int64]())
+            var free = max(0, Int(metadata[1]) - max(0, Int(metadata[2]) - Int(metadata[5])))
+            var budget = Int(Float64(free) * fraction)
+            if self._budget >= 0:
+                budget = min(budget, self._budget)
+            var key = _metal_calibration_key(library, metadata, optimize, streaming, batch_size)
+            var decision = select_cost(facts, table, key, budget, external_call["time", Int64](Int(0)))
+            return (decision.engine.copy(), decision.reason + "; peak_bytes=" + String(facts.peak_bytes) + "; budget_bytes=" + String(budget))
+        except error:
+            return ("cpu", "automatic analytical preflight rejected: " + String(error))
 
     def execute(self, query: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
         return self._run(query, False)
@@ -1282,8 +1379,11 @@ struct MetalRuntime(AcceleratorBackend):
         try:
             if has_dictionary_columns(query):
                 _ = query._execute(len(query._nodes) - 1, True)
-                var dictionary = DictionaryCodes(query)
-                var encoded = encode_query(query, dictionary)
+                var metadata = query.copy()
+                for i in range(len(metadata._frames)):
+                    metadata._frames[i] = metadata._frames[i].slice(0, 0)
+                var dictionary = DictionaryCodes(metadata)
+                var encoded = encode_query(metadata, dictionary)
                 return "Metal ordered dictionary staging; " + self.describe(encoded)
             if has_join(query):
                 var dag = lower_join_dag(query, _capabilities())

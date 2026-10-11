@@ -62,12 +62,12 @@ def calibration_key(
     optimize: Bool, streaming: Bool, batch_size: Int
 ) raises -> CalibrationKey:
     """Provider metadata for the common calibration harness; no submission."""
-    raise Error("installed provider has no analytical calibration identity")
+    return _runtime().calibration_key(optimize, streaming, batch_size)
 
 
 def estimate_auto(plan: LazyFrame) raises -> PlanEstimate:
     """Plan-time facts required by the provider-neutral calibration runner."""
-    raise Error("installed provider has no analytical plan estimate")
+    return _runtime().estimate_auto(plan)
 
 
 def select_auto(
@@ -78,10 +78,10 @@ def select_auto(
 ) -> Tuple[String, String]:
     """Select before execution; providers supply facts to the shared analytical cost selector."""
     if installed():
-        return (
-            "cpu",
-            "auto uses CPU; Metal has no matched end-to-end cost evidence",
-        )
+        try:
+            return _runtime().select_auto(plan, optimize, streaming, batch_size)
+        except error:
+            return ("cpu", "automatic analytical preflight rejected: " + String(error))
     return ("cpu", "auto uses CPU; accelerator provider is not installed")
 
 
@@ -93,4 +93,4 @@ def execute_auto(
     profiling: Bool,
 ) raises -> Tuple[DataFrame, DataFrame]:
     """Execute a selected region; execution errors must propagate to callers."""
-    return execute(plan)
+    return _runtime().execute_profiled(plan) if profiling else _runtime().execute(plan)

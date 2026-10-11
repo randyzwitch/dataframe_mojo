@@ -128,7 +128,7 @@ def collect(binary, cases, output, table, reps, timeout):
     with output.open("w") as file:
         for number, case in enumerate(cases):
             env = os.environ.copy()
-            env.update({"COST_" + k.upper(): str(v) for k, v in case.items() if k != "role"})
+            env.update({"COST_" + k.upper(): str(v).lower() if k == "dtype" else str(v) for k, v in case.items() if k != "role"})
             env.update(COST_REPS=str(reps), DATAFRAME_ACCEL_COST_TABLE=str(table.resolve()))
             record = {"case": case, "query_id": case_id(case)}
             try:
@@ -307,6 +307,9 @@ def main():
     parser.add_argument("--package-dir", type=Path)
     parser.add_argument("--samples", type=int, default=192)
     parser.add_argument("--reps", type=int, default=7)
+    parser.add_argument("--dtypes", nargs="+", choices=DTYPES, default=list(DTYPES))
+    parser.add_argument("--max-rows", type=int, default=33554432)
+    parser.add_argument("--exclude-reductions", nargs="*", choices=("rows", "count", "sum", "mean", "extrema"), default=[])
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -314,7 +317,11 @@ def main():
         if args.binary is None or args.package_dir is None:
             parser.error("--build requires --binary and --package-dir")
         build_runner(args.binary, args.package_dir)
-    cases = matrix(args.samples)
+    cases = [c for c in matrix(args.samples)
+             if c["dtype"] in args.dtypes and c["rows"] <= args.max_rows
+             and (c["workload"] if c["workload"] in ("sum", "count", "extrema") else c["reduction"]) not in args.exclude_reductions]
+    if not cases:
+        parser.error("selected calibration matrix is empty")
     provenance = dict(recorded_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(), driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), runner_sha256=hashlib.sha256((ROOT / "benchmarks/bench_accelerator_cost.mojo").read_bytes()).hexdigest(), exposure="generated training; named mechanisms held out from this fit but previously exposed during development", external_holdout_policy="scripts/bench_policy.py: TPC-DS and ClickBench validation only", method="fresh process per case; one explicit runtime; cold context cost retained; alternating warm CPU/accelerator pairs; parity outside timings; full preflight overhead measured separately and added to accelerator cost; CPU lower and accelerator upper residual envelopes fitted on training only")
     (args.output / "manifest.json").write_text(json.dumps(dict(provenance=provenance, cases=cases), indent=2) + "\n")
     if not args.collect:

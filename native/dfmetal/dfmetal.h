@@ -167,6 +167,18 @@ typedef struct DFMDeviceInfo {
   int64_t unified_memory;
 } DFMDeviceInfo;
 
+// Metadata probe creates no context, queue, pipeline, or device buffer.
+typedef struct DFMProbeInfo {
+  uint64_t registry_id;
+  int64_t recommended_bytes;
+  int64_t allocated_bytes;
+  int64_t unified_memory;
+  int64_t plan_cached;
+  int64_t reclaimable_bytes;
+  int64_t max_buffer_bytes;
+  const char *host_identity; // Valid until the next probe on this thread.
+} DFMProbeInfo;
+
 // Additive workspace inspection; existing request/stats layouts stay intact.
 typedef struct DFMWorkspaceInfo {
   int64_t idle_bytes;
@@ -232,6 +244,8 @@ extern "C" {
 DFM_API int64_t dfm_abi_version(void);
 DFM_API const char *dfm_build_id(void);
 DFM_API int64_t dfm_device_count(void);
+DFM_API int32_t dfm_probe(int64_t device_id, const DFMRequest *request,
+                           DFMProbeInfo *info, char **error);
 DFM_API void *dfm_context_create(int64_t device_id, int64_t reuse_default,
                                  char **error);
 DFM_API void dfm_context_retain(void *context);
