@@ -21,6 +21,7 @@ static_assert(sizeof(DFMInput) == 40 && sizeof(DFMStep) == 48);
 static_assert(sizeof(DFMOutput) == 48 && sizeof(DFMRequest) == 176);
 static_assert(sizeof(DFMMemory) == 64 && sizeof(DFMStats) == 136);
 static_assert(sizeof(DFMDeviceInfo) == 48);
+static_assert(sizeof(DFMWorkspaceInfo) == 40);
 namespace {
 using Clock = std::chrono::steady_clock;
 int64_t ns(Clock::time_point start) {
@@ -532,6 +533,66 @@ struct Context {
   std::mutex mutex;
   uint64_t age = 0;
   std::unordered_map<std::string, std::shared_ptr<Pipelines>> cache;
+  // Idle buffers have no in-flight users. The independent lock also covers
+  // join-session destruction, which happens outside the submission lock.
+  std::mutex workspace_mutex;
+  std::vector<id<MTLBuffer>> idle;
+  int64_t idle_bytes = 0, workspace_limit = 0;
+  int64_t workspace_hits = 0, workspace_allocations = 0;
+  int64_t headroom() {
+    std::lock_guard<std::mutex> lock(workspace_mutex);
+    auto recommended = int64_t(std::min<uint64_t>(
+        device.recommendedMaxWorkingSetSize, INT64_MAX));
+    auto allocated = int64_t(std::min<uint64_t>(device.currentAllocatedSize,
+                                              INT64_MAX));
+    // Idle buffers are reclaimable. Live buffers from other sessions remain
+    // charged to allocated; they can never satisfy this request's allocations.
+    return std::max<int64_t>(0, recommended -
+                                std::max<int64_t>(0, allocated - idle_bytes));
+  }
+  id<MTLBuffer> acquire(int64_t bytes) {
+    std::lock_guard<std::mutex> lock(workspace_mutex);
+    for (auto it = idle.begin(); it != idle.end(); ++it) {
+      if (int64_t((*it).length) == bytes) {
+        auto buffer = *it;
+        idle.erase(it);
+        idle_bytes -= bytes;
+        ++workspace_hits;
+        // Reset reused storage so inactive lanes and bitmap padding cannot
+        // expose data from a previous collection, including failed requests.
+        memset(buffer.contents, 0, bytes);
+        return buffer;
+      }
+    }
+    // A shape change may need new allocations. Reclaim unmatched idle buffers
+    // first, rather than allowing a cache to consume the request's headroom.
+    idle.clear();
+    idle_bytes = 0;
+    auto buffer = [device newBufferWithLength:bytes
+                                    options:MTLResourceStorageModeShared |
+                                            MTLResourceCPUCacheModeDefaultCache];
+    if (!buffer)
+      fail("Metal shared buffer allocation failed");
+    ++workspace_allocations;
+    return buffer;
+  }
+  void recycle(std::vector<id<MTLBuffer>> &buffers) noexcept {
+    std::lock_guard<std::mutex> lock(workspace_mutex);
+    for (auto buffer : buffers) {
+      auto bytes = int64_t(buffer.length);
+      if (idle.size() >= 64 || bytes > workspace_limit - idle_bytes)
+        continue;
+      try {
+        idle.push_back(buffer);
+        idle_bytes += bytes;
+      } catch (...) {
+        // Caching is optional; allocation failure during destruction must not
+        // interrupt context release or ownership cleanup.
+        break;
+      }
+    }
+    buffers.clear();
+  }
 };
 std::mutex defaultMutex;
 Context *defaultContext = nullptr;
@@ -1303,12 +1364,17 @@ struct Buffers {
   Context &c;
   std::vector<id<MTLBuffer>> all;
   int64_t requested = 0;
+  explicit Buffers(Context &context) : c(context) {
+    dfm_context_retain(&c);
+  }
+  ~Buffers() {
+    c.recycle(all);
+    dfm_context_release(&c);
+  }
+  Buffers(const Buffers &) = delete;
+  Buffers &operator=(const Buffers &) = delete;
   id<MTLBuffer> make(int64_t bytes) {
-    auto b = [c.device newBufferWithLength:std::max<int64_t>(1, bytes)
-                                   options:MTLResourceStorageModeShared |
-                                           MTLResourceCPUCacheModeDefaultCache];
-    if (!b)
-      fail("Metal shared buffer allocation failed");
+    auto b = c.acquire(std::max<int64_t>(1, bytes));
     requested = add(requested, std::max<int64_t>(1, bytes));
     all.push_back(b);
     return b;
@@ -1334,11 +1400,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   stats = {};
   stats.gpu_ns = -1;
   stats.memory = estimate(r, shape);
-  int64_t recommended = static_cast<int64_t>(
-      std::min<uint64_t>(c.device.recommendedMaxWorkingSetSize, INT64_MAX));
-  int64_t allocated = static_cast<int64_t>(
-      std::min<uint64_t>(c.device.currentAllocatedSize, INT64_MAX));
-  int64_t budget = std::max<int64_t>(0, recommended - allocated);
+  int64_t budget = c.headroom();
   if (r.memory_budget_bytes >= 0)
     budget = std::min(budget, r.memory_budget_bytes);
   if (stats.memory.peak_bytes > budget)
@@ -1356,7 +1418,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   auto p = pipelines(c, src, hit);
   stats.pipeline_cache_hit = hit;
   stats.pipeline_compile_ns = hit ? 0 : ns(start);
-  Buffers b{c, {}};
+  Buffers b{c};
   auto x = b.make(shape.matrix), v = b.make(shape.validity);
   id<MTLBuffer> y = nil, w = nil, rank = nil, blocks = nil;
   if (shape.filter || shape.order) {
@@ -1760,6 +1822,8 @@ void *dfm_context_create(int64_t device_id, int64_t reuse_default, char **err) {
       if (!ctx->queue)
         fail("Metal command queue unavailable");
       ctx->name = ctx->device.name.UTF8String;
+      ctx->workspace_limit = std::min<int64_t>(256 * 1024 * 1024,
+          int64_t(ctx->device.recommendedMaxWorkingSetSize / 16));
       auto *ptr = ctx.release();
       if (reuse_default && device_id == 0) {
         defaultContext = ptr;
@@ -1799,6 +1863,38 @@ int32_t dfm_context_info(void *p, DFMDeviceInfo *info, char **err) {
       error(err, e);
       return 1;
     }
+  }
+}
+int32_t dfm_workspace_info(void *p, DFMWorkspaceInfo *info, char **err) {
+  if (err)
+    *err = nullptr;
+  try {
+    if (!p || !info)
+      fail("Missing Metal workspace context or info");
+    auto &c = *static_cast<Context *>(p);
+    std::lock_guard<std::mutex> lock(c.workspace_mutex);
+    *info = {c.idle_bytes, int64_t(c.idle.size()), c.workspace_hits,
+             c.workspace_allocations, c.workspace_limit};
+    return 0;
+  } catch (const std::exception &e) {
+    error(err, e);
+    return 1;
+  }
+}
+int32_t dfm_workspace_trim(void *p, char **err) {
+  if (err)
+    *err = nullptr;
+  try {
+    if (!p)
+      fail("Missing Metal workspace context");
+    auto &c = *static_cast<Context *>(p);
+    std::lock_guard<std::mutex> lock(c.workspace_mutex);
+    c.idle.clear();
+    c.idle_bytes = 0;
+    return 0;
+  } catch (const std::exception &e) {
+    error(err, e);
+    return 1;
   }
 }
 int32_t dfm_estimate(const DFMRequest *r, DFMMemory *m, char **err) {

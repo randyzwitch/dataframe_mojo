@@ -216,12 +216,16 @@ struct _Library(Movable):
             _ = external_call["dlclose", Int32](self.handle)
 
     def symbol(self, name: String) raises -> Int:
+        var value = self.optional_symbol(name)
+        if not value:
+            raise Error("Metal runtime lacks " + name)
+        return value
+
+    def optional_symbol(self, name: String) -> Int:
         var c_name = _c_string(name)
         var value = external_call["dlsym", Int](
             self.handle, c_name.unsafe_ptr()
         )
-        if not value:
-            raise Error("Metal runtime lacks " + name)
         return value
 
     def check(self, status: Int32, error: Int) raises:
@@ -588,7 +592,14 @@ def _execute(
     var info_fn = context.library.info
     status = _info_call(info_fn, context.address, info, error)
     context.library.check(status, error)
-    var headroom = max(0, Int(info[2] - info[3]))
+    var idle_bytes = 0
+    var workspace_info = context.library.optional_symbol("dfm_workspace_info")
+    if workspace_info:
+        var workspace = List[Int64](length=5, fill=0)
+        status = _info_call(workspace_info, context.address, workspace, error)
+        context.library.check(status, error)
+        idle_bytes = Int(workspace[0])
+    var headroom = max(0, Int(info[2]) - max(0, Int(info[3]) - idle_bytes))
     if Int(memory[2]) > headroom:
         raise Error("Metal request exceeds current working set headroom")
     var capacity = 1 if plan.reductions else plan.source.height()

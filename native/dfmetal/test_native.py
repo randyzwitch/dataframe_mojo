@@ -2136,6 +2136,65 @@ def test_additional_reductions():
 
 test_additional_reductions()
 
+
+def test_workspace_reuse():
+    class Workspace(C.Structure):
+        _fields_ = [(name, I) for name in (
+            "bytes", "buffers", "hits", "allocations", "limit"
+        )]
+
+    lib.dfm_workspace_info.argtypes = [P, C.POINTER(Workspace), C.POINTER(P)]
+    lib.dfm_workspace_trim.argtypes = [P, C.POINTER(P)]
+
+    def info():
+        result, error = Workspace(), P()
+        check(lib.dfm_workspace_info(ctx, C.byref(result), C.byref(error)), error)
+        assert 0 <= result.bytes <= result.limit
+        assert 0 <= result.buffers <= 64
+        return result
+
+    error = P()
+    check(lib.dfm_workspace_trim(ctx, C.byref(error)), error)
+    assert info().bytes == info().buffers == 0
+    n = 521
+    values = list(range(n))
+    first = execute(values, 2, [col], [0])
+    cold = info()
+    assert cold.bytes > 0 and cold.buffers > 0
+    # Same allocations, different payload and nulls: stale data must not leak.
+    valid = [i % 3 != 0 for i in range(n)]
+    second = execute([-i for i in values], 2, [col], [0], valid=valid)
+    # Validity storage changes shape; warm that shape before checking reuse.
+    warm = info()
+    third = execute(values, 2, [col], [0], valid=valid)
+    hot = info()
+    assert hot.allocations == warm.allocations
+    assert hot.hits > warm.hits
+    assert first[0] == values and all(first[1])
+    assert second[1] == third[1] == valid
+    for i in range(n):
+        if valid[i]:
+            assert second[0][i] == -i and third[0][i] == i
+    execute(values, 2, [col], [0], valid=valid, budget=0,
+            expect_error="memory budget")
+    denied = info()
+    assert denied.allocations == hot.allocations and denied.hits == hot.hits
+    execute([2147483647] * n, 2,
+            [col, (1, -1, -1, -1), (5, 0, 1, -1)], [0, 1, 0],
+            expect_error="overflow")
+    recovered = execute(values, 2, [col], [0], valid=valid)
+    assert recovered[1] == valid
+    for i in range(n):
+        if valid[i]:
+            assert recovered[0][i] == i
+    check(lib.dfm_workspace_trim(ctx, C.byref(error)), error)
+    assert info().bytes == info().buffers == 0
+    execute([], 2, [col], [0])
+    info()
+
+
+test_workspace_reuse()
+
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"

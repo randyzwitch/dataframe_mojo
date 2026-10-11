@@ -235,19 +235,15 @@ struct JSession {
   bool consumed = false;
   int64_t gpu_intervals = 0;
   explicit JSession(Context &c, const DFMJoinRequest &r, JShape s)
-      : context(&c), request(r), shape(std::move(s)), buffers{c, {}} {
+      : context(&c), request(r), shape(std::move(s)), buffers{c} {
     dfm_context_retain(&c);
   }
   ~JSession() { dfm_context_release(context); }
 };
 void jbudget(Context &c, const DFMJoinRequest &r, int64_t peak,
              int64_t owned = 0) {
-  auto recommended = int64_t(
-      std::min<uint64_t>(c.device.recommendedMaxWorkingSetSize, INT64_MAX));
-  auto allocated =
-      int64_t(std::min<uint64_t>(c.device.currentAllocatedSize, INT64_MAX));
   auto additional = std::max<int64_t>(0, peak - owned);
-  if (additional > std::max<int64_t>(0, recommended - allocated) ||
+  if (additional > c.headroom() ||
       (r.memory_budget_bytes >= 0 && peak > r.memory_budget_bytes))
     fail("Metal join exceeds memory budget before submission");
 }

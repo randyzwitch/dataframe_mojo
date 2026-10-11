@@ -167,6 +167,15 @@ typedef struct DFMDeviceInfo {
   int64_t unified_memory;
 } DFMDeviceInfo;
 
+// Additive workspace inspection; existing request/stats layouts stay intact.
+typedef struct DFMWorkspaceInfo {
+  int64_t idle_bytes;
+  int64_t idle_buffers;
+  int64_t reuse_hits;
+  int64_t allocations;
+  int64_t limit_bytes;
+} DFMWorkspaceInfo;
+
 // Versioned two-phase join interface; row request ABI remains unchanged.
 #define DFM_JOIN_ABI_VERSION 1
 
@@ -210,6 +219,10 @@ DFM_API void dfm_context_retain(void *context);
 DFM_API void dfm_context_release(void *context);
 DFM_API int32_t dfm_context_info(void *context, DFMDeviceInfo *info,
                                  char **error);
+DFM_API int32_t dfm_workspace_info(void *context, DFMWorkspaceInfo *info,
+                                  char **error);
+// Releases only idle buffers; live join sessions and in-flight work keep owners.
+DFM_API int32_t dfm_workspace_trim(void *context, char **error);
 
 // Pure shape validation and allocation accounting; no device initialization.
 DFM_API int32_t dfm_estimate(const DFMRequest *request, DFMMemory *memory,

@@ -188,6 +188,16 @@ its inputs once and uses two waits: matching determines cardinality, then a
 second submission gathers and packs the output. Shared memory still
 requires synchronization; CPU code never reads an in-flight GPU result.
 
+Each context keeps up to 64 idle shared buffers, bounded by the smaller of
+256 MiB and one sixteenth of the device's recommended working set. Repeated
+collections reuse exact-size allocations; recycled storage is cleared before
+use. Shape changes release unmatched idle storage before allocating. Live join
+sessions retain exclusive ownership of their buffers, and storage enters the
+idle cache only after submitted GPU work has drained. Idle bytes are reclaimable
+for headroom checks; explicit payload estimates still count every live request
+allocation. Native callers can inspect or release idle storage with
+`dfm_workspace_info` and `dfm_workspace_trim` without invalidating live sessions.
+
 Consecutive projection steps, including the next filter predicate, execute in
 one specialized kernel. Intermediate expression values stay in thread-local
 variables. Shared matrices hold input columns, final outputs, filter predicates,
