@@ -310,7 +310,7 @@ def test_many_string_groups_flush_and_unique_keys_stay_eager() raises:
         assert_equal(piped.height(), eager.height())
         assert_true(eager.sort(keys).equals(piped.sort(keys)))
     _ = external_call["unsetenv", Int32](
-        Int("DATAFRAME_PIPELINE_FLUSH_GROUPS\0".unsafe_ptr())
+        Int("DATAFRAME_PIPELINE_FLUSH_GROUPS\0".ptr())
     )
 
 

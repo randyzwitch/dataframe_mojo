@@ -7,7 +7,7 @@ does not change dataframe.parse's cast semantics.
 from std.memory import bitcast, pack_bits
 from std.bit import count_trailing_zeros
 from std.sys import CompilationTarget, size_of, llvm_intrinsic
-from std.sys.info import is_little_endian
+from std.sys import Endian
 
 
 @always_inline
@@ -400,7 +400,9 @@ def _parse_magnitude_u64[
     wide: Bool
 ](bytes: Span[UInt8, _], start: Int, digits: Int) raises -> UInt64:
     """Unsigned 64-bit checked parsing route."""
-    comptime assert is_little_endian(), "atoi_simd packed path requires LE"
+    comptime assert (
+        Endian.native() == Endian.little
+    ), "atoi_simd packed path requires LE"
     comptime if _has_x86_atoi_simd_backend():
         comptime if wide:
             comptime if _has_wide_atoi_simd_backend():
