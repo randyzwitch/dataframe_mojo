@@ -40,7 +40,9 @@ def test_unsupported_cost_plans_reject_without_reading_sources() raises:
     var runtime = MetalRuntime()
     var wide = DataFrame([Series("x", Column[Float64]([1, 2]))])
     with assert_raises(contains="unsupported"):
-        _ = runtime.estimate_auto(wide.lazy().select(col("x").round(2)))
+        _ = runtime.estimate_auto(
+            wide.lazy().select(col("x").pow(lit(Float64(2))))
+        )
     var missing = scan_csv("/nonexistent/metal-cost-must-not-read.csv").select(
         col("x")
     )

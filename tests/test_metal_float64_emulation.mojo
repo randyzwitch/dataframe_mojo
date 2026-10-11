@@ -188,6 +188,112 @@ def test_float64_emulation_has_separate_automatic_cost_family() raises:
     )
 
 
+def test_floating_decimal_rounding_bits_extremes_and_cost() raises:
+    if not metal_installed():
+        return
+    var runtime = MetalRuntime()
+    var base = fixture().column("a").float64()
+    var values = List[Float64]()
+    var valid = List[Bool]()
+    for i in range(len(base)):
+        values.append(base._get(i))
+        valid.append(base.is_valid(i))
+    for value in List[Float64](
+        [
+            0.1,
+            -0.1,
+            1.005,
+            -1.005,
+            2.675,
+            -2.675,
+            1.245,
+            -1.245,
+            1234.5,
+            -1234.5,
+            4503599627370495,
+            -4503599627370495,
+            4503599627370496,
+            -4503599627370496,
+        ]
+    ):
+        values.append(value)
+        valid.append(True)
+    var wide = DataFrame(
+        [Series("a", Column[Float64](values.copy(), valid.copy()))]
+    )
+    var narrow_values = List[Float32]()
+    for value in values:
+        narrow_values.append(Float32(value))
+    var narrow = DataFrame(
+        [Series("a", Column[Float32](narrow_values^, valid.copy()))]
+    )
+    var decimals = List[Int](
+        [
+            -9223372036854775807 - 1,
+            -400,
+            -309,
+            -308,
+            -100,
+            -23,
+            -22,
+            -17,
+            -2,
+            -1,
+            0,
+            1,
+            2,
+            17,
+            22,
+            23,
+            100,
+            308,
+            309,
+            400,
+            9223372036854775807,
+        ]
+    )
+    for frame in List[DataFrame]([wide.copy(), narrow.copy()]):
+        var rounded = List[Expr]()
+        for places in decimals:
+            rounded.append(
+                col("a").round(places).alias("round_" + String(places))
+            )
+        var query = frame.lazy().select_exprs(rounded^)
+        same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
+        var child = (
+            frame.lazy()
+            .with_columns(col("a").round(2).alias("rounded"))
+            .head(7)
+        )
+        same(child.collect(accelerator=runtime), child.collect(engine="cpu"))
+        var empty = frame.slice(0, 0).lazy().select(col("a").round(-2))
+        same(empty.collect(accelerator=runtime), empty.collect(engine="cpu"))
+        for places in List[Int]([0, 2, -2]):
+            var costed = frame.lazy().select(col("a").round(places))
+            assert_true(
+                "metal-emulated-float64-v1"
+                in runtime.estimate_auto(costed).family
+            )
+            same(
+                costed.collect(engine="auto", accelerator=runtime),
+                costed.collect(engine="cpu"),
+            )
+    # Float32's CPU rounding goes through binary64, including -0 becoming +0.
+    var zero = DataFrame(
+        [
+            Series(
+                "a",
+                Column[Float32]([bitcast[DType.float32](UInt32(0x80000000))]),
+            )
+        ]
+    )
+    var zero_query = zero.lazy().select(col("a").round())
+    same(
+        zero_query.collect(accelerator=runtime),
+        zero_query.collect(engine="cpu"),
+    )
+
+
 def test_float64_numeric_casts_and_integer_division() raises:
     if not metal_installed():
         return

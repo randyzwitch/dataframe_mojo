@@ -36,6 +36,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             "analytical CPU",
             float64=True,
             float_division=True,
+            float_rounding=True,
             wide_integer=True,
             int64_arithmetic=True,
             extended_integers=True,

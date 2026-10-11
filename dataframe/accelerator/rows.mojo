@@ -5,6 +5,7 @@ are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
 from std.memory import bitcast
+from std.math import pow, abs
 from .capabilities import RowCapabilities
 from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.dtype import DataType
@@ -168,6 +169,11 @@ def _program(
         if not (
             op == COL
             or (
+                op == ROUND
+                and capabilities.float_rounding
+                and bound.dtypes[i].is_float()
+            )
+            or (
                 (op == DIV or op == FLOORDIV)
                 and capabilities.float_division
                 and bound.dtypes[i] == DataType.FLOAT64
@@ -268,7 +274,7 @@ def _program(
                         or op == CAST
                         or op == FLOOR
                         or op == CEIL
-                        or (op == ROUND and node.integer == 0)
+                        or op == ROUND
                         or op == ABS
                         or op == GT
                         or op == LT
@@ -367,6 +373,7 @@ def _program(
             op == ROUND
             and bound.dtypes[i] == DataType.FLOAT32
             and node.integer != 0
+            and not capabilities.float_rounding
         ):
             capabilities.reject(
                 "precision",
@@ -422,7 +429,13 @@ def _program(
         literals.append(
             bitcast[DType.float64](node.integer) if op
             == LIT_INT else (
-                Float64(node.integer) if op == LIT_BOOL else node.floating
+                Float64(node.integer) if op
+                == LIT_BOOL else (
+                    pow(Float64(10), Float64(abs(node.integer))) if op == ROUND
+                    and capabilities.float_rounding
+                    and bound.dtypes[i].is_float()
+                    and node.integer != 0 else node.floating
+                )
             )
         )
         if op == INT_IS_IN:
