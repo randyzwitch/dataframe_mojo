@@ -83,8 +83,9 @@ paired logical dtypes must match. Null keys do not match. Float32 NaNs form one
 matching class, and signed zeros compare equal. Duplicate matches retain build
 input order: inner/left/full probe left rows in order, right joins probe right
 rows in order, and full joins append unmatched right rows in original order.
-Key coalescing and suffix collisions follow the CPU API, including separate
-key columns for full joins with `coalesce=False`.
+Key coalescing and suffix collisions follow the CPU API. With
+`coalesce=False`, inner, left, right, and full joins retain both input key
+columns; unmatched rows preserve nulls on the missing side.
 
 The complete join DAG is bound before device initialization. Supported row
 regions can feed a join and follow its result, including further joins and

@@ -183,5 +183,4 @@ def test_time_windows_and_membership_dispatch_independently() raises:
 
 
 def main() raises:
-    var suite = TestSuite.discover_tests[__functions_in_module()]()
-    suite^.run()
+    TestSuite.discover_tests[__functions_in_module()]().run()
