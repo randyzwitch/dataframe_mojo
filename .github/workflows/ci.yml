@@ -73,16 +73,21 @@ jobs:
 
   unit-linux:
     needs: native-linux
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
-      - uses: actions/download-artifact@v8
-        with:
-          name: dfparquet-linux
-          path: build/dfparquet
+      - name: Download native Parquet artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          --name dfparquet-linux --dir build/dfparquet
       - name: Verify Parquet exports and loader search paths
         run: python3 scripts/ci_time.py --label parquet-loader -- pixi run bash scripts/check_parquet_library.sh build/ci-tests/test_parquet
       # Keep the measured Linux memory bound: two grouped programs, serial.
@@ -122,16 +127,21 @@ jobs:
 
   oracles:
     needs: native-linux
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
-      - uses: actions/download-artifact@v8
-        with:
-          name: dfparquet-linux
-          path: build/dfparquet
+      - name: Download native Parquet artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          --name dfparquet-linux --dir build/dfparquet
       - name: Differential tests against Polars
         env:
           ORACLE_SEED: ${{ github.run_number }}
@@ -143,6 +153,9 @@ jobs:
 
   answers:
     needs: native-linux
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -157,10 +170,12 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
-      - uses: actions/download-artifact@v8
-        with:
-          name: dfparquet-linux
-          path: build/dfparquet
+      - name: Download native Parquet artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          --name dfparquet-linux --dir build/dfparquet
       - name: Query answers (smoke scale)
         env:
           SUITES: ${{ matrix.suites }}
