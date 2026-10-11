@@ -200,7 +200,9 @@ struct Shape {
       partial;
   bool filter, order, grouped;
 };
-Shape validate(const DFMRequest &r, bool storage = false) {
+Shape validate(const DFMRequest &r, bool storage = false,
+               const DFMResidentInput *resident = nullptr,
+               bool resident_output = false) {
   if (r.abi_version != DFM_ABI_VERSION)
     fail("Metal ABI version mismatch");
   if (r.rows < 0 || r.rows > INT32_MAX || r.slots < 1 || r.slots > 64 ||
@@ -239,9 +241,13 @@ Shape validate(const DFMRequest &r, bool storage = false) {
     if (v.bit_offset < 0 || v.bit_offset > 7 ||
         (v.has_validity != 0 && v.has_validity != 1))
       fail("Invalid input bitmap descriptor");
-    if (storage && r.rows && (!v.values || (v.has_validity && !v.validity)))
+    bool native = resident && resident[i].table;
+    if (storage && !native && r.rows &&
+        (!v.values || (v.has_validity && !v.validity)))
       fail("Missing Metal input data");
     int64_t bytes = (r.rows + v.bit_offset + 7) / 8;
+    if (native)
+      continue;
     if (v.dtype == DFM_BOOL)
       s.bitmap = add(s.bitmap, bytes);
     else if (typed(r))
@@ -440,7 +446,7 @@ Shape validate(const DFMRequest &r, bool storage = false) {
       if ((v.reduction == DFM_ANY || v.reduction == DFM_ALL) && v.min_count > 1)
         fail("Invalid Metal Boolean reduction metadata");
     }
-    if (storage && (r.rows || r.reductions || s.grouped) &&
+    if (storage && !resident_output && (r.rows || r.reductions || s.grouped) &&
         (!v.values || !v.validity))
       fail("Missing Metal output storage");
   }
@@ -455,7 +461,9 @@ Shape validate(const DFMRequest &r, bool storage = false) {
           : 1;
   return s;
 }
-DFMMemory estimate(const DFMRequest &r, const Shape &s) {
+DFMMemory estimate(const DFMRequest &r, const Shape &s,
+                   const DFMResidentInput *resident = nullptr,
+                   bool retain = false, bool final = false) {
   DFMMemory m{};
   m.capacity = s.cap;
   m.packed_bytes = s.packed;
@@ -483,6 +491,8 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
   if (r.reductions)
     account(mul(r.output_count, 16));
   for (int64_t i = 0; i < r.input_count; ++i) {
+    if (resident && resident[i].table)
+      continue;
     const auto &input = r.inputs[i];
     auto bitmapBytes = (r.rows + input.bit_offset + 7) / 8;
     m.upload_bytes = add(m.upload_bytes, input.dtype == DFM_BOOL
@@ -493,6 +503,8 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
   }
   m.upload_bytes = add(m.upload_bytes, mul(r.literal_count, storageWidth(r)));
   for (int64_t i = 0; i < r.output_count; ++i) {
+    if (retain && !final)
+      break;
     auto t = r.outputs[i].dtype;
     m.result_bytes =
         add(m.result_bytes,
@@ -504,7 +516,8 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s) {
   }
   m.peak_bytes = add(m.shared_bytes, m.result_bytes);
   auto layout = Layout(r);
-  m.launches = r.input_count + layout.ends.size() + (r.reductions ? 2 : 1);
+  m.launches = r.input_count + layout.ends.size() +
+      (r.reductions ? 2 : (!retain || final));
   for (int64_t i = 0; i < r.step_count; ++i)
     if (r.steps[i].filter) {
       if (r.steps[i].filter == 1)
@@ -596,6 +609,23 @@ struct Context {
 };
 std::mutex defaultMutex;
 Context *defaultContext = nullptr;
+std::string residentSource() {
+  return R"MSL(
+struct ResidentCopy { ulong source, validity, target, rows;
+ long scalar, minimum, sum, padding; };
+kernel void resident_copy(device const ulong *a[[buffer(0)]],
+ device const uchar *b[[buffer(1)]],device ulong *x[[buffer(2)]],
+ device uchar *v[[buffer(3)]],constant ResidentCopy &p[[buffer(4)]],
+ uint row[[thread_position_in_grid]]) {
+ if(row>=p.rows)return;
+ bool valid=p.scalar? (p.sum? *((device const long*)(b+p.validity))>=p.minimum:
+                              *((device const long*)(b+p.validity))>0):
+                         b[p.validity+row]!=0;
+ x[p.target+row]=valid?a[p.source+row]:0UL;
+ v[p.target+row]=uchar(valid);
+}
+)MSL";
+}
 std::string castExpression(int64_t from, int64_t to, const std::string &a,
                            const std::string &z, const std::string &valid,
                            bool strict, int64_t id) {
@@ -869,6 +899,7 @@ std::string source(const DFMRequest &r) {
                      "clang fp contract(off)\n";
   text += "struct Out { long slot; long kind; long minimum; long type; "
           "};\nstruct Partial { long total; long count; };\n";
+  text += residentSource();
   text += R"MSL(
 bool float_compare(float a,float b,int op){
  uint x=as_type<uint>(a),y=as_type<uint>(b),ax=x&0x7fffffffU,ay=y&0x7fffffffU;
@@ -1373,6 +1404,14 @@ struct Buffers {
   }
   Buffers(const Buffers &) = delete;
   Buffers &operator=(const Buffers &) = delete;
+  void transfer(id<MTLBuffer> value, Buffers &to) {
+    auto it = std::find(all.begin(), all.end(), value);
+    if (it == all.end())
+      fail("Metal resident buffer owner mismatch");
+    to.all.push_back(value);
+    to.requested = add(to.requested, int64_t(value.length));
+    all.erase(it);
+  }
   id<MTLBuffer> make(int64_t bytes) {
     auto b = c.acquire(std::max<int64_t>(1, bytes));
     requested = add(requested, std::max<int64_t>(1, bytes));
@@ -1394,12 +1433,87 @@ struct GPUOut {
 struct Partial {
   int64_t total, count;
 };
-void run(Context &c, const DFMRequest &r, DFMStats &stats) {
-  auto shape = validate(r, true);
+struct Query {
+  std::atomic<int64_t> refs{1}, live{0}, peak{0};
+  Context &context;
+  int64_t budget;
+  Query(Context &c, int64_t limit) : context(c), budget(limit) {
+    dfm_context_retain(&c);
+  }
+  ~Query() { dfm_context_release(&context); }
+  void check(int64_t additional) {
+    auto total = add(live.load(), additional);
+    if (budget >= 0 && total > budget)
+      fail("Metal resident query exceeds memory budget before submission");
+    auto previous = peak.load();
+    while (previous < total && !peak.compare_exchange_weak(previous, total)) {}
+  }
+};
+void queryRelease(Query *q) {
+  if (q && --q->refs == 0)
+    delete q;
+}
+struct ResidentColumn {
+  int64_t slot, type, reduction, minimum;
+};
+struct Resident {
+  Query &query;
+  Buffers buffers;
+  id<MTLBuffer> values = nil, validity = nil, bitmap = nil;
+  int64_t rows = 0, cap = 0, packed = 0, retained = 0;
+  bool scalar = false, final = false;
+  std::vector<ResidentColumn> columns;
+  DFMStats stats{};
+  explicit Resident(Query &q) : query(q), buffers(q.context) { ++q.refs; }
+  ~Resident() {
+    query.live -= retained;
+    queryRelease(&query);
+  }
+  void seal() {
+    retained = buffers.requested;
+    query.live += retained;
+  }
+};
+struct ResidentCopy {
+  uint64_t source, validity, target, rows;
+  int64_t scalar, minimum, sum, padding;
+};
+Resident *residentInput(Query &query, const DFMResidentInput *refs,
+                        int64_t index, int64_t rows, int64_t type) {
+  if (!refs || !refs[index].table)
+    return nullptr;
+  auto &t = *static_cast<Resident *>(refs[index].table);
+  auto col = refs[index].column;
+  if (&t.query != &query || t.rows != rows || col < 0 ||
+      col >= int64_t(t.columns.size()) || t.columns[col].type != type)
+    fail("Metal resident input context, rows, column or dtype mismatch");
+  return &t;
+}
+ResidentCopy residentCopy(const Resident &table, int64_t column,
+                          int64_t target) {
+  auto c = table.columns[column];
+  return {uint64_t(table.scalar ? 2 * c.slot : c.slot * table.cap),
+          uint64_t(table.scalar ? 16 * c.slot + 8 : c.slot * table.cap),
+          uint64_t(target), uint64_t(table.rows), table.scalar, c.minimum,
+          c.reduction == DFM_SUM, 0};
+}
+void run(Context &c, const DFMRequest &r, DFMStats &stats,
+         Query *query = nullptr, const DFMResidentInput *refs = nullptr,
+         Resident **resident = nullptr, bool final = false) {
+  auto shape = validate(r, true, refs, query != nullptr);
+  if (query && !typed(r))
+    fail("Metal resident row requests require typed word storage");
+  if (query)
+    for (int64_t i = 0; i < r.input_count; ++i)
+      residentInput(*query, refs, i, r.rows, r.inputs[i].dtype);
+  if (query && !final)
+    shape.outputBits = 1;
   auto layout = Layout(r);
   stats = {};
   stats.gpu_ns = -1;
-  stats.memory = estimate(r, shape);
+  stats.memory = estimate(r, shape, refs, query != nullptr, final);
+  if (query)
+    query->check(stats.memory.peak_bytes);
   int64_t budget = c.headroom();
   if (r.memory_budget_bytes >= 0)
     budget = std::min(budget, r.memory_budget_bytes);
@@ -1442,6 +1556,10 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   int64_t offset = 0;
   for (int64_t i = 0; i < r.input_count; ++i) {
     auto &input = r.inputs[i];
+    if (refs && refs[i].table) {
+      unpack.push_back({});
+      continue;
+    }
     int64_t size = (r.rows + input.bit_offset + 7) / 8;
     std::array<uint64_t, 4> params{
         static_cast<uint64_t>(layout.physical[i]),
@@ -1545,6 +1663,18 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
   };
   offset = 0;
   for (int64_t i = 0; i < r.input_count; ++i) {
+    if (refs && refs[i].table) {
+      auto &t = *static_cast<Resident *>(refs[i].table);
+      auto params = residentCopy(t, refs[i].column,
+                                layout.physical[i] * shape.cap);
+      buffer(0, t.values);
+      buffer(1, t.validity);
+      buffer(2, x);
+      buffer(3, v);
+      bytes(4, &params, sizeof(params));
+      dispatch("resident_copy", shape.cap);
+      continue;
+    }
     buffer(0, x);
     buffer(1, v);
     buffer(2, bitmap);
@@ -1689,7 +1819,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
     buffer(3, meta);
     bytes(4, &groups, 8);
     dispatch("finish_reduce", r.output_count);
-  } else {
+  } else if (!query || final) {
     uint64_t params[4] = {
         static_cast<uint64_t>(shape.packed),
         static_cast<uint64_t>(r.output_count),
@@ -1755,6 +1885,45 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats) {
            (r.outputs[i].dtype == DFM_UINT32 &&
             (values[i].total < 0 || uint64_t(values[i].total) > UINT32_MAX))))
         fail("Integer overflow in Metal sum");
+  }
+  if (query) {
+    auto t = std::make_unique<Resident>(*query);
+    t->rows = rows;
+    t->cap = shape.cap;
+    t->packed = shape.packed;
+    t->scalar = r.reductions;
+    t->final = final;
+    for (int64_t i = 0; i < r.output_count; ++i) {
+      auto o = r.outputs[i];
+      t->columns.push_back({r.reductions ? i : layout.physical[o.slot],
+                             o.dtype, o.reduction, o.min_count});
+    }
+    if (r.reductions) {
+      t->values = result;
+      t->validity = result;
+      b.transfer(result, t->buffers);
+    } else {
+      t->values = x;
+      t->validity = v;
+      b.transfer(x, t->buffers);
+      b.transfer(v, t->buffers);
+      if (final) {
+        t->bitmap = bits;
+        b.transfer(bits, t->buffers);
+      }
+    }
+    // Cardinality and the error word are synchronization metadata. Intermediate
+    // column payloads stay in Metal storage; checked sums also inspect scalars.
+    stats.download_bytes = 8;
+    if (r.reductions && rows)
+      for (int64_t i = 0; i < r.output_count; ++i)
+        if (r.outputs[i].reduction == DFM_SUM)
+          stats.download_bytes += sizeof(Partial);
+    stats.result_copy_ns = 0;
+    t->stats = stats;
+    t->seal();
+    *resident = t.release();
+    return;
   }
   for (int64_t i = 0; i < r.output_count; ++i) {
     auto &o = r.outputs[i];
@@ -1943,6 +2112,134 @@ int32_t dfm_execute(void *p, const DFMRequest *r, DFMStats *stats, char **err) {
     }
   }
 }
+int64_t dfm_resident_abi_version() { return DFM_RESIDENT_ABI_VERSION; }
+void *dfm_query_create(void *p, int64_t budget, char **err) {
+  if (err)
+    *err = nullptr;
+  try {
+    if (!p || budget < -1)
+      fail("Invalid Metal resident query context or budget");
+    return new Query(*static_cast<Context *>(p), budget);
+  } catch (const std::exception &e) {
+    error(err, e);
+    return nullptr;
+  }
+}
+void dfm_query_release(void *p) { queryRelease(static_cast<Query *>(p)); }
+int32_t dfm_query_info(void *p, DFMQueryInfo *info, char **err) {
+  if (err)
+    *err = nullptr;
+  try {
+    if (!p || !info)
+      fail("Missing Metal resident query or info");
+    auto &q = *static_cast<Query *>(p);
+    *info = {q.live.load(), q.peak.load(), q.budget};
+    return 0;
+  } catch (const std::exception &e) {
+    error(err, e);
+    return 1;
+  }
+}
+int32_t dfm_resident_rows(void *p, const DFMRequest *r,
+    const DFMResidentInput *refs, int64_t count, int64_t final,
+    void **table, DFMStats *stats, char **err) {
+  if (err)
+    *err = nullptr;
+  if (table)
+    *table = nullptr;
+  @autoreleasepool {
+    try {
+      if (!p || !r || !table || !stats || count != r->input_count ||
+          (count && !refs) || (final != 0 && final != 1))
+        fail("Invalid Metal resident row request");
+      auto &q = *static_cast<Query *>(p);
+      std::lock_guard<std::mutex> lock(q.context.mutex);
+      Resident *result = nullptr;
+      run(q.context, *r, *stats, &q, refs, &result, final);
+      *table = result;
+      return 0;
+    } catch (const std::exception &e) {
+      error(err, e);
+      return 1;
+    }
+  }
+}
+int32_t dfm_resident_info(void *p, DFMResidentInfo *info, char **err) {
+  if (err)
+    *err = nullptr;
+  try {
+    if (!p || !info)
+      fail("Missing Metal resident table or info");
+    auto &t = *static_cast<Resident *>(p);
+    *info = {t.rows, int64_t(t.columns.size()), t.retained};
+    return 0;
+  } catch (const std::exception &e) {
+    error(err, e);
+    return 1;
+  }
+}
+int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
+                           DFMStats *stats, char **err) {
+  if (err)
+    *err = nullptr;
+  @autoreleasepool {
+    try {
+      if (!p || !outputs || !stats)
+        fail("Missing Metal resident export table, outputs or stats");
+      auto &t = *static_cast<Resident *>(p);
+      std::lock_guard<std::mutex> lock(t.query.context.mutex);
+      if (!t.final || count != int64_t(t.columns.size()))
+        fail("Metal resident table was not prepared for final export");
+      auto packed = (t.rows + 7) / 8;
+      int64_t payload = 0;
+      for (int64_t i = 0; i < count; ++i) {
+        auto o = outputs[i];
+        if (o.dtype != t.columns[i].type ||
+            (t.rows && (!o.values || !o.validity)))
+          fail("Metal resident export output metadata mismatch");
+        payload = add(payload, add(packed, o.dtype == DFM_BOOL ? packed :
+                                                        mul(t.rows, width(o.dtype))));
+      }
+      t.query.check(payload);
+      auto start = Clock::now();
+      for (int64_t i = 0; i < count; ++i) {
+        auto o = outputs[i];
+        auto c = t.columns[i];
+        if (!t.rows)
+          continue;
+        if (t.scalar) {
+          auto a = static_cast<Partial *>(t.values.contents)[c.slot];
+          bool valid = c.reduction == DFM_SUM ? a.count >= c.minimum : a.count > 0;
+          if (!valid)
+            a.total = 0;
+          memcpy(o.values, &a.total, width(o.dtype));
+          o.validity[0] = valid;
+        } else {
+          auto *bitmap = static_cast<uint8_t *>(t.bitmap.contents) +
+                         2 * i * t.packed;
+          memcpy(o.validity, bitmap, packed);
+          if (o.dtype == DFM_BOOL) {
+            memcpy(o.values, bitmap + t.packed, packed);
+          } else {
+            auto *words = static_cast<uint64_t *>(t.values.contents) +
+                          c.slot * t.cap;
+            auto bytes = width(o.dtype);
+            for (int64_t row = 0; row < t.rows; ++row)
+              memcpy(static_cast<char *>(o.values) + row * bytes, words + row, bytes);
+          }
+        }
+      }
+      *stats = t.stats;
+      stats->download_bytes = add(stats->download_bytes, payload);
+      stats->result_copy_ns = ns(start);
+      return 0;
+    } catch (const std::exception &e) {
+      error(err, e);
+      return 1;
+    }
+  }
+}
+void dfm_resident_release(void *p) { delete static_cast<Resident *>(p); }
 void dfm_free(void *p) { free(p); }
 }
 

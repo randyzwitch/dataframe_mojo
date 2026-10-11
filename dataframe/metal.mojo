@@ -92,6 +92,10 @@ comptime _Count = def() thin abi("C") -> Int64
 comptime _Build = def() thin abi("C") -> Int
 comptime _JoinPrepare = def(Int, Int, Int, Int, Int) thin abi("C") -> Int32
 comptime _JoinFinish = def(Int, Int, Int64, Int, Int) thin abi("C") -> Int32
+comptime _QueryCreate = def(Int, Int64, Int) thin abi("C") -> Int
+comptime _ResidentRun = def(
+    Int, Int, Int, Int64, Int64, Int, Int, Int
+) thin abi("C") -> Int32
 
 
 def _create_call(callback: Int, device: Int, mut error: Int) -> Int:
@@ -661,6 +665,8 @@ def _native_report(
     build_rows: Int = 0,
     builds: Int = 0,
     build_side: String = "",
+    resident_input_bytes: Int = 0,
+    resident_output_bytes: Int = 0,
 ) raises -> DataFrame:
     var report = ExecutionReport()
     report.record(
@@ -685,6 +691,17 @@ def _native_report(
     fields.append(Series("shared_buffer_bytes", Column[Int64]([stats[0]])))
     fields.append(Series("host_result_bytes", Column[Int64]([stats[1]])))
     fields.append(Series("peak_requested_bytes", Column[Int64]([stats[2]])))
+    fields.append(
+        Series(
+            "resident_input_bytes", Column[Int64]([Int64(resident_input_bytes)])
+        )
+    )
+    fields.append(
+        Series(
+            "resident_output_bytes",
+            Column[Int64]([Int64(resident_output_bytes)]),
+        )
+    )
     fields.append(Series("kernel_launches", Column[Int64]([stats[4]])))
     fields.append(Series("synchronizations", Column[Int64]([stats[10]])))
     fields.append(Series("pipeline_cache_hit", Column[Bool]([stats[11] != 0])))
@@ -789,34 +806,6 @@ struct _JoinDescriptors(Movable):
         ]
 
 
-@fieldwise_init
-struct _JoinSession(Movable):
-    var address: Int
-    var release: Int
-
-    def __deinit__(deinit self):
-        if self.address:
-            var callback = self.release
-            Pointer(to=callback).unsafe_bitcast[_Release]()[](self.address)
-
-
-def _join_prepare_call(
-    callback: Int,
-    context: Int,
-    request: List[Int64],
-    mut session: Int,
-    mut stats: List[Int64],
-    mut error: Int,
-) -> Int32:
-    return Pointer(to=callback).unsafe_bitcast[_JoinPrepare]()[](
-        context,
-        Int(request.unsafe_ptr()),
-        Int(Pointer(to=session)),
-        Int(stats.unsafe_ptr()),
-        Int(Pointer(to=error)),
-    )
-
-
 def _join_finish_call(
     callback: Int,
     session: Int,
@@ -833,81 +822,113 @@ def _join_finish_call(
     )
 
 
-def _execute_join(
-    task: DagTask,
-    left: DataFrame,
-    right: DataFrame,
-    device: Int,
-    budget: Int,
-    profiling: Bool,
-    start: Int,
-) raises -> Tuple[DataFrame, DataFrame]:
-    var descriptors = _JoinDescriptors(task, left, right)
-    var request = descriptors.request(task, left, right, budget, profiling)
-    var library = _Library()
-    # Resolve the additive join API before opening a device. Row ABI 2 stays
-    # compatible with row-only runtimes; joins require these four symbols.
-    var estimate = library.symbol("dfm_join_estimate")
-    var prepare = library.symbol("dfm_join_prepare")
-    var finish = library.symbol("dfm_join_finish")
-    var release = library.symbol("dfm_join_release")
-    var memory = List[Int64](length=8, fill=0)
-    var error = 0
-    var status = _estimate_call(estimate, request, memory, error)
-    library.check(status, error)
-    if budget >= 0 and Int(memory[2]) > budget:
-        raise Error("Metal join exceeds memory budget before submission")
-    var initialized = perf_counter_ns()
-    var context = _Context(library^, device)
-    var initialization_ns = Int(perf_counter_ns() - initialized)
-    var info = List[Int64](length=6, fill=0)
-    status = _info_call(context.library.info, context.address, info, error)
-    context.library.check(status, error)
-    var stats = List[Int64](length=17, fill=0)
-    var address = 0
-    status = _join_prepare_call(
-        prepare, context.address, request, address, stats, error
+struct _ResidentScope(Movable):
+    var context: _Context
+    var address: Int
+    var release: Int
+    var release_table: Int
+    var rows: Int
+    var join: Int
+    var info: Int
+    var query_info: Int
+    var export: Int
+    var device_info: List[Int64]
+    var initialization_ns: Int
+
+    def __init__(out self, device: Int, budget: Int) raises:
+        self.address = 0
+        self.release = 0
+        self.release_table = 0
+        self.rows = 0
+        self.join = 0
+        self.info = 0
+        self.query_info = 0
+        self.export = 0
+        self.device_info = List[Int64](length=6, fill=0)
+        self.initialization_ns = 0
+        var library = _Library()
+        var version = library.symbol("dfm_resident_abi_version")
+        if Pointer(to=version).unsafe_bitcast[_Version]()[]() != 1:
+            raise Error(
+                "Metal resident ABI version mismatch; rebuild native/dfmetal"
+            )
+        var create = library.symbol("dfm_query_create")
+        self.release = library.symbol("dfm_query_release")
+        self.release_table = library.symbol("dfm_resident_release")
+        self.rows = library.symbol("dfm_resident_rows")
+        self.join = library.symbol("dfm_resident_join")
+        self.info = library.symbol("dfm_resident_info")
+        self.query_info = library.symbol("dfm_query_info")
+        self.export = library.symbol("dfm_resident_export")
+        var start = perf_counter_ns()
+        self.context = _Context(library^, device)
+        self.initialization_ns = Int(perf_counter_ns() - start)
+        var error = 0
+        var status = _info_call(
+            self.context.library.info,
+            self.context.address,
+            self.device_info,
+            error,
+        )
+        self.context.library.check(status, error)
+        self.address = Pointer(to=create).unsafe_bitcast[_QueryCreate]()[](
+            self.context.address, Int64(budget), Int(Pointer(to=error))
+        )
+        self.context.library.check(Int32(self.address == 0), error)
+
+    def __deinit__(deinit self):
+        if self.address:
+            var callback = self.release
+            Pointer(to=callback).unsafe_bitcast[_Release]()[](self.address)
+
+
+struct _ResidentValue(Movable):
+    var frame: DataFrame
+    var address: Int
+    var release: Int
+    var rows: Int
+    var retained: Int
+
+    def __init__(
+        out self,
+        var frame: DataFrame,
+        address: Int = 0,
+        release: Int = 0,
+        rows: Int = -1,
+        retained: Int = 0,
+    ):
+        self.rows = frame.height() if rows < 0 else rows
+        self.frame = frame^
+        self.address = address
+        self.release = release
+        self.retained = retained
+
+    def __deinit__(deinit self):
+        if self.address:
+            var callback = self.release
+            Pointer(to=callback).unsafe_bitcast[_Release]()[](self.address)
+
+
+def _resident_run_call(
+    callback: Int,
+    query: Int,
+    request: List[Int64],
+    refs: List[Int64],
+    final: Bool,
+    mut address: Int,
+    mut stats: List[Int64],
+    mut error: Int,
+) -> Int32:
+    return Pointer(to=callback).unsafe_bitcast[_ResidentRun]()[](
+        query,
+        Int(request.unsafe_ptr()),
+        Int(refs.unsafe_ptr()),
+        Int64(len(refs) // 2),
+        Int64(final),
+        Int(Pointer(to=address)),
+        Int(stats.unsafe_ptr()),
+        Int(Pointer(to=error)),
     )
-    context.library.check(status, error)
-    var session = _JoinSession(address, release)
-    # Prepare has checked the complete peak, including these CPU columns,
-    # after matching determines output size and before any caller allocation.
-    var storage = List[Series]()
-    for i in range(len(task.fields)):
-        var field = task.fields[i].copy()
-        var column = _allocate_output(field.name, field.dtype, Int(stats[8]))
-        var pointers = _output_addresses(column)
-        descriptors.outputs[6 * i] = Int64(pointers[0])
-        descriptors.outputs[6 * i + 1] = Int64(pointers[1])
-        storage.append(column^)
-    status = _join_finish_call(
-        finish, session.address, descriptors.outputs, stats, error
-    )
-    # FFI addresses carry no Mojo origins. Keep all metadata alive through
-    # both synchronous calls; the native session owns staged input payloads.
-    _ = session^
-    _ = descriptors^
-    _ = request^
-    context.library.check(status, error)
-    var result = DataFrame(storage^, height=Int(stats[8]))
-    var report = _native_report(
-        context,
-        device,
-        task.root,
-        "JOIN",
-        left.height(),
-        result.height(),
-        stats,
-        info,
-        initialization_ns,
-        start,
-        "native_metal_sorted_join",
-        "CPU input columns -> GPU matching -> cardinality synchronization -> GPU output gather -> synchronized CPU result",
-        build_rows=left.height() if task.how == 2 else right.height(),
-        builds=1,
-        build_side="left" if task.how == 2 else "right",
-    )
-    return (result^, report^)
 
 
 def _execute_join_dag(
@@ -917,8 +938,10 @@ def _execute_join_dag(
     profiling: Bool,
     query_start: Int,
 ) raises -> Tuple[DataFrame, DataFrame]:
-    var values = List[DataFrame]()
+    var scope = _ResidentScope(device, budget)
+    var values = List[_ResidentValue]()
     var report = DataFrame(List[Series]())
+    var result = DataFrame(List[Series]())
     var uses = List[Int](length=len(dag.tasks), fill=0)
     for task in dag.tasks:
         if task.source >= 0:
@@ -928,45 +951,178 @@ def _execute_join_dag(
     for index in range(len(dag.tasks)):
         var task = dag.tasks[index].copy()
         var start = Int(perf_counter_ns())
+        var final = index == dag.root
+        var input_rows: Int
+        var input_bytes = 0
+        var algorithm = String("native_metal_resident_rows")
+        var label = String("RESIDENT ROW EXPRESSIONS")
+        var stats = List[Int64](length=17, fill=0)
+        var address = 0
+        var error = 0
+        var status: Int32
         if task.kind == DAG_JOIN:
-            var joined = _execute_join(
-                task,
-                values[task.source],
-                values[task.right],
-                device,
-                budget,
-                profiling,
-                start,
+            var left = values[task.source].frame.copy()
+            var right = values[task.right].frame.copy()
+            var descriptors = _JoinDescriptors(task, left, right)
+            var request = descriptors.request(
+                task, left, right, budget, profiling
             )
-            values.append(joined[0].copy())
-            report = joined[1].copy() if report.width() == 0 else report.vstack(
-                joined[1]
+            request[1] = Int64(values[task.source].rows)
+            request[2] = Int64(values[task.right].rows)
+            input_rows = values[task.source].rows
+            input_bytes = values[task.source].retained
+            if values[task.right].address != values[task.source].address:
+                input_bytes += values[task.right].retained
+            var refs = List[Int64]()
+            for side in range(2):
+                var parent = task.source if side == 0 else task.right
+                for column in range(values[parent].frame.width()):
+                    refs.extend([Int64(values[parent].address), Int64(column)])
+            status = _resident_run_call(
+                scope.join,
+                scope.address,
+                request,
+                refs,
+                final,
+                address,
+                stats,
+                error,
             )
+            _ = descriptors^
+            _ = request^
+            _ = refs^
+            scope.context.library.check(status, error)
+            algorithm = "native_metal_resident_sorted_join"
+            label = "JOIN"
         else:
             if task.source >= 0:
-                task.query._frames[0] = values[task.source].copy()
+                task.query._frames[0] = values[task.source].frame.copy()
             var plan = lower_rows(
                 task.query, _capabilities(), terminal_boundary=task.terminal
             )
             plan.root = task.root
-            if len(task.query._nodes) == 1:
-                # A scan only retains selected source columns. It needs no
-                # expression evaluation or GPU round trip before the join.
-                values.append(plan.source.copy())
-            else:
-                var region = _execute(plan, device, budget, profiling, start)
-                values.append(region[0].copy())
-                report = region[
-                    1
-                ].copy() if report.width() == 0 else report.vstack(region[1])
+            if len(task.query._nodes) == 1 and task.source < 0:
+                # Keep original CPU scans until their first consumer. This
+                # avoids a standalone upload/submit/wait for an identity scan.
+                values.append(_ResidentValue(plan.source.copy()))
+                continue
+            var descriptors = _Descriptors(plan)
+            descriptors.typed = True
+            var request = descriptors.request(plan, budget, profiling)
+            var source_address = 0
+            var source_frame = plan.source.copy()
+            input_rows = plan.source.height()
+            if task.source >= 0:
+                source_address = values[task.source].address
+                source_frame = values[task.source].frame.copy()
+                input_rows = values[task.source].rows
+                input_bytes = values[task.source].retained
+            request[1] = Int64(input_rows)
+            var refs = List[Int64]()
+            for name in plan.source.columns():
+                refs.extend(
+                    [Int64(source_address), Int64(source_frame._index(name))]
+                )
+            status = _resident_run_call(
+                scope.rows,
+                scope.address,
+                request,
+                refs,
+                final,
+                address,
+                stats,
+                error,
+            )
+            _ = descriptors^
+            _ = request^
+            _ = refs^
+            scope.context.library.check(status, error)
+        var metadata = List[Int64](length=3, fill=0)
+        status = _info_call(scope.info, address, metadata, error)
+        if status:
+            var release = scope.release_table
+            Pointer(to=release).unsafe_bitcast[_Release]()[](address)
+            scope.context.library.check(status, error)
+        values.append(
+            _ResidentValue(
+                task.schema.copy(),
+                address,
+                scope.release_table,
+                Int(metadata[0]),
+                Int(metadata[2]),
+            )
+        )
+        if final:
+            var output_columns = List[Series]()
+            var outputs = List[Int64]()
+            for i in range(task.schema.width()):
+                var field = task.schema._columns[i].copy()
+                var column = _allocate_output(
+                    field.name(), field.dtype(), Int(metadata[0])
+                )
+                var pointers = _output_addresses(column)
+                outputs.extend(
+                    [
+                        Int64(pointers[0]),
+                        Int64(pointers[1]),
+                        _type(field.dtype()),
+                        Int64(i),
+                        Int64(-1),
+                        Int64(0),
+                    ]
+                )
+                output_columns.append(column^)
+            status = _join_finish_call(
+                scope.export, address, outputs, stats, error
+            )
+            _ = outputs^
+            scope.context.library.check(status, error)
+            result = DataFrame(output_columns^, height=Int(metadata[0]))
+        var region = _native_report(
+            scope.context,
+            device,
+            task.root,
+            label,
+            input_rows,
+            Int(metadata[0]),
+            stats,
+            scope.device_info,
+            scope.initialization_ns if report.width() == 0 else 0,
+            start,
+            algorithm,
+            "CPU source staging -> resident Metal regions -> synchronized final CPU result",
+            build_rows=(
+                values[task.source].rows if task.how
+                == 2 else values[task.right].rows
+            ) if task.kind
+            == DAG_JOIN else 0,
+            builds=Int(task.kind == DAG_JOIN),
+            build_side=("left" if task.how == 2 else "right") if task.kind
+            == DAG_JOIN else "",
+            resident_input_bytes=input_bytes,
+            resident_output_bytes=Int(metadata[2]),
+        )
+        report = region^ if report.width() == 0 else report.vstack(region)
         if task.source >= 0:
             uses[task.source] -= 1
             if uses[task.source] == 0:
-                values[task.source] = DataFrame(List[Series]())
+                values[task.source] = _ResidentValue(DataFrame(List[Series]()))
         if task.kind == DAG_JOIN:
             uses[task.right] -= 1
             if uses[task.right] == 0:
-                values[task.right] = DataFrame(List[Series]())
+                values[task.right] = _ResidentValue(DataFrame(List[Series]()))
+    var query_info = List[Int64](length=3, fill=0)
+    var error = 0
+    var status = _info_call(scope.query_info, scope.address, query_info, error)
+    scope.context.library.check(status, error)
+    report = report.with_column(
+        Series(
+            "query_peak_requested_bytes",
+            Column[Int64](
+                List[Int64](length=report.height(), fill=query_info[1])
+            ),
+        )
+    )
     var elapsed = Float64(Int(perf_counter_ns()) - query_start) / 1e6
     report = report.with_column(
         Series(
@@ -976,7 +1132,7 @@ def _execute_join_dag(
             ),
         )
     )
-    return (values[dag.root].copy(), report^)
+    return (result^, report^)
 
 
 struct MetalRuntime(AcceleratorBackend):
@@ -1037,7 +1193,7 @@ struct MetalRuntime(AcceleratorBackend):
                     + String(dag.joins)
                     + " joins, "
                     + String(len(dag.tasks))
-                    + " regions; joins use two synchronizations with CPU materialization between regions; optional runtime "
+                    + " resident regions; joins use two synchronizations and only the final result materializes CPU columns; optional runtime "
                     + ("present" if metal_installed() else "missing")
                     + "\n"
                 )

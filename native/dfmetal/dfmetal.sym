@@ -15,3 +15,12 @@ _dfm_join_estimate
 _dfm_join_prepare
 _dfm_join_finish
 _dfm_join_release
+_dfm_resident_abi_version
+_dfm_query_create
+_dfm_query_release
+_dfm_query_info
+_dfm_resident_rows
+_dfm_resident_join
+_dfm_resident_info
+_dfm_resident_export
+_dfm_resident_release

@@ -206,6 +206,25 @@ typedef struct DFMJoinRequest {
   const DFMJoinOutput *outputs; // Storage pointers may be null during prepare.
 } DFMJoinRequest;
 
+// Resident ABI 1. A null table selects the ordinary CPU input descriptor.
+// A non-null table selects an immutable native column; its rows and dtype must
+// match the descriptor, and it must belong to this query scope.
+#define DFM_RESIDENT_ABI_VERSION 1
+typedef struct DFMResidentInput {
+  void *table;
+  int64_t column;
+} DFMResidentInput;
+typedef struct DFMResidentInfo {
+  int64_t rows;
+  int64_t columns;
+  int64_t retained_bytes;
+} DFMResidentInfo;
+typedef struct DFMQueryInfo {
+  int64_t live_bytes;
+  int64_t peak_bytes;
+  int64_t memory_budget_bytes;
+} DFMQueryInfo;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -223,6 +242,27 @@ DFM_API int32_t dfm_workspace_info(void *context, DFMWorkspaceInfo *info,
                                   char **error);
 // Releases only idle buffers; live join sessions and in-flight work keep owners.
 DFM_API int32_t dfm_workspace_trim(void *context, char **error);
+DFM_API int64_t dfm_resident_abi_version(void);
+DFM_API void *dfm_query_create(void *context, int64_t memory_budget_bytes,
+                               char **error);
+DFM_API void dfm_query_release(void *query);
+DFM_API int32_t dfm_query_info(void *query, DFMQueryInfo *info, char **error);
+// Every call drains its submissions before returning. Resident tables retain
+// their query/context, never alias recycled storage, and can feed multiple
+// consumers. final_output packs bitmaps and reserves the CPU result payload;
+// intermediate calls retain native words and validity without materialization.
+DFM_API int32_t dfm_resident_rows(void *query, const DFMRequest *request,
+    const DFMResidentInput *inputs, int64_t input_count, int64_t final_output,
+    void **table, DFMStats *stats, char **error);
+DFM_API int32_t dfm_resident_join(void *query, const DFMJoinRequest *request,
+    const DFMResidentInput *inputs, int64_t input_count, int64_t final_output,
+    void **table, DFMStats *stats, char **error);
+DFM_API int32_t dfm_resident_info(void *table, DFMResidentInfo *info, char **error);
+// Export checks all metadata and the complete CPU result budget before touching
+// any caller output. Request dtype and column order must match the table.
+DFM_API int32_t dfm_resident_export(void *table, const DFMOutput *outputs,
+    int64_t output_count, DFMStats *stats, char **error);
+DFM_API void dfm_resident_release(void *table);
 
 // Pure shape validation and allocation accounting; no device initialization.
 DFM_API int32_t dfm_estimate(const DFMRequest *request, DFMMemory *memory,

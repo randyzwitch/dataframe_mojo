@@ -1371,6 +1371,29 @@ def test_native_join_dag_regions_and_logical_types() raises:
     assert_equal(
         measured[1].column("synchronizations").int64()._get(2), Int64(2)
     )
+    # Both join inputs and its downstream row region use resident handles.
+    # Intermediate regions return only synchronization metadata to the CPU.
+    assert_equal(measured[1].column("upload_bytes").int64()._get(2), Int64(0))
+    assert_true(measured[1].column("resident_input_bytes").int64()._get(2) > 0)
+    for region in range(3):
+        assert_equal(
+            measured[1].column("host_result_bytes").int64()._get(region),
+            Int64(0),
+        )
+        assert_equal(
+            measured[1].column("download_bytes").int64()._get(region), Int64(8)
+        )
+        assert_true(
+            measured[1].column("resident_output_bytes").int64()._get(region) > 0
+        )
+    for region in range(4):
+        assert_true(
+            measured[1]
+            .column("query_peak_requested_bytes")
+            .int64()
+            ._get(region)
+            >= measured[1].column("peak_requested_bytes").int64()._get(region)
+        )
     var grouped = joined.group_by("k", maintain_order=True).agg(
         [col("x").min(), col("x_right").max()]
     )
@@ -1387,6 +1410,14 @@ def test_native_join_dag_regions_and_logical_types() raises:
     )
     assert_true(
         nested.collect(accelerator=runtime).equals(nested.collect(engine="cpu"))
+    )
+    var nested_profile = nested.profile(accelerator=runtime)
+    # The first join stages CPU scans; the second stages only the third scan.
+    assert_true(
+        nested_profile[1].column("resident_input_bytes").int64()._get(1) > 0
+    )
+    assert_equal(
+        nested_profile[1].column("host_result_bytes").int64()._get(0), Int64(0)
     )
     var scalar = (
         frame.lazy()

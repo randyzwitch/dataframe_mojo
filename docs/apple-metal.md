@@ -88,9 +88,13 @@ key columns for full joins with `coalesce=False`.
 
 The complete join DAG is bound before device initialization. Supported row
 regions can feed a join and follow its result, including further joins and
-grouped or scalar reductions. Intermediate regions currently materialize CPU
-columns and stage them again for their next consumer. These boundaries appear
-in profiles; a multi-region join query is not a single resident submission.
+grouped or scalar reductions. Intermediate results remain in native Metal
+buffers. Consumers read their words and validity on the GPU without constructing
+CPU columns or staging intermediate payloads. Original CPU scans stage at their
+first consumer; only the final result becomes ordinary CPU columns. Immutable
+result handles retain their query and context and are released after their last
+consumer. Regions still synchronize for errors and cardinality, so a resident
+DAG is not a single command-buffer submission.
 Checked integer arithmetic, strict casts, and checked Int32/UInt32 sums in
 join inputs require CPU execution because those inputs are not terminal
 observable boundaries. Pure expressions and bounded Int8/Int16/UInt8/UInt16
@@ -223,9 +227,13 @@ build rows in original order. After the first wait, the runtime checks the
 complete matching-plus-output peak against the payload budget and maximum
 buffer length before the caller allocates CPU result columns. It checks current
 headroom again before output submission. Budget failure can therefore occur
-after matching, while caller outputs remain untouched. Estimates and profile
-peaks are per region; retained CPU inputs and intermediate frames are outside
-the requested payload estimate.
+after matching, while caller outputs remain untouched. Resident DAG budgets
+include every live intermediate buffer, the current region's allocations, and
+the final CPU result reservation. Shared owners are counted once; branches
+retain their allocation until their last consumer. Region profiles still show
+their own requested allocations, while `query_peak_requested_bytes` reports the
+complete requested peak. Retained original CPU inputs remain outside this
+payload estimate.
 
 Profiles report observed launch and wait counts; upload/download traffic;
 requested shared/result bytes; pipeline cache hits and compilation time;
@@ -238,6 +246,15 @@ have one row per executed region, with per-region `wall_ms`; `query_wall_ms`
 reports the complete DAG duration including preflight and materialization. `runtime_build_id` fingerprints the native
 source, ABI, compiler, SDK, and build flags.
 
+`resident_input_bytes` and `resident_output_bytes` identify retained native
+payloads at each region boundary. Intermediate regions report zero CPU result
+bytes and download only synchronization metadata (plus scalar checks for checked
+sums); their consumers report no upload traffic for those resident columns.
+Scalar reduction results can also feed a join or another row region without
+copying their payloads through CPU columns. Resident DAGs require the additive
+resident ABI version 1; older row-only and two-phase join interfaces retain their
+existing layouts.
+
 Submission errors propagate. The bridge drains committed work before releasing
 buffers or returning an error; execution never retries the query on CPU after a
 GPU fault. Output owners and source owners remain alive across that boundary.
@@ -247,6 +264,7 @@ GPU fault. Output owners and source owners remain alive across that boundary.
 ```sh
 python3 native/dfmetal/test_native.py
 python3 native/dfmetal/test_join.py
+python3 native/dfmetal/test_resident.py
 pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
 ```
@@ -268,3 +286,8 @@ parity cases also cover nested joins, row regions on both sides, post-join
 grouping and sorting, scalar reduction inputs, logical metadata, and profiling
 of the two synchronization points. Hosted macOS VMs still run pure ABI
 validation when no GPU is exposed.
+
+The resident suite checks row/join/row pipelines, multiple consumers, scalar
+handoffs, all native dtypes, empty and nullable inputs, exact UInt64 and Float32
+payloads, whole-query budget rejection, invalid output metadata, failure
+recovery, and tables that outlive the caller's query and context handles.
