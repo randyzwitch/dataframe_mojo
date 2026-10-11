@@ -26,7 +26,11 @@ permissions:
 jobs:
   native-metal:
     runs-on: macos-latest
-    timeout-minutes: 10
+    # Cold Metal shader compilation on hosted macOS runners can exceed ten
+    # minutes with binary64 emulation. Keep a finite limit for stalled drivers.
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v7
       - name: Build optional native runtime
@@ -34,8 +38,10 @@ jobs:
       - name: Validate native ABI and execute when a GPU is exposed
         # Hosted VMs may expose no Metal device. The suite still validates the
         # ABI and pure preflight, and explicitly reports execution as skipped.
-        run: |
-          python3 native/dfmetal/test_native.py
-          python3 native/dfmetal/test_join.py
-          python3 native/dfmetal/test_resident.py
-          python3 native/dfmetal/test_float64.py
+        run: python3 native/dfmetal/test_native.py
+      - name: Validate native joins
+        run: python3 native/dfmetal/test_join.py
+      - name: Validate resident execution
+        run: python3 native/dfmetal/test_resident.py
+      - name: Validate binary64 primitives
+        run: python3 native/dfmetal/test_float64.py
