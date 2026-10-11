@@ -38,7 +38,10 @@ not a claim that the complete tree equals the later rebased stack.
 
 `results.json` records compiler/platform information, input SHA-256 hashes,
 generated worker source hashes, worker binary hashes, and the native library
-file hash. `sources/` preserves the actual generated workers. The native library
+file hash. `sources/` preserves the actual generated workers as byte-identical
+`.mojo.txt` files, so archived evidence is not treated as active repository
+source by formatters and test discovery. Remove the final `.txt` suffix to
+reconstruct a worker. The native library
 file SHA-256 is
 `b40037b318af5bc1311b37ca648780fd2eb8cf520f60cff0aef091405ba286bf`.
 The compiler was Mojo `1.2.0.dev2026100905 (3b71af75)` on Apple Silicon macOS;
