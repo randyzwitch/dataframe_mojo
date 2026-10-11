@@ -172,8 +172,9 @@ Integer-to-Float32 casts use native conversion. The CPU cast contract rounds
 through Float64 first; a small region around Float32 halfway points above
 2**53 can therefore double-round differently. Kernels detect that region and
 require CPU execution without emulating Float64. Value-dependent precision
-failures are reported during execution. Automatic selection remains
-on CPU until matched end-to-end cost evidence is available.
+failures are reported during execution. Automatic selection uses the shared
+analytical cost policy when a matching validated calibration is configured;
+otherwise it selects CPU before submission.
 
 ## Memory, synchronization, and profiles
 
@@ -342,3 +343,26 @@ conservative restoration bound before allocating decoded outputs. Cross-input
 categorical parity passed for all seven join types, including unmatched full
 join keys and nulls. The four public dictionary tests also cover string filter,
 sort, grouped sums, output metadata, profiling, and budget rejection.
+
+Metal implements the shared backend's `estimate_auto`, `calibration_key`, and
+`select_auto` methods for the common numeric row subset. Estimates use bound
+expression counts and native launch, transfer, and allocation bounds without
+reading source values. The additive native metadata probe does not create a
+context, command queue, buffers, or pipelines. It reports device identity,
+memory headroom, and whether the exact row pipeline is already cached.
+
+Calibration keys include native and CPU build identities, device and host
+identity, worker count, and execution options. An identified package is required;
+development source, missing or stale evidence, unsupported plans, and rejected
+memory estimates select CPU. Grouping, sorting, joins, and dictionary staging
+currently require explicit accelerator selection because their complete costs
+are outside the calibrated numeric row model. Errors after device submission
+propagate to the caller.
+
+The provider-neutral `scripts/bench_accelerator_cost.py` runner records cold and
+warm whole-query timings, parity, preflight overhead, package hashes, generated
+training queries, and separate held-out query identities. Failed observations
+remain in the evidence. Coefficients and residual envelopes are frozen before
+held-out validation; rejected models cannot enable automatic GPU execution.
+Its regret report replays the policy against measured explicit-engine samples;
+it does not measure automatic-execution latency directly.
