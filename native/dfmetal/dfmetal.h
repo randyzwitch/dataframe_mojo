@@ -65,6 +65,9 @@ enum DFMOp {
   DFM_IS_INFINITE = 66,
   DFM_WHEN = 100,
   DFM_CAST = 79,
+  // Unary membership: code[2] is the first literal payload index, code[3]
+  // its count. Payload descriptors are LITERAL_INT with the operand dtype.
+  DFM_INT_IS_IN = 172,
   DFM_MIN = 80,
   DFM_MAX = 81,
   DFM_FIRST = 83,

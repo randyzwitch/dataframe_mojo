@@ -26,6 +26,7 @@ from dataframe.expr import (
     IS_FINITE,
     IS_INFINITE,
     WHEN,
+    INT_IS_IN,
     COL,
     CAST,
     LIT_FLOAT,
@@ -143,6 +144,8 @@ def _program(
         capabilities.reject(
             "plan", "expression must contain 1 to 64 row-local nodes"
         )
+    var program_start = len(literals)
+    var memberships = List[Int]()
     for i in range(count):
         ref node = bound.expr._nodes[i]
         var op = node.op
@@ -157,6 +160,7 @@ def _program(
             )
         if not (
             op == COL
+            or (op == INT_IS_IN and capabilities.extended_integers)
             or (
                 capabilities.row_extras
                 and (
@@ -309,6 +313,21 @@ def _program(
                 Float64(node.integer) if op == LIT_BOOL else node.floating
             )
         )
+        if op == INT_IS_IN:
+            memberships.append(i)
+    # Membership values are runtime literal payloads, outside the executable
+    # expression's local node range. Changing values reuses the same shader.
+    # Preserve exact signed/unsigned 64-bit words without Float64 conversion.
+    for i in memberships:
+        ref node = bound.expr._nodes[i]
+        var entries = node.text.split(",")
+        var size = len(entries) if node.text else 0
+        code[4 * (program_start + i) + 2] = Int64(len(literals))
+        code[4 * (program_start + i) + 3] = Int64(size)
+        for j in range(size):
+            code.extend([Int64(LIT_INT), Int64(-1), Int64(-1), Int64(-1)])
+            literals.append(bitcast[DType.float64](Int64(atol(entries[j]))))
+            node_dtypes.append(bound.dtypes[node.left])
 
 
 def lower_rows(
