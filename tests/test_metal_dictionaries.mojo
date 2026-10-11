@@ -6,7 +6,8 @@ from dataframe.metal import MetalRuntime, metal_installed
 
 
 def test_string_filter_sort_group_and_join() raises:
-    assert_true(metal_installed())
+    if not metal_installed():
+        return
     var runtime = MetalRuntime()
     var frame = DataFrame(
         [
@@ -49,7 +50,8 @@ def test_string_filter_sort_group_and_join() raises:
 
 
 def test_categorical_projection_preserves_original_dictionary() raises:
-    assert_true(metal_installed())
+    if not metal_installed():
+        return
     var runtime = MetalRuntime()
     var source = encode(
         Series("k", StringColumn(List[String](["z", "a", "z", "é"])))
@@ -62,7 +64,8 @@ def test_categorical_projection_preserves_original_dictionary() raises:
 
 
 def test_different_categorical_dictionaries_join_all_styles() raises:
-    assert_true(metal_installed())
+    if not metal_installed():
+        return
     var runtime = MetalRuntime(memory_limit_bytes=64 * 1024 * 1024)
     var a = encode(
         Series(
@@ -102,7 +105,8 @@ def test_different_categorical_dictionaries_join_all_styles() raises:
 
 
 def test_dictionary_profile_includes_host_staging_and_restoration() raises:
-    assert_true(metal_installed())
+    if not metal_installed():
+        return
     var frame = DataFrame(
         [
             Series(

@@ -32,7 +32,7 @@ def advise_huge_pages(address: Int, bytes: Int):
         _ = external_call["madvise", Int32](start, end - start, _MADV_HUGEPAGE)
 
 
-def huge_list[T: Copyable & Movable](length: Int, fill: T) -> List[T]:
+def huge_list[T: Copyable](length: Int, fill: T) -> List[T]:
     """`length` copies of `fill`, on huge pages when the list is large
     enough to hold one and the kernel grants them."""
     var out = List[T](unsafe_uninit_length=length)
@@ -43,7 +43,7 @@ def huge_list[T: Copyable & Movable](length: Int, fill: T) -> List[T]:
     return out^
 
 
-def huge_uninit[T: Copyable & Movable](length: Int) -> List[T]:
+def huge_uninit[T: Copyable](length: Int) -> List[T]:
     """`length` uninitialized elements, every one of which the caller
     writes, on huge pages when the list is large enough to hold one and
     the kernel grants them."""

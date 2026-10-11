@@ -842,7 +842,7 @@ def _filter_keeps(
     quantities and sums prices and discounts)."""
     if operations[k].kind != FILTER:
         return None
-    var exprs = List[Expr]()
+    var exprs: List[Expr]
     var names = List[String]()
     if k + 1 < len(operations):
         if operations[k + 1].kind != SELECT:

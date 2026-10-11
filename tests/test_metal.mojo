@@ -582,8 +582,8 @@ def test_native_fixed_logical_types_preserve_metadata() raises:
 
 
 def _native_integer_row_ops[D: DType]() raises:
-    var values = List[Scalar[D]]()
-    var divisors = List[Scalar[D]]()
+    var values: List[Scalar[D]]
+    var divisors: List[Scalar[D]]
     comptime if D.is_signed():
         values = [-7, -1, 0, 1, 7]
         divisors = [3, -3, 0, -1, 2]

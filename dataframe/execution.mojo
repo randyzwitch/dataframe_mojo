@@ -1704,7 +1704,7 @@ def _shifted_sum_shape(
         return False
     if inner.left < 0 or inner.right < 0:
         return False
-    var column_at = -1
+    var column_at: Int
     if (
         bound.expr._nodes[inner.left].op == COL
         and bound.expr._nodes[inner.right].op == LIT_INT
