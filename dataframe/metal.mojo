@@ -71,6 +71,7 @@ from .expr import (
     FILL_NAN,
     KEEP_NULLS,
     ABS,
+    SQRT,
     FLOOR,
     CEIL,
     ROUND,
@@ -317,6 +318,7 @@ def _capabilities() -> RowCapabilities:
         float_division=True,
         float_rounding=True,
         float_modulo=True,
+        float_sqrt=True,
         wide_integer=False,
         bounded_integer_sum=True,
         extended_integers=True,
@@ -404,6 +406,8 @@ def _op(op: Int) raises -> Int64:
         return 35
     if op == ABS:
         return 51
+    if op == SQRT:
+        return 52
     if op == FLOOR:
         return 55
     if op == CEIL:
@@ -1368,7 +1372,9 @@ struct MetalRuntime(AcceleratorBackend):
         for i in range(len(plan.node_dtypes)):
             if plan.node_dtypes[i] == DataType.FLOAT64:
                 emulated = True
-            if plan.node_dtypes[i].is_float() and plan.code[i * 4] == ROUND:
+            if plan.node_dtypes[i].is_float() and (
+                plan.code[i * 4] == ROUND or plan.code[i * 4] == SQRT
+            ):
                 emulated = True
         for output in plan.outputs:
             emulated |= output.reduction == MEAN or (

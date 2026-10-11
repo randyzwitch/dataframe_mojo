@@ -20,6 +20,7 @@ from dataframe.expr import (
     FILL_NAN,
     KEEP_NULLS,
     ABS,
+    SQRT,
     FLOOR,
     CEIL,
     ROUND,
@@ -169,6 +170,11 @@ def _program(
         if not (
             op == COL
             or (
+                op == SQRT
+                and capabilities.float_sqrt
+                and bound.dtypes[i].is_float()
+            )
+            or (
                 op == ROUND
                 and capabilities.float_rounding
                 and bound.dtypes[i].is_float()
@@ -276,6 +282,7 @@ def _program(
                         or op == DIV
                         or op == FLOORDIV
                         or op == MOD
+                        or op == SQRT
                         or op == CAST
                         or op == FLOOR
                         or op == CEIL
@@ -310,7 +317,8 @@ def _program(
             or right_type.is_decimal()
         )
         if logical and (
-            op == ABS
+            op == SQRT
+            or op == ABS
             or op == FLOORDIV
             or op == MOD
             or op == POW

@@ -677,5 +677,107 @@ def test_float64_remainder_extremes_filters_children_and_cost() raises:
     )
 
 
+def test_float64_sqrt_bits_filters_children_and_cost() raises:
+    if not metal_installed():
+        return
+    var frame = fixture()
+    var expression = col("a").sqrt()
+    var query = frame.lazy().select(expression.alias("root"))
+    assert_true(
+        "metal-emulated-float64-v1"
+        in MetalRuntime().estimate_auto(query).family
+    )
+    var runtime = MetalRuntime()
+    same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
+    var empty = frame.slice(0, 0).lazy().select(expression)
+    same(empty.collect(accelerator=runtime), empty.collect(engine="cpu"))
+    var filtered = (
+        frame.lazy()
+        .filter(expression.is_finite())
+        .with_columns(expression.alias("root"))
+        .head(31)
+    )
+    same(filtered.collect(accelerator=runtime), filtered.collect(engine="cpu"))
+    var child = frame.lazy().with_columns(expression.alias("root")).slice(3, 17)
+    same(child.collect(accelerator=runtime), child.collect(engine="cpu"))
+    var scalar = frame.lazy().select(col("b").max().sqrt().alias("root"))
+    same(scalar.collect(accelerator=runtime), scalar.collect(engine="cpu"))
+    var integers = DataFrame(
+        [
+            Series(
+                "x",
+                Column[Int64](
+                    [
+                        0,
+                        1,
+                        2,
+                        3,
+                        4,
+                        -1,
+                        9223372036854775807,
+                        -9223372036854775807,
+                    ]
+                ),
+            )
+        ]
+    )
+    var integer_query = integers.lazy().select(col("x").sqrt())
+    same(
+        integer_query.collect(accelerator=runtime),
+        integer_query.collect(engine="cpu"),
+    )
+    var unsigned = DataFrame(
+        [Series("x", Column[UInt64]([0, 1, 2, 18446744073709551615]))]
+    )
+    var unsigned_query = unsigned.lazy().select(col("x").sqrt())
+    same(
+        unsigned_query.collect(accelerator=runtime),
+        unsigned_query.collect(engine="cpu"),
+    )
+    var words: List[UInt32] = [
+        0,
+        0x80000000,
+        1,
+        0x80000001,
+        0x007FFFFF,
+        0x00800000,
+        0x00800001,
+        0x3F7FFFFF,
+        0x3F800000,
+        0x3F800001,
+        0x40000000,
+        0x40800000,
+        0x7F7FFFFF,
+        0xFF7FFFFF,
+        0x7F800000,
+        0xFF800000,
+        0x7FC00042,
+        0x7F800042,
+    ]
+    var values = List[Float32]()
+    var valid = List[Bool]()
+    for word in words:
+        values.append(bitcast[DType.float32](word))
+        valid.append(len(values) % 7 != 0)
+    var narrow = DataFrame([Series("x", Column[Float32](values^, valid^))])
+    var narrow_query = narrow.lazy().with_columns(col("x").sqrt().alias("root"))
+    assert_true(
+        "metal-emulated-float64-v1"
+        in runtime.estimate_auto(narrow_query).family
+    )
+    same(
+        narrow_query.collect(accelerator=runtime),
+        narrow_query.collect(engine="cpu"),
+    )
+    same(
+        narrow_query.head(11).collect(accelerator=runtime),
+        narrow_query.head(11).collect(engine="cpu"),
+    )
+    same(
+        query.collect(engine="auto", accelerator=runtime),
+        query.collect(engine="cpu"),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

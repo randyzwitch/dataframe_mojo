@@ -32,6 +32,7 @@ struct RowCapabilities(Copyable):
     var float64_emulated: Bool
     var float_division: Bool
     var float_modulo: Bool
+    var float_sqrt: Bool
     var float_rounding: Bool
     var wide_integer: Bool
     var bounded_integer_sum: Bool
@@ -58,6 +59,7 @@ struct RowCapabilities(Copyable):
         float64_emulated: Bool = False,
         float_division: Bool = False,
         float_modulo: Bool = False,
+        float_sqrt: Bool = False,
         float_rounding: Bool = False,
         wide_integer: Bool = True,
         bounded_integer_sum: Bool = False,
@@ -81,6 +83,7 @@ struct RowCapabilities(Copyable):
         self.float64_emulated = float64_emulated
         self.float_division = float_division
         self.float_modulo = float_modulo
+        self.float_sqrt = float_sqrt
         self.float_rounding = float_rounding
         self.wide_integer = wide_integer
         self.bounded_integer_sum = bounded_integer_sum

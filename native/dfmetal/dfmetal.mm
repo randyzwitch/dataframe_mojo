@@ -47,7 +47,7 @@ bool binaryOp(int64_t op) {
 }
 bool unaryOp(int64_t op) {
   return (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
-         op == DFM_CEIL || op == DFM_ROUND ||
+         op == DFM_CEIL || op == DFM_ROUND || op == DFM_SQRT ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
 int64_t add(int64_t a, int64_t b) {
@@ -468,13 +468,17 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
           c[0] != DFM_ADD && c[0] != DFM_SUB && c[0] != DFM_MUL &&
           c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_MOD && c[0] != DFM_CAST &&
-          c[0] != DFM_FLOOR && c[0] != DFM_CEIL && c[0] != DFM_ROUND &&
+          c[0] != DFM_FLOOR && c[0] != DFM_CEIL && c[0] != DFM_ROUND && c[0] != DFM_SQRT &&
           c[0] != DFM_NEG && c[0] != DFM_ABS &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE &&
           c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
           !(c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
           c[0] != DFM_FILL_NAN && c[0] != DFM_CLIP_LOW && c[0] != DFM_CLIP_HIGH)
         fail("Metal Float64 requires CPU execution for this operation");
+      if (c[0] == DFM_SQRT &&
+          (operand == DFM_BOOL || resultType !=
+              (operand == DFM_FLOAT32 ? DFM_FLOAT32 : DFM_FLOAT64_STORAGE)))
+        fail("Invalid Metal square root dtype");
       if (c[0] == DFM_INT_IS_IN) {
         if (!typed(r) || operand == DFM_FLOAT32 || operand == DFM_BOOL ||
             nodeType(r, v.start + j) != DFM_BOOL || c[2] < 0 || c[3] < 0 ||
@@ -1538,6 +1542,11 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           if (op == DFM_DIV) {
             text += z + "=f64_div(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) +
                     "),f64_word(" + encode(operandType,b) + "," + std::to_string(operandType) + "));";
+          } else if (op == DFM_SQRT) {
+            auto expression = "f64_sqrt(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) + "))";
+            text += z + "=" + (dtype == DFM_FLOAT32
+                ? "as_type<float>(f64_to_float32(" + expression + "))"
+                : expression) + ";";
           } else if (operandType == DFM_FLOAT64_STORAGE) {
             std::string expression;
             if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL)

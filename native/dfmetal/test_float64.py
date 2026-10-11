@@ -67,6 +67,25 @@ int main() { @autoreleasepool {
     left.push_back(a);
     right.push_back((a ^ (1UL << 63)) + (i % 9) - 4);
   }
+  // Every normal exponent and both sides of exact squares stress root
+  // normalization and rounding beyond uniform random binary64 encodings.
+  for (ulong exponent = 1; exponent < 2047; ++exponent) {
+    for (ulong fraction : {0UL, 1UL, 0x000fffffffffffffUL}) {
+      left.push_back((exponent << 52) | fraction); right.push_back(0);
+    }
+  }
+  for (ulong exponent = 0; exponent < 255; ++exponent) {
+    for (ulong fraction : {0UL, 1UL, 0x007fffffUL}) {
+      left.push_back((exponent << 23) | fraction); right.push_back(0);
+    }
+  }
+  for (size_t i = 0; i < 25000; ++i) {
+    double root = std::bit_cast<double>((random() & 0x000fffffffffffffUL) | 0x3ff0000000000000UL);
+    ulong square = std::bit_cast<ulong>(root * root);
+    for (int adjacent = -1; adjacent <= 1; ++adjacent) {
+      left.push_back(square + adjacent); right.push_back(0);
+    }
+  }
   if (f64_add(0x7ff0000000000042UL, 0) != 0x7ff8000000000042UL ||
       f64_sub(0, 0xfff0000000000042UL) != 0xfff8000000000042UL)
     return 2;
@@ -91,7 +110,9 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
           op==24 ? ulong(f64_to_float32(f64_round(f64_from_float32(uint(a[i]))))) :
           op==25 ? f64_mod(a[i],b[i]) :
           op==26 ? f64_fma(a[i],b[i],f64_mul(a[i],b[i])^0x8000000000000000UL) :
-          op==27 ? f64_fma(a[i],b[i],(a[i]>>31)|(a[i]<<33)) : test_integer(a[i],op);
+          op==27 ? f64_fma(a[i],b[i],(a[i]>>31)|(a[i]<<33)) :
+          op==28 ? f64_sqrt(a[i]) :
+          op==29 ? ulong(f64_to_float32(f64_sqrt(f64_from_float32(uint(a[i]))))) : test_integer(a[i],op);
 }
 )shader";
   NSError *error = nil;
@@ -108,7 +129,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
   id<MTLBuffer> b = [device newBufferWithBytes:right.data() length:bytes options:MTLResourceStorageModeShared];
   id<MTLBuffer> out = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
   size_t checked = 0;
-  for (uint op = 0; op < 28; ++op) {
+  for (uint op = 0; op < 30; ++op) {
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:pipeline];
@@ -155,6 +176,8 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
         expected=op==24?ulong(std::bit_cast<uint>(float(rounded))):std::bit_cast<ulong>(rounded);
       }
       if (op==26) { volatile double product=x*y; expected=std::bit_cast<ulong>(std::fma(x,y,-product)); }
+      if (op==29) expected=std::bit_cast<uint>(std::sqrt(std::bit_cast<float>(uint(left[i]))));
+      if (op==28) expected=std::bit_cast<ulong>(std::sqrt(x));
       if (op==27) expected=std::bit_cast<ulong>(std::fma(x,y,std::bit_cast<double>((left[i]>>31)|(left[i]<<33))));
       if (op>=13 && op<21) {
         uint pair=(op-13)/2, width=pair<2?64:8;
@@ -174,8 +197,10 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
                    op==24 ? ulong(f64_to_float32(f64_round(f64_from_float32(uint(left[i]))))) :
                    op==25 ? f64_mod(left[i],right[i]) :
                    op==26 ? f64_fma(left[i],right[i],f64_mul(left[i],right[i])^0x8000000000000000UL) :
-                   op==27 ? f64_fma(left[i],right[i],(left[i]>>31)|(left[i]<<33)) : test_integer(left[i],op);
-      bool narrow=op==9||op==24;
+                   op==27 ? f64_fma(left[i],right[i],(left[i]>>31)|(left[i]<<33)) :
+                   op==28 ? f64_sqrt(left[i]) :
+                   op==29 ? ulong(f64_to_float32(f64_sqrt(f64_from_float32(uint(left[i]))))) : test_integer(left[i],op);
+      bool narrow=op==9||op==24||op==29;
       bool nan = op>=13 && op<21 ? false : narrow ? (expected&0x7fffffffUL)>0x7f800000UL : f64_nan(expected);
       bool actualNan = narrow ? (host&0x7fffffffUL)>0x7f800000UL && (gpu[i]&0x7fffffffUL)>0x7f800000UL : f64_nan(host) && f64_nan(gpu[i]);
       if ((nan ? !actualNan : host != expected || gpu[i] != expected)) {
