@@ -169,6 +169,19 @@ Expressions combining supported aggregate results are decomposed into native
 aggregate leaves and a resident projection. This includes grouped and global
 counts, extrema, supported sums, null counts and conditional expressions.
 Global reductions can feed later row regions without CPU materialization.
+They can also broadcast into row-valued projections, filters, and with-columns
+expressions, such as `col("x") > col("x").mean()`. A shared resident prefix
+feeds the scalar reduction and row branch, and a GPU cross join broadcasts the
+scalar result. Empty inputs stay empty in row-valued consumers; all-null means
+broadcast null. Temporary columns do not appear in the output.
+
+Conditional scalar leaves remain restricted when eager evaluation could expose
+a data-dependent precision rejection: Float32 arithmetic inside such a leaf,
+and Int64/UInt64 means needing a range proof, reject before device execution.
+Nonthrowing Float64 leaves and direct Float32 column reductions can broadcast
+through conditional expressions. File-backed inputs still reject before source
+reads. Automatic placement keeps these multi-region plans on CPU until it can
+estimate the complete DAG.
 Checked sums in child regions and checked arithmetic followed by head retain
 their existing rejection boundaries. Selectors, windows and unsupported
 aggregate leaves remain unsupported.

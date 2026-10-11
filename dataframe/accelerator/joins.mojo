@@ -265,6 +265,13 @@ def _join_task(
     return id
 
 
+def _cached_rows(tasks: List[DagTask], root: Int) -> Int:
+    for i in range(len(tasks)):
+        if tasks[i].kind == DAG_ROWS and tasks[i].root == root:
+            return i
+    return -1
+
+
 def _task(
     query: LazyFrame,
     root: Int,
@@ -272,6 +279,9 @@ def _task(
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
 ) raises -> Int:
+    var cached = _cached_rows(tasks, root)
+    if cached >= 0:
+        return cached
     if query._nodes[root].kind == JOIN:
         return _join_task(query, root, terminal, -1, capabilities, tasks)
     # A direct head is a join output limit, so large fanout can be bounded
@@ -289,6 +299,7 @@ def _task(
     var cursor = root
     while (
         query._nodes[cursor].kind != SCAN_FRAME
+        and _cached_rows(tasks, cursor) < 0
         and query._nodes[cursor].kind != JOIN
         and (cursor == root or query._nodes[cursor].kind != SLICE)
         and (
@@ -301,7 +312,11 @@ def _task(
         cursor = query._nodes[cursor].left
     var source = -1
     var frame: DataFrame
-    if (
+    cached = _cached_rows(tasks, cursor)
+    if cached >= 0:
+        source = cached
+        frame = tasks[source].schema.copy()
+    elif (
         query._nodes[cursor].kind == JOIN
         or query._nodes[cursor].kind == SLICE
         or (
