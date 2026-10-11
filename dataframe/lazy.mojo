@@ -114,6 +114,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .trace import trace_path
 from .execution import direct_reductions
+from .accelerator.cost import PlanEstimate
 from .execution_report import ExecutionReport
 from .join_type import (
     JOIN_ANTI,
@@ -997,6 +998,10 @@ def _selection_report(report: DataFrame, reason: String) raises -> DataFrame:
 
 trait AcceleratorBackend(Copyable):
     """Optional execution provider; importing dataframe needs no GPU SDK."""
+
+    def estimate_auto(self, plan: LazyFrame) raises -> PlanEstimate:
+        """Optional plan-time facts; no device submission or source-value reads."""
+        raise Error("provider has no analytical plan estimate")
 
     def select_auto(
         self,

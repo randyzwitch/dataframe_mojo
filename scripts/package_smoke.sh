@@ -5,7 +5,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 mkdir -p dist
-mojo precompile dataframe -o dist/dataframe.mojoc
+python3 scripts/build_package.py --output dist
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 cp examples/sales.mojo "$work/"
