@@ -312,9 +312,16 @@ def _program(
 
 
 def lower_rows(
-    query: LazyFrame, capabilities: RowCapabilities = RowCapabilities()
+    query: LazyFrame,
+    capabilities: RowCapabilities = RowCapabilities(),
+    *,
+    terminal_boundary: Bool = True,
 ) raises -> RowPlan:
-    """Bind the entire resident region before GPU submission or source I/O."""
+    """Bind the entire resident region before GPU submission or source I/O.
+
+    Regions feeding another operator are not observable terminal boundaries:
+    that operator can prune rows and change whether checked work is evaluated.
+    """
     var root = len(query._nodes) - 1
     if root < 0:
         capabilities.reject("plan", "empty plan")
@@ -506,7 +513,12 @@ def lower_rows(
                         # CPU predicate/projection/head pushdown can remove
                         # checked work. Keep the first integer subset at an
                         # observable terminal boundary, with no final head.
-                        if k != 0 or node.kind == FILTER or limit >= 0:
+                        if (
+                            not terminal_boundary
+                            or k != 0
+                            or node.kind == FILTER
+                            or limit >= 0
+                        ):
                             capabilities.reject(
                                 "plan",
                                 "checked integer arithmetic requires terminal projections without head",
@@ -520,7 +532,12 @@ def lower_rows(
                 if (
                     part.op == CAST
                     and part.integer
-                    and (k != 0 or node.kind == FILTER or limit >= 0)
+                    and (
+                        not terminal_boundary
+                        or k != 0
+                        or node.kind == FILTER
+                        or limit >= 0
+                    )
                 ):
                     capabilities.reject(
                         "plan",
@@ -559,6 +576,17 @@ def lower_rows(
                     bound.dtypes[last.left], reduction, frame.height()
                 )
                 capabilities.require_dtype(result_dtype)
+                if (
+                    reduction == SUM
+                    and (
+                        result_dtype == DataType.INT32
+                        or result_dtype == DataType.UINT32
+                    )
+                    and not terminal_boundary
+                ):
+                    capabilities.reject(
+                        "plan", "checked sums require a terminal boundary"
+                    )
                 if (
                     node.kind == AGG
                     and reduction == SUM

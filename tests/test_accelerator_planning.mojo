@@ -21,6 +21,7 @@ from dataframe.dtype import DataType
 from dataframe.expr import SUM
 from dataframe.accelerator.rows import lower_rows, ROW_MAX_NODES
 from dataframe.accelerator import RowCapabilities
+from dataframe.accelerator.joins import lower_join_dag, DAG_JOIN, DAG_ROWS
 
 
 def test_resident_steps_bind_shared_names_and_dtypes() raises:
@@ -487,6 +488,246 @@ def test_additional_reductions_are_backend_opt_in() raises:
     assert_equal(plan.outputs[2].dtype, DataType.BOOL)
     assert_equal(plan.outputs[2].min_count, 0)
     assert_equal(plan.outputs[3].dtype, DataType.INT64)
+
+
+def test_join_child_regions_are_not_terminal_boundaries() raises:
+    var frame = DataFrame(
+        [
+            Series("x", Column[Int32]([1, 2])),
+            Series("y", Column[Float32]([1, 2])),
+        ]
+    )
+    var native = RowCapabilities(
+        "native",
+        float64=False,
+        wide_integer=False,
+        extended_integers=True,
+        mixed_types=True,
+        extrema=True,
+        casts=True,
+    )
+    var checked = frame.lazy().select(col("x") + 1)
+    _ = lower_rows(checked, native)
+    with assert_raises(contains="terminal projections"):
+        _ = lower_rows(checked, native, terminal_boundary=False)
+    var casted = frame.lazy().select(col("y").cast("int32", strict=True))
+    _ = lower_rows(casted, native)
+    with assert_raises(contains="strict casts"):
+        _ = lower_rows(casted, native, terminal_boundary=False)
+    var summed = frame.lazy().select(col("x").sum())
+    _ = lower_rows(summed, native)
+    with assert_raises(contains="checked sums"):
+        _ = lower_rows(summed, native, terminal_boundary=False)
+    # Reordering cannot hide errors in pure expressions or bounded Int64 sums.
+    var pure = lower_rows(
+        frame.lazy().select(col("y") + 1), native, terminal_boundary=False
+    )
+    assert_true(not pure.reductions)
+    var narrow = DataFrame([Series("x", Column[Int8]([1, 2]))])
+    var safe_sum = lower_rows(
+        narrow.lazy().select(col("x").sum()), native, terminal_boundary=False
+    )
+    assert_equal(safe_sum.outputs[0].dtype, DataType.INT64)
+
+
+def _join_capabilities() -> RowCapabilities:
+    return RowCapabilities(
+        "native",
+        float64=False,
+        wide_integer=False,
+        extended_integers=True,
+        mixed_types=True,
+        casts=True,
+        extrema=True,
+        fixed_logical=True,
+        order=True,
+        grouped=True,
+        extra_reductions=True,
+    )
+
+
+def test_join_dag_binds_all_join_schemas_and_coalescing() raises:
+    var left = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 2])),
+            Series("x", Column[Float32]([3, 4])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("r", Column[Int32]([1, 2])),
+            Series("x", Column[Float32]([5, 6])),
+        ]
+    )
+    var native = _join_capabilities()
+    for how in List[String](["inner", "left", "right", "full", "semi", "anti"]):
+        for coalesce in List[Bool]([True, False]):
+            var dag = lower_join_dag(
+                left.lazy().join(
+                    right.lazy(),
+                    left_on=["k"],
+                    right_on=["r"],
+                    how=how,
+                    coalesce=coalesce,
+                ),
+                native,
+            )
+            assert_equal(dag.joins, 1)
+            ref task = dag.tasks[dag.root]
+            assert_equal(task.kind, DAG_JOIN)
+            var expected = List[String](["k", "x", "x_right"])
+            if how == "semi" or how == "anti":
+                expected = ["k", "x"]
+            elif how == "full" and not coalesce:
+                expected = ["k", "x", "r", "x_right"]
+            assert_equal(task.schema.columns(), expected)
+            assert_equal(task.keys, List[Int64]([Int64(0), Int64(2)]))
+            assert_equal(task.fields[0].prefer_right, how == "right")
+            assert_equal(
+                task.fields[0].right,
+                2 if how == "right" or (how == "full" and coalesce) else -1,
+            )
+    var cross = lower_join_dag(
+        left.lazy().join(right.lazy(), how="cross"), native
+    )
+    assert_equal(len(cross.tasks[cross.root].keys), 0)
+    assert_equal(
+        cross.tasks[cross.root].schema.columns(),
+        List[String](["k", "x", "r", "x_right"]),
+    )
+    var limited = lower_join_dag(
+        left.lazy().join(right.lazy(), left_on=["k"], right_on=["r"]).head(3),
+        native,
+    )
+    assert_equal(limited.tasks[limited.root].kind, DAG_JOIN)
+    assert_equal(limited.tasks[limited.root].limit, 3)
+    var projected = lower_join_dag(
+        left.lazy()
+        .join(right.lazy(), left_on=["k"], right_on=["r"])
+        .select_exprs([col("k"), col("x")])
+        .head(3),
+        native,
+    )
+    assert_equal(projected.tasks[projected.root].kind, DAG_ROWS)
+    assert_equal(
+        projected.tasks[projected.tasks[projected.root].source].limit, 3
+    )
+    var after_head = lower_join_dag(
+        left.lazy()
+        .join(right.lazy(), left_on=["k"], right_on=["r"])
+        .head(3)
+        .select_exprs([col("k"), col("x")]),
+        native,
+    )
+    assert_equal(
+        after_head.tasks[after_head.tasks[after_head.root].source].limit, 3
+    )
+    var sorted = lower_join_dag(
+        left.lazy()
+        .join(right.lazy(), left_on=["k"], right_on=["r"])
+        .sort("x")
+        .head(3),
+        native,
+    )
+    assert_equal(sorted.tasks[sorted.tasks[sorted.root].source].limit, -1)
+
+
+def test_join_dag_rejects_every_branch_before_source_execution() raises:
+    var frame = DataFrame(
+        [Series("k", Column[Int32]([1, 2])), Series("x", Column[Int32]([3, 4]))]
+    )
+    var native = _join_capabilities()
+    var checked = frame.lazy().with_columns((col("x") + 1).alias("x"))
+    with assert_raises(contains="terminal projections"):
+        _ = lower_join_dag(checked.join(frame.lazy(), "k"), native)
+    with assert_raises(contains="terminal projections"):
+        _ = lower_join_dag(frame.lazy().join(checked, "k"), native)
+    with assert_raises(contains="in-memory scans"):
+        _ = lower_join_dag(
+            frame.lazy().join(scan_csv("/nonexistent/metal-join.csv"), "k"),
+            native,
+        )
+    var wide = DataFrame(
+        [Series("k", Column[Int32]([1])), Series("bad", Column[Float64]([2]))]
+    )
+    with assert_raises(contains="Float64 requires CPU"):
+        _ = lower_join_dag(frame.lazy().join(wide.lazy(), "k"), native)
+    with assert_raises(contains="Duplicate join key"):
+        _ = lower_join_dag(
+            frame.lazy().join(frame.lazy(), List[String](["k", "k"])), native
+        )
+    with assert_raises(contains="Unknown column"):
+        _ = lower_join_dag(frame.lazy().join(frame.lazy(), "missing"), native)
+    var incompatible = DataFrame([Series("k", Column[Int64]([1]))])
+    with assert_raises(contains="Join key dtypes differ"):
+        _ = lower_join_dag(frame.lazy().join(incompatible.lazy(), "k"), native)
+    with assert_raises(contains="Join output name collision"):
+        _ = lower_join_dag(
+            frame.lazy().join(frame.lazy(), "k", suffix=""), native
+        )
+
+
+def test_join_dag_prunes_unused_unsupported_columns() raises:
+    var left = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 2])),
+            Series("a", Column[Float32]([3, 4])),
+            Series("unused", Column[Float64]([5, 6])),
+        ]
+    )
+    var right = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 2])),
+            Series("b", Column[Float32]([7, 8])),
+            Series("unused", Column[Float64]([9, 10])),
+        ]
+    )
+    var query = (
+        left.lazy()
+        .join(right.lazy(), "k")
+        .select_exprs([col("k"), col("a"), col("b")])
+    )
+    var dag = lower_join_dag(query, _join_capabilities())
+    assert_equal(
+        dag.tasks[0].query._frames[0].columns(), List[String](["k", "a"])
+    )
+    assert_equal(
+        dag.tasks[1].query._frames[0].columns(), List[String](["k", "b"])
+    )
+    assert_equal(
+        dag.tasks[dag.root].schema.columns(), List[String](["k", "a", "b"])
+    )
+
+
+def test_join_dag_preserves_scalar_children_and_nested_regions() raises:
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32]([1, 2])),
+            Series("x", Column[Float32]([3, 4])),
+        ]
+    )
+    var native = _join_capabilities()
+    var scalar = frame.lazy().select_exprs(
+        [col("k").min().alias("k"), col("x").first().alias("x")]
+    )
+    var dag = lower_join_dag(scalar.join(frame.lazy(), "k"), native)
+    var child = lower_rows(dag.tasks[0].query, native, terminal_boundary=False)
+    assert_true(child.reductions)
+    var query = (
+        frame.lazy()
+        .join(frame.lazy(), "k")
+        .join(frame.lazy(), "k", suffix="_last")
+        .select_exprs([col("k"), col("x"), col("x_last")])
+    )
+    var nested = lower_join_dag(query, native)
+    assert_equal(nested.joins, 2)
+    for i in range(len(nested.tasks)):
+        assert_true(nested.tasks[i].source < i)
+        assert_true(nested.tasks[i].right < i)
+    assert_equal(
+        nested.tasks[nested.root].schema.columns(),
+        List[String](["k", "x", "x_last"]),
+    )
 
 
 def main() raises:
