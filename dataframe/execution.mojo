@@ -91,7 +91,13 @@ from .nested_column import ListColumn, StructColumn
 from .cast import cast_series
 from .categorical import decode, encode, gather
 from .binding import BoundExpr, bind, ROWS, AGGREGATE, SCALAR
-from .hashing import encode_rows, encode_rows_parallel
+from .hashing import (
+    RowKeys,
+    _encode_dense,
+    _encode_dense_chunks,
+    encode_rows,
+    encode_rows_parallel,
+)
 from .partition import encode_partitioned, low_cardinality
 from .distinct import distinct_counts
 from .window import window_op, interpolate_by_op, rolling_by_op
@@ -2117,6 +2123,29 @@ def _batch[
     )
 
 
+def _whole(
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    index: Int,
+    height: Int,
+    grouped: Bool,
+) raises -> Optional[Series]:
+    """Node `index` over every row with no batch copies, when it already
+    exists whole: a source column of the same type, or a window or over()
+    state of `height` rows. None otherwise."""
+    ref node = bound.expr._nodes[index]
+    if node.op == COL and bound.sources[index] >= 0:
+        ref column = columns[bound.sources[index]]
+        if len(column) == height and column.dtype() == bound.dtypes[index]:
+            return column.copy()
+        return None
+    if (is_window(node.op) or node.op == OVER) and len(states[index]) == height:
+        if states[index].dtype() == bound.dtypes[index]:
+            return states[index].copy()
+    return None
+
+
 def _full[
     width: Int
 ](
@@ -2128,7 +2157,13 @@ def _full[
     batch_size: Int,
     grouped: Bool,
 ) raises -> Series:
-    """Materialize a row-valued node over every row, batch by batch."""
+    """Materialize a row-valued node over every row, batch by batch; a
+    column, or a window or over() already computed for every row, as it
+    is (TPC-DS q51's running maxima copied 611K rows in 1,024-row batches
+    into each window's input and out of its result)."""
+    var whole = _whole(bound, columns, states, index, height, grouped)
+    if whole:
+        return whole.take()
     var result = _empty(bound.dtypes[index])
     for offset in range(0, height, batch_size):
         var chunk = _batch[width](
@@ -2144,6 +2179,16 @@ def _full[
             chunk = chunk._broadcast(min(batch_size, height - offset))
         result._append_series(chunk)
     return result^
+
+
+def _dense_partitions(keys: List[Series]) raises -> Optional[RowKeys]:
+    """Partition ids by direct lookup for one integer key whose values span
+    few enough integers; None otherwise."""
+    if len(keys) != 1:
+        return None
+    return _encode_dense(keys[0], True) if not keys[0].is_chunked() else (
+        _encode_dense_chunks(keys[0], True)
+    )
 
 
 def _over[
@@ -2173,11 +2218,19 @@ def _over[
     # ranges and merge (#336); many encode one hash bucket at a time. One
     # thread numbering 5M partition keys was most of H2O q8 at k2.
     var workers = worker_count(height)
-    var partitions = encode_rows(keys, nulls_equal=True) if workers <= 1 else (
-        encode_rows_parallel(keys, True, workers) if low_cardinality(
-            keys
-        ) else encode_partitioned(keys, workers, nulls_equal=True)
-    )
+    # One integer key over a small span numbers by direct lookup in one
+    # pass, faster than either parallel route (TPC-DS q51's 611K item keys:
+    # 8 ms partitioned).
+    var partitions: RowKeys
+    var dense = _dense_partitions(keys)
+    if dense:
+        partitions = dense.take()
+    elif workers <= 1:
+        partitions = encode_rows(keys, nulls_equal=True)
+    elif low_cardinality(keys):
+        partitions = encode_rows_parallel(keys, True, workers)
+    else:
+        partitions = encode_partitioned(keys, workers, nulls_equal=True)
     var result = evaluate[width](
         inner,
         columns,
@@ -2391,10 +2444,16 @@ def evaluate[
             states[node_index] = _over[width](
                 bound, prepared_columns, node_index, height, batch_size
             )
-    var result = _empty(bound.dtypes[root])
     var size = height if bound.shape() == ROWS else (
         group_count if grouped else 1
     )
+    if bound.shape() == ROWS and not bound.dtypes[root].is_categorical():
+        var whole = _whole(bound, prepared_columns, states, root, size, grouped)
+        if whole and bound.expr._nodes[root].op != COL:
+            var done = whole.take()
+            done._name = bound.expr._name
+            return done^
+    var result = _empty(bound.dtypes[root])
     var workers = worker_count(size) if bound.shape() == ROWS else 1
     if workers <= 1:
         result._reserve_rows(size, 0)

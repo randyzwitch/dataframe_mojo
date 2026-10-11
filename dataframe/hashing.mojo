@@ -599,7 +599,12 @@ def _encode_dense_parts[
     var width = UInt64(0) if first else _unsigned_distance[D](low, high)
     # A table no larger than a few times the input: a small bucket of a
     # partitioned group-by should not clear a 512 KB table to encode it.
-    var limit = min(_dense_span_limit[D](), max(4096, 4 * n))
+    # A large input may span as many integers as it has rows, up to the
+    # 16-bit keys' 512 KB table: TPC-DS's 18K item keys over 611K rows
+    # hashed at 13 ns a row under the 4,096 span measured for buckets.
+    var limit = min(
+        max(_dense_span_limit[D](), min(n, 1 << 16)), max(4096, 4 * n)
+    )
     if width >= UInt64(limit):
         return None
     var span = Int(width) + 1

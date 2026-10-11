@@ -46,6 +46,7 @@ from .reductions import WideInt
 from .series import Series, sort_indices
 from .rank import rank_numeric
 from .packed_sort import packed_arg_sort
+from std.collections import Optional
 from std.math import isnan, floor, sqrt, isfinite
 
 
@@ -185,6 +186,15 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
         ):
             return result^
         return _narrow_sum(result, input.dtype().sum_type())
+    if (
+        op_code == CUM_COUNT
+        or op_code == CUM_SUM
+        or op_code == CUM_MIN
+        or op_code == CUM_MAX
+    ):
+        var running = _running(op_code, input, ids, node.min_count == 1)
+        if running:
+            return running.take()
     if op_code == RANK:
         # Numeric columns sort once per partition, in parallel (#330).
         var fast = rank_numeric(input, ids, node.text, node.min_count == 1)
@@ -293,6 +303,114 @@ def window_op(node: Node, input: Series, ids: List[Int]) raises -> Series:
                     if last >= 0 and (limit < 0 or distance <= limit):
                         source[row] = last
     return input.take_or_null(source)
+
+
+def _running(
+    op: Int, input: Series, ids: List[Int], reverse: Bool
+) raises -> Optional[Series]:
+    """A cumulative count, sum, min or max in one pass over the rows (from
+    the last row when reversed), each partition's running value kept in a
+    flat array by partition id. The general path below collects a row list
+    per partition and, for min and max, sorts the whole column to compare
+    ranks: TPC-DS q51's running max over 611K rows in 18K items took 66
+    ms. Int64 and Float64 input (others are widened first or keep the
+    general path); a Float64 column holding NaN keeps it too, since NaN's
+    place comes from the sort. None when not handled."""
+    var n = len(input)
+    var groups = 1
+    var partitioned = len(ids) > 0
+    if partitioned:
+        var id_ptr = ids.unsafe_ptr()
+        for i in range(n):
+            groups = max(groups, id_ptr[unsafe_offset=i] + 1)
+    if op == CUM_COUNT:
+        var valid = validity(input)
+        var flags = valid.unsafe_ptr()
+        var partition = ids.unsafe_ptr()
+        var state = List[Int64](length=groups, fill=0)
+        var out = List[Int64](length=n, fill=0)
+        var counts = state.unsafe_ptr()
+        var written = out.unsafe_ptr()
+        for step in range(n):
+            var i = n - 1 - step if reverse else step
+            var g = partition[unsafe_offset=i] if partitioned else 0
+            if flags[unsafe_offset=i]:
+                counts[unsafe_offset=g] += 1
+            written[unsafe_offset=i] = counts[unsafe_offset=g]
+        return Series("", Column[Int64](out^))
+    if input._data.isa[Column[Int64]]():
+        return _running_values[DType.int64](
+            op, input, input._data[Column[Int64]], ids, groups, reverse
+        )
+    if input._data.isa[Column[Float64]]():
+        ref column = input._data[Column[Float64]]
+        if op != CUM_SUM:
+            var values = column.unsafe_values()
+            var nulls = column.null_count() > 0
+            for i in range(n):
+                if isnan(values.unsafe_load(i)) and (
+                    not nulls or column._valid(i)
+                ):
+                    return None
+        return _running_values[DType.float64](
+            op, input, column, ids, groups, reverse
+        )
+    return None
+
+
+def _running_values[
+    D: DType
+](
+    op: Int,
+    input: Series,
+    column: Column[Scalar[D]],
+    ids: List[Int],
+    groups: Int,
+    reverse: Bool,
+) raises -> Series:
+    """`_running` over Int64 or Float64 values, through pointers. A column
+    without nulls reads no validity and writes none; with nulls, a null row
+    stays null and does not change its partition's running value."""
+    var n = len(column)
+    var values = column.unsafe_values()
+    var partitioned = len(ids) > 0
+    var partition = ids.unsafe_ptr()
+    var nulls = column.null_count() > 0
+    var state = List[Scalar[D]](length=groups, fill=Scalar[D](0))
+    var seen = List[Bool](length=groups, fill=False)
+    var out = List[Scalar[D]](length=n, fill=Scalar[D](0))
+    var running = state.unsafe_ptr()
+    var started = seen.unsafe_ptr()
+    var written = out.unsafe_ptr()
+    for step in range(n):
+        var i = n - 1 - step if reverse else step
+        if nulls and not column._valid(i):
+            continue
+        var g = partition[unsafe_offset=i] if partitioned else 0
+        var value = values.unsafe_load(i)
+        var current = running[unsafe_offset=g]
+        if op == CUM_SUM:
+            comptime if D == DType.int64:
+                current = rebind[Scalar[D]](
+                    checked_add(rebind[Int64](current), rebind[Int64](value))
+                )
+            else:
+                current += value
+        elif not started[unsafe_offset=g]:
+            current = value
+        elif op == CUM_MAX:
+            # Strictly greater, as the ranked path keeps the first of equal
+            # values (-0.0 and 0.0).
+            if value > current:
+                current = value
+        elif value < current:
+            current = value
+        started[unsafe_offset=g] = True
+        running[unsafe_offset=g] = current
+        written[unsafe_offset=i] = current
+    if nulls:
+        return Series("", Column[Scalar[D]](out^, validity(input)))
+    return Series("", Column[Scalar[D]](out^))
 
 
 def _decimal_cum_sum(
