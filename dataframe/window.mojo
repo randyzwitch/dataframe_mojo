@@ -7,6 +7,7 @@ every number and ties keep the earlier row.
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
+    split_names,
     Node,
     CUM_SUM,
     CUM_MIN,
@@ -468,8 +469,8 @@ def _bins(input: Series, groups: List[List[Int]], node: Node) raises -> Series:
             specs.append(parse_float64(String(part)))
     var custom = List[String]()
     if node.text2.byte_length() > 0:
-        for label in node.text2.split(SEP):
-            custom.append(String(label))
+        for label in split_names(node.text2):
+            custom.append(label)
     var left_closed = (node.integer & 1) != 0
     var allow_duplicates = (node.integer & 4) != 0
     for rows in groups:

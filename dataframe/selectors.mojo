@@ -2,6 +2,7 @@
 from std.collections import Optional
 from .dtype import DataType
 from .expr import (
+    split_names,
     COL,
     SELECT_ALL,
     SELECT_COLS,
@@ -19,9 +20,7 @@ def _split(text: String) -> List[String]:
     var out = List[String]()
     if text.byte_length() == 0:
         return out^
-    for part in text.split(SEP):
-        out.append(String(part))
-    return out^
+    return split_names(text)
 
 
 def _matches(
@@ -93,9 +92,9 @@ def expand(expression: Expr, columns: List[Series]) raises -> List[Expr]:
         result.append(expression.copy())
         return result^
     ref node = expression._nodes[selector]
-    var parts = node.text.split(SEP)
-    var prefix = String(parts[0])
-    var suffix = String(parts[1])
+    var parts = split_names(node.text)
+    var prefix = parts[0]
+    var suffix = parts[1]
     for name in _matches(
         node.min_count, node.text2, node.integer, node.dtypes, columns
     ):

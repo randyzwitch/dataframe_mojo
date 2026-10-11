@@ -10,7 +10,7 @@ column already owns its buffers outright.
 """
 from std.bit import pop_count
 from std.memory import ArcPointer, Pointer, unsafe_memcpy
-from std.sys.info import is_little_endian
+from std.sys import Endian
 
 
 struct Column[T: Copyable & Deinitable](Copyable, Sized):
@@ -32,7 +32,9 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
 
     def __init__(out self, var values: List[Self.T]):
         # Bitmaps are shared as little-endian bytes (Arrow layout).
-        comptime assert is_little_endian(), "dataframe requires little-endian"
+        comptime assert (
+            Endian.native() == Endian.little
+        ), "dataframe requires little-endian"
         self._length = len(values)
         self._offset = 0
         self._bits = ArcPointer(List[UInt8]())

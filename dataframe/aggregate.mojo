@@ -46,6 +46,7 @@ from .expr import (
     COV,
     VALUE_COUNTS,
     SEP,
+    split_names,
 )
 from .reductions import (
     CoMomentState,
@@ -1921,9 +1922,9 @@ struct Reducer(Movable):
         """Per group, a list of {value, count} structs: every distinct value
         (null last), ascending by value, or by count descending when sorted
         (ties by value)."""
-        var names = self.text.split(SEP)
-        var value_name = String(names[0])
-        var count_name = String(names[1])
+        var names = split_names(self.text)
+        var value_name = names[0]
+        var count_name = names[1]
         var by_count = (self.integer & 1) != 0
         var normalize = (self.integer & 2) != 0
         var n = self.group_count

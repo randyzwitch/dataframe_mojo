@@ -151,7 +151,9 @@ def check(
             for k in range(len(left_on)):
                 if left_on[k] == name:
                     key = k
-            var mixed = how == "right" or (how == "full" and coalesce)
+            # Coalesced keys of right and full joins take the right side's
+            # value where no left row matched; uncoalesced keys never do.
+            var mixed = (how == "right" or how == "full") and coalesce
             if key >= 0 and mixed and lr[r] < 0:
                 want = cell(right, rr[r], right_on[key], dtype)
             assert_true(actual.item(r, name) == want, msg=how + " " + name)
@@ -164,7 +166,8 @@ def check(
             var is_key = False
             for k in right_on:
                 is_key = is_key or k == name
-            if is_key and not (how == "full" and not coalesce):
+            # Right keys are output columns only without coalescing (#466).
+            if is_key and coalesce:
                 continue
             var want = cell(right, rr[r], name, right.dtypes()[c])
             assert_true(
@@ -240,6 +243,62 @@ def test_left_on_right_on_and_schemas() raises:
     assert_true(separate.item(4, "customer").is_null())
     assert_equal(separate.item(4, "id").int64(), Int64(3))
     assert_true(separate.item(3, "id").is_null())
+    # coalesce=False keeps the right key for inner, left and right joins
+    # too (#466): a left join's unmatched row has a null right key.
+    var kept_left = orders.join(
+        customers,
+        left_on=["customer"],
+        right_on=["id"],
+        how="left",
+        coalesce=False,
+    )
+    assert_equal(
+        kept_left.columns(),
+        [String("customer"), "amount", "id", "name", "amount_right"],
+    )
+    assert_equal(kept_left.height(), 4)
+    assert_equal(kept_left.item(1, "id").int64(), Int64(2))
+    assert_equal(kept_left.item(3, "customer").int64(), Int64(4))
+    assert_true(kept_left.item(3, "id").is_null())
+    var kept_inner = orders.join(
+        customers,
+        left_on=["customer"],
+        right_on=["id"],
+        coalesce=False,
+    )
+    assert_equal(kept_inner.columns(), kept_left.columns())
+    assert_equal(kept_inner.height(), 3)
+    for r in range(3):
+        assert_equal(
+            kept_inner.item(r, "id").int64(),
+            kept_inner.item(r, "customer").int64(),
+        )
+    var kept_right = orders.join(
+        customers,
+        left_on=["customer"],
+        right_on=["id"],
+        how="right",
+        coalesce=False,
+    )
+    assert_equal(kept_right.columns(), kept_left.columns())
+    assert_equal(kept_right.height(), 4)
+    # The unmatched right row: no left key, its own right key.
+    assert_true(kept_right.item(3, "customer").is_null())
+    assert_equal(kept_right.item(3, "id").int64(), Int64(3))
+    # Keys named alike: the right one takes the suffix.
+    var renamed = customers.rename({"id": "customer"})
+    var same = orders.join(renamed, on=["customer"], how="left", coalesce=False)
+    assert_equal(
+        same.columns(),
+        [
+            String("customer"),
+            "amount",
+            "customer_right",
+            "name",
+            "amount_right",
+        ],
+    )
+    assert_true(same.item(3, "customer_right").is_null())
     var semi = orders.join(
         customers, left_on=["customer"], right_on=["id"], how="semi"
     )
