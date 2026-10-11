@@ -71,6 +71,22 @@ enum DFMOp {
   // Unary membership: code[2] is the first literal payload index, code[3]
   // its count. Payload descriptors are LITERAL_INT with the operand dtype.
   DFM_INT_IS_IN = 172,
+  // Unary temporal fields; code[3]: date=0, datetime ms/us/ns=1/2/3,
+  // time (nanoseconds)=4. Both input and output have Int64 storage.
+  DFM_DT_YEAR = 130,
+  DFM_DT_MONTH = 131,
+  DFM_DT_DAY = 132,
+  DFM_DT_HOUR = 133,
+  DFM_DT_MINUTE = 134,
+  DFM_DT_SECOND = 135,
+  DFM_DT_NANOSECOND = 136,
+  DFM_DT_WEEKDAY = 137,
+  DFM_DT_ORDINAL_DAY = 138,
+  DFM_DT_DATE = 139,
+  DFM_DT_TIME = 140,
+  // Fixed interval truncation: code[2] is the positive step in storage
+  // ticks. Whole-week steps align to Monday; other steps to the epoch.
+  DFM_DT_TRUNCATE = 141,
   DFM_MIN = 80,
   DFM_MAX = 81,
   DFM_FIRST = 83,

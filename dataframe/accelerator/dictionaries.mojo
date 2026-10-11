@@ -21,6 +21,8 @@ from dataframe.expr import (
     subtree,
     STR_PAD,
     STR_REPLACE,
+    DT_STRPTIME,
+    STR_CONCAT,
 )
 from dataframe.binding import bind, ROWS
 from dataframe.frame import DataFrame
@@ -335,6 +337,20 @@ def encode_query(
 ) raises -> LazyFrame:
     """Stage ordered UInt32 codes while retaining the original plan structure."""
     var encoded = query.copy()
+    # Reject operations that still require text before replacing text operands
+    # with integer codes. Binding encoded text would otherwise report a bogus
+    # dtype error instead of the provider's actual capability boundary.
+    for operation in query._nodes:
+        for expression in operation.exprs:
+            for node in expression._nodes:
+                if (
+                    node.op == DT_STRPTIME
+                    or node.op == STR_CONCAT
+                    or is_string_op(node.op)
+                ):
+                    raise Error(
+                        "Metal unsupported [dictionary]: unlowered text operation"
+                    )
     for f in range(len(encoded._frames)):
         ref frame = encoded._frames[f]
         var columns = List[Series]()

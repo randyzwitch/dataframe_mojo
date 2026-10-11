@@ -21,9 +21,31 @@ from dataframe.lazy import (
     JOIN,
 )
 from dataframe.series import Series
+from dataframe.expr import is_reduction
 
 comptime DAG_ROWS = 0
 comptime DAG_JOIN = 1
+
+
+def _scalar_reduction(query: LazyFrame, index: Int) -> Bool:
+    ref operation = query._nodes[index]
+    if operation.kind != SELECT:
+        return False
+    for expression in operation.exprs:
+        if len(expression._nodes) and is_reduction(
+            expression._nodes[len(expression._nodes) - 1].op
+        ):
+            return True
+    return False
+
+
+def has_scalar_consumers(query: LazyFrame) -> Bool:
+    for operation in query._nodes:
+        if operation.left >= 0 and _scalar_reduction(query, operation.left):
+            return True
+        if operation.right >= 0 and _scalar_reduction(query, operation.right):
+            return True
+    return False
 
 
 @fieldwise_init
@@ -269,12 +291,25 @@ def _task(
         query._nodes[cursor].kind != SCAN_FRAME
         and query._nodes[cursor].kind != JOIN
         and (cursor == root or query._nodes[cursor].kind != SLICE)
+        and (
+            cursor == root
+            or not capabilities.scalar_regions
+            or not _scalar_reduction(query, cursor)
+        )
     ):
         chain.append(cursor)
         cursor = query._nodes[cursor].left
     var source = -1
     var frame: DataFrame
-    if query._nodes[cursor].kind == JOIN or query._nodes[cursor].kind == SLICE:
+    if (
+        query._nodes[cursor].kind == JOIN
+        or query._nodes[cursor].kind == SLICE
+        or (
+            capabilities.scalar_regions
+            and _scalar_reduction(query, cursor)
+            and cursor != root
+        )
+    ):
         source = _task(query, cursor, False, capabilities, tasks)
         frame = tasks[source].schema.copy()
     else:

@@ -22,6 +22,18 @@ from .parallel import configured_workers
 from .json_value import JsonValue
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.sets import has_set_operations, lower_set_operations
+from .accelerator.constants import (
+    has_literal_text_parsing,
+    fold_literal_text_parsing,
+)
+from .accelerator.distinct_counts import (
+    has_distinct_counts,
+    lower_distinct_counts,
+)
+from .accelerator.aggregates import (
+    has_aggregate_compositions,
+    lower_aggregate_compositions,
+)
 from .accelerator.dictionaries import (
     DictionaryCodes,
     has_dictionary_columns,
@@ -37,6 +49,7 @@ from .accelerator.joins import (
     DAG_ROWS,
     DAG_JOIN,
     has_join,
+    has_scalar_consumers,
     lower_join_dag,
 )
 from .arrow import _c_string, _read_c_string
@@ -45,6 +58,9 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .execution_report import ExecutionReport
 from .expr import (
     COL,
+    DT_YEAR,
+    DT_TIME,
+    DT_TRUNCATE,
     FLOORDIV,
     MOD,
     POW,
@@ -306,6 +322,8 @@ def _capabilities() -> RowCapabilities:
         grouped=True,
         extra_reductions=True,
         slices=True,
+        scalar_regions=True,
+        temporal_fields=True,
     )
 
 
@@ -336,6 +354,8 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if op >= DT_YEAR and op <= DT_TRUNCATE:
+        return Int64(130 + op - DT_YEAR)
     if op == INT_IS_IN:
         return 172
     if (
@@ -1407,6 +1427,52 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
         var start = Int(perf_counter_ns())
+        if has_literal_text_parsing(query):
+            var executed = self._run(
+                fold_literal_text_parsing(query), profiling
+            )
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
+        if has_aggregate_compositions(query):
+            var executed = self._run(
+                lower_aggregate_compositions(query), profiling
+            )
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
+        if has_distinct_counts(query):
+            var executed = self._run(lower_distinct_counts(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
         if has_set_operations(query):
             var executed = self._run(lower_set_operations(query), profiling)
             var report = executed[1].with_column(
@@ -1516,17 +1582,28 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (result^, report^)
-        if has_join(query):
+        if has_join(query) or has_scalar_consumers(query):
             var dag = lower_join_dag(query, _capabilities())
-            if dag.joins:
-                return _execute_join_dag(
-                    dag, self._device, self._budget, profiling, start
-                )
+            return _execute_join_dag(
+                dag, self._device, self._budget, profiling, start
+            )
         var plan = lower_rows(query, _capabilities())
         return _execute(plan, self._device, self._budget, profiling, start)
 
     def describe(self, query: LazyFrame) -> String:
         try:
+            if has_literal_text_parsing(query):
+                return "Metal literal text parsing; " + self.describe(
+                    fold_literal_text_parsing(query)
+                )
+            if has_aggregate_compositions(query):
+                return "Metal resident aggregate expressions; " + self.describe(
+                    lower_aggregate_compositions(query)
+                )
+            if has_distinct_counts(query):
+                return "Metal resident distinct counts; " + self.describe(
+                    lower_distinct_counts(query)
+                )
             if has_set_operations(query):
                 return "Metal resident set operations; " + self.describe(
                     lower_set_operations(query)
@@ -1543,14 +1620,16 @@ struct MetalRuntime(AcceleratorBackend):
                 return "Metal ordered dictionary staging; " + self.describe(
                     encoded
                 )
-            if has_join(query):
+            if has_join(query) or has_scalar_consumers(query):
                 var dag = lower_join_dag(query, _capabilities())
                 return (
-                    "ENGINE accel: Metal native joins; "
+                    (
+                        "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
+                    )
                     + String(dag.joins)
                     + " joins, "
                     + String(len(dag.tasks))
-                    + " resident regions; joins use two synchronizations and only the final result materializes CPU columns; optional runtime "
+                    + " resident regions; only the final result materializes CPU columns; optional runtime "
                     + ("present" if metal_installed() else "missing")
                     + "\n"
                 )
