@@ -74,6 +74,24 @@ def run[
             or not actual.sort(actual.columns()).equals(canonical)
         ):
             print("coverage\t" + name + "\twrong_answer\tfull result differs")
+            print("expected_rows\t" + String(expected.height()))
+            print("actual_rows\t" + String(actual.height()))
+            print(
+                "expected_sample\n"
+                + expected.to_string(max_rows=20, max_columns=64)
+            )
+            print(
+                "actual_sample\n"
+                + actual.to_string(max_rows=20, max_columns=64)
+            )
+            # Repeating the original CPU query helps diagnose unspecified
+            # limit/tie choices without relaxing the full-result comparison.
+            var repeated = reference(name, tables)
+            print("cpu_repeat_equal\t" + String(repeated.equals(expected)))
+            print(
+                "cpu_repeat_sample\n"
+                + repeated.to_string(max_rows=20, max_columns=64)
+            )
             return
     print("coverage\t" + name + "\tok\t")
     print("ordered_equal\t" + String(ordered_equal))
