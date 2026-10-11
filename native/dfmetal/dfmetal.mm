@@ -468,7 +468,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
           c[0] != DFM_ADD && c[0] != DFM_SUB && c[0] != DFM_MUL &&
           c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_CAST &&
-          c[0] != DFM_FLOOR && c[0] != DFM_CEIL && !(c[0] == DFM_ROUND && c[3] == 0) &&
+          c[0] != DFM_FLOOR && c[0] != DFM_CEIL && c[0] != DFM_ROUND &&
           c[0] != DFM_NEG && c[0] != DFM_ABS &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE &&
           c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
@@ -490,8 +490,13 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if ((c[0] == DFM_FLOORDIV || c[0] == DFM_MOD || c[0] == DFM_POW) &&
           operand == DFM_FLOAT32)
         fail("Metal floating operator requires CPU execution");
-      if (c[0] == DFM_ROUND && operand == DFM_FLOAT32 && c[3] != 0)
-        fail("Metal Float32 decimal rounding requires CPU execution");
+      if (c[0] == DFM_ROUND && c[3] != 0 &&
+          (operand == DFM_FLOAT32 || operand == DFM_FLOAT64_STORAGE) && !typed(r))
+        fail("Metal floating decimal rounding requires typed descriptors");
+      if (c[0] == DFM_ROUND && c[3] != 0 &&
+          (operand == DFM_FLOAT32 || operand == DFM_FLOAT64_STORAGE) &&
+          r.literals[v.start+j] > 0x7ff0000000000000UL)
+        fail("Invalid Metal floating rounding scale");
       if (nodeType(r, v.start + j) != DFM_FLOAT32 &&
           nodeType(r, v.start + j) != DFM_FLOAT64_STORAGE && c[0] == DFM_LITERAL_FLOAT)
         fail("Floating literal requires native Float32 storage");
@@ -1540,7 +1545,9 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
             else if (op == DFM_NEG) expression = "(" + a + "^0x8000000000000000UL)";
             else if (op == DFM_ABS) expression = "f64_abs(" + a + ")";
             else if (op == DFM_FLOOR || op == DFM_CEIL) expression = "f64_integral(" + a + "," + std::to_string(op) + ")";
-            else if (op == DFM_ROUND) expression = "f64_round(" + a + ")";
+            else if (op == DFM_ROUND)
+              expression = c[3] == 0 ? "f64_round(" + a + ")"
+                  : "f64_decimal_round(" + a + ",lit[" + std::to_string(s.start+j) + "]," + (c[3] < 0 ? "true" : "false") + ")";
             else if (op == DFM_FLOORDIV) expression = "f64_integral(f64_div(" + a + "," + b + "),55)";
             else if (op == DFM_IS_NAN) expression = "f64_nan(" + a + ")";
             else if (op == DFM_IS_NOT_NAN) expression = "!f64_nan(" + a + ")";
@@ -1601,6 +1608,11 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                         : op == DFM_IS_FINITE  ? bits + "<0x7f800000U"
                                                : bits + "==0x7f800000U";
             text += z + "=uchar(" + test + ");";
+          } else if (op == DFM_ROUND && operandType == DFM_FLOAT32) {
+            auto wide = "f64_from_float32(as_type<uint>(" + a + "))";
+            auto rounded = c[3] == 0 ? "f64_round(" + wide + ")"
+                : "f64_decimal_round(" + wide + ",lit[" + std::to_string(s.start+j) + "]," + (c[3] < 0 ? "true" : "false") + ")";
+            text += z + "=as_type<float>(f64_to_float32(" + rounded + "));";
           } else if (op == DFM_FLOOR || op == DFM_CEIL || op == DFM_ROUND) {
             text += z + "=" +
                     (dtype == DFM_FLOAT32 ? "float_integral(" + a + "," +
@@ -1978,6 +1990,11 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     memcpy(&floating, r.literals + i, 8);
     auto op = r.code[4 * i];
     auto dtype = nodeType(r, i);
+    if (op == DFM_ROUND && r.code[4*i+3] != 0 &&
+        (dtype == DFM_FLOAT32 || dtype == DFM_FLOAT64_STORAGE)) {
+      memcpy(static_cast<char *>(literal.contents) + i * 8, r.literals + i, 8);
+      continue;
+    }
     if (op == DFM_GROUP_OUTPUT) {
       memcpy(static_cast<char *>(literal.contents) + i * 8, &integer, 8);
       continue;

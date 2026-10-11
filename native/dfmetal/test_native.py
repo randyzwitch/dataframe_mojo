@@ -1611,7 +1611,7 @@ def test_additional_row_ops():
                     )
                 )
                 if expected == 0:
-                    expected = math.copysign(0.0, x)
+                    expected = math.copysign(0.0, x) if op != 57 or x != 0 else 0.0
                 expected = f32(expected)
             assert C.string_at(C.byref(C.c_float(y)), 4) == C.string_at(
                 C.byref(C.c_float(expected)), 4
@@ -2845,15 +2845,18 @@ def test_opaque_float64_storage_and_rejection():
     assert unpack(validity[1], n) == [True] * n
     assert list(literal) == [0x8000000000000001] * n
     assert unpack(validity[2], n) == [True] * n
-    # Decimal rounding still needs additional lowering. Reject before device
-    # submission, rather than treating Float64 words as integer values.
+    # Nonzero floating rounding carries the exact bound Float64 scale.
+    # Malformed scale encodings reject before submission.
     code[8:12] = [57, 0, -1, 2]
     nt[2] = 11
     st[2] = 11
     outputs[1].dtype = 11
     memory, err = Memory(), P()
+    literals[2] = C.cast(C.pointer(C.c_double(100)), C.POINTER(C.c_uint64))[0]
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    literals[2] = 0xBFF0000000000000
     assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
-    assert b"Float64 requires CPU execution" in C.string_at(err)
+    assert b"Invalid Metal floating rounding scale" in C.string_at(err)
     lib.dfm_free(err)
 
 
