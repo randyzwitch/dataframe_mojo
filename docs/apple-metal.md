@@ -124,6 +124,19 @@ execution. Decimal sums retain the CPU contract of Decimal128 accumulation
 and require CPU execution; Decimal128 storage is not yet supported by this
 row backend.
 
+Native Int64 kernels extract year, month, day, hour, minute, second,
+nanosecond, ISO weekday and ordinal day from dates, naive datetimes and times
+where the CPU API permits each field. Datetime date/time extraction preserves
+the output logical dtype. All ms/us/ns datetime units, negative instants and
+nulls retain CPU semantics. Fixed-interval truncation supports storage-aligned
+positive intervals, including Monday-aligned whole weeks. Month/year truncation,
+zone-aware temporal operations, offsets and logical arithmetic/casts remain
+unsupported. Source-independent
+literal `strptime` expressions are folded before dictionary encoding, with
+the parsed temporal dtype retained. Row-valued parsing and binary String
+concatenation reject before encoding, rather than binding text operations to
+integer dictionary codes.
+
 Grouped aggregation supports multiple keys with minimum, maximum, count,
 length, first, last, null count, arg-min/arg-max, Boolean any/all, and the
 supported integer sums. Null keys form a group; Float32 NaNs
@@ -140,6 +153,21 @@ Each group reduction uses a 256-thread workgroup; GPU-produced dispatch
 arguments schedule only the observed groups. Preflight includes these arguments
 and all temporary slots. Grouping requires at least one key, matching the CPU
 API.
+
+Expressions combining supported aggregate results are decomposed into native
+aggregate leaves and a resident projection. This includes grouped and global
+counts, extrema, supported sums, null counts and conditional expressions.
+Global reductions can feed later row regions without CPU materialization.
+Checked sums in child regions and checked arithmetic followed by head retain
+their existing rejection boundaries. Selectors, windows and unsupported
+aggregate leaves remain unsupported.
+
+A single `n_unique()` aggregate in a select or grouped aggregation runs as
+resident deduplication followed by row counting. Null contributes one distinct
+category, matching CPU semantics; empty global input returns zero. Numeric and
+dictionary-backed text values, later aggregate expressions and prior joins
+are supported. Multiple distinct counts or other aggregate siblings in the
+same operation still require additional lowering and remain unsupported.
 
 Minimum and maximum preserve the input dtype, ignore nulls, and return null
 for empty or all-null inputs. NaNs order above numeric values, so maximum
@@ -321,6 +349,10 @@ pixi run mojo run -I . tests/test_metal_slices.mojo
 pixi run mojo run -I . tests/test_metal_concat.mojo
 pixi run mojo run -I . tests/test_metal_float64_storage.mojo
 pixi run mojo run -I . tests/test_metal_bounded_sums.mojo
+pixi run mojo run -I . tests/test_metal_constants.mojo
+pixi run mojo run -I . tests/test_metal_aggregate_compositions.mojo
+pixi run mojo run -I . tests/test_metal_distinct_counts.mojo
+pixi run mojo run -I . tests/test_metal_temporal_fields.mojo
 ```
 
 The unchanged external-suite query expressions can be checked with Metal

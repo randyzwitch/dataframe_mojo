@@ -45,7 +45,7 @@ bool binaryOp(int64_t op) {
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+  return (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
          op == DFM_CEIL || op == DFM_ROUND ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
@@ -458,6 +458,14 @@ Shape validate(const DFMRequest &r, bool storage = false,
                          ? nodeType(r, v.start + c[1])
                          : nodeType(r, v.start + j);
       auto resultType = nodeType(r, v.start + j);
+      if (c[0] >= DFM_DT_YEAR && c[0] <= DFM_DT_TRUNCATE) {
+        if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
+            (c[0] == DFM_DT_TRUNCATE ? c[2] <= 0 : c[2] != -1) || c[3] < 0 || c[3] > 4 ||
+            (c[3] == 4 && c[0] <= DFM_DT_DAY) ||
+            (c[3] == 0 && c[0] >= DFM_DT_HOUR && c[0] <= DFM_DT_NANOSECOND) ||
+            ((c[0] == DFM_DT_DATE || c[0] == DFM_DT_TIME) && (c[3] == 0 || c[3] == 4)))
+          fail("Invalid Metal temporal field descriptor");
+      }
       if ((operand == DFM_FLOAT64_STORAGE || resultType == DFM_FLOAT64_STORAGE) &&
           c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_FLOAT && c[0] != DFM_LITERAL_NULL &&
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL && c[0] != DFM_FILL_NULL &&
@@ -1491,7 +1499,46 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           bool unary = unaryOp(op);
           text += valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid +
                   "){";
-          if (op >= DFM_IS_NAN && op <= DFM_IS_INFINITE) {
+          if (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) {
+            const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
+            const int64_t dayTicks = c[3] == 0 ? 1 : perSecond * 86400;
+            const auto perDay = std::to_string(dayTicks) + "L";
+            const auto second = std::to_string(perSecond) + "L";
+            if (c[3] == 0)
+              text += "long days=" + a + ";";
+            else
+              text += "long days=" + a + "/" + perDay + ";if(" + a + "%" + perDay + "<0)--days;";
+            if (op == DFM_DT_TRUNCATE) {
+              const int64_t origin = c[2] % (7 * dayTicks) == 0 ? 4 * dayTicks : 0;
+              const auto step = std::to_string(c[2]);
+              text += "long shifted=as_type<long>(as_type<ulong>(" + a + ")-" + std::to_string(origin) + "UL);long quotient=shifted/" + step + "L;if(shifted%" + step + "L<0)--quotient;" + z + "=as_type<long>(as_type<ulong>(quotient)*" + step + "UL+" + std::to_string(origin) + "UL);";
+            } else if (op == DFM_DT_DATE)
+              text += z + "=days;";
+            else if (op == DFM_DT_WEEKDAY) {
+              // Explicit unsigned wrapping matches the CPU calendar's Int64
+              // addition even at the extremes of stored date values.
+              text += "long wd=as_type<long>(as_type<ulong>(days)+3UL)%7L;if(wd<0)wd+=7L;" + z + "=wd+1L;";
+            } else if ((op >= DFM_DT_HOUR && op <= DFM_DT_NANOSECOND) || op == DFM_DT_TIME) {
+              text += "long within=" + a + "%" + perDay + ";if(within<0)within+=" + perDay + ";long seconds=within/" + second + ";";
+              if (op == DFM_DT_HOUR) text += z + "=seconds/3600L;";
+              else if (op == DFM_DT_MINUTE) text += z + "=(seconds/60L)%60L;";
+              else if (op == DFM_DT_SECOND) text += z + "=seconds%60L;";
+              else if (op == DFM_DT_TIME) text += z + "=within*" + std::to_string(1000000000 / perSecond) + "L;";
+              else text += z + "=(within%" + second + ")*" + std::to_string(1000000000 / perSecond) + "L;";
+            } else if (op == DFM_DT_ORDINAL_DAY && c[3] == 4) {
+              text += z + "=days+1L;";
+            } else {
+              text += "long shifted=as_type<long>(as_type<ulong>(days)+719468UL);long era=shifted/146097L;if(shifted%146097L<0)--era;"
+                      "long doe=as_type<long>(as_type<ulong>(shifted)-as_type<ulong>(era)*146097UL);"
+                      "long yoe=(doe-doe/1460L+doe/36524L-doe/146096L)/365L;"
+                      "long doy=doe-(365L*yoe+yoe/4L-yoe/100L);long mp=(5L*doy+2L)/153L;"
+                      "long day=doy-(153L*mp+2L)/5L+1L;long month=mp<10L?mp+3L:mp-9L;long year=yoe+era*400L+(month<=2L?1L:0L);";
+              if (op == DFM_DT_YEAR) text += z + "=year;";
+              else if (op == DFM_DT_MONTH) text += z + "=month;";
+              else if (op == DFM_DT_DAY) text += z + "=day;";
+              else text += "bool leap=(year%4L==0L&&year%100L!=0L)||year%400L==0L;" + z + "=(367L*month-362L)/12L+day-(month<=2L?0L:leap?1L:2L);";
+            }
+          } else if (op >= DFM_IS_NAN && op <= DFM_IS_INFINITE) {
             auto bits = "(as_type<uint>(" + a + ")&0x7fffffffU)";
             auto test = op == DFM_IS_NAN       ? bits + ">0x7f800000U"
                         : op == DFM_IS_NOT_NAN ? bits + "<=0x7f800000U"

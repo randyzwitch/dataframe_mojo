@@ -137,11 +137,18 @@ def _numeric_literal(node: Node) raises -> Series:
     var dtype = node.dtypes[0].value()
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
-        if dtype == DataType.of(D):
+        if dtype == DataType.of(D) or (
+            dtype.is_temporal() and dtype.physical() == DataType.of(D)
+        ):
             comptime if D.is_floating_point():
                 return Series("", Column[Scalar[D]]([node.floating.cast[D]()]))
             else:
-                return Series("", Column[Scalar[D]]([node.integer.cast[D]()]))
+                var result = Series(
+                    "", Column[Scalar[D]]([node.integer.cast[D]()])
+                )
+                if dtype.is_temporal():
+                    return result.with_dtype(dtype)
+                return result^
     raise Error("Unsupported literal dtype " + node.text)
 
 

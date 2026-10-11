@@ -63,8 +63,12 @@ from dataframe.expr import (
     NULL_COUNT,
     ARG_MIN,
     ARG_MAX,
+    DT_YEAR,
+    DT_TIME,
+    DT_TRUNCATE,
 )
 from dataframe.frame import DataFrame
+from dataframe.temporal import parse_every, NANOS_PER_DAY
 from dataframe.lazy import (
     LazyFrame,
     SCAN_FRAME,
@@ -162,6 +166,11 @@ def _program(
             )
         if not (
             op == COL
+            or (
+                capabilities.temporal_fields
+                and op >= DT_YEAR
+                and op <= DT_TRUNCATE
+            )
             or (op == INT_IS_IN and capabilities.extended_integers)
             or (
                 capabilities.row_extras
@@ -216,6 +225,15 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
+        var temporal = op >= DT_YEAR and op <= DT_TRUNCATE
+        if (
+            temporal
+            and left_type.is_datetime()
+            and left_type.time_zone().byte_length()
+        ):
+            capabilities.reject(
+                "temporal", "time zone field extraction requires CPU execution"
+            )
         if (
             not capabilities.float64
             and (
@@ -323,10 +341,33 @@ def _program(
             Int(node.integer) if op == CAST
             or op == ROUND else (node.extra if op == WHEN else -1)
         )
+        if temporal:
+            source = 0 if left_type.is_date() else (
+                4 if left_type.is_time() else (
+                    1 if left_type.per_second()
+                    == 1000 else (2 if left_type.per_second() == 1000000 else 3)
+                )
+            )
+        var right = Int64(node.right)
+        if op == DT_TRUNCATE:
+            var interval = parse_every(node.text)
+            var per_tick = NANOS_PER_DAY if left_type.is_date() else (
+                Int64(1000000000) // left_type.per_second()
+            )
+            if (
+                interval[0] != 0
+                or interval[1] <= 0
+                or interval[1] % per_tick != 0
+            ):
+                capabilities.reject(
+                    "temporal",
+                    "truncate requires a positive fixed interval aligned to the storage unit",
+                )
+            right = interval[1] // per_tick
         node_dtypes.append(bound.dtypes[i])
         code.append(Int64(op))
         code.append(Int64(node.left))
-        code.append(Int64(node.right))
+        code.append(right)
         code.append(Int64(source))
         # Integer payloads travel as raw 64-bit words, never through a float
         # conversion (Int64 literals beyond 2**53 must remain exact).

@@ -516,7 +516,8 @@ def execute(
     limit=-1,
     budget=-1,
     expect_error=None,
-    repeats=1
+    repeats=1,
+    typed=False,
 ):
     scalar = SCALARS[dtype]
     n = len(values)
@@ -594,6 +595,13 @@ def execute(
         ptr(gather_array),
         ptr(outputs),
     )
+    if typed:
+        assert not filter_nodes and not output_bool
+        node_types = (I * len(programs))(*([dtype] * len(programs)))
+        slot_types = (I * (slot + 1))(*([dtype] * (slot + 1)))
+        request.dtype = 0
+        request.node_types = ptr(node_types)
+        request.slot_types = ptr(slot_types)
     memory = Memory()
     err = P()
     status = lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
@@ -2885,6 +2893,66 @@ def test_bounded_wide_sums():
 
 
 test_bounded_wide_sums()
+
+
+def test_temporal_fields():
+    import datetime as dt
+    epoch = dt.date(1970, 1, 1)
+    dates = [dt.date(1, 1, 1), dt.date(1600, 2, 29), dt.date(1900, 3, 1),
+             dt.date(1969, 12, 31), epoch, dt.date(2000, 2, 29),
+             dt.date(2000, 3, 1), dt.date(2024, 12, 31), dt.date(9999, 12, 31)]
+    days = [(d - epoch).days for d in dates] * 29
+    valid = [i % 7 != 1 for i in range(len(days))]
+    for op, expected in [(130, [d.year for d in dates]),
+                         (131, [d.month for d in dates]),
+                         (132, [d.day for d in dates]),
+                         (137, [d.isoweekday() for d in dates]),
+                         (138, [d.timetuple().tm_yday for d in dates])]:
+        result, bitmap, _ = execute(days, 3, [col, (op, 0, -1, 0)], [0, 0],
+                                    valid=valid, offset=5, typed=True)
+        assert bitmap == valid
+        assert all(not ok or got == want for got, want, ok in zip(result, expected * 29, valid)), (op, result, expected)
+    for kind, second in [(1, 1000), (2, 1000000), (3, 1000000000), (4, 1000000000)]:
+        day = second * 86400
+        values = [-(1 << 63), -day-1, -day, -second-1, -second, -1, 0, 1,
+                  second-1, second, day-1, day, day+1, (1 << 63)-1] * 19
+        for op in (133, 134, 135, 136, 137, 139, 140):
+            if kind == 4 and op in (139, 140):
+                continue
+            expected = []
+            for x in values:
+                within = x % day
+                seconds = within // second
+                expected.append({133: seconds // 3600, 134: seconds // 60 % 60,
+                                 135: seconds % 60, 136: within % second * (1000000000 // second),
+                                 137: ((x // day + 3) % 7) + 1, 139: x // day,
+                                 140: within * (1000000000 // second)}[op])
+            result, bitmap, _ = execute(values, 3, [col, (op, 0, -1, kind)], [0, 0], typed=True)
+            assert all(bitmap) and result == expected, (kind, op, result, expected)
+    execute([0], 3, [col, (134, 0, -1, 9)], [0, 0], typed=True, expect_error="temporal field descriptor")
+    execute([0], 2, [col, (134, 0, -1, 1)], [0, 0], typed=True, expect_error="temporal field descriptor")
+    execute([0], 3, [col, (134, 0, -1, 1)], [0, 0], expect_error="temporal field descriptor")
+
+
+test_temporal_fields()
+
+
+def test_temporal_truncate():
+    def i64(x):
+        return C.c_int64(x).value
+    for kind, second in [(0, 1), (1, 1000), (2, 1000000), (3, 1000000000), (4, 1000000000)]:
+        day = 1 if kind == 0 else 86400 * second
+        values = [-(1 << 63), -8 * day - 1, -7 * day, -4 * day, -1, 0, 1,
+                  4 * day, 7 * day, 8 * day + 1, (1 << 63) - 1] * 25
+        for step in [1, 3 * day, 7 * day, 14 * day]:
+            origin = 4 * day if step % (7 * day) == 0 else 0
+            expected = [i64((i64(x - origin) // step) * step + origin) for x in values]
+            result, bitmap, _ = execute(values, 3, [col, (141, 0, step, kind)], [0, 0], typed=True)
+            assert all(bitmap) and result == expected, (kind, step, result, expected)
+    execute([0], 3, [col, (141, 0, 0, 1)], [0, 0], typed=True, expect_error="temporal field descriptor")
+
+
+test_temporal_truncate()
 
 lib.dfm_context_release(ctx)
 print(
