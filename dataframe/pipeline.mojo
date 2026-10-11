@@ -13,6 +13,7 @@ reads it, once, and the gathered column replaces the shared one. DuckDB
 slices a chunk into dictionary vectors the same way.
 """
 from std.atomic import Atomic
+from std.os import getenv
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
@@ -59,6 +60,8 @@ from .huge_pages import huge_list
 from .mask_filter import filter_columns
 from .parallel import Job, run_jobs
 from .series import Series
+from .hashing import encode_rows
+from .string_column import StringColumn
 from .trace import trace_path
 
 # Step kinds, the row-local plan nodes a pipeline runs between its source
@@ -78,6 +81,27 @@ comptime _PART_BITS = 4
 # 2^_PART_BITS parts: a few groups (ClickBench q7's eight) pay nothing
 # per part and morsel, many fit the parts' tables in cache.
 comptime _SPLIT_GROUPS = 4096
+# A worker's hash part holding more groups than this is flushed: its table
+# is set aside whole for the combine and a fresh one takes its place, so
+# the tables rows are inserted into stay cache-sized however many groups
+# there are (DuckDB's radix-partitioned sink abandons a full thread-local
+# table the same way). The combine merges every flushed table of a part.
+comptime _FLUSH_GROUPS = 4096
+
+
+def _flush_groups() -> Int:
+    """`_FLUSH_GROUPS`, or DATAFRAME_PIPELINE_FLUSH_GROUPS when set, which
+    also lowers `_SPLIT_GROUPS` to it, so tests can split and flush tables
+    on small inputs."""
+    var setting = getenv("DATAFRAME_PIPELINE_FLUSH_GROUPS")
+    if setting.byte_length() > 0:
+        try:
+            return max(1, Int(setting))
+        except:
+            pass
+    return _FLUSH_GROUPS
+
+
 # The column a top-k sink adds to its candidates: the row's place in the
 # source's order (morsel sequence, then row within the morsel's output),
 # the last sort key, so ties come out as a stable sort of the whole input
@@ -660,20 +684,50 @@ struct _PartIndex(Movable):
     words: an open-addressing slot table of ids, each group's hash and
     words stored once. A probe compares the hash, then the words through
     pointers; no key is hashed again and nothing is bounds-checked per
-    row. `_KeyIndex` served the same purpose at 100 to 180 ns a probe."""
+    row. `_KeyIndex` served the same purpose at 100 to 180 ns a probe.
+
+    A String key's words are its length and either its bytes (up to 8,
+    exact) or a hash of all of them; for a longer one, equal words are
+    compared once more on the bytes, which the index finds by address in
+    the part's stored key frames, as DuckDB's aggregate table points into
+    its string heap."""
 
     var slots: List[Int32]
     var hashes: List[UInt64]
     var words: List[List[Int]]
     var count: Int
+    # Per String key, each group's byte address and length.
+    var addresses: List[List[Int]]
+    var lengths: List[List[Int]]
 
-    def __init__(out self, width: Int):
+    def __init__(out self, width: Int, strings: Int):
         self.slots = huge_list(1024, Int32(-1))
         self.hashes = List[UInt64]()
         self.words = List[List[Int]](capacity=width)
         for _ in range(width):
             self.words.append(List[Int]())
         self.count = 0
+        self.addresses = List[List[Int]](capacity=strings)
+        self.lengths = List[List[Int]](capacity=strings)
+        for _ in range(strings):
+            self.addresses.append(List[Int]())
+            self.lengths.append(List[Int]())
+
+    def reserve(mut self, groups: Int):
+        """Room for `groups` in all without growing: the slot table at
+        twice that, rehashed once, and the per-group lists."""
+        var capacity = len(self.slots)
+        while capacity < 2 * groups:
+            capacity *= 2
+        if capacity > len(self.slots):
+            self.slots = huge_list(capacity // 2, Int32(-1))
+            self._grow()
+        self.hashes.reserve(groups)
+        for w in range(len(self.words)):
+            self.words[w].reserve(groups)
+        for k in range(len(self.addresses)):
+            self.addresses[k].reserve(groups)
+            self.lengths[k].reserve(groups)
 
     def _grow(mut self):
         var capacity = 2 * len(self.slots)
@@ -689,10 +743,18 @@ struct _PartIndex(Movable):
 
     @always_inline
     def find_or_insert(
-        mut self, hash: UInt64, ptrs: List[Int], width: Int, row: Int
+        mut self,
+        hash: UInt64,
+        ptrs: List[Int],
+        width: Int,
+        row: Int,
+        addresses: List[Int],
+        lengths: List[Int],
     ) -> Int:
         """The id of the key at `row` of the word buffers `ptrs`, added as
-        the next id if new; True in the second value when added."""
+        the next id if new. String keys add `addresses` and `lengths`: per
+        String key, the address of a buffer of each row's byte address,
+        and of one of its byte length (-1 null)."""
         if 2 * (self.count + 1) > len(self.slots):
             self._grow()
         var table = self.slots.unsafe_ptr()
@@ -710,6 +772,17 @@ struct _PartIndex(Movable):
                             unsafe_offset=row
                         ]
                     )
+                for k in range(len(addresses)):
+                    self.addresses[k].append(
+                        Pointer[Int, MutAnyOrigin](
+                            unsafe_from_address=addresses[k]
+                        )[unsafe_offset=row]
+                    )
+                    self.lengths[k].append(
+                        Pointer[Int, MutAnyOrigin](
+                            unsafe_from_address=lengths[k]
+                        )[unsafe_offset=row]
+                    )
                 self.count += 1
                 return self.count - 1
             if hashes[unsafe_offset=id] == hash:
@@ -722,9 +795,155 @@ struct _PartIndex(Movable):
                     if stored != mine:
                         same = False
                         break
+                if same and len(addresses) > 0:
+                    same = self._same_bytes(id, row, addresses)
                 if same:
                     return id
             slot = (slot + 1) & mask
+
+    def _same_bytes(self, id: Int, row: Int, addresses: List[Int]) -> Bool:
+        """Whether the strings longer than their word (the words, lengths
+        included, are equal) have the same bytes."""
+        for k in range(len(addresses)):
+            var length = self.lengths[k][id]
+            if length <= 8:
+                continue
+            var mine = Pointer[Int, MutAnyOrigin](
+                unsafe_from_address=addresses[k]
+            )[unsafe_offset=row]
+            var compared = external_call["memcmp", Int32](
+                self.addresses[k][id], mine, length
+            )
+            if compared != 0:
+                return False
+        return True
+
+    def point(mut self, first: Int, keys: DataFrame, positions: List[Int]):
+        """Point the groups from id `first` on, one per row of `keys` (the
+        part's stored frame they were taken into), at their bytes there:
+        the morsel or table they were found in goes away."""
+        for k in range(len(positions)):
+            _string_addresses(
+                keys._columns[positions[k]],
+                Pointer[Int, MutAnyOrigin](
+                    unsafe_from_address=Int(self.addresses[k].unsafe_ptr())
+                    + 8 * first
+                ),
+            )
+
+
+def _string_addresses(column: Series, target: Pointer[Int, MutAnyOrigin]):
+    """Each row's byte address, the column's buffers found once (as
+    `_string_words` does)."""
+    ref strings = column._data[StringColumn]
+    var n = len(strings)
+    if strings._is_view_storage():
+        ref views = strings._view_storage.value()
+        for i in range(n):
+            target[unsafe_offset=i] = Int(
+                views._get_unchecked(strings._offset + i)
+                .as_bytes()
+                .unsafe_ptr()
+            )
+        return
+    var offsets = strings._offsets[].unsafe_ptr().unsafe_offset(strings._offset)
+    var base = strings._base()
+    for i in range(n):
+        target[unsafe_offset=i] = Int(
+            base.unsafe_offset(Int(offsets[unsafe_offset=i]))
+        )
+
+
+def _string_words(
+    column: Series,
+    mut addresses: List[Int],
+    mut lengths: List[Int],
+    mut values: List[Int],
+):
+    """A String key's words for each row: its byte length (-1 null) and
+    its bytes when they fit a word, else a hash of all of them; with each
+    row's byte address for the index's comparison. The column's buffers
+    are found once: a row read through `_row_bytes` copied the column's
+    view storage, reference counts included, every row (PDS-H q1's two
+    flags: 142 ms against 60)."""
+    ref strings = column._data[StringColumn]
+    var n = len(strings)
+    var nulls = strings.null_count() > 0
+    if strings._is_view_storage():
+        ref views = strings._view_storage.value()
+        for i in range(n):
+            if nulls and not strings._valid(i):
+                lengths[i] = -1
+                values[i] = 0
+                addresses[i] = 0
+                continue
+            var bytes = views._get_unchecked(strings._offset + i).as_bytes()
+            _word_of(
+                bytes.unsafe_ptr(), len(bytes), i, addresses, lengths, values
+            )
+        return
+    var offsets = strings._offsets[].unsafe_ptr().unsafe_offset(strings._offset)
+    var base = strings._base()
+    for i in range(n):
+        if nulls and not strings._valid(i):
+            lengths[i] = -1
+            values[i] = 0
+            addresses[i] = 0
+            continue
+        var start = Int(offsets[unsafe_offset=i])
+        var length = Int(offsets[unsafe_offset=i + 1]) - start
+        _word_of(
+            base.unsafe_offset(start), length, i, addresses, lengths, values
+        )
+
+
+@always_inline
+def _word_of(
+    start: Pointer[UInt8, ImmutAnyOrigin],
+    length: Int,
+    i: Int,
+    mut addresses: List[Int],
+    mut lengths: List[Int],
+    mut values: List[Int],
+):
+    lengths.unsafe_ptr()[unsafe_offset=i] = length
+    addresses.unsafe_ptr()[unsafe_offset=i] = Int(start)
+    if length <= 8:
+        var packed = UInt64(0)
+        for b in range(length):
+            packed |= UInt64(start[unsafe_offset=b]) << UInt64(8 * b)
+        values.unsafe_ptr()[unsafe_offset=i] = Int(packed)
+        return
+    var h = UInt64(0x9E3779B97F4A7C15) ^ UInt64(length)
+    var at = 0
+    while at + 8 <= length:
+        var word = (
+            start.unsafe_offset(at)
+            .unsafe_bitcast[UInt64]()
+            .unsafe_load[width=1, alignment=1]()
+        )
+        h = (h ^ word) * 0xBF58476D1CE4E5B9
+        h ^= h >> 29
+        at += 8
+    if at < length:
+        # The last 8 bytes, overlapping what was read.
+        var word = (
+            start.unsafe_offset(length - 8)
+            .unsafe_bitcast[UInt64]()
+            .unsafe_load[width=1, alignment=1]()
+        )
+        h = (h ^ word) * 0x94D049BB133111EB
+        h ^= h >> 31
+    values.unsafe_ptr()[unsafe_offset=i] = Int(h)
+
+
+def _fixed_keys(columns: List[Series], strings: List[Int]) -> List[Series]:
+    """The key columns that are not Strings, in order."""
+    var out = List[Series](capacity=len(columns))
+    for k in range(len(columns)):
+        if k not in strings:
+            out.append(columns[k].copy())
+    return out^
 
 
 struct _GroupPart(Movable):
@@ -736,12 +955,22 @@ struct _GroupPart(Movable):
     var states: List[Reducer]
     var firsts: List[Int]
     var keys: List[DataFrame]
+    # Positions of the String keys among the key frames' columns.
+    var positions: List[Int]
 
-    def __init__(out self, width: Int):
-        self.index = _PartIndex(width)
+    def __init__(out self, width: Int, positions: List[Int]):
+        self.index = _PartIndex(width, len(positions))
         self.states = List[Reducer]()
         self.firsts = List[Int]()
         self.keys = List[DataFrame]()
+        self.positions = positions.copy()
+
+    def keep_keys(mut self, var keys: DataFrame, first: Int):
+        """Store the key rows of the groups from id `first` on, pointing
+        their String keys' bytes at them."""
+        if len(self.positions) > 0:
+            self.index.point(first, keys, self.positions)
+        self.keys.append(keys^)
 
     def absorb(mut self, var other: Self, width: Int) raises:
         """Merge another worker's groups of the same hash part: each is
@@ -753,12 +982,17 @@ struct _GroupPart(Movable):
         var ptrs = List[Int](capacity=width)
         for w in range(width):
             ptrs.append(Int(other.index.words[w].unsafe_ptr()))
+        var addresses = List[Int](capacity=len(self.positions))
+        var lengths = List[Int](capacity=len(self.positions))
+        for k in range(len(self.positions)):
+            addresses.append(Int(other.index.addresses[k].unsafe_ptr()))
+            lengths.append(Int(other.index.lengths[k].unsafe_ptr()))
         var mapping = List[Int](capacity=n)
         var fresh = List[Int]()
         var before = self.index.count
         for g in range(n):
             var id = self.index.find_or_insert(
-                other.index.hashes[g], ptrs, width, g
+                other.index.hashes[g], ptrs, width, g, addresses, lengths
             )
             mapping.append(id)
             if id >= before + len(fresh):
@@ -767,16 +1001,30 @@ struct _GroupPart(Movable):
             elif other.firsts[g] < self.firsts[id]:
                 self.firsts[id] = other.firsts[g]
         if len(fresh) > 0:
-            var keys: DataFrame
-            if len(other.keys) == 1:
-                keys = other.keys[0].copy()
-            else:
-                keys = concat(other.keys)
-            self.keys.append(keys.take(fresh))
+            # The new groups' key rows, taken frame by frame from the other
+            # part's stored frames (no concatenation of them first: one
+            # copy of every key's bytes fewer where most groups are new).
+            # Fresh groups come in row order and take consecutive ids.
+            var first = before
+            var at = 0
+            var start = 0
+            for f in range(len(other.keys)):
+                var height = other.keys[f].height()
+                var rows = List[Int]()
+                while at < len(fresh) and fresh[at] < start + height:
+                    rows.append(fresh[at] - start)
+                    at += 1
+                if len(rows) > 0:
+                    var taken = len(rows)
+                    self.keep_keys(other.keys[f].take(rows), first)
+                    first += taken
+                start += height
         var count = self.index.count
         for e in range(len(self.states)):
             self.states[e].grow(count)
             self.states[e].merge(other.states[e], groups=mapping)
+        # Its key frames hold the bytes read through addresses above.
+        _ = other^
 
     def into_state(
         mut self,
@@ -841,7 +1089,12 @@ struct _GroupedSink(Movable):
     var key_names: List[String]
     var key_schema: DataFrame
     var parts: List[_GroupPart]
+    # Per hash part, the tables flushed from it (`_FLUSH_GROUPS`).
+    var flushed: List[List[_GroupPart]]
     var count: Int
+    # Groups a part holds before it is flushed (`_flush_groups`).
+    var flush_groups: Int
+    var split_groups: Int
     var collecting: Bool
     var collected: List[DataFrame]
     var batch_size: Int
@@ -851,6 +1104,9 @@ struct _GroupedSink(Movable):
     var lengths: List[Int]
     var masks: List[BoolColumn]
     var width: Int
+    # Positions of the String key columns among the expanded keys: their
+    # bytes past the words' prefix are compared exactly (`_PartIndex`).
+    var strings: List[Int]
     # Scratch for a morsel's rows, kept across morsels: fresh lists of
     # this size are returned to the kernel by the allocator and faulted
     # in again every morsel.
@@ -889,20 +1145,30 @@ struct _GroupedSink(Movable):
         self.offsets = List[Int]()
         self.lengths = List[Int]()
         self.masks = List[BoolColumn]()
+        self.strings = List[Int]()
+        for k in range(len(key_columns)):
+            if key_columns[k].dtype().physical() == DataType.STRING:
+                self.strings.append(k)
+        # The other keys' words, then a length and a value word per String
+        # key (`_string_words`).
+        var fixed = _fixed_keys(key_columns, self.strings)
         self.width = (
-            len(_equality_words(key_columns)) if len(key_columns) > 0 else 0
-        )
+            len(_equality_words(fixed)) if len(fixed) > 0 else 0
+        ) + 2 * len(self.strings)
         self.part_of = List[Int]()
         self.order = List[Int]()
         self.ids = List[Int]()
         self.parts = List[_GroupPart](capacity=1 << _PART_BITS)
+        self.flushed = List[List[_GroupPart]]()
+        self.flush_groups = _flush_groups()
+        self.split_groups = min(_SPLIT_GROUPS, self.flush_groups)
         if not collecting:
             self.parts.append(self._empty_part(empty))
 
     def _empty_part(self, sample: DataFrame) raises -> _GroupPart:
         """A part with one empty state per expression, so the workers'
         parts merge expression by expression."""
-        var part = _GroupPart(self.width)
+        var part = _GroupPart(self.width, self.strings)
         for s in range(len(self.state_exprs)):
             var bound = bind(
                 self.expressions[self.state_exprs[s]], sample._columns
@@ -932,20 +1198,32 @@ struct _GroupedSink(Movable):
         var ptrs = List[Int](capacity=self.width)
         for w in range(self.width):
             ptrs.append(Int(whole.index.words[w].unsafe_ptr()))
+        var addresses = List[Int](capacity=len(self.strings))
+        var lengths = List[Int](capacity=len(self.strings))
+        for k in range(len(self.strings)):
+            addresses.append(Int(whole.index.addresses[k].unsafe_ptr()))
+            lengths.append(Int(whole.index.lengths[k].unsafe_ptr()))
         for p in range(count):
             var part = self._empty_part(sample)
             if len(members[p]) > 0:
                 var part_keys = keys.take(members[p])
                 for g in members[p]:
                     _ = part.index.find_or_insert(
-                        whole.index.hashes[g], ptrs, self.width, g
+                        whole.index.hashes[g],
+                        ptrs,
+                        self.width,
+                        g,
+                        addresses,
+                        lengths,
                     )
                     part.firsts.append(whole.firsts[g])
-                part.keys.append(part_keys^)
+                part.keep_keys(part_keys^, 0)
                 for s in range(len(part.states)):
                     part.states[s].grow(len(members[p]))
                     part.states[s].merge(whole.states[s], sources=members[p])
             self.parts.append(part^)
+        # Its key frames hold the bytes read through addresses above.
+        _ = whole^
 
     def select(mut self, offset: Int, length: Int, mask: BoolColumn):
         """Keep a filter-only morsel's selection over the source frame."""
@@ -962,13 +1240,22 @@ struct _GroupedSink(Movable):
         var key_columns = _expand_struct_keys(
             input._subset_keys(self.key_names)
         )
-        for column in key_columns:
-            if column.dtype().is_nested() or not encodable(column):
+        for k in range(len(key_columns)):
+            ref column = key_columns[k]
+            if column.dtype().is_nested():
+                return False
+            if k in self.strings:
+                # Any length: the bytes past the prefix are compared.
+                if column.is_chunked():
+                    column = column.rechunk()
+                if not column._data.isa[StringColumn]():
+                    return False
+            elif not encodable(column):
                 return False
         var n = input.height()
         if n == 0:
             return True
-        if len(self.parts) == 1 and self.count >= _SPLIT_GROUPS:
+        if len(self.parts) == 1 and self.count >= self.split_groups:
             self._repartition(input)
         var part_count = len(self.parts)
         var shift = UInt64(64 - _PART_BITS)
@@ -981,17 +1268,80 @@ struct _GroupedSink(Movable):
         # The words define key equality; their hash is the index's hash
         # and, by its top bits, the row's part, so the same key lands in
         # the same part with the same hash on every worker and morsel.
-        var words = _equality_words(key_columns)
-        var row_hashes = List[UInt64](capacity=n)
-        for r in range(n):
+        #
+        # String keys that all carry their source's dictionary codes (a
+        # Parquet scan) find the morsel's distinct keys by those codes
+        # first, one integer encode, and only those units get words and a
+        # probe; each row takes its unit's group (PDS-H q1's two flags: 55
+        # ms, against 103 with words for every row). Otherwise every row
+        # is its own unit.
+        var units = False
+        var unit_of = List[Int]()
+        var unit_columns = key_columns.copy()
+        if len(self.strings) > 0:
+            var local_columns = List[Series](capacity=len(key_columns))
+            var coded = True
+            for k in range(len(key_columns)):
+                if k not in self.strings:
+                    local_columns.append(key_columns[k].copy())
+                    continue
+                var codes = key_columns[k]._dictionary_codes()
+                if not codes:
+                    coded = False
+                    break
+                local_columns.append(codes.take())
+            if coded:
+                var local = encode_rows(local_columns, nulls_equal=True)
+                for k in range(len(key_columns)):
+                    unit_columns[k] = key_columns[k].take(local.representatives)
+                unit_of = local^.into_ids()
+                units = True
+        var u = len(unit_columns[0])
+        var fixed = _fixed_keys(unit_columns, self.strings)
+        var words = (
+            _equality_words(fixed) if len(fixed) > 0 else List[List[Int]]()
+        )
+        var addresses = List[Int](capacity=len(self.strings))
+        var lengths = List[Int](capacity=len(self.strings))
+        var address_rows = List[List[Int]](capacity=len(self.strings))
+        for k in self.strings:
+            var address = List[Int](unsafe_uninit_length=u)
+            var length = List[Int](unsafe_uninit_length=u)
+            var value = List[Int](unsafe_uninit_length=u)
+            _string_words(unit_columns[k], address, length, value)
+            words.append(length^)
+            words.append(value^)
+            address_rows.append(address^)
+        for k in range(len(self.strings)):
+            addresses.append(Int(address_rows[k].unsafe_ptr()))
+            lengths.append(
+                Int(
+                    words[
+                        len(words) - 2 * len(self.strings) + 2 * k
+                    ].unsafe_ptr()
+                )
+            )
+        var row_hashes = List[UInt64](capacity=u)
+        for r in range(u):
             row_hashes.append(_word_hash(words, r))
         var hashes_ptr = row_hashes.unsafe_ptr()
+        var unit_ptr = unit_of.unsafe_ptr()
+        # A unit's group id once probed (-1 before).
+        var unit_ids = List[Int](length=u if units else 0, fill=-1)
+        var unit_ids_ptr = unit_ids.unsafe_ptr()
         var parts_ptr = part_of.unsafe_ptr()
         var starts_ptr = starts.unsafe_ptr()
         if part_count == 1:
             for r in range(n):
                 parts_ptr[unsafe_offset=r] = 0
             starts[1] = n
+        elif units:
+            for r in range(n):
+                var p = Int(
+                    hashes_ptr[unsafe_offset=unit_ptr[unsafe_offset=r]] >> shift
+                )
+                parts_ptr[unsafe_offset=r] = p
+                starts_ptr[unsafe_offset=p + 1] += 1
         else:
             for r in range(n):
                 var p = Int(hashes_ptr[unsafe_offset=r] >> shift)
@@ -1061,9 +1411,29 @@ struct _GroupedSink(Movable):
             var fresh = List[Int]()
             for k in range(lo, hi):
                 var r = rows_ptr[unsafe_offset=k]
-                var id = part.index.find_or_insert(
-                    hashes_ptr[unsafe_offset=r], ptrs, self.width, r
-                )
+                var id: Int
+                if units:
+                    var unit = unit_ptr[unsafe_offset=r]
+                    id = unit_ids_ptr[unsafe_offset=unit]
+                    if id < 0:
+                        id = part.index.find_or_insert(
+                            hashes_ptr[unsafe_offset=unit],
+                            ptrs,
+                            self.width,
+                            unit,
+                            addresses,
+                            lengths,
+                        )
+                        unit_ids_ptr[unsafe_offset=unit] = id
+                else:
+                    id = part.index.find_or_insert(
+                        hashes_ptr[unsafe_offset=r],
+                        ptrs,
+                        self.width,
+                        r,
+                        addresses,
+                        lengths,
+                    )
                 ids_ptr[unsafe_offset=k] = id
                 if id >= before + len(fresh):
                     fresh.append(r)
@@ -1074,7 +1444,7 @@ struct _GroupedSink(Movable):
                 var columns = List[Series](capacity=len(key_columns))
                 for column in key_columns:
                     columns.append(column.take(fresh))
-                part.keys.append(DataFrame(columns^, height=len(fresh)))
+                part.keep_keys(DataFrame(columns^, height=len(fresh)), before)
             for s in range(len(self.state_exprs)):
                 var e = self.state_exprs[s]
                 ref node = bounds[e].expr._nodes[self.state_nodes[s]]
@@ -1132,20 +1502,51 @@ struct _GroupedSink(Movable):
         _ = words^
         _ = row_hashes^
         _ = cursor^
+        _ = address_rows^
+        _ = unit_of^
+        _ = unit_ids^
+        _ = unit_columns^
+        if len(self.parts) == 1 and self.count >= self.split_groups:
+            # Split as soon as the groups pass the split, so a part can
+            # flush below.
+            self._repartition(input)
+        part_count = len(self.parts)
+        if part_count > 1:
+            for p in range(part_count):
+                if self.parts[p].index.count <= self.flush_groups:
+                    continue
+                if len(self.flushed) == 0:
+                    for _ in range(part_count):
+                        self.flushed.append(List[_GroupPart]())
+                trace_path("pipeline.group_flush")
+                var full = self._empty_part(input)
+                swap(full, self.parts[p])
+                self.flushed[p].append(full^)
         return True
 
     def into_parts(
         mut self, sample: DataFrame, split: Bool
-    ) raises -> List[_GroupPart]:
+    ) raises -> List[List[_GroupPart]]:
         """The inserted parts, in part order, for combining: one when no
         worker's table grew past the split (small aggregates combine
         and finish as one table, as DuckDB's do before they partition),
-        otherwise 2^_PART_BITS, so every worker's parts line up."""
+        otherwise 2^_PART_BITS, so every worker's parts line up; each
+        with the tables flushed from it."""
         if split and len(self.parts) == 1:
             self._repartition(sample)
         var parts = List[_GroupPart]()
         swap(parts, self.parts)
-        return parts^
+        var out = List[List[_GroupPart]](capacity=len(parts))
+        var p = 0
+        while len(parts) > 0:
+            var tables = List[_GroupPart]()
+            tables.append(parts.pop(0))
+            if p < len(self.flushed):
+                while len(self.flushed[p]) > 0:
+                    tables.append(self.flushed[p].pop())
+            out.append(tables^)
+            p += 1
+        return out^
 
 
 struct _PartJob(Job):
@@ -1180,14 +1581,24 @@ struct _PartJob(Job):
     def run(mut self) raises:
         while len(self.parts) > 0:
             var workers = self.parts.pop(0)
-            var base = workers.pop(0)
-            while len(workers) > 0:
-                base.absorb(workers.pop(0), self.width)
-            self.states.append(
-                base.into_state(
-                    self.names, self.dtypes, self.outputs, self.schema
-                )
-            )
+            var total = 0
+            for t in range(len(workers)):
+                total += workers[t].index.count
+            self.states.append(self._merge(workers^, total))
+
+    def _merge(
+        mut self, var tables: List[_GroupPart], total: Int
+    ) raises -> _StreamReduction:
+        var base = tables.pop(0)
+        # Sized once for every table's groups: grown by doubling, the
+        # index rehashed seven times on the way to ClickBench q12's 52K
+        # groups a part.
+        base.index.reserve(total)
+        while len(tables) > 0:
+            base.absorb(tables.pop(0), self.width)
+        return base.into_state(
+            self.names, self.dtypes, self.outputs, self.schema
+        )
 
 
 struct _PipelineJob(Job):
@@ -1721,6 +2132,11 @@ def run_pipeline(
     group-by). `counts` receives the rows fed, then each step's input and
     output rows."""
     trace_path("pipeline.run")
+    if len(keys) > 0 and len(expressions) > 0:
+        if insert:
+            trace_path("pipeline.group_insert")
+        else:
+            trace_path("pipeline.group_collect")
     var shared = ArcPointer(frame.copy())
     var ranges = ArcPointer(
         _morsel_ranges(frame, max(1, morsel_rows), max(1, workers))
@@ -1848,7 +2264,9 @@ def run_pipeline(
             while len(pieces) > 0:
                 if len(parts) <= p:
                     parts.append(List[_GroupPart]())
-                parts[p].append(pieces.pop(0))
+                var tables = pieces.pop(0)
+                while len(tables) > 0:
+                    parts[p].append(tables.pop(0))
                 p += 1
         ref meta = jobs[sink].grouped[0]
         return _combine_grouped(
