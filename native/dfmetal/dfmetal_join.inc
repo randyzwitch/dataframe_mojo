@@ -82,8 +82,6 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
     input(k.right, 1);
     if (r.inputs[k.left].input.dtype != r.inputs[k.right].input.dtype)
       fail("Metal join key dtype mismatch");
-    if (r.inputs[k.left].input.dtype == DFM_FLOAT64_STORAGE)
-      fail("Metal Float64 join keys require CPU execution");
   }
   for (int64_t i = 0; i < r.output_count; ++i) {
     auto o = r.outputs[i];

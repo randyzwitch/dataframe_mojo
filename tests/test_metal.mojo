@@ -24,13 +24,13 @@ def test_configuration_and_semantic_rejections_without_device() raises:
     var wide = DataFrame([Series("x", Column[Float64]([1, 2]))])
     assert_true(
         "Float64 requires CPU"
-        in runtime.describe(wide.lazy().select(col("x") + 1))
+        in runtime.describe(wide.lazy().select(col("x").round(2)))
     )
     with assert_raises(contains="Float64 requires CPU"):
-        _ = wide.lazy().select(col("x") + 1).collect(accelerator=runtime)
+        _ = wide.lazy().select(col("x").round(2)).collect(accelerator=runtime)
     var narrow = DataFrame([Series("x", Column[Float32]([1, 2]))])
-    with assert_raises(contains="Float64 accumulation"):
-        _ = narrow.lazy().select(col("x").sum()).collect(accelerator=runtime)
+    with assert_raises(contains="unsupported reduction"):
+        _ = narrow.lazy().select(col("x").var()).collect(accelerator=runtime)
     # Auto is conservative until matched end-to-end cost evidence exists.
     var query = narrow.lazy().select(col("x") + 1)
     assert_true(
@@ -373,12 +373,12 @@ def test_native_numeric_casts() raises:
             .select(col("u").cast("int64"))
             .collect(accelerator=runtime)
         )
-    with assert_raises(contains="Float64 requires CPU"):
-        _ = (
-            frame.lazy()
-            .select(col("u").cast("float64"))
-            .collect(accelerator=runtime)
+    var wide_cast = frame.lazy().select(col("u").cast("float64"))
+    assert_true(
+        wide_cast.collect(accelerator=runtime).equals(
+            wide_cast.collect(engine="cpu")
         )
+    )
     with assert_raises(contains="strict casts require terminal"):
         _ = (
             frame.lazy()
@@ -1202,7 +1202,9 @@ def test_join_preflight_does_not_open_devices_or_read_files() raises:
     with assert_raises(contains="Float64 requires CPU"):
         _ = (
             frame.lazy()
-            .join(wide.lazy().with_columns((col("bad") + 1).alias("bad")), "k")
+            .join(
+                wide.lazy().with_columns(col("bad").round(2).alias("bad")), "k"
+            )
             .collect(accelerator=runtime)
         )
     with assert_raises(contains="in-memory scans"):

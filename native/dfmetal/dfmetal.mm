@@ -1,4 +1,5 @@
 #include "dfmetal.h"
+#include "dfmetal_float64.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
@@ -38,7 +39,7 @@ void error(char **p, const std::exception &e) {
     *p = strdup(e.what());
 }
 bool binaryOp(int64_t op) {
-  return op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_GT ||
+  return op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_DIV || op == DFM_GT ||
          op == DFM_EQ ||
          ((op >= DFM_LT && op <= DFM_NE) ||
           (op >= DFM_FLOORDIV && op <= DFM_CLIP_HIGH)) ||
@@ -76,15 +77,14 @@ bool unsignedType(int64_t t) {
          t == DFM_UINT64;
 }
 bool sumSupported(int64_t t) {
-  return t != DFM_FLOAT32 && t != DFM_BOOL && t != DFM_FLOAT64_STORAGE;
+  return t != DFM_BOOL;
 }
 int64_t sumType(int64_t t) {
+  if (t == DFM_FLOAT32 || t == DFM_FLOAT64_STORAGE) return t;
   return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
-  if (type == DFM_FLOAT64_STORAGE &&
-      (op == DFM_MIN || op == DFM_MAX || op == DFM_ARG_MIN || op == DFM_ARG_MAX))
-    return -1;
+  if (op == DFM_MEAN) return type == DFM_BOOL ? -1 : DFM_FLOAT64_STORAGE;
   if (op == DFM_SUM)
     return sumSupported(type) ? sumType(type) : -1;
   if (op == DFM_COUNT || op == DFM_LEN || op == DFM_NULL_COUNT)
@@ -263,7 +263,7 @@ int64_t radixPasses(const DFMRequest &r, int64_t step) {
   const auto &v = r.steps[step];
   for (int64_t j = 0; j < v.nodes; ++j) {
     auto type = slotType(r, r.code[4 * (v.start + j) + 1]);
-    if (type == DFM_FLOAT32) return 0;
+    if (type == DFM_FLOAT32 || type == DFM_FLOAT64_STORAGE) return 0;
     passes += 2 * width(type) + 1;
   }
   return passes <= 18 ? passes : 0;
@@ -379,8 +379,6 @@ Shape validate(const DFMRequest &r, bool storage = false,
           if (c[0] != DFM_GROUP_KEY || c[2] || c[3] ||
               r.node_types[v.start + j] != slotType(r, c[1]))
             fail("Invalid Metal group key");
-          if (slotType(r, c[1]) == DFM_FLOAT64_STORAGE)
-            fail("Metal Float64 grouping requires CPU execution");
         } else {
           if (c[0] != DFM_GROUP_OUTPUT || c[2] < r.input_count ||
               c[2] >= r.slots || defined[c[2]] || targets[c[2]] ||
@@ -414,8 +412,6 @@ Shape validate(const DFMRequest &r, bool storage = false,
           fail("Invalid Metal sort key descriptor");
         if (r.node_types[v.start + j] != slotType(r, c[1]))
           fail("Metal sort key dtype mismatch");
-        if (slotType(r, c[1]) == DFM_FLOAT64_STORAGE)
-          fail("Metal Float64 sorting requires CPU execution");
       }
       for (int64_t j = 0; j < v.gather_count; ++j) {
         auto slot = r.gathers[v.gather_start + j];
@@ -469,7 +465,15 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if ((operand == DFM_FLOAT64_STORAGE || resultType == DFM_FLOAT64_STORAGE) &&
           c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_FLOAT && c[0] != DFM_LITERAL_NULL &&
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL && c[0] != DFM_FILL_NULL &&
-          c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN)
+          c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
+          c[0] != DFM_ADD && c[0] != DFM_SUB && c[0] != DFM_MUL &&
+          c[0] != DFM_DIV && c[0] != DFM_CAST &&
+          c[0] != DFM_FLOOR && c[0] != DFM_CEIL && !(c[0] == DFM_ROUND && c[3] == 0) &&
+          c[0] != DFM_NEG && c[0] != DFM_ABS &&
+          c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE &&
+          c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
+          !(c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
+          c[0] != DFM_FILL_NAN && c[0] != DFM_CLIP_LOW && c[0] != DFM_CLIP_HIGH)
         fail("Metal Float64 requires CPU execution for this operation");
       if (c[0] == DFM_INT_IS_IN) {
         if (!typed(r) || operand == DFM_FLOAT32 || operand == DFM_BOOL ||
@@ -481,7 +485,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
             fail("Metal integer membership literal dtype mismatch");
       }
       if ((c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
-          operand != DFM_FLOAT32)
+          operand != DFM_FLOAT32 && operand != DFM_FLOAT64_STORAGE)
         fail("Metal floating classification requires Float32");
       if ((c[0] == DFM_FLOORDIV || c[0] == DFM_MOD || c[0] == DFM_POW) &&
           operand == DFM_FLOAT32)
@@ -527,7 +531,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           fail("Metal conditional dtype mismatch");
         if (c[0] == DFM_KEEP_NULLS && t != r.node_types[v.start + c[2]])
           fail("Metal validity selection dtype mismatch");
-        if (c[0] == DFM_FILL_NAN && t != DFM_FLOAT32)
+        if (c[0] == DFM_FILL_NAN && t != DFM_FLOAT32 && t != DFM_FLOAT64_STORAGE)
           fail("Metal fill NaN requires Float32");
         if ((compare || logic || nulltest) && t != DFM_BOOL)
           fail("Metal predicate dtype mismatch");
@@ -535,6 +539,10 @@ Shape validate(const DFMRequest &r, bool storage = false,
             (r.node_types[v.start + c[1]] != DFM_BOOL ||
              (c[0] != DFM_NOT && r.node_types[v.start + c[2]] != DFM_BOOL)))
           fail("Metal Boolean operand dtype mismatch");
+        if (c[0] == DFM_DIV &&
+            (t != DFM_FLOAT64_STORAGE || r.node_types[v.start+c[1]] == DFM_BOOL ||
+             r.node_types[v.start+c[1]] != r.node_types[v.start+c[2]]))
+          fail("Invalid Metal floating division dtype");
         if ((compare || math) &&
             (r.node_types[v.start + c[1]] !=
                  (math ? t : r.node_types[v.start + c[2]]) ||
@@ -794,7 +802,17 @@ std::string castExpression(int64_t from, int64_t to, const std::string &a,
                            bool strict, int64_t id) {
   auto target = std::string(metalType(to));
   std::string body = "bool fits=true;";
-  if (to == DFM_BOOL) {
+  if (to == DFM_FLOAT64_STORAGE) {
+    body += z + "=f64_word(" + encode(from,a) + "," + std::to_string(from) + ");";
+  } else if (from == DFM_FLOAT64_STORAGE) {
+    if (to == DFM_BOOL)
+      body += "fits=!f64_nan(" + a + ");" + z + "=uchar(f64_abs(" + a + ")!=0);";
+    else if (to == DFM_FLOAT32)
+      body += z + "=as_type<float>(f64_to_float32(" + a + "));";
+    else
+      body += "F64Integer casted=f64_to_integer(" + a + "," + std::to_string(width(to)*8) +
+              "," + (unsignedType(to) ? "true" : "false") + ");fits=casted.valid;if(fits)" + z + "=" + target + "(casted.word);";
+  } else if (to == DFM_BOOL) {
     if (from == DFM_FLOAT32)
       body += "uint ab=as_type<uint>(" + a +
               ")&0x7fffffffu;fits=ab<=0x7f800000u;" + z + "=uchar(ab!=0);";
@@ -802,20 +820,10 @@ std::string castExpression(int64_t from, int64_t to, const std::string &a,
       body += z + "=uchar(" + a + "!=0);";
   } else if (to == DFM_FLOAT32) {
     if (from == DFM_INT64 || from == DFM_UINT64) {
-      auto mag = from == DFM_INT64
-                     ? "(" + a + "<0?0UL-ulong(" + a + "):ulong(" + a + "))"
-                     : "ulong(" + a + ")";
-      // Native Float32 conversion is exact for the CPU contract unless the
-      // CPU's intervening Float64 rounding can land on a Float32 midpoint.
-      // Detect that narrow region; never emulate Float64 on the device.
-      body += "ulong mag=" + mag +
-              ";if(mag>9007199254740992UL){uint e=63-clz(mag);ulong "
-              "step=1UL<<(e-23),rest=mag&(step-1),midpoint=step/"
-              "2,dist=rest>midpoint?rest-midpoint:midpoint-rest;if(dist!=0&&"
-              "dist<=(1UL<<(e-53)))atomic_fetch_min_explicit(error," +
-              std::to_string(0x20000000UL + id) + "u,memory_order_relaxed);}";
-    }
-    body += z + "=float(" + a + ");";
+      // CPU conversion rounds through binary64 before narrowing to Float32.
+      body += z + "=as_type<float>(f64_to_float32(f64_word(ulong(" + a + ")," + std::to_string(from) + ")));";
+    } else
+      body += z + "=float(" + a + ");";
   } else if (from == DFM_FLOAT32) {
     auto bits = width(to) * 8 - (unsignedType(to) ? 0 : 1);
     // Powers of two are exactly representable in Float32, including 2**64.
@@ -944,6 +952,13 @@ bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x0
 std::string orderingSource() {
   return R"MSL(
 bool extrema_better(ulong a,ulong b,long type,bool maximum) {
+ if(type==11){ulong ax=a&0x7fffffffffffffffUL,ay=b&0x7fffffffffffffffUL;
+ bool nx=ax>0x7ff0000000000000UL,ny=ay>0x7ff0000000000000UL;
+ if(nx||ny)return nx!=ny&&(maximum?nx:ny);
+ if(ax==0&&ay==0)return false;
+ ulong kx=(a&0x8000000000000000UL)?~a:(a^0x8000000000000000UL);
+ ulong ky=(b&0x8000000000000000UL)?~b:(b^0x8000000000000000UL);
+ return maximum?kx>ky:kx<ky;}
  if(type==1){uint x=uint(a),y=uint(b),ax=x&0x7fffffffU,ay=y&0x7fffffffU;
  bool nx=ax>0x7f800000U,ny=ay>0x7f800000U;
  if(nx||ny)return nx!=ny&&(maximum?nx:ny);
@@ -1073,6 +1088,7 @@ std::string source(const DFMRequest &r) {
   text += "struct Out { long slot; long kind; long minimum; long type; "
           "};\nstruct Partial { long total; long count; };\n";
   text += residentSource();
+  text += dfm_float64_source;
   text += "constant bool DIRECT_FILTERED_REDUCTION=" +
           std::string(direct ? "true" : "false") + ";\n" +
           "constant ulong FILTERED_SLOT=" + std::to_string(filterSlot) + "UL;\n";
@@ -1158,6 +1174,9 @@ kernel void pack_rows(device const T *x[[buffer(0)]],device const uchar *v[[buff
   text += orderingSource();
   text += R"MSL(
 bool candidate_better(ulong a,ulong b,Out o){
+ if((o.kind==95||o.kind==96)&&o.type==11){
+  bool an=f64_nan(a),bn=f64_nan(b);if(an!=bn)return !an;
+ }
  if((o.kind==95||o.kind==96)&&o.type==1){
   bool an=(uint(a)&0x7fffffffU)>0x7f800000U,bn=(uint(b)&0x7fffffffU)>0x7f800000U;
   if(an!=bn)return !an;
@@ -1170,7 +1189,7 @@ bool candidate_better(ulong a,ulong b,Out o){
 // every parallel partial and merge exact without a wider accumulator. A
 // failed proof is unsupported, even if cancellation could fit the result.
 bool sum_bound(ulong word,Out o,ulong rows){
- if(o.kind!=10||(o.type!=3&&o.type!=10)||!rows)return true;
+ if((o.kind!=10&&o.kind!=82)||(o.type!=3&&o.type!=10)||!rows)return true;
  bool negative=o.type==3&&long(word)<0;
  ulong maximum=o.type==10?~0UL:(negative?(1UL<<63):((1UL<<63)-1UL));
 // Variable 64-bit division here crashes the M1 grouped pipeline compiler.
@@ -1190,6 +1209,9 @@ void state_merge(thread long &value,thread long &count,long other,long n,Out o){
   if(take){value=other;count=n;}return;
  }
  if(o.kind==91||o.kind==92){value|=other;return;}
+ if((o.kind==82||o.kind==10)&&(o.type==1||o.type==11)){
+  if(n){value=long(f64_add(ulong(value),ulong(other)));count+=n;}return;
+ }
  value=long(ulong(value)+ulong(other));count+=n;
 }
 void state_add(thread long &value,thread long &count,ulong word,bool valid,long row,Out o){
@@ -1198,10 +1220,15 @@ void state_add(thread long &value,thread long &count,ulong word,bool valid,long 
  if(o.kind==93){count+=!valid;return;}
  if(!valid)return;
  if(o.kind==80||o.kind==81||o.kind==95||o.kind==96||o.kind==204){state_merge(value,count,long(word),row+1,o);return;}
- ++count;if(o.kind==10)value=long(ulong(value)+word);
+ ++count;
+ if((o.kind==82||o.kind==10)&&(o.type==1||o.type==11))value=long(f64_add(ulong(value),f64_word(word,o.type)));
+ else if(o.kind==10||o.kind==82)value=long(ulong(value)+word);
 }
 void state_finish(thread long &value,thread long &count,Out o,long rows){
- if(o.kind==11||o.kind==93){value=count;count=1;}
+ if(o.kind==82){if(count){ulong total=(o.type==1||o.type==11)?ulong(value):f64_word(ulong(value),o.type);
+  value=long(f64_div(total,f64_from_signed(count)));}}
+ else if(o.kind==10&&o.type==1){value=long(ulong(f64_to_float32(ulong(value))));}
+ else if(o.kind==11||o.kind==93){value=count;count=1;}
  else if(o.kind==90){value=rows;count=1;}
  else if(o.kind==83||o.kind==84){count=count>0?1:0;}
  else if(o.kind==95||o.kind==96){value=count?count-1:0;count=count?1:0;}
@@ -1313,6 +1340,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           text += "bool "
                   "an=(uint(x[ai])&0x7fffffffU)>0x7f800000U,bn=(uint(x[bi])&"
                   "0x7fffffffU)>0x7f800000U;if(an!=bn)return !an;";
+        if (slotType(r, key[1]) == DFM_FLOAT64_STORAGE)
+          text += "bool an=f64_nan(ulong(x[ai])),bn=f64_nan(ulong(x[bi]));if(an!=bn)return !an;";
         auto type = std::to_string(slotType(r, key[1])),
              maximum = std::string(key[2] ? "true" : "false");
         text += "if(extrema_better(ulong(x[ai]),ulong(x[bi])," + type + "," +
@@ -1480,7 +1509,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
         } else if (op == DFM_KEEP_NULLS)
           text += valid + "=" + av + "&&" + bv + ";" + z + "=" + b + ";";
         else if (op == DFM_FILL_NAN) {
-          auto nan = "((as_type<uint>(" + a + ")&0x7fffffffU)>0x7f800000U)";
+          auto nan = dtype == DFM_FLOAT64_STORAGE ? "f64_nan(" + a + ")" :
+              "((as_type<uint>(" + a + ")&0x7fffffffU)>0x7f800000U)";
           text += valid + "=" + av + "&&(!" + nan + "||" + bv + ");" + z + "=" +
                   nan + "?" + b + ":" + a + ";";
         } else if (op == DFM_FILL_NULL)
@@ -1499,7 +1529,32 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           bool unary = unaryOp(op);
           text += valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid +
                   "){";
-          if (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) {
+          auto operandType = nodeType(r, s.start + c[1]);
+          if (op == DFM_DIV) {
+            text += z + "=f64_div(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) +
+                    "),f64_word(" + encode(operandType,b) + "," + std::to_string(operandType) + "));";
+          } else if (operandType == DFM_FLOAT64_STORAGE) {
+            std::string expression;
+            if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL)
+              expression = std::string(op == DFM_ADD ? "f64_add(" : op == DFM_SUB ? "f64_sub(" : "f64_mul(") + a + "," + b + ")";
+            else if (op == DFM_NEG) expression = "(" + a + "^0x8000000000000000UL)";
+            else if (op == DFM_ABS) expression = "f64_abs(" + a + ")";
+            else if (op == DFM_FLOOR || op == DFM_CEIL) expression = "f64_integral(" + a + "," + std::to_string(op) + ")";
+            else if (op == DFM_ROUND) expression = "f64_round(" + a + ")";
+            else if (op == DFM_IS_NAN) expression = "f64_nan(" + a + ")";
+            else if (op == DFM_IS_NOT_NAN) expression = "!f64_nan(" + a + ")";
+            else if (op == DFM_IS_FINITE) expression = "(f64_abs(" + a + ")<0x7ff0000000000000UL)";
+            else if (op == DFM_IS_INFINITE) expression = "f64_inf(" + a + ")";
+            else if (op == DFM_EQ || op == DFM_NE)
+              expression = std::string(op == DFM_NE ? "!" : "") + "f64_equal(" + a + "," + b + ")";
+            else if (op == DFM_GT || op == DFM_LT || op == DFM_GE || op == DFM_LE) {
+              expression = (op == DFM_GT || op == DFM_GE ? "f64_less(" + b + "," + a : "f64_less(" + a + "," + b) + ")";
+              if (op == DFM_GE || op == DFM_LE) expression += "||f64_equal(" + a + "," + b + ")";
+            } else if (op == DFM_CLIP_LOW || op == DFM_CLIP_HIGH)
+              expression = (op == DFM_CLIP_LOW ? "f64_less(" + a + "," + b : "f64_less(" + b + "," + a) + ")?" + b + ":" + a;
+            else fail("Unsupported emulated Float64 expression");
+            text += z + "=" + typename_ + "(" + expression + ");";
+          } else if (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) {
             const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
             const int64_t dayTicks = c[3] == 0 ? 1 : perSecond * 86400;
             const auto perDay = std::to_string(dayTicks) + "L";
@@ -2250,9 +2305,6 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
            "within the native Int64/UInt64 range");
     if (fault == 0xF0000000U)
       fail("Integer overflow in Metal grouped sum");
-    if (fault & 0x20000000u)
-      fail("Metal unsupported [precision]: integer to Float32 double-rounding "
-           "boundary requires CPU execution");
     if (fault & 0x40000000u)
       fail("Metal strict cast failed: value out of target range or NaN has no "
            "Boolean value");
