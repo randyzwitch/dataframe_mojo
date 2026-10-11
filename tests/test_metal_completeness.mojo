@@ -184,7 +184,7 @@ def test_native_integer_membership_all_widths_exact_words() raises:
     if not metal_installed():
         return
     var runtime = MetalRuntime()
-    comptime TYPES = (
+    comptime TYPES: Array[DType, 8] = [
         DType.int8,
         DType.int16,
         DType.int32,
@@ -193,12 +193,12 @@ def test_native_integer_membership_all_widths_exact_words() raises:
         DType.uint16,
         DType.uint32,
         DType.uint64,
-    )
+    ]
     comptime for d in range(len(TYPES)):
         comptime D = TYPES[d]
-        var values = List[Scalar[D]](
-            [0, 1, 2, Scalar[D].MAX, Scalar[D].MIN, 7, 2]
-        )
+        var values: List[Scalar[D]] = [
+            0, 1, 2, Scalar[D].MAX, Scalar[D].MIN, 7, 2
+        ]
         var frame = DataFrame(
             [
                 Series(

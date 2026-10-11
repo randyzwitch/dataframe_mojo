@@ -292,7 +292,7 @@ def lower_dictionary_operations(
                             pool.append(value^)
                 var source = subtree(expression, node.left).alias(key_name)
                 result._nodes.append(
-                    _plan_node(WITH_COLUMNS, operation.left, exprs=[source])
+                    _plan_node(WITH_COLUMNS, operation.left, exprs=[source^])
                 )
                 var left = len(result._nodes) - 1
                 var frame = len(result._frames)
