@@ -1,0 +1,33 @@
+{
+  "total": 345,
+  "counts": {
+    "ok": 65,
+    "unsupported": 254,
+    "reference_unsupported": 21,
+    "wrong_answer": 5
+  },
+  "suites": {
+    "clickbench": {
+      "ok": 24,
+      "unsupported": 13,
+      "wrong_answer": 5,
+      "reference_unsupported": 1
+    },
+    "h2o_groupby": {
+      "ok": 15,
+      "unsupported": 35
+    },
+    "h2o_join": {
+      "ok": 10
+    },
+    "pdsh": {
+      "unsupported": 36,
+      "ok": 8
+    },
+    "tpcds": {
+      "unsupported": 170,
+      "reference_unsupported": 20,
+      "ok": 8
+    }
+  }
+}

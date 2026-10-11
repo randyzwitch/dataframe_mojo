@@ -1,0 +1,1 @@
+coverage	q8	unsupported	Metal unsupported [accumulator]: decimal sum requires exact Decimal128 accumulation

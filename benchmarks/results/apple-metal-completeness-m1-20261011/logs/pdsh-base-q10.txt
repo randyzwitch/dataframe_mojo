@@ -1,0 +1,1 @@
+coverage	q10	unsupported	Metal unsupported [precision]: Float64 requires CPU execution for ordering and keys

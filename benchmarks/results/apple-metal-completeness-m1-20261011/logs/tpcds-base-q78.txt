@@ -1,0 +1,1 @@
+coverage	q78	unsupported	Metal unsupported [plan]: checked sums require a terminal boundary

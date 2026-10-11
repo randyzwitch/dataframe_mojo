@@ -1,0 +1,58 @@
+coverage	q11	wrong_answer	full result differs
+expected_rows	10
+actual_rows	10
+expected_sample
+shape: (10, 3)
+┌─────────────┬──────────────────┬──────┐
+│ MobilePhone ┆ MobilePhoneModel ┆ u    │
+│ ---         ┆ ---              ┆ ---  │
+│ i16         ┆ str              ┆ i64  │
+╞═════════════╪══════════════════╪══════╡
+│ 1           ┆ iPad             ┆ 1967 │
+│ 5           ┆ iPad             ┆ 97   │
+│ 7           ┆ iPad             ┆ 79   │
+│ 6           ┆ iPad             ┆ 55   │
+│ 6           ┆ iPhone           ┆ 37   │
+│ 26          ┆ iPhone           ┆ 36   │
+│ 118         ┆ A500             ┆ 34   │
+│ 32          ┆ iPad             ┆ 29   │
+│ 60          ┆ iPad             ┆ 22   │
+│ 6           ┆ GT-P7300B        ┆ 12   │
+└─────────────┴──────────────────┴──────┘
+actual_sample
+shape: (10, 3)
+┌─────────────┬──────────────────┬──────┐
+│ MobilePhone ┆ MobilePhoneModel ┆ u    │
+│ ---         ┆ ---              ┆ ---  │
+│ i16         ┆ str              ┆ i64  │
+╞═════════════╪══════════════════╪══════╡
+│ 1           ┆ iPad             ┆ 1967 │
+│ 5           ┆ iPad             ┆ 97   │
+│ 7           ┆ iPad             ┆ 79   │
+│ 6           ┆ iPad             ┆ 55   │
+│ 6           ┆ iPhone           ┆ 37   │
+│ 26          ┆ iPhone           ┆ 36   │
+│ 118         ┆ A500             ┆ 34   │
+│ 32          ┆ iPad             ┆ 29   │
+│ 60          ┆ iPad             ┆ 22   │
+│ 5           ┆ N8-00            ┆ 12   │
+└─────────────┴──────────────────┴──────┘
+cpu_repeat_equal	True
+cpu_repeat_sample
+shape: (10, 3)
+┌─────────────┬──────────────────┬──────┐
+│ MobilePhone ┆ MobilePhoneModel ┆ u    │
+│ ---         ┆ ---              ┆ ---  │
+│ i16         ┆ str              ┆ i64  │
+╞═════════════╪══════════════════╪══════╡
+│ 1           ┆ iPad             ┆ 1967 │
+│ 5           ┆ iPad             ┆ 97   │
+│ 7           ┆ iPad             ┆ 79   │
+│ 6           ┆ iPad             ┆ 55   │
+│ 6           ┆ iPhone           ┆ 37   │
+│ 26          ┆ iPhone           ┆ 36   │
+│ 118         ┆ A500             ┆ 34   │
+│ 32          ┆ iPad             ┆ 29   │
+│ 60          ┆ iPad             ┆ 22   │
+│ 6           ┆ GT-P7300B        ┆ 12   │
+└─────────────┴──────────────────┴──────┘

@@ -1,0 +1,1 @@
+coverage	q23	unsupported	Metal unsupported [plan]: strict casts require terminal projections without head

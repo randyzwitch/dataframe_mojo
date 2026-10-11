@@ -1,0 +1,315 @@
+/tmp/metal-completeness-final-public-drivers/driver_0.mojo
+== tests/test_accelerator_planning.mojo
+
+Running 22 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 1.161 ] test_resident_steps_bind_shared_names_and_dtypes
+    PASS [ 0.423 ] test_rejections_happen_without_reading_files
+    PASS [ 0.154 ] test_memory_preflight_counts_all_requested_buffers
+    PASS [ 0.308 ] test_integer_lowering_keeps_literal_words_and_checked_boundaries
+    PASS [ 1.093 ] test_projection_prunes_wide_mixed_sources_and_preserves_inputs
+    PASS [ 0.236 ] test_backend_capabilities_preserve_precision_contracts
+    PASS [ 0.053 ] test_memory_launch_dimensions_are_backend_owned
+    PASS [ 0.449 ] test_extended_integer_lowering_is_backend_opt_in
+    PASS [ 0.220 ] test_mixed_types_and_casts_are_backend_opt_in
+    PASS [ 0.060 ] test_extrema_reductions_are_backend_opt_in
+    PASS [ 0.209 ] test_fixed_logical_types_are_backend_opt_in
+    PASS [ 0.115 ] test_additional_row_operators_are_backend_opt_in
+    PASS [ 0.070 ] test_sort_lowering_is_backend_opt_in
+    PASS [ 0.097 ] test_group_lowering_is_backend_opt_in
+    PASS [ 0.036 ] test_group_without_keys_matches_cpu_rejection
+    PASS [ 0.028 ] test_duration_sum_preserves_wide_accumulator_rejection
+    PASS [ 0.126 ] test_additional_reductions_are_backend_opt_in
+    PASS [ 0.196 ] test_join_child_regions_are_not_terminal_boundaries
+    PASS [ 154.879 ] test_join_dag_binds_all_join_schemas_and_coalescing
+    PASS [ 0.101 ] test_join_dag_rejects_every_branch_before_source_execution
+    PASS [ 0.052 ] test_join_dag_prunes_unused_unsupported_columns
+    PASS [ 0.193 ] test_join_dag_preserves_scalar_children_and_nested_regions
+--------
+Summary [ 160.259 ] 22 tests run: 22 passed , 0 failed , 0 skipped 
+
+== tests/test_metal.mojo
+
+Running 19 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.665 ] test_configuration_and_semantic_rejections_without_device
+    PASS [ 342.432 ] test_native_resident_parity_and_profile
+    PASS [ 533.055 ] test_native_integer_precision_and_empty_results
+    PASS [ 1733.169 ] test_native_extended_integer_widths
+    PASS [ 174.158 ] test_native_mixed_types_preserve_values_and_output_dtypes
+    PASS [ 144.172 ] test_native_numeric_casts
+    PASS [ 1057.175 ] test_native_extrema_all_supported_types
+    PASS [ 269.774 ] test_native_fixed_logical_types_preserve_metadata
+    PASS [ 701.254 ] test_native_additional_integer_operators
+    PASS [ 86.867 ] test_native_conditional_masks_preserve_observable_errors
+    PASS [ 75.546 ] test_native_float_value_operations_and_subnormal_comparisons
+    PASS [ 423.312 ] test_native_stable_multikey_sort_between_resident_steps
+    PASS [ 3258.078 ] test_native_grouped_reductions
+    PASS [ 2763.141 ] test_native_additional_reductions
+    PASS [ 0.142 ] test_join_preflight_does_not_open_devices_or_read_files
+    PASS [ 1401.208 ] test_native_join_types_nulls_order_and_empty_inputs
+    PASS [ 386.028 ] test_native_join_dag_regions_and_logical_types
+    PASS [ 42.963 ] test_native_join_budget_and_large_fanout_head
+    PASS [ 1036.008 ] test_native_filtered_reductions_skip_compaction
+--------
+Summary [ 14429.147 ] 19 tests run: 19 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_aggregate_compositions.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 8.842 ] test_grouped_compositions
+    PASS [ 20.541 ] test_global_compositions_and_consumers
+    PASS [ 32.546 ] test_joined_compositions_and_checked_guards
+--------
+Summary [ 61.929 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_bounded_sums.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 7.211 ] test_bounded_wide_scalar_sums_and_nulls
+    PASS [ 36.751 ] test_bounded_wide_grouped_sums_and_resident_inputs
+    PASS [ 5.958 ] test_unproved_sums_reject_and_runtime_recovers
+--------
+Summary [ 49.920 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_completeness.mojo
+
+Running 4 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 127.431 ] test_dictionary_unary_operators_and_chains
+    PASS [ 16.475 ] test_dictionary_operations_filter_group_join_and_internal_names
+    PASS [ 6.506 ] test_dictionary_operation_budget_profile_and_numeric_casts
+    PASS [ 20.397 ] test_native_integer_membership_all_widths_exact_words
+--------
+Summary [ 170.809 ] 4 tests run: 4 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_concat.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 75.053 ] test_concat_order_columns_nulls_extremes_and_empty
+    PASS [ 25.204 ] test_concat_unique_group_aggregate_join_and_profile
+    PASS [ 3.704 ] test_concat_fixed_logical_metadata
+--------
+Summary [ 103.961 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_constants.mojo
+
+Running 4 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 4.211 ] test_literal_temporal_parsing
+    PASS [ 2.010 ] test_literal_datetime_and_time_dtypes
+    PASS [ 0.031 ] test_unlowered_text_rejected_before_encoding
+    PASS [ 0.942 ] test_literal_temporal_folding_without_device
+--------
+Summary [ 7.194 ] 4 tests run: 4 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_distinct_counts.mojo
+
+Running 2 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 11.142 ] test_distinct_counts_numeric_text_null_empty
+    PASS [ 8.844 ] test_distinct_count_composition_filter_join_budget
+--------
+Summary [ 19.986 ] 2 tests run: 2 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_float64_storage.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 3.640 ] test_float64_storage_projection_filter_literals_and_conditionals
+    PASS [ 17.564 ] test_float64_payload_all_joins_groups_unique_and_concat
+    PASS [ 0.188 ] test_float64_computation_remains_rejected_before_device_initialization
+--------
+Summary [ 21.392 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_sets.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 24.545 ] test_unique_subset_keeps_first_and_singletons
+    PASS [ 18.216 ] test_unique_whole_rows_and_string_keys
+    PASS [ 5.303 ] test_unique_float_nan_zero_and_recovery
+--------
+Summary [ 48.064 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_slices.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 57.993 ] test_slice_offsets_lengths_nulls_and_empty
+    PASS [ 12.940 ] test_slice_current_rows_after_filters_sort_groups_and_joins
+    PASS [ 1.844 ] test_slice_before_reductions_and_invalid_length_recovery
+--------
+Summary [ 72.777 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_temporal_fields.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 14.681 ] test_temporal_storage_units_and_extremes
+    PASS [ 6.115 ] test_temporal_fields_group_join_and_preflight
+    PASS [ 40.035 ] test_temporal_fixed_truncation
+--------
+Summary [ 60.831 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_time_windows.mojo
+
+Running 7 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 1.026 ] test_stable_row_variance
+    PASS [ 0.192 ] test_duplicate_boundaries_and_empty_windows
+    PASS [ 0.085 ] test_grouped_sorting
+    PASS [ 0.037 ] test_unsigned_and_nonfinite_values
+    PASS [ 0.074 ] test_invalid_requests
+    PASS [ 0.507 ] test_lazy_and_chunked_windows
+    PASS [ 0.049 ] test_time_windows_and_membership_dispatch_independently
+--------
+Summary [ 1.970 ] 7 tests run: 7 passed , 0 failed , 0 skipped 
+
+== tests/test_accelerator_planning.mojo
+
+Running 22 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.162 ] test_resident_steps_bind_shared_names_and_dtypes
+    PASS [ 0.115 ] test_rejections_happen_without_reading_files
+    PASS [ 0.031 ] test_memory_preflight_counts_all_requested_buffers
+    PASS [ 0.072 ] test_integer_lowering_keeps_literal_words_and_checked_boundaries
+    PASS [ 0.291 ] test_projection_prunes_wide_mixed_sources_and_preserves_inputs
+    PASS [ 0.068 ] test_backend_capabilities_preserve_precision_contracts
+    PASS [ 0.017 ] test_memory_launch_dimensions_are_backend_owned
+    PASS [ 0.124 ] test_extended_integer_lowering_is_backend_opt_in
+    PASS [ 0.058 ] test_mixed_types_and_casts_are_backend_opt_in
+    PASS [ 0.018 ] test_extrema_reductions_are_backend_opt_in
+    PASS [ 0.045 ] test_fixed_logical_types_are_backend_opt_in
+    PASS [ 0.034 ] test_additional_row_operators_are_backend_opt_in
+    PASS [ 0.017 ] test_sort_lowering_is_backend_opt_in
+    PASS [ 0.031 ] test_group_lowering_is_backend_opt_in
+    PASS [ 0.007 ] test_group_without_keys_matches_cpu_rejection
+    PASS [ 0.008 ] test_duration_sum_preserves_wide_accumulator_rejection
+    PASS [ 0.022 ] test_additional_reductions_are_backend_opt_in
+    PASS [ 0.057 ] test_join_child_regions_are_not_terminal_boundaries
+    PASS [ 1.970 ] test_join_dag_binds_all_join_schemas_and_coalescing
+    PASS [ 0.086 ] test_join_dag_rejects_every_branch_before_source_execution
+    PASS [ 0.051 ] test_join_dag_prunes_unused_unsupported_columns
+    PASS [ 0.122 ] test_join_dag_preserves_scalar_children_and_nested_regions
+--------
+Summary [ 3.406 ] 22 tests run: 22 passed , 0 failed , 0 skipped 
+
+== tests/test_metal.mojo
+
+Running 19 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.317 ] test_configuration_and_semantic_rejections_without_device
+    PASS [ 0.006 ] test_native_resident_parity_and_profile
+    PASS [ 0.001 ] test_native_integer_precision_and_empty_results
+    PASS [ 0.003 ] test_native_extended_integer_widths
+    PASS [ 0.003 ] test_native_mixed_types_preserve_values_and_output_dtypes
+    PASS [ 0.002 ] test_native_numeric_casts
+    PASS [ 0.001 ] test_native_extrema_all_supported_types
+    PASS [ 0.003 ] test_native_fixed_logical_types_preserve_metadata
+    PASS [ 0.002 ] test_native_additional_integer_operators
+    PASS [ 0.002 ] test_native_conditional_masks_preserve_observable_errors
+    PASS [ 0.001 ] test_native_float_value_operations_and_subnormal_comparisons
+    PASS [ 0.002 ] test_native_stable_multikey_sort_between_resident_steps
+    PASS [ 0.002 ] test_native_grouped_reductions
+    PASS [ 0.001 ] test_native_additional_reductions
+    PASS [ 0.062 ] test_join_preflight_does_not_open_devices_or_read_files
+    PASS [ 0.001 ] test_native_join_types_nulls_order_and_empty_inputs
+    PASS [ 0.002 ] test_native_join_dag_regions_and_logical_types
+    PASS [ 0.002 ] test_native_join_budget_and_large_fanout_head
+    PASS [ 0.020 ] test_native_filtered_reductions_skip_compaction
+--------
+Summary [ 0.433 ] 19 tests run: 19 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_aggregate_compositions.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.003 ] test_grouped_compositions
+    PASS [ 0.001 ] test_global_compositions_and_consumers
+    PASS [ 0.001 ] test_joined_compositions_and_checked_guards
+--------
+Summary [ 0.005 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_bounded_sums.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.002 ] test_bounded_wide_scalar_sums_and_nulls
+    PASS [ 0.003 ] test_bounded_wide_grouped_sums_and_resident_inputs
+    PASS [ 0.002 ] test_unproved_sums_reject_and_runtime_recovers
+--------
+Summary [ 0.007 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_completeness.mojo
+
+Running 4 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.002 ] test_dictionary_unary_operators_and_chains
+    PASS [ 0.001 ] test_dictionary_operations_filter_group_join_and_internal_names
+    PASS [ 0.042 ] test_dictionary_operation_budget_profile_and_numeric_casts
+    PASS [ 0.002 ] test_native_integer_membership_all_widths_exact_words
+--------
+Summary [ 0.047 ] 4 tests run: 4 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_concat.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.002 ] test_concat_order_columns_nulls_extremes_and_empty
+    PASS [ 0.001 ] test_concat_unique_group_aggregate_join_and_profile
+    PASS [ 0.002 ] test_concat_fixed_logical_metadata
+--------
+Summary [ 0.005 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_constants.mojo
+
+Running 4 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.002 ] test_literal_temporal_parsing
+    PASS [ 0.002 ] test_literal_datetime_and_time_dtypes
+    PASS [ 0.036 ] test_unlowered_text_rejected_before_encoding
+    PASS [ 0.985 ] test_literal_temporal_folding_without_device
+--------
+Summary [ 1.025 ] 4 tests run: 4 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_distinct_counts.mojo
+
+Running 2 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.006 ] test_distinct_counts_numeric_text_null_empty
+    PASS [ 0.002 ] test_distinct_count_composition_filter_join_budget
+--------
+Summary [ 0.008 ] 2 tests run: 2 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_float64_storage.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.002 ] test_float64_storage_projection_filter_literals_and_conditionals
+    PASS [ 0.002 ] test_float64_payload_all_joins_groups_unique_and_concat
+    PASS [ 0.141 ] test_float64_computation_remains_rejected_before_device_initialization
+--------
+Summary [ 0.145 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_sets.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.003 ] test_unique_subset_keeps_first_and_singletons
+    PASS [ 0.002 ] test_unique_whole_rows_and_string_keys
+    PASS [ 0.002 ] test_unique_float_nan_zero_and_recovery
+--------
+Summary [ 0.007 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_slices.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.001 ] test_slice_offsets_lengths_nulls_and_empty
+    PASS [ 0.001 ] test_slice_current_rows_after_filters_sort_groups_and_joins
+    PASS [ 0.002 ] test_slice_before_reductions_and_invalid_length_recovery
+--------
+Summary [ 0.004 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_metal_temporal_fields.mojo
+
+Running 3 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.001 ] test_temporal_storage_units_and_extremes
+    PASS [ 0.001 ] test_temporal_fields_group_join_and_preflight
+    PASS [ 0.001 ] test_temporal_fixed_truncation
+--------
+Summary [ 0.003 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+== tests/test_time_windows.mojo
+
+Running 7 tests for /tmp/metal-completeness-final-public-drivers/driver_0.mojo 
+    PASS [ 0.988 ] test_stable_row_variance
+    PASS [ 0.113 ] test_duplicate_boundaries_and_empty_windows
+    PASS [ 0.098 ] test_grouped_sorting
+    PASS [ 0.032 ] test_unsigned_and_nonfinite_values
+    PASS [ 0.037 ] test_invalid_requests
+    PASS [ 0.491 ] test_lazy_and_chunked_windows
+    PASS [ 0.052 ] test_time_windows_and_membership_dispatch_independently
+--------
+Summary [ 1.811 ] 7 tests run: 7 passed , 0 failed , 0 skipped 
+

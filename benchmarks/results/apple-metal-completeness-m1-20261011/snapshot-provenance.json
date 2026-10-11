@@ -1,0 +1,8 @@
+{
+  "measured_commit": "55ea74517173fc161523788bbfce0755ec8a58ea",
+  "published_equivalent_commit": "d8966c9",
+  "measured_and_published_git_tree": "5fa4a565e3c6cac43543a1eebb3c60e34d2b6986",
+  "rebased_integration_commit": "be9dbfdf663956dc2aa0963a0a25490125f43b23",
+  "rebased_cpu_base": "67dafef",
+  "note": "Full suite results precede the CPU window merge #592. Public tests separately cover the rebased stack. This snapshot precedes Float64 emulation."
+}

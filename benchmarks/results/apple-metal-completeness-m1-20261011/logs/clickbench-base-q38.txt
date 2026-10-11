@@ -1,0 +1,58 @@
+coverage	q38	wrong_answer	full result differs
+expected_rows	10
+actual_rows	10
+expected_sample
+shape: (10, 2)
+┌──────────────────────────────────┬───────────┐
+│ URL                              ┆ PageViews │
+│ ---                              ┆ ---       │
+│ str                              ┆ i64       │
+╞══════════════════════════════════╪═══════════╡
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://afisha.mail.ru/real-esta… ┆ 2         │
+│ http://voronezh.irr.ru/catalog   ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ https://mopsale/search/?section… ┆ 2         │
+│ http://ayzdorov.ru/1.202.html    ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://pogoda.yandex.ru%2Fprodu… ┆ 2         │
+└──────────────────────────────────┴───────────┘
+actual_sample
+shape: (10, 2)
+┌──────────────────────────────────┬───────────┐
+│ URL                              ┆ PageViews │
+│ ---                              ┆ ---       │
+│ str                              ┆ i64       │
+╞══════════════════════════════════╪═══════════╡
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+└──────────────────────────────────┴───────────┘
+cpu_repeat_equal	False
+cpu_repeat_sample
+shape: (10, 2)
+┌──────────────────────────────────┬───────────┐
+│ URL                              ┆ PageViews │
+│ ---                              ┆ ---       │
+│ str                              ┆ i64       │
+╞══════════════════════════════════╪═══════════╡
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http:%2F%2Ftregister/page_type=… ┆ 2         │
+│ http:%2F%2Ftregister_pf[CML2_BI… ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://afisha.mail.ru/login.htm… ┆ 2         │
+│ http://auto_id=2475/about_city   ┆ 2         │
+│ http://stalker-pub-200878986754… ┆ 2         │
+│ http://diary.ru/search?famillik… ┆ 2         │
+│ http://bdsmpeople.ru/search      ┆ 2         │
+│ http://forum/?shows.html?html?1… ┆ 2         │
+└──────────────────────────────────┴───────────┘

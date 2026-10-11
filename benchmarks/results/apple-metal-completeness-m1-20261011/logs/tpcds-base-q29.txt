@@ -1,0 +1,1 @@
+coverage	q29	unsupported	Metal unsupported [plan]: checked grouped sums require terminal aggregation without head

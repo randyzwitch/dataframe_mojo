@@ -1,0 +1,1 @@
+coverage	q35	unsupported	Metal unsupported [accumulator]: mean requires Float64 arithmetic

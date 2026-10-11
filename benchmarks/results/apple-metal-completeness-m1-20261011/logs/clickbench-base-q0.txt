@@ -1,0 +1,5 @@
+coverage	q0	ok	
+ordered_equal	True
+output_rows	1
+collections	2
+collection_ns	12230757000

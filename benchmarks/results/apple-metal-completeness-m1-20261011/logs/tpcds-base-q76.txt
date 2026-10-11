@@ -1,0 +1,1 @@
+coverage	q76	unsupported	Metal unsupported [accumulator]: floating sum requires Float64 accumulation

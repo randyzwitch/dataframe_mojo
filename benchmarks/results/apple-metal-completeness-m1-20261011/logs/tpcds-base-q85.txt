@@ -1,0 +1,1 @@
+coverage	q85	unsupported	Metal unsupported [plan]: join supports at most 64 combined input columns

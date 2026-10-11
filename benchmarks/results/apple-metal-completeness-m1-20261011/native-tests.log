@@ -1,0 +1,7 @@
+Built /tmp/metal-completeness-final-native/libdfmetal.dylib (6e70e0bfc1d7b1edec38e35408dd7ef13905259b2985d0afe4e49374b65a6280)
+Native Metal ABI and pure request validation: PASS
+Native Metal metadata-only probe and exact plan cache state: PASS
+Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS
+Metal join pure ABI validation passed
+Metal join GPU parity passed: seven joins, ten types, nulls, stable order, slicing, large scans, limits, lifecycle
+Metal resident DAG parity, traffic, budgets, failure recovery and ownership: PASS

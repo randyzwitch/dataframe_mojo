@@ -1,0 +1,58 @@
+coverage	q39	wrong_answer	full result differs
+expected_rows	10
+actual_rows	10
+expected_sample
+shape: (10, 6)
+┌────────────────┬────────────────┬─────────────┬──────────────────────────────────┬──────────────────────────────────┬───────────┐
+│ TraficSourceID ┆ SearchEngineID ┆ AdvEngineID ┆ Src                              ┆ Dst                              ┆ PageViews │
+│ ---            ┆ ---            ┆ ---         ┆ ---                              ┆ ---                              ┆ ---       │
+│ i16            ┆ i16            ┆ i16         ┆ str                              ┆ str                              ┆ i64       │
+╞════════════════╪════════════════╪═════════════╪══════════════════════════════════╪══════════════════════════════════╪═══════════╡
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ 0              ┆ 0              ┆ 0           ┆ ""                               ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ 4              ┆ 0              ┆ 0           ┆ ""                               ┆ http://komme%2F27.0.1453.116     ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ 1              ┆ 0              ┆ 0           ┆ http://mysw.info/node/215455&te… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+└────────────────┴────────────────┴─────────────┴──────────────────────────────────┴──────────────────────────────────┴───────────┘
+actual_sample
+shape: (10, 6)
+┌────────────────┬────────────────┬─────────────┬──────────────────────────────────┬──────────────────────────────────┬───────────┐
+│ TraficSourceID ┆ SearchEngineID ┆ AdvEngineID ┆ Src                              ┆ Dst                              ┆ PageViews │
+│ ---            ┆ ---            ┆ ---         ┆ ---                              ┆ ---                              ┆ ---       │
+│ i16            ┆ i16            ┆ i16         ┆ str                              ┆ str                              ┆ i64       │
+╞════════════════╪════════════════╪═════════════╪══════════════════════════════════╪══════════════════════════════════╪═══════════╡
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+└────────────────┴────────────────┴─────────────┴──────────────────────────────────┴──────────────────────────────────┴───────────┘
+cpu_repeat_equal	False
+cpu_repeat_sample
+shape: (10, 6)
+┌────────────────┬────────────────┬─────────────┬──────────────────────────────────┬──────────────────────────────────┬───────────┐
+│ TraficSourceID ┆ SearchEngineID ┆ AdvEngineID ┆ Src                              ┆ Dst                              ┆ PageViews │
+│ ---            ┆ ---            ┆ ---         ┆ ---                              ┆ ---                              ┆ ---       │
+│ i16            ┆ i16            ┆ i16         ┆ str                              ┆ str                              ┆ i64       │
+╞════════════════╪════════════════╪═════════════╪══════════════════════════════════╪══════════════════════════════════╪═══════════╡
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ 0              ┆ 0              ┆ 0           ┆ ""                               ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ 4              ┆ 0              ┆ 0           ┆ ""                               ┆ http://komme%2F27.0.1453.116     ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+│ -1             ┆ 0              ┆ 0           ┆ http://state=19945206/foto-4/lo… ┆ http://irr.ru/index.php?showalb… ┆ 10        │
+└────────────────┴────────────────┴─────────────┴──────────────────────────────────┴──────────────────────────────────┴───────────┘
