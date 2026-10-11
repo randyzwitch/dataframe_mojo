@@ -7,35 +7,91 @@ I, P = C.c_int64, C.c_void_p
 
 
 def structure(name, pointers, integers):
-    return type(name, (C.Structure,), {"_fields_":
-        [(field, P) for field in pointers] + [(field, I) for field in integers]})
+    return type(
+        name,
+        (C.Structure,),
+        {
+            "_fields_": [(field, P) for field in pointers]
+            + [(field, I) for field in integers]
+        },
+    )
 
 
 Input = structure("Input", ["values", "validity"], ["dtype", "offset", "valid"])
-Output = structure("Output", ["values", "validity"],
-                   ["dtype", "slot", "reduction", "minimum"])
-Step = structure("Step", [], ["start", "nodes", "slot", "filter", "gather", "count"])
+Output = structure(
+    "Output", ["values", "validity"], ["dtype", "slot", "reduction", "minimum"]
+)
+Step = structure(
+    "Step", [], ["start", "nodes", "slot", "filter", "gather", "count"]
+)
 ResidentInput = structure("ResidentInput", ["table"], ["column"])
 ResidentInfo = structure("ResidentInfo", [], ["rows", "columns", "bytes"])
 QueryInfo = structure("QueryInfo", [], ["live", "peak", "budget"])
-Memory = structure("Memory", [], ["shared", "result", "peak", "upload",
-                                  "launches", "blocks", "capacity", "packed"])
+Memory = structure(
+    "Memory",
+    [],
+    [
+        "shared",
+        "result",
+        "peak",
+        "upload",
+        "launches",
+        "blocks",
+        "capacity",
+        "packed",
+    ],
+)
 
 
 class Request(C.Structure):
-    _fields_ = [(name, I) for name in (
-        "abi", "rows", "dtype", "slots", "input_count", "code_words",
-        "literal_count", "step_count", "gather_count", "output_count", "limit",
-        "reductions", "profiling", "budget"
-    )] + [(name, P) for name in (
-        "inputs", "code", "literals", "steps", "gathers", "outputs",
-        "node_types", "slot_types")]
+    _fields_ = [
+        (name, I)
+        for name in (
+            "abi",
+            "rows",
+            "dtype",
+            "slots",
+            "input_count",
+            "code_words",
+            "literal_count",
+            "step_count",
+            "gather_count",
+            "output_count",
+            "limit",
+            "reductions",
+            "profiling",
+            "budget",
+        )
+    ] + [
+        (name, P)
+        for name in (
+            "inputs",
+            "code",
+            "literals",
+            "steps",
+            "gathers",
+            "outputs",
+            "node_types",
+            "slot_types",
+        )
+    ]
 
 
 class Stats(C.Structure):
-    _fields_ = [("memory", Memory)] + [(name, I) for name in (
-        "rows", "download", "waits", "cache_hit", "compile_ns", "stage_ns",
-        "submit_ns", "copy_ns", "gpu_ns")]
+    _fields_ = [("memory", Memory)] + [
+        (name, I)
+        for name in (
+            "rows",
+            "download",
+            "waits",
+            "cache_hit",
+            "compile_ns",
+            "stage_ns",
+            "submit_ns",
+            "copy_ns",
+            "gpu_ns",
+        )
+    ]
 
 
 class JoinInput(C.Structure):
@@ -43,18 +99,32 @@ class JoinInput(C.Structure):
 
 
 JoinKey = structure("JoinKey", [], ["left", "right"])
-JoinOutput = structure("JoinOutput", ["values", "validity"],
-                       ["dtype", "left", "right", "prefer"])
+JoinOutput = structure(
+    "JoinOutput", ["values", "validity"], ["dtype", "left", "right", "prefer"]
+)
 
 
 class JoinRequest(C.Structure):
-    _fields_ = [(name, I) for name in (
-        "abi", "left_rows", "right_rows", "input_count", "key_count",
-        "output_count", "how", "limit", "budget", "profiling")
+    _fields_ = [
+        (name, I)
+        for name in (
+            "abi",
+            "left_rows",
+            "right_rows",
+            "input_count",
+            "key_count",
+            "output_count",
+            "how",
+            "limit",
+            "budget",
+            "profiling",
+        )
     ] + [(name, P) for name in ("inputs", "keys", "outputs")]
 
 
-lib = C.CDLL(sys.argv[1] if len(sys.argv) > 1 else "build/dfmetal/libdfmetal.dylib")
+lib = C.CDLL(
+    sys.argv[1] if len(sys.argv) > 1 else "build/dfmetal/libdfmetal.dylib"
+)
 lib.dfm_context_create.argtypes = [I, I, C.POINTER(P)]
 lib.dfm_context_create.restype = P
 lib.dfm_context_release.argtypes = [P]
@@ -64,12 +134,32 @@ lib.dfm_query_release.argtypes = [P]
 lib.dfm_resident_release.argtypes = [P]
 lib.dfm_resident_info.argtypes = [P, C.POINTER(ResidentInfo), C.POINTER(P)]
 lib.dfm_query_info.argtypes = [P, C.POINTER(QueryInfo), C.POINTER(P)]
-lib.dfm_resident_rows.argtypes = [P, C.POINTER(Request), P, I, I,
-                                C.POINTER(P), C.POINTER(Stats), C.POINTER(P)]
-lib.dfm_resident_join.argtypes = [P, C.POINTER(JoinRequest), P, I, I,
-                                C.POINTER(P), C.POINTER(Stats), C.POINTER(P)]
+lib.dfm_resident_rows.argtypes = [
+    P,
+    C.POINTER(Request),
+    P,
+    I,
+    I,
+    C.POINTER(P),
+    C.POINTER(Stats),
+    C.POINTER(P),
+]
+lib.dfm_resident_join.argtypes = [
+    P,
+    C.POINTER(JoinRequest),
+    P,
+    I,
+    I,
+    C.POINTER(P),
+    C.POINTER(Stats),
+    C.POINTER(P),
+]
 lib.dfm_resident_export.argtypes = [P, P, I, C.POINTER(Stats), C.POINTER(P)]
-lib.dfm_estimate.argtypes = [C.POINTER(Request), C.POINTER(Memory), C.POINTER(P)]
+lib.dfm_estimate.argtypes = [
+    C.POINTER(Request),
+    C.POINTER(Memory),
+    C.POINTER(P),
+]
 lib.dfm_free.argtypes = [P]
 lib.dfm_device_count.restype = I
 lib.dfm_resident_abi_version.restype = I
@@ -97,26 +187,53 @@ def bits(values, offset=0):
     return data
 
 
-SCALAR = {1: C.c_float, 2: C.c_int32, 3: C.c_int64, 4: C.c_uint8,
-          5: C.c_int8, 6: C.c_int16, 7: C.c_uint8, 8: C.c_uint16,
-          9: C.c_uint32, 10: C.c_uint64}
+SCALAR = {
+    1: C.c_float,
+    2: C.c_int32,
+    3: C.c_int64,
+    4: C.c_uint8,
+    5: C.c_int8,
+    6: C.c_int16,
+    7: C.c_uint8,
+    8: C.c_uint16,
+    9: C.c_uint32,
+    10: C.c_uint64,
+}
 
 
 class Rows:
-    def __init__(self, columns, *, rows=None, outputs=None, nodes=(),
-                 steps=(), slot_types=None, literals=None, reductions=False,
-                 offset=0):
+    def __init__(
+        self,
+        columns,
+        *,
+        rows=None,
+        outputs=None,
+        nodes=(),
+        steps=(),
+        slot_types=None,
+        literals=None,
+        reductions=False,
+        offset=0
+    ):
         # A column is (dtype, values, validity), or (dtype, table, column_index).
         self.owners, inputs, refs = [], [], []
         for dtype, source, valid in columns:
             if isinstance(source, list):
                 rows = len(source) if rows is None else rows
                 data = bits(source, offset) if dtype == 4 else (
-                    SCALAR[dtype] * max(1, len(source)))(*source)
+                    SCALAR[dtype] * max(1, len(source))
+                )(*source)
                 bitmap = bits(valid, offset) if valid is not None else None
                 self.owners.extend([data, bitmap])
-                inputs.append(Input(ptr(data), ptr(bitmap) if bitmap is not None
-                                    else None, dtype, offset, valid is not None))
+                inputs.append(
+                    Input(
+                        ptr(data),
+                        ptr(bitmap) if bitmap is not None else None,
+                        dtype,
+                        offset,
+                        valid is not None,
+                    )
+                )
                 refs.append(ResidentInput(None, 0))
             else:
                 inputs.append(Input(None, None, dtype, 0, 0))
@@ -126,21 +243,54 @@ class Rows:
         slot_types = slot_types or [column[0] for column in columns]
         self.types = (I * len(slot_types))(*slot_types)
         self.code = (I * (len(nodes) * 4))(*[x for node in nodes for x in node])
-        self.literals = (C.c_uint64 * len(nodes))(*(literals or [0] * len(nodes)))
-        self.node_types = (I * len(nodes))(*[slot_types[step[2]] for step in steps
-                                           for _ in range(step[1])])
+        self.literals = (C.c_uint64 * len(nodes))(
+            *(literals or [0] * len(nodes))
+        )
+        self.node_types = (I * len(nodes))(
+            *[slot_types[step[2]] for step in steps for _ in range(step[1])]
+        )
         self.steps = (Step * len(steps))(*(Step(*step) for step in steps))
         outputs = outputs or [(t, i, -1, 0) for i, t in enumerate(slot_types)]
-        self.outputs = (Output * len(outputs))(*(Output(None, None, *o) for o in outputs))
-        self.request = Request(2, rows, 0, len(slot_types), len(inputs),
-            len(self.code), len(nodes), len(steps), 0, len(outputs), -1,
-            reductions, 0, -1, ptr(self.inputs), ptr(self.code), ptr(self.literals),
-            ptr(self.steps), None, ptr(self.outputs), ptr(self.node_types), ptr(self.types))
+        self.outputs = (Output * len(outputs))(
+            *(Output(None, None, *o) for o in outputs)
+        )
+        self.request = Request(
+            2,
+            rows,
+            0,
+            len(slot_types),
+            len(inputs),
+            len(self.code),
+            len(nodes),
+            len(steps),
+            0,
+            len(outputs),
+            -1,
+            reductions,
+            0,
+            -1,
+            ptr(self.inputs),
+            ptr(self.code),
+            ptr(self.literals),
+            ptr(self.steps),
+            None,
+            ptr(self.outputs),
+            ptr(self.node_types),
+            ptr(self.types),
+        )
 
     def run(self, query, final=False, failure=None):
         result, stats, err = P(), Stats(), P()
-        status = lib.dfm_resident_rows(query, C.byref(self.request), self.refs,
-            len(self.refs), final, C.byref(result), C.byref(stats), C.byref(err))
+        status = lib.dfm_resident_rows(
+            query,
+            C.byref(self.request),
+            self.refs,
+            len(self.refs),
+            final,
+            C.byref(result),
+            C.byref(stats),
+            C.byref(err),
+        )
         if failure:
             assert status and not result
             message = C.string_at(err).decode()
@@ -171,7 +321,9 @@ def export(table, types, invalid=False):
     n = information(table).rows
     arrays, bitmaps, outputs = [], [], []
     for i, dtype in enumerate(types):
-        data = (SCALAR[dtype] * max(1, n))() if dtype != 4 else bits([False] * n)
+        data = (SCALAR[dtype] * max(1, n))() if dtype != 4 else bits(
+            [False] * n
+        )
         bitmap = bits([False] * n)
         C.memset(data, 0xA5, C.sizeof(data))
         C.memset(bitmap, 0xA5, C.sizeof(bitmap))
@@ -183,34 +335,62 @@ def export(table, types, invalid=False):
     if invalid:
         descriptors[-1].dtype = 10 if types[-1] != 10 else 2
     stats, err = Stats(), P()
-    status = lib.dfm_resident_export(table, descriptors, len(outputs),
-                                   C.byref(stats), C.byref(err))
+    status = lib.dfm_resident_export(
+        table, descriptors, len(outputs), C.byref(stats), C.byref(err)
+    )
     if invalid:
         assert status and [bytes(a) for a in arrays + bitmaps] == before
         assert b"metadata mismatch" in C.string_at(err)
         lib.dfm_free(err)
         return
     check(status, err)
-    values = [[bool(a[i // 8] & (1 << (i % 8))) for i in range(n)]
-              if dtype == 4 else list(a)[:n] for a, dtype in zip(arrays, types)]
-    validity = [[bool(b[i // 8] & (1 << (i % 8))) for i in range(n)] for b in bitmaps]
+    values = [
+        [bool(a[i // 8] & (1 << (i % 8))) for i in range(n)] if dtype
+        == 4 else list(a)[:n]
+        for a, dtype in zip(arrays, types)
+    ]
+    validity = [
+        [bool(b[i // 8] & (1 << (i % 8))) for i in range(n)] for b in bitmaps
+    ]
     return values, validity, stats
 
 
 def joined(q, left, right, n, m, how=0, final=False):
-    inputs = (JoinInput * 4)(*(JoinInput(Input(None, None, 2, 0, 0), i // 2)
-                              for i in range(4)))
-    refs = (ResidentInput * 4)(ResidentInput(left, 0), ResidentInput(left, 1),
-                               ResidentInput(right, 0), ResidentInput(right, 1))
+    inputs = (JoinInput * 4)(
+        *(JoinInput(Input(None, None, 2, 0, 0), i // 2) for i in range(4))
+    )
+    refs = (ResidentInput * 4)(
+        ResidentInput(left, 0),
+        ResidentInput(left, 1),
+        ResidentInput(right, 0),
+        ResidentInput(right, 1),
+    )
     keys = (JoinKey * 1)(JoinKey(0, 2))
-    outputs = (JoinOutput * 3)(JoinOutput(None, None, 2, 0, 2, 0),
-        JoinOutput(None, None, 2, 1, -1, 0), JoinOutput(None, None, 2, -1, 3, 0))
-    request = JoinRequest(1, n, m, 4, 1, 3, how, -1, -1, 0,
-                          ptr(inputs), ptr(keys), ptr(outputs))
+    outputs = (JoinOutput * 3)(
+        JoinOutput(None, None, 2, 0, 2, 0),
+        JoinOutput(None, None, 2, 1, -1, 0),
+        JoinOutput(None, None, 2, -1, 3, 0),
+    )
+    request = JoinRequest(
+        1, n, m, 4, 1, 3, how, -1, -1, 0, ptr(inputs), ptr(keys), ptr(outputs)
+    )
     table, stats, err = P(), Stats(), P()
-    check(lib.dfm_resident_join(q, C.byref(request), refs, 4, final,
-        C.byref(table), C.byref(stats), C.byref(err)), err)
-    assert stats.memory.upload == 0 and stats.download == 8 and stats.copy_ns == 0
+    check(
+        lib.dfm_resident_join(
+            q,
+            C.byref(request),
+            refs,
+            4,
+            final,
+            C.byref(table),
+            C.byref(stats),
+            C.byref(err),
+        ),
+        err,
+    )
+    assert (
+        stats.memory.upload == 0 and stats.download == 8 and stats.copy_ns == 0
+    )
     assert stats.waits == 2
     return table, stats
 
@@ -223,8 +403,12 @@ err = P()
 context = lib.dfm_context_create(0, 0, C.byref(err))
 check(not context, err)
 q = query(context)
-left, _ = Rows([(2, [1, 2, 2, 9, 4], [True, True, True, False, True]),
-                (2, [10, 20, 21, 90, 40], None)]).run(q)
+left, _ = Rows(
+    [
+        (2, [1, 2, 2, 9, 4], [True, True, True, False, True]),
+        (2, [10, 20, 21, 90, 40], None),
+    ]
+).run(q)
 right, _ = Rows([(2, [2, 2, 3], None), (2, [200, 201, 300], None)]).run(q)
 table, _ = joined(q, left, right, 5, 3)
 assert information(table).rows == 4
@@ -236,10 +420,14 @@ assert valid[0] == [True] * 5 + [False, True, True]
 lib.dfm_resident_release(outer)
 lib.dfm_resident_release(left)
 lib.dfm_resident_release(right)
-post = Rows([(2, table, i) for i in range(3)], rows=4,
+post = Rows(
+    [(2, table, i) for i in range(3)],
+    rows=4,
     outputs=[(2, 0, -1, 0), (2, 3, -1, 0)],
     nodes=[(0, -1, -1, 1), (0, -1, -1, 2), (5, 0, 1, -1)],
-    steps=[(0, 3, 3, 0, 0, 0)], slot_types=[2] * 4)
+    steps=[(0, 3, 3, 0, 0, 0)],
+    slot_types=[2] * 4,
+)
 result, stats = post.run(q, final=True)
 assert stats.memory.upload == 24  # Literal descriptors, no column payload.
 lib.dfm_resident_release(table)
@@ -256,8 +444,10 @@ for dtype in range(1, 11):
     for n in (0, 1, 9, 257):
         source = [i % 17 for i in range(n)]
         if dtype == 1:
-            source = ([0.0, -0.0, math.nan, math.inf, -math.inf, 1e-40] *
-                      ((n + 5) // 6))[:n]
+            source = (
+                [0.0, -0.0, math.nan, math.inf, -math.inf, 1e-40]
+                * ((n + 5) // 6)
+            )[:n]
         if dtype == 10:
             source = [(1 << 64) - 1 - i for i in range(n)]
         if dtype == 4:
@@ -273,16 +463,30 @@ for dtype in range(1, 11):
             for i in range(n):
                 if valid[i]:
                     expected = SCALAR[dtype](source[i]).value
-                    assert (dtype == 1 and math.isnan(expected) and math.isnan(actual[0][i])) or actual[0][i] == expected
+                    assert (
+                        dtype == 1
+                        and math.isnan(expected)
+                        and math.isnan(actual[0][i])
+                    ) or actual[0][i] == expected
                     if dtype == 1 and expected == 0:
-                        assert bytes(C.c_float(actual[0][i])) == bytes(C.c_float(expected))
+                        assert bytes(C.c_float(actual[0][i])) == bytes(
+                            C.c_float(expected)
+                        )
             lib.dfm_resident_release(second)
 
 # Scalar reductions can feed another native region without host payload copies.
-for kind, dtype, expected in ((10, 2, 6), (11, 3, 3), (90, 3, 4),
-                              (80, 2, 1), (81, 2, 3)):
-    first, _ = Rows([(2, [1, 2, 3, 99], [True, True, True, False])],
-        outputs=[(dtype, 0, kind, 1)], reductions=True).run(q)
+for kind, dtype, expected in (
+    (10, 2, 6),
+    (11, 3, 3),
+    (90, 3, 4),
+    (80, 2, 1),
+    (81, 2, 3),
+):
+    first, _ = Rows(
+        [(2, [1, 2, 3, 99], [True, True, True, False])],
+        outputs=[(dtype, 0, kind, 1)],
+        reductions=True,
+    ).run(q)
     second, _ = Rows([(dtype, first, 0)], rows=1).run(q, final=True)
     lib.dfm_resident_release(first)
     values, valid, _ = export(second, [dtype])
@@ -315,10 +519,14 @@ lib.dfm_query_release(other)
 lib.dfm_resident_release(first)
 
 # Failed checked arithmetic drains work and does not poison the next consumer.
-Rows([(2, [2147483647] * 9, None)], nodes=[(0, -1, -1, 0),
-     (1, -1, -1, -1), (5, 0, 1, -1)], literals=[0, 1, 0],
-     steps=[(0, 3, 1, 0, 0, 0)], slot_types=[2, 2],
-     outputs=[(2, 1, -1, 0)]).run(q, failure="overflow")
+Rows(
+    [(2, [2147483647] * 9, None)],
+    nodes=[(0, -1, -1, 0), (1, -1, -1, -1), (5, 0, 1, -1)],
+    literals=[0, 1, 0],
+    steps=[(0, 3, 1, 0, 0, 0)],
+    slot_types=[2, 2],
+    outputs=[(2, 1, -1, 0)],
+).run(q, failure="overflow")
 assert information(q, query=True).live == 0
 last, _ = Rows([(2, [42], None)]).run(q, final=True)
 # Tables own their query and context even after both caller handles are dropped.
@@ -326,4 +534,6 @@ lib.dfm_query_release(q)
 lib.dfm_context_release(context)
 assert export(last, [2])[0] == [[42]]
 lib.dfm_resident_release(last)
-print("Metal resident DAG parity, traffic, budgets, failure recovery and ownership: PASS")
+print(
+    "Metal resident DAG parity, traffic, budgets, failure recovery and ownership: PASS"
+)

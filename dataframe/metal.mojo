@@ -90,6 +90,7 @@ comptime _Info = def(Int, Int, Int) thin abi("C") -> Int32
 comptime _Version = def() thin abi("C") -> Int64
 comptime _Count = def() thin abi("C") -> Int64
 comptime _Build = def() thin abi("C") -> Int
+comptime _PlanFeatures = def(Int, Int) thin abi("C") -> Int64
 comptime _JoinPrepare = def(Int, Int, Int, Int, Int) thin abi("C") -> Int32
 comptime _JoinFinish = def(Int, Int, Int64, Int, Int) thin abi("C") -> Int32
 comptime _QueryCreate = def(Int, Int64, Int) thin abi("C") -> Int
@@ -576,12 +577,43 @@ def _output_addresses(column: Series) raises -> Tuple[Int, Int]:
     raise Error("Metal unsupported output dtype")
 
 
+def _direct_filtered_reduction(plan: RowPlan) -> Bool:
+    if not plan.reductions:
+        return False
+    var filtered = False
+    for step in plan.steps:
+        if step.order or step.grouped:
+            return False
+        filtered |= step.filter
+    for output in plan.outputs:
+        if (
+            output.reduction != SUM
+            and output.reduction != COUNT
+            and output.reduction != LEN
+        ):
+            return False
+    return filtered
+
+
+def _plan_features(library: _Library, request: List[Int64]) raises -> Int64:
+    var callback = library.optional_symbol("dfm_plan_features")
+    if not callback:
+        return 0
+    var error = 0
+    var features = Pointer(to=callback).unsafe_bitcast[_PlanFeatures]()[](
+        Int(request.unsafe_ptr()), Int(Pointer(to=error))
+    )
+    library.check(Int32(features < 0), error)
+    return features
+
+
 def _execute(
     plan: RowPlan, device: Int, budget: Int, profiling: Bool, start: Int
 ) raises -> Tuple[DataFrame, DataFrame]:
     var descriptors = _Descriptors(plan)
     var request = descriptors.request(plan, budget, profiling)
     var library = _Library()
+    var features = _plan_features(library, request)
     var memory = List[Int64](length=8, fill=0)
     var error = 0
     var estimate = library.estimate
@@ -642,7 +674,8 @@ def _execute(
         info,
         initialization_ns,
         start,
-        "specialized_native_metal_stable_compaction",
+        "native_metal_predicate_reductions" if features
+        & 1 else "specialized_native_metal_stable_compaction",
         "shared-buffer staging -> native Metal kernels -> synchronized CPU result",
     )
     return (result^, report^)
@@ -1018,6 +1051,8 @@ def _execute_join_dag(
                 input_rows = values[task.source].rows
                 input_bytes = values[task.source].retained
             request[1] = Int64(input_rows)
+            if _plan_features(scope.context.library, request) & 1:
+                algorithm = "native_metal_predicate_reductions"
             var refs = List[Int64]()
             for name in plan.source.columns():
                 refs.extend(
@@ -1205,6 +1240,11 @@ struct MetalRuntime(AcceleratorBackend):
                 + String(plan.slots)
                 + " slots; optional runtime "
                 + ("present" if metal_installed() else "missing")
+                + (
+                    "; filtered reductions consume predicates without row compaction" if _direct_filtered_reduction(
+                        plan
+                    ) else ""
+                )
                 + "\n"
             )
         except error:

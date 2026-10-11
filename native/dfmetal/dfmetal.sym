@@ -8,6 +8,7 @@ _dfm_context_info
 _dfm_workspace_info
 _dfm_workspace_trim
 _dfm_estimate
+_dfm_plan_features
 _dfm_plan_cached
 _dfm_execute
 _dfm_free

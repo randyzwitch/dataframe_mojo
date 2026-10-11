@@ -25,6 +25,8 @@ WORKLOADS = [
     "filter_sparse",
     "count",
     "int_sum",
+    "filtered_int_sum",
+    "filter_unused",
 ]
 VARIANTS = ["base", "sorted", "nulls"]
 

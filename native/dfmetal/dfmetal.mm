@@ -141,6 +141,7 @@ int64_t aligned(int64_t n) { return mul(add(n, 7) / 8, 8); }
 // occupy shared memory. Logical ABI slot identifiers remain unchanged.
 struct Layout {
   std::array<int64_t, 64> physical;
+  std::array<std::array<bool, 64>, 64> gathered{};
   std::vector<int64_t> ends;
   int64_t slots = 0;
   explicit Layout(const DFMRequest &r) {
@@ -193,6 +194,42 @@ struct Layout {
     }
     for (int64_t i = 0; i < r.output_count; ++i)
       keep(r.outputs[i].slot);
+    // A column can need physical storage before a boundary without needing a
+    // gather after it. Walk uses backward to distinguish those lifetimes.
+    std::array<bool, 64> live{};
+    for (int64_t i = 0; i < r.output_count; ++i)
+      live[r.outputs[i].slot] = true;
+    for (int64_t i = r.step_count; i-- > 0;) {
+      auto &step = r.steps[i];
+      if (step.filter == 1 || step.filter == 2)
+        for (int64_t j = 0; j < step.gather_count; ++j) {
+          auto slot = r.gathers[step.gather_start + j];
+          gathered[i][slot] = live[slot];
+        }
+      if (step.filter == 3) {
+        auto header = r.code + 4 * step.start;
+        live[step.slot] = live[header[2]] = live[header[3]] = false;
+        for (int64_t j = 1; j < step.nodes; ++j) {
+          auto node = r.code + 4 * (step.start + j);
+          if (node[0] == DFM_GROUP_OUTPUT)
+            live[node[2]] = false;
+        }
+        for (int64_t j = 1; j < step.nodes; ++j)
+          live[r.code[4 * (step.start + j) + 1]] = true;
+      } else if (step.filter == 2) {
+        for (int64_t j = 0; j < step.nodes; ++j)
+          live[r.code[4 * (step.start + j) + 1]] = true;
+      } else {
+        live[step.slot] = false;
+        // Retain inputs even for a dead result: evaluating a checked expression
+        // can still raise an observable error at this stage.
+        for (int64_t j = 0; j < step.nodes; ++j) {
+          auto node = r.code + 4 * (step.start + j);
+          if (node[0] == DFM_COLUMN)
+            live[node[3]] = true;
+        }
+      }
+    }
   }
 };
 struct Shape {
@@ -200,6 +237,22 @@ struct Shape {
       partial;
   bool filter, order, grouped;
 };
+bool directFilteredReduction(const DFMRequest &r) {
+  if (!r.reductions || !r.steps || !r.outputs)
+    return false;
+  bool filter = false;
+  for (int64_t i = 0; i < r.step_count; ++i) {
+    if (r.steps[i].filter >= 2)
+      return false;
+    filter |= r.steps[i].filter == 1;
+  }
+  for (int64_t i = 0; i < r.output_count; ++i)
+    if (r.outputs[i].reduction != DFM_SUM &&
+        r.outputs[i].reduction != DFM_COUNT &&
+        r.outputs[i].reduction != DFM_LEN)
+      return false;
+  return filter;
+}
 Shape validate(const DFMRequest &r, bool storage = false,
                const DFMResidentInput *resident = nullptr,
                bool resident_output = false) {
@@ -459,6 +512,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
       r.reductions
           ? mul(mul(std::min<int64_t>(s.blocks, 1024), r.output_count), 16)
           : 1;
+  if (directFilteredReduction(r))
+    s.filter = false;
   return s;
 }
 DFMMemory estimate(const DFMRequest &r, const Shape &s,
@@ -519,7 +574,7 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
   m.launches = r.input_count + layout.ends.size() +
       (r.reductions ? 2 : (!retain || final));
   for (int64_t i = 0; i < r.step_count; ++i)
-    if (r.steps[i].filter) {
+    if (r.steps[i].filter && !directFilteredReduction(r)) {
       if (r.steps[i].filter == 1)
         m.launches += 2;
       else
@@ -528,8 +583,7 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
       if (r.steps[i].filter == 3)
         m.launches += 5;
       for (int64_t j = 0; j < r.steps[i].gather_count; ++j)
-        m.launches +=
-            layout.physical[r.gathers[r.steps[i].gather_start + j]] >= 0;
+        m.launches += layout.gathered[i][r.gathers[r.steps[i].gather_start + j]];
     }
   return m;
 }
@@ -895,11 +949,20 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
 
 std::string source(const DFMRequest &r) {
   auto layout = Layout(r);
+  bool direct = directFilteredReduction(r);
+  int64_t filterSlot = 0;
+  if (direct)
+    for (int64_t i = 0; i < r.step_count; ++i)
+      if (r.steps[i].filter)
+        filterSlot = layout.physical[r.steps[i].slot];
   std::string text = "#include <metal_stdlib>\nusing namespace metal;\n#pragma "
                      "clang fp contract(off)\n";
   text += "struct Out { long slot; long kind; long minimum; long type; "
           "};\nstruct Partial { long total; long count; };\n";
   text += residentSource();
+  text += "constant bool DIRECT_FILTERED_REDUCTION=" +
+          std::string(direct ? "true" : "false") + ";\n" +
+          "constant ulong FILTERED_SLOT=" + std::to_string(filterSlot) + "UL;\n";
   text += R"MSL(
 bool float_compare(float a,float b,int op){
  uint x=as_type<uint>(a),y=as_type<uint>(b),ax=x&0x7fffffffU,ay=y&0x7fffffffU;
@@ -1030,7 +1093,9 @@ kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[bu
  threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
  Out o=out[group.y];
  for(ulong row=group.x*256+lane;row<meta.x;row+=groups*256){ulong idx=o.slot*meta.z+row;
- state_add(sum,count,read_word(x[idx]),v[idx]!=0,long(row),o);}
+ if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+ Out current=o;if(DIRECT_FILTERED_REDUCTION&&o.kind==90)current.kind=11;
+ state_add(sum,count,read_word(x[idx]),DIRECT_FILTERED_REDUCTION&&o.kind==90?true:v[idx]!=0,long(row),current);}
  sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
  for(uint stride=128;stride;stride/=2){if(lane<stride){
  long a=sums[lane],b=counts[lane];state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;}
@@ -1043,7 +1108,8 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
  long sum=0,count=0;Out o=out[column];
  for(ulong i=0;i<groups;++i){Partial p=partials[column*groups+i];
  state_merge(sum,count,p.total,p.count,o);}
- state_finish(sum,count,o,meta.x);
+ if(DIRECT_FILTERED_REDUCTION&&o.kind==90){sum=count;count=1;}
+ else state_finish(sum,count,o,meta.x);
  result[column]={sum,count};
 }
 kernel void order_init(device uint *index[[buffer(0)]],constant uint4 &meta[[buffer(1)]],uint row[[thread_position_in_grid]]){
@@ -1117,7 +1183,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           "(index[mid],own,x,v,meta))lo=mid+1;else "
           "hi=mid;}target[base+(row-(left?base:middle))+(lo-first)]=own;}\n";
     }
-  int64_t first = 0;
+  int64_t first = 0, previousFilter = -1;
   for (auto end : layout.ends) {
     if (r.steps[end].filter >= 2) {
       first = end + 1;
@@ -1129,6 +1195,16 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
             "const T *lit[[buffer(2)]],constant uint4 "
             "&meta[[buffer(3)]],device atomic_uint *error[[buffer(4)]],uint "
             "row[[thread_position_in_grid]]){if(row>=meta.x)return;\n";
+    if (direct && previousFilter >= 0) {
+      auto at = std::to_string(layout.physical[previousFilter]) + "UL*meta.z+row";
+      text += "if(!v[" + at + "]||x[" + at + "]==T(0)){";
+      if (r.steps[end].filter) {
+        auto target = std::to_string(layout.physical[r.steps[end].slot]) +
+                      "UL*meta.z+row";
+        text += "x[" + target + "]=T(0);v[" + target + "]=0;";
+      }
+      text += "return;}\n";
+    }
     for (int64_t k = first; k <= end; ++k) {
       auto &s = r.steps[k];
       auto prefix = "s" + std::to_string(k) + "_";
@@ -1344,6 +1420,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
       }
     }
     text += "}\n";
+    if (direct && r.steps[end].filter)
+      previousFilter = r.steps[end].slot;
     first = end + 1;
   }
   return text;
@@ -1746,8 +1824,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         continue;
       }
       for (int64_t j = 0; j < step.gather_count; ++j) {
-        auto physical = layout.physical[r.gathers[step.gather_start + j]];
-        if (physical < 0)
+        auto logical = r.gathers[step.gather_start + j];
+        auto physical = layout.physical[logical];
+        if (!layout.gathered[i][logical])
           continue;
         uint64_t slot = physical;
         buffer(0, x);
@@ -1769,7 +1848,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     buffer(3, meta);
     buffer(4, arithmeticError);
     dispatch("project" + std::to_string(i), shape.cap);
-    if (step.filter) {
+    if (step.filter && !directFilteredReduction(r)) {
       uint64_t slot = layout.physical[step.slot];
       buffer(0, x);
       buffer(1, v);
@@ -1782,8 +1861,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
       buffer(1, meta);
       dispatch("block_offsets", 1);
       for (int64_t j = 0; j < step.gather_count; ++j) {
-        auto physical = layout.physical[r.gathers[step.gather_start + j]];
-        if (physical < 0)
+        auto logical = r.gathers[step.gather_start + j];
+        auto physical = layout.physical[logical];
+        if (!layout.gathered[i][logical])
           continue;
         uint64_t params[2] = {slot, static_cast<uint64_t>(physical)};
         buffer(0, x);
@@ -2090,6 +2170,19 @@ int32_t dfm_plan_cached(void *p, const DFMRequest *r, char **err) {
     auto src = source(*r);
     std::lock_guard<std::mutex> lock(c.mutex);
     return c.cache.count(src) ? 1 : 0;
+  } catch (const std::exception &e) {
+    error(err, e);
+    return -1;
+  }
+}
+int64_t dfm_plan_features(const DFMRequest *r, char **err) {
+  if (err)
+    *err = nullptr;
+  try {
+    if (!r)
+      fail("Missing Metal plan feature request");
+    validate(*r);
+    return directFilteredReduction(*r) ? 1 : 0;
   } catch (const std::exception &e) {
     error(err, e);
     return -1;

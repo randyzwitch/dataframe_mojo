@@ -10,7 +10,9 @@ from std.os import getenv
 from std.time import perf_counter_ns
 
 
-def make_frame(n: Int, variant: String, integer: Bool) raises -> DataFrame:
+def make_frame(
+    n: Int, variant: String, integer: Bool, extra_column: Bool = False
+) raises -> DataFrame:
     var validity = List[Bool](length=n, fill=True)
     if variant == "nulls":
         for i in range(n):
@@ -39,6 +41,13 @@ def make_frame(n: Int, variant: String, integer: Bool) raises -> DataFrame:
                 % UInt32(1024)
             )
         values[i] = Float32(key) / 1024
+    if extra_column:
+        return DataFrame(
+            [
+                Series("x", Column[Float32](values.copy(), validity.copy())),
+                Series("y", Column[Float32](values^, validity^)),
+            ]
+        )
     return DataFrame([Series("x", Column[Float32](values^, validity^))])
 
 
@@ -73,6 +82,14 @@ def make_query(frame: DataFrame, workload: String) raises -> LazyFrame:
         query = query.filter(col("x") > lit(Float32(0.5))).select_exprs(
             [col("x").count().alias("n"), col("x").len().alias("rows")]
         )
+    elif workload == "filter_unused":
+        query = query.filter(col("x") > lit(Float32(0.5))).select(
+            (col("y") * lit(Float32(2))).alias("y")
+        )
+    elif workload == "filtered_int_sum":
+        query = query.filter(col("x") > lit(Int32(0))).select(
+            col("x").sum().alias("s")
+        )
     elif workload == "int_sum":
         query = query.select(col("x").sum().alias("s"))
     else:
@@ -101,7 +118,12 @@ def main() raises:
     var gpu_first = getenv("BENCH_GPU_FIRST", "0") == "1"
     if n < 1 or reps < 1:
         raise Error("Rows and repetitions must be positive")
-    var frame = make_frame(n, variant, workload == "int_sum")
+    var frame = make_frame(
+        n,
+        variant,
+        workload == "int_sum" or workload == "filtered_int_sum",
+        extra_column=workload == "filter_unused",
+    )
     var query = make_query(frame, workload)
     var runtime = MetalRuntime()
     var first = timed(query, runtime, gpu_first)

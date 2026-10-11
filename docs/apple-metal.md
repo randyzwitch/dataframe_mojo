@@ -205,12 +205,23 @@ allocation. Native callers can inspect or release idle storage with
 Consecutive projection steps, including the next filter predicate, execute in
 one specialized kernel. Intermediate expression values stay in thread-local
 variables. Shared matrices hold input columns, final outputs, filter predicates,
-and values needed after a filter boundary. Dead temporary slots are omitted from
-stable gathers. Operator rounding, validity, and precision/overflow guards remain
+and values needed after a filter boundary. Backward use analysis omits columns
+from stable gathers when they are needed only before that boundary. Operator
+rounding, validity, and precision/overflow guards remain
 in the fused expression sequence.
 
+Filtered scalar count, length, and supported integer sums consume predicate
+states directly when no sort or group operation intervenes. These queries do
+not allocate the second value matrix, prefix ranks or block offsets, and do not
+compact selected rows. Later expression segments run only on lanes retained by
+all preceding predicates. Length counts selected rows even when their values
+are null; count and sum retain their own validity and `min_count` contracts.
+Profiles identify this path as `native_metal_predicate_reductions`. Row outputs
+still use stable compaction, and other scalar reductions retain their existing
+execution path.
+
 Preflight uses this same physical slot layout and counts each requested shared
-buffer once, both matrices when filtering,
+buffer once, both matrices when row compaction is needed,
 prefix ranks and block offsets, bitmap windows, typed literals, output bitmaps,
 reduction partials/results, GPU descriptors, metadata, and error storage. It also
 counts the worst-case CPU result allocation. Checked arithmetic rejects size

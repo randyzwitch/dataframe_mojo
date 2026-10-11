@@ -122,7 +122,9 @@ def unpack(bits, n):
     return [bool(bits[i // 8] & (1 << (i % 8))) for i in range(n)]
 
 
-lib = C.CDLL(sys.argv[1] if len(sys.argv) > 1 else "build/dfmetal/libdfmetal.dylib")
+lib = C.CDLL(
+    sys.argv[1] if len(sys.argv) > 1 else "build/dfmetal/libdfmetal.dylib"
+)
 lib.dfm_context_create.argtypes = [I, I, C.POINTER(P)]
 lib.dfm_context_create.restype = P
 lib.dfm_context_release.argtypes = [P]
@@ -149,7 +151,11 @@ def check(status, err):
 
 
 assert C.sizeof(Input) == 40 and C.sizeof(Step) == 48 and C.sizeof(Output) == 48
-assert C.sizeof(Request) == 176 and C.sizeof(Memory) == 64 and C.sizeof(Stats) == 136
+assert (
+    C.sizeof(Request) == 176
+    and C.sizeof(Memory) == 64
+    and C.sizeof(Stats) == 136
+)
 lib.dfm_abi_version.restype = I
 lib.dfm_device_count.restype = I
 assert lib.dfm_abi_version() == 2
@@ -253,7 +259,9 @@ def check_sort_preflight_without_device():
         ptr(slot_types),
     )
     memory, err = Memory(), P()
-    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    check(
+        lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
+    )
     assert memory.launches == 14
     assert memory.shared >= 30 * 513
     for field, value, message in ((2, 2, b"sort key"), (1, 1, b"sort key")):
@@ -310,7 +318,10 @@ def check_group_preflight_without_device():
     for n in (0, 1, 8388608):
         request.rows = n
         memory, err = Memory(), P()
-        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        check(
+            lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)),
+            err,
+        )
         assert memory.result == 4 * max(1, n) + (max(1, n) + 7) // 8
         assert memory.launches == 8 + (max(1, n) - 1).bit_length()
     for index, value in [(2, 0), (3, 2), (9, 1), (10, 3), (11, 11)]:
@@ -362,7 +373,10 @@ def check_additional_reduction_preflight_without_device():
     for op, outtype in [(83, 1), (84, 1), (93, 3), (95, 9), (96, 9)]:
         outputs[0].reduction, outputs[0].dtype = op, outtype
         memory, err = Memory(), P()
-        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        check(
+            lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)),
+            err,
+        )
         assert memory.result == ({1: 4, 3: 8, 9: 4}[outtype]) + 1
     outputs[0].dtype = 3
     outputs[0].reduction = 95
@@ -377,7 +391,10 @@ def check_additional_reduction_preflight_without_device():
             outputs[0].min_count = ignore
             err = P()
             check(
-                lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
+                lib.dfm_estimate(
+                    C.byref(request), C.byref(memory), C.byref(err)
+                ),
+                err,
             )
         outputs[0].min_count = 2
         err = P()
@@ -386,6 +403,33 @@ def check_additional_reduction_preflight_without_device():
 
 
 check_additional_reduction_preflight_without_device()
+
+
+def check_predicate_reduction_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 2, 0, 0))
+    code = (I * 16)(0, -1, -1, 0, 1, -1, -1, -1,
+                     8, 0, 1, -1, 0, -1, -1, 0)
+    literals = (I * 4)()
+    steps = (Step * 2)(Step(0, 3, 1, 1, 0, 1), Step(3, 1, 2, 0, 1, 0))
+    gathers = (I * 1)(0)
+    outputs = (Output * 1)(Output(None, None, 3, 2, 11, 0))
+    request = Request(2, 4097, 2, 3, 1, 16, 4, 2, 1, 1, -1, 1, 0, -1,
+        ptr(inputs), ptr(code), ptr(literals), ptr(steps), ptr(gathers), ptr(outputs))
+    lib.dfm_plan_features.argtypes = [C.POINTER(Request), C.POINTER(P)]
+    lib.dfm_plan_features.restype = I
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.launches == 5
+    assert lib.dfm_plan_features(C.byref(request), C.byref(err)) == 1
+    request.reductions = 0
+    outputs[0].dtype, outputs[0].reduction = 2, -1
+    rows = Memory()
+    check(lib.dfm_estimate(C.byref(request), C.byref(rows), C.byref(err)), err)
+    assert lib.dfm_plan_features(C.byref(request), C.byref(err)) == 0
+    assert rows.launches == 7 and memory.shared < rows.shared
+
+
+check_predicate_reduction_preflight_without_device()
 
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
@@ -430,7 +474,9 @@ def execute(
 ):
     scalar = SCALARS[dtype]
     n = len(values)
-    data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(*values)
+    data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(
+        *values
+    )
     validity = packed(valid, offset) if valid is not None else None
     inputs = (Input * 1)(
         Input(
@@ -461,9 +507,8 @@ def execute(
     words = []
     for node, value in zip(programs, lit):
         words.append(
-            C.c_uint64(int(value)).value
-            if node[0] == 1
-            else C.cast(
+            C.c_uint64(int(value)).value if node[0]
+            == 1 else C.cast(
                 C.pointer(C.c_double(value)), C.POINTER(C.c_uint64)
             ).contents.value
         )
@@ -471,10 +516,8 @@ def execute(
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
     out_type = (
-        ((dtype if dtype in (2, 9) else 3) if reduction == 10 else 3)
-        if reduction >= 0
-        else (4 if output_bool else dtype)
-    )
+        (dtype if dtype in (2, 9) else 3) if reduction == 10 else 3
+    ) if reduction >= 0 else (4 if output_bool else dtype)
     out_scalar = SCALARS[out_type]
     result = (out_scalar * max(1, n))()
     bits = (C.c_uint8 * max(1, (n + 7) // 8))()
@@ -515,7 +558,9 @@ def execute(
     for repeat in range(repeats):
         stats = Stats()
         err = P()
-        status = lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+        status = lib.dfm_execute(
+            ctx, C.byref(request), C.byref(stats), C.byref(err)
+        )
         if expect_error:
             assert status, expect_error
             message = C.string_at(err).decode()
@@ -533,7 +578,8 @@ def execute(
         if repeat:
             assert stats.cache_hit and stats.compile_ns == 0
     return (
-        unpack(result, stats.rows) if out_type == 4 else list(result)[: stats.rows],
+        unpack(result, stats.rows) if out_type
+        == 4 else list(result)[: stats.rows],
         unpack(bits, stats.rows),
         stats,
     )
@@ -608,7 +654,9 @@ for dtype, lo, hi in [
             [0, b, 0],
             expect_error="overflow",
         )
-    execute([lo], dtype, [col, (50, 0, -1, -1)], [0, 0], expect_error="overflow")
+    execute(
+        [lo], dtype, [col, (50, 0, -1, -1)], [0, 0], expect_error="overflow"
+    )
     for op, a, b, expected in [
         (5, hi, -1, hi - 1),
         (6, lo, -1, lo + 1),
@@ -637,9 +685,9 @@ for n in [0, 1, 257, 10001]:
             values, 2, [col], [0], valid=valid, reduction=reduction
         )
         expected = (
-            sum(x for x, v in zip(values, valid) if v)
-            if reduction == 10
-            else sum(valid) if reduction == 11 else n
+            sum(x for x, v in zip(values, valid) if v) if reduction
+            == 10 else sum(valid) if reduction
+            == 11 else n
         )
         assert result == [expected] and bits == [True]
 result, bits, _ = execute(
@@ -650,7 +698,9 @@ execute([2**31 - 1, 1], 2, [col], [0], reduction=10, expect_error="overflow")
 result, bits, _ = execute([2**31 - 1, 1, -1], 2, [col], [0], reduction=10)
 assert result == [2**31 - 1]
 execute([1.0], 1, [col], [0.0], budget=0, expect_error="memory budget")
-execute([1.0], 1, [col], [0.0], reduction=10, expect_error="accumulator precision")
+execute(
+    [1.0], 1, [col], [0.0], reduction=10, expect_error="accumulator precision"
+)
 
 
 # Separate Float32 multiply/add rounding must survive source specialization.
@@ -674,12 +724,16 @@ assert result == expected, "Float32 multiply/add contraction changed rounding"
 result, bits, _ = execute(
     [math.nan, math.inf, -math.inf, -0.0], 1, [col, (50, 0, -1, -1)], [0.0, 0.0]
 )
-assert math.isnan(result[0]) and result[1] == -math.inf and result[2] == math.inf
+assert (
+    math.isnan(result[0]) and result[1] == -math.inf and result[2] == math.inf
+)
 assert math.copysign(1, result[3]) == 1
 tiny = 2.0**-149
 result, bits, _ = execute([tiny, -tiny, 0.0], 1, [col], [0.0])
 assert result == [tiny, -tiny, 0.0]
-result, bits, _ = execute([tiny, -tiny, 0.0], 1, [col, (50, 0, -1, -1)], [0.0, 0.0])
+result, bits, _ = execute(
+    [tiny, -tiny, 0.0], 1, [col, (50, 0, -1, -1)], [0.0, 0.0]
+)
 assert result == [-tiny, tiny, -0.0]
 for op, a, b in [
     (5, tiny, tiny),
@@ -725,7 +779,9 @@ def check_fused_boundaries():
             start = len(programs)
             programs += [(0, -1, -1, current), (1, -1, -1, -1), (8, 0, 1, -1)]
             literals += [0, 5 if stage == 15 else 25, 0]
-            steps.append(Step(start, 3, slots, 1, len(gathers), len(live_columns)))
+            steps.append(
+                Step(start, 3, slots, 1, len(gathers), len(live_columns))
+            )
             gathers += live_columns
             slots += 1
             expected = [
@@ -768,10 +824,14 @@ def check_fused_boundaries():
         ptr(outputs),
     )
     memory, stats, err = Memory(), Stats(), P()
-    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    check(
+        lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
+    )
     for _ in range(2):
         check(
-            lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
+            lib.dfm_execute(
+                ctx, C.byref(request), C.byref(stats), C.byref(err)
+            ),
             err,
         )
         assert stats.rows == len(expected)
@@ -840,7 +900,9 @@ for dtype, lo, hi in [
     assert result == [hi] and bits == [True]
     for op in (5, 6, 7):
         samples = [(0, 0), (hi, 0), (hi, 1), (hi, hi), (lo, 1), (lo, lo)]
-        samples += [(random.randint(lo, hi), random.randint(lo, hi)) for _ in range(8)]
+        samples += [
+            (random.randint(lo, hi), random.randint(lo, hi)) for _ in range(8)
+        ]
         for a, b in samples:
             expected = a + b if op == 5 else a - b if op == 6 else a * b
             if lo <= expected <= hi:
@@ -886,7 +948,9 @@ for dtype, lo, hi in [
         output_bool=True,
     )
     assert result == [True, False] and all(bits)
-    result, bits, _ = execute(values, dtype, [col], [0], valid=valid, reduction=11)
+    result, bits, _ = execute(
+        values, dtype, [col], [0], valid=valid, reduction=11
+    )
     assert result == [sum(valid)] and bits == [True]
     if dtype != 10:
         result, bits, _ = execute([1, 2, 3], dtype, [col], [0], reduction=10)
@@ -950,9 +1014,10 @@ def test_typed_rows():
             node_types += [t, t]
             words += [
                 (
-                    C.cast(C.pointer(C.c_double(1.0)), C.POINTER(C.c_uint64))[0]
-                    if t == 1
-                    else 1
+                    C.cast(C.pointer(C.c_double(1.0)), C.POINTER(C.c_uint64))[
+                        0
+                    ] if t
+                    == 1 else 1
                 ),
                 0,
             ]
@@ -995,7 +1060,9 @@ def test_typed_rows():
         ptr(st),
     )
     memory, stats, err = Memory(), Stats(), P()
-    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    check(
+        lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err
+    )
     check(
         lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
         err,
@@ -1005,7 +1072,8 @@ def test_typed_rows():
     assert stats.memory.peak == memory.peak
     for j, t in enumerate(types):
         result = (
-            unpack(results[j], stats.rows) if t == 4 else list(results[j])[: stats.rows]
+            unpack(results[j], stats.rows) if t
+            == 4 else list(results[j])[: stats.rows]
         )
         expected = [values[t][i] + (t not in [3, 4, 10]) for i in selected]
         assert result == expected, (t, result[:10], expected[:10])
@@ -1090,7 +1158,9 @@ def test_numeric_casts():
             steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
             result = (SCALARS[target] * n)()
             valid = (C.c_uint8 * ((n + 7) // 8))()
-            outputs = (Output * 1)(Output(ptr(result), ptr(valid), target, 1, -1, 0))
+            outputs = (Output * 1)(
+                Output(ptr(result), ptr(valid), target, 1, -1, 0)
+            )
             nt, st = (I * 2)(source, target), (I * 2)(source, target)
             request = Request(
                 2,
@@ -1118,7 +1188,9 @@ def test_numeric_casts():
             )
             stats, err = Stats(), P()
             check(
-                lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
+                lib.dfm_execute(
+                    ctx, C.byref(request), C.byref(stats), C.byref(err)
+                ),
                 err,
             )
             got = unpack(result, n) if target == 4 else list(result)
@@ -1134,13 +1206,9 @@ def test_numeric_casts():
                 else:
                     width = C.sizeof(SCALARS[target]) * 8
                     unsigned = target in [7, 8, 9, 10]
-                    lo, hi = (
-                        (0, 2**width - 1)
-                        if unsigned
-                        else (
-                            -(2 ** (width - 1)),
-                            2 ** (width - 1) - 1,
-                        )
+                    lo, hi = (0, 2**width - 1) if unsigned else (
+                        -(2 ** (width - 1)),
+                        2 ** (width - 1) - 1,
                     )
                     fits = not (source == 1 and not math.isfinite(x))
                     expected = math.trunc(x) if fits else 0
@@ -1148,7 +1216,9 @@ def test_numeric_casts():
                 expected_valid.append(fits)
                 if fits:
                     assert got[i] == expected or (
-                        target == 1 and math.isnan(got[i]) and math.isnan(expected)
+                        target == 1
+                        and math.isnan(got[i])
+                        and math.isnan(expected)
                     ), (source, target, i, x, got[i], expected)
             assert validity == expected_valid, (
                 source,
@@ -1248,7 +1318,14 @@ def test_extrema():
         bits = [(C.c_uint8 * 1)() for _ in range(2)]
         outputs = (Output * 2)(
             *[
-                Output(C.addressof(results[i]) + 8, ptr(bits[i]), dtype, 0, 80 + i, 0)
+                Output(
+                    C.addressof(results[i]) + 8,
+                    ptr(bits[i]),
+                    dtype,
+                    0,
+                    80 + i,
+                    0,
+                )
                 for i in range(2)
             ]
         )
@@ -1278,7 +1355,9 @@ def test_extrema():
             ptr(slots),
         )
         stats, err = Stats(), P()
-        rc = lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+        rc = lib.dfm_execute(
+            ctx, C.byref(request), C.byref(stats), C.byref(err)
+        )
         assert rc == 0, C.string_at(err) if err else rc
         chosen = [x for x, yes in zip(values, valid) if yes]
         for i in range(2):
@@ -1322,7 +1401,9 @@ def test_extrema():
         check(dtype, values, [i % 7 != 3 for i in range(521)])
         check(dtype, [])
         check(dtype, values, [False] * 521)
-    float_bits = lambda u: C.cast(C.pointer(C.c_uint32(u)), C.POINTER(C.c_float))[0]
+    float_bits = lambda u: C.cast(
+        C.pointer(C.c_uint32(u)), C.POINTER(C.c_float)
+    )[0]
     for values in (
         [float("nan"), 3.0, -2.0],
         [float("nan")] * 521,
@@ -1347,7 +1428,7 @@ def test_additional_row_ops():
         signed = dtype in (2, 3, 5, 6)
         values = ([-7, -1, 0, 1, 7] if signed else [0, 1, 2, 7, 15]) * 53
         valid = [i % 7 != 2 for i in range(len(values))]
-        for denominator in ([3, -3] if signed else [3]):
+        for denominator in [3, -3] if signed else [3]:
             for op in (25, 26):
                 result, bits, _ = execute(
                     values,
@@ -1358,11 +1439,13 @@ def test_additional_row_ops():
                     offset=5,
                 )
                 expected = [
-                    x // denominator if op == 25 else x % denominator for x in values
+                    x // denominator if op == 25 else x % denominator
+                    for x in values
                 ]
                 assert bits == valid
                 assert all(
-                    not yes or x == y for x, y, yes in zip(result, expected, valid)
+                    not yes or x == y
+                    for x, y, yes in zip(result, expected, valid)
                 ), (dtype, op, result, expected)
         _, bits, _ = execute(
             values, dtype, [col, (1, -1, -1, -1), (25, 0, 1, -1)], [0, 0, 0]
@@ -1398,7 +1481,10 @@ def test_additional_row_ops():
                 expect_error="overflow",
             )
             result, _, _ = execute(
-                [minimum], dtype, [col, (1, -1, -1, -1), (26, 0, 1, -1)], [0, -1, 0]
+                [minimum],
+                dtype,
+                [col, (1, -1, -1, -1), (26, 0, 1, -1)],
+                [0, -1, 0],
             )
             assert result == [0]
             execute(
@@ -1425,7 +1511,9 @@ def test_additional_row_ops():
             )
             assert result == [minimum, -1, 0, 1]
     rng = random.Random(918)
-    from_bits = lambda x: C.cast(C.pointer(C.c_uint32(x)), C.POINTER(C.c_float))[0]
+    from_bits = lambda x: C.cast(
+        C.pointer(C.c_uint32(x)), C.POINTER(C.c_float)
+    )[0]
     values = [
         0.0,
         -0.0,
@@ -1469,12 +1557,11 @@ def test_additional_row_ops():
                 expected = x
             else:
                 expected = float(
-                    math.floor(x)
-                    if op == 55
-                    else (
-                        math.ceil(x)
-                        if op == 56
-                        else math.floor(x + 0.5) if x >= 0 else math.ceil(x - 0.5)
+                    math.floor(x) if op
+                    == 55 else (
+                        math.ceil(x) if op
+                        == 56 else math.floor(x + 0.5) if x
+                        >= 0 else math.ceil(x - 0.5)
                     )
                 )
                 if expected == 0:
@@ -1489,12 +1576,11 @@ def test_additional_row_ops():
         )
         expected = [
             (
-                math.isnan(x)
-                if op == 63
-                else (
-                    not math.isnan(x)
-                    if op == 64
-                    else math.isfinite(x) if op == 65 else math.isinf(x)
+                math.isnan(x) if op
+                == 63 else (
+                    not math.isnan(x) if op
+                    == 64 else math.isfinite(x) if op
+                    == 65 else math.isinf(x)
                 )
             )
             for x in values
@@ -1503,8 +1589,12 @@ def test_additional_row_ops():
     result, _, _ = execute(
         values, 1, [col, (2, -1, -1, -1), (34, 0, 1, -1)], [0, 3.5, 0]
     )
-    assert all(y == 3.5 if math.isnan(x) else y == x for x, y in zip(values, result))
-    _, bits, _ = execute(values, 1, [col, (12, -1, -1, -1), (34, 0, 1, -1)], [0, 0, 0])
+    assert all(
+        y == 3.5 if math.isnan(x) else y == x for x, y in zip(values, result)
+    )
+    _, bits, _ = execute(
+        values, 1, [col, (12, -1, -1, -1), (34, 0, 1, -1)], [0, 0, 0]
+    )
     assert bits == [not math.isnan(x) for x in values]
     for op in (28, 29):
         result, _, _ = execute(
@@ -1538,7 +1628,9 @@ def test_stable_sort():
         n = len(values)
         offset = 5
         scalar = SCALARS[dtype]
-        data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(*values)
+        data = packed(values, offset) if dtype == 4 else (scalar * max(1, n))(
+            *values
+        )
         bitmap = packed(valid, offset)
         ids = (I * max(1, n))(*range(n))
         inputs = (Input * 2)(
@@ -1582,8 +1674,16 @@ def test_stable_sort():
             ptr(st),
         )
         memory, stats, err = Memory(), Stats(), P()
-        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
-        check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+        check(
+            lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)),
+            err,
+        )
+        check(
+            lib.dfm_execute(
+                ctx, C.byref(request), C.byref(stats), C.byref(err)
+            ),
+            err,
+        )
         assert stats.rows == n and stats.waits == 1
         assert (
             stats.memory.peak == memory.peak
@@ -1597,7 +1697,10 @@ def test_stable_sort():
                 return 0
             x, y = values[a], values[b]
             if dtype == 1 and (math.isnan(x) or math.isnan(y)):
-                c = 0 if math.isnan(x) and math.isnan(y) else 1 if math.isnan(x) else -1
+                c = (
+                    0 if math.isnan(x)
+                    and math.isnan(y) else 1 if math.isnan(x) else -1
+                )
                 return c  # NaNs follow numeric values in either direction.
             else:
                 c = (x > y) - (x < y)
@@ -1619,9 +1722,13 @@ def test_stable_sort():
         else:
             size = C.sizeof(scalar)
             for i, source in enumerate(expected):
-                assert C.string_at(C.addressof(key) + i * size, size) == C.string_at(
-                    C.addressof(data) + source * size, size
-                ), (dtype, i, source)
+                assert C.string_at(
+                    C.addressof(key) + i * size, size
+                ) == C.string_at(C.addressof(data) + source * size, size), (
+                    dtype,
+                    i,
+                    source,
+                )
 
     rng = random.Random(10001)
     for dtype, scalar in SCALARS.items():
@@ -1728,14 +1835,16 @@ def test_grouped_reductions():
         words.append(0)
         gathers = (I * len(outs))(*[slot for slot, t in outs])
         steps = (Step * 2)(
-            Step(0, stepnodes, 3, 3, 0, 0), Step(stepnodes, 1, 0, 2, 0, len(outs))
+            Step(0, stepnodes, 3, 3, 0, 0),
+            Step(stepnodes, 1, 0, 2, 0, len(outs)),
         )
         code = (I * (4 * len(nodes)))(*[x for node in nodes for x in node])
         literals = (I * len(words))(*words)
         types = (I * len(nt))(*nt)
         st = (I * len(slots))(*slots)
         arrays = [
-            packed([False] * max(1, n)) if t == 4 else (SCALARS[t] * max(1, n))()
+            packed([False] * max(1, n)) if t
+            == 4 else (SCALARS[t] * max(1, n))()
             for _, t in outs
         ]
         bits = [packed([False] * max(1, n)) for _ in outs]
@@ -1772,7 +1881,11 @@ def test_grouped_reductions():
         groups = {}
         for i in range(n):
             raw = key[i] if kv[i] else None
-            canon = "nan" if dtype == 1 and raw is not None and math.isnan(raw) else raw
+            canon = (
+                "nan" if dtype == 1
+                and raw is not None
+                and math.isnan(raw) else raw
+            )
             k = (canon, second[i] if bv[i] else None) if key_count else ()
             groups.setdefault(k, []).append(i)
         if not key_count and not n:
@@ -1786,7 +1899,10 @@ def test_grouped_reductions():
             )
             smallest = min(good, key=rank_value) if good else 0
             largest = max(good, key=rank_value) if good else 0
-            record = [(key[row], kv[row]), (second[row], bv[row])] if key_count else []
+            record = [
+                (key[row], kv[row]),
+                (second[row], bv[row]),
+            ] if key_count else []
             record += [
                 (len(good), True),
                 (len(rows), True),
@@ -1798,7 +1914,9 @@ def test_grouped_reductions():
                 record.append((sum(value[i] for i in good), len(good) >= 3))
             expected.append(record)
         stats, memory, err = Stats(), Memory(), P()
-        check(lib.dfm_estimate(C.byref(req), C.byref(memory), C.byref(err)), err)
+        check(
+            lib.dfm_estimate(C.byref(req), C.byref(memory), C.byref(err)), err
+        )
         # Large-width sample sums can intentionally overflow the narrow result.
         overflow = False
         if len(specs) == 6 and outs[-1][1] in (2, 9):
@@ -1809,13 +1927,20 @@ def test_grouped_reductions():
                 for record in expected
                 for v, valid in [record[-1]]
             )
-        status = lib.dfm_execute(ctx, C.byref(req), C.byref(stats), C.byref(err))
+        status = lib.dfm_execute(
+            ctx, C.byref(req), C.byref(stats), C.byref(err)
+        )
         if overflow:
             assert status and b"overflow" in C.string_at(err)
             lib.dfm_free(err)
             return
         check(status, err)
-        assert stats.rows == len(expected), (dtype, n, stats.rows, len(expected))
+        assert stats.rows == len(expected), (
+            dtype,
+            n,
+            stats.rows,
+            len(expected),
+        )
         assert stats.waits == 1 and stats.memory.shared == memory.shared
         assert stats.memory.launches == memory.launches, (
             stats.memory.launches,
@@ -1826,11 +1951,27 @@ def test_grouped_reductions():
             validity = unpack(b, stats.rows)
             for row, record in enumerate(expected):
                 value0, valid = record[c]
-                assert validity[row] == valid, (dtype, n, c, row, validity[row], valid)
+                assert validity[row] == valid, (
+                    dtype,
+                    n,
+                    c,
+                    row,
+                    validity[row],
+                    valid,
+                )
                 if valid:
                     assert (
-                        t == 1 and math.isnan(value0) and math.isnan(actual[row])
-                    ) or actual[row] == value0, (dtype, n, c, row, actual[row], value0)
+                        t == 1
+                        and math.isnan(value0)
+                        and math.isnan(actual[row])
+                    ) or actual[row] == value0, (
+                        dtype,
+                        n,
+                        c,
+                        row,
+                        actual[row],
+                        value0,
+                    )
                     if t == 1 and value0 == 0:
                         assert C.string_at(
                             C.byref(C.c_float(actual[row])), 4
@@ -2000,7 +2141,8 @@ def test_additional_reductions():
             ]
         else:
             outs = [
-                (source, outtype, kind, param) for source, kind, outtype, param in specs
+                (source, outtype, kind, param)
+                for source, kind, outtype, param in specs
             ]
         code = (I * len([x for node in nodes for x in node]))(
             *[x for node in nodes for x in node]
@@ -2012,14 +2154,17 @@ def test_additional_reductions():
         gathers = (I * len(gather_list))(*gather_list)
         cap = max(1, n) if grouped else 1
         arrays = [
-            packed([False] * cap) if outtype == 4 else (SCALARS[outtype] * cap)()
+            packed([False] * cap) if outtype
+            == 4 else (SCALARS[outtype] * cap)()
             for slot, outtype, kind, param in outs
         ]
         bits = [packed([False] * cap) for _ in outs]
         output = (Output * len(outs))(
             *[
                 Output(ptr(a), ptr(b), outtype, slot, kind, param)
-                for (slot, outtype, kind, param), a, b in zip(outs, arrays, bits)
+                for (slot, outtype, kind, param), a, b in zip(
+                    outs, arrays, bits
+                )
             ]
         )
         req = Request(
@@ -2063,7 +2208,9 @@ def test_additional_reductions():
                 ]
                 if kind in (83, 84):
                     at = rows[0 if kind == 83 else -1] if rows else 0
-                    record.append((values[at] if rows else 0, bool(rows) and vv[at]))
+                    record.append(
+                        (values[at] if rows else 0, bool(rows) and vv[at])
+                    )
                 elif kind == 93:
                     record.append((len(rows) - len(good), True))
                 elif kind in (95, 96):
@@ -2073,13 +2220,9 @@ def test_additional_reductions():
                         if not (t == 1 and math.isnan(values[row]))
                     ]
                     choices = numeric or good
-                    chosen = (
-                        (max if kind == 96 else min)(
-                            choices, key=lambda pair: values[pair[1]]
-                        )
-                        if choices
-                        else (0, 0)
-                    )
+                    chosen = (max if kind == 96 else min)(
+                        choices, key=lambda pair: values[pair[1]]
+                    ) if choices else (0, 0)
                     record.append((chosen[0], bool(choices)))
                 else:
                     yes = any(bools[row] for pos, row in good)
@@ -2088,27 +2231,44 @@ def test_additional_reductions():
                     record.append(
                         (
                             yes if kind == 91 else not no,
-                            bool(param) or not unknown or (yes if kind == 91 else no),
+                            bool(param)
+                            or not unknown
+                            or (yes if kind == 91 else no),
                         )
                     )
             expected.append(record)
         memory, stats, err = Memory(), Stats(), P()
-        check(lib.dfm_estimate(C.byref(req), C.byref(memory), C.byref(err)), err)
-        check(lib.dfm_execute(ctx, C.byref(req), C.byref(stats), C.byref(err)), err)
-        assert stats.rows == len(expected), (t, n, grouped, stats.rows, len(expected))
+        check(
+            lib.dfm_estimate(C.byref(req), C.byref(memory), C.byref(err)), err
+        )
+        check(
+            lib.dfm_execute(ctx, C.byref(req), C.byref(stats), C.byref(err)),
+            err,
+        )
+        assert stats.rows == len(expected), (
+            t,
+            n,
+            grouped,
+            stats.rows,
+            len(expected),
+        )
         assert stats.waits == 1 and memory.shared == stats.memory.shared
         assert memory.launches == stats.memory.launches
         for c, ((slot, outtype, kind, param), a, b) in enumerate(
             zip(outs, arrays, bits)
         ):
-            actual = unpack(a, stats.rows) if outtype == 4 else list(a)[: stats.rows]
+            actual = (
+                unpack(a, stats.rows) if outtype == 4 else list(a)[: stats.rows]
+            )
             valid = unpack(b, stats.rows)
             for row, record in enumerate(expected):
                 value, ok = record[c]
                 assert valid[row] == ok, (t, n, grouped, c, row, valid[row], ok)
                 if ok:
                     assert (
-                        outtype == 1 and math.isnan(value) and math.isnan(actual[row])
+                        outtype == 1
+                        and math.isnan(value)
+                        and math.isnan(actual[row])
                     ) or actual[row] == value, (
                         t,
                         n,
@@ -2139,16 +2299,19 @@ test_additional_reductions()
 
 def test_workspace_reuse():
     class Workspace(C.Structure):
-        _fields_ = [(name, I) for name in (
-            "bytes", "buffers", "hits", "allocations", "limit"
-        )]
+        _fields_ = [
+            (name, I)
+            for name in ("bytes", "buffers", "hits", "allocations", "limit")
+        ]
 
     lib.dfm_workspace_info.argtypes = [P, C.POINTER(Workspace), C.POINTER(P)]
     lib.dfm_workspace_trim.argtypes = [P, C.POINTER(P)]
 
     def info():
         result, error = Workspace(), P()
-        check(lib.dfm_workspace_info(ctx, C.byref(result), C.byref(error)), error)
+        check(
+            lib.dfm_workspace_info(ctx, C.byref(result), C.byref(error)), error
+        )
         assert 0 <= result.bytes <= result.limit
         assert 0 <= result.buffers <= 64
         return result
@@ -2175,13 +2338,24 @@ def test_workspace_reuse():
     for i in range(n):
         if valid[i]:
             assert second[0][i] == -i and third[0][i] == i
-    execute(values, 2, [col], [0], valid=valid, budget=0,
-            expect_error="memory budget")
+    execute(
+        values,
+        2,
+        [col],
+        [0],
+        valid=valid,
+        budget=0,
+        expect_error="memory budget",
+    )
     denied = info()
     assert denied.allocations == hot.allocations and denied.hits == hot.hits
-    execute([2147483647] * n, 2,
-            [col, (1, -1, -1, -1), (5, 0, 1, -1)], [0, 1, 0],
-            expect_error="overflow")
+    execute(
+        [2147483647] * n,
+        2,
+        [col, (1, -1, -1, -1), (5, 0, 1, -1)],
+        [0, 1, 0],
+        expect_error="overflow",
+    )
     recovered = execute(values, 2, [col], [0], valid=valid)
     assert recovered[1] == valid
     for i in range(n):
@@ -2194,6 +2368,202 @@ def test_workspace_reuse():
 
 
 test_workspace_reuse()
+
+
+def test_filtered_reduction_without_compaction():
+    for n in (0, 1, 9, 257, 65537):
+        values = [i % 11 - 5 for i in range(n)]
+        valid = [i % 7 != 0 for i in range(n)]
+        predicate = [col, (1, -1, -1, -1), (8, 0, 1, -1)]
+        selected = [x for x, ok in zip(values, valid) if ok and x > 0]
+        row = execute(
+            values, 2, [col], [0], valid=valid, offset=3, filter_nodes=predicate
+        )
+        assert row[0] == selected
+        for kind in (10, 11, 90):
+            result, bitmap, stats = execute(
+                values,
+                2,
+                [col],
+                [0],
+                valid=valid,
+                offset=3,
+                filter_nodes=predicate,
+                reduction=kind,
+            )
+            expected = sum(selected) if kind == 10 else len(selected)
+            assert result == [expected] and bitmap == [True]
+            # Unpack, two expression segments, and two reduction stages. No
+            # prefix ranks, block scan or column gather launches remain.
+            assert stats.memory.launches == 5
+            if n >= 257:
+                assert stats.memory.shared < row[2].memory.shared
+        for kind in (11, 90):
+            # A null test retains null rows: count and length must differ.
+            result, bitmap, _ = execute(
+                values,
+                2,
+                [col],
+                [0],
+                valid=valid,
+                offset=3,
+                filter_nodes=[col, (61, 0, -1, -1)],
+                reduction=kind,
+            )
+            assert result == [0 if kind == 11 else n - sum(valid)]
+            assert bitmap == [True]
+    result = execute(
+        [2147483647, -1],
+        2,
+        [col, (1, -1, -1, -1), (5, 0, 1, -1)],
+        [0, 1, 0],
+        filter_nodes=[col, (1, -1, -1, -1), (20, 0, 1, -1)],
+        reduction=10,
+    )
+    assert result[0] == [0] and result[1] == [True]
+    execute(
+        [2147483647, -1],
+        2,
+        [col, (1, -1, -1, -1), (5, 0, 1, -1)],
+        [0, 1, 0],
+        filter_nodes=[col, (1, -1, -1, -1), (8, 0, 1, -1)],
+        reduction=10,
+        expect_error="overflow",
+    )
+    result = execute(
+        [1, 2, 3],
+        2,
+        [col],
+        [0],
+        filter_nodes=[col, (1, -1, -1, -1), (20, 0, 1, -1)],
+        reduction=10,
+        minimum=1,
+    )
+    assert result[1] == [False]
+
+    # Two filters whose conjunction is empty. Inactive lanes of the second
+    # predicate must be false even when a recycled matrix contains old values.
+    n = 521
+    data = (C.c_int32 * n)(*[i % 11 - 5 for i in range(n)])
+    inputs = (Input * 1)(Input(ptr(data), None, 2, 0, 0))
+    nodes = [
+        col,
+        (1, -1, -1, -1),
+        (8, 0, 1, -1),
+        col,
+        (1, -1, -1, -1),
+        (20, 0, 1, -1),
+        col,
+    ]
+    code = (I * (4 * len(nodes)))(*[v for node in nodes for v in node])
+    words = (I * len(nodes))()
+    types = (I * len(nodes))(2, 2, 4, 2, 2, 4, 2)
+    slots = (I * 4)(2, 4, 4, 2)
+    steps = (Step * 3)(
+        Step(0, 3, 1, 1, 0, 1), Step(3, 3, 2, 1, 1, 1), Step(6, 1, 3, 0, 2, 0)
+    )
+    gathers = (I * 2)(0, 0)
+    value, bitmap = (C.c_int64 * 1)(), (C.c_uint8 * 1)()
+    outputs = (Output * 1)(Output(ptr(value), ptr(bitmap), 3, 3, 90, 0))
+    request = Request(
+        2,
+        n,
+        0,
+        4,
+        1,
+        len(code),
+        len(nodes),
+        3,
+        2,
+        1,
+        -1,
+        1,
+        0,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(words),
+        ptr(steps),
+        ptr(gathers),
+        ptr(outputs),
+        ptr(types),
+        ptr(slots),
+    )
+    for _ in range(3):
+        stats, err = Stats(), P()
+        check(
+            lib.dfm_execute(
+                ctx, C.byref(request), C.byref(stats), C.byref(err)
+            ),
+            err,
+        )
+        assert value[0] == 0 and bitmap[0] == 1
+        assert stats.memory.launches == 6
+
+
+test_filtered_reduction_without_compaction()
+
+
+def test_filter_gathers_only_columns_used_after_boundary():
+    n = 521
+    keys = [i % 7 - 3 for i in range(n)]
+    key_valid = [i % 11 != 0 for i in range(n)]
+    payload_valid = [i % 5 != 0 for i in range(n)]
+    key_data = (C.c_int32 * n)(*keys)
+    payload = (C.c_int32 * n)(*[1000 + i for i in range(n)])
+    key_bits, payload_bits = packed(key_valid), packed(payload_valid)
+    inputs = (Input * 2)(
+        Input(ptr(key_data), ptr(key_bits), 2, 0, 1),
+        Input(ptr(payload), ptr(payload_bits), 2, 0, 1),
+    )
+    nodes = [col, (1, -1, -1, -1), (8, 0, 1, -1), (0, -1, -1, 1)]
+    code = (I * 16)(*[v for node in nodes for v in node])
+    literals = (I * 4)()
+    steps = (Step * 2)(Step(0, 3, 2, 1, 0, 2), Step(3, 1, 3, 0, 2, 0))
+    gathers = (I * 2)(0, 1)
+    result, bitmap = (C.c_int32 * n)(), packed([False] * n)
+    outputs = (Output * 1)(Output(ptr(result), ptr(bitmap), 2, 3, -1, 0))
+    request = Request(
+        2,
+        n,
+        2,
+        4,
+        2,
+        16,
+        4,
+        2,
+        2,
+        1,
+        -1,
+        0,
+        0,
+        -1,
+        ptr(inputs),
+        ptr(code),
+        ptr(literals),
+        ptr(steps),
+        ptr(gathers),
+        ptr(outputs),
+    )
+    stats, estimate, err = Stats(), Memory(), P()
+    check(
+        lib.dfm_estimate(C.byref(request), C.byref(estimate), C.byref(err)), err
+    )
+    check(
+        lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)),
+        err,
+    )
+    selected = [i for i in range(n) if key_valid[i] and keys[i] > 0]
+    assert stats.rows == len(selected)
+    actual_valid = unpack(bitmap, stats.rows)
+    assert actual_valid == [payload_valid[i] for i in selected]
+    for row, source in enumerate(selected):
+        if actual_valid[row]:
+            assert result[row] == payload[source]
+    assert stats.memory.launches == estimate.launches == 8
+
+
+test_filter_gathers_only_columns_used_after_boundary()
 
 lib.dfm_context_release(ctx)
 print(

@@ -267,6 +267,9 @@ DFM_API void dfm_resident_release(void *table);
 // Pure shape validation and allocation accounting; no device initialization.
 DFM_API int32_t dfm_estimate(const DFMRequest *request, DFMMemory *memory,
                              char **error);
+// Pure flags for the implementation selected by this runtime build. Bit zero
+// denotes predicate-aware scalar reduction without row compaction.
+DFM_API int64_t dfm_plan_features(const DFMRequest *request, char **error);
 // Checks an existing cache without compiling or submitting GPU work.
 // Returns 1 if cached, 0 if missing, or -1 with an allocated error message.
 DFM_API int32_t dfm_plan_cached(void *context, const DFMRequest *request,
