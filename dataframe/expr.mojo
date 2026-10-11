@@ -29,6 +29,47 @@ comptime SELECT_EXCLUDE = 2
 comptime SELECT_DTYPE = 3
 comptime SELECT_NTH = 4
 comptime SEP = "\x1f"
+# Lists of names (and labels, dtypes, numbers) are kept in one String,
+# joined by SEP. A name may hold any character, SEP included (#438), so
+# each item is escaped first: _ESC becomes _ESC "0" and SEP becomes
+# _ESC "1", and no raw SEP is left inside an item. Items holding neither
+# are unchanged, so ordinary names read the same as before.
+comptime _ESC = "\x1e"
+
+
+def encode_name(name: String) -> String:
+    """`name` with SEP and _ESC escaped, to join with SEP losslessly."""
+    if SEP not in name and _ESC not in name:
+        return name
+    return name.replace(_ESC, _ESC + "0").replace(SEP, _ESC + "1")
+
+
+def decode_name(item: String) -> String:
+    """The name `encode_name` escaped. Every _ESC in an escaped item is
+    followed by "0" or "1", so the two replacements cannot overlap."""
+    if _ESC not in item:
+        return item
+    return item.replace(_ESC + "1", SEP).replace(_ESC + "0", _ESC)
+
+
+def join_names(names: List[String]) -> String:
+    """`names` as one String: each escaped, joined by SEP."""
+    var out = String()
+    for i in range(len(names)):
+        if i > 0:
+            out += SEP
+        out += encode_name(names[i])
+    return out^
+
+
+def split_names(text: String) -> List[String]:
+    """The names `join_names` joined (one empty name for empty text, as
+    splitting it gives)."""
+    var out = List[String]()
+    for part in text.split(SEP):
+        out.append(decode_name(String(part)))
+    return out^
+
 
 # Binary operations occupy 20..49.
 comptime LT = 20
@@ -372,9 +413,9 @@ struct Expr(Copyable):
         var result = self.copy()
         for i in range(len(result._nodes)):
             if result._nodes[i].op == SELECTOR:
-                var parts = result._nodes[i].text.split(SEP)
-                result._nodes[i].text = (
-                    prefix + String(parts[0]) + SEP + String(parts[1]) + suffix
+                var parts = split_names(result._nodes[i].text)
+                result._nodes[i].text = join_names(
+                    [prefix + parts[0], parts[1] + suffix]
                 )
                 return result^
         result._name = prefix + result._name + suffix
@@ -1237,7 +1278,7 @@ struct Expr(Copyable):
             _node(
                 VALUE_COUNTS,
                 len(nodes) - 1,
-                text=self._name + SEP + count_name,
+                text=join_names([self._name, count_name]),
                 integer=Int64(sort) + 2 * Int64(normalize),
             )
         )
@@ -1298,12 +1339,7 @@ def _selector(
 
 
 def _joined(items: List[String]) -> String:
-    var out = String()
-    for i in range(len(items)):
-        if i > 0:
-            out += SEP
-        out += items[i]
-    return out^
+    return join_names(items)
 
 
 def col(names: List[String]) -> Expr:
@@ -1962,7 +1998,7 @@ def as_struct(fields: List[Expr], name: String = "") raises -> Expr:
             roots += SEP
             names += SEP
         roots += String(root)
-        names += fields[i]._name
+        names += encode_name(fields[i]._name)
     nodes.append(_node(STRUCT_PACK, first, text=names, text2=roots))
     return Expr(nodes^, name if name != "" else fields[0]._name)
 
@@ -1979,7 +2015,4 @@ def struct_pack_children(node: Node) -> List[Int]:
 
 
 def struct_pack_names(node: Node) -> List[String]:
-    var names = List[String]()
-    for part in node.text.split(SEP):
-        names.append(String(part))
-    return names^
+    return split_names(node.text)

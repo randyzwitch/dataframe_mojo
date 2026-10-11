@@ -22,6 +22,8 @@ from .series import Series, sort_indices, smallest_indices
 from .fused_compare import fused_comparisons, fused_mask
 from .sorted_range import sorted_window
 from .expr import (
+    decode_name,
+    encode_name,
     Expr,
     ARG_MIN,
     ARG_MAX,
@@ -157,8 +159,11 @@ from .display import render_frame, render_glimpse
 
 # A struct key groups, joins and deduplicates by its fields plus its own
 # validity, so a null struct is one group and a struct of nulls another.
-# The expanded columns carry the struct's name, this separator, and the
-# field name (or _KEY_VALID); _key_columns packs them back.
+# The expanded columns are named this separator, the struct's name, the
+# separator again, and the field name (or _KEY_VALID), the names escaped
+# (`encode_name`) so neither holds a raw separator; _pack_struct_keys packs
+# them back. The leading separator marks them: a name without it is never
+# taken apart, whatever it holds (#438).
 comptime _KEY_SEP = "\x1f"
 comptime _KEY_VALID = "\x1evalid"
 
@@ -180,22 +185,41 @@ def _expand_struct_keys(columns: List[Series]) raises -> List[Series]:
                     + "."
                     + field.name()
                 )
-            out.append(field.renamed(column.name() + _KEY_SEP + field.name()))
+            out.append(
+                field.renamed(
+                    _KEY_SEP
+                    + encode_name(column.name())
+                    + _KEY_SEP
+                    + encode_name(field.name())
+                )
+            )
         out.append(
             Series(
-                column.name() + _KEY_SEP + _KEY_VALID,
+                _KEY_SEP + encode_name(column.name()) + _KEY_SEP + _KEY_VALID,
                 BoolColumn(structs.validity()),
             )
         )
     return out^
 
 
+def _key_parts(name: String) -> Tuple[String, String]:
+    """An expanded key column's struct name and its field part (escaped, or
+    _KEY_VALID); ("", "") for a plain column."""
+    if not name.startswith(_KEY_SEP):
+        return (String(""), String(""))
+    var rest = String(name[byte = _KEY_SEP.byte_length() :])
+    var at = rest.find(_KEY_SEP)
+    if at < 0:
+        return (String(""), String(""))
+    return (
+        decode_name(String(rest[byte=0:at])),
+        String(rest[byte = at + _KEY_SEP.byte_length() :]),
+    )
+
+
 def _key_prefix(name: String) -> String:
     """The struct name an expanded key column belongs to, or "" if plain."""
-    var at = name.find(_KEY_SEP)
-    if at < 0:
-        return ""
-    return String(name[byte=0:at])
+    return _key_parts(name)[0]
 
 
 def _pack_struct_keys(frame: DataFrame) raises -> DataFrame:
@@ -216,9 +240,7 @@ def _pack_struct_keys(frame: DataFrame) raises -> DataFrame:
             and _key_prefix(frame._columns[k].name()) == prefix
         ):
             ref column = frame._columns[k]
-            var suffix = String(
-                column.name()[byte = prefix.byte_length() + 1 :]
-            )
+            var suffix = _key_parts(column.name())[1]
             if suffix == _KEY_VALID:
                 # The helper's values (not its bitmap) are the struct's
                 # validity.
@@ -228,7 +250,7 @@ def _pack_struct_keys(frame: DataFrame) raises -> DataFrame:
                     values.append(flags._get(i))
                 bits = _pack_bits(values)
             else:
-                fields.append(column.renamed(suffix))
+                fields.append(column.renamed(decode_name(suffix)))
             k += 1
         columns.append(Series(prefix, StructColumn(fields^, bits^)))
     return DataFrame(columns^, height=frame.height())

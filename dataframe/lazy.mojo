@@ -61,6 +61,7 @@ from ._accel_provider import (
 )
 from .streaming import _StreamReduction, _StreamMergeJob, _finish_parts
 from .expr import (
+    split_names,
     ARG_MAX,
     ARG_MIN,
     SUM,
@@ -229,8 +230,8 @@ def _references(expr: Expr) -> Optional[List[String]]:
         if node.op == OVER and node.text2.byte_length() > 0:
             # over() partitions read their key columns. Other operators
             # keep other text there (a strptime dtype, cut labels).
-            for part in node.text2.split("\x1f"):
-                names.append(String(part))
+            for part in split_names(node.text2):
+                names.append(part)
     return names^
 
 
@@ -3409,16 +3410,18 @@ struct LazyFrame(Copyable):
         its slot through `canonical`."""
         ref node = self._nodes[index]
         var text = String(node.kind)
-        text += "|" + _joined(node.names) + "|" + _joined(node.names2)
+        # Free text (names, labels) goes in with its length, so no name
+        # can read as a delimiter: columns "a, b" and "a", "b" differ.
+        text += "|" + _field_list(node.names) + "|" + _field_list(node.names2)
         for flag in node.flags:
             text += "1" if flag else "0"
         var slot = node.offset
         if node.kind == SCAN_FRAME and slot >= 0 and slot < len(canonical):
             slot = canonical[slot]
-        text += "|" + node.text + "|" + String(slot)
+        text += "|" + _field(node.text) + "|" + String(slot)
         text += "|" + String(node.length)
         text += "|" + ("o" if node.maintain_order else "u")
-        text += "|" + String(node.how) + "|" + _joined(node.right_keys)
+        text += "|" + String(node.how) + "|" + _field_list(node.right_keys)
         text += "|" + ("c" if node.coalesce else "n")
         if node.asof_tolerance:
             text += "|" + String(node.asof_tolerance.value())
@@ -5332,9 +5335,22 @@ def _text_hash(text: String) -> UInt64:
     return h
 
 
+def _field(text: String) -> String:
+    """`text` prefixed by its byte length, for a signature."""
+    return String(text.byte_length()) + ":" + text
+
+
+def _field_list(items: List[String]) -> String:
+    var out = String(len(items)) + "["
+    for item in items:
+        out += _field(item)
+    return out + "]"
+
+
 def _expr_signature(expr: Expr) -> String:
-    """An expression as text, node by node, for `_signature`."""
-    var text = expr._name
+    """An expression as text, node by node, for `_signature`; free text
+    with its length (`_field`)."""
+    var text = _field(expr._name)
     for n in expr._nodes:
         text += (
             ";"
@@ -5344,7 +5360,7 @@ def _expr_signature(expr: Expr) -> String:
             + ","
             + String(n.right)
             + ","
-            + n.text
+            + _field(n.text)
             + ","
             + String(n.integer)
             + ","
@@ -5354,7 +5370,7 @@ def _expr_signature(expr: Expr) -> String:
             + ","
             + String(n.extra)
             + ","
-            + n.text2
+            + _field(n.text2)
         )
         for d in n.dtypes:
             text += "," + (d.value().name() if d else "_")

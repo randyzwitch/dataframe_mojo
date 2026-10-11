@@ -72,6 +72,7 @@ from .expr import (
     is_rolling_by,
     is_dt_op,
     SEP,
+    split_names,
     subtree,
     is_window,
     is_reduction,
@@ -2163,9 +2164,9 @@ def _over[
         )
         return scalar._broadcast(height)
     var keys = List[Series]()
-    for part in node.text2.split(SEP):
+    for part in split_names(node.text2):
         for column in columns:
-            if column.name() == String(part):
+            if column.name() == part:
                 keys.append(column.copy())
     # Partition ids need only be consistent, not in first-occurrence order:
     # number them on every worker (#387). Few distinct keys encode row
