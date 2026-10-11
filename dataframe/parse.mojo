@@ -2,7 +2,7 @@
 from std.utils.numerics import isinf
 from std.memory import bitcast
 from std.sys import size_of
-from std.sys.info import is_little_endian
+from std.sys import Endian
 
 from .csv_numeric import _pow10_f64
 
@@ -23,7 +23,7 @@ def _short_decimal(bytes: Span[UInt8, _], start: Int) raises -> UInt64:
     cleanup therefore remains safe for every StringSlice offset and length.
     """
     comptime assert (
-        is_little_endian()
+        Endian.native() == Endian.little
     ), "packed decimal parsing requires little endian"
     var index = start
     var value = UInt64(0)
