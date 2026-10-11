@@ -86,7 +86,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
           op==6 ? f64_from_unsigned(a[i]) : op==7 ? f64_from_signed(as_type<long>(a[i])) :
           op==8 ? f64_from_float32(uint(a[i])) : op==9 ? ulong(f64_to_float32(a[i])) :
           op==10 ? f64_integral(a[i],55) : op==11 ? f64_integral(a[i],56) :
-          op==12 ? f64_round(a[i]) : test_integer(a[i],op);
+          op==12 ? f64_round(a[i]) : op==21 ? f64_integral(f64_div(a[i],b[i]),55) : test_integer(a[i],op);
 }
 )shader";
   NSError *error = nil;
@@ -103,7 +103,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
   id<MTLBuffer> b = [device newBufferWithBytes:right.data() length:bytes options:MTLResourceStorageModeShared];
   id<MTLBuffer> out = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
   size_t checked = 0;
-  for (uint op = 0; op < 21; ++op) {
+  for (uint op = 0; op < 22; ++op) {
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:pipeline];
@@ -130,7 +130,8 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
         if (!(std::isnan(x)||std::isinf(x)||std::abs(x)>=4503599627370496.0) && x<0) rounded=-rounded;
         expected=std::bit_cast<ulong>(rounded);
       }
-      if (op>=13) {
+      if (op==21) expected=std::bit_cast<ulong>(std::floor(x/y));
+      if (op>=13 && op<21) {
         uint pair=(op-13)/2, width=pair<2?64:8;
         bool uns=(pair&1)!=0;
         double whole=std::trunc(x), upper=std::ldexp(1.0,int(width)-(uns?0:1));
@@ -143,8 +144,8 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
                    op==6 ? f64_from_unsigned(left[i]) : op==7 ? f64_from_signed(std::bit_cast<int64_t>(left[i])) :
                    op==8 ? f64_from_float32(uint(left[i])) : op==9 ? ulong(f64_to_float32(left[i])) :
                    op==10 ? f64_integral(left[i],55) : op==11 ? f64_integral(left[i],56) :
-                   op==12 ? f64_round(left[i]) : test_integer(left[i],op);
-      bool nan = op>=13 ? false : op==9 ? (expected&0x7fffffffUL)>0x7f800000UL : f64_nan(expected);
+                   op==12 ? f64_round(left[i]) : op==21 ? f64_integral(f64_div(left[i],right[i]),55) : test_integer(left[i],op);
+      bool nan = op>=13 && op<21 ? false : op==9 ? (expected&0x7fffffffUL)>0x7f800000UL : f64_nan(expected);
       bool actualNan = op==9 ? (host&0x7fffffffUL)>0x7f800000UL && (gpu[i]&0x7fffffffUL)>0x7f800000UL : f64_nan(host) && f64_nan(gpu[i]);
       if ((nan ? !actualNan : host != expected || gpu[i] != expected)) {
         fprintf(stderr, "Mismatch op=%u a=%016llx b=%016llx expected=%016llx host=%016llx gpu=%016llx\n",
