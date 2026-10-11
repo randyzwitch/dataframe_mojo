@@ -563,7 +563,7 @@ def execute(
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
     out_type = (
-        (dtype if dtype in (2, 9, 10) else 3) if reduction == 10 else 3
+        (dtype if dtype in (1, 2, 9, 10) else 3) if reduction == 10 else 3
     ) if reduction >= 0 else (4 if output_bool else dtype)
     out_scalar = SCALARS[out_type]
     result = (out_scalar * max(1, n))()
@@ -755,9 +755,8 @@ execute([2**31 - 1, 1], 2, [col], [0], reduction=10, expect_error="overflow")
 result, bits, _ = execute([2**31 - 1, 1, -1], 2, [col], [0], reduction=10)
 assert result == [2**31 - 1]
 execute([1.0], 1, [col], [0.0], budget=0, expect_error="memory budget")
-execute(
-    [1.0], 1, [col], [0.0], reduction=10, expect_error="accumulator precision"
-)
+result, bits, _ = execute([1.0], 1, [col], [0.0], reduction=10)
+assert result == [1.0] and bits == [True]
 
 
 # Separate Float32 multiply/add rounding must survive source specialization.
@@ -1286,7 +1285,7 @@ def test_numeric_casts():
                 )
                 lib.dfm_free(err)
     # A value just below a Float32 halfway point can round via Float64 to
-    # that point. This is a native precision boundary, never a silent mismatch.
+    # that point. Software binary64 must reproduce the CPU's two conversions.
     source, target = 10, 1
     data = (C.c_uint64 * 1)(2**63 + 2**39 - 1)
     inputs = (Input * 1)(Input(ptr(data), None, source, 0, 0))
@@ -1321,9 +1320,9 @@ def test_numeric_casts():
         ptr(st),
     )
     stats, err = Stats(), P()
-    assert lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
-    assert b"double-rounding boundary" in C.string_at(err), C.string_at(err)
-    lib.dfm_free(err)
+    check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+    assert result[0] == C.c_float(float(data[0])).value
+    assert unpack(valid, 1) == [True]
 
 
 test_numeric_casts()
@@ -2846,9 +2845,9 @@ def test_opaque_float64_storage_and_rejection():
     assert unpack(validity[1], n) == [True] * n
     assert list(literal) == [0x8000000000000001] * n
     assert unpack(validity[2], n) == [True] * n
-    # A valid bytecode DAG requesting Float64 addition must reject before
-    # device submission, rather than treating the IEEE words as UInt64 math.
-    code[8:12] = [5, 0, 0, -1]
+    # Decimal rounding still needs additional lowering. Reject before device
+    # submission, rather than treating Float64 words as integer values.
+    code[8:12] = [57, 0, -1, 2]
     nt[2] = 11
     st[2] = 11
     outputs[1].dtype = 11

@@ -19,8 +19,8 @@ enum DFMType {
   DFM_UINT16 = 8,
   DFM_UINT32 = 9,
   DFM_UINT64 = 10,
-  // Opaque IEEE-754 words: storage, copying and validity only. Native Metal
-  // never performs Float64 arithmetic, conversions, comparisons or ordering.
+  // IEEE-754 binary64 words. Arithmetic and conversions use integer-only
+  // software primitives; the name retains compatibility with opaque storage.
   DFM_FLOAT64_STORAGE = 11,
 };
 
@@ -43,6 +43,7 @@ enum DFMOp {
   DFM_GE = 21,
   DFM_LE = 22,
   DFM_NE = 23,
+  DFM_DIV = 24,
   DFM_AND = 30,
   DFM_OR = 31,
   DFM_XOR = 32,
@@ -88,6 +89,7 @@ enum DFMOp {
   // ticks. Whole-week steps align to Monday; other steps to the epoch.
   DFM_DT_TRUNCATE = 141,
   DFM_MIN = 80,
+  DFM_MEAN = 82,
   DFM_MAX = 81,
   DFM_FIRST = 83,
   DFM_LAST = 84,

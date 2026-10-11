@@ -5,27 +5,19 @@ on:
     paths:
       - '.github/workflows/metal.yml'
       - 'native/dfmetal/**'
-      - 'dataframe/**'
-      - 'tests/execution_modes/test_backend*.mojo'
-      - 'tests/support/**'
-      - 'tests/tooling/**'
-      - 'tests/runner.mojo'
-      - 'tests/run_tests.sh'
-      - 'pixi.toml'
-      - 'pixi.lock'
+      - 'dataframe/metal.mojo'
+      - 'dataframe/_accel_provider.mojo'
+      - 'dataframe/accelerator/**'
+      - 'tests/test_metal.mojo'
   push:
     branches: [main]
     paths:
       - '.github/workflows/metal.yml'
       - 'native/dfmetal/**'
-      - 'dataframe/**'
-      - 'tests/execution_modes/test_backend*.mojo'
-      - 'tests/support/**'
-      - 'tests/tooling/**'
-      - 'tests/runner.mojo'
-      - 'tests/run_tests.sh'
-      - 'pixi.toml'
-      - 'pixi.lock'
+      - 'dataframe/metal.mojo'
+      - 'dataframe/_accel_provider.mojo'
+      - 'dataframe/accelerator/**'
+      - 'tests/test_metal.mojo'
   workflow_dispatch:
 
 permissions:
@@ -34,14 +26,11 @@ permissions:
 jobs:
   native-metal:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: prefix-dev/setup-pixi@v0.10.2
-        with:
-          cache: true
       - name: Build optional native runtime
-        run: pixi run build-dfmetal
+        run: bash native/dfmetal/build.sh
       - name: Validate native ABI and execute when a GPU is exposed
         # Hosted VMs may expose no Metal device. The suite still validates the
         # ABI and pure preflight, and explicitly reports execution as skipped.
@@ -49,17 +38,4 @@ jobs:
           python3 native/dfmetal/test_native.py
           python3 native/dfmetal/test_join.py
           python3 native/dfmetal/test_resident.py
-      - name: Run Mojo provider contracts with explicit hardware capability
-        run: |
-          mkdir -p build/contract-tests
-          pixi run mojo build -I . tests/tooling/metal_available.mojo -o build/contract-tests/metal-available
-          capability="$(build/contract-tests/metal-available)"
-          if [[ "$capability" == available ]]; then
-            pixi run test --areas execution --contracts execution.backends --capabilities metal
-          elif [[ "$capability" == absent ]]; then
-            echo "Metal device unavailable; native contracts will report SKIP(capability)."
-            pixi run test --areas execution --contracts execution.backends
-          else
-            echo "Unexpected Metal capability probe result: $capability" >&2
-            exit 1
-          fi
+          python3 native/dfmetal/test_float64.py

@@ -1,8 +1,9 @@
 """Optional native Apple Metal provider for the shared accelerator row planner.
 
-Importing this module loads no driver. Float64 arithmetic and floating sum/mean
-remain CPU operations. Int64/UInt64 sums require a GPU proof that all parallel
-partials fit the native range. No arithmetic is emulated.
+Importing this module loads no driver. Binary64 arithmetic uses integer-only
+GPU emulation, including floating sum/mean accumulation. Int64/UInt64 sums and
+integer means require a GPU proof that all exact integer partials fit the native
+range. Automatic placement requires separate calibration for emulated work.
 """
 from std.ffi import external_call
 from std.math import isfinite
@@ -58,6 +59,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .execution_report import ExecutionReport
 from .expr import (
     COL,
+    DIV,
     DT_YEAR,
     DT_TIME,
     DT_TRUNCATE,
@@ -101,6 +103,7 @@ from .expr import (
     IS_NULL,
     IS_NOT_NULL,
     SUM,
+    MEAN,
     MIN,
     MAX,
     COUNT,
@@ -310,6 +313,8 @@ def _capabilities() -> RowCapabilities:
         "Metal",
         float64=False,
         float64_storage=True,
+        float64_emulated=True,
+        float_division=True,
         wide_integer=False,
         bounded_integer_sum=True,
         extended_integers=True,
@@ -429,6 +434,8 @@ def _op(op: Int) raises -> Int64:
         return 6
     if op == MUL:
         return 7
+    if op == DIV:
+        return 24
     if op == GT:
         return 8
     if op == EQ:
@@ -439,6 +446,8 @@ def _op(op: Int) raises -> Int64:
         return 81
     if op == SUM:
         return 10
+    if op == MEAN:
+        return 82
     if op == COUNT:
         return 11
     if op == LIT_NULL:
@@ -533,6 +542,7 @@ struct _Descriptors(Movable):
         for output in plan.outputs:
             self.typed |= (
                 output.reduction == MIN
+                or output.reduction == MEAN
                 or output.reduction == MAX
                 or output.reduction == FIRST
                 or output.reduction == LAST
@@ -1346,8 +1356,38 @@ struct MetalRuntime(AcceleratorBackend):
         device[12] = Float64(memory[2])
         device[13] = Float64(metadata[4] == 0)
         device[14] = 0
+        var family = work[1].copy()
+        var emulated = False
+        for i in range(len(plan.node_dtypes)):
+            if plan.node_dtypes[i] == DataType.FLOAT64:
+                emulated = True
+        for output in plan.outputs:
+            emulated |= output.reduction == MEAN or (
+                output.reduction == SUM and output.dtype.is_float()
+            )
+        for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if (
+                    plan.code[i * 4] == CAST
+                    and plan.node_dtypes[i] == DataType.FLOAT32
+                ):
+                    var operand = Int(plan.code[i * 4 + 1])
+                    if operand >= 0:
+                        var source = plan.node_dtypes[step.start + operand]
+                        emulated |= (
+                            source == DataType.INT64
+                            or source == DataType.UINT64
+                        )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                emulated |= plan.code[i + 3] == MEAN or (
+                    plan.code[i + 3] == SUM
+                    and plan.slot_dtypes[Int(plan.code[i + 1])].is_float()
+                )
+        if emulated:
+            family += ";metal-emulated-float64-v1"
         return PlanEstimate(
-            work[0].copy(), device^, Int(memory[2]), work[1].copy(), "accel"
+            work[0].copy(), device^, Int(memory[2]), family^, "accel"
         )
 
     def calibration_key(

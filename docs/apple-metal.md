@@ -42,21 +42,28 @@ for the process. Runtime copies retain their configuration. Nonzero devices use
 a collection-scoped context. Literal values, row counts, and output names are
 runtime data; changing those does not require recompiling an identical shader.
 
-## Native precision and supported operations
+## Precision and supported operations
 
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
 width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns.
-Float64 columns can also travel as opaque IEEE words through projection,
-null tests, fill-null, conditionals, filtering/sorting by other columns, joins,
-first/last, and counts. Their bits, including NaN payloads and signed zero, are
-preserved. Float64 arithmetic, comparisons, ordering, keys, casts, and extrema
-remain unsupported. Mixed numeric dtypes
+Float64 columns use IEEE words throughout resident execution. Add, subtract,
+multiply, divide, comparisons, numeric/Boolean casts, absolute value, negation,
+floor/ceiling, whole-number rounding, classification, clipping, and NaN filling
+use integer-only binary64 primitives on the GPU. Basic arithmetic rounds to
+nearest with ties to even, preserves gradual underflow, and does not contract
+separate multiply/add operations. Integer true division produces Float64.
+Copying values preserves all bits, including NaN payloads and signed zero;
+arithmetic quiets NaNs, whose resulting sign/payload is not a portable CPU
+contract. Float64 keys, stable sorting, grouping, joins, distinct rows, extrema,
+and arg-extrema use bitwise IEEE ordering and equality. Mixed numeric dtypes
 retain their native types through expressions, filtering, and materialization.
 Sliced numeric and bitmap windows are supported. Expressions support literals, add/subtract/multiply/negate,
 comparisons, Kleene Boolean logic, null tests, fill-null, and explicit casts
 among these numeric and Boolean types. Out-of-range casts and NaN-to-Bool
 conversions raise in strict mode and become null in non-strict mode. Nulls stay
-null. Strict casts currently require terminal projections without head.
+null. Checked casts to integer/Boolean targets currently require terminal
+projections without head. Numeric casts to Float32/Float64 cannot raise range
+errors and may occur in child regions or before head.
 Integer expressions additionally support floor division, remainder, powers,
 absolute value, clipping, and integral rounding operations. Division and
 remainder by zero return null; signed floor division and remainder follow
@@ -88,6 +95,7 @@ paired logical dtypes must match. Null keys do not match. Float32 NaNs form one
 matching class, and signed zeros compare equal. Duplicate matches retain build
 input order: inner/left/full probe left rows in order, right joins probe right
 rows in order, and full joins append unmatched right rows in original order.
+Float64 NaNs and signed zeros use the same key equivalence.
 Key coalescing and suffix collisions follow the CPU API. With
 `coalesce=False`, inner, left, right, and full joins retain both input key
 columns; unmatched rows preserve nulls on the missing side.
@@ -101,7 +109,7 @@ first consumer; only the final result becomes ordinary CPU columns. Immutable
 result handles retain their query and context and are released after their last
 consumer. Regions still synchronize for errors and cardinality, so a resident
 DAG is not a single command-buffer submission.
-Checked integer arithmetic, strict casts, and checked Int32/UInt32/Int64/UInt64 sums in
+Checked integer arithmetic, checked casts to integer/Boolean targets, and checked Int32/UInt32/Int64/UInt64 sums in
 join inputs require CPU execution because those inputs are not terminal
 observable boundaries. Pure expressions and bounded Int8/Int16/UInt8/UInt16
 sums can feed a join. Each join supports at most 64 combined input columns,
@@ -137,9 +145,8 @@ the parsed temporal dtype retained. Row-valued parsing and binary String
 concatenation reject before encoding, rather than binding text operations to
 integer dictionary codes.
 
-Grouped aggregation supports multiple keys with minimum, maximum, count,
-length, first, last, null count, arg-min/arg-max, Boolean any/all, and the
-supported integer sums. Null keys form a group; Float32 NaNs
+Grouped aggregation supports multiple keys with sum, mean, minimum, maximum, count,
+length, first, last, null count, arg-min/arg-max, and Boolean any/all. Null keys form a group; Float32 NaNs
 form one equality class, and signed zeros compare equal. `maintain_order=True`
 returns groups in first-seen order, while rows within each group retain their
 input order. The default group order is key order. Projections, filtering,
@@ -206,18 +213,22 @@ potential underflow, then reject the result with a precision error after drainin
 the command buffer. Copying subnormal values and flipping their sign preserve
 their bits. Float32 comparisons, predicates, clipping, and integral rounding
 use native encodings and support subnormals. This guard is conservative: a tiny product that would correctly round
-to zero can also require CPU execution. There is no arithmetic emulation or
-automatic retry after submission.
+to zero can also require CPU execution. These Float32 row operations retain
+native arithmetic and its conservative precision guard. There is no automatic CPU retry after submission.
 
-Float64 computation, floating sum/mean, and decimal sums require CPU execution.
-The backend does not emulate Float64 or wide integer accumulation. Forced
-accelerator execution rejects statically unsupported operations before
-submission; Int64/UInt64 sum range proofs can reject during GPU execution.
-Integer-to-Float32 casts use native conversion. The CPU cast contract rounds
-through Float64 first; a small region around Float32 halfway points above
-2**53 can therefore double-round differently. Kernels detect that region and
-require CPU execution without emulating Float64. Value-dependent precision
-failures are reported during execution. Automatic selection uses the shared
+Float32 and Float64 sum/mean accumulate with emulated Float64 arithmetic;
+Float32 sum narrows only once at completion, while means return Float64.
+As in the CPU mergeable floating state, reduction reassociation is allowed and
+bitwise reproducibility across execution schedules is not promised. Integer
+means retain an exact integer total before Float64 conversion and division.
+Their Int64/UInt64 inputs require the same native range proof as wide sums.
+Decimal sums and decimal means still require CPU execution; wide integer
+accumulation is not emulated. Forced accelerator execution rejects statically
+unsupported operations before submission; Int64/UInt64 sum and integer mean
+range proofs can reject during GPU execution.
+Int64/UInt64-to-Float32 casts emulate the CPU contract of rounding through
+Float64 before narrowing, including halfway boundaries above 2**53.
+Value-dependent precision failures are reported during execution. Automatic selection uses the shared
 analytical cost policy when a matching validated calibration is configured;
 otherwise it selects CPU before submission.
 
@@ -225,9 +236,8 @@ otherwise it selects CPU before submission.
 
 `unique` supports subset keys, all four keep modes (`first`, `last`, `any`,
 `none`), null keys, and ordered output. It lowers to resident grouping and,
-for `keep="none"`, a GPU count filter. Float32 NaNs and signed zeros follow the
-same key equality as grouping. Distinct keys inherit the native key restrictions;
-Float64 may be retained as payload when other columns supply the subset keys.
+for `keep="none"`, a GPU count filter. Float32/Float64 NaNs and signed zeros follow the
+same key equality as grouping.
 
 Lazy concat/union-all preserves left-then-right order, duplicate rows, nulls,
 and complete logical dtypes. Opposite Boolean tags form a full GPU join with
@@ -335,31 +345,38 @@ Submission errors propagate. The bridge drains committed work before releasing
 buffers or returning an error; execution never retries the query on CPU after a
 GPU fault. Output owners and source owners remain alive across that boundary.
 
+Binary64 emulation and native Float32 kernels have different costs. Plans
+containing Float64 values, floating sum/mean, or Int64/UInt64-to-Float32
+conversions carry the separate `metal-emulated-float64-v1` calibration family.
+Native-only calibration cannot select those plans. Without matching, validated
+end-to-end evidence, automatic placement stays on CPU. Future calibration may
+select emulation only when its conservative GPU estimate beats the CPU bound;
+forced accelerator execution remains available independently of that decision.
+
+Float64 decimal rounding, floating floor division/remainder/power,
+transcendentals, and variance/std are not yet supported by this subset.
+
 ## Validation
 
 ```sh
-pixi run build-dfmetal
 python3 native/dfmetal/test_native.py
 python3 native/dfmetal/test_join.py
 python3 native/dfmetal/test_resident.py
-pixi run test --contracts planner.routing execution.backends
-pixi run mojo run -I . tests/tooling/metal_available.mojo
+python3 native/dfmetal/test_float64.py
+pixi run mojo run -I . tests/test_accelerator_planning.mojo
+pixi run mojo run -I . tests/test_metal.mojo
+pixi run mojo run -I . tests/test_metal_completeness.mojo
+pixi run mojo run -I . tests/test_metal_sets.mojo
+pixi run mojo run -I . tests/test_metal_slices.mojo
+pixi run mojo run -I . tests/test_metal_concat.mojo
+pixi run mojo run -I . tests/test_metal_float64_storage.mojo
+pixi run mojo run -I . tests/test_metal_float64_emulation.mojo
+pixi run mojo run -I . tests/test_metal_bounded_sums.mojo
+pixi run mojo run -I . tests/test_metal_constants.mojo
+pixi run mojo run -I . tests/test_metal_aggregate_compositions.mojo
+pixi run mojo run -I . tests/test_metal_distinct_counts.mojo
+pixi run mojo run -I . tests/test_metal_temporal_fields.mojo
 ```
-
-Portable routing/provider tests exercise dispatch, mode/settings forwarding and
-error propagation. Actual native witnesses are selected separately:
-
-```sh
-# Requires a working native runtime and an actual Metal device.
-pixi run test --contracts execution.backends --capabilities metal
-```
-
-The capability probe reports `available` or `absent`; a broken runtime raises an
-error. Default runs record native witnesses as `SKIP(capability)` and do not import
-or count them as passes. Enabled native witnesses must execute and fail when their
-prerequisites are missing. The Native Metal workflow follows that probe explicitly.
-Native runtime execution remains unvalidated on the Linux redesign host; portable
-checks and successful ABI compilation do not establish GPU parity.
 
 The unchanged external-suite query expressions can be checked with Metal
 forced at every materialization boundary:
@@ -406,7 +423,7 @@ recovery, and tables that outlive the caller's query and context handles.
 Native grouping and joins now have bounded hash paths. Hash grouping preserves
 first-occurrence group order and verifies complete composite keys after hashing;
 hash joins preserve left and right duplicate order and every join type's null
-contract. Float32 hashes canonicalize signed zero and NaN equivalence while
+contract. Float32/Float64 hashes canonicalize signed zero and NaN equivalence while
 retaining the first original key payload in the output. Hash tables are limited
 to inputs between 4,096 and 8,388,608 rows. Sorted fallback remains available;
 explicit join budgets use that fallback.
@@ -499,3 +516,11 @@ including a synthetic matching calibration that executes a real Metal query,
 stale and missing evidence selecting CPU, and submitted strict-cast errors
 propagating followed by successful recovery. The synthetic calibration is
 isolated test data and is never installed as measured evidence.
+
+The binary64 primitive test compiles the same integer-only source as host C++
+and as Metal. It checks millions of randomized and boundary cases against
+native CPU arithmetic, including subnormal rounding, infinities, signed zeros,
+NaNs, floating conversions, and signed/unsigned integer cast boundaries.
+Finite row arithmetic and conversions are checked bit for bit; NaN payload
+variation is separated from numeric equality. Public query tests cover resident
+composition, nullable inputs, keys, reductions, and the separate cost family.
