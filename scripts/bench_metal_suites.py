@@ -69,7 +69,11 @@ def derive(source, name, engine):
             raise ValueError("H2O query count changed; review derivation")
         for start, stop, value in reversed(replacements):
             source = source[:start] + value + source[stop:]
-    return "from dataframe.metal import MetalRuntime\n" + source
+    # Mojo only accepts the module docstring before imports. Keep it first.
+    source, imports = re.subn(r"(?m)^from ", "from dataframe.metal import MetalRuntime\nfrom ", source, count=1)
+    if imports != 1:
+        raise ValueError("Suite has no import boundary; review derivation")
+    return source
 
 
 def stage_sources(destination):
