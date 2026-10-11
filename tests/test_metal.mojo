@@ -1567,5 +1567,4 @@ def test_native_filtered_reductions_skip_compaction() raises:
 
 
 def main() raises:
-    var suite = TestSuite.discover_tests[__functions_in_module()]()
-    suite^.run()
+    TestSuite.discover_tests[__functions_in_module()]().run()

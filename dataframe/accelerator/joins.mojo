@@ -182,10 +182,10 @@ def _join_task(
         keys.extend([Int64(l), Int64(left.width() + r)])
     var fields = List[JoinField]()
     var names = left.columns()
-    var keep_right_keys = node.how == 3 and not node.coalesce
+    var keep_right_keys = not node.coalesce
     for c in range(left.width()):
         var fallback = -1
-        if node.how == 2 or (node.how == 3 and not keep_right_keys):
+        if not keep_right_keys and (node.how == 2 or node.how == 3):
             for k in range(len(left_keys)):
                 if left_keys[k] == c:
                     fallback = left.width() + right_keys[k]

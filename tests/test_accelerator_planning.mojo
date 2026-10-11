@@ -562,30 +562,31 @@ def test_join_dag_binds_all_join_schemas_and_coalescing() raises:
     var native = _join_capabilities()
     for how in List[String](["inner", "left", "right", "full", "semi", "anti"]):
         for coalesce in List[Bool]([True, False]):
-            var dag = lower_join_dag(
-                left.lazy().join(
-                    right.lazy(),
-                    left_on=["k"],
-                    right_on=["r"],
-                    how=how,
-                    coalesce=coalesce,
-                ),
-                native,
+            var query = left.lazy().join(
+                right.lazy(),
+                left_on=["k"],
+                right_on=["r"],
+                how=how,
+                coalesce=coalesce,
             )
+            var dag = lower_join_dag(query, native)
             assert_equal(dag.joins, 1)
             ref task = dag.tasks[dag.root]
             assert_equal(task.kind, DAG_JOIN)
             var expected = List[String](["k", "x", "x_right"])
             if how == "semi" or how == "anti":
                 expected = ["k", "x"]
-            elif how == "full" and not coalesce:
+            elif not coalesce:
                 expected = ["k", "x", "r", "x_right"]
             assert_equal(task.schema.columns(), expected)
+            assert_true(task.schema.equals(query.collect(engine="cpu").clear()))
             assert_equal(task.keys, List[Int64]([Int64(0), Int64(2)]))
-            assert_equal(task.fields[0].prefer_right, how == "right")
+            assert_equal(
+                task.fields[0].prefer_right, how == "right" and coalesce
+            )
             assert_equal(
                 task.fields[0].right,
-                2 if how == "right" or (how == "full" and coalesce) else -1,
+                2 if coalesce and (how == "right" or how == "full") else -1,
             )
     var cross = lower_join_dag(
         left.lazy().join(right.lazy(), how="cross"), native
