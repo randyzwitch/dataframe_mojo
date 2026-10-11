@@ -45,7 +45,12 @@ runtime data; changing those does not require recompiling an identical shader.
 ## Native precision and supported operations
 
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
-width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns. Mixed numeric dtypes
+width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns.
+Float64 columns can also travel as opaque IEEE words through projection,
+null tests, fill-null, conditionals, filtering/sorting by other columns, joins,
+first/last, and counts. Their bits, including NaN payloads and signed zero, are
+preserved. Float64 arithmetic, comparisons, ordering, keys, casts, and extrema
+remain unsupported. Mixed numeric dtypes
 retain their native types through expressions, filtering, and materialization.
 Sliced numeric and bitmap windows are supported. Expressions support literals, add/subtract/multiply/negate,
 comparisons, Kleene Boolean logic, null tests, fill-null, and explicit casts
@@ -96,7 +101,7 @@ first consumer; only the final result becomes ordinary CPU columns. Immutable
 result handles retain their query and context and are released after their last
 consumer. Regions still synchronize for errors and cardinality, so a resident
 DAG is not a single command-buffer submission.
-Checked integer arithmetic, strict casts, and checked Int32/UInt32 sums in
+Checked integer arithmetic, strict casts, and checked Int32/UInt32/Int64/UInt64 sums in
 join inputs require CPU execution because those inputs are not terminal
 observable boundaries. Pure expressions and bounded Int8/Int16/UInt8/UInt16
 sums can feed a join. Each join supports at most 64 combined input columns,
@@ -106,8 +111,9 @@ A final head immediately above a join or above pure projections of its rows
 bounds the join output allocation, even when its full match count is larger
 than Int32.MAX. Match counts and prefix offsets
 use native 64-bit integers. Head is not pushed through filters, sorts, or
-aggregations. Strings, categorical dictionaries, and nested join columns are
-not yet supported by this native path.
+aggregations. String and categorical columns use query-wide dictionary codes
+for native matching and gathering, as described below. Nested values still
+require CPU execution.
 
 Temporal and Decimal32/64 columns retain their complete logical metadata
 through projection, stable filtering, null tests, fill-null, counts, and
@@ -126,7 +132,8 @@ returns groups in first-seen order, while rows within each group retain their
 input order. The default group order is key order. Projections, filtering,
 sorting, further grouping, and final reductions can follow a grouped result
 without returning intermediate data to the CPU. Checked Int32/UInt32 grouped
-sums currently require terminal aggregation without head.
+sums, and sums requiring the Int64/UInt64 range proof, currently require
+terminal aggregation without head.
 
 The GPU sorts row indices, marks group boundaries, and builds group ranges.
 Each group reduction uses a 256-thread workgroup; GPU-produced dispatch
@@ -154,7 +161,16 @@ Count and length return Int64. Int8, Int16, UInt8, and UInt16 sums return Int64.
 Int32 and UInt32 sums retain their input dtype with a final range check. These
 sums use an exact Int64 accumulator. The initial input has at most Int32.MAX
 rows, so this accumulator cannot overflow even when partial sums cancel. Sum's
-`min_count` is retained. Float32 row arithmetic preserves separate operator
+`min_count` is retained. Int64, UInt64, and duration sums retain their result
+dtype and require a GPU range proof. For N input rows (or rows in a group),
+every valid positive value must fit the native positive maximum divided by N;
+every negative magnitude must fit 2**63 divided by N. Null rows do not trigger
+the check. This proves that every parallel subset and merge fits, without a
+wider accumulator. Scalar filtered reductions conservatively use the original
+row count when they skip compaction. An unproved input raises an unsupported
+accumulator error before caller outputs change, even when cancellation could
+make the final result fit. A later query can reuse the runtime after rejection.
+Float32 row arithmetic preserves separate operator
 rounding for supported operations and disables shader contraction and unsafe math
 optimizations. Metal can flush Float32 subnormal operands and results even in
 safe math mode ([Metal specification, sections 8.1 and 8.5](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)). Native kernels detect subnormal arithmetic and
@@ -165,10 +181,10 @@ use native encodings and support subnormals. This guard is conservative: a tiny 
 to zero can also require CPU execution. There is no arithmetic emulation or
 automatic retry after submission.
 
-Float64 inputs, floating sum/mean, and Int64/UInt64 or duration sums require CPU execution. Their
-precision contracts need hardware types Apple GPUs do not supply. The backend
-does not emulate Float64 or wide integer accumulation. Forced accelerator
-execution rejects these statically unsupported plans before submission.
+Float64 computation, floating sum/mean, and decimal sums require CPU execution.
+The backend does not emulate Float64 or wide integer accumulation. Forced
+accelerator execution rejects statically unsupported operations before
+submission; Int64/UInt64 sum range proofs can reject during GPU execution.
 Integer-to-Float32 casts use native conversion. The CPU cast contract rounds
 through Float64 first; a small region around Float32 halfway points above
 2**53 can therefore double-round differently. Kernels detect that region and
@@ -176,6 +192,25 @@ require CPU execution without emulating Float64. Value-dependent precision
 failures are reported during execution. Automatic selection uses the shared
 analytical cost policy when a matching validated calibration is configured;
 otherwise it selects CPU before submission.
+
+## Distinct rows, union, and slicing
+
+`unique` supports subset keys, all four keep modes (`first`, `last`, `any`,
+`none`), null keys, and ordered output. It lowers to resident grouping and,
+for `keep="none"`, a GPU count filter. Float32 NaNs and signed zeros follow the
+same key equality as grouping. Distinct keys inherit the native key restrictions;
+Float64 may be retained as payload when other columns supply the subset keys.
+
+Lazy concat/union-all preserves left-then-right order, duplicate rows, nulls,
+and complete logical dtypes. Opposite Boolean tags form a full GPU join with
+no matches, and projections gather the original columns from each branch.
+Nested concats remain resident. This lowering currently supports at most 31
+source columns, because the join's combined input includes both tagged branches.
+
+Offset slices accept clipped positive or negative offsets and a nonnegative
+length, or the remaining rows. Their offset and length are runtime parameters;
+intermediate slices compact all live columns on the GPU. Slices can occur after
+filters, sorting, grouping, distinct rows, or joins and before reductions.
 
 ## Memory, synchronization, and profiles
 
@@ -280,7 +315,32 @@ python3 native/dfmetal/test_join.py
 python3 native/dfmetal/test_resident.py
 pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
+pixi run mojo run -I . tests/test_metal_completeness.mojo
+pixi run mojo run -I . tests/test_metal_sets.mojo
+pixi run mojo run -I . tests/test_metal_slices.mojo
+pixi run mojo run -I . tests/test_metal_concat.mojo
+pixi run mojo run -I . tests/test_metal_float64_storage.mojo
+pixi run mojo run -I . tests/test_metal_bounded_sums.mojo
 ```
+
+The unchanged external-suite query expressions can be checked with Metal
+forced at every materialization boundary:
+
+```sh
+pixi run -e oracle python3 scripts/bench_metal_suites.py --all-suites \
+  --scale smoke --reps 2 --threads 8 \
+  --library build/dfmetal/libdfmetal.dylib \
+  --output build/metal-suites/results.json
+```
+
+This is correctness and coverage evidence, not a performance report. Generated
+CPU and Metal workers, source hashes, per-case logs, original input dtypes, and
+every unsupported or failed case are retained. Comparison checks the full schema
+and exact row multiset, including duplicates; original-order equality is also
+recorded. No tolerance, Float32 recasting, automatic placement, or CPU retry is
+used. A materialization-only adapter wraps H2O's eager operations as equivalent
+lazy queries in its Metal worker; the CPU worker retains the original eager
+expressions. Unsupported operations remain coverage gaps.
 
 The native ABI suite requires the built library and executes on Apple Silicon.
 The Mojo suite always checks configuration and capability rejection; its GPU
@@ -340,13 +400,24 @@ remain correct across independently encoded categorical inputs. Filtering,
 sorting, grouping, joins, and projection run on native codes; the final result
 restores String values or each output's original categorical dictionary. UTF-8
 values, empty strings, nulls, and unused categorical members retain their public
-semantics. Dictionary plans currently reject explicit casts.
+semantics. Casts involving String/categorical values still require CPU
+execution; unrelated supported numeric casts remain available.
+
+Unary String predicates and transformations run through dictionary lookup
+joins. Contains/LIKE, starts/ends-with, character/byte lengths, case conversion,
+strip, replace, slicing, reverse, padding, zero-fill, and membership share the
+CPU String kernel once per distinct dictionary value. Native left joins apply
+the resulting table to resident row codes, preserve nulls and row order, and
+feed later GPU operators. Newly generated text joins the dictionary before
+row encoding. Integer membership supports every signed and unsigned width
+without converting exact large integers through floating literals.
 
 Encoding and decoding are host staging work. Profiles include
-`dictionary_staging_bytes`, `dictionary_encode_ms`, and `dictionary_decode_ms`;
+`dictionary_staging_bytes`, `dictionary_encode_ms`, and `dictionary_decode_ms`.
+`dictionary_operation_tables` counts the generated unary lookup tables.
 `query_wall_ms` includes both boundaries. An explicit payload budget reserves
-source code storage and dictionary bytes before native execution, and checks a
-conservative restoration bound before allocating decoded outputs. Cross-input
+source code storage, generated lookup tables, and dictionary bytes before
+native execution, and checks a conservative restoration bound before allocating decoded outputs. Cross-input
 categorical parity passed for all seven join types, including unmatched full
 join keys and nulls. The four public dictionary tests also cover string filter,
 sort, grouped sums, output metadata, profiling, and budget rejection.

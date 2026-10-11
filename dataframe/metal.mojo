@@ -1,8 +1,8 @@
 """Optional native Apple Metal provider for the shared accelerator row planner.
 
-Importing this module loads no driver. Float64 arithmetic, floating sum/mean,
-and Int64 sum remain CPU operations because their accumulators require more
-precision than Apple GPU hardware provides. No arithmetic is emulated.
+Importing this module loads no driver. Float64 arithmetic and floating sum/mean
+remain CPU operations. Int64/UInt64 sums require a GPU proof that all parallel
+partials fit the native range. No arithmetic is emulated.
 """
 from std.ffi import external_call
 from std.math import isfinite
@@ -295,6 +295,7 @@ def _capabilities() -> RowCapabilities:
         float64=False,
         float64_storage=True,
         wide_integer=False,
+        bounded_integer_sum=True,
         extended_integers=True,
         mixed_types=True,
         casts=True,

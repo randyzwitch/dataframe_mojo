@@ -21,7 +21,8 @@ struct RowCapabilities(Copyable):
     """Semantic capabilities, independent of storage and device availability.
 
     Defaults describe the existing NVIDIA row subset. A native Metal provider
-    disables Float64 and wide integer accumulation. Float32 input alone does
+    disables Float64 arithmetic and wide integer accumulation, with optional
+    range-guarded native integer sums. Float32 input alone does
     not make sum/mean eligible: their shared accumulator contract is Float64.
     """
 
@@ -29,6 +30,7 @@ struct RowCapabilities(Copyable):
     var float64: Bool
     var float64_storage: Bool
     var wide_integer: Bool
+    var bounded_integer_sum: Bool
     var int64_arithmetic: Bool
     var extra_reductions: Bool
     var grouped: Bool
@@ -48,6 +50,7 @@ struct RowCapabilities(Copyable):
         float64: Bool = True,
         float64_storage: Bool = False,
         wide_integer: Bool = True,
+        bounded_integer_sum: Bool = False,
         int64_arithmetic: Bool = True,
         extended_integers: Bool = False,
         mixed_types: Bool = False,
@@ -64,6 +67,7 @@ struct RowCapabilities(Copyable):
         self.float64 = float64
         self.float64_storage = float64_storage
         self.wide_integer = wide_integer
+        self.bounded_integer_sum = bounded_integer_sum
         self.int64_arithmetic = int64_arithmetic
         self.extended_integers = extended_integers
         self.mixed_types = mixed_types
@@ -167,8 +171,10 @@ struct RowCapabilities(Copyable):
                     "accumulator", "floating sum requires Float64 accumulation"
                 )
             if (
-                dtype.physical() == DataType.INT64 or dtype == DataType.UINT64
-            ) and not self.wide_integer:
+                (dtype.physical() == DataType.INT64 or dtype == DataType.UINT64)
+                and not self.wide_integer
+                and not self.bounded_integer_sum
+            ):
                 self.reject(
                     "accumulator",
                     dtype.name() + " sum requires exact wide accumulation",
