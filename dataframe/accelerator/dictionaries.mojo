@@ -65,7 +65,9 @@ struct DictionaryCodes(Movable):
                     total = checked_add(total, checked_add(len(column), 7) // 8)
         return total
 
-    def restoration_bytes(self, frame: DataFrame, schema: DataFrame) raises -> Int:
+    def restoration_bytes(
+        self, frame: DataFrame, schema: DataFrame
+    ) raises -> Int:
         # Native code outputs remain alive until restoration finishes. String
         # views own a copy of dictionary text; categorical recoding also holds
         # those views while building the original dictionary's result codes.
@@ -81,7 +83,9 @@ struct DictionaryCodes(Movable):
             if dictionary_dtype(dtype):
                 total = checked_add(total, checked_mul(rows, 24))
                 total = checked_add(total, checked_mul(self.bytes, 2))
-                total = checked_add(total, checked_mul(len(self.dtype.dictionary()[]), 16))
+                total = checked_add(
+                    total, checked_mul(len(self.dtype.dictionary()[]), 16)
+                )
         return total
 
     def code(self, text: String) raises -> UInt32:
@@ -112,7 +116,9 @@ def has_dictionary_columns(query: LazyFrame) -> Bool:
     return False
 
 
-def encode_query(query: LazyFrame, dictionary: DictionaryCodes) raises -> LazyFrame:
+def encode_query(
+    query: LazyFrame, dictionary: DictionaryCodes
+) raises -> LazyFrame:
     """Stage ordered UInt32 codes while retaining the original plan structure."""
     var encoded = query.copy()
     for f in range(len(encoded._frames)):
@@ -138,10 +144,14 @@ def encode_query(query: LazyFrame, dictionary: DictionaryCodes) raises -> LazyFr
                 elif node.op == CAST:
                     # Numeric-to-string formatting and string parsing are not
                     # dictionary operations and cannot run on numeric codes.
-                    raise Error("Accelerator dictionary plans do not support casts")
+                    raise Error(
+                        "Accelerator dictionary plans do not support casts"
+                    )
                 elif node.op == LIT_NULL:
                     for d in range(len(node.dtypes)):
-                        if node.dtypes[d] and dictionary_dtype(node.dtypes[d].value()):
+                        if node.dtypes[d] and dictionary_dtype(
+                            node.dtypes[d].value()
+                        ):
                             node.dtypes[d] = Optional[DataType](DataType.UINT32)
     return encoded^
 
@@ -151,5 +161,7 @@ def restore_frame(
 ) raises -> DataFrame:
     var columns = List[Series]()
     for i in range(len(frame._columns)):
-        columns.append(dictionary.restore(frame._columns[i], schema._columns[i].dtype()))
+        columns.append(
+            dictionary.restore(frame._columns[i], schema._columns[i].dtype())
+        )
     return DataFrame(columns^)

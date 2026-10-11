@@ -11,14 +11,21 @@ from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
 from std.time import perf_counter_ns
-from .accelerator.cost import PlanEstimate, CalibrationKey, select_auto as select_cost
+from .accelerator.cost import (
+    PlanEstimate,
+    CalibrationKey,
+    select_auto as select_cost,
+)
 from .accelerator.cpu_work import cpu_features
 from ._build_identity import CPU_BUILD_ID
 from .parallel import configured_workers
 from .json_value import JsonValue
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.dictionaries import (
-    DictionaryCodes, has_dictionary_columns, encode_query, restore_frame,
+    DictionaryCodes,
+    has_dictionary_columns,
+    encode_query,
+    restore_frame,
 )
 from .accelerator.rows import RowPlan, lower_rows, ROW_SORT_KEY
 from .accelerator.joins import (
@@ -1027,7 +1034,9 @@ def _execute_join_dag(
                 var parent = task.source if side == 0 else task.right
                 for column in range(values[parent].frame.width()):
                     refs.extend([Int64(values[parent].address), Int64(column)])
-            var join_features = _plan_features(scope.context.library, request, True)
+            var join_features = _plan_features(
+                scope.context.library, request, True
+            )
             status = _resident_run_call(
                 scope.join,
                 scope.address,
@@ -1042,7 +1051,10 @@ def _execute_join_dag(
             _ = request^
             _ = refs^
             scope.context.library.check(status, error)
-            algorithm = "native_metal_resident_hash_join" if join_features & 1 else "native_metal_resident_sorted_join"
+            algorithm = (
+                "native_metal_resident_hash_join" if join_features
+                & 1 else "native_metal_resident_sorted_join"
+            )
             label = "JOIN"
         else:
             if task.source >= 0:
@@ -1199,23 +1211,36 @@ def _probe_metadata(
     var info = List[Int64](length=8, fill=0)
     var error = 0
     var status = Pointer(to=callback).unsafe_bitcast[_Probe]()[](
-        Int64(device), Int(request.unsafe_ptr()) if len(request) else 0,
-        Int(info.unsafe_ptr()), Int(Pointer(to=error)),
+        Int64(device),
+        Int(request.unsafe_ptr()) if len(request) else 0,
+        Int(info.unsafe_ptr()),
+        Int(Pointer(to=error)),
     )
     library.check(status, error)
     return info^
 
 
 def _metal_calibration_key(
-    library: _Library, metadata: List[Int64], optimize: Bool,
-    streaming: Bool, batch_size: Int,
+    library: _Library,
+    metadata: List[Int64],
+    optimize: Bool,
+    streaming: Bool,
+    batch_size: Int,
 ) -> CalibrationKey:
     var callback = library.build
-    var native_id = _read_c_string(Pointer(to=callback).unsafe_bitcast[_Build]()[]())
+    var native_id = _read_c_string(
+        Pointer(to=callback).unsafe_bitcast[_Build]()[]()
+    )
     return CalibrationKey(
-        "metal", "registry=" + String(metadata[0]) + ";unified=" + String(metadata[3]),
-        native_id^, CPU_BUILD_ID, _read_c_string(Int(metadata[7])),
-        configured_workers(), optimize, streaming, batch_size,
+        "metal",
+        "registry=" + String(metadata[0]) + ";unified=" + String(metadata[3]),
+        native_id^,
+        CPU_BUILD_ID,
+        _read_c_string(Int(metadata[7])),
+        configured_workers(),
+        optimize,
+        streaming,
+        batch_size,
     )
 
 
@@ -1271,14 +1296,18 @@ struct MetalRuntime(AcceleratorBackend):
         device[12] = Float64(memory[2])
         device[13] = Float64(metadata[4] == 0)
         device[14] = 0
-        return PlanEstimate(work[0].copy(), device^, Int(memory[2]), work[1].copy(), "accel")
+        return PlanEstimate(
+            work[0].copy(), device^, Int(memory[2]), work[1].copy(), "accel"
+        )
 
     def calibration_key(
         self, optimize: Bool, streaming: Bool, batch_size: Int
     ) raises -> CalibrationKey:
         var library = _Library()
         var metadata = _probe_metadata(library, self._device, List[Int64]())
-        return _metal_calibration_key(library, metadata, optimize, streaming, batch_size)
+        return _metal_calibration_key(
+            library, metadata, optimize, streaming, batch_size
+        )
 
     def select_auto(
         self, query: LazyFrame, optimize: Bool, streaming: Bool, batch_size: Int
@@ -1286,12 +1315,21 @@ struct MetalRuntime(AcceleratorBackend):
         try:
             var path = getenv("DATAFRAME_ACCEL_COST_TABLE")
             if not path:
-                return ("cpu", "auto uses CPU; no analytical calibration configured")
+                return (
+                    "cpu",
+                    "auto uses CPU; no analytical calibration configured",
+                )
             if CPU_BUILD_ID == "development-source-no-calibration":
-                return ("cpu", "automatic calibration requires an identified CPU/provider package")
+                return (
+                    "cpu",
+                    "automatic calibration requires an identified CPU/provider package",
+                )
             var facts = self.estimate_auto(query)
             if self._budget >= 0 and facts.peak_bytes > self._budget:
-                return ("cpu", "estimated Metal payload exceeds configured memory limit")
+                return (
+                    "cpu",
+                    "estimated Metal payload exceeds configured memory limit",
+                )
             var table: JsonValue
             with open(path, "r") as file:
                 table = JsonValue(file.read())
@@ -1300,15 +1338,32 @@ struct MetalRuntime(AcceleratorBackend):
                 return ("cpu", "invalid automatic memory headroom fraction")
             var library = _Library()
             var metadata = _probe_metadata(library, self._device, List[Int64]())
-            var free = max(0, Int(metadata[1]) - max(0, Int(metadata[2]) - Int(metadata[5])))
+            var free = max(
+                0,
+                Int(metadata[1]) - max(0, Int(metadata[2]) - Int(metadata[5])),
+            )
             var budget = Int(Float64(free) * fraction)
             if self._budget >= 0:
                 budget = min(budget, self._budget)
-            var key = _metal_calibration_key(library, metadata, optimize, streaming, batch_size)
-            var decision = select_cost(facts, table, key, budget, external_call["time", Int64](Int(0)))
-            return (decision.engine.copy(), decision.reason + "; peak_bytes=" + String(facts.peak_bytes) + "; budget_bytes=" + String(budget))
+            var key = _metal_calibration_key(
+                library, metadata, optimize, streaming, batch_size
+            )
+            var decision = select_cost(
+                facts, table, key, budget, external_call["time", Int64](Int(0))
+            )
+            return (
+                decision.engine.copy(),
+                decision.reason
+                + "; peak_bytes="
+                + String(facts.peak_bytes)
+                + "; budget_bytes="
+                + String(budget),
+            )
         except error:
-            return ("cpu", "automatic analytical preflight rejected: " + String(error))
+            return (
+                "cpu",
+                "automatic analytical preflight rejected: " + String(error),
+            )
 
     def execute(self, query: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
         return self._run(query, False)
@@ -1331,40 +1386,67 @@ struct MetalRuntime(AcceleratorBackend):
             var budget = self._budget
             if budget >= 0:
                 if staging_bytes > budget:
-                    raise Error("Metal dictionary staging exceeds payload budget")
+                    raise Error(
+                        "Metal dictionary staging exceeds payload budget"
+                    )
                 budget -= staging_bytes
             var encoded = encode_query(query, dictionary)
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
             var staged_ns = Int(perf_counter_ns()) - start
             var executed = runtime._run(encoded, profiling)
             if self._budget >= 0:
-                if dictionary.restoration_bytes(executed[0], schema) > self._budget - staging_bytes:
-                    raise Error("Metal dictionary restoration exceeds payload budget")
+                if (
+                    dictionary.restoration_bytes(executed[0], schema)
+                    > self._budget - staging_bytes
+                ):
+                    raise Error(
+                        "Metal dictionary restoration exceeds payload budget"
+                    )
             var decode_start = Int(perf_counter_ns())
             var result = restore_frame(executed[0], schema, dictionary)
             var decoded_ns = Int(perf_counter_ns()) - decode_start
             var report = executed[1].copy()
             var elapsed = Float64(Int(perf_counter_ns()) - start) / 1e6
-            report = report.with_column(Series(
-                "query_wall_ms", Column[Float64](
-                    List[Float64](length=report.height(), fill=elapsed)
-                ),
-            ))
-            report = report.with_column(Series(
-                "dictionary_staging_bytes", Column[Int64](
-                    List[Int64](length=report.height(), fill=Int64(staging_bytes))
-                ),
-            ))
-            report = report.with_column(Series(
-                "dictionary_encode_ms", Column[Float64](
-                    List[Float64](length=report.height(), fill=Float64(staged_ns) / 1e6)
-                ),
-            ))
-            report = report.with_column(Series(
-                "dictionary_decode_ms", Column[Float64](
-                    List[Float64](length=report.height(), fill=Float64(decoded_ns) / 1e6)
-                ),
-            ))
+            report = report.with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](length=report.height(), fill=elapsed)
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "dictionary_staging_bytes",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(), fill=Int64(staging_bytes)
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "dictionary_encode_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=report.height(),
+                            fill=Float64(staged_ns) / 1e6,
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "dictionary_decode_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=report.height(),
+                            fill=Float64(decoded_ns) / 1e6,
+                        )
+                    ),
+                )
+            )
             return (result^, report^)
         if has_join(query):
             var dag = lower_join_dag(query, _capabilities())
@@ -1384,7 +1466,9 @@ struct MetalRuntime(AcceleratorBackend):
                     metadata._frames[i] = metadata._frames[i].slice(0, 0)
                 var dictionary = DictionaryCodes(metadata)
                 var encoded = encode_query(metadata, dictionary)
-                return "Metal ordered dictionary staging; " + self.describe(encoded)
+                return "Metal ordered dictionary staging; " + self.describe(
+                    encoded
+                )
             if has_join(query):
                 var dag = lower_join_dag(query, _capabilities())
                 return (

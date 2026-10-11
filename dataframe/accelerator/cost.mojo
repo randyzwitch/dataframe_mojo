@@ -12,23 +12,25 @@ comptime COST_FEATURE_COUNT = 15
 
 
 def cost_feature_names() -> List[String]:
-    return List[String]([
-        "fixed",
-        "rows",
-        "source_bytes",
-        "projection_node_rows",
-        "filter_node_rows",
-        "reduction_rows",
-        "integer_node_rows",
-        "cast_node_rows",
-        "launches",
-        "synchronizations",
-        "upload_bytes",
-        "download_bytes",
-        "allocation_bytes",
-        "cold",
-        "materializations",
-    ])
+    return List[String](
+        [
+            "fixed",
+            "rows",
+            "source_bytes",
+            "projection_node_rows",
+            "filter_node_rows",
+            "reduction_rows",
+            "integer_node_rows",
+            "cast_node_rows",
+            "launches",
+            "synchronizations",
+            "upload_bytes",
+            "download_bytes",
+            "allocation_bytes",
+            "cold",
+            "materializations",
+        ]
+    )
 
 
 @fieldwise_init

@@ -81,7 +81,10 @@ def select_auto(
         try:
             return _runtime().select_auto(plan, optimize, streaming, batch_size)
         except error:
-            return ("cpu", "automatic analytical preflight rejected: " + String(error))
+            return (
+                "cpu",
+                "automatic analytical preflight rejected: " + String(error),
+            )
     return ("cpu", "auto uses CPU; accelerator provider is not installed")
 
 
@@ -93,4 +96,8 @@ def execute_auto(
     profiling: Bool,
 ) raises -> Tuple[DataFrame, DataFrame]:
     """Execute a selected region; execution errors must propagate to callers."""
-    return _runtime().execute_profiled(plan) if profiling else _runtime().execute(plan)
+    return (
+        _runtime()
+        .execute_profiled(plan) if profiling else _runtime()
+        .execute(plan)
+    )

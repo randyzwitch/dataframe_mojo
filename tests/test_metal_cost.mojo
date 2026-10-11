@@ -23,7 +23,9 @@ def test_plan_estimates_ignore_values_and_observe_pipeline_cache() raises:
     assert_equal(x.accelerator[13], Float64(1))
     assert_true(x.peak_bytes > 0 and x.accelerator[8] > 0)
     assert_true(a.equals(before))
-    assert_true(first.collect(accelerator=runtime).equals(first.collect(engine="cpu")))
+    assert_true(
+        first.collect(accelerator=runtime).equals(first.collect(engine="cpu"))
+    )
     var warm = runtime.estimate_auto(first)
     assert_equal(warm.accelerator[13], Float64(0))
     assert_equal(warm.cpu, x.cpu)
@@ -38,7 +40,9 @@ def test_unsupported_cost_plans_reject_without_reading_sources() raises:
     var wide = DataFrame([Series("x", Column[Float64]([1, 2]))])
     with assert_raises(contains="Float64 requires CPU"):
         _ = runtime.estimate_auto(wide.lazy().select(col("x") + 1))
-    var missing = scan_csv("/nonexistent/metal-cost-must-not-read.csv").select(col("x"))
+    var missing = scan_csv("/nonexistent/metal-cost-must-not-read.csv").select(
+        col("x")
+    )
     with assert_raises(contains="unsupported"):
         _ = runtime.estimate_auto(missing)
 
