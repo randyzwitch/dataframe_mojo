@@ -293,6 +293,7 @@ def _capabilities() -> RowCapabilities:
     return RowCapabilities(
         "Metal",
         float64=False,
+        float64_storage=True,
         wide_integer=False,
         extended_integers=True,
         mixed_types=True,
@@ -308,6 +309,8 @@ def _capabilities() -> RowCapabilities:
 
 
 def _type(dtype: DataType) raises -> Int64:
+    if dtype.physical() == DataType.FLOAT64:
+        return 11
     if dtype.physical() == DataType.FLOAT32:
         return 1
     if dtype.physical() == DataType.INT32:
@@ -523,6 +526,7 @@ struct _Descriptors(Movable):
             self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
         for dtype in plan.slot_dtypes:
             self.slot_types.append(_type(dtype))
+            self.typed |= dtype == DataType.FLOAT64
             self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
             self.typed |= dtype != dtype.physical()
         for i in range(0, len(self.code), 4):

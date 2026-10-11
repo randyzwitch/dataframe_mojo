@@ -216,6 +216,27 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
+        if (
+            not capabilities.float64
+            and (
+                bound.dtypes[i] == DataType.FLOAT64
+                or left_type == DataType.FLOAT64
+                or right_type == DataType.FLOAT64
+            )
+            and not (
+                op == COL
+                or op == LIT_FLOAT
+                or op == LIT_NULL
+                or op == IS_NULL
+                or op == IS_NOT_NULL
+                or op == FILL_NULL
+                or op == KEEP_NULLS
+                or op == WHEN
+            )
+        ):
+            capabilities.reject(
+                "precision", "Float64 requires CPU execution for this operation"
+            )
         var logical = (
             bound.dtypes[i].is_temporal()
             or bound.dtypes[i].is_decimal()
@@ -486,6 +507,7 @@ def lower_rows(
                         found = j
                 if found < 0:
                     raise Error("Unknown column: " + node.names[i])
+                capabilities.require_key(schema[found].dtype())
                 code.extend(
                     [
                         Int64(ROW_SORT_KEY),
@@ -544,6 +566,7 @@ def lower_rows(
                 if found < 0:
                     raise Error("Unknown column: " + name)
                 group_keys.append(found)
+                capabilities.require_key(schema[found].dtype())
         var projected = List[Series]()
         var projected_slots = List[Int]()
         var aggregate_outputs = List[RowOutput]()

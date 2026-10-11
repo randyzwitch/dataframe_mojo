@@ -62,7 +62,7 @@ int64_t mul(int64_t a, int64_t b) {
 int64_t width(int64_t t) {
   if (t == DFM_FLOAT32 || t == DFM_INT32 || t == DFM_UINT32)
     return 4;
-  if (t == DFM_INT64 || t == DFM_UINT64)
+  if (t == DFM_INT64 || t == DFM_UINT64 || t == DFM_FLOAT64_STORAGE)
     return 8;
   if (t == DFM_INT16 || t == DFM_UINT16)
     return 2;
@@ -76,12 +76,15 @@ bool unsignedType(int64_t t) {
          t == DFM_UINT64;
 }
 bool sumSupported(int64_t t) {
-  return t != DFM_FLOAT32 && t != DFM_INT64 && t != DFM_UINT64 && t != DFM_BOOL;
+  return t != DFM_FLOAT32 && t != DFM_INT64 && t != DFM_UINT64 && t != DFM_BOOL && t != DFM_FLOAT64_STORAGE;
 }
 int64_t sumType(int64_t t) {
   return t == DFM_INT32 || t == DFM_UINT32 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
+  if (type == DFM_FLOAT64_STORAGE &&
+      (op == DFM_MIN || op == DFM_MAX || op == DFM_ARG_MIN || op == DFM_ARG_MAX))
+    return -1;
   if (op == DFM_SUM)
     return sumSupported(type) ? sumType(type) : -1;
   if (op == DFM_COUNT || op == DFM_LEN || op == DFM_NULL_COUNT)
@@ -124,6 +127,7 @@ const char *metalType(int64_t t) {
   case DFM_UINT32:
     return "uint";
   case DFM_UINT64:
+  case DFM_FLOAT64_STORAGE:
     return "ulong";
   default:
     fail("Metal unsupported expression dtype");
@@ -308,6 +312,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
     width(r.dtype);
   if (r.dtype == DFM_BOOL)
     fail("Metal common storage must be numeric");
+  if (r.dtype == DFM_FLOAT64_STORAGE)
+    fail("Metal opaque Float64 requires typed storage");
   if (!r.inputs || !r.outputs || (r.step_count && !r.steps) ||
       (r.literal_count && (!r.code || !r.literals)) ||
       (r.gather_count && !r.gathers))
@@ -373,6 +379,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
           if (c[0] != DFM_GROUP_KEY || c[2] || c[3] ||
               r.node_types[v.start + j] != slotType(r, c[1]))
             fail("Invalid Metal group key");
+          if (slotType(r, c[1]) == DFM_FLOAT64_STORAGE)
+            fail("Metal Float64 grouping requires CPU execution");
         } else {
           if (c[0] != DFM_GROUP_OUTPUT || c[2] < r.input_count ||
               c[2] >= r.slots || defined[c[2]] || targets[c[2]] ||
@@ -406,6 +414,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
           fail("Invalid Metal sort key descriptor");
         if (r.node_types[v.start + j] != slotType(r, c[1]))
           fail("Metal sort key dtype mismatch");
+        if (slotType(r, c[1]) == DFM_FLOAT64_STORAGE)
+          fail("Metal Float64 sorting requires CPU execution");
       }
       for (int64_t j = 0; j < v.gather_count; ++j) {
         auto slot = r.gathers[v.gather_start + j];
@@ -447,6 +457,12 @@ Shape validate(const DFMRequest &r, bool storage = false,
       auto operand = (binary || unary || conditional)
                          ? nodeType(r, v.start + c[1])
                          : nodeType(r, v.start + j);
+      auto resultType = nodeType(r, v.start + j);
+      if ((operand == DFM_FLOAT64_STORAGE || resultType == DFM_FLOAT64_STORAGE) &&
+          c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_FLOAT && c[0] != DFM_LITERAL_NULL &&
+          c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL && c[0] != DFM_FILL_NULL &&
+          c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN)
+        fail("Metal Float64 requires CPU execution for this operation");
       if (c[0] == DFM_INT_IS_IN) {
         if (!typed(r) || operand == DFM_FLOAT32 || operand == DFM_BOOL ||
             nodeType(r, v.start + j) != DFM_BOOL || c[2] < 0 || c[3] < 0 ||
@@ -464,7 +480,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
         fail("Metal floating operator requires CPU execution");
       if (c[0] == DFM_ROUND && operand == DFM_FLOAT32 && c[3] != 0)
         fail("Metal Float32 decimal rounding requires CPU execution");
-      if (nodeType(r, v.start + j) != DFM_FLOAT32 && c[0] == DFM_LITERAL_FLOAT)
+      if (nodeType(r, v.start + j) != DFM_FLOAT32 &&
+          nodeType(r, v.start + j) != DFM_FLOAT64_STORAGE && c[0] == DFM_LITERAL_FLOAT)
         fail("Floating literal requires native Float32 storage");
     }
     if (typed(r)) {
@@ -1071,7 +1088,7 @@ float float_integral(float x,int op){
 )MSL";
   if (typed(r)) {
     text += "typedef ulong T;\n";
-    std::array<bool, 11> used{};
+    std::array<bool, 12> used{};
     for (int64_t i = 0; i < r.literal_count; ++i)
       used[r.node_types[i]] = true;
     for (int64_t t = 1; t <= 10; ++t)
