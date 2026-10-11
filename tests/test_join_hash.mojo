@@ -3,6 +3,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.join_hash import (
+    int64_progression,
     direct_hash_join_rows,
     prepare_hash_index,
     prepared_hash_join_rows,
@@ -499,6 +500,33 @@ def test_prepared_progressions_extremes_and_invalid_shapes() raises:
     assert_true(not prepare_hash_index([nulls.copy()]).progression)
     var descending = Series("k", Column[Int64]([3, 2, 1]))
     assert_true(not prepare_hash_index([descending.copy()]).progression)
+    # Across chunks, with an all-valid bitmap (as Parquet stores one): the
+    # step carries over the boundary, and a break at it declines.
+    var all_valid = List[Bool](length=3000, fill=True)
+    var first = List[Int64]()
+    var second = List[Int64]()
+    var broken = List[Int64]()
+    for i in range(3000):
+        first.append(Int64(5 + 3 * i))
+        second.append(Int64(5 + 3 * (3000 + i)))
+        broken.append(Int64(5 + 3 * (3000 + i) + 1))
+    var chunked = Series._from_chunks(
+        [
+            Series("k", Column[Int64](first.copy(), all_valid.copy())),
+            Series("k", Column[Int64](second^, all_valid.copy())),
+        ]
+    )
+    var across = int64_progression(chunked)
+    assert_true(across[0])
+    assert_equal(across[1], Int64(5))
+    assert_equal(across[2], UInt64(3))
+    var split = Series._from_chunks(
+        [
+            Series("k", Column[Int64](first^)),
+            Series("k", Column[Int64](broken^)),
+        ]
+    )
+    assert_false(int64_progression(split)[0])
 
 
 def test_prepared_null_build_rows_are_never_indexed() raises:
