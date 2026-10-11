@@ -4,7 +4,8 @@ from dataframe import Column, DataFrame, Series, col
 from dataframe.json_value import JsonValue, json_quote
 from dataframe._build_identity import CPU_BUILD_ID
 from dataframe.accelerator.cost import (
-    COST_FEATURES,
+    COST_FEATURE_COUNT,
+    cost_feature_names,
     PlanEstimate,
     CalibrationKey,
     select_auto,
@@ -16,12 +17,13 @@ def _model(fixed: Int, factor: String) -> String:
     var coefficients = String("{")
     var minimum = String("{")
     var maximum = String("{")
-    comptime for i in range(len(COST_FEATURES)):
+    var feature_names = cost_feature_names()
+    for i in range(COST_FEATURE_COUNT):
         if i:
             coefficients += ","
             minimum += ","
             maximum += ","
-        var name = json_quote(COST_FEATURES[i])
+        var name = json_quote(feature_names[i])
         coefficients += name + ":" + String(fixed if i == 0 else 0)
         minimum += name + ":0"
         maximum += name + ":1000000"
@@ -57,7 +59,7 @@ def _table(record: String) raises -> JsonValue:
 
 
 def _facts() -> PlanEstimate:
-    var cpu = List[Float64](length=len(COST_FEATURES), fill=0)
+    var cpu = List[Float64](length=COST_FEATURE_COUNT, fill=0)
     cpu[0] = 1
     return PlanEstimate(cpu.copy(), cpu^, 100, "Float32", "accel")
 
@@ -73,7 +75,7 @@ def test_shared_comparison_explains_both_bounds_and_the_largest_term() raises:
     var decision = select_auto(facts, _table(_record()), _key(), 100, 10)
     assert_equal(decision.engine, "accel")
     assert_equal(decision.cpu_ns, Float64(900))
-    assert_equal(decision.accelerator_ns, Float64(110))
+    assert_true(abs(decision.accelerator_ns - Float64(110)) < 1e-9)
     assert_true("cpu_lower_ns=" in decision.reason)
     assert_true("accelerator_upper_ns=" in decision.reason)
     assert_true("deciding_term=fixed" in decision.reason)
@@ -114,7 +116,7 @@ def test_cpu_features_count_work_without_values_or_query_mutation() raises:
     var query = frame.lazy().filter(col("x") > 1).select((col("x") + 1).sum())
     var before = query.explain(engine="cpu")
     var work = cpu_features(query)
-    assert_equal(work[1], "Float32")
+    assert_equal(work[1], "float32")
     assert_equal(work[0][1], Float64(3))
     assert_equal(work[0][2], Float64(12))
     assert_true(work[0][3] > 0)

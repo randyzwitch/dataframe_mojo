@@ -14,7 +14,7 @@ from dataframe._accel_provider import (
     estimate_auto,
     select_auto,
 )
-from dataframe.accelerator.cost import COST_FEATURES
+from dataframe.accelerator.cost import COST_FEATURE_COUNT, cost_feature_names
 from dataframe.json_value import json_quote
 
 
@@ -120,8 +120,9 @@ def run[D: DType]() raises:
         + "}",
     )
     print("PEAK", facts.peak_bytes)
-    comptime for i in range(len(COST_FEATURES)):
-        print("FEATURE", COST_FEATURES[i], facts.cpu[i], facts.accelerator[i])
+    var feature_names = cost_feature_names()
+    for i in range(COST_FEATURE_COUNT):
+        print("FEATURE", feature_names[i], facts.cpu[i], facts.accelerator[i])
     var started = perf_counter_ns()
     var runtime = calibration_runtime()
     var initialization_ns = Int(perf_counter_ns() - started)

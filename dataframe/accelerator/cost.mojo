@@ -8,23 +8,27 @@ from std.math import isfinite
 from ..json_value import JsonValue
 
 comptime COST_FORMAT = "dataframe-analytical-cost-v1"
-comptime COST_FEATURES = (
-    "fixed",
-    "rows",
-    "source_bytes",
-    "projection_node_rows",
-    "filter_node_rows",
-    "reduction_rows",
-    "integer_node_rows",
-    "cast_node_rows",
-    "launches",
-    "synchronizations",
-    "upload_bytes",
-    "download_bytes",
-    "allocation_bytes",
-    "cold",
-    "materializations",
-)
+comptime COST_FEATURE_COUNT = 15
+
+
+def cost_feature_names() -> List[String]:
+    return List[String]([
+        "fixed",
+        "rows",
+        "source_bytes",
+        "projection_node_rows",
+        "filter_node_rows",
+        "reduction_rows",
+        "integer_node_rows",
+        "cast_node_rows",
+        "launches",
+        "synchronizations",
+        "upload_bytes",
+        "download_bytes",
+        "allocation_bytes",
+        "cold",
+        "materializations",
+    ])
 
 
 @fieldwise_init
@@ -91,7 +95,7 @@ def _matches(
 def _predict(
     model: JsonValue, features: List[Float64]
 ) raises -> Tuple[Float64, String]:
-    if len(features) != len(COST_FEATURES):
+    if len(features) != COST_FEATURE_COUNT:
         raise Error("analytical feature vector has the wrong width")
     var total = Float64(0)
     var largest = Float64(-1)
@@ -99,8 +103,9 @@ def _predict(
     var coefficients = model.get("coefficients")
     var minimum = model.get("minimum")
     var maximum = model.get("maximum")
-    comptime for i in range(len(COST_FEATURES)):
-        comptime name = COST_FEATURES[i]
+    var feature_names = cost_feature_names()
+    for i in range(len(feature_names)):
+        var name = feature_names[i]
         var value = features[i]
         var low = _number(minimum, name)
         var high = _number(maximum, name)

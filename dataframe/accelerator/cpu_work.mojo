@@ -4,7 +4,7 @@ from ..expr import CAST, LEN
 from ..lazy import LazyFrame
 from .capabilities import RowCapabilities
 from .rows import lower_rows
-from .cost import COST_FEATURES
+from .cost import COST_FEATURE_COUNT, cost_feature_names
 
 
 def _width(dtype: DataType) -> Int:
@@ -44,7 +44,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             fixed_logical=False,
         ),
     )
-    var features = List[Float64](length=len(COST_FEATURES), fill=0)
+    var features = List[Float64](length=COST_FEATURE_COUNT, fill=0)
     features[0] = 1
     var rows = Float64(plan.source.height())
     features[1] = rows
