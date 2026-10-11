@@ -93,6 +93,7 @@ def test_float64_arithmetic_rounding_subnormals_and_nulls() raises:
             (col("a") - col("b")).alias("subtract"),
             (col("a") * col("b")).alias("multiply"),
             (col("a") / col("b")).alias("divide"),
+            (col("a") // col("b")).alias("floor_divide"),
             (-col("a")).alias("negative"),
             col("a").abs().alias("absolute"),
             col("a").floor().alias("floor"),
@@ -164,13 +165,16 @@ def test_float64_emulation_has_separate_automatic_cost_family() raises:
         return
     var runtime = MetalRuntime()
     var frame = DataFrame([Series("x", Column[Float64]([1, 2, 3]))])
-    var query = frame.lazy().select(col("x") + lit(Float64(0.5)))
-    var facts = runtime.estimate_auto(query)
-    assert_true("metal-emulated-float64-v1" in facts.family)
-    same(
-        query.collect(engine="auto", accelerator=runtime),
-        query.collect(engine="cpu"),
-    )
+    for expression in List[Expr](
+        [col("x") + lit(Float64(0.5)), col("x") // lit(Float64(0.5))]
+    ):
+        var query = frame.lazy().select(expression)
+        var facts = runtime.estimate_auto(query)
+        assert_true("metal-emulated-float64-v1" in facts.family)
+        same(
+            query.collect(engine="auto", accelerator=runtime),
+            query.collect(engine="cpu"),
+        )
     var narrow = DataFrame([Series("x", Column[Float32]([1, 2, 3]))])
     var reduction = narrow.lazy().select(col("x").sum())
     assert_true(

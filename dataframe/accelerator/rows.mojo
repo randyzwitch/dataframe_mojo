@@ -168,7 +168,7 @@ def _program(
         if not (
             op == COL
             or (
-                op == DIV
+                (op == DIV or op == FLOORDIV)
                 and capabilities.float_division
                 and bound.dtypes[i] == DataType.FLOAT64
             )
@@ -264,6 +264,7 @@ def _program(
                         or op == MUL
                         or op == NEG
                         or op == DIV
+                        or op == FLOORDIV
                         or op == CAST
                         or op == FLOOR
                         or op == CEIL
@@ -371,9 +372,15 @@ def _program(
                 "precision",
                 "Float32 decimal rounding requires Float64 intermediate arithmetic",
             )
-        if (op == FLOORDIV or op == MOD or op == POW) and bound.dtypes[
-            i
-        ].is_float():
+        if (
+            (op == FLOORDIV or op == MOD or op == POW)
+            and bound.dtypes[i].is_float()
+            and not (
+                op == FLOORDIV
+                and capabilities.float_division
+                and bound.dtypes[i] == DataType.FLOAT64
+            )
+        ):
             capabilities.reject(
                 "precision",
                 "floating division, modulo, and power require CPU execution",
