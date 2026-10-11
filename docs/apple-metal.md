@@ -47,12 +47,17 @@ runtime data; changing those does not require recompiling an identical shader.
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
 width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns.
 Float64 columns use IEEE words throughout resident execution. Add, subtract,
-multiply, divide, floor division, comparisons, numeric/Boolean casts, absolute value, negation,
+multiply, divide, floor division, remainder, comparisons, numeric/Boolean casts,
+absolute value, negation,
 floor/ceiling, decimal rounding, classification, clipping, and NaN filling
 use integer-only binary64 primitives on the GPU. Basic arithmetic rounds to
 nearest with ties to even, preserves gradual underflow, and does not contract
 separate multiply/add operations. Float64 floor division matches the CPU
-contract of flooring the rounded quotient. Integer true division produces Float64.
+contract of flooring the rounded quotient. Remainder (`%`) matches the CPU SIMD
+sequence: truncate the rounded quotient, use the CPU’s fused multiply/subtract, and adjust
+for differing operand signs. It preserves each binary64 intermediate, including
+the CPU's positive-zero results and NaNs for infinite divisors. This differs from
+native `fmod` for extreme quotients. Integer true division produces Float64.
 Copying values preserves all bits, including NaN payloads and signed zero;
 arithmetic quiets NaNs, whose resulting sign/payload is not a portable CPU
 contract. Float64 keys, stable sorting, grouping, joins, distinct rows, extrema,
@@ -73,8 +78,8 @@ filling, and NaN/finite/infinite predicates. Float32 and Float64 rounding at
 any decimal count uses binary64 emulation and follows the CPU half-away formula,
 including its large-value early return and every intermediate rounding step.
 The scalar power-of-ten scale is bound once using the CPU scalar formula; all
-row computation stays on the GPU. Float32 floor division, floating
-remainder/power, and transcendental functions still require CPU execution.
+row computation stays on the GPU. Float32 floor division and remainder, floating
+power, and transcendental functions still require CPU execution.
 
 Conditional `when/then/otherwise` expressions propagate an observation mask
 through each branch. Inactive branches do not raise integer overflow, strict
@@ -371,7 +376,7 @@ end-to-end evidence, automatic placement stays on CPU. Future calibration may
 select emulation only when its conservative GPU estimate beats the CPU bound;
 forced accelerator execution remains available independently of that decision.
 
-Floating remainder/power, transcendentals, and variance/std are not yet
+Floating power, Float32 remainder, transcendentals, and variance/std are not yet
 supported by this subset.
 
 ## Validation
