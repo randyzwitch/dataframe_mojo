@@ -195,6 +195,14 @@ rejected(
     b"dtype mismatch",
 )
 inputs[1].input.dtype = 2
+inputs[0].input.dtype = inputs[1].input.dtype = 11
+rejected(
+    lambda e: lib.dfm_join_estimate(
+        C.byref(request), C.byref(memory), C.byref(e)
+    ),
+    b"Float64 join keys",
+)
+inputs[0].input.dtype = inputs[1].input.dtype = 2
 keys[0].left = 1
 rejected(
     lambda e: lib.dfm_join_estimate(

@@ -19,6 +19,9 @@ enum DFMType {
   DFM_UINT16 = 8,
   DFM_UINT32 = 9,
   DFM_UINT64 = 10,
+  // Opaque IEEE-754 words: storage, copying and validity only. Native Metal
+  // never performs Float64 arithmetic, conversions, comparisons or ordering.
+  DFM_FLOAT64_STORAGE = 11,
 };
 
 // Fixed native opcodes. The Mojo wrapper translates the shared expression IR

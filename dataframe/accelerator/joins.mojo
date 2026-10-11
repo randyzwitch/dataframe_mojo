@@ -166,6 +166,8 @@ def _join_task(
         var r = right._index(node.right_keys[i])
         var lt = left._columns[l].dtype()
         var rt = right._columns[r].dtype()
+        capabilities.require_key(lt)
+        capabilities.require_key(rt)
         if lt != rt:
             raise Error(
                 "Join key dtypes differ: "

@@ -27,6 +27,7 @@ struct RowCapabilities(Copyable):
 
     var backend: String
     var float64: Bool
+    var float64_storage: Bool
     var wide_integer: Bool
     var int64_arithmetic: Bool
     var extra_reductions: Bool
@@ -45,6 +46,7 @@ struct RowCapabilities(Copyable):
         backend: String = "accelerator",
         *,
         float64: Bool = True,
+        float64_storage: Bool = False,
         wide_integer: Bool = True,
         int64_arithmetic: Bool = True,
         extended_integers: Bool = False,
@@ -60,6 +62,7 @@ struct RowCapabilities(Copyable):
     ):
         self.backend = backend
         self.float64 = float64
+        self.float64_storage = float64_storage
         self.wide_integer = wide_integer
         self.int64_arithmetic = int64_arithmetic
         self.extended_integers = extended_integers
@@ -77,7 +80,11 @@ struct RowCapabilities(Copyable):
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)
 
     def require_dtype(self, dtype: DataType) raises:
-        if dtype == DataType.FLOAT64 and not self.float64:
+        if (
+            dtype == DataType.FLOAT64
+            and not self.float64
+            and not self.float64_storage
+        ):
             self.reject("dtype", "Float64 requires CPU execution")
         if self.fixed_logical:
             if dtype.is_temporal():
@@ -98,12 +105,31 @@ struct RowCapabilities(Copyable):
             self.reject("dtype", "row input dtype is not supported")
 
     def require_arithmetic(self, dtype: DataType) raises:
+        if dtype == DataType.FLOAT64 and not self.float64:
+            self.reject(
+                "precision", "Float64 requires CPU execution for arithmetic"
+            )
         if dtype == DataType.INT64 and not self.int64_arithmetic:
             self.reject(
                 "arithmetic", "checked Int64 arithmetic requires CPU execution"
             )
 
+    def require_key(self, dtype: DataType) raises:
+        if dtype == DataType.FLOAT64 and not self.float64:
+            self.reject(
+                "precision",
+                "Float64 requires CPU execution for ordering and keys",
+            )
+
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
+        if (
+            dtype == DataType.FLOAT64
+            and not self.float64
+            and (op == MIN or op == MAX or op == ARG_MIN or op == ARG_MAX)
+        ):
+            self.reject(
+                "precision", "Float64 requires CPU execution for extrema"
+            )
         if (
             op == FIRST
             or op == LAST

@@ -82,6 +82,8 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
     input(k.right, 1);
     if (r.inputs[k.left].input.dtype != r.inputs[k.right].input.dtype)
       fail("Metal join key dtype mismatch");
+    if (r.inputs[k.left].input.dtype == DFM_FLOAT64_STORAGE)
+      fail("Metal Float64 join keys require CPU execution");
   }
   for (int64_t i = 0; i < r.output_count; ++i) {
     auto o = r.outputs[i];
@@ -150,7 +152,7 @@ kernel void j_unpack(device const uchar *raw[[buffer(0)]],device ulong *x[[buffe
  if(at.y>=m.columns)return;Col c=cols[at.y];if(at.x>=c.rows||c.values<0)return;
  ulong i=c.word+at.x,b=ulong(at.x)+c.bit;device const uchar *p=raw+c.values;
  ulong z=0;switch(c.type){case 1:case 9:z=((device const uint*)p)[at.x];break;
- case 2:z=ulong(((device const int*)p)[at.x]);break;case 3:case 10:z=((device const ulong*)p)[at.x];break;
+ case 2:z=ulong(((device const int*)p)[at.x]);break;case 3:case 10:case 11:z=((device const ulong*)p)[at.x];break;
  case 4:z=(p[b/8]>>(b%8))&1;break;case 5:z=ulong(((device const char*)p)[at.x]);break;
  case 6:z=ulong(((device const short*)p)[at.x]);break;case 7:z=p[at.x];break;case 8:z=((device const ushort*)p)[at.x];break;}
  x[i]=z;v[i]=c.validity<0?1:((raw[c.validity+b/8]>>(b%8))&1);

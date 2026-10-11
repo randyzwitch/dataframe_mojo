@@ -1200,7 +1200,11 @@ def test_join_preflight_does_not_open_devices_or_read_files() raises:
         [Series("k", Column[Int32]([1])), Series("bad", Column[Float64]([2]))]
     )
     with assert_raises(contains="Float64 requires CPU"):
-        _ = frame.lazy().join(wide.lazy(), "k").collect(accelerator=runtime)
+        _ = (
+            frame.lazy()
+            .join(wide.lazy().with_columns((col("bad") + 1).alias("bad")), "k")
+            .collect(accelerator=runtime)
+        )
     with assert_raises(contains="in-memory scans"):
         _ = (
             frame.lazy()

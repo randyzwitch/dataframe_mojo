@@ -2813,6 +2813,52 @@ def test_resident_slice_runtime_parameters():
 
 test_resident_slice_runtime_parameters()
 
+
+def test_opaque_float64_storage_and_rejection():
+    words = [0, 1 << 63, 0x3FF0000000000000, 0xBFF0000000000000,
+             0x7FF0000000000000, 0xFFF0000000000000, 0x7FF8000000000042,
+             0x7FF0000000000042, 1, (1 << 63) | 1, 0x7FEFFFFFFFFFFFFF]
+    n = len(words)
+    values = (C.c_uint64 * n)(*words)
+    valid = [i % 4 != 1 for i in range(n)]
+    bits = packed(valid, 5)
+    inputs = (Input * 1)(Input(ptr(values), ptr(bits), 11, 5, 1))
+    nodes = [(0, -1, -1, 0), (0, -1, -1, 0), (61, 0, -1, -1), (2, -1, -1, -1)]
+    code = (I * 16)(*[x for node in nodes for x in node])
+    literals = (C.c_uint64 * 4)(0, 0, 0, 0x8000000000000001)
+    nt, st = (I * 4)(11, 11, 4, 11), (I * 4)(11, 11, 4, 11)
+    steps = (Step * 3)(Step(0, 1, 1, 0, 0, 0), Step(1, 2, 2, 0, 0, 0), Step(3, 1, 3, 0, 0, 0))
+    result, literal = (C.c_uint64 * n)(), (C.c_uint64 * n)()
+    nulls = packed([False] * n)
+    validity = [packed([False] * n) for _ in range(3)]
+    outputs = (Output * 3)(Output(ptr(result), ptr(validity[0]), 11, 1, -1, 0),
+                           Output(ptr(nulls), ptr(validity[1]), 4, 2, -1, 0),
+                           Output(ptr(literal), ptr(validity[2]), 11, 3, -1, 0))
+    request = Request(2, n, 0, 4, 1, 16, 4, 3, 0, 3, -1, 0, 1, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nt), ptr(st))
+    stats, err = Stats(), P()
+    check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+    assert unpack(validity[0], n) == valid
+    assert all(not ok or got == want for ok, got, want in zip(valid, result, words))
+    assert unpack(nulls, n) == [not v for v in valid]
+    assert unpack(validity[1], n) == [True] * n
+    assert list(literal) == [0x8000000000000001] * n
+    assert unpack(validity[2], n) == [True] * n
+    # A valid bytecode DAG requesting Float64 addition must reject before
+    # device submission, rather than treating the IEEE words as UInt64 math.
+    code[8:12] = [5, 0, 0, -1]
+    nt[2] = 11
+    st[2] = 11
+    outputs[1].dtype = 11
+    memory, err = Memory(), P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"Float64 requires CPU execution" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+test_opaque_float64_storage_and_rejection()
+
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"
