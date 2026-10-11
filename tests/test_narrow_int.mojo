@@ -82,7 +82,6 @@ def test_nulls_keep_the_row_path() raises:
 def test_sum_of_computed_narrow_column() raises:
     var data = frame(100_000)
     var exprs = List[Expr]()
-    var want = List[Int]()
     for k in range(5):
         exprs.append((col("a") + lit(Int16(k))).sum().alias("s" + String(k)))
     var out = data.select_exprs(exprs)

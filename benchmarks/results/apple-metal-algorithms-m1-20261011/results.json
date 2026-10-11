@@ -1,0 +1,7454 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "recorded_at_utc": "2026-10-11T14:38:02.313283+00:00",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "cpu": "Apple M1",
+    "physical_cores": "8",
+    "memory_bytes": "17179869184",
+    "git_commit": "576ee8181bbba21f5a9db8170e85d547054c2be2",
+    "engine_status": "",
+    "benchmark_status": "M benchmarks/bench_metal.mojo\n M scripts/bench_metal.py",
+    "mojo_version": "Mojo 1.2.0.dev2026092105 (e9569894)",
+    "xcode": "Xcode 26.6\nBuild version 17F113",
+    "sdk": "26.5",
+    "compile_flags": [
+      "-O3",
+      "-I",
+      "."
+    ],
+    "dataframe_threads": 8,
+    "binary_sha256": "4489bf860d4d520b18a4db2451b11e75f9b3ae2dc3087e938e96948f558bbcf0",
+    "source_sha256": "16a92f31c634a5c3f50913cbf414e6f2bead6fca7845c5c094558dc03bb11f0d",
+    "driver_sha256": "17dca7a4149ad5652ac268691a7c5f1bc32b0488fb1db5e9a5d33ae013c634b6",
+    "library_sha256": {
+      "metal": "364d775c9b7d9aa2699bb65ad4846876c61e096a6f382913825c87644459f1eb",
+      "baseline": "b11f935b9941478e15266bc1e97b1b17e59e2d42f4dfc09c2b4c6f46c8b079b4"
+    },
+    "environment": {},
+    "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
+    "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
+    "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash has min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes. Base keys are (37*i) modulo cardinality; sorted keys are monotone bins. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024.",
+    "limitations": [
+      "No external-suite coverage claimed; Float64 and floating reductions are outside these cases. Algorithm comparisons preserve complete output order and values against CPU.",
+      "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
+      "CPU and GPU share host memory and power limits; short timings can vary with scheduler and thermal state.",
+      "Native profile is a separate warm collection after timed samples; its GPU interval is not a caller-wall substitute.",
+      "Workload exposure: chain32 was used during fusion development; other cases broaden mechanism coverage without a holdout claim."
+    ]
+  },
+  "selection": {
+    "rows": [
+      65536,
+      1048576
+    ],
+    "workloads": [
+      "sort_radix",
+      "group_hash",
+      "group_high",
+      "join_hash"
+    ],
+    "variants": [
+      "base",
+      "sorted",
+      "nulls"
+    ],
+    "rounds": 2,
+    "reps": 7
+  },
+  "runs": [
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-metal-65536-sort_radix-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2067000,
+          "metal_ns": 2811000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2609000,
+          "metal_ns": 2900000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2077000,
+          "metal_ns": 3042000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 3942000,
+          "metal_ns": 2986000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4919000,
+          "metal_ns": 3035000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2314000,
+          "metal_ns": 2907000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2225000,
+          "metal_ns": 2972000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 4513981,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 5316797,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 2.838,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.022709,
+        "submit_wait_ms": 2.098292,
+        "result_copy_ms": 0.568458,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.606041,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 12920000,
+        "metal": 143936000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-baseline-65536-sort_radix-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1859000,
+          "metal_ns": 2421000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5085000,
+          "metal_ns": 2293000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2889000,
+          "metal_ns": 2544000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2142000,
+          "metal_ns": 2423000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 3003000,
+          "metal_ns": 2457000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 3190000,
+          "metal_ns": 2351000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2954000,
+          "metal_ns": 2525000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 3711069,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 4513885,
+        "kernel_launches": 22,
+        "synchronizations": 1,
+        "wall_ms": 2.387,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.023291,
+        "submit_wait_ms": 1.655291,
+        "result_copy_ms": 0.573625,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.161124,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 2184000,
+        "metal": 70352000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-metal-65536-sort_radix-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 620000,
+          "metal_ns": 2582000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 617000,
+          "metal_ns": 2880000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 662000,
+          "metal_ns": 2976000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 611000,
+          "metal_ns": 2958000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 640000,
+          "metal_ns": 2794000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 607000,
+          "metal_ns": 2976000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 645000,
+          "metal_ns": 2912000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 4513981,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 5316797,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 2.788,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.013333,
+        "submit_wait_ms": 2.013916,
+        "result_copy_ms": 0.599958,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.509875,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 912000,
+        "metal": 20448000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-baseline-65536-sort_radix-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 612000,
+          "metal_ns": 1910000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 617000,
+          "metal_ns": 2229000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 658000,
+          "metal_ns": 2181000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 613000,
+          "metal_ns": 2248000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 657000,
+          "metal_ns": 2064000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1190000,
+          "metal_ns": 2268000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 634000,
+          "metal_ns": 2248000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 3711069,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 4513885,
+        "kernel_launches": 22,
+        "synchronizations": 1,
+        "wall_ms": 2.122,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.0135,
+        "submit_wait_ms": 1.360208,
+        "result_copy_ms": 0.59925,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.89,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 884000,
+        "metal": 14762000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-metal-65536-sort_radix-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2513000,
+          "metal_ns": 2668000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2671000,
+          "metal_ns": 2957000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 3075000,
+          "metal_ns": 3014000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4780000,
+          "metal_ns": 2854000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2896000,
+          "metal_ns": 2980000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2579000,
+          "metal_ns": 2895000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1872000,
+          "metal_ns": 3015000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 4513981,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 5316797,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 2.853,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.020625,
+        "submit_wait_ms": 2.11775,
+        "result_copy_ms": 0.561709,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.619541,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 2947000,
+        "metal": 20831000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-baseline-65536-sort_radix-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1930000,
+          "metal_ns": 2432000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 3523000,
+          "metal_ns": 2416000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4587000,
+          "metal_ns": 2491000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 3044000,
+          "metal_ns": 2428000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 3213000,
+          "metal_ns": 2385000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2670000,
+          "metal_ns": 2413000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2645000,
+          "metal_ns": 2461000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 3711069,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 4513885,
+        "kernel_launches": 22,
+        "synchronizations": 1,
+        "wall_ms": 2.361,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.022917,
+        "submit_wait_ms": 1.638542,
+        "result_copy_ms": 0.564125,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.150625,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 1319000,
+        "metal": 14677000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-metal-65536-group_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1223000,
+          "metal_ns": 2216000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1212000,
+          "metal_ns": 2782000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1181000,
+          "metal_ns": 2104000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1222000,
+          "metal_ns": 3030000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1180000,
+          "metal_ns": 2480000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1181000,
+          "metal_ns": 2892000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1226000,
+          "metal_ns": 2475000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 2.486,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.011583,
+        "submit_wait_ms": 2.082042,
+        "result_copy_ms": 0.016292,
+        "initialization_ms": 0.001,
+        "gpu_ms": 1.830333,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 2217000,
+        "metal": 142870000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-baseline-65536-group_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1215000,
+          "metal_ns": 3181000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1195000,
+          "metal_ns": 3643000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1205000,
+          "metal_ns": 3209000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1176000,
+          "metal_ns": 3693000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1273000,
+          "metal_ns": 3283000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1248000,
+          "metal_ns": 3572000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1275000,
+          "metal_ns": 3173000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 3.184,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.0105,
+        "submit_wait_ms": 2.845959,
+        "result_copy_ms": 0.017792,
+        "initialization_ms": 0.0,
+        "gpu_ms": 2.559,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 1562000,
+        "metal": 93739000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-metal-65536-group_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1384000,
+          "metal_ns": 2218000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1458000,
+          "metal_ns": 2043000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1441000,
+          "metal_ns": 2881000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1386000,
+          "metal_ns": 2143000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1383000,
+          "metal_ns": 2793000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1392000,
+          "metal_ns": 2306000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1362000,
+          "metal_ns": 2842000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 2.396,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.01225,
+        "submit_wait_ms": 2.037333,
+        "result_copy_ms": 0.0165,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.755,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 1802000,
+        "metal": 20905000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-baseline-65536-group_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1380000,
+          "metal_ns": 1800000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1430000,
+          "metal_ns": 1789000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1422000,
+          "metal_ns": 1989000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1370000,
+          "metal_ns": 1758000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1383000,
+          "metal_ns": 2281000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1367000,
+          "metal_ns": 1949000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1378000,
+          "metal_ns": 2235000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 2.036,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.011667,
+        "submit_wait_ms": 1.72125,
+        "result_copy_ms": 0.015334,
+        "initialization_ms": 0.001,
+        "gpu_ms": 1.49475,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 1737000,
+        "metal": 20498000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-metal-65536-group_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1526000,
+          "metal_ns": 2476000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1510000,
+          "metal_ns": 2682000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1508000,
+          "metal_ns": 2489000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1529000,
+          "metal_ns": 2675000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1513000,
+          "metal_ns": 2471000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1506000,
+          "metal_ns": 2665000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1632000,
+          "metal_ns": 2510000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16787,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 2.631,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.01025,
+        "submit_wait_ms": 2.260959,
+        "result_copy_ms": 0.016375,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.855124,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 1917000,
+        "metal": 21253000
+      },
+      "workers": 8,
+      "output_rows": 1025,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-baseline-65536-group_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1520000,
+          "metal_ns": 2674000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1535000,
+          "metal_ns": 2981000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1523000,
+          "metal_ns": 2815000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1494000,
+          "metal_ns": 2992000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1510000,
+          "metal_ns": 2910000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1482000,
+          "metal_ns": 3028000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1621000,
+          "metal_ns": 3223000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16787,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 2.929,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.010334,
+        "submit_wait_ms": 2.589291,
+        "result_copy_ms": 0.01725,
+        "initialization_ms": 0.0,
+        "gpu_ms": 2.040125,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 1921000,
+        "metal": 21326000
+      },
+      "workers": 8,
+      "output_rows": 1025,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.234375,
+        3.28173828125,
+        2.916015625
+      ],
+      "log": "0-metal-65536-group_high-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 4046000,
+          "metal_ns": 12919000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5270000,
+          "metal_ns": 13112000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4064000,
+          "metal_ns": 13695000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 3805000,
+          "metal_ns": 13653000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 6293000,
+          "metal_ns": 14072000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 5111000,
+          "metal_ns": 12370000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4513000,
+          "metal_ns": 13434000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536576,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 13.082,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.024625,
+        "submit_wait_ms": 11.873792,
+        "result_copy_ms": 0.728334,
+        "initialization_ms": 0.001,
+        "gpu_ms": 11.18,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 4704000,
+        "metal": 33301000
+      },
+      "workers": 8,
+      "output_rows": 32768,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-baseline-65536-group_high-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 4034000,
+          "metal_ns": 11203000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4378000,
+          "metal_ns": 11185000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4380000,
+          "metal_ns": 11413000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 5791000,
+          "metal_ns": 11212000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 6662000,
+          "metal_ns": 11299000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 3375000,
+          "metal_ns": 11180000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 3909000,
+          "metal_ns": 11325000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536576,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 11.195,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.016041,
+        "submit_wait_ms": 10.253667,
+        "result_copy_ms": 0.613916,
+        "initialization_ms": 0.0,
+        "gpu_ms": 9.612583,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 3672000,
+        "metal": 31277000
+      },
+      "workers": 8,
+      "output_rows": 32768,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-metal-65536-group_high-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 4527000,
+          "metal_ns": 11541000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4264000,
+          "metal_ns": 11726000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4566000,
+          "metal_ns": 11563000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 5148000,
+          "metal_ns": 11713000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4912000,
+          "metal_ns": 11573000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4681000,
+          "metal_ns": 11803000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4414000,
+          "metal_ns": 11562000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536576,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 11.809,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.017042,
+        "submit_wait_ms": 10.591542,
+        "result_copy_ms": 0.614083,
+        "initialization_ms": 0.0,
+        "gpu_ms": 9.871,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 4133000,
+        "metal": 29922000
+      },
+      "workers": 8,
+      "output_rows": 32768,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-baseline-65536-group_high-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 4004000,
+          "metal_ns": 10428000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4297000,
+          "metal_ns": 10955000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4284000,
+          "metal_ns": 10807000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 5974000,
+          "metal_ns": 10970000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2896000,
+          "metal_ns": 10852000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4197000,
+          "metal_ns": 10877000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 3958000,
+          "metal_ns": 10689000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536576,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 10.886,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.014083,
+        "submit_wait_ms": 9.953084,
+        "result_copy_ms": 0.567792,
+        "initialization_ms": 0.004,
+        "gpu_ms": 9.268875,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 3384000,
+        "metal": 29382000
+      },
+      "workers": 8,
+      "output_rows": 32768,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-metal-65536-group_high-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 5230000,
+          "metal_ns": 11930000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4579000,
+          "metal_ns": 11792000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4557000,
+          "metal_ns": 12132000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4619000,
+          "metal_ns": 11732000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 5485000,
+          "metal_ns": 11973000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 6308000,
+          "metal_ns": 11783000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4547000,
+          "metal_ns": 12112000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536595,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 11.919,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.0275,
+        "submit_wait_ms": 10.79725,
+        "result_copy_ms": 0.65175,
+        "initialization_ms": 0.0,
+        "gpu_ms": 10.149249,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 4058000,
+        "metal": 30211000
+      },
+      "workers": 8,
+      "output_rows": 32769,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-baseline-65536-group_high-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 4434000,
+          "metal_ns": 11318000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4467000,
+          "metal_ns": 11222000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4819000,
+          "metal_ns": 11377000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 5006000,
+          "metal_ns": 11354000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 5916000,
+          "metal_ns": 11348000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4603000,
+          "metal_ns": 11250000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4392000,
+          "metal_ns": 11446000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536595,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 11.267,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.0195,
+        "submit_wait_ms": 10.334666,
+        "result_copy_ms": 0.610291,
+        "initialization_ms": 0.0,
+        "gpu_ms": 9.617749,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 5496000,
+        "metal": 29104000
+      },
+      "workers": 8,
+      "output_rows": 32769,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-metal-65536-join_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2758000,
+          "metal_ns": 3591000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2085000,
+          "metal_ns": 4040000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2137000,
+          "metal_ns": 4086000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2059000,
+          "metal_ns": 4251000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2146000,
+          "metal_ns": 4126000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2070000,
+          "metal_ns": 4044000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2171000,
+          "metal_ns": 4011000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2670600,
+        "shared_buffer_bytes": 12587460,
+        "host_result_bytes": 2670592,
+        "peak_requested_bytes": 15258052,
+        "kernel_launches": 25,
+        "synchronizations": 2,
+        "wall_ms": 4.003,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.167375,
+        "submit_wait_ms": 2.493084,
+        "result_copy_ms": 1.068458,
+        "initialization_ms": 0.001,
+        "gpu_ms": 1.591874,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 2801000,
+        "metal": 107771000
+      },
+      "workers": 8,
+      "output_rows": 131072,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-baseline-65536-join_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2306000,
+          "metal_ns": 6166000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2092000,
+          "metal_ns": 6589000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2096000,
+          "metal_ns": 6525000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2079000,
+          "metal_ns": 6594000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2165000,
+          "metal_ns": 6657000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2060000,
+          "metal_ns": 6469000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2144000,
+          "metal_ns": 6445000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2670600,
+        "shared_buffer_bytes": 10211684,
+        "host_result_bytes": 2670592,
+        "peak_requested_bytes": 12882276,
+        "kernel_launches": 23,
+        "synchronizations": 2,
+        "wall_ms": 6.3,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.117,
+        "submit_wait_ms": 4.765542,
+        "result_copy_ms": 1.09675,
+        "initialization_ms": 0.001,
+        "gpu_ms": 3.859374,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 2610000,
+        "metal": 69582000
+      },
+      "workers": 8,
+      "output_rows": 131072,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-metal-65536-join_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2158000,
+          "metal_ns": 4005000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2253000,
+          "metal_ns": 4094000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2100000,
+          "metal_ns": 3914000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2295000,
+          "metal_ns": 4093000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2166000,
+          "metal_ns": 3900000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2158000,
+          "metal_ns": 4104000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2144000,
+          "metal_ns": 3789000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2670600,
+        "shared_buffer_bytes": 12587460,
+        "host_result_bytes": 2670592,
+        "peak_requested_bytes": 15258052,
+        "kernel_launches": 25,
+        "synchronizations": 2,
+        "wall_ms": 3.633,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.140291,
+        "submit_wait_ms": 2.166084,
+        "result_copy_ms": 1.089,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.456374,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 2710000,
+        "metal": 17931000
+      },
+      "workers": 8,
+      "output_rows": 131072,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-baseline-65536-join_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2181000,
+          "metal_ns": 5478000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2230000,
+          "metal_ns": 5574000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2112000,
+          "metal_ns": 5555000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4398000,
+          "metal_ns": 5479000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2092000,
+          "metal_ns": 5594000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2672000,
+          "metal_ns": 5492000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2107000,
+          "metal_ns": 5656000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2670600,
+        "shared_buffer_bytes": 10211684,
+        "host_result_bytes": 2670592,
+        "peak_requested_bytes": 12882276,
+        "kernel_launches": 23,
+        "synchronizations": 2,
+        "wall_ms": 5.838,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.112667,
+        "submit_wait_ms": 4.346334,
+        "result_copy_ms": 1.086083,
+        "initialization_ms": 0.0,
+        "gpu_ms": 3.270791,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 6303000,
+        "metal": 18137000
+      },
+      "workers": 8,
+      "output_rows": 131072,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-metal-65536-join_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2695000,
+          "metal_ns": 3517000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2514000,
+          "metal_ns": 3957000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2592000,
+          "metal_ns": 4102000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2455000,
+          "metal_ns": 4150000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2527000,
+          "metal_ns": 4083000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 7211000,
+          "metal_ns": 4082000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2623000,
+          "metal_ns": 4043000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2537063,
+        "shared_buffer_bytes": 12405588,
+        "host_result_bytes": 2537055,
+        "peak_requested_bytes": 14942643,
+        "kernel_launches": 25,
+        "synchronizations": 2,
+        "wall_ms": 3.973,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.152334,
+        "submit_wait_ms": 2.526083,
+        "result_copy_ms": 1.015375,
+        "initialization_ms": 0.001,
+        "gpu_ms": 1.598082,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 2975000,
+        "metal": 18031000
+      },
+      "workers": 8,
+      "output_rows": 124518,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-baseline-65536-join_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2651000,
+          "metal_ns": 6057000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2498000,
+          "metal_ns": 6380000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2539000,
+          "metal_ns": 6415000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2499000,
+          "metal_ns": 6383000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2654000,
+          "metal_ns": 6468000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2461000,
+          "metal_ns": 6402000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2508000,
+          "metal_ns": 6426000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2537063,
+        "shared_buffer_bytes": 10029812,
+        "host_result_bytes": 2537055,
+        "peak_requested_bytes": 12566867,
+        "kernel_launches": 23,
+        "synchronizations": 2,
+        "wall_ms": 6.329,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.122041,
+        "submit_wait_ms": 4.8445,
+        "result_copy_ms": 1.031083,
+        "initialization_ms": 0.001,
+        "gpu_ms": 3.805374,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 2962000,
+        "metal": 19330000
+      },
+      "workers": 8,
+      "output_rows": 124518,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-metal-1048576-sort_radix-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 9868000,
+          "metal_ns": 28950000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 13052000,
+          "metal_ns": 28883000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 8732000,
+          "metal_ns": 34378000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 9676000,
+          "metal_ns": 28830000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 10842000,
+          "metal_ns": 32968000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 9769000,
+          "metal_ns": 30022000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 18567000,
+          "metal_ns": 32730000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 72220861,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 85065917,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 28.956,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.445875,
+        "submit_wait_ms": 16.958916,
+        "result_copy_ms": 9.63,
+        "initialization_ms": 0.0,
+        "gpu_ms": 16.226125,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 12071000,
+        "metal": 49345000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-baseline-1048576-sort_radix-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 9730000,
+          "metal_ns": 25859000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 11362000,
+          "metal_ns": 26084000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 9914000,
+          "metal_ns": 32794000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 11305000,
+          "metal_ns": 27576000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 8697000,
+          "metal_ns": 31492000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 8758000,
+          "metal_ns": 28225000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 9835000,
+          "metal_ns": 31665000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 59375709,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 72220765,
+        "kernel_launches": 26,
+        "synchronizations": 1,
+        "wall_ms": 27.48,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.471667,
+        "submit_wait_ms": 15.814917,
+        "result_copy_ms": 9.474875,
+        "initialization_ms": 0.001,
+        "gpu_ms": 15.032083,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 12212000,
+        "metal": 40958000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-metal-1048576-sort_radix-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 12691000,
+          "metal_ns": 27357000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5664000,
+          "metal_ns": 32690000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 5969000,
+          "metal_ns": 28184000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4692000,
+          "metal_ns": 27388000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 6515000,
+          "metal_ns": 27147000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4721000,
+          "metal_ns": 31249000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 6345000,
+          "metal_ns": 27699000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 72220861,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 85065917,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 27.354,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.416959,
+        "submit_wait_ms": 15.421125,
+        "result_copy_ms": 9.585666,
+        "initialization_ms": 0.001,
+        "gpu_ms": 14.688625,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 6983000,
+        "metal": 48575000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-baseline-1048576-sort_radix-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 13924000,
+          "metal_ns": 24224000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4682000,
+          "metal_ns": 26864000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 5764000,
+          "metal_ns": 25181000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4757000,
+          "metal_ns": 24258000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 6994000,
+          "metal_ns": 23494000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4696000,
+          "metal_ns": 23218000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 5921000,
+          "metal_ns": 23900000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 59375709,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 72220765,
+        "kernel_launches": 26,
+        "synchronizations": 1,
+        "wall_ms": 23.224,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.442667,
+        "submit_wait_ms": 11.703375,
+        "result_copy_ms": 9.353542,
+        "initialization_ms": 0.0,
+        "gpu_ms": 10.995791,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 10873000,
+        "metal": 38385000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.05517578125,
+        3.22705078125,
+        2.89892578125
+      ],
+      "log": "0-metal-1048576-sort_radix-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 11497000,
+          "metal_ns": 28683000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 11828000,
+          "metal_ns": 28797000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 11572000,
+          "metal_ns": 34708000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 12183000,
+          "metal_ns": 29068000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 11544000,
+          "metal_ns": 34832000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 12149000,
+          "metal_ns": 29288000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 13063000,
+          "metal_ns": 34186000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 72220861,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 85065917,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 28.977,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.5005,
+        "submit_wait_ms": 17.091167,
+        "result_copy_ms": 9.456833,
+        "initialization_ms": 0.001,
+        "gpu_ms": 16.282708,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 15607000,
+        "metal": 51286000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.53076171875,
+        3.30615234375,
+        2.9287109375
+      ],
+      "log": "0-baseline-1048576-sort_radix-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 11928000,
+          "metal_ns": 25780000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 11203000,
+          "metal_ns": 25852000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 11282000,
+          "metal_ns": 29354000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 12224000,
+          "metal_ns": 25453000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 32928000,
+          "metal_ns": 31036000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 27376000,
+          "metal_ns": 27465000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 13097000,
+          "metal_ns": 30366000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 59375709,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 72220765,
+        "kernel_launches": 26,
+        "synchronizations": 1,
+        "wall_ms": 26.26,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.448166,
+        "submit_wait_ms": 14.48175,
+        "result_copy_ms": 9.613542,
+        "initialization_ms": 0.001,
+        "gpu_ms": 13.818374,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 12128000,
+        "metal": 40579000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.53076171875,
+        3.30615234375,
+        2.9287109375
+      ],
+      "log": "0-metal-1048576-group_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 5772000,
+          "metal_ns": 22240000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5455000,
+          "metal_ns": 22683000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 8114000,
+          "metal_ns": 22486000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 8804000,
+          "metal_ns": 22970000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 8980000,
+          "metal_ns": 22835000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 5901000,
+          "metal_ns": 23098000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 5934000,
+          "metal_ns": 22897000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 23.0,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.313542,
+        "submit_wait_ms": 17.618875,
+        "result_copy_ms": 0.026375,
+        "initialization_ms": 0.001,
+        "gpu_ms": 16.881374,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 5334000,
+        "metal": 146813000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.53076171875,
+        3.30615234375,
+        2.9287109375
+      ],
+      "log": "0-baseline-1048576-group_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 7245000,
+          "metal_ns": 41915000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 7492000,
+          "metal_ns": 42359000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 9380000,
+          "metal_ns": 42546000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 8306000,
+          "metal_ns": 42948000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 9970000,
+          "metal_ns": 43233000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 10924000,
+          "metal_ns": 43633000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 20167000,
+          "metal_ns": 44175000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 44.181,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.390791,
+        "submit_wait_ms": 37.126125,
+        "result_copy_ms": 0.042584,
+        "initialization_ms": 0.001,
+        "gpu_ms": 36.409874,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 7204000,
+        "metal": 68011000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.53076171875,
+        3.30615234375,
+        2.9287109375
+      ],
+      "log": "0-metal-1048576-group_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 6080000,
+          "metal_ns": 19066000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5472000,
+          "metal_ns": 17901000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 5682000,
+          "metal_ns": 18199000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 5062000,
+          "metal_ns": 17898000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 6442000,
+          "metal_ns": 18280000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 5767000,
+          "metal_ns": 17903000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 5521000,
+          "metal_ns": 18131000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 17.773,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.302417,
+        "submit_wait_ms": 13.164833,
+        "result_copy_ms": 0.043083,
+        "initialization_ms": 0.0,
+        "gpu_ms": 12.559083,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 7959000,
+        "metal": 51302000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.53076171875,
+        3.30615234375,
+        2.9287109375
+      ],
+      "log": "0-baseline-1048576-group_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 5212000,
+          "metal_ns": 18004000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5377000,
+          "metal_ns": 17838000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 7112000,
+          "metal_ns": 18208000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 6362000,
+          "metal_ns": 17945000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 5555000,
+          "metal_ns": 18085000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 6156000,
+          "metal_ns": 18041000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 16883000,
+          "metal_ns": 18156000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 17.784,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.279792,
+        "submit_wait_ms": 13.455958,
+        "result_copy_ms": 0.041917,
+        "initialization_ms": 0.0,
+        "gpu_ms": 12.842625,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 5722000,
+        "metal": 42183000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.53076171875,
+        3.30615234375,
+        2.9287109375
+      ],
+      "log": "0-metal-1048576-group_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 8548000,
+          "metal_ns": 22210000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 6562000,
+          "metal_ns": 22530000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 8110000,
+          "metal_ns": 22332000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 7862000,
+          "metal_ns": 22569000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 6230000,
+          "metal_ns": 22275000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 6846000,
+          "metal_ns": 22528000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 7103000,
+          "metal_ns": 22494000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16787,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 22.571,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.295709,
+        "submit_wait_ms": 17.742334,
+        "result_copy_ms": 0.037,
+        "initialization_ms": 0.001,
+        "gpu_ms": 16.947625,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 6317000,
+        "metal": 46015000
+      },
+      "workers": 8,
+      "output_rows": 1025,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.53076171875,
+        3.30615234375,
+        2.9287109375
+      ],
+      "log": "0-baseline-1048576-group_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 9099000,
+          "metal_ns": 40710000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 7588000,
+          "metal_ns": 40935000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 11345000,
+          "metal_ns": 41144000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 7680000,
+          "metal_ns": 41294000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 12325000,
+          "metal_ns": 41540000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 12610000,
+          "metal_ns": 41536000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 22990000,
+          "metal_ns": 42142000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16787,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 41.62,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.311833,
+        "submit_wait_ms": 35.991333,
+        "result_copy_ms": 0.043875,
+        "initialization_ms": 0.001,
+        "gpu_ms": 35.303124,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 6601000,
+        "metal": 65301000
+      },
+      "workers": 8,
+      "output_rows": 1025,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.53076171875,
+        3.30615234375,
+        2.9287109375
+      ],
+      "log": "0-metal-1048576-group_high-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 34712000,
+          "metal_ns": 215141000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 41313000,
+          "metal_ns": 215255000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 26766000,
+          "metal_ns": 209703000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 37987000,
+          "metal_ns": 215926000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 23238000,
+          "metal_ns": 208882000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 35986000,
+          "metal_ns": 216944000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 22091000,
+          "metal_ns": 211054000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585216,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 215.849,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.341959,
+        "submit_wait_ms": 181.839375,
+        "result_copy_ms": 28.143584,
+        "initialization_ms": 0.001,
+        "gpu_ms": 181.073999,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 31746000,
+        "metal": 237809000
+      },
+      "workers": 8,
+      "output_rows": 524288,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.32763671875,
+        3.2509765625,
+        2.9111328125
+      ],
+      "log": "0-baseline-1048576-group_high-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 36451000,
+          "metal_ns": 199615000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 39669000,
+          "metal_ns": 203131000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 22854000,
+          "metal_ns": 192900000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 38353000,
+          "metal_ns": 200726000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 22154000,
+          "metal_ns": 192514000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 51181000,
+          "metal_ns": 200312000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 21341000,
+          "metal_ns": 193425000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585216,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 202.226,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.322083,
+        "submit_wait_ms": 167.058417,
+        "result_copy_ms": 29.920042,
+        "initialization_ms": 0.001,
+        "gpu_ms": 166.200166,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 25523000,
+        "metal": 215085000
+      },
+      "workers": 8,
+      "output_rows": 524288,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.32763671875,
+        3.2509765625,
+        2.9111328125
+      ],
+      "log": "0-metal-1048576-group_high-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 39262000,
+          "metal_ns": 207804000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 23511000,
+          "metal_ns": 201731000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 48828000,
+          "metal_ns": 211514000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 26641000,
+          "metal_ns": 200002000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 36899000,
+          "metal_ns": 206280000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 21914000,
+          "metal_ns": 201052000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 36875000,
+          "metal_ns": 211073000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585216,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 210.28,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.26425,
+        "submit_wait_ms": 175.093041,
+        "result_copy_ms": 30.2675,
+        "initialization_ms": 0.001,
+        "gpu_ms": 174.3375,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 35441000,
+        "metal": 226848000
+      },
+      "workers": 8,
+      "output_rows": 524288,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.22119140625,
+        3.21337890625,
+        2.89990234375
+      ],
+      "log": "0-baseline-1048576-group_high-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 39032000,
+          "metal_ns": 192097000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 26724000,
+          "metal_ns": 183895000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 43777000,
+          "metal_ns": 195305000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 22695000,
+          "metal_ns": 182413000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 41001000,
+          "metal_ns": 195816000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 24519000,
+          "metal_ns": 182160000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 36006000,
+          "metal_ns": 194325000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585216,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 191.34,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.270042,
+        "submit_wait_ms": 159.319625,
+        "result_copy_ms": 27.379208,
+        "initialization_ms": 0.001,
+        "gpu_ms": 158.574624,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 40260000,
+        "metal": 212395000
+      },
+      "workers": 8,
+      "output_rows": 524288,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.203125,
+        3.19287109375,
+        2.89453125
+      ],
+      "log": "0-metal-1048576-group_high-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 44516000,
+          "metal_ns": 218336000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 41451000,
+          "metal_ns": 219137000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 23628000,
+          "metal_ns": 210774000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 39672000,
+          "metal_ns": 218660000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 24514000,
+          "metal_ns": 209467000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 38482000,
+          "metal_ns": 218330000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 22785000,
+          "metal_ns": 211795000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585235,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 214.055,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.326459,
+        "submit_wait_ms": 181.790042,
+        "result_copy_ms": 26.828042,
+        "initialization_ms": 0.001,
+        "gpu_ms": 180.939458,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 35166000,
+        "metal": 240224000
+      },
+      "workers": 8,
+      "output_rows": 524289,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.203125,
+        3.19287109375,
+        2.89453125
+      ],
+      "log": "0-baseline-1048576-group_high-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 40282000,
+          "metal_ns": 201086000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 42979000,
+          "metal_ns": 201598000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 26285000,
+          "metal_ns": 192255000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 47786000,
+          "metal_ns": 202445000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 22759000,
+          "metal_ns": 192514000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 37293000,
+          "metal_ns": 199389000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 22561000,
+          "metal_ns": 193086000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585235,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 203.684,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.319792,
+        "submit_wait_ms": 168.703375,
+        "result_copy_ms": 29.851167,
+        "initialization_ms": 0.001,
+        "gpu_ms": 167.801875,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 39578000,
+        "metal": 216954000
+      },
+      "workers": 8,
+      "output_rows": 524289,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.1064453125,
+        3.15625,
+        2.88330078125
+      ],
+      "log": "0-metal-1048576-join_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 25355000,
+          "metal_ns": 48422000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 28838000,
+          "metal_ns": 51159000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 29593000,
+          "metal_ns": 51333000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 27280000,
+          "metal_ns": 50682000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 30861000,
+          "metal_ns": 50774000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 28987000,
+          "metal_ns": 52863000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 26632000,
+          "metal_ns": 51096000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 42729480,
+        "shared_buffer_bytes": 201392580,
+        "host_result_bytes": 42729472,
+        "peak_requested_bytes": 244122052,
+        "kernel_launches": 28,
+        "synchronizations": 2,
+        "wall_ms": 49.875,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.972333,
+        "submit_wait_ms": 25.50425,
+        "result_copy_ms": 18.139375,
+        "initialization_ms": 0.004,
+        "gpu_ms": 24.576916,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 32150000,
+        "metal": 75160000
+      },
+      "workers": 8,
+      "output_rows": 2097152,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.1064453125,
+        3.15625,
+        2.88330078125
+      ],
+      "log": "0-baseline-1048576-join_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 28632000,
+          "metal_ns": 93808000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 44560000,
+          "metal_ns": 98676000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 29570000,
+          "metal_ns": 97751000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 25794000,
+          "metal_ns": 98915000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 27886000,
+          "metal_ns": 99341000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 28804000,
+          "metal_ns": 97797000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 28424000,
+          "metal_ns": 98002000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 42729480,
+        "shared_buffer_bytes": 163381604,
+        "host_result_bytes": 42729472,
+        "peak_requested_bytes": 206111076,
+        "kernel_launches": 27,
+        "synchronizations": 2,
+        "wall_ms": 96.218,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.421708,
+        "submit_wait_ms": 67.165541,
+        "result_copy_ms": 22.383584,
+        "initialization_ms": 0.004,
+        "gpu_ms": 66.167416,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 35809000,
+        "metal": 118911000
+      },
+      "workers": 8,
+      "output_rows": 2097152,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.017578125,
+        3.1201171875,
+        2.8720703125
+      ],
+      "log": "0-metal-1048576-join_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 22943000,
+          "metal_ns": 53185000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 22612000,
+          "metal_ns": 47379000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 35220000,
+          "metal_ns": 49323000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 20758000,
+          "metal_ns": 49020000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 25434000,
+          "metal_ns": 47662000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 23172000,
+          "metal_ns": 49421000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 25399000,
+          "metal_ns": 49984000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 42729480,
+        "shared_buffer_bytes": 201392580,
+        "host_result_bytes": 42729472,
+        "peak_requested_bytes": 244122052,
+        "kernel_launches": 28,
+        "synchronizations": 2,
+        "wall_ms": 49.314,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.999375,
+        "submit_wait_ms": 25.20075,
+        "result_copy_ms": 17.848958,
+        "initialization_ms": 0.004,
+        "gpu_ms": 24.025833,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 21902000,
+        "metal": 69579000
+      },
+      "workers": 8,
+      "output_rows": 2097152,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.017578125,
+        3.1201171875,
+        2.8720703125
+      ],
+      "log": "0-baseline-1048576-join_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 26139000,
+          "metal_ns": 76150000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 24139000,
+          "metal_ns": 73850000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 22128000,
+          "metal_ns": 74686000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 23466000,
+          "metal_ns": 74446000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 24000000,
+          "metal_ns": 75081000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 21296000,
+          "metal_ns": 74248000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 23299000,
+          "metal_ns": 72208000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 42729480,
+        "shared_buffer_bytes": 163381604,
+        "host_result_bytes": 42729472,
+        "peak_requested_bytes": 206111076,
+        "kernel_launches": 27,
+        "synchronizations": 2,
+        "wall_ms": 73.197,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.420125,
+        "submit_wait_ms": 46.970624,
+        "result_copy_ms": 20.141292,
+        "initialization_ms": 0.003,
+        "gpu_ms": 45.907291,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 23997000,
+        "metal": 92980000
+      },
+      "workers": 8,
+      "output_rows": 2097152,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.017578125,
+        3.1201171875,
+        2.8720703125
+      ],
+      "log": "0-metal-1048576-join_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 29069000,
+          "metal_ns": 46609000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 28414000,
+          "metal_ns": 49186000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 31563000,
+          "metal_ns": 50552000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 29935000,
+          "metal_ns": 50800000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 25040000,
+          "metal_ns": 49324000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 27681000,
+          "metal_ns": 50080000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 30926000,
+          "metal_ns": 48204000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 40592999,
+        "shared_buffer_bytes": 198482772,
+        "host_result_bytes": 40592991,
+        "peak_requested_bytes": 239075763,
+        "kernel_launches": 28,
+        "synchronizations": 2,
+        "wall_ms": 48.987,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 3.057375,
+        "submit_wait_ms": 25.723833,
+        "result_copy_ms": 17.3465,
+        "initialization_ms": 0.001,
+        "gpu_ms": 24.838957,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 31219000,
+        "metal": 71971000
+      },
+      "workers": 8,
+      "output_rows": 1992294,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 0,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.01611328125,
+        3.10107421875,
+        2.86669921875
+      ],
+      "log": "0-baseline-1048576-join_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 29739000,
+          "metal_ns": 94732000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 28160000,
+          "metal_ns": 99908000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 33940000,
+          "metal_ns": 97581000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 28410000,
+          "metal_ns": 97428000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 30251000,
+          "metal_ns": 99844000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 26721000,
+          "metal_ns": 97464000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 53582000,
+          "metal_ns": 100696000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 40592999,
+        "shared_buffer_bytes": 160471796,
+        "host_result_bytes": 40592991,
+        "peak_requested_bytes": 201064787,
+        "kernel_launches": 27,
+        "synchronizations": 2,
+        "wall_ms": 98.632,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.41025,
+        "submit_wait_ms": 69.846542,
+        "result_copy_ms": 22.329458,
+        "initialization_ms": 0.002,
+        "gpu_ms": 68.923207,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 26665000,
+        "metal": 118998000
+      },
+      "workers": 8,
+      "output_rows": 1992294,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.01611328125,
+        3.10107421875,
+        2.86669921875
+      ],
+      "log": "1-baseline-1048576-join_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 28645000,
+          "metal_ns": 94364000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 29789000,
+          "metal_ns": 98435000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 29936000,
+          "metal_ns": 98025000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 24812000,
+          "metal_ns": 100901000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 30144000,
+          "metal_ns": 97074000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 27753000,
+          "metal_ns": 100441000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 29446000,
+          "metal_ns": 98591000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 40592999,
+        "shared_buffer_bytes": 160471796,
+        "host_result_bytes": 40592991,
+        "peak_requested_bytes": 201064787,
+        "kernel_launches": 27,
+        "synchronizations": 2,
+        "wall_ms": 99.414,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.428583,
+        "submit_wait_ms": 70.257376,
+        "result_copy_ms": 22.683083,
+        "initialization_ms": 0.002,
+        "gpu_ms": 69.309749,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 29996000,
+        "metal": 119234000
+      },
+      "workers": 8,
+      "output_rows": 1992294,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.01611328125,
+        3.10107421875,
+        2.86669921875
+      ],
+      "log": "1-metal-1048576-join_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 29483000,
+          "metal_ns": 46434000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 25334000,
+          "metal_ns": 51389000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 30011000,
+          "metal_ns": 48638000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 25981000,
+          "metal_ns": 50587000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 29173000,
+          "metal_ns": 50160000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 28748000,
+          "metal_ns": 49162000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 27475000,
+          "metal_ns": 50829000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 40592999,
+        "shared_buffer_bytes": 198482772,
+        "host_result_bytes": 40592991,
+        "peak_requested_bytes": 239075763,
+        "kernel_launches": 28,
+        "synchronizations": 2,
+        "wall_ms": 49.391,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 3.024875,
+        "submit_wait_ms": 26.065958,
+        "result_copy_ms": 17.215292,
+        "initialization_ms": 0.004,
+        "gpu_ms": 24.986625,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 30632000,
+        "metal": 71658000
+      },
+      "workers": 8,
+      "output_rows": 1992294,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        1.8544921875,
+        3.04931640625,
+        2.849609375
+      ],
+      "log": "1-baseline-1048576-join_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 26972000,
+          "metal_ns": 73699000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 27947000,
+          "metal_ns": 71729000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 24685000,
+          "metal_ns": 72524000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 26321000,
+          "metal_ns": 71348000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 24234000,
+          "metal_ns": 72316000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 24385000,
+          "metal_ns": 74037000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 22239000,
+          "metal_ns": 73362000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 42729480,
+        "shared_buffer_bytes": 163381604,
+        "host_result_bytes": 42729472,
+        "peak_requested_bytes": 206111076,
+        "kernel_launches": 27,
+        "synchronizations": 2,
+        "wall_ms": 71.46,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.447708,
+        "submit_wait_ms": 45.300876,
+        "result_copy_ms": 19.989125,
+        "initialization_ms": 0.003,
+        "gpu_ms": 44.221373,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 25296000,
+        "metal": 93143000
+      },
+      "workers": 8,
+      "output_rows": 2097152,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        1.8544921875,
+        3.04931640625,
+        2.849609375
+      ],
+      "log": "1-metal-1048576-join_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 21250000,
+          "metal_ns": 50716000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 25142000,
+          "metal_ns": 50378000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 25080000,
+          "metal_ns": 48438000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 20802000,
+          "metal_ns": 49077000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 24464000,
+          "metal_ns": 47258000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 24040000,
+          "metal_ns": 49415000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 24985000,
+          "metal_ns": 49638000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 42729480,
+        "shared_buffer_bytes": 201392580,
+        "host_result_bytes": 42729472,
+        "peak_requested_bytes": 244122052,
+        "kernel_launches": 28,
+        "synchronizations": 2,
+        "wall_ms": 48.807,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.964625,
+        "submit_wait_ms": 24.861791,
+        "result_copy_ms": 17.73,
+        "initialization_ms": 0.004,
+        "gpu_ms": 23.835665,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 30633000,
+        "metal": 69494000
+      },
+      "workers": 8,
+      "output_rows": 2097152,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        1.8544921875,
+        3.04931640625,
+        2.849609375
+      ],
+      "log": "1-baseline-1048576-join_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 30933000,
+          "metal_ns": 94571000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 25147000,
+          "metal_ns": 100005000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 27010000,
+          "metal_ns": 97989000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 24200000,
+          "metal_ns": 97048000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 30141000,
+          "metal_ns": 97491000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 22513000,
+          "metal_ns": 97093000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 24471000,
+          "metal_ns": 96466000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 42729480,
+        "shared_buffer_bytes": 163381604,
+        "host_result_bytes": 42729472,
+        "peak_requested_bytes": 206111076,
+        "kernel_launches": 27,
+        "synchronizations": 2,
+        "wall_ms": 97.414,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.426334,
+        "submit_wait_ms": 67.547833,
+        "result_copy_ms": 23.533125,
+        "initialization_ms": 0.001,
+        "gpu_ms": 66.467457,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 35774000,
+        "metal": 118145000
+      },
+      "workers": 8,
+      "output_rows": 2097152,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "join_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        1.78564453125,
+        3.01513671875,
+        2.83837890625
+      ],
+      "log": "1-metal-1048576-join_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 30972000,
+          "metal_ns": 47620000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 25732000,
+          "metal_ns": 50996000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 27180000,
+          "metal_ns": 50858000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 47859000,
+          "metal_ns": 53009000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 27156000,
+          "metal_ns": 50887000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 28491000,
+          "metal_ns": 51321000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 26691000,
+          "metal_ns": 50533000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 25427968,
+        "download_bytes": 42729480,
+        "shared_buffer_bytes": 201392580,
+        "host_result_bytes": 42729472,
+        "peak_requested_bytes": 244122052,
+        "kernel_launches": 28,
+        "synchronizations": 2,
+        "wall_ms": 49.586,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 2.993,
+        "submit_wait_ms": 25.574,
+        "result_copy_ms": 17.745167,
+        "initialization_ms": 0.004,
+        "gpu_ms": 24.572332,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 29846000,
+        "metal": 72719000
+      },
+      "workers": 8,
+      "output_rows": 2097152,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        1.78564453125,
+        3.01513671875,
+        2.83837890625
+      ],
+      "log": "1-baseline-1048576-group_high-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 48320000,
+          "metal_ns": 203533000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 45886000,
+          "metal_ns": 202920000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 44426000,
+          "metal_ns": 193826000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 47083000,
+          "metal_ns": 203360000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 22647000,
+          "metal_ns": 191293000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 47835000,
+          "metal_ns": 200563000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 22244000,
+          "metal_ns": 190449000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585235,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 202.018,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.353042,
+        "submit_wait_ms": 167.045542,
+        "result_copy_ms": 29.799792,
+        "initialization_ms": 0.0,
+        "gpu_ms": 166.291291,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 24492000,
+        "metal": 215947000
+      },
+      "workers": 8,
+      "output_rows": 524289,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        1.8828125,
+        3.0146484375,
+        2.8388671875
+      ],
+      "log": "1-metal-1048576-group_high-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 39968000,
+          "metal_ns": 217115000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 46021000,
+          "metal_ns": 219484000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 27844000,
+          "metal_ns": 212310000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 40583000,
+          "metal_ns": 216979000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 25551000,
+          "metal_ns": 214275000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 41069000,
+          "metal_ns": 219021000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 23543000,
+          "metal_ns": 211775000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585235,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 220.65,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.325125,
+        "submit_wait_ms": 181.945417,
+        "result_copy_ms": 33.084167,
+        "initialization_ms": 0.001,
+        "gpu_ms": 181.08675,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 28194000,
+        "metal": 242938000
+      },
+      "workers": 8,
+      "output_rows": 524289,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        1.8828125,
+        3.0146484375,
+        2.8388671875
+      ],
+      "log": "1-baseline-1048576-group_high-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 41348000,
+          "metal_ns": 194052000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 29754000,
+          "metal_ns": 185258000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 38868000,
+          "metal_ns": 200881000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 23549000,
+          "metal_ns": 185192000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 39946000,
+          "metal_ns": 195396000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 23167000,
+          "metal_ns": 193365000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 42040000,
+          "metal_ns": 202606000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585216,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 192.624,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.255917,
+        "submit_wait_ms": 160.659125,
+        "result_copy_ms": 27.383542,
+        "initialization_ms": 0.001,
+        "gpu_ms": 159.847749,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 33535000,
+        "metal": 213735000
+      },
+      "workers": 8,
+      "output_rows": 524288,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.53271484375,
+        3.13037109375,
+        2.88037109375
+      ],
+      "log": "1-metal-1048576-group_high-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 51806000,
+          "metal_ns": 207789000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 31064000,
+          "metal_ns": 202945000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 39132000,
+          "metal_ns": 210366000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 24372000,
+          "metal_ns": 201869000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 38274000,
+          "metal_ns": 206981000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 22618000,
+          "metal_ns": 202369000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 34834000,
+          "metal_ns": 207564000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585216,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 205.966,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.267625,
+        "submit_wait_ms": 174.490666,
+        "result_copy_ms": 26.593583,
+        "initialization_ms": 0.0,
+        "gpu_ms": 173.733749,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 34922000,
+        "metal": 227685000
+      },
+      "workers": 8,
+      "output_rows": 524288,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.53271484375,
+        3.13037109375,
+        2.88037109375
+      ],
+      "log": "1-baseline-1048576-group_high-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 37863000,
+          "metal_ns": 198254000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 39507000,
+          "metal_ns": 198441000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 23307000,
+          "metal_ns": 191118000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 38383000,
+          "metal_ns": 199958000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 22612000,
+          "metal_ns": 189589000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 38821000,
+          "metal_ns": 200534000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 21854000,
+          "metal_ns": 192450000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585216,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 200.968,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.329833,
+        "submit_wait_ms": 166.796541,
+        "result_copy_ms": 28.874959,
+        "initialization_ms": 0.001,
+        "gpu_ms": 165.930791,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 25166000,
+        "metal": 216402000
+      },
+      "workers": 8,
+      "output_rows": 524288,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_high",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.56982421875,
+        3.1279296875,
+        2.880859375
+      ],
+      "log": "1-metal-1048576-group_high-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 37931000,
+          "metal_ns": 214172000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 40047000,
+          "metal_ns": 214574000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 22765000,
+          "metal_ns": 211443000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 39702000,
+          "metal_ns": 218970000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 24148000,
+          "metal_ns": 211338000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 44980000,
+          "metal_ns": 212914000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 24535000,
+          "metal_ns": 210977000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 8585216,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 215.464,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.320583,
+        "submit_wait_ms": 181.126833,
+        "result_copy_ms": 28.692166,
+        "initialization_ms": 0.001,
+        "gpu_ms": 180.246624,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 24278000,
+        "metal": 234070000
+      },
+      "workers": 8,
+      "output_rows": 524288,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-baseline-1048576-group_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 10302000,
+          "metal_ns": 40552000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 6351000,
+          "metal_ns": 41002000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 11755000,
+          "metal_ns": 41092000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 10939000,
+          "metal_ns": 41448000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 11689000,
+          "metal_ns": 41931000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 11789000,
+          "metal_ns": 41785000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 15984000,
+          "metal_ns": 42797000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16787,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 42.718,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.36225,
+        "submit_wait_ms": 36.01525,
+        "result_copy_ms": 0.055209,
+        "initialization_ms": 0.001,
+        "gpu_ms": 35.257499,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 6641000,
+        "metal": 68367000
+      },
+      "workers": 8,
+      "output_rows": 1025,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-metal-1048576-group_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 7268000,
+          "metal_ns": 22443000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 7276000,
+          "metal_ns": 22670000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 7765000,
+          "metal_ns": 22406000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 7317000,
+          "metal_ns": 22583000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 6798000,
+          "metal_ns": 22391000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 7142000,
+          "metal_ns": 22608000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 9096000,
+          "metal_ns": 22512000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16787,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 22.673,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.295125,
+        "submit_wait_ms": 17.784333,
+        "result_copy_ms": 0.037292,
+        "initialization_ms": 0.001,
+        "gpu_ms": 17.014124,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 7246000,
+        "metal": 56723000
+      },
+      "workers": 8,
+      "output_rows": 1025,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-baseline-1048576-group_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 6614000,
+          "metal_ns": 18089000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 6835000,
+          "metal_ns": 17809000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 5890000,
+          "metal_ns": 18178000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 7106000,
+          "metal_ns": 18070000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 5550000,
+          "metal_ns": 18519000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 5834000,
+          "metal_ns": 18118000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 5856000,
+          "metal_ns": 18310000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 17.939,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.296583,
+        "submit_wait_ms": 13.503625,
+        "result_copy_ms": 0.026541,
+        "initialization_ms": 0.0,
+        "gpu_ms": 12.834791,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 5492000,
+        "metal": 41105000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-metal-1048576-group_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 5224000,
+          "metal_ns": 18080000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 6808000,
+          "metal_ns": 17901000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 6411000,
+          "metal_ns": 18137000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 6408000,
+          "metal_ns": 17942000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 6243000,
+          "metal_ns": 18310000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 5439000,
+          "metal_ns": 17995000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 5668000,
+          "metal_ns": 18436000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 18.09,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.308083,
+        "submit_wait_ms": 13.202542,
+        "result_copy_ms": 0.035166,
+        "initialization_ms": 0.0,
+        "gpu_ms": 12.557875,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 5173000,
+        "metal": 42516000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-baseline-1048576-group_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 7657000,
+          "metal_ns": 41951000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 6141000,
+          "metal_ns": 42650000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 9260000,
+          "metal_ns": 42665000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 10412000,
+          "metal_ns": 42911000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 16411000,
+          "metal_ns": 44151000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 9352000,
+          "metal_ns": 43788000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 15153000,
+          "metal_ns": 45825000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 187695293,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 204865725,
+        "kernel_launches": 54,
+        "synchronizations": 1,
+        "wall_ms": 43.777,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.406916,
+        "submit_wait_ms": 37.218292,
+        "result_copy_ms": 0.054583,
+        "initialization_ms": 0.002,
+        "gpu_ms": 36.41475,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 5378000,
+        "metal": 65025000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "group_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-metal-1048576-group_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 5489000,
+          "metal_ns": 22308000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5225000,
+          "metal_ns": 22748000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 6334000,
+          "metal_ns": 22505000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 7396000,
+          "metal_ns": 22910000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 8599000,
+          "metal_ns": 22711000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 5627000,
+          "metal_ns": 23065000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 10827000,
+          "metal_ns": 23027000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 8650808,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 208929053,
+        "host_result_bytes": 17170432,
+        "peak_requested_bytes": 226099485,
+        "kernel_launches": 81,
+        "synchronizations": 1,
+        "wall_ms": 23.19,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.325792,
+        "submit_wait_ms": 17.603708,
+        "result_copy_ms": 0.028417,
+        "initialization_ms": 0.001,
+        "gpu_ms": 16.92175,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 7545000,
+        "metal": 61033000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-baseline-1048576-sort_radix-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 12317000,
+          "metal_ns": 25751000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 11521000,
+          "metal_ns": 25852000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 12446000,
+          "metal_ns": 30306000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 13427000,
+          "metal_ns": 27921000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 11956000,
+          "metal_ns": 29942000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 13075000,
+          "metal_ns": 26095000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 11300000,
+          "metal_ns": 28919000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 59375709,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 72220765,
+        "kernel_launches": 26,
+        "synchronizations": 1,
+        "wall_ms": 25.569,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.50875,
+        "submit_wait_ms": 13.963375,
+        "result_copy_ms": 9.379583,
+        "initialization_ms": 0.0,
+        "gpu_ms": 13.211249,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 26152000,
+        "metal": 42884000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-metal-1048576-sort_radix-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 13326000,
+          "metal_ns": 28696000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 19828000,
+          "metal_ns": 28756000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 10610000,
+          "metal_ns": 34463000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 11396000,
+          "metal_ns": 31567000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 11919000,
+          "metal_ns": 35109000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 11616000,
+          "metal_ns": 29016000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 10790000,
+          "metal_ns": 35151000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 72220861,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 85065917,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 29.535,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.451791,
+        "submit_wait_ms": 17.493958,
+        "result_copy_ms": 9.632417,
+        "initialization_ms": 0.001,
+        "gpu_ms": 16.8025,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 12957000,
+        "metal": 48943000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.52392578125,
+        3.10888671875,
+        2.87548828125
+      ],
+      "log": "1-baseline-1048576-sort_radix-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 5806000,
+          "metal_ns": 24870000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 7081000,
+          "metal_ns": 28811000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4733000,
+          "metal_ns": 26018000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4689000,
+          "metal_ns": 24293000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4765000,
+          "metal_ns": 23418000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4809000,
+          "metal_ns": 23670000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4802000,
+          "metal_ns": 23203000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 59375709,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 72220765,
+        "kernel_launches": 26,
+        "synchronizations": 1,
+        "wall_ms": 23.411,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.429167,
+        "submit_wait_ms": 11.952959,
+        "result_copy_ms": 9.282791,
+        "initialization_ms": 0.001,
+        "gpu_ms": 11.291749,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 10934000,
+        "metal": 38719000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-1048576-sort_radix-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 8185000,
+          "metal_ns": 27206000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5454000,
+          "metal_ns": 27424000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 7438000,
+          "metal_ns": 27483000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4720000,
+          "metal_ns": 33615000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4712000,
+          "metal_ns": 30782000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 6597000,
+          "metal_ns": 32099000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4798000,
+          "metal_ns": 27845000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 72220861,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 85065917,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 27.398,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.441791,
+        "submit_wait_ms": 15.446375,
+        "result_copy_ms": 9.595292,
+        "initialization_ms": 0.001,
+        "gpu_ms": 14.69075,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 15578000,
+        "metal": 49039000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-1048576-sort_radix-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 8639000,
+          "metal_ns": 26051000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 48935000,
+          "metal_ns": 26014000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 20738000,
+          "metal_ns": 30975000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 11138000,
+          "metal_ns": 28022000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 9838000,
+          "metal_ns": 30604000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 9793000,
+          "metal_ns": 26126000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 8626000,
+          "metal_ns": 31050000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 59375709,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 72220765,
+        "kernel_launches": 26,
+        "synchronizations": 1,
+        "wall_ms": 28.076,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.451083,
+        "submit_wait_ms": 16.31275,
+        "result_copy_ms": 9.573792,
+        "initialization_ms": 0.001,
+        "gpu_ms": 15.619833,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 10213000,
+        "metal": 40797000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 1048576,
+      "workload": "sort_radix",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-1048576-sort_radix-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 9755000,
+          "metal_ns": 28914000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 11528000,
+          "metal_ns": 28753000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 10533000,
+          "metal_ns": 33190000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 9291000,
+          "metal_ns": 28861000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 10205000,
+          "metal_ns": 34067000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 9702000,
+          "metal_ns": 29988000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 9795000,
+          "metal_ns": 32567000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 12713992,
+        "download_bytes": 12845056,
+        "shared_buffer_bytes": 72220861,
+        "host_result_bytes": 12845056,
+        "peak_requested_bytes": 85065917,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 29.088,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.498708,
+        "submit_wait_ms": 17.027709,
+        "result_copy_ms": 9.612583,
+        "initialization_ms": 0.001,
+        "gpu_ms": 16.315166,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 18977000,
+        "metal": 51710000
+      },
+      "workers": 8,
+      "output_rows": 1048576,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-join_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2621000,
+          "metal_ns": 4198000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2459000,
+          "metal_ns": 4694000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2546000,
+          "metal_ns": 5094000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2469000,
+          "metal_ns": 5302000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2518000,
+          "metal_ns": 5457000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2476000,
+          "metal_ns": 5952000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2532000,
+          "metal_ns": 5920000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2537063,
+        "shared_buffer_bytes": 10029812,
+        "host_result_bytes": 2537055,
+        "peak_requested_bytes": 12566867,
+        "kernel_launches": 23,
+        "synchronizations": 2,
+        "wall_ms": 6.217,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.103542,
+        "submit_wait_ms": 4.781708,
+        "result_copy_ms": 1.032167,
+        "initialization_ms": 0.001,
+        "gpu_ms": 3.815207,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 2961000,
+        "metal": 17253000
+      },
+      "workers": 8,
+      "output_rows": 124518,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-join_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2661000,
+          "metal_ns": 3480000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2523000,
+          "metal_ns": 4077000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2610000,
+          "metal_ns": 4057000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2487000,
+          "metal_ns": 3906000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2518000,
+          "metal_ns": 3949000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2475000,
+          "metal_ns": 3984000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2594000,
+          "metal_ns": 4053000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2537063,
+        "shared_buffer_bytes": 12405588,
+        "host_result_bytes": 2537055,
+        "peak_requested_bytes": 14942643,
+        "kernel_launches": 25,
+        "synchronizations": 2,
+        "wall_ms": 4.066,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.144541,
+        "submit_wait_ms": 2.653458,
+        "result_copy_ms": 1.012042,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.64454,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 2970000,
+        "metal": 17916000
+      },
+      "workers": 8,
+      "output_rows": 124518,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-join_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2157000,
+          "metal_ns": 5534000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2415000,
+          "metal_ns": 5864000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2178000,
+          "metal_ns": 5889000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2209000,
+          "metal_ns": 5883000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2195000,
+          "metal_ns": 5861000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2219000,
+          "metal_ns": 5828000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2139000,
+          "metal_ns": 5913000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2670600,
+        "shared_buffer_bytes": 10211684,
+        "host_result_bytes": 2670592,
+        "peak_requested_bytes": 12882276,
+        "kernel_launches": 23,
+        "synchronizations": 2,
+        "wall_ms": 5.508,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.117875,
+        "submit_wait_ms": 4.021291,
+        "result_copy_ms": 1.08125,
+        "initialization_ms": 0.0,
+        "gpu_ms": 3.229499,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 2715000,
+        "metal": 18405000
+      },
+      "workers": 8,
+      "output_rows": 131072,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-join_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2166000,
+          "metal_ns": 3944000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2286000,
+          "metal_ns": 4322000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2105000,
+          "metal_ns": 4080000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2231000,
+          "metal_ns": 4118000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2124000,
+          "metal_ns": 4031000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2613000,
+          "metal_ns": 3999000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2131000,
+          "metal_ns": 3976000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2670600,
+        "shared_buffer_bytes": 12587460,
+        "host_result_bytes": 2670592,
+        "peak_requested_bytes": 15258052,
+        "kernel_launches": 25,
+        "synchronizations": 2,
+        "wall_ms": 3.918,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.145875,
+        "submit_wait_ms": 2.41125,
+        "result_copy_ms": 1.096084,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.529207,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 2703000,
+        "metal": 17753000
+      },
+      "workers": 8,
+      "output_rows": 131072,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-join_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2319000,
+          "metal_ns": 6174000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2080000,
+          "metal_ns": 6425000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2127000,
+          "metal_ns": 6476000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2126000,
+          "metal_ns": 6426000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2120000,
+          "metal_ns": 6467000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2087000,
+          "metal_ns": 6519000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2094000,
+          "metal_ns": 6713000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2670600,
+        "shared_buffer_bytes": 10211684,
+        "host_result_bytes": 2670592,
+        "peak_requested_bytes": 12882276,
+        "kernel_launches": 23,
+        "synchronizations": 2,
+        "wall_ms": 6.432,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.119417,
+        "submit_wait_ms": 4.903208,
+        "result_copy_ms": 1.073208,
+        "initialization_ms": 0.001,
+        "gpu_ms": 3.871458,
+        "algorithm": "native_metal_resident_sorted_join"
+      },
+      "first_use_ns": {
+        "cpu": 2626000,
+        "metal": 19009000
+      },
+      "workers": 8,
+      "output_rows": 131072,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "join_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-join_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2290000,
+          "metal_ns": 3682000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2097000,
+          "metal_ns": 4006000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2130000,
+          "metal_ns": 4175000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2104000,
+          "metal_ns": 4168000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2160000,
+          "metal_ns": 4210000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2071000,
+          "metal_ns": 4245000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2132000,
+          "metal_ns": 4179000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 1589248,
+        "download_bytes": 2670600,
+        "shared_buffer_bytes": 12587460,
+        "host_result_bytes": 2670592,
+        "peak_requested_bytes": 15258052,
+        "kernel_launches": 25,
+        "synchronizations": 2,
+        "wall_ms": 4.056,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.160042,
+        "submit_wait_ms": 2.56725,
+        "result_copy_ms": 1.06525,
+        "initialization_ms": 0.001,
+        "gpu_ms": 1.589625,
+        "algorithm": "native_metal_resident_hash_join"
+      },
+      "first_use_ns": {
+        "cpu": 2618000,
+        "metal": 17663000
+      },
+      "workers": 8,
+      "output_rows": 131072,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-group_high-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 4208000,
+          "metal_ns": 11135000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 3968000,
+          "metal_ns": 11230000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 8394000,
+          "metal_ns": 11497000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4554000,
+          "metal_ns": 11380000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 5646000,
+          "metal_ns": 11566000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4684000,
+          "metal_ns": 11373000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4572000,
+          "metal_ns": 11517000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536595,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 11.381,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.024,
+        "submit_wait_ms": 10.331209,
+        "result_copy_ms": 0.656791,
+        "initialization_ms": 0.0,
+        "gpu_ms": 9.66875,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 3639000,
+        "metal": 30794000
+      },
+      "workers": 8,
+      "output_rows": 32769,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-group_high-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 4705000,
+          "metal_ns": 11857000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4962000,
+          "metal_ns": 11825000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 5625000,
+          "metal_ns": 11968000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4523000,
+          "metal_ns": 11719000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4414000,
+          "metal_ns": 11985000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4772000,
+          "metal_ns": 11915000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 5653000,
+          "metal_ns": 11990000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536595,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 11.822,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.025584,
+        "submit_wait_ms": 10.740167,
+        "result_copy_ms": 0.653209,
+        "initialization_ms": 0.0,
+        "gpu_ms": 10.131166,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 5774000,
+        "metal": 29720000
+      },
+      "workers": 8,
+      "output_rows": 32769,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-group_high-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 6064000,
+          "metal_ns": 10443000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 3795000,
+          "metal_ns": 11205000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4218000,
+          "metal_ns": 11117000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 6426000,
+          "metal_ns": 11125000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4381000,
+          "metal_ns": 10822000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4085000,
+          "metal_ns": 11014000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4361000,
+          "metal_ns": 10908000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536576,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 10.957,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.013541,
+        "submit_wait_ms": 9.947083,
+        "result_copy_ms": 0.614583,
+        "initialization_ms": 0.0,
+        "gpu_ms": 9.295875,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 3423000,
+        "metal": 30146000
+      },
+      "workers": 8,
+      "output_rows": 32768,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-group_high-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 4613000,
+          "metal_ns": 11593000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 5077000,
+          "metal_ns": 11743000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4961000,
+          "metal_ns": 11526000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2340000,
+          "metal_ns": 11675000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4424000,
+          "metal_ns": 11565000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4506000,
+          "metal_ns": 11732000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4784000,
+          "metal_ns": 11644000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536576,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 11.67,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.01725,
+        "submit_wait_ms": 10.526125,
+        "result_copy_ms": 0.654875,
+        "initialization_ms": 0.001,
+        "gpu_ms": 9.855374,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 4122000,
+        "metal": 30157000
+      },
+      "workers": 8,
+      "output_rows": 32768,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-group_high-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 5201000,
+          "metal_ns": 11179000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4476000,
+          "metal_ns": 11118000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 4210000,
+          "metal_ns": 11346000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 4342000,
+          "metal_ns": 11186000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4248000,
+          "metal_ns": 11237000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4505000,
+          "metal_ns": 11266000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 4210000,
+          "metal_ns": 11322000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536576,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 11.047,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.014,
+        "submit_wait_ms": 10.130333,
+        "result_copy_ms": 0.608833,
+        "initialization_ms": 0.001,
+        "gpu_ms": 9.607333,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 4081000,
+        "metal": 29815000
+      },
+      "workers": 8,
+      "output_rows": 32768,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_high",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-group_high-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 7214000,
+          "metal_ns": 11861000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 12866000,
+          "metal_ns": 11511000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 11004000,
+          "metal_ns": 11598000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 6221000,
+          "metal_ns": 11516000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 5760000,
+          "metal_ns": 11864000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4274000,
+          "metal_ns": 11674000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 3592000,
+          "metal_ns": 11826000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 536576,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 11.645,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.0225,
+        "submit_wait_ms": 10.750208,
+        "result_copy_ms": 0.540583,
+        "initialization_ms": 0.0,
+        "gpu_ms": 10.104666,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 7504000,
+        "metal": 30286000
+      },
+      "workers": 8,
+      "output_rows": 32768,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-group_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1532000,
+          "metal_ns": 2093000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1533000,
+          "metal_ns": 2425000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1515000,
+          "metal_ns": 2126000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1514000,
+          "metal_ns": 2491000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1513000,
+          "metal_ns": 2268000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1505000,
+          "metal_ns": 2333000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1489000,
+          "metal_ns": 2226000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16787,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 2.04,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.011833,
+        "submit_wait_ms": 1.703166,
+        "result_copy_ms": 0.015292,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.468874,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 1932000,
+        "metal": 19937000
+      },
+      "workers": 8,
+      "output_rows": 1025,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "nulls",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-group_hash-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1554000,
+          "metal_ns": 2131000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1526000,
+          "metal_ns": 2577000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1527000,
+          "metal_ns": 2183000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1504000,
+          "metal_ns": 2743000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1516000,
+          "metal_ns": 2197000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1523000,
+          "metal_ns": 2837000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1525000,
+          "metal_ns": 2157000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16787,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 2.116,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.010666,
+        "submit_wait_ms": 1.751958,
+        "result_copy_ms": 0.015292,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.505458,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 1912000,
+        "metal": 20624000
+      },
+      "workers": 8,
+      "output_rows": 1025,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-group_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1407000,
+          "metal_ns": 2155000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1451000,
+          "metal_ns": 2126000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1408000,
+          "metal_ns": 2600000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1401000,
+          "metal_ns": 2134000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1377000,
+          "metal_ns": 2556000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1380000,
+          "metal_ns": 2124000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1378000,
+          "metal_ns": 2586000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 2.165,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.012208,
+        "submit_wait_ms": 1.848083,
+        "result_copy_ms": 0.015458,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.553541,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 1749000,
+        "metal": 20095000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "sorted",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-group_hash-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1414000,
+          "metal_ns": 2334000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1431000,
+          "metal_ns": 2369000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1438000,
+          "metal_ns": 2859000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1394000,
+          "metal_ns": 2418000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1371000,
+          "metal_ns": 2892000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1398000,
+          "metal_ns": 2483000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1360000,
+          "metal_ns": 2647000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 2.482,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.012333,
+        "submit_wait_ms": 2.125125,
+        "result_copy_ms": 0.016458,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.804999,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 1744000,
+        "metal": 20701000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-group_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1240000,
+          "metal_ns": 3233000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1162000,
+          "metal_ns": 3437000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1221000,
+          "metal_ns": 3237000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1177000,
+          "metal_ns": 3654000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1190000,
+          "metal_ns": 3184000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1168000,
+          "metal_ns": 3623000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1275000,
+          "metal_ns": 3233000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 11731133,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 12804285,
+        "kernel_launches": 46,
+        "synchronizations": 1,
+        "wall_ms": 3.216,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.013375,
+        "submit_wait_ms": 2.8645,
+        "result_copy_ms": 0.01725,
+        "initialization_ms": 0.0,
+        "gpu_ms": 2.567458,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 1570000,
+        "metal": 22412000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "group_hash",
+      "variant": "base",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-group_hash-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1223000,
+          "metal_ns": 2462000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1185000,
+          "metal_ns": 2924000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 1176000,
+          "metal_ns": 2476000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1166000,
+          "metal_ns": 2924000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 1171000,
+          "metal_ns": 2515000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1186000,
+          "metal_ns": 2916000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1233000,
+          "metal_ns": 2465000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 540728,
+        "download_bytes": 16768,
+        "shared_buffer_bytes": 13058333,
+        "host_result_bytes": 1073152,
+        "peak_requested_bytes": 14131485,
+        "kernel_launches": 70,
+        "synchronizations": 1,
+        "wall_ms": 2.474,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.010334,
+        "submit_wait_ms": 2.104125,
+        "result_copy_ms": 0.016417,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.848125,
+        "algorithm": "native_metal_hash_groups"
+      },
+      "first_use_ns": {
+        "cpu": 1565000,
+        "metal": 20891000
+      },
+      "workers": 8,
+      "output_rows": 1024,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-sort_radix-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 1880000,
+          "metal_ns": 2431000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 2549000,
+          "metal_ns": 2404000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 3382000,
+          "metal_ns": 2504000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 3221000,
+          "metal_ns": 2408000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2718000,
+          "metal_ns": 2483000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2631000,
+          "metal_ns": 2414000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 1883000,
+          "metal_ns": 2496000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 3711069,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 4513885,
+        "kernel_launches": 22,
+        "synchronizations": 1,
+        "wall_ms": 2.343,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.031416,
+        "submit_wait_ms": 1.619417,
+        "result_copy_ms": 0.5615,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.134749,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 1340000,
+        "metal": 14580000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "nulls",
+      "gpu_first": false,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-metal-65536-sort_radix-nulls.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2906000,
+          "metal_ns": 3001000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 3332000,
+          "metal_ns": 2909000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2678000,
+          "metal_ns": 3070000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 1969000,
+          "metal_ns": 2905000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 3034000,
+          "metal_ns": 3054000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 1887000,
+          "metal_ns": 2908000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2963000,
+          "metal_ns": 3020000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 4513981,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 5316797,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 2.924,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.028125,
+        "submit_wait_ms": 2.15625,
+        "result_copy_ms": 0.592,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.612749,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 3220000,
+        "metal": 20878000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.40185546875,
+        3.07373046875,
+        2.8642578125
+      ],
+      "log": "1-baseline-65536-sort_radix-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 617000,
+          "metal_ns": 1781000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 618000,
+          "metal_ns": 2256000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 636000,
+          "metal_ns": 2225000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 606000,
+          "metal_ns": 2163000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 621000,
+          "metal_ns": 2183000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 610000,
+          "metal_ns": 2162000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 610000,
+          "metal_ns": 2213000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 3711069,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 4513885,
+        "kernel_launches": 22,
+        "synchronizations": 1,
+        "wall_ms": 2.084,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.013709,
+        "submit_wait_ms": 1.318459,
+        "result_copy_ms": 0.599375,
+        "initialization_ms": 0.0,
+        "gpu_ms": 0.856749,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 914000,
+        "metal": 14476000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "sorted",
+      "gpu_first": true,
+      "load_before": [
+        2.68994140625,
+        3.1220703125,
+        2.88232421875
+      ],
+      "log": "1-metal-65536-sort_radix-sorted.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 646000,
+          "metal_ns": 2592000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1016000,
+          "metal_ns": 2916000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 667000,
+          "metal_ns": 2880000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 602000,
+          "metal_ns": 2968000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 621000,
+          "metal_ns": 2909000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 602000,
+          "metal_ns": 2836000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 640000,
+          "metal_ns": 2835000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 4513981,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 5316797,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 2.85,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.013542,
+        "submit_wait_ms": 2.074125,
+        "result_copy_ms": 0.604041,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.557124,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 888000,
+        "metal": 20276000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "baseline",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.68994140625,
+        3.1220703125,
+        2.88232421875
+      ],
+      "log": "1-baseline-65536-sort_radix-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 2952000,
+          "metal_ns": 2460000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 1952000,
+          "metal_ns": 2335000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2468000,
+          "metal_ns": 2539000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2497000,
+          "metal_ns": 2400000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 2401000,
+          "metal_ns": 2510000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 4449000,
+          "metal_ns": 2381000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2577000,
+          "metal_ns": 2447000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 3711069,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 4513885,
+        "kernel_launches": 22,
+        "synchronizations": 1,
+        "wall_ms": 2.261,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.022292,
+        "submit_wait_ms": 1.547792,
+        "result_copy_ms": 0.560542,
+        "initialization_ms": 0.0,
+        "gpu_ms": 1.117874,
+        "algorithm": "specialized_native_metal_stable_compaction"
+      },
+      "first_use_ns": {
+        "cpu": 2618000,
+        "metal": 14527000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9",
+      "validated": true,
+      "status": "ok"
+    },
+    {
+      "round": 1,
+      "runtime": "metal",
+      "rows": 65536,
+      "workload": "sort_radix",
+      "variant": "base",
+      "gpu_first": false,
+      "load_before": [
+        2.68994140625,
+        3.1220703125,
+        2.88232421875
+      ],
+      "log": "1-metal-65536-sort_radix-base.txt",
+      "samples": [
+        {
+          "index": 0,
+          "cpu_ns": 3110000,
+          "metal_ns": 2644000
+        },
+        {
+          "index": 1,
+          "cpu_ns": 4347000,
+          "metal_ns": 2985000
+        },
+        {
+          "index": 2,
+          "cpu_ns": 2568000,
+          "metal_ns": 3093000
+        },
+        {
+          "index": 3,
+          "cpu_ns": 2633000,
+          "metal_ns": 2882000
+        },
+        {
+          "index": 4,
+          "cpu_ns": 4318000,
+          "metal_ns": 2959000
+        },
+        {
+          "index": 5,
+          "cpu_ns": 2926000,
+          "metal_ns": 2891000
+        },
+        {
+          "index": 6,
+          "cpu_ns": 2114000,
+          "metal_ns": 3008000
+        }
+      ],
+      "profile": {
+        "upload_bytes": 794632,
+        "download_bytes": 802816,
+        "shared_buffer_bytes": 4513981,
+        "host_result_bytes": 802816,
+        "peak_requested_bytes": 5316797,
+        "kernel_launches": 36,
+        "synchronizations": 1,
+        "wall_ms": 2.775,
+        "pipeline_compile_ms": 0.0,
+        "staging_copy_ms": 0.021542,
+        "submit_wait_ms": 2.04575,
+        "result_copy_ms": 0.561875,
+        "initialization_ms": 0.001,
+        "gpu_ms": 1.614333,
+        "algorithm": "native_metal_integer_radix_sort"
+      },
+      "first_use_ns": {
+        "cpu": 2133000,
+        "metal": 20545000
+      },
+      "workers": 8,
+      "output_rows": 65536,
+      "runtime_build_id": "ec16a3a0079af9a05a0ea1314d64a6ef96ad76f4123ec334ea55bd8e959328e6",
+      "validated": true,
+      "status": "ok"
+    }
+  ]
+}

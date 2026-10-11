@@ -1,0 +1,79 @@
+Imported from /private/tmp/apple-algorithms-validation/tests/test_metal_dictionaries.mojo:4:
+Imported from ./dataframe/categorical.mojo:25:
+Imported from ./dataframe/hashing.mojo:14:
+./dataframe/huge_pages.mojo:35:27: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+def huge_list[T: Copyable & Movable](length: Int, fill: T) -> List[T]:
+                          ^
+Imported from /private/tmp/apple-algorithms-validation/tests/test_metal_dictionaries.mojo:4:
+Imported from ./dataframe/categorical.mojo:25:
+Imported from ./dataframe/hashing.mojo:14:
+./dataframe/huge_pages.mojo:46:29: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+def huge_uninit[T: Copyable & Movable](length: Int) -> List[T]:
+                            ^
+Included from /private/tmp/apple-algorithms-validation/tests/test_metal_dictionaries.mojo:3:
+Included from ./dataframe/__init__.mojo:7:
+Included from ./dataframe/frame.mojo:72:
+./dataframe/execution.mojo:1706:21: warning: assignment to 'column_at' was never used; assign to '_' instead?
+    var column_at = -1
+                    ^
+Included from /private/tmp/apple-algorithms-validation/tests/test_metal_dictionaries.mojo:5:
+Included from ./dataframe/metal.mojo:90:
+./dataframe/lazy.mojo:844:27: warning: assignment to 'exprs' was never used; assign to '_' instead?
+    var exprs = List[Expr]()
+                          ^
+
+Running 4 tests for /private/tmp/apple-algorithms-validation/tests/test_metal_dictionaries.mojo 
+    PASS [ 587.136 ] test_string_filter_sort_group_and_join
+    PASS [ 32.692 ] test_categorical_projection_preserves_original_dictionary
+    PASS [ 208.971 ] test_different_categorical_dictionaries_join_all_styles
+    PASS [ 0.679 ] test_dictionary_profile_includes_host_staging_and_restoration
+--------
+Summary [ 829.478 ] 4 tests run: 4 passed , 0 failed , 0 skipped 
+
+Imported from /private/tmp/apple-algorithms-validation/tests/test_analytical_cost.mojo:3:
+Imported from ./dataframe/__init__.mojo:7:
+Imported from ./dataframe/frame.mojo:98:
+Imported from ./dataframe/partition.mojo:34:
+./dataframe/huge_pages.mojo:46:29: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+def huge_uninit[T: Copyable & Movable](length: Int) -> List[T]:
+                            ^
+Imported from /private/tmp/apple-algorithms-validation/tests/test_analytical_cost.mojo:3:
+Imported from ./dataframe/__init__.mojo:7:
+Imported from ./dataframe/frame.mojo:98:
+Imported from ./dataframe/partition.mojo:34:
+./dataframe/huge_pages.mojo:35:27: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+def huge_list[T: Copyable & Movable](length: Int, fill: T) -> List[T]:
+                          ^
+Included from /private/tmp/apple-algorithms-validation/tests/test_analytical_cost.mojo:3:
+Included from ./dataframe/__init__.mojo:7:
+Included from ./dataframe/frame.mojo:72:
+./dataframe/execution.mojo:1706:21: warning: assignment to 'column_at' was never used; assign to '_' instead?
+    var column_at = -1
+                    ^
+Included from /private/tmp/apple-algorithms-validation/tests/test_analytical_cost.mojo:13:
+Included from ./dataframe/accelerator/cpu_work.mojo:4:
+./dataframe/lazy.mojo:844:27: warning: assignment to 'exprs' was never used; assign to '_' instead?
+    var exprs = List[Expr]()
+                          ^
+
+Running 3 tests for /private/tmp/apple-algorithms-validation/tests/test_analytical_cost.mojo 
+    PASS [ 2.129 ] test_shared_comparison_explains_both_bounds_and_the_largest_term
+    PASS [ 2.750 ] test_identity_memory_expiration_coverage_and_ambiguity_reject
+    PASS [ 0.601 ] test_cpu_features_count_work_without_values_or_query_mutation
+--------
+Summary [ 5.480 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+
+Imported from /private/tmp/apple-algorithms-validation/tests/test_accelerator_dictionaries.mojo:5:
+Imported from ./dataframe/categorical.mojo:25:
+Imported from ./dataframe/hashing.mojo:14:
+./dataframe/huge_pages.mojo:35:27: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+def huge_list[T: Copyable & Movable](length: Int, fill: T) -> List[T]:
+                          ^
+
+Running 3 tests for /private/tmp/apple-algorithms-validation/tests/test_accelerator_dictionaries.mojo 
+    PASS [ 0.135 ] test_ordered_codes_include_literals_and_preserve_nulls
+    PASS [ 0.052 ] test_categorical_inputs_reconcile_different_code_orders
+    PASS [ 0.027 ] test_empty_categorical_retains_unused_members
+--------
+Summary [ 0.214 ] 3 tests run: 3 passed , 0 failed , 0 skipped 
+

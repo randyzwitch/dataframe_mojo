@@ -23,11 +23,13 @@ struct JShape {
   std::vector<JColumn> columns;
   int64_t raw = 0, words = 0, probe = 0, build = 0, pb = 0, bb = 0;
   DFMMemory memory{};
+  bool hash = false;
 };
 int64_t jpacked(int64_t rows, int64_t offset = 0) {
   return rows ? add(add(rows, offset), 7) / 8 : 0;
 }
-JShape jvalidate(const DFMJoinRequest &r, bool pointers = false) {
+JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
+                 const DFMResidentInput *refs = nullptr) {
   if (r.abi_version != DFM_JOIN_ABI_VERSION || r.left_rows < 0 ||
       r.right_rows < 0 || r.left_rows > INT32_MAX || r.right_rows > INT32_MAX ||
       r.input_count < 0 || r.input_count > 64 || r.key_count < 0 ||
@@ -40,6 +42,7 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false) {
   JShape s;
   s.probe = r.how == 2 ? r.right_rows : r.left_rows;
   s.build = r.how == 2 ? r.left_rows : r.right_rows;
+  s.hash = r.how != 6 && r.memory_budget_bytes == -1 && hashCandidate(s.build);
   s.pb = std::max<int64_t>(1, (s.probe + 255) / 256);
   s.bb = std::max<int64_t>(1, (s.build + 255) / 256);
   for (int64_t i = 0; i < r.input_count; ++i) {
@@ -50,19 +53,23 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false) {
       fail("Invalid Metal join input");
     auto rows = a.side ? r.right_rows : r.left_rows;
     auto w = width(v.dtype), bitmap = jpacked(rows, v.bit_offset);
-    if (pointers && rows && (!v.values || (v.has_validity && !v.validity)))
+    bool native = refs && refs[i].table;
+    if (pointers && !native && rows &&
+        (!v.values || (v.has_validity && !v.validity)))
       fail("Missing Metal join input storage");
     s.raw = aligned(s.raw);
     auto at = s.raw;
     auto payload = v.dtype == DFM_BOOL ? bitmap : mul(rows, w);
-    s.raw = add(s.raw, payload);
-    s.memory.upload_bytes = add(s.memory.upload_bytes, payload);
-    auto valid = v.has_validity ? s.raw : -1;
-    if (v.has_validity) {
+    if (!native) {
+      s.raw = add(s.raw, payload);
+      s.memory.upload_bytes = add(s.memory.upload_bytes, payload);
+    }
+    auto valid = !native && v.has_validity ? s.raw : -1;
+    if (!native && v.has_validity) {
       s.raw = add(s.raw, bitmap);
       s.memory.upload_bytes = add(s.memory.upload_bytes, bitmap);
     }
-    s.columns.push_back({s.words, at, valid, rows, v.bit_offset, v.dtype});
+    s.columns.push_back({s.words, native ? -1 : at, valid, rows, v.bit_offset, v.dtype});
     s.words = add(s.words, std::max<int64_t>(1, rows));
   }
   auto input = [&](int64_t index, int64_t side) {
@@ -106,29 +113,41 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false) {
                      mul(s.probe, 8), mul(s.pb, 8), mul(add(s.build, 1), 4),
                      mul(s.build, 8), mul(s.bb, 8), mul(s.build, 4)})
     charge(bytes);
+  if (s.hash) {
+    RadixShape radix(s.build);
+    charge(mul(radix.cap, 8)); charge(mul(radix.cap, 4));
+    charge(radix.histogram); charge(64); charge(32);
+    charge(mul(hashCapacity(s.build), 4)); charge(mul(hashCapacity(s.build), 8));
+  }
   s.memory.peak_bytes = s.memory.shared_bytes;
   s.memory.blocks = s.pb;
   s.memory.capacity = std::max<int64_t>(1, s.probe);
   s.memory.launches = (r.input_count ? 1 : 0) + (r.how == 6 ? 0 : 1) + 5;
-  if (r.how != 6)
+  if (s.hash) {
+    auto bits = 0;
+    for (auto cap = hashCapacity(s.build); cap; cap >>= 1) ++bits;
+    s.memory.launches += 3 + 3 * ((bits + 3) / 4);
+  } else if (r.how != 6)
     for (int64_t width = 1; width < s.build; width *= 2)
       ++s.memory.launches;
   if (r.how == 3)
     s.memory.launches += 6;
   return s;
 }
-std::string jsource(int64_t keys, int64_t how) {
+std::string jsource(int64_t keys, int64_t how, bool hash) {
   std::string src = "#include <metal_stdlib>\nusing namespace metal;\n";
+  src += residentSource();
   src += "constant uint KEYS=" + std::to_string(keys) +
          ";\nconstant uint HOW=" + std::to_string(how) + ";\n";
   src += orderingSource();
+  if (hash) src += radixSource();
   src += R"MSL(
 struct Col { long word, values, validity, rows, bit, type; };
 struct Out { long type, left, right, prefer; };
 struct Meta { uint probe, build, side, columns; ulong total, leftTotal, unmatched, limit; };
 kernel void j_unpack(device const uchar *raw[[buffer(0)]],device ulong *x[[buffer(1)]],
  device uchar *v[[buffer(2)]],device const Col *cols[[buffer(3)]],constant Meta &m[[buffer(4)]],uint2 at[[thread_position_in_grid]]) {
- if(at.y>=m.columns)return;Col c=cols[at.y];if(at.x>=c.rows)return;
+ if(at.y>=m.columns)return;Col c=cols[at.y];if(at.x>=c.rows||c.values<0)return;
  ulong i=c.word+at.x,b=ulong(at.x)+c.bit;device const uchar *p=raw+c.values;
  ulong z=0;switch(c.type){case 1:case 9:z=((device const uint*)p)[at.x];break;
  case 2:z=ulong(((device const int*)p)[at.x]);break;case 3:case 10:z=((device const ulong*)p)[at.x];break;
@@ -218,6 +237,48 @@ kernel void j_pack(device const ulong *y[[buffer(0)]],device const uchar *w[[buf
  bits[(2UL*at.y)*packed+at.x]=valid;bits[(2UL*at.y+1)*packed+at.x]=value;
 }
 )MSL";
+  if (hash) {
+    const std::string helpers = R"MSL(
+ulong j_hash_key(uint row,bool build,device const ulong *x,device const uchar *v,
+ device const Col *cols,device const long2 *keys,constant Meta &m,thread bool &valid) {
+ ulong hash=0x9e3779b97f4a7c15UL;valid=true;
+ for(uint k=0;k<KEYS;++k){long2 pair=keys[k];
+  Col c=cols[build?(m.side?pair.x:pair.y):(m.side?pair.y:pair.x)];
+  ulong at=c.word+row;if(!v[at])valid=false;
+  hash=key_hash(hash^canonical_key(x[at],c.type));}
+ return hash;
+}
+kernel void j_hash_build(device const ulong *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
+ device const Col *cols[[buffer(2)]],device const long2 *keys[[buffer(3)]],constant Meta &m[[buffer(4)]],
+ device atomic_uint *owners[[buffer(5)]],device ulong *buckets[[buffer(6)]],constant uint &capacity[[buffer(7)]],uint row[[thread_position_in_grid]]){
+ if(row>=m.build)return;bool valid;ulong hash=j_hash_key(row,true,x,v,cols,keys,m,valid);
+ if(!valid){buckets[row]=capacity;return;}uint bucket=uint(hash)&(capacity-1);
+ for(;;){uint owner=atomic_load_explicit(owners+bucket,memory_order_relaxed);
+  if(owner==0xffffffffU){uint empty=0xffffffffU;
+   if(atomic_compare_exchange_weak_explicit(owners+bucket,&empty,row,memory_order_relaxed,memory_order_relaxed)){buckets[row]=bucket;return;}
+   owner=empty;if(owner==0xffffffffU)continue;}
+  if(j_cmp(row,owner,false,x,v,cols,keys,m)==0){buckets[row]=bucket;return;}
+  bucket=(bucket+1)&(capacity-1);
+ }
+}
+kernel void j_hash_ranges(device const uint *index[[buffer(0)]],device const ulong *buckets[[buffer(1)]],
+ device uint *ranges[[buffer(2)]],constant Meta &m[[buffer(3)]],constant uint &capacity[[buffer(4)]],uint row[[thread_position_in_grid]]){
+ if(row>=m.build)return;uint bucket=uint(buckets[index[row]]);if(bucket==capacity)return;
+ if(row==0||buckets[index[row-1]]!=bucket)ranges[2UL*bucket]=row;
+ if(row+1==m.build||buckets[index[row+1]]!=bucket)ranges[2UL*bucket+1]=row+1;
+}
+)MSL";
+    src.insert(src.find("kernel void j_match"), helpers);
+    auto signature = src.find("device atomic_int *diff[[buffer(8)]],uint i[[thread_position_in_grid]])");
+    src.replace(signature, std::string("device atomic_int *diff[[buffer(8)]],uint i[[thread_position_in_grid]])").size(),
+      "device atomic_int *diff[[buffer(8)]],device atomic_uint *owners[[buffer(9)]],device const ulong *bucketRanges[[buffer(10)]],constant uint &capacity[[buffer(11)]],uint i[[thread_position_in_grid]])");
+    auto first = src.find("else if(valid){uint lo=0,hi=m.build;");
+    auto last = src.find("high=lo;}", first) + std::string("high=lo;}").size();
+    src.replace(first, last-first, R"MSL(else if(valid){bool good;ulong hash=j_hash_key(i,false,x,v,cols,keys,m,good);
+ uint bucket=uint(hash)&(capacity-1);for(;;){uint owner=atomic_load_explicit(owners+bucket,memory_order_relaxed);
+ if(owner==0xffffffffU)break;if(j_cmp(owner,i,true,x,v,cols,keys,m)==0){ulong pair=bucketRanges[bucket];low=uint(pair);high=uint(pair>>32);break;}
+ bucket=(bucket+1)&(capacity-1);}})MSL");
+  }
   return src;
 }
 struct JSession {
@@ -231,23 +292,21 @@ struct JSession {
   std::shared_ptr<Pipelines> shaders;
   id<MTLBuffer> raw, x, v, cols, key, out, meta, sorted, scratch, ranges,
       prefix, pblocks, diff, bprefix, bblocks, unmatched;
+  id<MTLBuffer> radixKeys = nil, radixRanks = nil, radixHistogram = nil,
+      radixTotals = nil, radixArgs = nil, hashOwners = nil, bucketRanges = nil;
   DFMStats stats{};
   bool consumed = false;
   int64_t gpu_intervals = 0;
   explicit JSession(Context &c, const DFMJoinRequest &r, JShape s)
-      : context(&c), request(r), shape(std::move(s)), buffers{c, {}} {
+      : context(&c), request(r), shape(std::move(s)), buffers{c} {
     dfm_context_retain(&c);
   }
   ~JSession() { dfm_context_release(context); }
 };
 void jbudget(Context &c, const DFMJoinRequest &r, int64_t peak,
              int64_t owned = 0) {
-  auto recommended = int64_t(
-      std::min<uint64_t>(c.device.recommendedMaxWorkingSetSize, INT64_MAX));
-  auto allocated =
-      int64_t(std::min<uint64_t>(c.device.currentAllocatedSize, INT64_MAX));
   auto additional = std::max<int64_t>(0, peak - owned);
-  if (additional > std::max<int64_t>(0, recommended - allocated) ||
+  if (additional > c.headroom() ||
       (r.memory_budget_bytes >= 0 && peak > r.memory_budget_bytes))
     fail("Metal join exceeds memory budget before submission");
 }
@@ -323,8 +382,17 @@ void jscan(JEncoder &e, id<MTLBuffer> values, id<MTLBuffer> blocks,
   e.val(2, args);
   e.launch("j_offsets", 1);
 }
-std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r) {
-  auto shape = jvalidate(r, true);
+std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r,
+                                  Query *query = nullptr,
+                                  const DFMResidentInput *refs = nullptr,
+                                  bool final = false) {
+  auto shape = jvalidate(r, true, refs);
+  if (query) {
+    for (int64_t i = 0; i < r.input_count; ++i)
+      residentInput(*query, refs, i,
+          r.inputs[i].side ? r.right_rows : r.left_rows, r.inputs[i].input.dtype);
+    query->check(shape.memory.peak_bytes);
+  }
   jbudget(c, r, shape.memory.peak_bytes);
   auto s = std::make_unique<JSession>(c, r, shape);
   auto &q = *s;
@@ -341,7 +409,7 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r) {
   q.request.outputs = q.outputs.data();
   auto start = Clock::now();
   bool hit = false;
-  q.shaders = pipelines(c, jsource(r.key_count, r.how), hit);
+  q.shaders = pipelines(c, jsource(r.key_count, r.how, shape.hash), hit);
   q.stats.pipeline_cache_hit = hit;
   q.stats.pipeline_compile_ns = hit ? 0 : ns(start);
   start = Clock::now();
@@ -361,7 +429,18 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r) {
   q.bprefix = jmake(q, mul(shape.build, 8));
   q.bblocks = jmake(q, mul(shape.bb, 8));
   q.unmatched = jmake(q, mul(shape.build, 4));
+  if (shape.hash) {
+    RadixShape radix(shape.build);
+    auto capacity = hashCapacity(shape.build);
+    q.radixKeys = jmake(q, mul(radix.cap, 8)); q.radixRanks = jmake(q, mul(radix.cap, 4));
+    q.radixHistogram = jmake(q, radix.histogram); q.radixTotals = jmake(q, 64); q.radixArgs = jmake(q, 32);
+    q.hashOwners = jmake(q, mul(capacity, 4)); q.bucketRanges = jmake(q, mul(capacity, 8));
+    auto *args = static_cast<uint32_t *>(q.radixArgs.contents);
+    args[0] = shape.build; args[1] = radix.blocks;
+  }
   for (int64_t i = 0; i < r.input_count; ++i) {
+    if (refs && refs[i].table)
+      continue;
     auto a = r.inputs[i].input;
     auto col = shape.columns[i];
     auto packed = jpacked(col.rows, col.bit);
@@ -401,10 +480,42 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r) {
     e.buf(4, q.meta);
     e.launch("j_unpack", std::max(r.left_rows, r.right_rows), r.input_count);
   }
+  if (refs)
+    for (int64_t i = 0; i < r.input_count; ++i) {
+      if (!refs[i].table)
+        continue;
+      auto &table = *static_cast<Resident *>(refs[i].table);
+      auto params = residentCopy(table, refs[i].column, shape.columns[i].word);
+      e.buf(0, table.values);
+      e.buf(1, table.validity);
+      e.buf(2, q.x);
+      e.buf(3, q.v);
+      e.val(4, params);
+      e.launch("resident_copy", table.rows);
+    }
   if (r.how != 6) {
     e.buf(0, q.sorted);
     e.buf(1, q.meta);
     e.launch("j_init", shape.build);
+    if (shape.hash) {
+      uint32_t capacity = hashCapacity(shape.build);
+      e.buf(0, q.hashOwners); e.val(1, capacity); e.launch("hash_owners_init", capacity);
+      e.buf(0, q.x); e.buf(1, q.v); e.buf(2, q.cols); e.buf(3, q.key); e.buf(4, q.meta);
+      e.buf(5, q.hashOwners); e.buf(6, q.radixKeys); e.val(7, capacity); e.launch("j_hash_build", shape.build);
+      int bits = 0; for (auto cap = capacity; cap; cap >>= 1) ++bits;
+      for (uint32_t shift = 0; shift < uint32_t(bits); shift += 4) {
+        e.buf(0, q.sorted); e.buf(1, q.radixKeys); e.buf(2, q.radixRanks);
+        e.buf(3, q.radixHistogram); e.buf(4, q.radixArgs); e.val(5, shift);
+        e.launch("radix_rank", shape.build, 1, true);
+        e.buf(0, q.radixHistogram); e.buf(1, q.radixTotals); e.buf(2, q.radixArgs);
+        e.launch("radix_prefix", 16 * 256, 1, true);
+        e.buf(0, q.sorted); e.buf(1, q.scratch); e.buf(2, q.radixKeys); e.buf(3, q.radixRanks);
+        e.buf(4, q.radixHistogram); e.buf(5, q.radixTotals); e.buf(6, q.radixArgs); e.val(7, shift);
+        e.launch("radix_scatter", shape.build); std::swap(q.sorted, q.scratch);
+      }
+      e.buf(0, q.sorted); e.buf(1, q.radixKeys); e.buf(2, q.bucketRanges); e.buf(3, q.meta); e.val(4, capacity);
+      e.launch("j_hash_ranges", shape.build);
+    } else
     for (uint64_t width = 1; width < uint64_t(shape.build); width *= 2) {
       e.buf(0, q.sorted);
       e.buf(1, q.scratch);
@@ -427,6 +538,9 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r) {
   e.buf(6, q.ranges);
   e.buf(7, q.prefix);
   e.buf(8, q.diff);
+  if (shape.hash) {
+    e.buf(9, q.hashOwners); e.buf(10, q.bucketRanges); e.val(11, uint32_t(hashCapacity(shape.build)));
+  }
   e.launch("j_match", shape.probe);
   jscan(e, q.prefix, q.pblocks, shape.probe, 0, q.scratch);
   if (r.how == 3) {
@@ -455,18 +569,21 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r) {
   // Check the complete peak before the caller allocates output storage.
   auto rows = q.stats.output_rows, packed = jpacked(rows);
   int64_t result = 0;
-  for (auto o : q.outputs)
-    result = add(
-        result,
-        add(packed, o.dtype == DFM_BOOL ? packed : mul(rows, width(o.dtype))));
+  if (!query || final)
+    for (auto o : q.outputs)
+      result = add(
+          result,
+          add(packed, o.dtype == DFM_BOOL ? packed : mul(rows, width(o.dtype))));
   auto words = mul(mul(std::max<int64_t>(1, rows), r.output_count), 8);
   auto valid = mul(std::max<int64_t>(1, rows), r.output_count),
-       bits = mul(mul(packed, r.output_count), 2);
+       bits = query && !final ? 1 : mul(mul(packed, r.output_count), 2);
   auto shared =
       add(shape.memory.shared_bytes,
           add(add(std::max<int64_t>(1, words), std::max<int64_t>(1, valid)),
               std::max<int64_t>(1, bits)));
   auto peak = add(shared, result);
+  if (query)
+    query->check(peak);
   jbudget(c, r, peak, q.buffers.requested);
   for (auto n : {words, valid, bits})
     if (uint64_t(std::max<int64_t>(1, n)) > c.device.maxBufferLength)
@@ -478,7 +595,9 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r) {
   q.stats.memory.capacity = std::max<int64_t>(1, rows);
   return s;
 }
-void jfinish(JSession &q, const DFMJoinOutput *outputs, int64_t count) {
+void jfinish(JSession &q, const DFMJoinOutput *outputs, int64_t count,
+             Query *query = nullptr, Resident **resident = nullptr,
+             bool final = false) {
   if (q.consumed)
     fail("Metal join session already consumed");
   q.consumed = true;
@@ -491,20 +610,23 @@ void jfinish(JSession &q, const DFMJoinOutput *outputs, int64_t count) {
     auto a = outputs[i], b = q.outputs[i];
     if (a.dtype != b.dtype || a.left != b.left || a.right != b.right ||
         a.prefer_right != b.prefer_right ||
-        (rows && (!a.values || !a.validity)))
+        (!query && rows && (!a.values || !a.validity)))
       fail("Metal join finish output metadata mismatch");
-    result = add(
-        result,
-        add(packed, a.dtype == DFM_BOOL ? packed : mul(rows, width(a.dtype))));
+    if (!query || final)
+      result = add(
+          result,
+          add(packed, a.dtype == DFM_BOOL ? packed : mul(rows, width(a.dtype))));
   }
   auto words = mul(mul(std::max<int64_t>(1, rows), count), 8),
        valid = mul(std::max<int64_t>(1, rows), count),
-       bits = mul(mul(packed, count), 2);
+       bits = query && !final ? 1 : mul(mul(packed, count), 2);
   auto shared =
       add(q.shape.memory.shared_bytes,
           add(add(std::max<int64_t>(1, words), std::max<int64_t>(1, valid)),
               std::max<int64_t>(1, bits)));
   auto peak = add(shared, result);
+  if (query)
+    query->check(peak);
   jbudget(*q.context, r, peak, q.buffers.requested);
   // Validate every output allocation before requesting any of them.
   for (auto n : {words, valid, bits})
@@ -526,13 +648,44 @@ void jfinish(JSession &q, const DFMJoinOutput *outputs, int64_t count) {
   e.buf(11, w);
   e.val(12, uint32_t(count));
   e.launch("j_gather", rows, count);
-  e.buf(0, y);
-  e.buf(1, w);
-  e.buf(2, bitmap);
-  e.buf(3, q.meta);
-  e.val(4, uint32_t(count));
-  e.launch("j_pack", packed, count);
+  if (!query || final) {
+    e.buf(0, y);
+    e.buf(1, w);
+    e.buf(2, bitmap);
+    e.buf(3, q.meta);
+    e.val(4, uint32_t(count));
+    e.launch("j_pack", packed, count);
+  }
   e.wait();
+  if (query) {
+    auto table = std::make_unique<Resident>(*query);
+    table->rows = rows;
+    table->cap = std::max<int64_t>(1, rows);
+    table->packed = packed;
+    table->final = final;
+    table->values = y;
+    table->validity = w;
+    q.buffers.transfer(y, table->buffers);
+    q.buffers.transfer(w, table->buffers);
+    if (final) {
+      table->bitmap = bitmap;
+      q.buffers.transfer(bitmap, table->buffers);
+    }
+    for (int64_t i = 0; i < count; ++i)
+      table->columns.push_back({i, outputs[i].dtype, -1, 0});
+    q.stats.memory.shared_bytes = shared;
+    q.stats.memory.result_bytes = result;
+    q.stats.memory.peak_bytes = peak;
+    q.stats.memory.packed_bytes = bits;
+    q.stats.memory.capacity = table->cap;
+    q.stats.result_copy_ns = 0;
+    if (q.gpu_intervals != q.stats.synchronizations)
+      q.stats.gpu_ns = -1;
+    table->stats = q.stats;
+    table->seal();
+    *resident = table.release();
+    return;
+  }
   auto start = Clock::now();
   for (int64_t i = 0; i < count; ++i) {
     auto o = outputs[i];
@@ -575,6 +728,13 @@ int32_t dfm_join_estimate(const DFMJoinRequest *r, DFMMemory *m, char **err) {
     error(err, e);
     return 1;
   }
+}
+int64_t dfm_join_plan_features(const DFMJoinRequest *r, char **err) {
+  if (err) *err = nullptr;
+  try {
+    if (!r) fail("Missing Metal join feature request");
+    return jvalidate(*r).hash ? 1 : 0;
+  } catch (const std::exception &e) { error(err, e); return -1; }
 }
 int32_t dfm_join_prepare(void *context, const DFMJoinRequest *r, void **session,
                          DFMStats *stats, char **err) {
@@ -619,5 +779,31 @@ int32_t dfm_join_finish(void *session, const DFMJoinOutput *outputs,
 }
 void dfm_join_release(void *session) {
   delete static_cast<JSession *>(session);
+}
+int32_t dfm_resident_join(void *p, const DFMJoinRequest *r,
+    const DFMResidentInput *refs, int64_t count, int64_t final,
+    void **table, DFMStats *stats, char **err) {
+  if (err)
+    *err = nullptr;
+  if (table)
+    *table = nullptr;
+  @autoreleasepool {
+    try {
+      if (!p || !r || !table || !stats || count != r->input_count ||
+          (count && !refs) || (final != 0 && final != 1))
+        fail("Invalid Metal resident join request");
+      auto &query = *static_cast<Query *>(p);
+      std::lock_guard<std::mutex> lock(query.context.mutex);
+      auto q = jprepare(query.context, *r, &query, refs, final);
+      Resident *result = nullptr;
+      jfinish(*q, q->outputs.data(), r->output_count, &query, &result, final);
+      *stats = q->stats;
+      *table = result;
+      return 0;
+    } catch (const std::exception &e) {
+      error(err, e);
+      return 1;
+    }
+  }
 }
 }

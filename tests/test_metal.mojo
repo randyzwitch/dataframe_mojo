@@ -582,8 +582,8 @@ def test_native_fixed_logical_types_preserve_metadata() raises:
 
 
 def _native_integer_row_ops[D: DType]() raises:
-    var values = List[Scalar[D]]()
-    var divisors = List[Scalar[D]]()
+    var values: List[Scalar[D]]
+    var divisors: List[Scalar[D]]
     comptime if D.is_signed():
         values = [-7, -1, 0, 1, 7]
         divisors = [3, -3, 0, -1, 2]
@@ -1371,6 +1371,29 @@ def test_native_join_dag_regions_and_logical_types() raises:
     assert_equal(
         measured[1].column("synchronizations").int64()._get(2), Int64(2)
     )
+    # Both join inputs and its downstream row region use resident handles.
+    # Intermediate regions return only synchronization metadata to the CPU.
+    assert_equal(measured[1].column("upload_bytes").int64()._get(2), Int64(0))
+    assert_true(measured[1].column("resident_input_bytes").int64()._get(2) > 0)
+    for region in range(3):
+        assert_equal(
+            measured[1].column("host_result_bytes").int64()._get(region),
+            Int64(0),
+        )
+        assert_equal(
+            measured[1].column("download_bytes").int64()._get(region), Int64(8)
+        )
+        assert_true(
+            measured[1].column("resident_output_bytes").int64()._get(region) > 0
+        )
+    for region in range(4):
+        assert_true(
+            measured[1]
+            .column("query_peak_requested_bytes")
+            .int64()
+            ._get(region)
+            >= measured[1].column("peak_requested_bytes").int64()._get(region)
+        )
     var grouped = joined.group_by("k", maintain_order=True).agg(
         [col("x").min(), col("x_right").max()]
     )
@@ -1387,6 +1410,14 @@ def test_native_join_dag_regions_and_logical_types() raises:
     )
     assert_true(
         nested.collect(accelerator=runtime).equals(nested.collect(engine="cpu"))
+    )
+    var nested_profile = nested.profile(accelerator=runtime)
+    # The first join stages CPU scans; the second stages only the third scan.
+    assert_true(
+        nested_profile[1].column("resident_input_bytes").int64()._get(1) > 0
+    )
+    assert_equal(
+        nested_profile[1].column("host_result_bytes").int64()._get(0), Int64(0)
     )
     var scalar = (
         frame.lazy()
@@ -1469,6 +1500,70 @@ def test_native_join_budget_and_large_fanout_head() raises:
         .select_exprs([col("id"), col("id_right")])
     )
     assert_true(after_head.collect(accelerator=runtime).equals(measured[0]))
+
+
+def test_native_filtered_reductions_skip_compaction() raises:
+    var tiny = DataFrame([Series("k", Column[Int32]([1, 2]))])
+    var explain = tiny.lazy().filter(col("k") > 0).select(col("k").count())
+    assert_true("without row compaction" in MetalRuntime().describe(explain))
+    if not metal_installed():
+        return
+    var runtime = MetalRuntime()
+    for n in List[Int]([0, 1, 9, 257, 65537]):
+        var keys = List[Int32]()
+        var values = List[Int32]()
+        var floats = List[Float32]()
+        var key_valid = List[Bool]()
+        var value_valid = List[Bool]()
+        var float_valid = List[Bool]()
+        for i in range(n + 1):
+            keys.append(Int32(i % 7 - 3))
+            values.append(Int32(i % 5 - 2))
+            floats.append(Float32(i % 13))
+            key_valid.append(i % 11 != 0)
+            value_valid.append(i % 5 != 0)
+            float_valid.append(i % 3 != 0)
+        var frame = DataFrame(
+            [
+                Series("k", Column[Int32](keys^, key_valid)),
+                Series("v", Column[Int32](values^, value_valid)),
+                Series("f", Column[Float32](floats^, float_valid)),
+            ]
+        ).slice(1, n)
+        for mode in range(3):
+            var filtered = frame.lazy().filter(col("k") > 0)
+            if mode == 1:
+                filtered = filtered.filter(col("k") < 0)
+            elif mode == 2:
+                filtered = frame.lazy().filter(col("k").is_null())
+            var query = filtered.select_exprs(
+                [
+                    col("v").sum().alias("sum"),
+                    col("f").count().alias("count"),
+                    col("k").len().alias("len"),
+                ]
+            )
+            var measured = query.profile(accelerator=runtime)
+            assert_true(measured[0].equals(query.collect(engine="cpu")))
+            assert_equal(
+                measured[1].column("algorithm").string()._get(0),
+                String("native_metal_predicate_reductions"),
+            )
+            assert_equal(
+                measured[1].column("synchronizations").int64()._get(0), Int64(1)
+            )
+            var min_count = filtered.select(col("v").sum(min_count=5))
+            assert_true(
+                min_count.collect(accelerator=runtime).equals(
+                    min_count.collect(engine="cpu")
+                )
+            )
+            if n >= 257 and mode == 0:
+                var rows = filtered.profile(accelerator=runtime)
+                assert_true(
+                    measured[1].column("shared_buffer_bytes").int64()._get(0)
+                    < rows[1].column("shared_buffer_bytes").int64()._get(0)
+                )
 
 
 def main() raises:

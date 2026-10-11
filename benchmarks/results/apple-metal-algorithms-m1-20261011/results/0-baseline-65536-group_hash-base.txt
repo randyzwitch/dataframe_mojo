@@ -1,0 +1,27 @@
+FIRST 1562000 93739000
+WORKERS 8
+OUTPUT_ROWS 1024
+SAMPLE 0 1215000 3181000
+SAMPLE 1 1195000 3643000
+SAMPLE 2 1205000 3209000
+SAMPLE 3 1176000 3693000
+SAMPLE 4 1273000 3283000
+SAMPLE 5 1248000 3572000
+SAMPLE 6 1275000 3173000
+PROFILE_I upload_bytes 540728
+PROFILE_I download_bytes 16768
+PROFILE_I shared_buffer_bytes 11731133
+PROFILE_I host_result_bytes 1073152
+PROFILE_I peak_requested_bytes 12804285
+PROFILE_I kernel_launches 46
+PROFILE_I synchronizations 1
+PROFILE_F wall_ms 3.184
+PROFILE_F pipeline_compile_ms 0.0
+PROFILE_F staging_copy_ms 0.0105
+PROFILE_F submit_wait_ms 2.845959
+PROFILE_F result_copy_ms 0.017792
+PROFILE_F initialization_ms 0.0
+PROFILE_F gpu_ms 2.559
+BUILD_ID 0742b361ff93eae5b98dc4ed7bf9cfe9872bbc630dc2a24affa0847a5863faf9
+PROFILE_S algorithm specialized_native_metal_stable_compaction
+VALIDATED True

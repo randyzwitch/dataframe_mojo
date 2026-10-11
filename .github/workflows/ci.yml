@@ -61,7 +61,7 @@ jobs:
       # One cache restore/build per run, even on a cold cache. All Linux
       # consumers use this exact artifact, including on fork PRs.
       - uses: ./.github/actions/setup-parquet
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: dfparquet-linux
           path: build/dfparquet/libdfparquet.so
@@ -73,16 +73,21 @@ jobs:
 
   unit-linux:
     needs: native-linux
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: dfparquet-linux
-          path: build/dfparquet
+      - name: Download native Parquet artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          --name dfparquet-linux --dir build/dfparquet
       - name: Verify Parquet exports and loader search paths
         run: python3 scripts/ci_time.py --label parquet-loader -- pixi run bash scripts/check_parquet_library.sh build/ci-tests/test_parquet
       # Keep the measured Linux memory bound: two grouped programs, serial.
@@ -122,16 +127,21 @@ jobs:
 
   oracles:
     needs: native-linux
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: dfparquet-linux
-          path: build/dfparquet
+      - name: Download native Parquet artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          --name dfparquet-linux --dir build/dfparquet
       - name: Differential tests against Polars
         env:
           ORACLE_SEED: ${{ github.run_number }}
@@ -143,6 +153,9 @@ jobs:
 
   answers:
     needs: native-linux
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -157,10 +170,12 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: dfparquet-linux
-          path: build/dfparquet
+      - name: Download native Parquet artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          --name dfparquet-linux --dir build/dfparquet
       - name: Query answers (smoke scale)
         env:
           SUITES: ${{ matrix.suites }}
@@ -171,7 +186,7 @@ jobs:
           --engines mojo,duckdb --threads 4
       - name: Upload query answers
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: query-answers-${{ matrix.name }}
           path: build/suites/answers.json

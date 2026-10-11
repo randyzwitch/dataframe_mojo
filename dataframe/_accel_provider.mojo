@@ -3,6 +3,7 @@
 Presence checks do not open a driver. CPU collection never initializes Metal.
 The optional NVIDIA package builder can replace this module in its staged tree.
 """
+from .accelerator.cost import PlanEstimate, CalibrationKey
 from .frame import DataFrame
 from .lazy import LazyFrame
 from std.os import getenv
@@ -52,18 +53,38 @@ def execute_profiled(plan: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
     return execute(plan)
 
 
+def calibration_runtime() raises -> MetalRuntime:
+    """Explicit runtime factory for the provider-neutral benchmark driver."""
+    return _runtime()
+
+
+def calibration_key(
+    optimize: Bool, streaming: Bool, batch_size: Int
+) raises -> CalibrationKey:
+    """Provider metadata for the common calibration harness; no submission."""
+    return _runtime().calibration_key(optimize, streaming, batch_size)
+
+
+def estimate_auto(plan: LazyFrame) raises -> PlanEstimate:
+    """Plan-time facts required by the provider-neutral calibration runner."""
+    return _runtime().estimate_auto(plan)
+
+
 def select_auto(
     plan: LazyFrame,
     optimize: Bool,
     streaming: Bool,
     batch_size: Int,
 ) -> Tuple[String, String]:
-    """Select before execution; optional providers own capability and cost gates."""
+    """Select before execution; providers supply facts to the shared analytical cost selector."""
     if installed():
-        return (
-            "cpu",
-            "auto uses CPU; Metal has no matched end-to-end cost evidence",
-        )
+        try:
+            return _runtime().select_auto(plan, optimize, streaming, batch_size)
+        except error:
+            return (
+                "cpu",
+                "automatic analytical preflight rejected: " + String(error),
+            )
     return ("cpu", "auto uses CPU; accelerator provider is not installed")
 
 
@@ -75,4 +96,8 @@ def execute_auto(
     profiling: Bool,
 ) raises -> Tuple[DataFrame, DataFrame]:
     """Execute a selected region; execution errors must propagate to callers."""
-    return execute(plan)
+    return (
+        _runtime()
+        .execute_profiled(plan) if profiling else _runtime()
+        .execute(plan)
+    )

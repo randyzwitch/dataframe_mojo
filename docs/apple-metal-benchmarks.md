@@ -41,7 +41,8 @@ ABI precision and overflow suite; they are not an independent SQL oracle.
 
 Cases cover a simple projection, a 15-repetition single expression, a 32-stage projection
 chain, filters retaining about half or one percent of rows, count/length after a
-filter, and exact Int32 sum. Base, sorted, and nullable/permuted distributions
+filter, exact Int32 sum, filtered Int32 sum, and a filter whose predicate column
+is omitted from the output. Base, sorted, and nullable/permuted distributions
 all run by default. Float32 inputs are exact multiples of 1/1024. Int32 sum
 inputs stay small enough that the final Int32 result fits. The raw record states
 the deterministic input recipe. The report includes every variant and each
@@ -117,3 +118,29 @@ comparisons. Filtering and the tested reductions favor CPU, sometimes strongly.
 The full report includes smaller inputs, where startup and launch costs matter
 more. First-use numbers remain separate from warm medians. There is no general
 GPU-win claim and no automatic-selection threshold derived from this matrix.
+
+## Filtered reductions and gather liveness, M1, 2026-10-10
+
+The [filtering report](../benchmarks/results/apple-metal-filter-m1-20261010/results.md)
+and [raw record](../benchmarks/results/apple-metal-filter-m1-20261010/results.json)
+retain 72 successful processes: three workloads, two row counts, three data
+variants, two native builds, and two rounds with seven warm samples per engine.
+All measured outputs passed exact CPU-reference checks. The same optimized
+runner and CPU engine compare the resident runtime before and after predicate
+reductions and gather liveness; both native builds already include buffer reuse.
+The [source manifest](../benchmarks/results/apple-metal-filter-m1-20261010/source-manifest.json)
+identifies the modified engine and both native sources. Raw process stdout is
+retained beside the report. First-use measurements remain separate in the JSON.
+
+At 8,388,608 rows in the base variant, complete warm Metal count/length
+collections fell from 22.919 ms to 10.957 ms, about 2.09 times faster. Launches
+fell from eight to five, and requested shared buffers fell from 357.16 MiB to
+165.03 MiB. Filtered integer sum fell from 16.706 ms to 10.923 ms, about
+1.53 times faster, with shared buffers falling from 275.14 MiB to 123.02 MiB.
+Omitting the predicate-only column from gathers removed one launch; its base
+median fell from 30.546 ms to 28.948 ms.
+
+CPU remained faster for every selected workload/row-count/variant median.
+These changes reduce GPU overhead but do not justify automatic GPU selection
+for the measured filtering cases. They are development measurements, not an
+external-suite score or held-out calibration evidence.

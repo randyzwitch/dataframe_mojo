@@ -24,7 +24,7 @@ def main() raises:
         original._export_to_c(a, s)
         var frame = import_arrow(a, s)
         # Release all producer references before export.
-        original = Python.none()
+        _ = original^
         export_arrow(frame, a, s)
         var back = pa.RecordBatch._import_from_c(a, s)
         assert_true(

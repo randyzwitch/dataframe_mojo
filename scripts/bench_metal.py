@@ -18,6 +18,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKLOADS = [
+    "sort_radix",
+    "group_hash",
+    "group_high",
+    "join_hash",
     "projection",
     "expression15",
     "chain32",
@@ -25,6 +29,8 @@ WORKLOADS = [
     "filter_sparse",
     "count",
     "int_sum",
+    "filtered_int_sum",
+    "filter_unused",
 ]
 VARIANTS = ["base", "sorted", "nulls"]
 
@@ -86,9 +92,9 @@ def metadata(binary, libraries, threads):
         },
         "method": "Fresh process per case/build/round; first-use collections retained separately; two extra warmups per engine; alternating CPU/Metal timed order; process/build order rotated per round; inputs and exact CPU-reference validation untimed; complete result materialization timed; result release untimed.",
         "scope": "Development mechanisms only, not external-suite evidence or a general GPU speedup. Chain32 includes fusion advantages over the current CPU executor.",
-        "data": "Deterministic 1024-value numeric distribution. Base cycles; sorted uses monotone Float32 or Int32 bins; nulls permutes bins with fixed LCG constants and marks exactly every twentieth row invalid. Float32 values are exact multiples of 1/1024; Int32 values are bin modulo 17 minus 8.",
+        "data": "Row mechanisms use a deterministic 1024-value numeric distribution. Algorithm cases use Int32 keys: group_hash has min(N,1024) classes; group_high, join_hash and sort_radix have max(1,N/2) classes. Base keys are (37*i) modulo cardinality; sorted keys are monotone bins. Null variants invalidate every twentieth key; grouped values additionally invalidate every thirteenth row. Grouped sums use i modulo 17 minus 8; sort and self-left-join carry original Int64 row IDs. Float32 row values are exact multiples of 1/1024.",
         "limitations": [
-            "No external-suite coverage claimed; joins, group-by, Float64 and floating reductions are outside these cases.",
+            "No external-suite coverage claimed; Float64 and floating reductions are outside these cases. Algorithm comparisons preserve complete output order and values against CPU.",
             "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
             "CPU and GPU share host memory and power limits; short timings can vary with scheduler and thermal state.",
             "Native profile is a separate warm collection after timed samples; its GPU interval is not a caller-wall substitute.",
@@ -123,6 +129,8 @@ def parse_run(output, reps):
             result["profile"][parts[1]] = (
                 int if kind == "PROFILE_I" else float
             )(parts[2])
+        elif kind == "PROFILE_S":
+            result["profile"][parts[1]] = " ".join(parts[2:])
         elif kind == "BUILD_ID":
             result["runtime_build_id"] = parts[1]
         elif kind == "VALIDATED":
@@ -133,8 +141,9 @@ def parse_run(output, reps):
         or "first_use_ns" not in result
     ):
         raise ValueError("Missing correctness marker or timed samples")
-    if result["profile"].get("synchronizations") != 1:
-        raise ValueError("Expected one native synchronization")
+    waits = 2 if "join" in result["profile"].get("algorithm", "") else 1
+    if result["profile"].get("synchronizations") != waits:
+        raise ValueError("Unexpected native synchronization count")
     return result
 
 

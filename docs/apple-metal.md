@@ -88,9 +88,13 @@ key columns for full joins with `coalesce=False`.
 
 The complete join DAG is bound before device initialization. Supported row
 regions can feed a join and follow its result, including further joins and
-grouped or scalar reductions. Intermediate regions currently materialize CPU
-columns and stage them again for their next consumer. These boundaries appear
-in profiles; a multi-region join query is not a single resident submission.
+grouped or scalar reductions. Intermediate results remain in native Metal
+buffers. Consumers read their words and validity on the GPU without constructing
+CPU columns or staging intermediate payloads. Original CPU scans stage at their
+first consumer; only the final result becomes ordinary CPU columns. Immutable
+result handles retain their query and context and are released after their last
+consumer. Regions still synchronize for errors and cardinality, so a resident
+DAG is not a single command-buffer submission.
 Checked integer arithmetic, strict casts, and checked Int32/UInt32 sums in
 join inputs require CPU execution because those inputs are not terminal
 observable boundaries. Pure expressions and bounded Int8/Int16/UInt8/UInt16
@@ -168,8 +172,9 @@ Integer-to-Float32 casts use native conversion. The CPU cast contract rounds
 through Float64 first; a small region around Float32 halfway points above
 2**53 can therefore double-round differently. Kernels detect that region and
 require CPU execution without emulating Float64. Value-dependent precision
-failures are reported during execution. Automatic selection remains
-on CPU until matched end-to-end cost evidence is available.
+failures are reported during execution. Automatic selection uses the shared
+analytical cost policy when a matching validated calibration is configured;
+otherwise it selects CPU before submission.
 
 ## Memory, synchronization, and profiles
 
@@ -188,15 +193,36 @@ its inputs once and uses two waits: matching determines cardinality, then a
 second submission gathers and packs the output. Shared memory still
 requires synchronization; CPU code never reads an in-flight GPU result.
 
+Each context keeps up to 64 idle shared buffers, bounded by the smaller of
+256 MiB and one sixteenth of the device's recommended working set. Repeated
+collections reuse exact-size allocations; recycled storage is cleared before
+use. Shape changes release unmatched idle storage before allocating. Live join
+sessions retain exclusive ownership of their buffers, and storage enters the
+idle cache only after submitted GPU work has drained. Idle bytes are reclaimable
+for headroom checks; explicit payload estimates still count every live request
+allocation. Native callers can inspect or release idle storage with
+`dfm_workspace_info` and `dfm_workspace_trim` without invalidating live sessions.
+
 Consecutive projection steps, including the next filter predicate, execute in
 one specialized kernel. Intermediate expression values stay in thread-local
 variables. Shared matrices hold input columns, final outputs, filter predicates,
-and values needed after a filter boundary. Dead temporary slots are omitted from
-stable gathers. Operator rounding, validity, and precision/overflow guards remain
+and values needed after a filter boundary. Backward use analysis omits columns
+from stable gathers when they are needed only before that boundary. Operator
+rounding, validity, and precision/overflow guards remain
 in the fused expression sequence.
 
+Filtered scalar count, length, and supported integer sums consume predicate
+states directly when no sort or group operation intervenes. These queries do
+not allocate the second value matrix, prefix ranks or block offsets, and do not
+compact selected rows. Later expression segments run only on lanes retained by
+all preceding predicates. Length counts selected rows even when their values
+are null; count and sum retain their own validity and `min_count` contracts.
+Profiles identify this path as `native_metal_predicate_reductions`. Row outputs
+still use stable compaction, and other scalar reductions retain their existing
+execution path.
+
 Preflight uses this same physical slot layout and counts each requested shared
-buffer once, both matrices when filtering,
+buffer once, both matrices when row compaction is needed,
 prefix ranks and block offsets, bitmap windows, typed literals, output bitmaps,
 reduction partials/results, GPU descriptors, metadata, and error storage. It also
 counts the worst-case CPU result allocation. Checked arithmetic rejects size
@@ -213,9 +239,13 @@ build rows in original order. After the first wait, the runtime checks the
 complete matching-plus-output peak against the payload budget and maximum
 buffer length before the caller allocates CPU result columns. It checks current
 headroom again before output submission. Budget failure can therefore occur
-after matching, while caller outputs remain untouched. Estimates and profile
-peaks are per region; retained CPU inputs and intermediate frames are outside
-the requested payload estimate.
+after matching, while caller outputs remain untouched. Resident DAG budgets
+include every live intermediate buffer, the current region's allocations, and
+the final CPU result reservation. Shared owners are counted once; branches
+retain their allocation until their last consumer. Region profiles still show
+their own requested allocations, while `query_peak_requested_bytes` reports the
+complete requested peak. Retained original CPU inputs remain outside this
+payload estimate.
 
 Profiles report observed launch and wait counts; upload/download traffic;
 requested shared/result bytes; pipeline cache hits and compilation time;
@@ -228,6 +258,15 @@ have one row per executed region, with per-region `wall_ms`; `query_wall_ms`
 reports the complete DAG duration including preflight and materialization. `runtime_build_id` fingerprints the native
 source, ABI, compiler, SDK, and build flags.
 
+`resident_input_bytes` and `resident_output_bytes` identify retained native
+payloads at each region boundary. Intermediate regions report zero CPU result
+bytes and download only synchronization metadata (plus scalar checks for checked
+sums); their consumers report no upload traffic for those resident columns.
+Scalar reduction results can also feed a join or another row region without
+copying their payloads through CPU columns. Resident DAGs require the additive
+resident ABI version 1; older row-only and two-phase join interfaces retain their
+existing layouts.
+
 Submission errors propagate. The bridge drains committed work before releasing
 buffers or returning an error; execution never retries the query on CPU after a
 GPU fault. Output owners and source owners remain alive across that boundary.
@@ -237,6 +276,7 @@ GPU fault. Output owners and source owners remain alive across that boundary.
 ```sh
 python3 native/dfmetal/test_native.py
 python3 native/dfmetal/test_join.py
+python3 native/dfmetal/test_resident.py
 pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
 ```
@@ -258,3 +298,94 @@ parity cases also cover nested joins, row regions on both sides, post-join
 grouping and sorting, scalar reduction inputs, logical metadata, and profiling
 of the two synchronization points. Hosted macOS VMs still run pure ABI
 validation when no GPU is exposed.
+
+The resident suite checks row/join/row pipelines, multiple consumers, scalar
+handoffs, all native dtypes, empty and nullable inputs, exact UInt64 and Float32
+payloads, whole-query budget rejection, invalid output metadata, failure
+recovery, and tables that outlive the caller's query and context handles.
+
+Native grouping and joins now have bounded hash paths. Hash grouping preserves
+first-occurrence group order and verifies complete composite keys after hashing;
+hash joins preserve left and right duplicate order and every join type's null
+contract. Float32 hashes canonicalize signed zero and NaN equivalence while
+retaining the first original key payload in the output. Hash tables are limited
+to inputs between 4,096 and 8,388,608 rows. Sorted fallback remains available;
+explicit join budgets use that fallback.
+
+Integer sorting can use stable four-bit radix passes for 65,536 through
+8,388,608 input rows when the total key width requires at most 18 passes.
+Null placement, signed integer order, descending order, and stable multikey ties
+retain the public sort contract. Float32 keys and sorts following grouping use
+the merge path. If radix/group hash scratch would exceed an explicit row budget,
+the estimator and execution both select the bounded fallback.
+
+The additive plan-feature functions expose the selected native mechanism in
+profiles. Native ABI, join, and resident suites passed on Apple Silicon, and all
+19 public Mojo Metal tests passed with the rebuilt library loaded. New fixtures
+exercise the hash threshold on both sides, composite nullable keys, signed-zero
+and NaN equivalence, radix ordering, bounded fallback, and error recovery. These
+correctness results do not establish performance crossovers for the dispatch
+bounds. Matched M1 development measurements are now available in
+[`apple-metal-algorithms-m1-20261011`](../benchmarks/results/apple-metal-algorithms-m1-20261011/README.md):
+hash joins improve all selected cases, while grouping depends on cardinality
+and input order. Radix sorting is slower than the preserved merge path in all
+six selected cases. These bounds therefore remain structural eligibility bounds,
+not validated performance crossovers. Explicit Metal selection can regress for
+these mechanisms; the analytical automatic policy excludes them.
+
+String and categorical frame inputs use a query-wide ordered UInt32 dictionary.
+All inputs and string literals share the same mapping, so equality and ordering
+remain correct across independently encoded categorical inputs. Filtering,
+sorting, grouping, joins, and projection run on native codes; the final result
+restores String values or each output's original categorical dictionary. UTF-8
+values, empty strings, nulls, and unused categorical members retain their public
+semantics. Dictionary plans currently reject explicit casts.
+
+Encoding and decoding are host staging work. Profiles include
+`dictionary_staging_bytes`, `dictionary_encode_ms`, and `dictionary_decode_ms`;
+`query_wall_ms` includes both boundaries. An explicit payload budget reserves
+source code storage and dictionary bytes before native execution, and checks a
+conservative restoration bound before allocating decoded outputs. Cross-input
+categorical parity passed for all seven join types, including unmatched full
+join keys and nulls. The four public dictionary tests also cover string filter,
+sort, grouped sums, output metadata, profiling, and budget rejection.
+
+Metal implements the shared backend's `estimate_auto`, `calibration_key`, and
+`select_auto` methods for the common numeric row subset. Estimates use bound
+expression counts and native launch, transfer, and allocation bounds without
+reading source values. The additive native metadata probe does not create a
+context, command queue, buffers, or pipelines. It reports device identity,
+memory headroom, and whether the exact row pipeline is already cached.
+
+Calibration keys include native and CPU build identities, device and host
+identity, worker count, and execution options. An identified package is required;
+development source, missing or stale evidence, unsupported plans, and rejected
+memory estimates select CPU. Grouping, sorting, joins, and dictionary staging
+currently require explicit accelerator selection because their complete costs
+are outside the calibrated numeric row model. Errors after device submission
+propagate to the caller.
+
+The provider-neutral `scripts/bench_accelerator_cost.py` runner records cold and
+warm whole-query timings, parity, preflight overhead, package hashes, generated
+training queries, and separate held-out query identities. Failed observations
+remain in the evidence. Coefficients and residual envelopes are frozen before
+held-out validation; rejected models cannot enable automatic GPU execution.
+Its regret report replays the policy against measured explicit-engine samples;
+it does not measure automatic-execution latency directly.
+
+
+The packaged M1 cost collection is preserved in
+[`apple-metal-cost-m1-20261011`](../benchmarks/results/apple-metal-cost-m1-20261011/README.md).
+Of 284 training and 128 held-out cases, 117 and 104 respectively succeeded;
+unsupported cases remain in the raw evidence. The frozen Float32 model passed
+its accelerator-safety gate; Int32 lacked validation coverage. All 208 replayed
+held-out cold/warm decisions selected CPU, including 46 slower-engine choices.
+The model therefore misses useful longer-expression placements. No calibration
+from this collection is installed or enabled, and no external-suite performance
+claim follows from it.
+
+A clean identified package also passed 20 provider-neutral consumer modes,
+including a synthetic matching calibration that executes a real Metal query,
+stale and missing evidence selecting CPU, and submitted strict-cast errors
+propagating followed by successful recovery. The synthetic calibration is
+isolated test data and is never installed as measured evidence.
