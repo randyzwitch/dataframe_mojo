@@ -17,7 +17,14 @@ summary. The subsequent dictionary invocation omitted the explicit native
 library setting and failed its installation assertions; the corrected complete
 dictionary/policy run is preserved in `dictionary-policy-tests.log`.
 
-The clean package build and matched Metal cost collection remain pending the
-specific repository-bundle transfer approval. Source tests do not establish
-automatic-placement calibration or performance crossovers for hash and radix
-dispatch. No new calibration has been enabled.
+The repository bundle was subsequently transferred with approval and built as a
+clean identified package in `/tmp/apple-final-validation` on the Mac. The
+provider-neutral packaged consumer passed all 20 modes, including real Metal
+automatic execution under synthetic test calibration, CPU fallback for stale or
+invalid evidence, and device error propagation/recovery. The synthetic fixture
+was never installed. `package-consumer.log` preserves the output.
+
+Matched packaged cost collection is complete; see
+[the cost evidence](../apple-metal-cost-m1-20261011/README.md). No calibration was
+enabled. Hash/radix performance evidence is recorded separately from these
+correctness and package checks.

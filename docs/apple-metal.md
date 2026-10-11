@@ -366,3 +366,20 @@ remain in the evidence. Coefficients and residual envelopes are frozen before
 held-out validation; rejected models cannot enable automatic GPU execution.
 Its regret report replays the policy against measured explicit-engine samples;
 it does not measure automatic-execution latency directly.
+
+
+The packaged M1 cost collection is preserved in
+[`apple-metal-cost-m1-20261011`](../benchmarks/results/apple-metal-cost-m1-20261011/README.md).
+Of 284 training and 128 held-out cases, 117 and 104 respectively succeeded;
+unsupported cases remain in the raw evidence. The frozen Float32 model passed
+its accelerator-safety gate; Int32 lacked validation coverage. All 208 replayed
+held-out cold/warm decisions selected CPU, including 46 slower-engine choices.
+The model therefore misses useful longer-expression placements. No calibration
+from this collection is installed or enabled, and no external-suite performance
+claim follows from it.
+
+A clean identified package also passed 20 provider-neutral consumer modes,
+including a synthetic matching calibration that executes a real Metal query,
+stale and missing evidence selecting CPU, and submitted strict-cast errors
+propagating followed by successful recovery. The synthetic calibration is
+isolated test data and is never installed as measured evidence.
