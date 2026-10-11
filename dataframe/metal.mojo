@@ -1373,7 +1373,9 @@ struct MetalRuntime(AcceleratorBackend):
             if plan.node_dtypes[i] == DataType.FLOAT64:
                 emulated = True
             if plan.node_dtypes[i].is_float() and (
-                plan.code[i * 4] == ROUND or plan.code[i * 4] == SQRT
+                plan.code[i * 4] == ROUND
+                or plan.code[i * 4] == SQRT
+                or plan.code[i * 4] == FLOORDIV
             ):
                 emulated = True
         for output in plan.outputs:
