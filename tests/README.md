@@ -27,12 +27,12 @@ The runner discovers test functions automatically; named groups, strict known
 failures and capability gates live in
 [tooling/suite_policy.mojo](tooling/suite_policy.mojo).
 
-Default `--packaging combined` compiles ordinary tests into one executable while
-retaining contract areas, canonical case IDs and per-area fixtures. Ordinary
-assertion failures still allow later cases and areas to run. Use `--packaging areas`
-to build areas separately when diagnosing a compile error or unexpected process
-crash, which otherwise affects the entire ordinary bundle. Both modes compile one
-fatal dispatcher and launch a fresh process for each selected full case ID.
+Default `--packaging areas` builds one ordinary executable per contract area and
+continues after area build or process failures. `--packaging combined` explicitly
+shares one ordinary executable and can require substantially more compiler memory.
+Both modes compile one fatal dispatcher and launch a fresh process for each
+selected full case ID. A full default run therefore builds seven executables
+instead of sixteen, while retaining contract areas, canonical IDs and fixtures.
 Run metadata and logs are stored under `build/contract-tests/`. See the
 [packaging evidence](tooling/PERFORMANCE.md) for measurements and their limits.
 

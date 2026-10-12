@@ -4,12 +4,14 @@ Source files follow the coverage plan. Executable packaging controls how often
 shared dataframe code is compiled; merging files within an existing area would
 remove no compiler invocation.
 
-The default `combined` mode builds one ordinary executable. `--packaging areas`
-retains separate area executables for diagnosis and process isolation. Both modes
-build fatal cases once into a shared dispatcher, then run each selected canonical
+The default `areas` mode retains one ordinary executable per contract area.
+Both modes build fatal cases once into a shared dispatcher, then run each canonical
 `module::function` ID in a fresh process with its own fixture directory and
 one-worker baseline. Exact platform exit status and diagnostic checks remain
 mandatory for every fatal case; a shared build does not establish a test result.
+A full default run builds six ordinary executables and one fatal executable,
+reducing compiler invocations from sixteen to seven. Explicit `--packaging combined`
+shares the ordinary executable too, at the cost of greater compilation memory.
 
 ## Evidence
 
@@ -38,8 +40,11 @@ compilation to 225.17 s; unchanged-driver timings must not be averaged with fres
 builds. The precise compiler reuse mechanism was not isolated.
 
 Peak individual compiler RSS changed from 5.43 to 5.50 GiB for the initial ordinary
-sample and from 3.85 to 3.92 GiB for fatal cases. Full combined compilation may
-require more memory; subset measurements do not establish hosted-runner capacity.
+sample and from 3.85 to 3.92 GiB for fatal cases. An independent full Linux
+combined build subsequently exceeded 12 GiB RSS during compilation. That observed
+lower bound is not a final peak or a macOS measurement. The uniform default keeps
+area executables for portability; combined remains opt-in because subset results
+do not establish full-suite memory capacity on supported CI hosts.
 
 ## Correctness requirements
 
@@ -50,6 +55,6 @@ requires an available device and explicit capability selection. Its existing
 workflow selects one area; that hardware check does not establish Metal behavior
 inside a full six-area combined executable.
 
-`--packaging areas` remains available when a compiler failure, unexpected abort
-or shared process state requires narrower isolation. No test expectations or
-production algorithms need to change to consolidate compilation.
+Area executables retain ordinary-test process isolation; the fatal dispatcher
+retains fresh-process isolation per case. No test expectations or production
+algorithms need to change to consolidate compilation.

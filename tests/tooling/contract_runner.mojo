@@ -11,7 +11,7 @@ from std.memory import Pointer
 from dataframe.json_value import json_quote
 from tests.tooling.suite_policy import SuitePolicy
 
-comptime DEFAULT_PACKAGING = "combined"
+comptime DEFAULT_PACKAGING = "areas"
 comptime AREAS = (
     "public",
     "storage",

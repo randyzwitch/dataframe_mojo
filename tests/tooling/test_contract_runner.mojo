@@ -232,6 +232,7 @@ def _run_fixture(
 
 
 def test_compile_and_execution_failures_do_not_hide_later_areas() raises:
+    assert_equal(String(DEFAULT_PACKAGING), "areas")
     for scenario in ["none", "compile", "execute"]:
         var metadata = _run_fixture(_root(), scenario, False, "areas")
         assert_equal(metadata.get("packaging").string(), "areas")
@@ -247,10 +248,9 @@ def test_compile_and_execution_failures_do_not_hide_later_areas() raises:
             assert_equal(failures[0].string(), "public:" + scenario)
 
 
-def test_default_combined_packaging_keeps_selection_and_reports_shared_process_failures() raises:
-    assert_equal(String(DEFAULT_PACKAGING), "combined")
+def test_explicit_combined_packaging_keeps_selection_and_reports_shared_process_failures() raises:
     for scenario in ["none", "compile", "execute"]:
-        var metadata = _run_fixture(_root(), scenario, False)
+        var metadata = _run_fixture(_root(), scenario, False, "combined")
         assert_equal(metadata.get("packaging").string(), "combined")
         assert_equal(len(metadata.get("cases").get("public").items()), 1)
         assert_equal(len(metadata.get("cases").get("storage").items()), 1)
@@ -616,7 +616,7 @@ def main() raises:
     ]()
     suite.test[test_compile_and_execution_failures_do_not_hide_later_areas]()
     suite.test[
-        test_default_combined_packaging_keeps_selection_and_reports_shared_process_failures
+        test_explicit_combined_packaging_keeps_selection_and_reports_shared_process_failures
     ]()
     suite.test[
         test_isolated_failures_require_exact_exit_and_diagnostic_and_reject_xpass
