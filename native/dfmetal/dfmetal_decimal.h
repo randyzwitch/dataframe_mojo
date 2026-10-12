@@ -115,6 +115,30 @@ inline DecimalCast decimal_scale_checked(ulong2 value, uint scale) {
   return {value, true};
 }
 struct DecimalComparison { bool value; bool valid; };
+struct DecimalArithmetic { ulong2 value; uint error; };
+inline DecimalArithmetic decimal_add_subtract(ulong2 left, ulong2 right,
+                                               uint leftScale, uint rightScale,
+                                               bool subtract) {
+  uint common = leftScale > rightScale ? leftScale : rightScale;
+  DecimalCast a = decimal_scale_checked(left, common - leftScale);
+  DecimalCast b = decimal_scale_checked(right, common - rightScale);
+  if (!a.valid || !b.valid) return {ulong2(0), 1};
+  ulong2 value = ulong2(0);
+  if (subtract) value = decimal_wide_subtract(a.value, b.value);
+  else {
+    ulong low = a.value.x + b.value.x;
+    value = ulong2(low, a.value.y + b.value.y + ulong(low < a.value.x));
+  }
+  // CPU addition/subtraction wraps at Int128 before its precision check.
+  return {value, decimal_wide_ge(decimal_magnitude(value), decimal_wide_pow10(38)) ? 2U : 0U};
+}
+inline DecimalArithmetic decimal_unary(ulong2 value, uint bits, bool absolute) {
+  ulong2 minimum = bits == 128 ? ulong2(0, 0x8000000000000000UL) :
+      bits == 64 ? ulong2(0x8000000000000000UL, ~0UL) :
+                   ulong2(0xffffffff80000000UL, ~0UL);
+  if (value.x == minimum.x && value.y == minimum.y) return {ulong2(0), 3};
+  return {(!absolute || (value.y >> 63)) ? decimal_negate(value) : value, 0};
+}
 inline DecimalComparison decimal_compare(ulong2 left, ulong2 right,
                                           uint leftScale, uint rightScale,
                                           uint op) {

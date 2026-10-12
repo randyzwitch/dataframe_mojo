@@ -356,6 +356,7 @@ def _capabilities() -> RowCapabilities:
         decimal_float_cast=True,
         decimal_casts=True,
         decimal_comparisons=True,
+        decimal_arithmetic=True,
         reuse_column_slots=True,
         proven_integer_operations=True,
         max_nodes=128,
@@ -696,6 +697,28 @@ struct _Descriptors(Movable):
                             | self.code[4 * i] << 12
                         )
                         self.code[4 * i] = 218
+                if plan.node_dtypes[i].is_decimal() and (
+                    plan.code[4 * i] == ADD
+                    or plan.code[4 * i] == SUB
+                    or plan.code[4 * i] == NEG
+                    or plan.code[4 * i] == ABS
+                ):
+                    var operand = Int(plan.code[4 * i + 1])
+                    var source = plan.node_dtypes[step.start + operand]
+                    if plan.code[4 * i] == ADD or plan.code[4 * i] == SUB:
+                        var other = Int(plan.code[4 * i + 2])
+                        self.code[4 * i + 3] = (
+                            Int64(source.scale())
+                            | Int64(
+                                plan.node_dtypes[step.start + other].scale()
+                            )
+                            << 6
+                            | self.code[4 * i] << 12
+                        )
+                        self.code[4 * i] = 219
+                    else:
+                        self.code[4 * i + 3] = self.code[4 * i]
+                        self.code[4 * i] = 220
                 if plan.code[4 * i] == CAST:
                     var operand = Int(plan.code[4 * i + 1])
                     if operand >= 0:
@@ -1662,6 +1685,16 @@ struct MetalRuntime(AcceleratorBackend):
                         decimal_casts = True
         if decimal_casts:
             family += ";metal-decimal-casts-v1"
+        var decimal_arithmetic = False
+        for i in range(len(plan.node_dtypes)):
+            decimal_arithmetic |= plan.node_dtypes[i].is_decimal() and (
+                plan.code[4 * i] == ADD
+                or plan.code[4 * i] == SUB
+                or plan.code[4 * i] == NEG
+                or plan.code[4 * i] == ABS
+            )
+        if decimal_arithmetic:
+            family += ";metal-decimal-arithmetic-v1"
         var decimal_comparisons = False
         for step in plan.steps:
             for i in range(step.start, step.start + step.nodes):
