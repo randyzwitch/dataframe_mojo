@@ -529,7 +529,7 @@ Rows(
 ).run(q, failure="overflow")
 assert information(q, query=True).live == 0
 # More than 64 logical columns retain raw signed words and bitmap offsets.
-for count in (65, 128):
+for count in (65, 128, 129, 255, 256):
     columns = [
         (3, [(1 << 63) - 1 - c * 32 - i for i in range(17)],
          [(c + i) % 5 != 2 for i in range(17)])
@@ -542,7 +542,7 @@ for count in (65, 128):
         assert all(not ok or got == want for got, want, ok in zip(actual, expected, valid))
     lib.dfm_resident_release(table)
     assert information(q, query=True).live == 0
-Rows([(2, [1], None)] * 129).run(q, failure="Invalid Metal request shape")
+Rows([(2, [1], None)] * 257).run(q, failure="Invalid Metal request shape")
 assert information(q, query=True).live == 0
 
 last, _ = Rows([(2, [42], None)]).run(q, final=True)

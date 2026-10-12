@@ -227,29 +227,36 @@ rejected(
     b"output",
 )
 def check_extended_join_shapes_without_device():
-    inputs = (JoinInput * 128)(
-        *(JoinInput(Input(None, None, 2, 5, 1), 0 if i < 65 else 1) for i in range(128))
+    inputs = (JoinInput * 256)(
+        *(JoinInput(Input(None, None, 2, 5, 1), 0 if i < 129 else 1) for i in range(256))
     )
-    outputs = (Output * 128)(
-        *(Output(None, None, 2, i if i < 65 else -1, i if i >= 65 else -1, 0)
-          for i in range(128))
+    outputs = (Output * 256)(
+        *(Output(None, None, 2, i if i < 129 else -1, i if i >= 129 else -1, 0)
+          for i in range(256))
     )
-    request = Request(1, 17, 3, 128, 0, 128, 6, -1, -1, 0,
+    request = Request(1, 17, 3, 256, 0, 256, 6, -1, -1, 0,
                       ptr(inputs), None, ptr(outputs))
     memory, err = Memory(), P()
     checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
-    assert memory.upload == 65 * (17 * 4 + 3) + 63 * (3 * 4 + 1)
-    assert memory.peak > 0
-    for field in ("inputs_count", "outputs_count"):
-        setattr(request, field, 129)
-        rejected(lambda e: lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(e)),
-                 b"Invalid Metal join request")
-        setattr(request, field, 128)
-    keys = (Key * 128)(*(Key(0, 65) for _ in range(128)))
-    request.how, request.keys_count, request.keys = 0, 128, ptr(keys)
+    assert memory.upload == 129 * (17 * 4 + 3) + 127 * (3 * 4 + 1)
+    for i in range(256):
+        inputs[i].input.dtype = outputs[i].dtype = 12
     err = P()
     checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
-    request.keys_count = 129
+    assert memory.upload == 129 * (17 * 16 + 3) + 127 * (3 * 16 + 1)
+    for i in range(256):
+        inputs[i].input.dtype = outputs[i].dtype = 2
+    assert memory.peak > 0
+    for field in ("inputs_count", "outputs_count"):
+        setattr(request, field, 257)
+        rejected(lambda e: lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(e)),
+                 b"Invalid Metal join request")
+        setattr(request, field, 256)
+    keys = (Key * 256)(*(Key(0, 129) for _ in range(256)))
+    request.how, request.keys_count, request.keys = 0, 256, ptr(keys)
+    err = P()
+    checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    request.keys_count = 257
     rejected(lambda e: lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(e)),
              b"Invalid Metal join request")
 

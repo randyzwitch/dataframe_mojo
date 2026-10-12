@@ -44,10 +44,10 @@ runtime data; changing those does not require recompiling an identical shader.
 
 ## Precision and supported operations
 
-Metal accepts up to 128 logical value slots, source/output columns, device
-steps, and nodes per row expression. Joins accept up to 128 combined input
-columns and 128 output columns. These bounds are independent: computed values
-and grouped-reduction temporaries also consume slots. Other accelerator
+Metal accepts up to 256 logical value slots and source/output columns,
+128 device steps, and 128 nodes per row expression. Joins accept up to 256
+combined input columns and 256 output columns. These bounds are independent:
+computed values and grouped-reduction temporaries also consume slots. Other accelerator
 backends retain their existing 64-entry defaults. The extended bounds require
 rebuilding the optional native Metal runtime; ABI layouts and opcode meanings
 are unchanged. Memory budgets and semantic preflight checks still apply.
@@ -56,7 +56,7 @@ Direct column projections and aliases reuse an existing resident value slot.
 They preserve separate output names and column order without a copying device
 step. Filters, sorts, and slices gather each shared value and validity bitmap
 once. Computed expressions still allocate slots, and aliases still count
-toward the independent 128-output-column limit. Automatic placement uses a
+toward the independent 256-output-column limit. Automatic placement uses a
 separate `metal-column-slots-v1` cost family for plans that reuse columns, so
 older calibration cannot select them for GPU execution. A complete supported
 cost estimate is still required; wider explicit plans can remain on CPU
@@ -186,8 +186,8 @@ DAG is not a single command-buffer submission.
 Unproved integer arithmetic, unproved casts to integer/Boolean targets, and checked Int32/UInt32/Int64/UInt64 sums in
 join inputs require CPU execution because those inputs are not terminal
 observable boundaries. Pure expressions and bounded Int8/Int16/UInt8/UInt16
-sums can feed a join. Each join supports at most 128 combined input columns,
-128 output columns, and Int32.MAX rows per input and output.
+sums can feed a join. Each join supports at most 256 combined input columns,
+256 output columns, and Int32.MAX rows per input and output.
 
 A final head immediately above a join or above pure projections of its rows
 bounds the join output allocation, even when its full match count is larger
