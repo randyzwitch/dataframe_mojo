@@ -177,10 +177,12 @@ def test_native_metal_decimal_comparisons_resident_consumers_and_conditionals() 
     var grouped = (
         frame.lazy()
         .group_by("k", maintain_order=True)
-        .agg((col("a") < col("b")).sum().alias("n"))
+        .agg((col("a") < col("b")).cast(DataType.INT64).sum().alias("n"))
     )
     same(grouped.collect(accelerator=runtime), grouped.collect(engine="cpu"))
-    var window = frame.lazy().select((col("a") < col("b")).sum().over("k"))
+    var window = frame.lazy().select(
+        (col("a") < col("b")).cast(DataType.INT64).sum().over("k")
+    )
     same(window.collect(accelerator=runtime), window.collect(engine="cpu"))
     var right = DataFrame([Series("k", Column[Int32]([1, 0, 1]))])
     var joined = (
