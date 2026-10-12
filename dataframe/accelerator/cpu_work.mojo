@@ -8,6 +8,8 @@ from .cost import COST_FEATURE_COUNT, cost_feature_names
 
 
 def _width(dtype: DataType) -> Int:
+    if dtype.is_decimal():
+        return dtype.decimal_width() // 8
     if dtype == DataType.BOOL:
         return 1  # byte upper bound for packed storage
     if dtype == DataType.INT8 or dtype == DataType.UINT8:
@@ -45,7 +47,8 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             mixed_types=True,
             casts=True,
             extrema=True,
-            fixed_logical=False,
+            fixed_logical=True,
+            decimal128=True,
             ranks=True,
         ),
     )
@@ -65,6 +68,15 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
         if plan.code[step.start * 4] == ROW_RANK_KEY:
             family += ";rank-v1"
             break
+    var wide_decimal = False
+    for dtype in plan.node_dtypes:
+        wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128
+    for output in plan.outputs:
+        wide_decimal |= (
+            output.dtype.is_decimal() and output.dtype.decimal_width() == 128
+        )
+    if wide_decimal:
+        family += ";decimal128-v1"
     for step in plan.steps:
         features[4 if step.filter else 3] += rows * Float64(step.nodes)
         for i in range(step.start, step.start + step.nodes):

@@ -11,6 +11,8 @@ struct JColumn {
   int64_t word, values, validity, rows, bit, type;
 };
 struct JOutput {
+  // Low bit selects the preferred side; upper bits name the physical output
+  // slot. A Decimal128 output reserves two slots without changing this layout.
   int64_t type, left, right, prefer;
 };
 struct JMeta {
@@ -27,6 +29,12 @@ struct JShape {
 };
 int64_t jpacked(int64_t rows, int64_t offset = 0) {
   return rows ? add(add(rows, offset), 7) / 8 : 0;
+}
+int64_t jOutputSlots(const DFMJoinRequest &r) {
+  int64_t slots = 0;
+  for (int64_t i = 0; i < r.output_count; ++i)
+    slots = add(slots, r.outputs[i].dtype == DFM_DECIMAL128 ? 2 : 1);
+  return slots;
 }
 JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
                  const DFMResidentInput *refs = nullptr) {
@@ -70,7 +78,7 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
       s.memory.upload_bytes = add(s.memory.upload_bytes, bitmap);
     }
     s.columns.push_back({s.words, native ? -1 : at, valid, rows, v.bit_offset, v.dtype});
-    s.words = add(s.words, std::max<int64_t>(1, rows));
+    s.words = add(s.words, mul(std::max<int64_t>(1, rows), v.dtype == DFM_DECIMAL128 ? 2 : 1));
   }
   auto input = [&](int64_t index, int64_t side) {
     if (index < 0 || index >= r.input_count || r.inputs[index].side != side)
@@ -151,9 +159,11 @@ kernel void j_unpack(device const uchar *raw[[buffer(0)]],device ulong *x[[buffe
  ulong i=c.word+at.x,b=ulong(at.x)+c.bit;device const uchar *p=raw+c.values;
  ulong z=0;switch(c.type){case 1:case 9:z=((device const uint*)p)[at.x];break;
  case 2:z=ulong(((device const int*)p)[at.x]);break;case 3:case 10:case 11:z=((device const ulong*)p)[at.x];break;
+ case 12:z=((device const ulong*)p)[2*at.x];break;
  case 4:z=(p[b/8]>>(b%8))&1;break;case 5:z=ulong(((device const char*)p)[at.x]);break;
  case 6:z=ulong(((device const short*)p)[at.x]);break;case 7:z=p[at.x];break;case 8:z=((device const ushort*)p)[at.x];break;}
  x[i]=z;v[i]=c.validity<0?1:((raw[c.validity+b/8]>>(b%8))&1);
+ if(c.type==12){x[i+max(c.rows,1L)]=((device const ulong*)p)[2*at.x+1];v[i+max(c.rows,1L)]=v[i];}
 }
 // Nulls sort first. Matching separately excludes every tuple containing null.
 int j_cmp(uint a,uint b,bool cross,device const ulong *x,device const uchar *v,
@@ -162,6 +172,7 @@ int j_cmp(uint a,uint b,bool cross,device const ulong *x,device const uchar *v,
  long bi=cross?(m.side?pair.y:pair.x):ai;Col ca=cols[ai],cb=cols[bi];
  ulong ia=ca.word+a,ib=cb.word+b;bool av=v[ia],bv=v[ib];
  if(av!=bv)return av?1:-1;if(!av)continue;
+ if(ca.type==12){ulong2 wa(x[ia],x[ia+max(ca.rows,1L)]),wb(x[ib],x[ib+max(cb.rows,1L)]);if(wide_less(wa,wb))return -1;if(wide_less(wb,wa))return 1;continue;}
  if(extrema_better(x[ia],x[ib],ca.type,false))return -1;
  if(extrema_better(x[ia],x[ib],ca.type,true))return 1;}
  return 0;
@@ -224,16 +235,17 @@ kernel void j_gather(device const ulong *x[[buffer(0)]],device const uchar *v[[b
  long build=-1;if(HOW!=4&&HOW!=5&&high>low){uint slot=low+uint(ulong(at.x)-start);build=HOW==6?slot:sorted[slot];}
  if(m.side){right=probe;left=build;}else{left=probe;right=build;}}
  Out o=outs[at.y];long source=-1,row=-1;
- if(o.prefer&&right>=0){source=o.right;row=right;}
+ if((o.prefer&1)&&right>=0){source=o.right;row=right;}
  else if(o.left>=0&&left>=0){source=o.left;row=left;}
  else if(o.right>=0&&right>=0){source=o.right;row=right;}
- ulong dst=ulong(at.y)*max(m.total,1UL)+at.x;bool valid=false;ulong z=0;
+ ulong dst=ulong(o.prefer>>1)*max(m.total,1UL)+at.x;bool valid=false;ulong z=0;
  if(source>=0){ulong i=cols[source].word+ulong(row);valid=v[i];if(valid)z=x[i];}y[dst]=z;w[dst]=valid;
+ if(o.type==12){ulong high=0;if(valid)high=x[cols[source].word+max(cols[source].rows,1L)+ulong(row)];y[dst+max(m.total,1UL)]=high;w[dst+max(m.total,1UL)]=valid;}
 }
 kernel void j_pack(device const ulong *y[[buffer(0)]],device const uchar *w[[buffer(1)]],device uchar *bits[[buffer(2)]],
- constant Meta &m[[buffer(3)]],constant uint &columns[[buffer(4)]],uint2 at[[thread_position_in_grid]]){
+ constant Meta &m[[buffer(3)]],constant uint &columns[[buffer(4)]],device const Out *outs[[buffer(5)]],uint2 at[[thread_position_in_grid]]){
  ulong packed=(m.total+7)/8;if(at.x>=packed||at.y>=columns)return;uchar valid=0,value=0;
- for(uint bit=0;bit<8;++bit){ulong row=ulong(at.x)*8+bit;if(row>=m.total)break;ulong i=ulong(at.y)*max(m.total,1UL)+row;valid|=uchar(w[i]!=0)<<bit;value|=uchar(y[i]!=0)<<bit;}
+ for(uint bit=0;bit<8;++bit){ulong row=ulong(at.x)*8+bit;if(row>=m.total)break;ulong i=ulong(outs[at.y].prefer>>1)*max(m.total,1UL)+row;valid|=uchar(w[i]!=0)<<bit;value|=uchar(y[i]!=0)<<bit;}
  bits[(2UL*at.y)*packed+at.x]=valid;bits[(2UL*at.y+1)*packed+at.x]=value;
 }
 )MSL";
@@ -245,7 +257,7 @@ ulong j_hash_key(uint row,bool build,device const ulong *x,device const uchar *v
  for(uint k=0;k<KEYS;++k){long2 pair=keys[k];
   Col c=cols[build?(m.side?pair.x:pair.y):(m.side?pair.y:pair.x)];
   ulong at=c.word+row;if(!v[at])valid=false;
-  hash=key_hash(hash^canonical_key(x[at],c.type));}
+  hash=key_hash(hash^canonical_key(x[at],c.type));if(c.type==12)hash=key_hash(hash^x[at+max(c.rows,1L)]);}
  return hash;
 }
 kernel void j_hash_build(device const ulong *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
@@ -456,9 +468,11 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r,
   if (r.key_count)
     memcpy(q.key.contents, r.keys, r.key_count * 16);
   auto *descriptors = static_cast<JOutput *>(q.out.contents);
+  int64_t output_slot = 0;
   for (int64_t i = 0; i < r.output_count; ++i) {
     auto o = r.outputs[i];
-    descriptors[i] = {o.dtype, o.left, o.right, o.prefer_right};
+    descriptors[i] = {o.dtype, o.left, o.right, 2 * output_slot + o.prefer_right};
+    output_slot += o.dtype == DFM_DECIMAL128 ? 2 : 1;
   }
   *static_cast<JMeta *>(q.meta.contents) = {uint32_t(shape.probe),
                                             uint32_t(shape.build),
@@ -485,7 +499,7 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r,
       if (!refs[i].table)
         continue;
       auto &table = *static_cast<Resident *>(refs[i].table);
-      auto params = residentCopy(table, refs[i].column, shape.columns[i].word);
+      auto params = residentCopy(table, refs[i].column, shape.columns[i].word, std::max<int64_t>(1, shape.columns[i].rows));
       e.buf(0, table.values);
       e.buf(1, table.validity);
       e.buf(2, q.x);
@@ -574,8 +588,8 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r,
       result = add(
           result,
           add(packed, o.dtype == DFM_BOOL ? packed : mul(rows, width(o.dtype))));
-  auto words = mul(mul(std::max<int64_t>(1, rows), r.output_count), 8);
-  auto valid = mul(std::max<int64_t>(1, rows), r.output_count),
+  auto words = mul(mul(std::max<int64_t>(1, rows), jOutputSlots(r)), 8);
+  auto valid = mul(std::max<int64_t>(1, rows), jOutputSlots(r)),
        bits = query && !final ? 1 : mul(mul(packed, r.output_count), 2);
   auto shared =
       add(shape.memory.shared_bytes,
@@ -617,8 +631,8 @@ void jfinish(JSession &q, const DFMJoinOutput *outputs, int64_t count,
           result,
           add(packed, a.dtype == DFM_BOOL ? packed : mul(rows, width(a.dtype))));
   }
-  auto words = mul(mul(std::max<int64_t>(1, rows), count), 8),
-       valid = mul(std::max<int64_t>(1, rows), count),
+  auto words = mul(mul(std::max<int64_t>(1, rows), jOutputSlots(r)), 8),
+       valid = mul(std::max<int64_t>(1, rows), jOutputSlots(r)),
        bits = query && !final ? 1 : mul(mul(packed, count), 2);
   auto shared =
       add(q.shape.memory.shared_bytes,
@@ -654,6 +668,7 @@ void jfinish(JSession &q, const DFMJoinOutput *outputs, int64_t count,
     e.buf(2, bitmap);
     e.buf(3, q.meta);
     e.val(4, uint32_t(count));
+    e.buf(5, q.out);
     e.launch("j_pack", packed, count);
   }
   e.wait();
@@ -672,7 +687,7 @@ void jfinish(JSession &q, const DFMJoinOutput *outputs, int64_t count,
       q.buffers.transfer(bitmap, table->buffers);
     }
     for (int64_t i = 0; i < count; ++i)
-      table->columns.push_back({i, outputs[i].dtype, -1, 0});
+      table->columns.push_back({static_cast<JOutput *>(q.out.contents)[i].prefer >> 1, outputs[i].dtype, -1, 0});
     q.stats.memory.shared_bytes = shared;
     q.stats.memory.result_bytes = result;
     q.stats.memory.peak_bytes = peak;
@@ -697,11 +712,14 @@ void jfinish(JSession &q, const DFMJoinOutput *outputs, int64_t count,
         memcpy(o.values, base + packed, packed);
     } else {
       auto *source =
-          static_cast<uint64_t *>(y.contents) + i * std::max<int64_t>(1, rows);
+          static_cast<uint64_t *>(y.contents) + (static_cast<JOutput *>(q.out.contents)[i].prefer >> 1) * std::max<int64_t>(1, rows);
       auto widthBytes = width(o.dtype);
       for (int64_t row = 0; row < rows; ++row)
         memcpy(static_cast<char *>(o.values) + row * widthBytes, source + row,
-               widthBytes);
+               std::min<int64_t>(8, widthBytes));
+      if (o.dtype == DFM_DECIMAL128)
+        for (int64_t row = 0; row < rows; ++row)
+          memcpy(static_cast<char *>(o.values) + row * 16 + 8, source + std::max<int64_t>(1, rows) + row, 8);
     }
   }
   q.stats.result_copy_ns = ns(start);

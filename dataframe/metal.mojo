@@ -3,7 +3,8 @@
 Importing this module loads no driver. Binary64 arithmetic uses integer-only
 GPU emulation, including floating sum/mean accumulation. Int64/UInt64 sums and
 integer means require a GPU proof that all exact integer partials fit the native
-range. Automatic placement requires separate calibration for emulated work.
+range. Decimal32/64 sums use exact two-word accumulation with Decimal128
+results. Automatic placement requires separate calibration for emulated work.
 """
 from std.ffi import external_call
 from std.math import isfinite
@@ -334,10 +335,13 @@ def _capabilities() -> RowCapabilities:
         scalar_regions=True,
         temporal_fields=True,
         ranks=True,
+        decimal128=True,
     )
 
 
 def _type(dtype: DataType) raises -> Int64:
+    if dtype.is_decimal() and dtype.decimal_width() == 128:
+        return 12
     if dtype.physical() == DataType.FLOAT64:
         return 11
     if dtype.physical() == DataType.FLOAT32:
@@ -505,6 +509,8 @@ def _input[T: DType](column: Column[Scalar[T]], dtype: Int64) -> List[Int64]:
 
 
 def _input_series(column: Series) raises -> List[Int64]:
+    if column.dtype().is_decimal() and column.dtype().decimal_width() == 128:
+        return _input(column.numeric[DType.int128](), Int64(12))
     if column.dtype() == DataType.BOOL:
         var source = column.bool()
         var offset = source.validity_offset()
@@ -582,7 +588,11 @@ struct _Descriptors(Movable):
                 )
             )
             if self.code[i] == ROW_GROUP_OUTPUT:
-                self.code[i + 3] = _op(Int(self.code[i + 3]))
+                self.code[i + 3] = Int64(208) if self.code[
+                    i + 3
+                ] == SUM and plan.node_dtypes[i // 4].is_decimal() else _op(
+                    Int(self.code[i + 3])
+                )
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
             self.inputs.extend(_input_series(column))
@@ -609,7 +619,10 @@ struct _Descriptors(Movable):
                     Int64(0),
                     _type(output.dtype),
                     Int64(output.slot),
-                    _op(output.reduction) if output.reduction
+                    Int64(208) if output.reduction == SUM
+                    and output.dtype.is_decimal() else _op(
+                        output.reduction
+                    ) if output.reduction
                     >= 0 else Int64(-1),
                     Int64(output.min_count),
                 ]
@@ -655,6 +668,9 @@ def _allocate_output(
 
 
 def _output_addresses(column: Series) raises -> Tuple[Int, Int]:
+    if column.dtype().is_decimal() and column.dtype().decimal_width() == 128:
+        var value = column.numeric[DType.int128]()
+        return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
     if column.dtype() == DataType.BOOL:
         var value = column.bool()
         return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
@@ -774,7 +790,10 @@ def _execute(
         & 1 else "native_metal_hash_groups" if features
         & 2 else "native_metal_integer_radix_sort" if features
         & 4 else "specialized_native_metal_stable_compaction",
-        "shared-buffer staging -> native Metal kernels -> synchronized CPU result",
+        (
+            "shared-buffer staging -> native Metal kernels -> synchronized CPU"
+            " result"
+        ),
     )
     return (result^, report^)
 
@@ -1234,7 +1253,10 @@ def _execute_join_dag(
             scope.initialization_ns if report.width() == 0 else 0,
             start,
             algorithm,
-            "CPU source staging -> resident Metal regions -> synchronized final CPU result",
+            (
+                "CPU source staging -> resident Metal regions -> synchronized"
+                " final CPU result"
+            ),
             build_rows=(
                 values[task.source].rows if task.how
                 == 2 else values[task.right].rows
@@ -1376,6 +1398,16 @@ struct MetalRuntime(AcceleratorBackend):
             if plan.code[step.start * 4] == ROW_RANK_KEY:
                 family += ";metal-rank-v1"
                 break
+        var wide_decimal = False
+        for dtype in plan.node_dtypes:
+            wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128
+        for output in plan.outputs:
+            wide_decimal |= (
+                output.dtype.is_decimal()
+                and output.dtype.decimal_width() == 128
+            )
+        if wide_decimal:
+            family += ";metal-decimal128-v1"
         var emulated = False
         for i in range(len(plan.node_dtypes)):
             if plan.node_dtypes[i] == DataType.FLOAT64:
@@ -1438,7 +1470,10 @@ struct MetalRuntime(AcceleratorBackend):
             if CPU_BUILD_ID == "development-source-no-calibration":
                 return (
                     "cpu",
-                    "automatic calibration requires an identified CPU/provider package",
+                    (
+                        "automatic calibration requires an identified"
+                        " CPU/provider package"
+                    ),
                 )
             var facts = self.estimate_auto(query)
             if self._budget >= 0 and facts.peak_bytes > self._budget:
@@ -1689,16 +1724,12 @@ struct MetalRuntime(AcceleratorBackend):
             if has_join(query) or has_scalar_consumers(query):
                 var dag = lower_join_dag(query, _capabilities())
                 return (
-                    (
-                        "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
-                    )
-                    + String(dag.joins)
-                    + " joins, "
-                    + String(len(dag.tasks))
-                    + " resident regions; only the final result materializes CPU columns; optional runtime "
-                    + ("present" if metal_installed() else "missing")
-                    + "\n"
-                )
+                    "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
+                ) + String(dag.joins) + " joins, " + String(
+                    len(dag.tasks)
+                ) + " resident regions; only the final result materializes" " CPU columns; optional runtime " + (
+                    "present" if metal_installed() else "missing"
+                ) + "\n"
             var plan = lower_rows(query, _capabilities())
             return (
                 "ENGINE accel: Metal native row expressions; "

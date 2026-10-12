@@ -61,6 +61,7 @@ int64_t mul(int64_t a, int64_t b) {
   return a * b;
 }
 int64_t width(int64_t t) {
+  if (t == DFM_DECIMAL128) return 16;
   if (t == DFM_FLOAT32 || t == DFM_INT32 || t == DFM_UINT32)
     return 4;
   if (t == DFM_INT64 || t == DFM_UINT64 || t == DFM_FLOAT64_STORAGE)
@@ -84,6 +85,13 @@ int64_t sumType(int64_t t) {
   return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
+  if (op == DFM_WIDE_SUM)
+    return type == DFM_INT32 || type == DFM_INT64 ? DFM_DECIMAL128 : -1;
+  if (type == DFM_DECIMAL128) {
+    if (op == DFM_COUNT || op == DFM_LEN || op == DFM_NULL_COUNT) return DFM_INT64;
+    if (op == DFM_MIN || op == DFM_MAX || op == DFM_FIRST || op == DFM_LAST) return DFM_DECIMAL128;
+    return -1;
+  }
   if (op == DFM_MEAN) return type == DFM_BOOL ? -1 : DFM_FLOAT64_STORAGE;
   if (op == DFM_SUM)
     return sumSupported(type) ? sumType(type) : -1;
@@ -98,6 +106,14 @@ int64_t reductionType(int64_t type, int64_t op) {
   return -1;
 }
 bool typed(const DFMRequest &r) { return r.dtype == 0; }
+int64_t partialWidth(const DFMRequest &r) {
+  if (!r.reductions) return 16;
+  for (int64_t i = 0; i < r.output_count; ++i) {
+    auto &o = r.outputs[i];
+    if (o.dtype == DFM_DECIMAL128) return 32;
+  }
+  return 16;
+}
 int64_t storageWidth(const DFMRequest &r) {
   return typed(r) ? 8 : width(r.dtype);
 }
@@ -109,6 +125,8 @@ int64_t slotType(const DFMRequest &r, int64_t slot) {
 }
 const char *metalType(int64_t t) {
   switch (t) {
+  case DFM_DECIMAL128:
+    return "ulong2";
   case DFM_FLOAT32:
     return "float";
   case DFM_INT32:
@@ -156,7 +174,8 @@ struct Layout {
     physical.fill(-1);
     auto keep = [&](int64_t slot) {
       if (physical[slot] < 0)
-        physical[slot] = slots++;
+        { physical[slot] = slots;
+          slots += slotType(r, slot) == DFM_DECIMAL128 ? 2 : 1; }
     };
     for (int64_t i = 0; i < r.input_count; ++i)
       keep(i);
@@ -316,6 +335,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
       width(r.node_types[i]);
   } else
     width(r.dtype);
+  if (r.dtype == DFM_DECIMAL128)
+    fail("Metal Decimal128 requires typed storage");
   if (r.dtype == DFM_BOOL)
     fail("Metal common storage must be numeric");
   if (r.dtype == DFM_FLOAT64_STORAGE)
@@ -477,6 +498,17 @@ Shape validate(const DFMRequest &r, bool storage = false,
                          ? nodeType(r, v.start + c[1])
                          : nodeType(r, v.start + j);
       auto resultType = nodeType(r, v.start + j);
+      if (c[0] == DFM_LITERAL_INT && resultType == DFM_DECIMAL128) {
+        if (c[3] < 0 || c[3] >= r.literal_count ||
+            r.code[4*c[3]] != DFM_LITERAL_INT || nodeType(r,c[3]) != DFM_INT64)
+          fail("Invalid Metal Decimal128 literal high-word payload");
+      }
+      if ((operand == DFM_DECIMAL128 || resultType == DFM_DECIMAL128) &&
+          c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_NULL && c[0] != DFM_LITERAL_INT &&
+          c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE && c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
+          c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL &&
+          c[0] != DFM_FILL_NULL && c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN)
+        fail("Metal Decimal128 row arithmetic requires CPU execution");
       if (c[0] >= DFM_DT_YEAR && c[0] <= DFM_DT_TRUNCATE) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
             (c[0] == DFM_DT_TRUNCATE ? c[2] <= 0 : c[2] != -1) || c[3] < 0 || c[3] > 4 ||
@@ -575,7 +607,15 @@ Shape validate(const DFMRequest &r, bool storage = false,
             (t != DFM_FLOAT64_STORAGE || r.node_types[v.start+c[1]] == DFM_BOOL ||
              r.node_types[v.start+c[1]] != r.node_types[v.start+c[2]]))
           fail("Invalid Metal floating division dtype");
-        if ((compare || math) &&
+        bool wideCompare = compare && (r.node_types[v.start+c[1]] == DFM_DECIMAL128 || r.node_types[v.start+c[2]] == DFM_DECIMAL128);
+        if (wideCompare) {
+          for (auto child : {c[1], c[2]}) {
+            auto type = r.node_types[v.start+child];
+            if (type != DFM_DECIMAL128 && type != DFM_INT32 && type != DFM_INT64)
+              fail("Invalid Metal Decimal128 comparison operand");
+          }
+        }
+        if ((compare || math) && !wideCompare &&
             (r.node_types[v.start + c[1]] !=
                  (math ? t : r.node_types[v.start + c[2]]) ||
              (!unaryMath &&
@@ -626,7 +666,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
   s.outputBits = mul(mul(s.packed, r.output_count), 2);
   s.partial =
       r.reductions
-          ? mul(mul(std::min<int64_t>(s.blocks, 1024), r.output_count), 16)
+          ? mul(mul(std::min<int64_t>(s.blocks, 1024), r.output_count), partialWidth(r))
           : 1;
   if (directFilteredReduction(r))
     s.filter = false;
@@ -683,7 +723,7 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
   account(16);
   account(4);
   if (r.reductions)
-    account(mul(r.output_count, 16));
+    account(mul(r.output_count, partialWidth(r)));
   for (int64_t i = 0; i < r.input_count; ++i) {
     if (resident && resident[i].table)
       continue;
@@ -817,7 +857,7 @@ Context *defaultContext = nullptr;
 std::string residentSource() {
   return R"MSL(
 struct ResidentCopy { ulong source, validity, target, rows;
- long scalar, minimum, sum, padding; };
+ long scalar, minimum, sum, padding; ulong source_high,target_high; };
 kernel void resident_copy(device const ulong *a[[buffer(0)]],
  device const uchar *b[[buffer(1)]],device ulong *x[[buffer(2)]],
  device uchar *v[[buffer(3)]],constant ResidentCopy &p[[buffer(4)]],
@@ -828,6 +868,7 @@ kernel void resident_copy(device const ulong *a[[buffer(0)]],
                          b[p.validity+row]!=0;
  x[p.target+row]=valid?a[p.source+row]:0UL;
  v[p.target+row]=uchar(valid);
+ if(p.target_high){x[p.target_high+row]=valid?a[p.source_high+row]:0UL;v[p.target_high+row]=uchar(valid);}
 }
 )MSL";
 }
@@ -985,6 +1026,16 @@ bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x0
 }
 std::string orderingSource() {
   return R"MSL(
+bool wide_less(ulong2 a,ulong2 b) {
+ return a.y==b.y?a.x<b.x:long(a.y)<long(b.y);
+}
+bool wide_compare(ulong2 a,ulong2 b,long op) {
+ bool equal=all(a==b),less=wide_less(a,b);
+ if(op==9)return equal;if(op==23)return !equal;
+ if(op==20)return less;if(op==8)return !equal&&!less;
+ if(op==21)return !less;return equal||less;
+}
+ulong2 wide_word(long value){return ulong2(ulong(value),value<0?~0UL:0UL);}
 bool extrema_better(ulong a,ulong b,long type,bool maximum) {
  if(type==11){ulong ax=a&0x7fffffffffffffffUL,ay=b&0x7fffffffffffffffUL;
  bool nx=ax>0x7ff0000000000000UL,ny=ay>0x7ff0000000000000UL;
@@ -1027,11 +1078,14 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
       auto c = r.code + 4 * (step.start + 1 + j);
       auto slot = std::to_string(layout.physical[c[1]]) + "UL*meta.z";
       auto type = std::to_string(slotType(r, c[1]));
-      text += "{ulong ai=" + slot + "+a,bi=" + slot +
-              "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return "
-              "false;if(av&&(extrema_better(x[ai],x[bi]," +
-              type + ",false)||extrema_better(x[bi],x[ai]," + type +
-              ",false)))return false;}";
+      if (slotType(r, c[1]) == DFM_DECIMAL128)
+        text += "{ulong ai=" + slot + "+a,bi=" + slot + "+b;if(v[ai]!=v[bi])return false;if(v[ai]&&(x[ai]!=x[bi]||x[ai+meta.z]!=x[bi+meta.z]))return false;}";
+      else
+        text += "{ulong ai=" + slot + "+a,bi=" + slot +
+                "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return "
+                "false;if(av&&(extrema_better(x[ai],x[bi]," +
+                type + ",false)||extrema_better(x[bi],x[ai]," + type +
+                ",false)))return false;}";
     }
     text += "return true;}\n";
     text +=
@@ -1091,19 +1145,21 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
  if(o.kind==-1){if(lane==0){uint row=uint(x[)MSL" +
         index +
         "+" + std::string(lastRepresentative ? "end-1" : "begin") +
-        R"MSL(]);y[to]=x[ulong(o.slot)*meta.z+row];w[to]=v[ulong(o.slot)*meta.z+row];}return;}
- threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
+        R"MSL(]);ulong from=ulong(o.slot)*meta.z+row;y[to]=x[from];w[to]=v[from];if(o.type==12){y[to+meta.z]=x[from+meta.z];w[to+meta.z]=v[from];}}return;}
+ threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  bool first=group.y==0;
  for(uint at=begin+lane;at<end;at+=256){uint row=uint(x[)MSL" +
         index + R"MSL(+at]);ulong idx=ulong(o.slot)*meta.z+row;
  if(first)state_add(sum,count,ulong(row),true,long(row),o);
  else {if(v[idx]&&!sum_bound(x[idx],o,end-begin)){atomic_fetch_min_explicit(error,0xE0000000U,memory_order_relaxed);continue;}
- state_add(sum,count,x[idx],v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);}}
- sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
- for(uint stride=128;stride;stride/=2){if(lane<stride){long a=sums[lane],b=counts[lane];state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;}threadgroup_barrier(mem_flags::mem_threadgroup);}
- if(lane==0){sum=sums[0];count=counts[0];state_finish(sum,count,o,end-begin);bool valid=state_valid(o,count);
+ if(USE_WIDE&&o.kind==208){if(v[idx]){wide_add(sum,high,x[idx]);++count;}}
+ else if(wide_pick(o))state_add_wide(sum,high,count,ulong2(x[idx],x[idx+meta.z]),v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);
+ else state_add(sum,count,x[idx],v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);}}
+ sums[lane]=sum;counts[lane]=count;highs[lane]=high;threadgroup_barrier(mem_flags::mem_threadgroup);
+ for(uint stride=128;stride;stride/=2){if(lane<stride){long a=sums[lane],b=counts[lane],h=highs[lane];if(USE_WIDE&&o.kind==208){wide_merge(a,h,sums[lane+stride],highs[lane+stride]);b+=counts[lane+stride];}else if(wide_pick(o))state_merge_wide(a,h,b,sums[lane+stride],highs[lane+stride],counts[lane+stride],o);else state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;highs[lane]=h;}threadgroup_barrier(mem_flags::mem_threadgroup);}
+ if(lane==0){sum=sums[0];high=highs[0];count=counts[0];state_finish(sum,count,o,end-begin);bool valid=state_valid(o,count);
  if(o.kind==10&&valid&&((o.type==2&&(sum<(-2147483647L-1L)||sum>2147483647L))||(o.type==9&&(sum<0||ulong(sum)>4294967295UL))))atomic_fetch_min_explicit(error,0xF0000000U,memory_order_relaxed);
- y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);}}
+ y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);if(wide_result(o)){y[to+meta.z]=valid?ulong(high):0UL;w[to+meta.z]=uchar(valid);}}}
 )MSL";
   }
   return text;
@@ -1119,8 +1175,20 @@ std::string source(const DFMRequest &r) {
         filterSlot = layout.physical[r.steps[i].slot];
   std::string text = "#include <metal_stdlib>\nusing namespace metal;\n#pragma "
                      "clang fp contract(off)\n";
+  bool wide = partialWidth(r) == 32;
+  if (typed(r))
+    for (int64_t i = 0; i < r.slots; ++i) wide |= r.slot_types[i] == DFM_DECIMAL128;
+  text += "constant bool USE_WIDE=" + std::string(wide ? "true" : "false") + ";\n";
   text += "struct Out { long slot; long kind; long minimum; long type; "
-          "};\nstruct Partial { long total; long count; };\n";
+          "};\n";
+  if (partialWidth(r) == 32)
+    text += "struct Partial { long total, high, count, padding; };\n"
+            "Partial make_partial(long total,long high,long count){return {total,high,count,0};}\n"
+            "long partial_high(Partial p){return p.high;}\n";
+  else
+    text += "struct Partial { long total,count; };\n"
+            "Partial make_partial(long total,long high,long count){return {total,count};}\n"
+            "long partial_high(Partial p){return 0;}\n";
   text += residentSource();
   text += dfm_float64_source;
   text += "constant bool DIRECT_FILTERED_REDUCTION=" +
@@ -1147,7 +1215,7 @@ float float_integral(float x,int op){
 )MSL";
   if (typed(r)) {
     text += "typedef ulong T;\n";
-    std::array<bool, 12> used{};
+    std::array<bool, 13> used{};
     for (int64_t i = 0; i < r.literal_count; ++i)
       used[r.node_types[i]] = true;
     for (int64_t t = 1; t <= 10; ++t)
@@ -1189,9 +1257,10 @@ kernel void block_offsets(device uint *blocks[[buffer(0)]],device uint4 &meta[[b
 kernel void gather_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device T *y[[buffer(2)]],device uchar *w[[buffer(3)]],device const uint *rank[[buffer(4)]],
  device const uint *blocks[[buffer(5)]],constant uint4 &meta[[buffer(6)]],
- constant ulong2 &p[[buffer(7)]],uint row[[thread_position_in_grid]]) {
+ constant ulong4 &p[[buffer(7)]],uint row[[thread_position_in_grid]]) {
  if(row>=meta.y||!v[p.x*meta.z+row]||x[p.x*meta.z+row]==T(0))return;
  ulong target=rank[row]+blocks[row/256];y[p.y*meta.z+target]=x[p.y*meta.z+row];w[p.y*meta.z+target]=v[p.y*meta.z+row];
+ if(p.z){y[(p.y+1)*meta.z+target]=x[(p.y+1)*meta.z+row];w[(p.y+1)*meta.z+target]=v[p.y*meta.z+row];}
 }
 kernel void pack_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device uchar *bits[[buffer(2)]],device const Out *out[[buffer(3)]],
@@ -1230,6 +1299,30 @@ bool sum_bound(ulong word,Out o,ulong rows){
 // A native high multiply checks the identical bound without division.
  ulong magnitude=negative?0UL-word:word;
  return mulhi(magnitude,rows)==0UL&&magnitude*rows<=maximum;
+}
+// Decimal32/64 input and Int32.MAX rows bound every sum partial below 2**94.
+// Two-word modulo addition is therefore exact in signed128 and precision38.
+void wide_merge(thread long &low,thread long &high,long other,long upper){
+ ulong before=ulong(low),after=before+ulong(other);
+ low=long(after);high=long(ulong(high)+ulong(upper)+ulong(after<before));
+}
+void wide_add(thread long &low,thread long &high,ulong word){
+ wide_merge(low,high,long(word),long(word)<0?-1L:0L);
+}
+bool wide_pick(Out o){return USE_WIDE&&o.type==12&&(o.kind==80||o.kind==81||o.kind==83||o.kind==84);}
+bool wide_result(Out o){return USE_WIDE&&(o.kind==208||(wide_pick(o)&&o.kind!=95&&o.kind!=96));}
+void state_merge_wide(thread long &value,thread long &high,thread long &count,long other,long upper,long n,Out o){
+ if(o.kind==83||o.kind==84){
+  long at=count<0?-count:count,bt=n<0?-n:n;
+  if(bt&&(!at||(o.kind==83?bt<at:bt>at))){value=other;high=upper;count=n;}return;
+ }
+ if(!n)return;ulong2 a=ulong2(ulong(value),ulong(high)),b=ulong2(ulong(other),ulong(upper));
+ bool better=(o.kind==81||o.kind==96)?wide_less(a,b):wide_less(b,a);
+ if(!count||better||(all(a==b)&&n<count)){value=other;high=upper;count=n;}
+}
+void state_add_wide(thread long &value,thread long &high,thread long &count,ulong2 word,bool valid,long row,Out o){
+ long n=(o.kind==83||o.kind==84)?(valid?row+1:-(row+1)):(valid?row+1:0);
+ state_merge_wide(value,high,count,valid?long(word.x):0,valid?long(word.y):0,n,o);
 }
 void state_merge(thread long &value,thread long &count,long other,long n,Out o){
  if(o.kind==83||o.kind==84){
@@ -1271,42 +1364,45 @@ void state_finish(thread long &value,thread long &count,Out o,long rows){
   count=o.minimum||!unknown||(o.kind==91?yes:no);value=o.kind==91?yes:!no;
  }
 }
-bool state_valid(Out o,long count){return o.kind==10?count>=o.minimum:count>0;}
+bool state_valid(Out o,long count){return o.kind==10||o.kind==208?count>=o.minimum:count>0;}
 kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device Partial *partials[[buffer(2)]],device const Out *out[[buffer(3)]],
  constant uint4 &meta[[buffer(4)]],constant ulong &groups[[buffer(5)]],device atomic_uint *error[[buffer(6)]],
  uint2 group[[threadgroup_position_in_grid]],uint lane[[thread_index_in_threadgroup]]) {
- threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
+ threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  Out o=out[group.y];
  for(ulong row=group.x*256+lane;row<meta.x;row+=groups*256){ulong idx=o.slot*meta.z+row;
  if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
  Out current=o;if(DIRECT_FILTERED_REDUCTION&&o.kind==90)current.kind=11;
  ulong word=read_word(x[idx]);
  if(v[idx]&&!sum_bound(word,current,meta.x)){atomic_fetch_min_explicit(error,0xE0000000U,memory_order_relaxed);continue;}
- state_add(sum,count,word,DIRECT_FILTERED_REDUCTION&&o.kind==90?true:v[idx]!=0,long(row),current);}
- sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(USE_WIDE&&o.kind==208){if(v[idx]){wide_add(sum,high,word);++count;}}
+ else if(wide_pick(o))state_add_wide(sum,high,count,ulong2(word,x[idx+meta.z]),v[idx]!=0,long(row),o);
+ else state_add(sum,count,word,DIRECT_FILTERED_REDUCTION&&o.kind==90?true:v[idx]!=0,long(row),current);}
+ sums[lane]=sum;counts[lane]=count;highs[lane]=high;threadgroup_barrier(mem_flags::mem_threadgroup);
  for(uint stride=128;stride;stride/=2){if(lane<stride){
- long a=sums[lane],b=counts[lane];state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;}
+ long a=sums[lane],b=counts[lane],h=highs[lane];if(USE_WIDE&&o.kind==208){wide_merge(a,h,sums[lane+stride],highs[lane+stride]);b+=counts[lane+stride];}else if(wide_pick(o))state_merge_wide(a,h,b,sums[lane+stride],highs[lane+stride],counts[lane+stride],o);else state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;highs[lane]=h;}
  threadgroup_barrier(mem_flags::mem_threadgroup);}
- if(lane==0)partials[group.y*groups+group.x]={sums[0],counts[0]};
+ if(lane==0)partials[group.y*groups+group.x]=make_partial(sums[0],highs[0],counts[0]);
 }
 kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *result[[buffer(1)]],
  device const Out *out[[buffer(2)]],constant uint4 &meta[[buffer(3)]],constant ulong &groups[[buffer(4)]],
  uint column[[thread_position_in_grid]]) {
- long sum=0,count=0;Out o=out[column];
+ long sum=0,count=0,high=0;Out o=out[column];
  for(ulong i=0;i<groups;++i){Partial p=partials[column*groups+i];
- state_merge(sum,count,p.total,p.count,o);}
+ if(USE_WIDE&&o.kind==208){wide_merge(sum,high,p.total,partial_high(p));count+=p.count;}else if(wide_pick(o))state_merge_wide(sum,high,count,p.total,partial_high(p),p.count,o);else state_merge(sum,count,p.total,p.count,o);}
  if(DIRECT_FILTERED_REDUCTION&&o.kind==90){sum=count;count=1;}
  else state_finish(sum,count,o,meta.x);
- result[column]={sum,count};
+ result[column]=make_partial(sum,high,count);
 }
 kernel void order_init(device uint *index[[buffer(0)]],constant uint4 &meta[[buffer(1)]],uint row[[thread_position_in_grid]]){
  if(row<meta.x)index[row]=row;
 }
 kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device T *y[[buffer(2)]],device uchar *w[[buffer(3)]],device const uint *index[[buffer(4)]],
- constant uint4 &meta[[buffer(5)]],constant ulong &slot[[buffer(6)]],uint row[[thread_position_in_grid]]){
- if(row>=meta.x)return;ulong target=slot*meta.z+row,source=slot*meta.z+index[row];y[target]=x[source];w[target]=v[source];
+ constant uint4 &meta[[buffer(5)]],constant ulong2 &p[[buffer(6)]],uint row[[thread_position_in_grid]]){
+ if(row>=meta.x)return;ulong target=p.x*meta.z+row,source=p.x*meta.z+index[row];y[target]=x[source];w[target]=v[source];
+ if(p.y){y[target+meta.z]=x[source+meta.z];w[target+meta.z]=v[source];}
 }
 )MSL";
   auto shape = validate(r);
@@ -1327,7 +1423,10 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
         auto logical = r.code[4 * (step.start + 1 + j) + 1];
         text += "{ulong at=" + std::to_string(layout.physical[logical]) +
           "UL*meta.z+row;hash=key_hash(hash^(v[at]?canonical_key(ulong(x[at])," +
-          std::to_string(slotType(r, logical)) + "):0xd6e8feb86659fd93UL));}";
+          std::to_string(slotType(r, logical)) + "):0xd6e8feb86659fd93UL));";
+        if (slotType(r, logical) == DFM_DECIMAL128)
+          text += "if(v[at])hash=key_hash(hash^x[at+meta.z]);";
+        text += "}";
       }
       auto capacity = std::to_string(hashCapacity(r.rows)) + "U";
       text += "uint bucket=uint(hash)&(" + capacity + "-1);for(uint probes=0;probes<" + capacity +
@@ -1348,12 +1447,16 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
               "at=p.x*meta.z+row,bit=row+p.y;";
       if (t == DFM_BOOL)
         text += "x[at]=ulong((bits[p.z-1+bit/8]>>(bit%8))&1);";
+      else if (t == DFM_DECIMAL128)
+        text += "device const ulong *raw=(device const ulong*)(bits+p.z);x[at]=raw[2*row];x[at+meta.z]=raw[2*row+1];";
       else
         text += "x[at]=" +
                 encode(t, "((device const " + std::string(metalType(t)) +
                               " *)(bits+p.z))[row]") +
                 ";";
-      text += "v[at]=p.w==ulong(-1)?1:uchar((bits[p.w+bit/8]>>(bit%8))&1); }\n";
+      text += "v[at]=p.w==ulong(-1)?1:uchar((bits[p.w+bit/8]>>(bit%8))&1);";
+      if (t == DFM_DECIMAL128) text += "v[at+meta.z]=v[at];";
+      text += "}\n";
     }
   for (int64_t i = 0; i < r.step_count; ++i)
     if (r.steps[i].filter >= 2) {
@@ -1380,10 +1483,15 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           text += "bool an=f64_nan(ulong(x[ai])),bn=f64_nan(ulong(x[bi]));if(an!=bn)return " + std::string(nanFirst) + ";";
         auto type = std::to_string(slotType(r, key[1])),
              maximum = std::string(key[2] ? "true" : "false");
-        text += "if(extrema_better(ulong(x[ai]),ulong(x[bi])," + type + "," +
-                maximum +
-                "))return true;if(extrema_better(ulong(x[bi]),ulong(x[ai])," +
-                type + "," + maximum + "))return false;}}";
+        if (slotType(r, key[1]) == DFM_DECIMAL128) {
+          auto left = std::string(key[2] ? "bi" : "ai"), right = std::string(key[2] ? "ai" : "bi");
+          text += "if(wide_less(ulong2(x[" + left + "],x[" + left + "+meta.z]),ulong2(x[" + right + "],x[" + right + "+meta.z])))return true;"
+                  "if(wide_less(ulong2(x[" + right + "],x[" + right + "+meta.z]),ulong2(x[" + left + "],x[" + left + "+meta.z])))return false;}}";
+        } else
+          text += "if(extrema_better(ulong(x[ai]),ulong(x[bi])," + type + "," +
+                  maximum +
+                  "))return true;if(extrema_better(ulong(x[bi]),ulong(x[ai])," +
+                  type + "," + maximum + "))return false;}}";
       }
       text += "return a<b;}\n";
       text +=
@@ -1506,7 +1614,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           } else {
             auto idx = std::to_string(layout.physical[c[3]]) + "UL*meta.z+row";
             text += z + "=" +
-                    (typed(r) ? decode(dtype, "x[" + idx + "]")
+                    (dtype == DFM_DECIMAL128 ? "ulong2(x[" + idx + "],x[(" + idx + ")+meta.z])" : typed(r) ? decode(dtype, "x[" + idx + "]")
                               : "x[" + idx + "]") +
                     ";" + valid + "=v[" + idx + "]!=0;";
           }
@@ -1530,6 +1638,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                   ");" + z + "=uchar(hit);}";
         } else if (op == DFM_LITERAL_NULL)
           text += valid + "=false;";
+        else if (op == DFM_LITERAL_INT && dtype == DFM_DECIMAL128)
+          text += z + "=ulong2(lit[" + std::to_string(s.start+j) + "],lit[" + std::to_string(c[3]) + "]);";
         else if (op == DFM_LITERAL_INT || op == DFM_LITERAL_FLOAT ||
                  op == DFM_LITERAL_BOOL)
           text += z + "=" +
@@ -1733,6 +1843,12 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                 op != DFM_XOR)
               expr = "float_compare(" + a + "," + b + "," + std::to_string(op) +
                      ")";
+            if (op != DFM_NOT && op != DFM_XOR &&
+                (nodeType(r,s.start+c[1]) == DFM_DECIMAL128 || nodeType(r,s.start+c[2]) == DFM_DECIMAL128)) {
+              auto left = nodeType(r,s.start+c[1]) == DFM_DECIMAL128 ? a : "wide_word(long(" + a + "))";
+              auto right = nodeType(r,s.start+c[2]) == DFM_DECIMAL128 ? b : "wide_word(long(" + b + "))";
+              expr = "wide_compare(" + left + "," + right + "," + std::to_string(op) + ")";
+            }
             text += z + "=T(" + expr + ");";
           }
           text += "}";
@@ -1756,9 +1872,11 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
       if (layout.physical[s.slot] >= 0) {
         auto idx = std::to_string(layout.physical[s.slot]) + "UL*meta.z+row";
         text += "x[" + idx + "]=" +
-                (typed(r) ? encode(r.slot_types[s.slot], "slot" + slot)
+                (r.slot_types && r.slot_types[s.slot] == DFM_DECIMAL128 ? "slot" + slot + ".x" : typed(r) ? encode(r.slot_types[s.slot], "slot" + slot)
                           : "slot" + slot) +
                 ";v[" + idx + "]=uchar(valid" + slot + ");\n";
+        if (typed(r) && r.slot_types[s.slot] == DFM_DECIMAL128)
+          text += "x[(" + idx + ")+meta.z]=slot" + slot + ".y;v[(" + idx + ")+meta.z]=uchar(valid" + slot + ");\n";
       }
     }
     text += "}\n";
@@ -1853,6 +1971,12 @@ struct GPUOut {
 struct Partial {
   int64_t total, count;
 };
+struct WidePartial { int64_t total, high, count, padding; };
+WidePartial loadPartial(id<MTLBuffer> buffer, int64_t index, int64_t stride) {
+  if (stride == 32) return static_cast<WidePartial *>(buffer.contents)[index];
+  auto p = static_cast<Partial *>(buffer.contents)[index];
+  return {p.total, 0, p.count, 0};
+}
 struct Query {
   std::atomic<int64_t> refs{1}, live{0}, peak{0};
   Context &context;
@@ -1882,6 +2006,7 @@ struct Resident {
   id<MTLBuffer> values = nil, validity = nil, bitmap = nil;
   int64_t rows = 0, cap = 0, packed = 0, retained = 0;
   bool scalar = false, final = false;
+  int64_t scalar_stride = 16;
   std::vector<ResidentColumn> columns;
   DFMStats stats{};
   explicit Resident(Query &q) : query(q), buffers(q.context) { ++q.refs; }
@@ -1897,6 +2022,7 @@ struct Resident {
 struct ResidentCopy {
   uint64_t source, validity, target, rows;
   int64_t scalar, minimum, sum, padding;
+  uint64_t source_high, target_high;
 };
 Resident *residentInput(Query &query, const DFMResidentInput *refs,
                         int64_t index, int64_t rows, int64_t type) {
@@ -1910,12 +2036,16 @@ Resident *residentInput(Query &query, const DFMResidentInput *refs,
   return &t;
 }
 ResidentCopy residentCopy(const Resident &table, int64_t column,
-                          int64_t target) {
+                          int64_t target, int64_t target_cap = 0) {
   auto c = table.columns[column];
-  return {uint64_t(table.scalar ? 2 * c.slot : c.slot * table.cap),
-          uint64_t(table.scalar ? 16 * c.slot + 8 : c.slot * table.cap),
+  bool wide = c.type == DFM_DECIMAL128;
+  auto source = table.scalar ? (table.scalar_stride / 8) * c.slot : c.slot * table.cap;
+  return {uint64_t(source),
+          uint64_t(table.scalar ? table.scalar_stride * c.slot + (table.scalar_stride == 32 ? 16 : 8) : c.slot * table.cap),
           uint64_t(target), uint64_t(table.rows), table.scalar, c.minimum,
-          c.reduction == DFM_SUM, 0};
+          c.reduction == DFM_SUM || c.reduction == DFM_WIDE_SUM, 0,
+          uint64_t(wide ? source + (table.scalar ? 1 : table.cap) : 0),
+          uint64_t(wide ? target + target_cap : 0)};
 }
 void run(Context &c, const DFMRequest &r, DFMStats &stats,
          Query *query = nullptr, const DFMResidentInput *refs = nullptr,
@@ -2121,7 +2251,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if (refs && refs[i].table) {
       auto &t = *static_cast<Resident *>(refs[i].table);
       auto params = residentCopy(t, refs[i].column,
-                                layout.physical[i] * shape.cap);
+                                layout.physical[i] * shape.cap, shape.cap);
       buffer(0, t.values);
       buffer(1, t.validity);
       buffer(2, x);
@@ -2255,9 +2385,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
           }
           for (int64_t logical = 0; logical < r.slots; ++logical) {
             if (!layout.group_after[i][logical]) continue;
-            uint64_t slot = layout.physical[logical];
+            uint64_t slot[2] = {uint64_t(layout.physical[logical]), uint64_t(slotType(r, logical) == DFM_DECIMAL128)};
             buffer(0, x); buffer(1, v); buffer(2, y); buffer(3, w);
-            buffer(4, orderA); buffer(5, meta); bytes(6, &slot, 8);
+            buffer(4, orderA); buffer(5, meta); bytes(6, slot, 16);
             indirect("order_gather");
           }
           std::swap(x, y); std::swap(v, w);
@@ -2269,14 +2399,14 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         auto physical = layout.physical[logical];
         if (!layout.gathered[i][logical])
           continue;
-        uint64_t slot = physical;
+        uint64_t slot[2] = {uint64_t(physical), uint64_t(slotType(r, logical) == DFM_DECIMAL128)};
         buffer(0, x);
         buffer(1, v);
         buffer(2, y);
         buffer(3, w);
         buffer(4, orderA);
         buffer(5, meta);
-        bytes(6, &slot, 8);
+        bytes(6, slot, 16);
         dispatch("order_gather", shape.cap);
       }
       std::swap(x, y);
@@ -2306,7 +2436,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         auto physical = layout.physical[logical];
         if (!layout.gathered[i][logical])
           continue;
-        uint64_t params[2] = {slot, static_cast<uint64_t>(physical)};
+        uint64_t params[4] = {slot, static_cast<uint64_t>(physical), uint64_t(slotType(r, logical) == DFM_DECIMAL128), 0};
         buffer(0, x);
         buffer(1, v);
         buffer(2, y);
@@ -2314,7 +2444,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         buffer(4, rank);
         buffer(5, blocks);
         buffer(6, meta);
-        bytes(7, params, 16);
+        bytes(7, params, 32);
         dispatch("gather_rows", shape.cap);
       }
       std::swap(x, y);
@@ -2334,7 +2464,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
   }
   id<MTLBuffer> result = nil;
   if (r.reductions) {
-    result = b.make(mul(r.output_count, 16));
+    result = b.make(mul(r.output_count, partialWidth(r)));
     buffer(0, partial);
     buffer(1, result);
     buffer(2, out);
@@ -2398,15 +2528,16 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
   stats.output_rows = rows;
   // Validate every aggregate before modifying any caller output.
   if (r.reductions && rows) {
-    auto *values = static_cast<Partial *>(result.contents);
-    for (int64_t i = 0; i < r.output_count; ++i)
+    for (int64_t i = 0; i < r.output_count; ++i) {
+      auto value = loadPartial(result, i, partialWidth(r));
       if (r.outputs[i].reduction == DFM_SUM &&
-          values[i].count >= r.outputs[i].min_count &&
+          value.count >= r.outputs[i].min_count &&
           ((r.outputs[i].dtype == DFM_INT32 &&
-            (values[i].total < INT32_MIN || values[i].total > INT32_MAX)) ||
+            (value.total < INT32_MIN || value.total > INT32_MAX)) ||
            (r.outputs[i].dtype == DFM_UINT32 &&
-            (values[i].total < 0 || uint64_t(values[i].total) > UINT32_MAX))))
+            (value.total < 0 || uint64_t(value.total) > UINT32_MAX))))
         fail("Integer overflow in Metal sum");
+    }
   }
   if (query) {
     auto t = std::make_unique<Resident>(*query);
@@ -2414,6 +2545,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     t->cap = shape.cap;
     t->packed = shape.packed;
     t->scalar = r.reductions;
+    t->scalar_stride = partialWidth(r);
     t->final = final;
     for (int64_t i = 0; i < r.output_count; ++i) {
       auto o = r.outputs[i];
@@ -2440,7 +2572,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if (r.reductions && rows)
       for (int64_t i = 0; i < r.output_count; ++i)
         if (r.outputs[i].reduction == DFM_SUM)
-          stats.download_bytes += sizeof(Partial);
+          stats.download_bytes += partialWidth(r);
     stats.result_copy_ns = 0;
     t->stats = stats;
     t->seal();
@@ -2452,11 +2584,11 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if (r.reductions) {
       if (!rows)
         continue;
-      auto a = static_cast<Partial *>(result.contents)[i];
+      auto a = loadPartial(result, i, partialWidth(r));
       bool valid =
-          o.reduction == DFM_SUM ? a.count >= o.min_count : a.count > 0;
+          (o.reduction == DFM_SUM || o.reduction == DFM_WIDE_SUM) ? a.count >= o.min_count : a.count > 0;
       if (!valid)
-        a.total = 0;
+        a.total = a.high = 0;
       memcpy(o.values, &a.total, width(o.dtype));
       o.validity[0] = valid;
       stats.download_bytes += width(o.dtype) + 1;
@@ -2472,7 +2604,10 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
                       layout.physical[o.slot] * shape.cap;
         for (int64_t row = 0; row < rows; ++row)
           memcpy(static_cast<char *>(o.values) + row * width(o.dtype),
-                 words + row, width(o.dtype));
+                 words + row, std::min<int64_t>(8, width(o.dtype)));
+        if (o.dtype == DFM_DECIMAL128)
+          for (int64_t row = 0; row < rows; ++row)
+            memcpy(static_cast<char *>(o.values) + row * 16 + 8, words + shape.cap + row, 8);
       } else if (size)
         memcpy(o.values,
                o.dtype == DFM_BOOL
@@ -2793,10 +2928,10 @@ int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
         if (!t.rows)
           continue;
         if (t.scalar) {
-          auto a = static_cast<Partial *>(t.values.contents)[c.slot];
-          bool valid = c.reduction == DFM_SUM ? a.count >= c.minimum : a.count > 0;
+          auto a = loadPartial(t.values, c.slot, t.scalar_stride);
+          bool valid = (c.reduction == DFM_SUM || c.reduction == DFM_WIDE_SUM) ? a.count >= c.minimum : a.count > 0;
           if (!valid)
-            a.total = 0;
+            a.total = a.high = 0;
           memcpy(o.values, &a.total, width(o.dtype));
           o.validity[0] = valid;
         } else {
@@ -2810,7 +2945,10 @@ int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
                           c.slot * t.cap;
             auto bytes = width(o.dtype);
             for (int64_t row = 0; row < t.rows; ++row)
-              memcpy(static_cast<char *>(o.values) + row * bytes, words + row, bytes);
+              memcpy(static_cast<char *>(o.values) + row * bytes, words + row, std::min<int64_t>(8, bytes));
+            if (o.dtype == DFM_DECIMAL128)
+              for (int64_t row = 0; row < t.rows; ++row)
+                memcpy(static_cast<char *>(o.values) + row * 16 + 8, words + t.cap + row, 8);
           }
         }
       }

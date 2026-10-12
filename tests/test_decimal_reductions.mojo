@@ -122,5 +122,37 @@ def test_a_decimal_beyond_64_bits_is_reported_not_miscounted() raises:
         _ = data.select(col("p").n_unique())
 
 
+def test_nullable_decimal128_grouped_counts_keep_chunk_offsets() raises:
+    var raw = (Int128(1) << 100) + 7
+    var first = Series("p", Column[Int128]([raw, -raw, 0], [True, False, True]))
+    var second = Series(
+        "p", Column[Int128]([raw, 0, -raw], [False, False, True])
+    )
+    var values = first.append(second).with_dtype(DataType.decimal(38, 2))
+    var data = DataFrame(
+        [Series("k", Column[Int64]([0, 0, 1, 0, 1, 1])), values^]
+    )
+    var aggs = List[Expr](
+        [col("p").count(), col("p").null_count().alias("nulls")]
+    )
+    var expected = DataFrame(
+        [
+            Series("k", Column[Int64]([0, 1])),
+            Series("p", Column[Int64]([1, 2])),
+            Series("nulls", Column[Int64]([2, 1])),
+        ]
+    )
+    assert_true(
+        data.group_by("k", maintain_order=True).agg(aggs).equals(expected)
+    )
+    assert_true(
+        data.lazy()
+        .group_by("k", maintain_order=True)
+        .agg(aggs)
+        .collect(engine="cpu")
+        .equals(expected)
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -581,8 +581,12 @@ def test_native_fixed_logical_types_preserve_metadata() raises:
             .select(col("a") == col("b"))
             .collect(accelerator=runtime)
         )
-    with assert_raises(contains="Decimal128 accumulation"):
-        _ = frame.lazy().select(col("a").sum()).collect(accelerator=runtime)
+    var sum_query = frame.lazy().select(col("a").sum())
+    assert_true(
+        sum_query.collect(accelerator=runtime).equals(
+            sum_query.collect(engine="cpu")
+        )
+    )
 
 
 def _native_integer_row_ops[D: DType]() raises:
