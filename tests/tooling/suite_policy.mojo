@@ -1132,6 +1132,31 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_casts.mojo::test_native_metal_decimal_cast_all_scales_widths_and_integer_rounding",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_casts.mojo::test_native_metal_decimal_cast_empty_nulls_slices_sort_and_resident_filters",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_casts.mojo::test_native_metal_decimal_cast_aggregates_windows_broadcasts_and_joins",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_casts.mojo::test_native_metal_decimal_cast_profile_budget_and_recovery",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -1506,6 +1531,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_wide_plans.mojo",
                 "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo",
                 "tests/execution_modes/test_backend_metal_decimal_means.mojo",
+                "tests/execution_modes/test_backend_metal_decimal_casts.mojo",
                 "tests/execution_modes/test_backends.mojo",
             ],
         )

@@ -630,6 +630,62 @@ def check_extended_shapes_without_device():
 
 
 check_extended_shapes_without_device()
+def check_decimal_float_cast_preflight_without_device():
+    def word(value):
+        return C.cast(C.pointer(C.c_double(value)), C.POINTER(C.c_uint64)).contents.value
+
+    for dtype, maximum in [(2, 9), (3, 18), (12, 38)]:
+        inputs = (Input * 1)(Input(None, None, dtype, 5, 1))
+        code = (I * 8)(0, -1, -1, 0, 213, 0, -1, 0)
+        literals = (C.c_uint64 * 2)(0, word(1.0))
+        nodes, slots = (I * 2)(dtype, 11), (I * 2)(dtype, 11)
+        steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+        outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+        request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                          ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                          ptr(outputs), ptr(nodes), ptr(slots))
+        for scale in range(maximum + 1):
+            code[7], literals[1] = scale, word(float(10**scale))
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+            assert memory.result == 513 * 8 + 65
+        for scale in [-1, maximum + 1, 2**63 - 1]:
+            code[7] = scale
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal Float64 cast descriptor" in C.string_at(err)
+            lib.dfm_free(err)
+        code[7] = maximum
+        for bad in [0, word(-1.0), word(float('inf')), word(float('nan')), literals[1] ^ 1]:
+            original = literals[1]
+            literals[1] = bad
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal Float64 cast divisor" in C.string_at(err)
+            lib.dfm_free(err)
+            literals[1] = original
+        code[6] = 0
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal Float64 cast descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+        code[6] = -1
+        for bad_source in [1, 4, 5, 6, 7, 8, 9, 10, 11]:
+            nodes[0] = slots[0] = inputs[0].dtype = bad_source
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal Float64 cast descriptor" in C.string_at(err)
+            lib.dfm_free(err)
+        nodes[0] = slots[0] = inputs[0].dtype = dtype
+        for bad_target in [1, 2, 3, 4, 12]:
+            nodes[1] = slots[1] = outputs[0].dtype = bad_target
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal Float64 cast descriptor" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+check_decimal_float_cast_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")

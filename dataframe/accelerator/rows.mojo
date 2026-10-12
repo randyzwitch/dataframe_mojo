@@ -289,6 +289,14 @@ def _program(
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
         var temporal = op >= DT_YEAR and op <= DT_TRUNCATE
+        var decimal_float_cast = (
+            op == CAST
+            and left_type.is_decimal()
+            and bound.dtypes[i] == DataType.FLOAT64
+            and capabilities.decimal_float_cast
+            and (capabilities.float64 or capabilities.float64_emulated)
+            and capabilities.casts
+        )
         if (
             temporal
             and left_type.is_datetime()
@@ -367,6 +375,7 @@ def _program(
                 and op != LE
                 and op != EQ
                 and op != NE
+                and not decimal_float_cast
             ):
                 capabilities.reject(
                     "logical",
@@ -380,20 +389,24 @@ def _program(
             or right_type.is_temporal()
             or right_type.is_decimal()
         )
-        if logical and (
-            op == SQRT
-            or op == ABS
-            or op == FLOORDIV
-            or op == MOD
-            or op == POW
-            or op == FLOOR
-            or op == CEIL
-            or op == ROUND
-            or op == ADD
-            or op == SUB
-            or op == MUL
-            or op == NEG
-            or op == CAST
+        if (
+            logical
+            and not decimal_float_cast
+            and (
+                op == SQRT
+                or op == ABS
+                or op == FLOORDIV
+                or op == MOD
+                or op == POW
+                or op == FLOOR
+                or op == CEIL
+                or op == ROUND
+                or op == ADD
+                or op == SUB
+                or op == MUL
+                or op == NEG
+                or op == CAST
+            )
         ):
             capabilities.reject(
                 "logical", "logical arithmetic and casts require CPU execution"
