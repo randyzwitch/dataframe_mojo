@@ -22,9 +22,6 @@ jobs:
       - name: Verify native Parquet exported ABI
         run: pixi run check-parquet-abi
 
-      - name: Check maintained coverage inventory
-        run: pixi run coverage-check
-
       - name: Run maintained contract suite
         run: pixi run test --output build/contract-tests
 

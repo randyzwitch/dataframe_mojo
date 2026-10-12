@@ -186,5 +186,5 @@ as errors. DuckDB Spatial checks actual GeoParquet interpretation when available
 The adapter reports missing optional engines or an absent compatible Spatial
 extension as unavailable and attempts no extension download; semantic or loading
 errors for available engines fail. An unavailable engine is not passing
-interoperability evidence. See [the testing guide](testing.md) and the `io.spatial`
-catalog entry for precise witnesses and validation scope.
+interoperability evidence. See [the testing guide](testing.md) and
+[coverage guide](test-coverage-plan.md) for validation scope and test design.

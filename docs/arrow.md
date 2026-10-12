@@ -95,8 +95,8 @@ independent fixtures and typed literals. Run `pixi run test --contracts io.arrow
 
 After the interchange suite, `pixi run -e oracle test-interchange-oracles`
 validates independent PyArrow fixtures and consumes actual Parquet/GeoParquet
-writer artifacts. The `io.arrow` catalog entry identifies each boundary and
-lifetime witness; a roundtrip alone does not establish interoperability.
+writer artifacts. The [coverage guide](test-coverage-plan.md) describes boundary
+and lifetime evidence; a roundtrip alone does not establish interoperability.
 
 Large record batches can copy columns in parallel on Linux. Release remains
 owned by the caller after all jobs finish; Parquet reuses the pool between

@@ -1,6 +1,13 @@
 """Runner sensitivity: discovery, quoting, strict failure matching and continuation."""
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
-from dataframe.json_value import JsonValue, json_quote
+from dataframe.json_value import JsonValue
+from tests.tooling.suite_policy import (
+    SuitePolicy,
+    ExpectedFailure,
+    CapabilityRequirement,
+    ContractGroup,
+    empty_policy,
+)
 from tests.tooling.contract_runner import (
     RunnerOptions,
     DEFAULT_PACKAGING,
@@ -11,7 +18,8 @@ from tests.tooling.contract_runner import (
     run_command,
     capture,
     cases_for,
-    selected_witnesses,
+    selected_modules,
+    validate_policy,
     generate_driver,
 )
 
@@ -34,49 +42,54 @@ def _root() raises -> String:
     return root^
 
 
-def _catalog(process: Bool = False) raises -> JsonValue:
-    var public = String(
-        "tests/public_contracts/test_operations.mojo::test_contract"
-    )
-    var storage = String(
-        "tests/storage_ownership/test_operations.mojo::test_contract"
-    )
-    var crash = String("tests/public_contracts/test_crash.mojo::test_fatal")
-    return JsonValue(
-        '{"contracts":[{"id":"public","witnesses":['
-        + json_quote(public)
-        + ("," + json_quote(crash) if process else "")
-        + ']},{"id":"storage","witnesses":['
-        + json_quote(storage)
-        + ']}],"known_failures":{},"known_process_failures":{'
-        + (
-            json_quote(crash)
-            + ':{"exit_code":132,"error_contains":"precise fatal diagnostic","reason":"verified fatal fixture"}' if process else ""
+def _policy(process: Bool = False) -> SuitePolicy:
+    var policy = empty_policy()
+    policy.groups = [
+        ContractGroup(
+            "public", ["tests/public_contracts/test_operations.mojo"]
+        ),
+        ContractGroup(
+            "storage", ["tests/storage_ownership/test_operations.mojo"]
+        ),
+    ]
+    if process:
+        policy.groups[0].modules.append(
+            "tests/public_contracts/test_crash.mojo"
         )
-        + "}}"
-    )
+        policy.failures.append(
+            ExpectedFailure(
+                "tests/public_contracts/test_crash.mojo::test_fatal",
+                "verified fatal fixture",
+                "precise fatal diagnostic",
+                132,
+            )
+        )
+    return policy^
 
 
 def test_discovery_contract_selection_and_generated_aliases_are_exact() raises:
     var root = _root()
-    var catalog = _catalog()
-    var public = cases_for(catalog, root, "public")
-    var storage = cases_for(catalog, root, "storage")
+    var policy = _policy()
+    var public = cases_for(root, "public")
+    var storage = cases_for(root, "storage")
     assert_equal(
         public, ["tests/public_contracts/test_operations.mojo::test_contract"]
     )
     assert_equal(
         storage, ["tests/storage_ownership/test_operations.mojo::test_contract"]
     )
-    assert_equal(selected_witnesses(catalog, ["public"]), public)
-    assert_equal(len(selected_witnesses(catalog, ["public", "storage"])), 2)
+    assert_equal(
+        selected_modules(policy, ["public"]),
+        ["tests/public_contracts/test_operations.mojo"],
+    )
+    assert_equal(len(selected_modules(policy, ["public", "storage"])), 2)
     with assert_raises():
-        _ = selected_witnesses(catalog, ["unknown"])
+        _ = selected_modules(policy, ["unknown"])
     var generated = generate_driver(
         ["public", "storage"],
         [public.copy(), storage.copy()],
         root + "/driver",
-        JsonValue("{}"),
+        empty_policy(),
     )
     assert_true(
         generated.find(
@@ -93,11 +106,42 @@ def test_discovery_contract_selection_and_generated_aliases_are_exact() raises:
     assert_true(generated.find('failed.append("public")') >= 0)
     var extra = root + "/tests/public_contracts/test_extra.mojo"
     write_text(extra, "def test_unmapped() raises:\n    pass\n")
-    with assert_raises():
-        _ = cases_for(catalog, root, "public")
+    assert_equal(len(cases_for(root, "public")), 2)
+    assert_equal(len(validate_policy(policy, root)), 3)
     write_text(extra, "def test_parameterized(value: Int) raises:\n    pass\n")
-    with assert_raises():
-        _ = cases_for(catalog, root, "public")
+    with assert_raises(contains="Unsupported test entry signature"):
+        _ = cases_for(root, "public")
+    write_text(
+        extra,
+        "def test_same() raises:\n    pass\ndef test_same() raises:\n    pass\n",
+    )
+    with assert_raises(contains="Duplicate test entry"):
+        _ = cases_for(root, "public")
+    write_text(extra, "def test_unmapped() raises:\n    pass\n")
+    var entry = "tests/public_contracts/test_operations.mojo::test_contract"
+    policy.failures.append(ExpectedFailure("missing", "reason", "precise", 0))
+    with assert_raises(contains="Stale expected failure"):
+        _ = validate_policy(policy, root)
+    _ = policy.failures.pop()
+    policy.failures.append(ExpectedFailure(entry, "reason", "precise", 0))
+    policy.failures.append(ExpectedFailure(entry, "reason", "precise", 0))
+    with assert_raises(contains="Duplicate expected failure"):
+        _ = validate_policy(policy, root)
+    _ = policy.failures.pop()
+    policy.failures[0].diagnostic = ""
+    with assert_raises(contains="Invalid expected failure"):
+        _ = validate_policy(policy, root)
+    policy.failures = List[ExpectedFailure]()
+    policy.requirements.append(CapabilityRequirement("missing", "metal"))
+    with assert_raises(contains="Stale capability requirement"):
+        _ = validate_policy(policy, root)
+    policy.requirements[0].entry = entry
+    with assert_raises(contains="Unknown required capability"):
+        _ = validate_policy(policy, root)
+    policy.requirements = List[CapabilityRequirement]()
+    policy.groups[0].modules.append("tests/public_contracts/missing.mojo")
+    with assert_raises(contains="Stale or duplicate contract module"):
+        _ = validate_policy(policy, root)
 
 
 def test_process_arguments_are_literal_and_wait_statuses_retain_failures() raises:
@@ -144,8 +188,7 @@ def _run_fixture(
     process: Bool,
     packaging: String = DEFAULT_PACKAGING,
 ) raises -> JsonValue:
-    var catalog = _catalog(process)
-    write_text(root + "/tests/plan.json", catalog.text)
+    var policy = _policy(process)
     if process:
         write_text(
             root + "/tests/public_contracts/test_crash.mojo",
@@ -161,7 +204,8 @@ def _run_fixture(
                 packaging.copy(),
                 root + "/output",
                 _compiler(root, scenario),
-            )
+            ),
+            policy,
         )
     except error:
         if String(error).find("Contract suite failure; provenance:") < 0:
@@ -235,13 +279,12 @@ def test_generated_expected_failure_wrappers_match_only_the_named_diagnostic() r
     var entry = String(
         "tests/public_contracts/test_operations.mojo::test_contract"
     )
-    var known = JsonValue(
-        "{"
-        + json_quote(entry)
-        + ':{"error_contains":"precise error","reason":"verified defect"}}'
+    var policy = empty_policy()
+    policy.failures.append(
+        ExpectedFailure(entry.copy(), "verified defect", "precise error", 0)
     )
     var generated = generate_driver(
-        ["public"], [[entry.copy()]], root + "/driver", known
+        ["public"], [[entry.copy()]], root + "/driver", policy
     )
     assert_true(generated.find('String(error).find("precise error") < 0') >= 0)
     assert_true(generated.find("raise error") >= 0)
@@ -259,14 +302,9 @@ def test_capability_requirements_omit_imports_and_record_skips_separately() rais
         root + "/tests/public_contracts/test_crash.mojo",
         "def test_fatal() raises:\n    pass\n",
     )
-    var catalog = _catalog(True)
-    var text = String(catalog.text[byte = 0 : catalog.text.byte_length() - 1])
-    text += (
-        ',"capabilities":{"metal":"real native provider"},"required_capabilities":{'
-        + json_quote(crash)
-        + ':["metal"]}}'
-    )
-    write_text(root + "/tests/plan.json", text)
+    var policy = _policy(True)
+    policy.capabilities = ["metal"]
+    policy.requirements.append(CapabilityRequirement(crash.copy(), "metal"))
     var compiler = _compiler(root, "process")
     var metadata = execute_suite(
         RunnerOptions(
@@ -276,7 +314,8 @@ def test_capability_requirements_omit_imports_and_record_skips_separately() rais
             "areas",
             root + "/output",
             compiler.copy(),
-        )
+        ),
+        policy,
     )
     var data = JsonValue(read_text(metadata))
     assert_equal(len(data.get("skipped_capability_cases").items()), 1)
@@ -294,7 +333,8 @@ def test_capability_requirements_omit_imports_and_record_skips_separately() rais
             root + "/output",
             compiler.copy(),
             ["metal"],
-        )
+        ),
+        policy,
     )
     data = JsonValue(read_text(metadata))
     assert_equal(len(data.get("skipped_capability_cases").items()), 0)
@@ -310,7 +350,8 @@ def test_capability_requirements_omit_imports_and_record_skips_separately() rais
                 root + "/output",
                 compiler.copy(),
                 ["typo"],
-            )
+            ),
+            policy,
         )
 
 

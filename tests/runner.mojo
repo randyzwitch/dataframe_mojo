@@ -1,4 +1,4 @@
-"""Run cataloged dataframe contracts with a Mojo-native compiler/process harness."""
+"""Discover dataframe tests and run them with a Mojo-native process harness."""
 from std.sys import argv
 from tests.tooling.contract_runner import (
     RunnerOptions,
@@ -6,6 +6,7 @@ from tests.tooling.contract_runner import (
     AREAS,
     DEFAULT_PACKAGING,
 )
+from tests.tooling.suite_policy import production_policy
 
 
 def main() raises:
@@ -69,5 +70,6 @@ def main() raises:
             output^,
             compiler^,
             capabilities^,
-        )
+        ),
+        production_policy(),
     )

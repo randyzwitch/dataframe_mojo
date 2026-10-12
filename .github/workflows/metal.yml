@@ -11,7 +11,6 @@ on:
       - 'tests/tooling/**'
       - 'tests/runner.mojo'
       - 'tests/run_tests.sh'
-      - 'tests/plan.json'
       - 'pixi.toml'
       - 'pixi.lock'
   push:
@@ -25,7 +24,6 @@ on:
       - 'tests/tooling/**'
       - 'tests/runner.mojo'
       - 'tests/run_tests.sh'
-      - 'tests/plan.json'
       - 'pixi.toml'
       - 'pixi.lock'
   workflow_dispatch:

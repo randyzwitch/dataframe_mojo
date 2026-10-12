@@ -71,5 +71,5 @@ Run `pixi run test --contracts expr.temporal expr.order_windows`. The maintained
 Mojo contracts use independent civil-calendar arithmetic and explicit interval
 membership for irregular/duplicate timestamps, endpoint options, periods,
 offsets and partitioned windows. Explicit timezone transitions and two-pass
-rolling moments anchor their respective semantics. The coverage plan records
-invalid requests, exact witnesses and remaining obligations.
+rolling moments anchor their respective semantics. See the
+[coverage guide](test-coverage-plan.md) for reference and dimension requirements.

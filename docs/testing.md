@@ -1,8 +1,8 @@
 # Testing
 
 The suite starts from public dataframe contracts and independent expected values.
-[The maintained coverage plan](test-coverage-plan.md) records each contract's
-oracle, required dimensions and named witnesses. Physical layout, planner settings
+[The coverage guide](test-coverage-plan.md) describes the contracts, independent
+models and adversarial dimensions to maintain. Physical layout, planner settings
 and execution modes vary independently of the logical input.
 The full suite requires `libdfparquet`; build it with
 `pixi run -e native build-dfparquet` before the first full run.
@@ -11,7 +11,6 @@ The full suite requires `libdfparquet`; build it with
 pixi run test
 pixi run test --areas public storage
 pixi run test --contracts table.join types.cast
-pixi run coverage-check
 ```
 
 The six areas separate public behavior, storage and ownership, kernel equivalence,
@@ -20,12 +19,13 @@ generators and typed comparisons live in `tests/support/`; orchestration and its
 own failure checks live in `tests/tooling/`. Test modules exercise production
 imports. Independent reference semantics have no dataframe dependency.
 
-The runner compares names, logical types, shapes, ordered cells and null validity.
+Shared comparators check names, logical types, shapes, ordered cells and validity.
 Known implementation defects run with exact diagnostic matching; an unrelated
 failure or unexpected pass fails the suite. Fatal defects run in isolated
 processes with exact exit-status matching. Native hardware cases report explicit
-capability skips and require actual device execution when enabled. See
-`tests/plan.json` for the current precise gaps.
+capability skips and require actual device execution when enabled. Named module
+groups, failure signatures and capability gates live in
+[`tests/tooling/suite_policy.mojo`](../tests/tooling/suite_policy.mojo).
 
 Run metadata and compile/execute logs are written under `build/contract-tests/`.
 They record the compiler, source fingerprints, revision, selected cases, settings
@@ -33,19 +33,14 @@ and capability omissions.
 By default, each area runs in its own executable and later areas still run after
 a build or process failure. `--packaging combined` explicitly selects a shared
 executable when that packaging is useful for investigation.
-The inventory validator rejects unmapped entry points,
-stale coverage evidence and retirement records without live replacement witnesses.
-The preservation ledger records unique regressions; it does not define the suite.
-Retired entry points, source fingerprints, assignments and review evidence are
-retained in `tests/preservation_archive.json`. Full source remains in Git history.
-Review decisions live in `tests/preservation_reviews/`, with named maintained
-witnesses in `tests/preservation.json`.
+Test functions are discovered automatically. `--contracts` selects named module
+groups; it does not require assigning every test to a coverage registry.
 
 Native Metal execution remains unvalidated on the Linux redesign host. Capability
 skips do not establish GPU parity. Multiworker positional global FIRST/LAST and
 ARGMIN/ARGMAX also remain a known coverage limit: schedule-dependent results were
-observed, so their deterministic assertions currently use one worker. The catalog
-records this limitation without installing a flaky expected-failure test.
+observed, so their deterministic assertions currently use one worker. No flaky
+expected-failure test substitutes for a deterministic regression.
 
 ## Interchange and native interfaces
 
@@ -67,8 +62,8 @@ Spatial tests construct and consume independent WKB and format metadata.
 
 External PyArrow adapters validate actual public writer artifacts; GeoPandas and
 DuckDB Spatial adapters distinguish unavailable engines from semantic failures.
-Python is used for these external engines, AST inventory, and unit tests of Python
-tooling. Dataframe tests, semantic references and suite orchestration use Mojo.
+Python is used for these external engines and unit tests of Python tooling.
+Dataframe tests, semantic references and suite orchestration use Mojo.
 
 `pixi run package-smoke` builds an identified package and compiles consumers outside
 the checkout. It checks independent example output, typed cells and build identity.
@@ -166,8 +161,8 @@ separately, and compare native-cache hits with hits (misses with misses).
 
 Linux and macOS run `pixi run test` after building the native Parquet library
 and checking its exported ABI. Independent consumers then validate the actual
-writer artifacts with `pixi run -e oracle test-interchange-oracles`. Coverage
-inventory, runner failure handling, formatting, version consistency, public
+writer artifacts with `pixi run -e oracle test-interchange-oracles`. Runner
+failure handling, formatting, version consistency, public
 docstrings and Python production-tool checks run separately. Compilation cost
 does not constrain semantic coverage.
 
@@ -199,6 +194,6 @@ the device. It enables `--capabilities metal` only when that probe reports an
 actual device. An absent device leaves native witnesses explicitly skipped;
 broken runtime loading and enabled execution failures fail the job.
 
-Release validation builds the native Parquet library, validates the coverage
-inventory, runs the maintained suite and independent consumers, then checks
+Release validation builds the native Parquet library, runs the maintained suite
+and independent consumers, then checks
 documentation, examples and the packaged consumer before publishing.

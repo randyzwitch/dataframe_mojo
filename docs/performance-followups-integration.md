@@ -31,4 +31,4 @@ and merge the recorded range-filter parent, then use that historical revision's
 test runner with the nine modules listed in the JSON record and its pinned
 environment. Those recorded runs used TEST_JOBS=4 on Linux and TEST_JOBS=2 on M1.
 For current source validation, run `pixi run test`; the maintained contract suite
-and preservation records supersede the retired module layout.
+supersedes the retired module layout.

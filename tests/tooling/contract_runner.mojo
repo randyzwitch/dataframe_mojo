@@ -1,14 +1,15 @@
 """Mojo-native suite orchestration; POSIX processes only, no Python runtime.
 
-The catalog defines coverage. Discovery verifies that every ordinary Mojo test
-has an assignment. Process-isolated failures require both a precise diagnostic
-and an exact exit code, so crashes cannot hide unrelated failures.
+Source discovery includes every ordinary Mojo test without a registry. The typed
+policy only controls expected failures, capabilities and convenient module groups.
+Process-isolated failures require both a precise diagnostic and exact exit code.
 """
 from std.ffi import external_call
 from std.os import getenv
 from std.os.path import exists
 from std.memory import Pointer
-from dataframe.json_value import JsonValue, json_quote
+from dataframe.json_value import json_quote
+from tests.tooling.suite_policy import SuitePolicy, empty_policy
 
 comptime DEFAULT_PACKAGING = "areas"
 comptime AREAS = (
@@ -101,13 +102,6 @@ def temporary_directory(parent: String) raises -> String:
     return String(unsafe_from_utf8=bytes^)
 
 
-def strings(value: JsonValue) raises -> List[String]:
-    var result = List[String]()
-    for item in value.items():
-        result.append(item.string())
-    return result^
-
-
 def json_strings(values: List[String]) -> String:
     var result = String("[")
     for i in range(len(values)):
@@ -174,41 +168,85 @@ def discovered_cases(root: String, area: String) raises -> List[String]:
     return cases^
 
 
-def cases_for(
-    catalog: JsonValue, root: String, area: String
-) raises -> List[String]:
-    var discovered = discovered_cases(root, area)
-    var declared = List[String]()
-    var prefix = "tests/" + area_directory(area) + "/"
-    for contract in catalog.get("contracts").items():
-        for witness in strings(contract.get("witnesses")):
-            if witness.startswith(prefix):
-                _append_unique(declared, witness)
-    if not discovered or len(declared) != len(discovered):
-        raise Error("Contract catalog/entry mismatch in " + area)
-    for entry in discovered:
-        if entry not in declared:
-            raise Error(
-                "Contract catalog/entry mismatch in " + area + ": " + entry
-            )
-    return discovered^
+def cases_for(root: String, area: String) raises -> List[String]:
+    return discovered_cases(root, area)
 
 
-def selected_witnesses(
-    catalog: JsonValue, contracts: List[String]
+def selected_modules(
+    policy: SuitePolicy, contracts: List[String]
 ) raises -> List[String]:
     var known = List[String]()
-    var witnesses = List[String]()
-    for contract in catalog.get("contracts").items():
-        var name = contract.get("id").string()
-        known.append(name.copy())
-        if name in contracts:
-            for witness in strings(contract.get("witnesses")):
-                _append_unique(witnesses, witness)
+    var modules = List[String]()
+    for group in policy.groups:
+        known.append(group.name.copy())
+        if group.name in contracts:
+            for module in group.modules:
+                _append_unique(modules, module)
     for name in contracts:
         if name not in known:
             raise Error("Unknown contract: " + name)
-    return witnesses^
+    return modules^
+
+
+def case_module(entry: String) raises -> String:
+    var split = entry.find("::")
+    if split < 0:
+        raise Error("Invalid entry identifier: " + entry)
+    return String(entry[byte=0:split])
+
+
+def validate_policy(policy: SuitePolicy, root: String) raises -> List[String]:
+    var discovered = List[String]()
+    var modules = List[String]()
+    comptime for i in range(len(AREAS)):
+        if exists(root + "/tests/" + String(DIRECTORIES[i])):
+            for entry in discovered_cases(root, String(AREAS[i])):
+                discovered.append(entry.copy())
+                _append_unique(modules, case_module(entry))
+    var seen = List[String]()
+    for capability in policy.capabilities:
+        if not capability or capability in seen:
+            raise Error("Invalid or duplicate capability: " + capability)
+        seen.append(capability.copy())
+    seen = List[String]()
+    for failure in policy.failures:
+        if failure.entry in seen:
+            raise Error("Duplicate expected failure: " + failure.entry)
+        if failure.entry not in discovered:
+            raise Error("Stale expected failure: " + failure.entry)
+        if (
+            not failure.reason
+            or not failure.diagnostic
+            or failure.exit_code < 0
+            or failure.exit_code > 255
+        ):
+            raise Error("Invalid expected failure: " + failure.entry)
+        seen.append(failure.entry.copy())
+    seen = List[String]()
+    for requirement in policy.requirements:
+        if requirement.entry not in discovered:
+            raise Error("Stale capability requirement: " + requirement.entry)
+        if requirement.capability not in policy.capabilities:
+            raise Error(
+                "Unknown required capability: " + requirement.capability
+            )
+        var key = requirement.entry + "::" + requirement.capability
+        if key in seen:
+            raise Error(
+                "Duplicate capability requirement: " + requirement.entry
+            )
+        seen.append(key^)
+    seen = List[String]()
+    for group in policy.groups:
+        if not group.name or group.name in seen or not group.modules:
+            raise Error("Invalid or duplicate contract group: " + group.name)
+        seen.append(group.name.copy())
+        var grouped = List[String]()
+        for module in group.modules:
+            if module not in modules or module in grouped:
+                raise Error("Stale or duplicate contract module: " + module)
+            grouped.append(module.copy())
+    return discovered^
 
 
 def case_alias(entry: String, area: String) raises -> String:
@@ -230,7 +268,7 @@ def generate_driver(
     areas: List[String],
     cases: List[List[String]],
     directory: String,
-    known: JsonValue,
+    policy: SuitePolicy,
 ) raises -> String:
     var result = String(
         "from std.testing import TestSuite\nfrom std.ffi import external_call\n"
@@ -251,9 +289,10 @@ def generate_driver(
             )
     for i in range(len(areas)):
         for entry in cases[i]:
-            if not known.has(entry):
+            var index = policy.failure_index(entry)
+            if index < 0:
                 continue
-            var failure = known.get(entry)
+            ref failure = policy.failures[index]
             var alias = case_alias(entry, areas[i])
             result += (
                 "\n\ndef "
@@ -261,11 +300,9 @@ def generate_driver(
                 + "__known_failure() raises:\n    var failed = False\n    try:\n        "
                 + alias
                 + "()\n    except error:\n        if String(error).find("
-                + json_quote(failure.get("error_contains").string())
+                + json_quote(failure.diagnostic)
                 + ") < 0:\n            raise error\n        print("
-                + json_quote(
-                    "XFAIL: " + entry + ": " + failure.get("reason").string()
-                )
+                + json_quote("XFAIL: " + entry + ": " + failure.reason)
                 + ", error)\n        failed = True\n    if not failed:\n        raise Error("
                 + json_quote(
                     "XPASS: " + entry + "; remove known-failure annotation"
@@ -290,7 +327,10 @@ def generate_driver(
                 + area
                 + ".test["
                 + case_alias(entry, area)
-                + ("__known_failure" if known.has(entry) else "")
+                + (
+                    "__known_failure" if policy.failure_index(entry)
+                    >= 0 else ""
+                )
                 + "]()\n"
             )
         result += (
@@ -349,9 +389,7 @@ def _fingerprints(root: String) raises -> String:
             dirs.append(path.copy())
     var arguments: List[String] = ["find"]
     arguments.extend(dirs^)
-    arguments.extend(
-        ["-type", "f", "(", "-name", "*.mojo", "-o", "-name", "plan.json", ")"]
-    )
+    arguments.extend(["-type", "f", "-name", "*.mojo"])
     var listing = capture(arguments)
     if listing[0]:
         raise Error(listing[1])
@@ -382,46 +420,41 @@ def _fingerprints(root: String) raises -> String:
     return result + "}"
 
 
-def execute_suite(options: RunnerOptions) raises -> String:
-    var catalog = JsonValue(read_text(options.root + "/tests/plan.json"))
-    var selected = selected_witnesses(catalog, options.contracts)
+def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
+    _ = validate_policy(policy, options.root)
+    var selected = selected_modules(policy, options.contracts)
     var areas = List[String]()
     var cases = List[List[String]]()
     var process_cases = List[String]()
     var process_areas = List[String]()
     var skipped = List[String]()
-    var capability_catalog = catalog.get("capabilities")
-    var requirements = catalog.get("required_capabilities")
-    if capability_catalog.kind() == 110:
-        capability_catalog = JsonValue("{}")
-    if requirements.kind() == 110:
-        requirements = JsonValue("{}")
     for capability in options.capabilities:
-        if not capability_catalog.has(capability):
+        if capability not in policy.capabilities:
             raise Error("Unknown runtime capability: " + capability)
-    var known = catalog.get("known_failures")
-    var process_known = catalog.get("known_process_failures")
-    if process_known.kind() == 110:
-        process_known = JsonValue("{}")
     if options.packaging not in ["combined", "areas"]:
         raise Error("Unknown packaging mode: " + options.packaging)
+    var seen_areas = List[String]()
     for area in options.areas:
-        if area in areas:
+        if area in seen_areas:
             raise Error("Select each area only once")
+        seen_areas.append(area.copy())
         var ordinary = List[String]()
-        for entry in cases_for(catalog, options.root, area):
-            if options.contracts and entry not in selected:
+        for entry in cases_for(options.root, area):
+            if options.contracts and case_module(entry) not in selected:
                 continue
-            if requirements.has(entry):
-                var missing = List[String]()
-                for capability in strings(requirements.get(entry)):
-                    if capability not in options.capabilities:
-                        missing.append(capability.copy())
-                if missing:
-                    print("SKIP(capability):", entry, "requires", missing)
-                    skipped.append(entry.copy())
-                    continue
-            if process_known.has(entry):
+            var missing = List[String]()
+            for requirement in policy.requirements:
+                if (
+                    requirement.entry == entry
+                    and requirement.capability not in options.capabilities
+                ):
+                    missing.append(requirement.capability.copy())
+            if missing:
+                print("SKIP(capability):", entry, "requires", missing)
+                skipped.append(entry.copy())
+                continue
+            var index = policy.failure_index(entry)
+            if index >= 0 and policy.failures[index].exit_code != 0:
                 process_cases.append(entry.copy())
                 process_areas.append(area.copy())
             else:
@@ -430,9 +463,7 @@ def execute_suite(options: RunnerOptions) raises -> String:
             areas.append(area.copy())
             cases.append(ordinary^)
     if not areas and not process_cases and not skipped:
-        raise Error(
-            "Selected contracts have no implemented witnesses in selected areas"
-        )
+        raise Error("Selected contracts have no tests in selected areas")
     var directory = temporary_directory(options.output)
     var version = capture([options.compiler, "--version"])
     if version[0]:
@@ -463,11 +494,11 @@ def execute_suite(options: RunnerOptions) raises -> String:
         var binary = folder + "/suite"
         write_text(
             source,
-            generate_driver(program_areas[i], program_cases[i], folder, known),
+            generate_driver(program_areas[i], program_cases[i], folder, policy),
         )
         for group in program_cases[i]:
             for entry in group:
-                expected += Int(known.has(entry))
+                expected += Int(policy.failure_index(entry) >= 0)
         for phase in [String("compile"), String("execute")]:
             var command: List[String] = [
                 options.compiler,
@@ -499,7 +530,7 @@ def execute_suite(options: RunnerOptions) raises -> String:
         write_text(
             source,
             generate_driver(
-                [area.copy()], [[entry.copy()]], folder, JsonValue("{}")
+                [area.copy()], [[entry.copy()]], folder, empty_policy()
             ),
         )
         var build = capture(
@@ -528,17 +559,14 @@ def execute_suite(options: RunnerOptions) raises -> String:
                 entry.copy(), "execute", result[0], folder + "/execute.log"
             )
         )
-        var failure = process_known.get(entry)
-        var code = Int(failure.get("exit_code").text)
-        if (
-            result[0] == code
-            and result[1].find(failure.get("error_contains").string()) >= 0
-        ):
+        ref failure = policy.failures[policy.failure_index(entry)]
+        var code = failure.exit_code
+        if result[0] == code and result[1].find(failure.diagnostic) >= 0:
             expected += 1
             print(
                 "XFAIL(process):",
                 entry,
-                failure.get("reason").string(),
+                failure.reason,
                 "exit",
                 result[0],
             )
