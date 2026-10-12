@@ -937,9 +937,14 @@ def lower_rows(
                 if method < 0:
                     raise Error("unknown rank method: " + rank_node.text)
                 var child = bind(subtree(ranked, rank_node.left), rank_schema)
+                var child_proven = List[Bool](
+                    length=len(child.expr._nodes), fill=False
+                )
+                if capabilities.proven_integer_operations:
+                    child_proven = proven_integer_nodes(child)
                 for c in range(len(child.expr._nodes)):
                     var operation = child.expr._nodes[c].op
-                    if (
+                    if not child_proven[c] and (
                         child.dtypes[c].is_integer()
                         and (
                             operation == ADD
