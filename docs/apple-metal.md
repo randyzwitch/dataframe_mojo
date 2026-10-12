@@ -44,6 +44,14 @@ runtime data; changing those does not require recompiling an identical shader.
 
 ## Precision and supported operations
 
+Metal accepts up to 128 logical value slots, source/output columns, device
+steps, and nodes per row expression. Joins accept up to 128 combined input
+columns and 128 output columns. These bounds are independent: computed values
+and grouped-reduction temporaries also consume slots. Other accelerator
+backends retain their existing 64-entry defaults. The extended bounds require
+rebuilding the optional native Metal runtime; ABI layouts and opcode meanings
+are unchanged. Memory budgets and semantic preflight checks still apply.
+
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
 width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64/128 columns.
 Float64 columns use IEEE words throughout resident execution. Add, subtract,

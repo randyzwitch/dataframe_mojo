@@ -342,6 +342,10 @@ def _capabilities() -> RowCapabilities:
         temporal_fields=True,
         ranks=True,
         decimal128=True,
+        max_nodes=128,
+        max_slots=128,
+        max_steps=128,
+        max_join_columns=128,
     )
 
 
