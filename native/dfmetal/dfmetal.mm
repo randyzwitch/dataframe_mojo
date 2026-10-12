@@ -47,7 +47,7 @@ bool binaryOp(int64_t op) {
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+  return (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
          op == DFM_CEIL || op == DFM_ROUND || op == DFM_SQRT ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
@@ -514,6 +514,19 @@ Shape validate(const DFMRequest &r, bool storage = false,
                          ? nodeType(r, v.start + c[1])
                          : nodeType(r, v.start + j);
       auto resultType = nodeType(r, v.start + j);
+      if (c[0] == DFM_DECIMAL_FLOAT_CAST) {
+        if (!typed(r) || (operand != DFM_INT32 && operand != DFM_INT64 && operand != DFM_DECIMAL128) ||
+            resultType != DFM_FLOAT64_STORAGE || c[2] != -1 || c[3] < 0 ||
+            c[3] > (operand == DFM_INT32 ? 9 : operand == DFM_INT64 ? 18 : 38))
+          fail("Invalid Metal decimal Float64 cast descriptor");
+        unsigned __int128 unit = 1;
+        for (int64_t scale = 0; scale < c[3]; ++scale) unit *= 10;
+        double divisor = double(unit);
+        uint64_t bits;
+        std::memcpy(&bits, &divisor, sizeof(bits));
+        if (r.literals[v.start + j] != bits)
+          fail("Invalid Metal decimal Float64 cast divisor");
+      }
       if (c[0] == DFM_LITERAL_INT && resultType == DFM_DECIMAL128) {
         if (c[3] < 0 || c[3] >= r.literal_count ||
             r.code[4*c[3]] != DFM_LITERAL_INT || nodeType(r,c[3]) != DFM_INT64)
@@ -523,7 +536,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_NULL && c[0] != DFM_LITERAL_INT &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE && c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL &&
-          c[0] != DFM_FILL_NULL && c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN)
+          c[0] != DFM_FILL_NULL && c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
+          c[0] != DFM_DECIMAL_FLOAT_CAST)
         fail("Metal Decimal128 row arithmetic requires CPU execution");
       if (c[0] >= DFM_DT_YEAR && c[0] <= DFM_DT_TRUNCATE) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
@@ -538,7 +552,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL && c[0] != DFM_FILL_NULL &&
           c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
           c[0] != DFM_ADD && c[0] != DFM_SUB && c[0] != DFM_MUL &&
-          c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_MOD && c[0] != DFM_CAST &&
+          c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_MOD && c[0] != DFM_CAST && c[0] != DFM_DECIMAL_FLOAT_CAST &&
           c[0] != DFM_FLOOR && c[0] != DFM_CEIL && c[0] != DFM_ROUND && c[0] != DFM_SQRT &&
           c[0] != DFM_NEG && c[0] != DFM_ABS &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE &&
@@ -1679,6 +1693,13 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                   "]),n=long(meta.x);long begin=off<0?max(n+off,0L):min(off,n);"
                   "long count=length==-1?n-begin:min(length,n-begin);" + z +
                   "=uchar(long(row)>=begin&&long(row)-begin<count);}";
+        } else if (op == DFM_DECIMAL_FLOAT_CAST) {
+          auto operand = nodeType(r, s.start + c[1]);
+          auto converted = operand == DFM_DECIMAL128
+              ? "f64_from_wide(" + a + ".x," + a + ".y,false)"
+              : "f64_word(" + encode(operand,a) + "," + std::to_string(operand) + ")";
+          text += valid + "=" + av + ";if(" + valid + "){" + z + "=f64_div(" +
+                  converted + ",lit[" + std::to_string(s.start+j) + "]);}";
         } else if (op == DFM_CAST) {
           text += valid + "=" + av + ";if(" + valid + "){" +
                   castExpression(r.node_types[s.start + c[1]], dtype, a, z,
