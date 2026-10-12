@@ -22,7 +22,7 @@ def main() raises:
         var option = String(arguments[i])
         if option == "--help" or option == "-h":
             print(
-                "Usage: mojo run -I . tests/runner.mojo [--areas public storage kernels planner execution interchange] [--contracts CONTRACT ...] [--capabilities CAPABILITY ...] [--packaging areas|combined] [--output DIRECTORY] [--compiler EXECUTABLE]\nDefault packaging: areas (separate executables; continue after area failures)."
+                "Usage: mojo run -I . tests/runner.mojo [--areas public storage kernels planner execution interchange] [--contracts CONTRACT ...] [--capabilities CAPABILITY ...] [--packaging areas|combined] [--output DIRECTORY] [--compiler EXECUTABLE]\nDefault packaging: combined (one ordinary executable; fatal cases run in separate processes). Use areas for separate ordinary executables."
             )
             return
         i += 1

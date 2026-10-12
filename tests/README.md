@@ -27,9 +27,14 @@ The runner discovers test functions automatically; named groups, strict known
 failures and capability gates live in
 [tooling/suite_policy.mojo](tooling/suite_policy.mojo).
 
-Default `--packaging areas` isolates each area in its own executable and continues
-after build or process failures. `--packaging combined` explicitly shares one
-executable. Run metadata and logs are stored under `build/contract-tests/`.
+Default `--packaging combined` compiles ordinary tests into one executable while
+retaining contract areas, canonical case IDs and per-area fixtures. Ordinary
+assertion failures still allow later cases and areas to run. Use `--packaging areas`
+to build areas separately when diagnosing a compile error or unexpected process
+crash, which otherwise affects the entire ordinary bundle. Both modes compile one
+fatal dispatcher and launch a fresh process for each selected full case ID.
+Run metadata and logs are stored under `build/contract-tests/`. See the
+[packaging evidence](tooling/PERFORMANCE.md) for measurements and their limits.
 
 An unrelated error or unexpected pass fails a strict expected-failure check.
 Fatal defects run in isolated processes and must match both the recorded

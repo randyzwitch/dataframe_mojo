@@ -9,9 +9,9 @@ from std.os import getenv
 from std.os.path import exists
 from std.memory import Pointer
 from dataframe.json_value import json_quote
-from tests.tooling.suite_policy import SuitePolicy, empty_policy
+from tests.tooling.suite_policy import SuitePolicy
 
-comptime DEFAULT_PACKAGING = "areas"
+comptime DEFAULT_PACKAGING = "combined"
 comptime AREAS = (
     "public",
     "storage",
@@ -264,6 +264,19 @@ def case_alias(entry: String, area: String) raises -> String:
     )
 
 
+def _settings_source() -> String:
+    return String(
+        "\n\ndef _setting(name: String, value: String) raises:\n    var key ="
+        " List[UInt8]()\n    key.extend(name.as_bytes())\n    key.append(0)\n  "
+        "  var contents = List[UInt8]()\n   "
+        " contents.extend(value.as_bytes())\n    contents.append(0)\n    var"
+        ' status = external_call["setenv", Int32](Int(key.unsafe_ptr()),'
+        " Int(contents.unsafe_ptr()), Int32(1))\n    _ = key^\n    _ ="
+        ' contents^\n    if status != 0:\n        raise Error("Cannot set suite'
+        ' environment: " + name)\n'
+    )
+
+
 def generate_driver(
     areas: List[String],
     cases: List[List[String]],
@@ -297,23 +310,27 @@ def generate_driver(
             result += (
                 "\n\ndef "
                 + alias
-                + "__known_failure() raises:\n    var failed = False\n    try:\n        "
+                + "__known_failure() raises:\n    var failed = False\n   "
+                " try:\n        "
                 + alias
                 + "()\n    except error:\n        if String(error).find("
                 + json_quote(failure.diagnostic)
                 + ") < 0:\n            raise error\n        print("
                 + json_quote("XFAIL: " + entry + ": " + failure.reason)
-                + ", error)\n        failed = True\n    if not failed:\n        raise Error("
+                + ", error)\n        failed = True\n    if not failed:\n       "
+                " raise Error("
                 + json_quote(
                     "XPASS: " + entry + "; remove known-failure annotation"
                 )
                 + ")\n"
             )
-    result += '\n\ndef _setting(name: String, value: String) raises:\n    var key = List[UInt8]()\n    key.extend(name.as_bytes())\n    key.append(0)\n    var contents = List[UInt8]()\n    contents.extend(value.as_bytes())\n    contents.append(0)\n    var status = external_call["setenv", Int32](Int(key.unsafe_ptr()), Int(contents.unsafe_ptr()), Int32(1))\n    _ = key^\n    _ = contents^\n    if status != 0:\n        raise Error("Cannot set suite environment: " + name)\n\n\ndef main() raises:\n    var failed = List[String]()\n'
+    result += _settings_source()
+    result += "\n\ndef main() raises:\n    var failed = List[String]()\n"
     for i in range(len(areas)):
         var area = areas[i]
         result += (
-            '    _setting("DATAFRAME_THREADS", "1")\n    _setting("COVERAGE_TEST_TMP", '
+            '    _setting("DATAFRAME_THREADS", "1")\n   '
+            ' _setting("COVERAGE_TEST_TMP", '
             + json_quote(directory + "/" + area)
             + ")\n    print("
             + json_quote("CONTRACT AREA: " + area)
@@ -342,7 +359,65 @@ def generate_driver(
             + json_quote(area)
             + ")\n"
         )
-    result += '    _setting("DATAFRAME_THREADS", "1")\n    if len(failed):\n        raise Error("Contract area failure")\n'
+    result += (
+        '    _setting("DATAFRAME_THREADS", "1")\n    if len(failed):\n       '
+        ' raise Error("Contract area failure")\n'
+    )
+    return result^
+
+
+def generate_fatal_driver(
+    areas: List[String], cases: List[String], directory: String
+) raises -> String:
+    """Compile cases together while selecting exactly one per fresh process."""
+    if not cases or len(areas) != len(cases):
+        raise Error(
+            "Fatal dispatcher requires matching nonempty areas and cases"
+        )
+    var result = String(
+        "from std.testing import TestSuite\nfrom std.ffi import"
+        " external_call\nfrom std.os import getenv\n"
+    )
+    for i in range(len(cases)):
+        var entry = cases[i]
+        var split = entry.find("::")
+        if split < 0:
+            raise Error("Invalid entry identifier: " + entry)
+        var module = String(entry[byte = 0 : split - 5]).replace("/", ".")
+        result += (
+            "from "
+            + module
+            + " import "
+            + String(entry[byte = split + 2 :])
+            + " as "
+            + case_alias(entry, areas[i])
+            + "\n"
+        )
+        run_command(
+            ["mkdir", "-p", directory + "/case-" + String(i) + "/" + areas[i]]
+        )
+    result += _settings_source()
+    result += (
+        "\n\ndef main() raises:\n    var selector ="
+        ' getenv("DATAFRAME_FATAL_CASE")\n    _setting("DATAFRAME_THREADS",'
+        ' "1")\n'
+    )
+    for i in range(len(cases)):
+        result += (
+            "    "
+            + ("if" if i == 0 else "elif")
+            + " selector == "
+            + json_quote(cases[i])
+            + ':\n        _setting("COVERAGE_TEST_TMP", '
+            + json_quote(directory + "/case-" + String(i) + "/" + areas[i])
+            + ")\n        var suite = TestSuite()\n        suite.test["
+            + case_alias(cases[i], areas[i])
+            + "]()\n        suite^.run()\n"
+        )
+    result += (
+        '    else:\n        raise Error("Unknown fatal case selector: " +'
+        ' selector)\n    _setting("DATAFRAME_THREADS", "1")\n'
+    )
     return result^
 
 
@@ -404,7 +479,10 @@ def _fingerprints(root: String) raises -> String:
             [
                 "sh",
                 "-c",
-                'if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi',
+                (
+                    "if command -v sha256sum >/dev/null 2>&1; then sha256sum"
+                    ' "$1"; else shasum -a 256 "$1"; fi'
+                ),
                 "hash",
                 path,
             ]
@@ -520,19 +598,16 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
             if result[0]:
                 failures.append(name + ":" + phase)
                 break
-    for i in range(len(process_cases)):
-        var entry = process_cases[i]
-        var area = process_areas[i]
-        var folder = directory + "/isolated-" + String(i)
+    if process_cases:
+        var folder = directory + "/fatal"
         run_command(["mkdir", "-p", folder])
         var source = folder + "/driver.mojo"
         var binary = folder + "/suite"
         write_text(
             source,
-            generate_driver(
-                [area.copy()], [[entry.copy()]], folder, empty_policy()
-            ),
+            generate_fatal_driver(process_areas, process_cases, folder),
         )
+        print("Contract compile fatal-bundle")
         var build = capture(
             [
                 options.compiler,
@@ -546,40 +621,54 @@ def execute_suite(options: RunnerOptions, policy: SuitePolicy) raises -> String:
         )
         write_text(folder + "/compile.log", build[1])
         events.append(
-            RunEvent(entry.copy(), "compile", build[0], folder + "/compile.log")
+            RunEvent(
+                "fatal-bundle", "compile", build[0], folder + "/compile.log"
+            )
         )
         if build[0]:
-            failures.append(entry + ":compile")
+            failures.append("fatal-bundle:compile")
             print(build[1])
-            continue
-        var result = capture([binary])
-        write_text(folder + "/execute.log", result[1])
-        events.append(
-            RunEvent(
-                entry.copy(), "execute", result[0], folder + "/execute.log"
-            )
-        )
-        ref failure = policy.failures[policy.failure_index(entry)]
-        var code = failure.exit_code
-        if result[0] == code and result[1].find(failure.diagnostic) >= 0:
-            expected += 1
-            print(
-                "XFAIL(process):",
-                entry,
-                failure.reason,
-                "exit",
-                result[0],
-            )
         else:
-            failures.append(entry + ":execute")
-            print(
-                "XPASS(process):" if result[0]
-                == 0 else "Unexpected process failure:",
-                entry,
-                "exit",
-                result[0],
-            )
-            print(result[1])
+            for i in range(len(process_cases)):
+                var entry = process_cases[i]
+                var case_folder = directory + "/isolated-" + String(i)
+                run_command(["mkdir", "-p", case_folder])
+                var result = capture(
+                    ["env", "DATAFRAME_FATAL_CASE=" + entry, binary]
+                )
+                write_text(case_folder + "/execute.log", result[1])
+                events.append(
+                    RunEvent(
+                        entry.copy(),
+                        "execute",
+                        result[0],
+                        case_folder + "/execute.log",
+                    )
+                )
+                ref failure = policy.failures[policy.failure_index(entry)]
+                var code = failure.exit_code
+                if (
+                    result[0] == code
+                    and result[1].find(failure.diagnostic) >= 0
+                ):
+                    expected += 1
+                    print(
+                        "XFAIL(process):",
+                        entry,
+                        failure.reason,
+                        "exit",
+                        result[0],
+                    )
+                else:
+                    failures.append(entry + ":execute")
+                    print(
+                        "XPASS(process):" if result[0]
+                        == 0 else "Unexpected process failure:",
+                        entry,
+                        "exit",
+                        result[0],
+                    )
+                    print(result[1])
     var data = (
         String('{"runner":"mojo","compiler":')
         + json_quote(String(version[1].strip()))
