@@ -166,7 +166,7 @@ def test_native_metal_decimal_comparisons_resident_consumers_and_conditionals() 
     )
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
     var conditional = frame.lazy().select(
-        when(col("k") == lit(0))
+        when(col("k") == lit(Int32(0)))
         .then(col("a") == col("b"))
         .otherwise(col("a") > col("b"))
     )
