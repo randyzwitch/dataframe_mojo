@@ -17,8 +17,19 @@ jobs:
         with:
           cache: true
 
-      - name: Run tests
-        run: pixi run test
+      - uses: ./.github/actions/setup-parquet
+
+      - name: Verify native Parquet exported ABI
+        run: pixi run check-parquet-abi
+
+      - name: Check maintained coverage inventory
+        run: pixi run coverage-check
+
+      - name: Run maintained contract suite
+        run: pixi run test --output build/contract-tests
+
+      - name: Validate actual contract outputs with independent format consumers
+        run: pixi run -e oracle test-interchange-oracles
 
       - name: Check public docstrings
         run: pixi run docs-check

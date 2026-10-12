@@ -1,0 +1,1252 @@
+{
+  "status": "12 new cases PASS; sources frozen after isolated validation",
+  "review_policy": "Public contracts and explicit actual kernel routes with independent scalar typed cells are the design anchor. Legacy bodies inspected only for unique regression preservation. Historical performance heuristics and test organization are not anchors.",
+  "reviewed_sources": [
+    {
+      "path": "tests_legacy/test_bucket_encoding.mojo",
+      "sha256": "2afa27d99a3644e054b4167a6de9467c2c333b1281a4c9412e96afbe76127cd2",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_bucket_encoding.mojo::test_colliding_hashes_still_group_exactly",
+          "line": 57
+        },
+        {
+          "id": "tests_legacy/test_bucket_encoding.mojo::test_take_from_chunks_without_rechunking",
+          "line": 73
+        },
+        {
+          "id": "tests_legacy/test_bucket_encoding.mojo::test_composite_string_collisions_offsets_and_null_fallback",
+          "line": 99
+        },
+        {
+          "id": "tests_legacy/test_bucket_encoding.mojo::test_composite_strings_grow_table_and_follow_selected_row_order",
+          "line": 137
+        },
+        {
+          "id": "tests_legacy/test_bucket_encoding.mojo::test_composite_view_string_fallback_with_collisions",
+          "line": 157
+        },
+        {
+          "id": "tests_legacy/test_bucket_encoding.mojo::test_every_key_dtype_compares_through_its_view",
+          "line": 204
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_composite_codes.mojo",
+      "sha256": "a0c187c1a9263ea541fcf176ad6d6c37a24662b6c3246dd030af56fe229e058e",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_composite_nulls_and_string_storage",
+          "line": 9
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_integer_domain_boundaries_and_extremes",
+          "line": 37
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_codes_replace_existing_buffer_and_preserve_nulls",
+          "line": 57
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_all_null_empty_and_sliced_chunked_keys",
+          "line": 84
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_boolean_first_key_requires_first_occurrence_renumbering",
+          "line": 113
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_unsigned_first_key_keeps_full_width_and_order",
+          "line": 134
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_composite_categorical_keys_match_strings_and_float_equality",
+          "line": 160
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_categorical_column_codes_cover_chunks_views_and_unused_dictionary",
+          "line": 204
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_categorical_lookup_domain_limit_preserves_generic_codes",
+          "line": 228
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_composite_categorical_lookup_checks_valid_codes",
+          "line": 241
+        },
+        {
+          "id": "tests_legacy/test_composite_codes.mojo::test_narrow_integer_keys_take_the_direct_table",
+          "line": 253
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_distinct_counts.mojo",
+      "sha256": "f42b644dff0fd45a4a9fb3dcb742fd107ed717f65f91e48b4048aef3a0251eb4",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_distinct_counts.mojo::test_numbers_every_width",
+          "line": 129
+        },
+        {
+          "id": "tests_legacy/test_distinct_counts.mojo::test_all_null_bool_and_temporal",
+          "line": 151
+        },
+        {
+          "id": "tests_legacy/test_distinct_counts.mojo::test_strings_in_both_storages_and_chunks",
+          "line": 197
+        },
+        {
+          "id": "tests_legacy/test_distinct_counts.mojo::test_expression_inputs_and_chunked_numbers",
+          "line": 231
+        },
+        {
+          "id": "tests_legacy/test_distinct_counts.mojo::test_many_groups_with_few_rows_each",
+          "line": 246
+        },
+        {
+          "id": "tests_legacy/test_distinct_counts.mojo::test_lazy_streaming_matches_eager",
+          "line": 294
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_group_by.mojo",
+      "sha256": "2184b3c548bc5fdbaf63ca871a83c67aa30b7a41e8311b656bc4c4d486c84adb",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_dense_int64_encoding_preserves_first_occurrence_and_nulls",
+          "line": 107
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_dense_int64_encoding_reads_chunks_in_place",
+          "line": 126
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_encode_rows_policies",
+          "line": 176
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_multi_key_groups_match_reference",
+          "line": 217
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_unordered_output_has_the_same_groups",
+          "line": 246
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_expression_keys",
+          "line": 258
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_validation_and_empty_input",
+          "line": 292
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_decimal_sort_group_and_join_keys",
+          "line": 317
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_many_groups",
+          "line": 341
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_fused_float_aggregates_match_general_reducer",
+          "line": 353
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_fused_group_state_limit_falls_back",
+          "line": 406
+        },
+        {
+          "id": "tests_legacy/test_group_by.mojo::test_single_string_key_across_view_and_legacy_chunks",
+          "line": 438
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_group_indices.mojo",
+      "sha256": "b4fb8debd3f95c78ff98ae817e1c142a8f1d8dd2e37da76ad97c24284d5d649e",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_group_indices.mojo::test_groups_are_in_first_occurrence_order",
+          "line": 18
+        },
+        {
+          "id": "tests_legacy/test_group_indices.mojo::test_rows_and_all_rows_agree",
+          "line": 28
+        },
+        {
+          "id": "tests_legacy/test_group_indices.mojo::test_caller_builds_its_own_sub_frames",
+          "line": 39
+        },
+        {
+          "id": "tests_legacy/test_group_indices.mojo::test_multiple_keys",
+          "line": 54
+        },
+        {
+          "id": "tests_legacy/test_group_indices.mojo::test_nulls_form_their_own_group",
+          "line": 67
+        },
+        {
+          "id": "tests_legacy/test_group_indices.mojo::test_group_count_matches_group_by",
+          "line": 85
+        },
+        {
+          "id": "tests_legacy/test_group_indices.mojo::test_single_group_and_empty_frame",
+          "line": 92
+        },
+        {
+          "id": "tests_legacy/test_group_indices.mojo::test_bad_arguments_raise",
+          "line": 105
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_grouped_native_reductions.mojo",
+      "sha256": "607c8a614bc331819fff2a9b4273d115403ae9a3383496489b161f10f51f6ea9",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_grouped_native_reductions.mojo::test_int64_chunk_intervals_nulls_and_wide_totals",
+          "line": 59
+        },
+        {
+          "id": "tests_legacy/test_grouped_native_reductions.mojo::test_float64_chunk_intervals_nulls_nan_infinity",
+          "line": 78
+        },
+        {
+          "id": "tests_legacy/test_grouped_native_reductions.mojo::test_every_numeric_width_takes_the_direct_route",
+          "line": 119
+        },
+        {
+          "id": "tests_legacy/test_grouped_native_reductions.mojo::test_uint64_totals_beyond_int64_stay_exact",
+          "line": 165
+        },
+        {
+          "id": "tests_legacy/test_grouped_native_reductions.mojo::test_public_narrow_sums_match_widened_columns",
+          "line": 179
+        },
+        {
+          "id": "tests_legacy/test_grouped_native_reductions.mojo::test_computed_and_logical_inputs_retain_batch_route",
+          "line": 208
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_hash_agg.mojo",
+      "sha256": "730d07909d6d37245f98c849e863d53186e455d4d994d0e981329e11f3ca621d",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_hash_agg.mojo::test_matches_row_by_row_totals",
+          "line": 63
+        },
+        {
+          "id": "tests_legacy/test_hash_agg.mojo::test_equals_the_partitioned_and_serial_paths",
+          "line": 93
+        },
+        {
+          "id": "tests_legacy/test_hash_agg.mojo::test_null_keys_form_one_group",
+          "line": 120
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_hash_agg_sampling.mojo",
+      "sha256": "92cafba95c40e06fdba49006af0002ebbda453d9f8efad073e8048f9e1e0f74d",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_hash_agg_sampling.mojo::test_periodic_half_frames_do_not_look_moderate",
+          "line": 14
+        },
+        {
+          "id": "tests_legacy/test_hash_agg_sampling.mojo::test_moderate_domains_remain_eligible",
+          "line": 22
+        },
+        {
+          "id": "tests_legacy/test_hash_agg_sampling.mojo::test_empty_full_samples_and_unique_keys",
+          "line": 27
+        },
+        {
+          "id": "tests_legacy/test_hash_agg_sampling.mojo::test_exact_cutoff_for_full_samples",
+          "line": 36
+        },
+        {
+          "id": "tests_legacy/test_hash_agg_sampling.mojo::test_offsets_and_nonmatching_chunks_use_the_same_sample",
+          "line": 46
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_indexed_mixed.mojo",
+      "sha256": "3c0d6b7a6b212d0a220c8719079bd61b5d0c7d4056949f52c31670b9fed6ae4d",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_indexed_mixed.mojo::test_numeric_computed_and_ordered_reducers",
+          "line": 47
+        },
+        {
+          "id": "tests_legacy/test_indexed_mixed.mojo::test_decimal_unsigned_null_nan_and_zero",
+          "line": 81
+        },
+        {
+          "id": "tests_legacy/test_indexed_mixed.mojo::test_mixed_partitioned_matches_whole_and_keeps_order",
+          "line": 145
+        },
+        {
+          "id": "tests_legacy/test_indexed_mixed.mojo::test_indexed_decimal_overflow_is_reported",
+          "line": 187
+        },
+        {
+          "id": "tests_legacy/test_indexed_mixed.mojo::test_categorical_fallback_does_not_gather_numeric_sources",
+          "line": 203
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_join.mojo",
+      "sha256": "0bdd05f85030576fc368514f3c2d7d9b43b0669244d80eabc1c9501152cf981e",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_join.mojo::test_every_mode_matches_nested_loop_reference",
+          "line": 180
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_left_on_right_on_and_schemas",
+          "line": 200
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_identity_left_rows_share_columns_and_fallback_gathers",
+          "line": 313
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_cross_join",
+          "line": 357
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_validation",
+          "line": 379
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_parallel_bounded_membership_preserves_order_and_nulls",
+          "line": 402
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_dense_right_left_join_handles_nulls_and_int64_bounds",
+          "line": 443
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_parallel_left_join_preserves_match_and_unmatched_order",
+          "line": 471
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_parallel_right_join_preserves_match_and_unmatched_order",
+          "line": 517
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_parallel_full_join_preserves_both_unmatched_sides",
+          "line": 563
+        },
+        {
+          "id": "tests_legacy/test_join.mojo::test_decimal_payloads_survive_joins",
+          "line": 614
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_join_build_side.mojo",
+      "sha256": "fc081dfe822c97cd48b64b72731509193c9e591381fd38a3ae44eb61a0493be1",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_join_build_side.mojo::test_smaller_build_restores_duplicate_order_and_unmatched",
+          "line": 8
+        },
+        {
+          "id": "tests_legacy/test_join_build_side.mojo::test_smaller_build_compound_float_string_equality",
+          "line": 64
+        },
+        {
+          "id": "tests_legacy/test_join_build_side.mojo::test_build_choice_capacity_and_unknown_heights",
+          "line": 84
+        },
+        {
+          "id": "tests_legacy/test_join_build_side.mojo::test_build_selection_keeps_compact_progressions",
+          "line": 94
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_join_hash.mojo",
+      "sha256": "54de0a1147d251056f8d2603331df9e414b1b72eed8aba60610856dd99a06550",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_int64_probe_hashes_on_read_with_extremes_and_nulls",
+          "line": 17
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_bounded_int64_rows_keep_duplicates_nulls_and_extremes",
+          "line": 53
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_parallel_bounded_index_keeps_duplicate_row_order",
+          "line": 86
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_integer_duplicates_nulls_and_unmatched",
+          "line": 105
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_packed_int64_hash_keys_keep_extremes_and_nulls",
+          "line": 120
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_hash_slot_collision_does_not_match_different_values",
+          "line": 143
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_string_keys_are_exact_and_nulls_do_not_match",
+          "line": 166
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_string_join_omits_identity_rows_and_falls_back_exactly",
+          "line": 186
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_parallel_string_identity_and_late_missing_row",
+          "line": 219
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_open_address_string_duplicates_preserve_right_order",
+          "line": 258
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_two_int64_keys_keep_duplicates_and_nulls",
+          "line": 266
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_two_nonnullable_int64_keys_keep_duplicates",
+          "line": 301
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_composite_float_nan_and_signed_zero",
+          "line": 322
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_large_sparse_join_uses_exact_index_in_frame",
+          "line": 337
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_direct_join_gathers_nonidentity_rows_at_equal_output_height",
+          "line": 375
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_high_cardinality_right_join_preserves_right_order",
+          "line": 413
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_prepared_index_reuses_build_across_independent_probes",
+          "line": 450
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_prepared_progressions_extremes_and_invalid_shapes",
+          "line": 473
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_prepared_null_build_rows_are_never_indexed",
+          "line": 532
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_every_integer_width_probes_on_read",
+          "line": 584
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_date_and_narrow_keys_join_like_int64_in_frame",
+          "line": 640
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_sliced_build_keys_hash_and_index_from_their_offset",
+          "line": 734
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_full_join_coalescing_preserves_temporal_key_metadata",
+          "line": 740
+        },
+        {
+          "id": "tests_legacy/test_join_hash.mojo::test_tagged_probe_matches_a_dictionary_reference",
+          "line": 780
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_join_integer_range.mojo",
+      "sha256": "698390fbd50b1ee9d6bb9499ebe5dff6f5e075a1bef1e02b897910c50b6e7a7f",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_negative_holes_null_ids_and_every_join_order",
+          "line": 49
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_all_null_int64_keys_have_no_hidden_group",
+          "line": 109
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_extreme_span_and_multi_key_join_correctness",
+          "line": 120
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_sparse_keys_reject_off_grid_probes_and_keep_duplicates",
+          "line": 130
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_ordered_strided_right_keys_map_rows_without_an_index",
+          "line": 161
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_ordered_duplicate_keys_keep_row_order",
+          "line": 181
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_aligned_chunk_membership_matches_general_row_selection",
+          "line": 207
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_temporal_physical_int64_uses_the_same_dense_range",
+          "line": 250
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_large_parallel_strided_probe_preserves_all_left_rows",
+          "line": 268
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_range_table_budget_is_bounded_without_integer_overflow",
+          "line": 294
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_membership_cache_limit_falls_back_without_changing_rows",
+          "line": 310
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_temporal_progressions_keep_logical_types_nulls_and_order",
+          "line": 327
+        },
+        {
+          "id": "tests_legacy/test_join_integer_range.mojo::test_timestamp_calendar_grid_and_irregular_fallback",
+          "line": 375
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_join_key_sets.mojo",
+      "sha256": "00be0c9f5d420b073ef10e95c48b04f5446f7b72f4e163d9bde86a7da30e6a29",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_join_key_sets.mojo::test_key_sets_reach_the_right_side_and_keep_the_answer",
+          "line": 56
+        },
+        {
+          "id": "tests_legacy/test_join_key_sets.mojo::test_two_key_sets_through_a_rename_from_a_join_chain",
+          "line": 100
+        },
+        {
+          "id": "tests_legacy/test_join_key_sets.mojo::test_integer_is_in_matches_the_equalities",
+          "line": 159
+        },
+        {
+          "id": "tests_legacy/test_join_key_sets.mojo::test_semi_join_hashes_a_small_left_side",
+          "line": 192
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_join_projection.mojo",
+      "sha256": "e97080a24f428ef2c9cf1cd1751a68a001995862dd4967be078bc40791727a53",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_duplicate_string_key_counts",
+          "line": 37
+        },
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_compound_nan_signed_zero_and_null_counts",
+          "line": 80
+        },
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_nullable_payload_counts_and_other_join_types",
+          "line": 126
+        },
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_counts_match_the_materialized_join",
+          "line": 185
+        },
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_explain_shows_joins_reading_only_used_columns",
+          "line": 288
+        },
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_filter_below_a_join_is_narrowed_before_the_join",
+          "line": 322
+        },
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_csv_scans_under_a_join_read_only_used_columns",
+          "line": 342
+        },
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_colliding_names_still_raise",
+          "line": 360
+        },
+        {
+          "id": "tests_legacy/test_join_projection.mojo::test_unknown_join_type_raises_from_a_lazy_plan",
+          "line": 375
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_join_ranges.mojo",
+      "sha256": "239b933ec45e6b16c4a51cd77e6a42ae976fe45e4815b30fecabb557f3466bec",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_join_ranges.mojo::test_bounds_handle_chunks_nulls_signed_extremes_and_temporal",
+          "line": 7
+        },
+        {
+          "id": "tests_legacy/test_join_ranges.mojo::test_sampling_is_only_a_cost_guard",
+          "line": 48
+        },
+        {
+          "id": "tests_legacy/test_join_ranges.mojo::test_range_filter_preserves_full_compound_left_join_results",
+          "line": 61
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_join_semi_anti.mojo",
+      "sha256": "e87ba3d687f20d01ce84b939d03f3de27a878641e0939b262694b091692d1bd0",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_join_semi_anti.mojo::test_wide_int64_keys",
+          "line": 137
+        },
+        {
+          "id": "tests_legacy/test_join_semi_anti.mojo::test_string_keys",
+          "line": 141
+        },
+        {
+          "id": "tests_legacy/test_join_semi_anti.mojo::test_two_keys",
+          "line": 145
+        },
+        {
+          "id": "tests_legacy/test_join_semi_anti.mojo::test_no_matches_and_all_matches",
+          "line": 149
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_partitioned_grouping.mojo",
+      "sha256": "8243b8a1bc802ede35de458f681b2260f91f5f56fc09561b263c94cb0caba531",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_string_hash_agrees_across_storage_and_slices",
+          "line": 29
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_word_hash_unaligned_spans_and_tail_boundaries",
+          "line": 89
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_every_key_dtype_low_cardinality",
+          "line": 248
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_every_key_dtype_high_cardinality",
+          "line": 254
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_parallel_string_groups_across_misaligned_chunks",
+          "line": 260
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_composite_keys",
+          "line": 273
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_just_above_the_threshold_and_skewed",
+          "line": 280
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_group_indices_numbering_matches_ordered_output",
+          "line": 305
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_all_null_keys_and_single_group",
+          "line": 327
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_worker_range_aggregation_matches_row_by_row_totals",
+          "line": 349
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_few_values_per_key_group_by_ranges",
+          "line": 419
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_indexed_quantiles_match_serial",
+          "line": 468
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_exact_hash_keys_group_like_their_values",
+          "line": 536
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_batched_cardinality_preserves_sample_decisions",
+          "line": 622
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_chunked_cardinality_sample_matches_rechunked",
+          "line": 655
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_skewed_small_domain_uses_whole_encoding",
+          "line": 691
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_fused_low_cardinality_sum_count_matches_serial",
+          "line": 713
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_direct_numeric_sum_count_matches_serial_with_nulls",
+          "line": 786
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_direct_numeric_sum_count_reads_aligned_chunks",
+          "line": 824
+        },
+        {
+          "id": "tests_legacy/test_partitioned_grouping.mojo::test_indexed_reductions_match_serial",
+          "line": 859
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_prepared_join_groups.mojo",
+      "sha256": "50ab0cf9d7467848ff78bcae39aafefb412df4982b982ac281205597fab85b8f",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_prepared_join_groups.mojo::test_heavy_groups_keep_integer_string_and_compound_order",
+          "line": 11
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_string_group_encode.mojo",
+      "sha256": "9fed017703b15b4da2d0eadba735871f2f5ce5a48501f152333b0466b532997a",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_string_group_encode.mojo::test_skewed_key_on_every_worker",
+          "line": 64
+        },
+        {
+          "id": "tests_legacy/test_string_group_encode.mojo::test_lazy_matches_eager",
+          "line": 73
+        }
+      ]
+    },
+    {
+      "path": "tests_legacy/test_typed_join_probes.mojo",
+      "sha256": "75460a40d9bdbe7ab22f88d84756fd1b50aaf592bb30b22645574852b372b8f9",
+      "test_bodies": [
+        {
+          "id": "tests_legacy/test_typed_join_probes.mojo::test_typed_strings_preserve_views_slices_bytes_and_nulls",
+          "line": 29
+        },
+        {
+          "id": "tests_legacy/test_typed_join_probes.mojo::test_typed_int64_membership_preserves_signed_bits_and_nulls",
+          "line": 74
+        },
+        {
+          "id": "tests_legacy/test_typed_join_probes.mojo::test_compound_keys_retain_generic_equality",
+          "line": 97
+        }
+      ]
+    }
+  ],
+  "new_witnesses": {
+    "tests/kernel_equivalence/test_bucket_keys.mojo": [
+      "tests/kernel_equivalence/test_bucket_keys.mojo::test_colliding_bucket_hashes_confirm_all_fixed_binary_dictionary_temporal_and_composite_cells",
+      "tests/kernel_equivalence/test_bucket_keys.mojo::test_bucket_string_storage_inline_external_growth_and_repeated_selection_compare_complete_bytes",
+      "tests/kernel_equivalence/test_bucket_keys.mojo::test_categorical_column_codes_lookup_boundary_null_poison_and_reused_output_have_literal_ids"
+    ],
+    "tests/kernel_equivalence/test_grouped_routes.mojo": [
+      "tests/kernel_equivalence/test_grouped_routes.mojo::test_grouped_native_sum_mean_all_ten_widths_chunk_intersections_empty_groups_and_wide_totals_match_scalar_states",
+      "tests/kernel_equivalence/test_grouped_routes.mojo::test_grouped_native_eligibility_rejects_computed_logical_and_ungrouped_inputs_without_changing_state",
+      "tests/kernel_equivalence/test_grouped_routes.mojo::test_partitioned_indexed_and_gathered_reducers_keep_distinct_source_owners_and_complete_literal_groups"
+    ],
+    "tests/kernel_equivalence/test_hash_join_routes.mojo": [
+      "tests/kernel_equivalence/test_hash_join_routes.mojo::test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_null_duplicate_row_pairs",
+      "tests/kernel_equivalence/test_hash_join_routes.mojo::test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_compare_full_utf8_nul_bytes",
+      "tests/kernel_equivalence/test_hash_join_routes.mojo::test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_literal_row",
+      "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows"
+    ],
+    "tests/kernel_equivalence/test_join_parallel_boundaries.mojo": [
+      "tests/kernel_equivalence/test_join_parallel_boundaries.mojo::test_parallel_bounded_chain_build_and_large_progression_probe_keep_every_duplicate_null_and_position",
+      "tests/kernel_equivalence/test_join_parallel_boundaries.mojo::test_equal_output_height_does_not_imply_identity_gather_and_parallel_full_join_appends_unmatched_rows"
+    ]
+  },
+  "validation": {
+    "tests/kernel_equivalence/test_bucket_keys.mojo": {
+      "source_sha256": "6230724a39aed3dc441771dada0f20d589d744c5ae3077ce8985552735ae9097",
+      "build_exit_code": 0,
+      "run_exit_code": 0,
+      "pass": 3,
+      "build_log": "/tmp/df-bucket-keys-build.log",
+      "run_log": "/tmp/df-bucket-keys-run.log"
+    },
+    "tests/kernel_equivalence/test_grouped_routes.mojo": {
+      "source_sha256": "543e01635656efebd2926292ec796b2fdea1dabbc5c8ea9e61de0dff5adbeee4",
+      "build_exit_code": 0,
+      "run_exit_code": 0,
+      "pass": 3,
+      "build_log": "/tmp/df-grouped-routes-build-final.log",
+      "run_log": "/tmp/df-grouped-routes-run-traced-final.log",
+      "observed_trace": [
+        "group_by.partitioned",
+        "group_by.partitioned.indexed",
+        "group_by.partitioned.mixed"
+      ]
+    },
+    "tests/kernel_equivalence/test_hash_join_routes.mojo": {
+      "source_sha256": "c0b1cd43f0fac56aac026c038504569c767df4ba38f6cc2e42a8dbf25762b802",
+      "build_exit_code": 0,
+      "run_exit_code": 0,
+      "pass": 4,
+      "build_log": "/tmp/df-hash-join-routes-build-second.log",
+      "run_log": "/tmp/df-hash-join-routes-run-traced-final.log",
+      "observed_trace": [
+        "join.range_filter",
+        "join.bounded_index",
+        "join.bounded_membership",
+        "join.smaller_build",
+        "join.hash_index"
+      ]
+    },
+    "tests/kernel_equivalence/test_join_parallel_boundaries.mojo": {
+      "source_sha256": "d37a0392d8e84d1e4a2ee89ba4ea630193ea3cd4d7ac5b3ae026f80e2b8d189c",
+      "build_exit_code": 0,
+      "run_exit_code": 0,
+      "pass": 2,
+      "build_log": "/tmp/df-join-parallel-boundaries-build-third.log",
+      "run_log": "/tmp/df-join-parallel-boundaries-run.log",
+      "observed_trace": [
+        "join.bounded_index",
+        "join.progression",
+        "join.hash_index",
+        "join.dictionary",
+        "join.dense_ids",
+        "join.full_parallel"
+      ],
+      "support": {
+        "path": "tests/support/join_worker_setting.mojo",
+        "sha256": "8e32966fda412769080966fcaf922448fb7b4f3af65e8ed0039f82f3c6958930",
+        "reason": "Scoped Mojo worker setting uses standard getenv default, avoiding incompatible raw libc getenv declarations when num_physical_cores is linked."
+      }
+    }
+  },
+  "dimension_witnesses": [
+    {
+      "dimension": "bucket tuple equality/all logical scalar variants",
+      "witness": "tests/kernel_equivalence/test_bucket_keys.mojo::test_colliding_bucket_hashes_confirm_all_fixed_binary_dictionary_temporal_and_composite_cells",
+      "evidence": "27 supported scalar variants; n0/1/9/65 offsets0/1/7 all/mixed/allNULL, Bool composite, reversed/repeated selected positions; all candidate hashes42"
+    },
+    {
+      "dimension": "bucket String direct/native/generic/growth",
+      "witness": "tests/kernel_equivalence/test_bucket_keys.mojo::test_bucket_string_storage_inline_external_growth_and_repeated_selection_compare_complete_bytes",
+      "evidence": "native _KeyView.kind VIEW vsArrow STRING; explicit allvalid offsets branch; 2203rows>1024groups, reordered repeats, inline/external/9000byte values and mixed native+offset tuples"
+    },
+    {
+      "dimension": "dictionary code lookup eligibility/fallback",
+      "witness": "tests/kernel_equivalence/test_bucket_keys.mojo::test_categorical_column_codes_lookup_boundary_null_poison_and_reused_output_have_literal_ids",
+      "evidence": "dictionary2/4096/4097, direct threshold condition, offset1/chunks, hiddenUInt32.MAX vsvisiblebadcode, first-observed literalIDs, old output19\u21925\u21920"
+    },
+    {
+      "dimension": "group native intervals",
+      "witness": "tests/kernel_equivalence/test_grouped_routes.mojo::test_grouped_native_sum_mean_all_ten_widths_chunk_intersections_empty_groups_and_wide_totals_match_scalar_states",
+      "evidence": "all10numericwidths, n0/1/9/65/2057 offsets0/1/7 modes3, flat/chunk/sourceinterval/full/empty, groups5inclunused, Int128 scalar totals and Float64 exact fractions"
+    },
+    {
+      "dimension": "group native decline",
+      "witness": "tests/kernel_equivalence/test_grouped_routes.mojo::test_grouped_native_eligibility_rejects_computed_logical_and_ungrouped_inputs_without_changing_state",
+      "evidence": "actualBoolfalse forcomputed/MAX/logicalDecimal32/Date/ungrouped; count/seen snapshots unchanged and sums states remainzero"
+    },
+    {
+      "dimension": "group mixed preparation",
+      "witness": "tests/kernel_equivalence/test_grouped_routes.mojo::test_partitioned_indexed_and_gathered_reducers_keep_distinct_source_owners_and_complete_literal_groups",
+      "evidence": "32017rows/2003groups; actualindexedflags [T,T,T,T,F,T,F,F,F,F], distinctsource lists, shared x chunk owner, forcedpartition workers4/batch127, complete scalar10reducer outputs inclListmode/categorical decodedString"
+    },
+    {
+      "dimension": "hash fixed integer probes",
+      "witness": "tests/kernel_equivalence/test_hash_join_routes.mojo::test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_null_duplicate_row_pairs",
+      "evidence": "all8integerwidths offsets0/1/7 flat/chunks, MIN/MAX/null/duplicates; actualleft_hashes0, completeinnerleftarrays/semianti"
+    },
+    {
+      "dimension": "prepared String duplicates/probes",
+      "witness": "tests/kernel_equivalence/test_hash_join_routes.mojo::test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_compare_full_utf8_nul_bytes",
+      "evidence": "2x2 native/Arrow storage proven _view_storage; n12013offset7 nullablecompactduplicategroups and UInt64 composite; actualgroups>0 slots<n/2 sharedindexpointer, repeatedprobes, completeinnerleft/semianti arrays, empty/12/13/fullprefix/NUL/UTF8/decomposedUnicode"
+    },
+    {
+      "dimension": "join range/membership budget",
+      "witness": "tests/kernel_equivalence/test_hash_join_routes.mojo::test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_literal_row",
+      "evidence": "8192rightoffset7/chunks, MIN+1/MAX-5, Int64/Date/nsNYmetadata, exactOptionalpositions, misleadingevery32sampledecline, empty/allNULL/float/fullspandecline; 131073bounded membership complete rows; 12milliondomain rejects allocation and Int.MAX capacity bound"
+    },
+    {
+      "dimension": "smaller build/progression",
+      "witness": "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows",
+      "evidence": "32:1 and524288 eligibility/capacityunknown boundaries; actualdirect/public smallerbuild+complete scalarcells for524288compoundright, rangefilterexplicitNone; FloatNaNzero compound; compactprogression actualindexesempty"
+    },
+    {
+      "dimension": "parallel index/progression",
+      "witness": "tests/kernel_equivalence/test_join_parallel_boundaries.mojo::test_parallel_bounded_chain_build_and_large_progression_probe_keep_every_duplicate_null_and_position",
+      "evidence": "actualPool4 _RangeIndexBuildJob owns disjoint slots:2million heads+2100003rows eachchain independentlychecked; boundedjoin exactpairs; >24MB progression probes3145731rows,offset7NULL/repeats flat/chunk routes actualusedtrue"
+    },
+    {
+      "dimension": "parallel row assembly",
+      "witness": "tests/kernel_equivalence/test_join_parallel_boundaries.mojo::test_equal_output_height_does_not_imply_identity_gather_and_parallel_full_join_appends_unmatched_rows",
+      "evidence": "196608rows16chunks, actualdirecthash omit_identityFalse despiteoutputsameheight, completeeveryrowpairs; publicinner/right/full exactly retains left-major/dominantside ordering and unmatched NULL rows"
+    }
+  ],
+  "review": {
+    "tests_legacy/test_bucket_encoding.mojo": {
+      "regressions": [
+        "equal candidate hashes must compare complete typed tuple, not one word/prefix",
+        "growth and selected repeated rows preserve first-observed numbering",
+        "native StringView and Arrow-offset exact bytes/null state",
+        "chunked gathers read all physical chunks"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_bucket_keys.mojo::test_colliding_bucket_hashes_confirm_all_fixed_binary_dictionary_temporal_and_composite_cells",
+        "tests/kernel_equivalence/test_bucket_keys.mojo::test_bucket_string_storage_inline_external_growth_and_repeated_selection_compare_complete_bytes",
+        "tests/kernel_equivalence/test_row_ops.mojo::test_chunk_local_sorted_and_generic_gathers_preserve_all_storage_widths"
+      ],
+      "rationale": "Direct forced collisions and independent typed cells replace serial-production equality. Large string growth covers >1024 distinct groups, inline/external boundaries and cross-buffer bytes. Row gathering is maintained in storage/row kernels."
+    },
+    "tests_legacy/test_composite_codes.mojo": {
+      "regressions": [
+        "numeric width/extreme/null code identity and first-observed composite numbering",
+        "Bool fixed codes must be renumbered by first tuple occurrence",
+        "unsigned high bits and categorical label identity",
+        "categorical direct lookup domain4096/4097, poisoned hidden codes and output buffer replacement"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_order_keys.mojo::test_dense_and_sparse_integer_key_routes_match_scalar_membership_at_all_widths",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_composite_key_columns_preserve_boundaries_and_reject_packing_overflow",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_dictionary_key_specialization_and_decoded_string_views_match_values",
+        "tests/kernel_equivalence/test_bucket_keys.mojo::test_categorical_column_codes_lookup_boundary_null_poison_and_reused_output_have_literal_ids"
+      ],
+      "rationale": "Independent scalar tuple IDs plus direct code eligibility/decline boundaries cover semantics without binding to the former module layout."
+    },
+    "tests_legacy/test_distinct_counts.mojo": {
+      "regressions": [
+        "all width distinct classes, NULL, NaN and signedzero",
+        "shared(group,value) partition set with many groups and few rows",
+        "native StringView/chunk values/global distinct"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_grouped_types.mojo::test_grouped_type_aggregation_matrix_compares_complete_unordered_rows",
+        "tests/kernel_equivalence/test_group_cardinality.mojo::test_shared_group_value_partitions_preserve_integer_bits_float_classes_and_nulls_across_workers",
+        "tests/kernel_equivalence/test_group_cardinality.mojo::test_partitioned_distinct_compares_native_view_string_bytes_across_pieces_and_declines_decimals",
+        "tests/execution_modes/test_group_strategy.mojo::test_streamed_collect_budget_boundaries_preserve_complete_composite_groups"
+      ],
+      "owner": "root validates direct shared partitioned set; text validates streamed group strategies",
+      "rationale": "Large direct partitioned counters and typed public aggregate matrices replace production encoder reference counts."
+    },
+    "tests_legacy/test_group_by.mojo": {
+      "regressions": [
+        "composite expression/null/decimal/dictionary group identity",
+        "first-observed ordered groups and complete unordered groups",
+        "empty validation and reducer output schema",
+        "computed/aliased grouping sources remain original aggregate sources",
+        "many groups and bounded strategy fallbacks"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_grouped_types.mojo::test_extended_group_keys_preserve_metadata_and_complete_null_groups",
+        "tests/public_contracts/test_grouped_types.mojo::test_grouped_type_aggregation_matrix_compares_complete_unordered_rows",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_float_key_ids_and_order_canonicalize_nan_payloads_and_signed_zero",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_dense_and_sparse_integer_key_routes_match_scalar_membership_at_all_widths",
+        "tests/execution_modes/test_group_strategy.mojo::test_streamed_collect_budget_boundaries_preserve_complete_composite_groups",
+        "tests/kernel_equivalence/test_grouped_routes.mojo::test_partitioned_indexed_and_gathered_reducers_keep_distinct_source_owners_and_complete_literal_groups"
+      ],
+      "owner": "root owns direct hash_aggregate; text owns stream bounded strategies",
+      "rationale": "Group algebra and independent complete typed rows are preserved; old reference AnyValue equality and extra-reducer comparison are replaced. Private historical strategy thresholds are not contractual snapshots."
+    },
+    "tests_legacy/test_group_indices.mojo": {
+      "regressions": [
+        "IDs/representatives/memberships/sizes/group_of and first occurrence",
+        "caller-owned membership results",
+        "multiple keys, NULL, empty and invalid requests"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_group_indices_api.mojo::test_group_indices_match_first_observed_scalar_keys_and_owned_memberships"
+      ],
+      "owner": "text final validation",
+      "rationale": "Dedicated maintained public GroupIndices contract, independent literal scalar identity and complete memberships."
+    },
+    "tests_legacy/test_grouped_native_reductions.mojo": {
+      "regressions": [
+        "actual _direct_grouped_sum all10 widths",
+        "interior/source-offset/chunk intervals and empty groups",
+        "Int128 integer totals beyond64bits",
+        "computed/logical/ungrouped decline"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_grouped_routes.mojo::test_grouped_native_sum_mean_all_ten_widths_chunk_intersections_empty_groups_and_wide_totals_match_scalar_states",
+        "tests/kernel_equivalence/test_grouped_routes.mojo::test_grouped_native_eligibility_rejects_computed_logical_and_ungrouped_inputs_without_changing_state",
+        "tests/public_contracts/test_grouped_types.mojo::test_grouped_type_aggregation_matrix_compares_complete_unordered_rows",
+        "tests/kernel_equivalence/test_reduction_routes.mojo::test_indexed_numeric_reducers_match_independent_ordered_groups_including_empty_groups"
+      ],
+      "rationale": "Direct route Bool is asserted; independent typed scalar totals/counts replace feeding a second production reducer."
+    },
+    "tests_legacy/test_hash_agg.mojo": {
+      "regressions": [
+        "moderate single Int64 grouping actual native aggregation",
+        "sum/mean/extrema/count/len with NULL values/keys and NaN",
+        "first occurrence and complete unordered results"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_grouped_types.mojo::test_grouped_type_aggregation_matrix_compares_complete_unordered_rows",
+        "tests/kernel_equivalence/test_group_cardinality.mojo::test_cardinality_sampling_rejects_period_aliasing_and_respects_the_strict_density_cutoff"
+      ],
+      "owner": "root new direct hash_aggregate witness pending final report",
+      "retirement_requires": "root actual hash_aggregate eligibility and full scalar state witness; semantic matrix alone does not establish this route"
+    },
+    "tests_legacy/test_hash_agg_sampling.mojo": {
+      "regressions": [
+        "period-alias rejection",
+        "strict85percent full-sample threshold",
+        "sliced/misaligned chunks and low-density acceptance"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_group_cardinality.mojo::test_cardinality_sampling_rejects_period_aliasing_and_respects_the_strict_density_cutoff"
+      ],
+      "owner": "root verified cardinality3",
+      "rationale": "Direct eligibility cases retain algorithm safety and anti-alias witnesses; historical sampler row-order equality is not a public requirement."
+    },
+    "tests_legacy/test_indexed_mixed.mojo": {
+      "regressions": [
+        "computed/native indexed reducers and reordered source rows",
+        "decimal exact range/error fallback",
+        "mixed median indexed vs mode gathered",
+        "categorical fallback never gathers numeric-only source"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_reduction_routes.mojo::test_indexed_numeric_reducers_match_independent_ordered_groups_including_empty_groups",
+        "tests/public_contracts/test_grouped_types.mojo::test_grouped_type_aggregation_matrix_compares_complete_unordered_rows",
+        "tests/kernel_equivalence/test_grouped_routes.mojo::test_partitioned_indexed_and_gathered_reducers_keep_distinct_source_owners_and_complete_literal_groups"
+      ],
+      "rationale": "Direct preparation flags/source lists/owner identity plus actual forced mixed partition dispatch and complete scalar per-group results replace whole-engine equality."
+    },
+    "tests_legacy/test_join.mojo": {
+      "regressions": [
+        "all join modes/null multiplicity/schemas/coalescing/cross/errors",
+        "left identity reuse and fanout gather",
+        "parallel outer joins and append unmatched sides",
+        "Decimal128 payload preservation"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_join_types.mojo::test_extended_scalar_keys_match_independent_pairs_in_every_equality_join_kind",
+        "tests/public_contracts/test_join_types.mojo::test_join_payloads_preserve_nested_children_and_all_logical_metadata",
+        "tests/public_contracts/test_joins.mojo::test_all_equality_join_kinds_match_nested_loops",
+        "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_typed_cell",
+        "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_csr_and_join_fanout_preserve_scalar_group_row_order_and_check_count_overflow",
+        "tests/kernel_equivalence/test_join_parallel_boundaries.mojo::test_equal_output_height_does_not_imply_identity_gather_and_parallel_full_join_appends_unmatched_rows"
+      ],
+      "rationale": "Literal nested-loop row pairs/all typed cells plus large assembly witnesses cover exact ordering and nulls; row-count-only and production equality assertions are replaced."
+    },
+    "tests_legacy/test_join_build_side.mojo": {
+      "regressions": [
+        "smaller logical left physical build restores duplicate row order/unmatched",
+        "Float NaN/zero String compound equality",
+        "crossover/unknown/capacity eligibility",
+        "compact progression remains index-free"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows"
+      ],
+      "rationale": "Actual build-selection predicates, direct smaller-build pair arrays, observed public smaller-build route, and complete independent cells."
+    },
+    "tests_legacy/test_join_hash.mojo": {
+      "regressions": [
+        "every integer width hashes on read with no probe-sized hash buffer",
+        "prepared immutable build shared across independent probes",
+        "heavy duplicates compact groups, null build rows never indexed",
+        "native/offset String fullbytes/collisions/NaNzero compounds",
+        "parallel bounded chains/progression and equal-height nonidentity assembly",
+        "temporal logical metadata coalescing and all modes"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_null_duplicate_row_pairs",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_compare_full_utf8_nul_bytes",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_literal_row",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows",
+        "tests/kernel_equivalence/test_join_parallel_boundaries.mojo::test_parallel_bounded_chain_build_and_large_progression_probe_keep_every_duplicate_null_and_position",
+        "tests/kernel_equivalence/test_join_parallel_boundaries.mojo::test_equal_output_height_does_not_imply_identity_gather_and_parallel_full_join_appends_unmatched_rows",
+        "tests/public_contracts/test_join_types.mojo::test_extended_scalar_keys_match_independent_pairs_in_every_equality_join_kind",
+        "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_typed_cell"
+      ],
+      "rationale": "Exact full row-pair arrays supersede the former hash checksum. Large direct hash invocation covers table growth; candidate-hash collision confirmation separately forced in bucket tests. Internal tag-byte layout is not promised as stable API."
+    },
+    "tests_legacy/test_join_integer_range.mojo": {
+      "regressions": [
+        "dense ordered progression/off-grid/unmatched/null/signed extremes",
+        "all join orders and temporal logical type",
+        "parallel strided probes crossing24MB key threshold",
+        "bounded cache allocation/overflow and out-of-budget fallback"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_join_types.mojo::test_extended_scalar_keys_match_independent_pairs_in_every_equality_join_kind",
+        "tests/kernel_equivalence/test_join_routes.mojo::test_dense_join_progression_eligibility_nullable_chunk_probes_and_integer_edges_have_literal_rows",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_literal_row",
+        "tests/kernel_equivalence/test_join_parallel_boundaries.mojo::test_parallel_bounded_chain_build_and_large_progression_probe_keep_every_duplicate_null_and_position"
+      ],
+      "rationale": "Actual eligibility and exact row positions/typed metadata cover both optimized progression and bounded membership decline routes."
+    },
+    "tests_legacy/test_join_key_sets.mojo": {
+      "regressions": [
+        "sideways list<=50/range>50 key sets through right join chain",
+        "two keys through renamed projection",
+        "integer is_in null/width semantics",
+        "small-left semi membership"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_at_every_bit_alignment",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_null_duplicate_row_pairs",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_compare_full_utf8_nul_bytes",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows"
+      ],
+      "owner": "text planner key-set witness assigned by root",
+      "retirement_requires": "text actual pushed predicate/profile pruning plus independent complete row results; original optimized-vs-unoptimized equality is insufficient route evidence"
+    },
+    "tests_legacy/test_join_projection.mojo": {
+      "regressions": [
+        "projected join keys/suffixed payloads/empty schema retained",
+        "post-join len/count cardinality and nullable payload distinction",
+        "invalid types/unknown columns/colliding names fail before pruning",
+        "CSV input projection"
+      ],
+      "witnesses": [
+        "tests/planner_correctness/test_relational.mojo::test_join_projection_retains_both_keys_suffix_payloads_and_empty_schema",
+        "tests/planner_correctness/test_relational.mojo::test_join_predicates_preserve_outer_null_rows_and_side_dependencies",
+        "tests/planner_correctness/test_errors_schema.mojo::test_relational_schema_preserves_key_coalescing_suffixes_and_reduction_types",
+        "tests/execution_modes/test_stateful_modes.mojo::test_stateful_groups_and_joins_preserve_complete_rows_across_batches_workers_and_layouts",
+        "tests/public_contracts/test_join_types.mojo::test_join_payloads_preserve_nested_children_and_all_logical_metadata"
+      ],
+      "owner": "root planner/CSV review handles scan projection and join-count optimization",
+      "rationale": "The maintained relational boundary matrix proves full schema/key/source cells and zero-column cardinality; exact explain whitespace is intentionally not maintained. Do not infer count-only shortcut eligibility from schema checks."
+    },
+    "tests_legacy/test_join_ranges.mojo": {
+      "regressions": [
+        "exact signed-extreme/temporal/chunked left bounds",
+        "sampling only cost guard; full scan can decline misleading sample",
+        "coarse bounds preserve compound join equality and logical row order"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_literal_row",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows",
+        "tests/public_contracts/test_join_types.mojo::test_extended_scalar_keys_match_independent_pairs_in_every_equality_join_kind"
+      ],
+      "rationale": "Actual Optional membership and complete scalar rows independently prove safe pruning; sampling never defines matches."
+    },
+    "tests_legacy/test_join_semi_anti.mojo": {
+      "regressions": [
+        "wide integer/String/compound membership",
+        "duplicate builds never duplicate probe rows",
+        "NULL keys never match and every kept position retained"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_join_types.mojo::test_extended_scalar_keys_match_independent_pairs_in_every_equality_join_kind",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_null_duplicate_row_pairs",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_compare_full_utf8_nul_bytes",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows"
+      ],
+      "rationale": "Typed direct prepared/direct hash membership and literal nested-loop expected rows replace string-token equality."
+    },
+    "tests_legacy/test_partitioned_grouping.mojo": {
+      "regressions": [
+        "typed/composite/null/NaNzero groups across worker ranges",
+        "String storage/slice exact key identity",
+        "first-observed representatives and row-based sums/counts",
+        "direct sums/indexed quantiles/mixed gathering",
+        "whole/range/partition strategy correctness and conservative sampling"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_grouped_types.mojo::test_extended_group_keys_preserve_metadata_and_complete_null_groups",
+        "tests/public_contracts/test_grouped_types.mojo::test_grouped_type_aggregation_matrix_compares_complete_unordered_rows",
+        "tests/public_contracts/test_group_indices_api.mojo::test_group_indices_match_first_observed_scalar_keys_and_owned_memberships",
+        "tests/kernel_equivalence/test_reduction_routes.mojo::test_indexed_numeric_reducers_match_independent_ordered_groups_including_empty_groups",
+        "tests/kernel_equivalence/test_quantile_routes.mojo::test_quantile_selection_small_sort_and_large_partition_routes_match_independent_histograms",
+        "tests/kernel_equivalence/test_grouped_routes.mojo::test_grouped_native_sum_mean_all_ten_widths_chunk_intersections_empty_groups_and_wide_totals_match_scalar_states",
+        "tests/kernel_equivalence/test_grouped_routes.mojo::test_partitioned_indexed_and_gathered_reducers_keep_distinct_source_owners_and_complete_literal_groups",
+        "tests/kernel_equivalence/test_group_cardinality.mojo::test_cardinality_sampling_rejects_period_aliasing_and_respects_the_strict_density_cutoff",
+        "tests/execution_modes/test_group_strategy.mojo::test_streamed_collect_budget_boundaries_preserve_complete_composite_groups",
+        "tests/kernel_equivalence/test_bucket_keys.mojo::test_bucket_string_storage_inline_external_growth_and_repeated_selection_compare_complete_bytes"
+      ],
+      "owner": "root actual hash_aggregate, text stream strategies",
+      "rationale": "Independent cells and direct owned route witnesses replace serial engine as oracle. Exact private hash-mixer vectors and historical sample-position equivalence are not stable public contracts; full-byte equality, cross-representation joins and anti-alias safe dispatch remain tested."
+    },
+    "tests_legacy/test_prepared_join_groups.mojo": {
+      "regressions": [
+        "actual heavy duplicate compact representation",
+        "integer/String/compound key exact order",
+        "reused shared prepared index",
+        "semi/anti and unmatched probe behavior"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_null_duplicate_row_pairs",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_compare_full_utf8_nul_bytes"
+      ],
+      "rationale": "Physical groups/compact slots/sharing are observed directly; complete literal pair arrays include every build fanout and NULL exclusion."
+    },
+    "tests_legacy/test_string_group_encode.mojo": {
+      "regressions": [
+        "single String hot empty value, NULL and many distinct labels",
+        "first-observed groups and complete counts",
+        "lazy filter grouping preserves independent row membership"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_order_keys.mojo::test_inline_external_and_common_prefix_strings_have_exact_key_and_sort_semantics",
+        "tests/kernel_equivalence/test_bucket_keys.mojo::test_bucket_string_storage_inline_external_growth_and_repeated_selection_compare_complete_bytes",
+        "tests/public_contracts/test_group_indices_api.mojo::test_group_indices_match_first_observed_scalar_keys_and_owned_memberships",
+        "tests/execution_modes/test_group_strategy.mojo::test_streamed_collect_budget_boundaries_preserve_complete_composite_groups"
+      ],
+      "rationale": "String identity, complete first-observed groups and bounded parallel grouping are maintained. Legacy source did not assert a particular native encoder dispatch; no fixed performance heuristic/encoder choice is promised."
+    },
+    "tests_legacy/test_typed_join_probes.mojo": {
+      "regressions": [
+        "Arrow/native StringView 2x2 storage joins",
+        "slices/fullbytes/NUL/UTF8 and distinct Unicode byte sequences",
+        "signed-width extreme probes/NULL exclusion",
+        "generic compoundFloatNaN/signedzero matching"
+      ],
+      "witnesses": [
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_null_duplicate_row_pairs",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_native_and_offsets_strings_prepared_duplicate_groups_reuse_build_and_compare_full_utf8_nul_bytes",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows"
+      ],
+      "rationale": "Direct typed entrypoints and full scalar row arrays replace count-only joins."
+    }
+  },
+  "known_failures": [],
+  "production_edits": [],
+  "owned_python_files": [],
+  "remaining_obligations": [
+    {
+      "owner": "root",
+      "obligation": "actual in-place hash_aggregate complete scalar states/eligibility final validation"
+    },
+    {
+      "owner": "text_binary_contracts",
+      "obligation": "actual sideways key-set list/range pushdown with observable pruning and renamed multikey chain final validation"
+    },
+    {
+      "owner": "root",
+      "obligation": "planner/CSV projected scan and count-only join shortcut review; new suite count semantics do not independently establish shortcut dispatch"
+    }
+  ]
+}

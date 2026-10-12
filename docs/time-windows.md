@@ -67,7 +67,9 @@ Duration expression bounds use binary searches; sum, mean, min and max scan
 each window, while std and var reuse sliding moments for monotone bounds.
 These eager dataframe requests do not add lazy grouping operators.
 
-Run the independent Polars comparison with `pixi run -e oracle oracle-time-windows`.
-It covers irregular and duplicate timestamps, gaps, all endpoint options,
-calendar periods, offsets, partitioned windows, time zones and large-offset
-variance. Contract tests also check invalid requests and lazy execution.
+Run `pixi run test --contracts expr.temporal expr.order_windows`. The maintained
+Mojo contracts use independent civil-calendar arithmetic and explicit interval
+membership for irregular/duplicate timestamps, endpoint options, periods,
+offsets and partitioned windows. Explicit timezone transitions and two-pass
+rolling moments anchor their respective semantics. The coverage plan records
+invalid requests, exact witnesses and remaining obligations.

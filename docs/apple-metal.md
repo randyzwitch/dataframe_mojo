@@ -338,22 +338,28 @@ GPU fault. Output owners and source owners remain alive across that boundary.
 ## Validation
 
 ```sh
+pixi run build-dfmetal
 python3 native/dfmetal/test_native.py
 python3 native/dfmetal/test_join.py
 python3 native/dfmetal/test_resident.py
-pixi run mojo run -I . tests/test_accelerator_planning.mojo
-pixi run mojo run -I . tests/test_metal.mojo
-pixi run mojo run -I . tests/test_metal_completeness.mojo
-pixi run mojo run -I . tests/test_metal_sets.mojo
-pixi run mojo run -I . tests/test_metal_slices.mojo
-pixi run mojo run -I . tests/test_metal_concat.mojo
-pixi run mojo run -I . tests/test_metal_float64_storage.mojo
-pixi run mojo run -I . tests/test_metal_bounded_sums.mojo
-pixi run mojo run -I . tests/test_metal_constants.mojo
-pixi run mojo run -I . tests/test_metal_aggregate_compositions.mojo
-pixi run mojo run -I . tests/test_metal_distinct_counts.mojo
-pixi run mojo run -I . tests/test_metal_temporal_fields.mojo
+pixi run test --contracts planner.routing execution.backends
+pixi run mojo run -I . tests/tooling/metal_available.mojo
 ```
+
+Portable routing/provider tests exercise dispatch, mode/settings forwarding and
+error propagation. Actual native witnesses are selected separately:
+
+```sh
+# Requires a working native runtime and an actual Metal device.
+pixi run test --contracts execution.backends --capabilities metal
+```
+
+The capability probe reports `available` or `absent`; a broken runtime raises an
+error. Default runs record native witnesses as `SKIP(capability)` and do not import
+or count them as passes. Enabled native witnesses must execute and fail when their
+prerequisites are missing. The Native Metal workflow follows that probe explicitly.
+Native runtime execution remains unvalidated on the Linux redesign host; portable
+checks and successful ABI compilation do not establish GPU parity.
 
 The unchanged external-suite query expressions can be checked with Metal
 forced at every materialization boundary:

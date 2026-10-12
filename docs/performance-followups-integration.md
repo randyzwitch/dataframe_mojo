@@ -27,6 +27,8 @@ eligible in-memory inner-join projections. These changes do not establish
 performance parity with Polars or DuckDB across all workloads.
 
 To reproduce the combined source, start from the recorded typed-probe parent
-and merge the recorded range-filter parent, then run `scripts/run_tests.sh`
-with the nine modules listed in the JSON record using the pinned environment.
-The test runs used TEST_JOBS=4 on Linux and TEST_JOBS=2 on M1.
+and merge the recorded range-filter parent, then use that historical revision's
+test runner with the nine modules listed in the JSON record and its pinned
+environment. Those recorded runs used TEST_JOBS=4 on Linux and TEST_JOBS=2 on M1.
+For current source validation, run `pixi run test`; the maintained contract suite
+and preservation records supersede the retired module layout.

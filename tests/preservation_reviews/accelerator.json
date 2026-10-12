@@ -1,0 +1,1048 @@
+{
+  "format_version": 1,
+  "scope": "Full-body preservation evidence audit for16 Metal/accelerator/cost sources plus3 ASOF oracle sources; timezone oracle generator sections additionally reviewed. Independent fresh contract suite is the design anchor.",
+  "review_method": "Read semantic bodies, literal/scalar models and actual producer/consumer/executor routes. Many-to-many preservation mapping of unique obligations; no test-count/name equivalence, no production fixes, no legacy deletion or shared metadata changes.",
+  "status": "frozen and verified; Linux native compilation and independent CPU/portable/file-backed fixtures pass; actual Metal hardware execution pending",
+  "full_body_reviewed_sources": [
+    "tests_legacy/test_metal.mojo",
+    "tests_legacy/test_metal_aggregate_compositions.mojo",
+    "tests_legacy/test_metal_bounded_sums.mojo",
+    "tests_legacy/test_metal_completeness.mojo",
+    "tests_legacy/test_metal_concat.mojo",
+    "tests_legacy/test_metal_constants.mojo",
+    "tests_legacy/test_metal_cost.mojo",
+    "tests_legacy/test_metal_dictionaries.mojo",
+    "tests_legacy/test_metal_distinct_counts.mojo",
+    "tests_legacy/test_metal_float64_storage.mojo",
+    "tests_legacy/test_metal_sets.mojo",
+    "tests_legacy/test_metal_slices.mojo",
+    "tests_legacy/test_metal_temporal_fields.mojo",
+    "tests_legacy/test_accelerator_dictionaries.mojo",
+    "tests_legacy/test_accelerator_planning.mojo",
+    "tests_legacy/test_analytical_cost.mojo",
+    "tests_legacy/oracle/asof.mojo",
+    "tests_legacy/oracle/asof_lazy.mojo",
+    "tests_legacy/oracle/asof_fixtures.py"
+  ],
+  "reviewed_sources": [
+    {
+      "source": "tests_legacy/test_metal.mojo",
+      "sha256": "571d2c02c2ef55107e2bd4809dfae266d58f809ab02c093763c4b7bf68a349fb",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_grouped_and_global_reductions_match_scalar_memberships_all_widths",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_aggregate_compositions_and_consumers_stay_resident",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_boolean_kleene_and_float_extrema_keep_null_nan_zero_and_subnormal_rules",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_wide_sum_proofs_exact_cancellation_and_error_recovery",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_integer_operators_membership_and_cast_matrix_keep_exact_native_words",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_branch_observation_masks_and_precision_errors_leave_runtime_reusable",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_float32_encodings_and_separate_operator_rounding_match_literal_results",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_checked_operation_boundaries_reject_before_device_initialization",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_temporal_all_units_and_extreme_ticks_match_independent_calendar",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_fields",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_fixed_truncation_literal_folding_and_temporal_resident_groups",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_fixed_logical_metadata_survives_nullable_rows_and_extrema",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_temporal_and_decimal_unsupported_requests_reject_before_device_setup",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_unary_lookup_tables_preserve_utf8_nulls_and_report_host_staging",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_categorical_join_styles_reconcile_independent_codes_and_restore_dictionary_identity",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions",
+        "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_nested_union_and_extreme_slices_preserve_all_typed_payloads_and_order",
+        "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_distinct_keep_modes_use_logical_null_nan_zero_classes_and_current_slice_positions",
+        "tests/execution_modes/test_backend_metal_dispatch.mojo::test_native_metal_filtered_scalar_reductions_observe_predicates_without_row_compaction",
+        "tests/execution_modes/test_backend_metal_dispatch.mojo::test_native_metal_group_dispatch_boundary_preserves_nullable_composite_first_seen_groups",
+        "tests/execution_modes/test_backend_metal_dispatch.mojo::test_native_metal_integer_sort_dispatch_boundary_keeps_exact_words_null_placement_and_stable_ties",
+        "tests/execution_modes/test_backend_metal_dispatch.mojo::test_native_metal_float_join_keys_canonicalize_nan_and_signed_zero_without_matching_nulls",
+        "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_row_graphs_copy_literal_null_padding_and_positional_ieee_words",
+        "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_computation_rejects_before_device_setup",
+        "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata",
+        "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_unsupported_requests_reject_before_source_or_device_access",
+        "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_typed_composite_join_styles_coalescing_and_empty_sides_match_scalar_pairs",
+        "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_bounded_cross_product_heads_preserve_pair_order_without_materializing_fanout",
+        "tests/execution_modes/test_backend_metal.mojo::test_native_metal_common_numeric_and_boolean_domain_matches_literal_rows_and_cpu_modes",
+        "tests/execution_modes/test_backend_metal.mojo::test_native_metal_payload_budget_accepts_exact_estimate_and_rejects_one_byte_less",
+        "tests/execution_modes/test_backend_metal.mojo::test_native_metal_resident_join_regions_export_complete_owned_typed_results"
+      ],
+      "retirement_rationale": "Precision-sensitive all-width casts/operators, masked errors,Float32 subnormal/IEEE behavior, fixed logical metadata, stable sort and grouped/global reducers are independently modeled across domain axes. Typed composite joins/coalescing/empty sides and bounded1.6Bcross head supply unique native join obligations; dispatch boundary cases assert actual predicate/hash/radix routes. Native configuration and rejection-before-device remain covered by preflight cases. Replaces broad CPU-parity proxies with literal/scalar full-cell witnesses; actualGPUexecution pending.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_aggregate_compositions.mojo",
+      "sha256": "84b66657c5613dde33ca36706e34bd61ea4e81c7354fa560a0b1514a5df6cc34",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_aggregate_compositions_and_consumers_stay_resident",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_checked_operation_boundaries_reject_before_device_initialization"
+      ],
+      "retirement_rationale": "Literal independent grouped/scalar membership compositions, alias collisions, downstream filter/join/resident consumption and checked overflow guards retain distinct aggregate-composition behavior.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_bounded_sums.mojo",
+      "sha256": "9000821e0a59c4d8cd1ef4b7dec12d81b5f07d33ef4ea033688db4679c74e90b",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_wide_sum_proofs_exact_cancellation_and_error_recovery",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_aggregate_compositions_and_consumers_stay_resident",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions"
+      ],
+      "retirement_rationale": "Independent exact Int128 sums, boundedInt32 cancellation, UInt64MAX singleton groups, duration metadata, resident inputs, unproved-bound rejection/overflow and runtime reuse retain wide-accumulator proof obligations.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_completeness.mojo",
+      "sha256": "1cacf13406db2b329d77f88afae8009d7a157e36fbf985d8025e96bcfc5699b4",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_unary_lookup_tables_preserve_utf8_nulls_and_report_host_staging",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_integer_operators_membership_and_cast_matrix_keep_exact_native_words",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_branch_observation_masks_and_precision_errors_leave_runtime_reusable"
+      ],
+      "retirement_rationale": "Independent UTF8 unary literal results, operation tables and host-staging budget/profile; query chains, internal-name collisions and exact all-width integer membership/casts are preserved without relying on decoded-only parity.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_concat.mojo",
+      "sha256": "ea65b08c32ef3b4ffca46f701532062739ad134c7247194c2b1bffd078741d05",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_nested_union_and_extreme_slices_preserve_all_typed_payloads_and_order",
+        "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_distinct_keep_modes_use_logical_null_nan_zero_classes_and_current_slice_positions",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_fixed_logical_metadata_survives_nullable_rows_and_extrema",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_aggregate_compositions_and_consumers_stay_resident",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions",
+        "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_row_graphs_copy_literal_null_padding_and_positional_ieee_words"
+      ],
+      "retirement_rationale": "Independent source positions cover nested/reordered-schema concatenation, empty inputs, typed nullable values and logical metadata; union consumers include unique/groups/reductions/joins and resident profiling.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_constants.mojo",
+      "sha256": "57a64b5d990d1c79980e342c6a54f89746d2aaa015fdaade57b40aa5ad25af4e",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_fixed_truncation_literal_folding_and_temporal_resident_groups",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_temporal_and_decimal_unsupported_requests_reject_before_device_setup",
+        "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_feature_capabilities_are_independent_opt_in_gates"
+      ],
+      "retirement_rationale": "Literal temporal parsing/folding and resultantDate/Time/DateTimeunit metadata preserved; preflight rejects unlowered text before device setup. Core parser syntax/error matrices live in public temporal contracts.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_cost.mojo",
+      "sha256": "3eee14d02739a9b97598975a40c84cbbc3c32342fda9fc889b61d371e62722c2",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata",
+        "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_unsupported_requests_reject_before_source_or_device_access"
+      ],
+      "retirement_rationale": "Actual native estimate/cache facts checked on dedicated21-output shader shape without source value evaluation or query mutation, cold→warm after execution, changed literals/names/rows reuse cache, full calibration identity, unsupportedplans failbeforeI/O/device. ActualGPUvalidation explicitlypending.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_dictionaries.mojo",
+      "sha256": "711933fde18bfa42e1eda0ef4344159b57033dd252e268301a234a5fb0b44fce",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_unary_lookup_tables_preserve_utf8_nulls_and_report_host_staging",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_categorical_join_styles_reconcile_independent_codes_and_restore_dictionary_identity",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions"
+      ],
+      "retirement_rationale": "Independent decoded values and original dictionary identity cover UTF8 filter/group/sort chains,7 categorical join styles with differing source code orders and actual host-staging/restoration profile bytes.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_distinct_counts.mojo",
+      "sha256": "f6afca57745ad923eaf0bd823679b7d06caa01ad16c2f8b2101b3d80c71345e2",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions",
+        "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_distinct_keep_modes_use_logical_null_nan_zero_classes_and_current_slice_positions"
+      ],
+      "retirement_rationale": "Logical null/NaN/zero classes include empty/all-null/numeric/text cases; distinct count compositions/group/filter/join consumers and resident/dictionary budgets covered by independent classes.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_float64_storage.mojo",
+      "sha256": "7c45d575fa21061f438227def6051932b398fbce359a36aac435c8c26fe5134e",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_row_graphs_copy_literal_null_padding_and_positional_ieee_words",
+        "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_computation_rejects_before_device_setup",
+        "tests/execution_modes/test_backend_metal.mojo::test_native_metal_opaque_float64_preserves_ieee_words_through_filter_sort_and_export"
+      ],
+      "retirement_rationale": "ExactUInt64 payload comparison preservesquiet/signalingNaN/subnormal/±zero/inf words through literal/conditional/null-fill, projection/filter/sort/export, alljoin kinds/nullpadding, grouped/scalarfirstlast, unique/union/slice. Computationandkeydomain rejectbeforedevice. Unique bit preservation kept separatelyfromnumericNaN-class equality.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_sets.mojo",
+      "sha256": "ae761b7babc46be4cecf568f5fc00b432d2ece7bd47c67946a407b72c45ac007",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_distinct_keep_modes_use_logical_null_nan_zero_classes_and_current_slice_positions",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions"
+      ],
+      "retirement_rationale": "Independent logical key equivalence classes and exact source-row representatives cover first/last/none/any with current slice positions, nulls,NaNs,±zero, whole-row/subset and text/dictionary identities; unsupported recovery remains explicitpreflight.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_slices.mojo",
+      "sha256": "a46ca53ac62a7bddb3c68ea86b1892c9bd35176458833e8622e68b1f88c3c951",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_nested_union_and_extreme_slices_preserve_all_typed_payloads_and_order",
+        "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_distinct_keep_modes_use_logical_null_nan_zero_classes_and_current_slice_positions",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_aggregate_compositions_and_consumers_stay_resident",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions",
+        "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_typed_composite_join_styles_coalescing_and_empty_sides_match_scalar_pairs",
+        "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_bounded_cross_product_heads_preserve_pair_order_without_materializing_fanout"
+      ],
+      "retirement_rationale": "Independent clipped source positions handleMIN/MAXoffset/count, empty/slicedbuffers and current rows; resident slices after filters/sort/group/join and before reducers retain pair order/typedpayloads. Invalidconfiguration recovery owned nativepreflight/rootbudgettests.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_metal_temporal_fields.mojo",
+      "sha256": "86a701491d4723d2404e46cac750ff9da385226230a97a73e01e3ae20ae4796a",
+      "extent": "full body",
+      "witnesses": [
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_temporal_all_units_and_extreme_ticks_match_independent_calendar",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_fields",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_fixed_truncation_literal_folding_and_temporal_resident_groups",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_fixed_logical_metadata_survives_nullable_rows_and_extrema",
+        "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_temporal_and_decimal_unsupported_requests_reject_before_device_setup"
+      ],
+      "retirement_rationale": "Independent Gregorian400yearcycle/Int128tick model replaces CPU-as-oracle for Date/Time/allDateTimeunits, negativeandfullInt64extremes, fixedtruncation andtemporalresidentgroup/metadata. Two actualCPUDateoverflow bugs separatelystrictknown; nativeextremeDatecorrectness unknownuntilhardware.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_accelerator_dictionaries.mojo",
+      "sha256": "500994d52a86f70d81f059353e5a6fcc8bc5f7bda74c39e9ed9cca7e9074ec53",
+      "extent": "full body",
+      "witnesses": [
+        "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_dictionary_codes_are_query_wide_ordered_and_keep_empty_source_dictionary_identity",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_categorical_join_styles_reconcile_independent_codes_and_restore_dictionary_identity"
+      ],
+      "retirement_rationale": "Exact ordered query-wide physicalUInt32codebook includes literals and nulls, reconciles differently ordered categorical dictionaries and preserves empty categorical unusedmembers/originalidentity.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_accelerator_planning.mojo",
+      "sha256": "a8c7faf6e0c1306afbad26d6c9aee5ae514678f44fa1796326109748fd700d81",
+      "extent": "full body",
+      "witnesses": [
+        "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_feature_capabilities_are_independent_opt_in_gates",
+        "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_cpu_work_is_value_blind_and_custom_launch_geometry_covers_each_row",
+        "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_typed_composite_join_styles_coalescing_and_empty_sides_match_scalar_pairs",
+        "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_aggregate_compositions_and_consumers_stay_resident",
+        "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions",
+        "tests/planner_correctness/test_routing.mojo::test_row_lowering_uses_schema_and_retains_source_owners_without_evaluation",
+        "tests/planner_correctness/test_routing.mojo::test_row_lowering_rejects_unsupported_storage_types_and_unobservable_errors",
+        "tests/planner_correctness/test_routing.mojo::test_bounded_lowering_checks_source_slots_and_step_limits_at_the_boundary",
+        "tests/planner_correctness/test_routing.mojo::test_memory_preflight_bitmap_geometry_exact_arithmetic_and_budget_fences"
+      ],
+      "retirement_rationale": "Portable opt-in12-flagmatrix plus owner retention, schema/dependency pruning and boundedIR/state/inputpreflight retain contract distinctions. Native logical/composite joins, nested/resident regions and precision/error domain tests complement portable lowering; exactincidentalIRshape isnotpubliccontract. Independently enumerated backend-ownedlaunchgeometry preserves coverage.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/test_analytical_cost.mojo",
+      "sha256": "1632e6a87ad8091ac402f4d887823901bba25e55beaf0aa4a99fd5b87d5e64a1",
+      "extent": "full body",
+      "witnesses": [
+        "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_cpu_work_is_value_blind_and_custom_launch_geometry_covers_each_row",
+        "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata",
+        "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_unsupported_requests_reject_before_source_or_device_access",
+        "tests/planner_correctness/test_routing.mojo::test_automatic_placement_uses_conservative_costs_memory_and_calibration_identity",
+        "tests/planner_correctness/test_routing.mojo::test_automatic_placement_rejects_ambiguous_nonfinite_or_unvalidated_estimates"
+      ],
+      "retirement_rationale": "Independent exact15-feature CPU work vector and null/value blindness preserve metadata accounting; root conservativepolicy testsretain intervals/residuals/identity/memory/expiration/ambiguity/nonfinite handling. Actual native cold/warm facts andbuild/device/request identity now separatefromsyntheticpolicy fixtures.",
+      "retirement_recommendation": "retire after catalog/evidence integration; native hardware evidence remains explicit pending requirement"
+    },
+    {
+      "source": "tests_legacy/oracle/asof.mojo",
+      "sha256": "dd850212a85364726694e62ea40d08de826456202b2ad5ecc9bc4bf91d912508",
+      "extent": "full body",
+      "witnesses": [
+        "tests/public_contracts/test_asof.mojo::test_asof_reference_has_literal_direction_duplicate_and_tolerance_anchors",
+        "tests/public_contracts/test_asof.mojo::test_asof_all_numeric_widths_match_quadratic_direction_and_tolerance_reference",
+        "tests/public_contracts/test_asof.mojo::test_asof_integer_extrema_and_unsigned_tolerances_keep_full_precision",
+        "tests/public_contracts/test_asof.mojo::test_asof_temporal_units_zones_and_exact_duration_tolerances",
+        "tests/public_contracts/test_asof.mojo::test_asof_nearest_null_positions_follow_pinned_external_scan_fixtures",
+        "tests/public_contracts/test_asof.mojo::test_asof_payloads_preserve_nested_values_and_logical_metadata",
+        "tests/public_contracts/test_asof.mojo::test_asof_interleaved_composite_groups_skip_null_members_and_unify_categories",
+        "tests/public_contracts/test_asof.mojo::test_asof_sortedness_is_per_group_ignores_hidden_nulls_and_reports_execution_rows",
+        "tests/public_contracts/test_asof.mojo::test_asof_key_group_tolerance_and_output_schema_errors_validate_empty_inputs",
+        "tests/public_contracts/test_asof.mojo::test_asof_float_fractional_tolerance_and_nonfinite_external_fixtures",
+        "tests/public_contracts/test_asof.mojo::test_asof_tolerance_extrema_and_subtick_duration_bounds_are_inclusive",
+        "tests/public_contracts/test_asof_errors.mojo::test_empty_left_asof_still_validates_right_sortedness",
+        "tests/planner_correctness/test_asof_boundaries.mojo::test_asof_post_match_filter_projection_and_limits_preserve_independent_pairs_and_profile",
+        "tests/planner_correctness/test_asof_sources.mojo::test_asof_two_parquet_sources_preserve_literal_pairs_through_projection_and_head"
+      ],
+      "retirement_rationale": "All10numeric+Date/alltimestampzones/allDuration types, strategies/exact/tolerances/groups/nulls andfullwidth/nonfinite/subtick cases retain independentquadratic pairmodel or specificallypinnedPolarsliteralfixtures forscan-definednearestnull/nonfinitebehavior. Arrowimport/export externalABI ownership andParquetformatproducer/consumer compatibility are independentlycovered ininterchangecontracts, soembeddedPythonbulkfixtureadapter isnotneeded ascoreASOFstructure.",
+      "retirement_recommendation": "retire after verified new file-backed source case and catalog integration"
+    },
+    {
+      "source": "tests_legacy/oracle/asof_lazy.mojo",
+      "sha256": "1608aeec23ac0cdc84e42aa42cd7f66014a85966d6bdb922c6a7e1e4dfcde25f",
+      "extent": "full body",
+      "witnesses": [
+        "tests/public_contracts/test_asof.mojo::test_asof_reference_has_literal_direction_duplicate_and_tolerance_anchors",
+        "tests/public_contracts/test_asof.mojo::test_asof_all_numeric_widths_match_quadratic_direction_and_tolerance_reference",
+        "tests/public_contracts/test_asof.mojo::test_asof_integer_extrema_and_unsigned_tolerances_keep_full_precision",
+        "tests/public_contracts/test_asof.mojo::test_asof_temporal_units_zones_and_exact_duration_tolerances",
+        "tests/public_contracts/test_asof.mojo::test_asof_nearest_null_positions_follow_pinned_external_scan_fixtures",
+        "tests/public_contracts/test_asof.mojo::test_asof_payloads_preserve_nested_values_and_logical_metadata",
+        "tests/public_contracts/test_asof.mojo::test_asof_interleaved_composite_groups_skip_null_members_and_unify_categories",
+        "tests/public_contracts/test_asof.mojo::test_asof_sortedness_is_per_group_ignores_hidden_nulls_and_reports_execution_rows",
+        "tests/public_contracts/test_asof.mojo::test_asof_key_group_tolerance_and_output_schema_errors_validate_empty_inputs",
+        "tests/public_contracts/test_asof.mojo::test_asof_float_fractional_tolerance_and_nonfinite_external_fixtures",
+        "tests/public_contracts/test_asof.mojo::test_asof_tolerance_extrema_and_subtick_duration_bounds_are_inclusive",
+        "tests/public_contracts/test_asof_errors.mojo::test_empty_left_asof_still_validates_right_sortedness",
+        "tests/planner_correctness/test_asof_boundaries.mojo::test_asof_post_match_filter_projection_and_limits_preserve_independent_pairs_and_profile",
+        "tests/planner_correctness/test_asof_sources.mojo::test_asof_two_parquet_sources_preserve_literal_pairs_through_projection_and_head"
+      ],
+      "retirement_rationale": "The unique two-file scan materialization/source-axis is preserved by actualscan_parquet onbothsides with independently authored literalpairtables andalltypedcells, projection/head, optimize±stream±batch3, rowgroups2/3. Existing source test had productioneagerjoin asits immediateoracle; newexpectations have noproductjoinoracle. Core dtype/tolerance/nearest scan semantics are independently covered by publicASOF models andpinnedexternalfixtures.",
+      "retirement_recommendation": "retire after verified new file-backed source case and catalog integration"
+    },
+    {
+      "source": "tests_legacy/oracle/asof_fixtures.py",
+      "sha256": "1d4c6994399375ee90c6dd88eb70f714677dc404cfa9b303f952993d0a252424",
+      "extent": "full body",
+      "witnesses": [
+        "tests/public_contracts/test_asof.mojo::test_asof_reference_has_literal_direction_duplicate_and_tolerance_anchors",
+        "tests/public_contracts/test_asof.mojo::test_asof_all_numeric_widths_match_quadratic_direction_and_tolerance_reference",
+        "tests/public_contracts/test_asof.mojo::test_asof_integer_extrema_and_unsigned_tolerances_keep_full_precision",
+        "tests/public_contracts/test_asof.mojo::test_asof_temporal_units_zones_and_exact_duration_tolerances",
+        "tests/public_contracts/test_asof.mojo::test_asof_nearest_null_positions_follow_pinned_external_scan_fixtures",
+        "tests/public_contracts/test_asof.mojo::test_asof_payloads_preserve_nested_values_and_logical_metadata",
+        "tests/public_contracts/test_asof.mojo::test_asof_interleaved_composite_groups_skip_null_members_and_unify_categories",
+        "tests/public_contracts/test_asof.mojo::test_asof_sortedness_is_per_group_ignores_hidden_nulls_and_reports_execution_rows",
+        "tests/public_contracts/test_asof.mojo::test_asof_key_group_tolerance_and_output_schema_errors_validate_empty_inputs",
+        "tests/public_contracts/test_asof.mojo::test_asof_float_fractional_tolerance_and_nonfinite_external_fixtures",
+        "tests/public_contracts/test_asof.mojo::test_asof_tolerance_extrema_and_subtick_duration_bounds_are_inclusive",
+        "tests/public_contracts/test_asof_errors.mojo::test_empty_left_asof_still_validates_right_sortedness",
+        "tests/planner_correctness/test_asof_boundaries.mojo::test_asof_post_match_filter_projection_and_limits_preserve_independent_pairs_and_profile",
+        "tests/planner_correctness/test_asof_sources.mojo::test_asof_two_parquet_sources_preserve_literal_pairs_through_projection_and_head"
+      ],
+      "retirement_rationale": "All10numeric+Date/alltimestampzones/allDuration types, strategies/exact/tolerances/groups/nulls andfullwidth/nonfinite/subtick cases retain independentquadratic pairmodel or specificallypinnedPolarsliteralfixtures forscan-definednearestnull/nonfinitebehavior. Arrowimport/export externalABI ownership andParquetformatproducer/consumer compatibility are independentlycovered ininterchangecontracts, soembeddedPythonbulkfixtureadapter isnotneeded ascoreASOFstructure.",
+      "retirement_recommendation": "retire after verified new file-backed source case and catalog integration"
+    }
+  ],
+  "partial_body_reviewed_sources": [
+    {
+      "source": "scripts/oracle.py",
+      "sha256": "85b11dff9897a161898836ce95bb9c2c1f8fa3a98535a79601558e70a9b76d29",
+      "sections": [
+        "lines82-142 TZ_BASES/TZ_STEPS/TZ_FIELDS/TZ_FORMATS/gen_tz/tz_expected"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_temporal_transitions.mojo::test_time_zone_transition_models_cover_political_half_hour_historical_footer_and_dst_boundaries",
+        "tests/public_contracts/test_temporal.mojo"
+      ],
+      "retirement_rationale": "Unique12zoneevent classes are deterministic independentMojo piecewisetransition fixtures (including futurefooter, firstUS DST, permanentBST,30min gap/overlap, skippedday andpoliticalpermanentoffsets) acrossallunits/layouts/localizationpolicies. Publictemporalcontracts cover generaloffset/truncate/parseroperators. Remaininggeneraloraclefunctions ownedroot."
+    }
+  ],
+  "unique_gaps_found_and_replacements": [
+    {
+      "gap": "OpaqueFloat64 payload exactbits through joinpadding/positionalreducers/unique/union",
+      "replacement_ids": [
+        "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_row_graphs_copy_literal_null_padding_and_positional_ieee_words",
+        "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_computation_rejects_before_device_setup"
+      ],
+      "evidence": "/tmp/df-metal-opaque-cpu-v7.log"
+    },
+    {
+      "gap": "Actual native value-blind cost metadata cold/warm state and actual calibration identity",
+      "replacement_ids": [
+        "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata",
+        "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_unsupported_requests_reject_before_source_or_device_access"
+      ],
+      "evidence": [
+        "/tmp/df-metal-cost-cpu-v4.log",
+        "/tmp/df-metal-final-domains-native-build.log"
+      ],
+      "actual_gpu": "pending hardware"
+    },
+    {
+      "gap": "Native composite logical-key joins/empty sides/coalescing and bounded large-cross head",
+      "replacement_ids": [
+        "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_typed_composite_join_styles_coalescing_and_empty_sides_match_scalar_pairs",
+        "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_bounded_cross_product_heads_preserve_pair_order_without_materializing_fanout"
+      ],
+      "evidence": [
+        "/tmp/df-metal-join-cpu.log",
+        "/tmp/df-metal-join-native-build-v2.log"
+      ],
+      "actual_gpu": "pending hardware"
+    },
+    {
+      "gap": "Portable feature flags, empty categorical dictionary identity and exact CPU metadata/backend launchgeometry",
+      "replacement_ids": [
+        "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_dictionary_codes_are_query_wide_ordered_and_keep_empty_source_dictionary_identity",
+        "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_feature_capabilities_are_independent_opt_in_gates",
+        "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_cpu_work_is_value_blind_and_custom_launch_geometry_covers_each_row"
+      ],
+      "evidence": "/tmp/df-accelerator-edges-v3.log"
+    },
+    {
+      "gap": "12event historical/political/subhour/futureTZif footer boundary oracle classes",
+      "replacement_ids": [
+        "tests/public_contracts/test_temporal_transitions.mojo::test_time_zone_transition_models_cover_political_half_hour_historical_footer_and_dst_boundaries"
+      ],
+      "evidence": "/tmp/df-temporal-transitions.log"
+    },
+    {
+      "gap": "BothASOFchildren actualfile-backedscan with projection/head underoptimizer/streamsettings",
+      "replacement_ids": [
+        "tests/planner_correctness/test_asof_sources.mojo::test_asof_two_parquet_sources_preserve_literal_pairs_through_projection_and_head"
+      ],
+      "evidence": "/tmp/df-asof-sources-v2.log",
+      "status": "verified pass"
+    }
+  ],
+  "new_native_cases": [
+    {
+      "id": "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_grouped_and_global_reductions_match_scalar_memberships_all_widths",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity"
+        ]
+      },
+      "independent_obligation": "Nine common numeric widths, empty/singleton/65/513 rows, sliced nullable buffers, filtered/scalar and first-seen nullable groups; independently compute min/max/first/last/count/len/null_count/arg positions and checked integer sums."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_aggregate_compositions_and_consumers_stay_resident",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Literal grouped/scalar aggregate compositions, generated-name collisions, empty groups, conditional reducers and native resident consumer chains."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_boolean_kleene_and_float_extrema_keep_null_nan_zero_and_subnormal_rules",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity"
+        ]
+      },
+      "independent_obligation": "Ignore-null and Kleene Bool identities for empty/all-null/mixed inputs; Float32 numeric-preferred extrema with NaN, signed-zero ties and subnormal endpoints."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_wide_sum_proofs_exact_cancellation_and_error_recovery",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity"
+        ]
+      },
+      "independent_obligation": "Exact signed/unsigned wide sums, duration metadata, UInt64.MAX singleton groups, bounded Int32 cancellation, unproven native-wide rejection, overflow and runtime reuse."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_integer_operators_membership_and_cast_matrix_keep_exact_native_words",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity"
+        ]
+      },
+      "independent_obligation": "All eight integer widths: independent Int128 floor division/remainder, power, abs, clip, membership, identity floor/ceil/round; 8x9 nonstrict numeric casts and Bool casts."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_branch_observation_masks_and_precision_errors_leave_runtime_reusable",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity"
+        ]
+      },
+      "independent_obligation": "Conditional observation masks hide inactive overflow/strict cast/subnormal arithmetic; null predicates, Float32 invalid-range/nonfinite casts, active error rejection, UInt64->Float32 double-round boundary and runtime reuse."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_float32_encodings_and_separate_operator_rounding_match_literal_results",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity"
+        ]
+      },
+      "independent_obligation": "Literal Float32 subnormal/signed-zero/NaN/infinity unary results, half-away-from-zero round, predicates/clip/fill_nan and a separate-rounding non-FMA witness."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_domains.mojo::test_native_metal_checked_operation_boundaries_reject_before_device_initialization",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype"
+        ]
+      },
+      "independent_obligation": "Invalid device guarantees unsupported terminal checked-operation arrangements reject in preflight before device initialization."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_temporal_all_units_and_extreme_ticks_match_independent_calendar",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity"
+        ]
+      },
+      "independent_obligation": "All temporal storage units, Date and Time, full Int64 physical endpoint fixtures, nulls and empty output schemas, independently compute wide Gregorian/calendar and within-day fields."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_fields",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present"
+        ]
+      },
+      "independent_obligation": "Native-only extreme Date calendar/weekday case independent of confirmed broken CPU epoch-shift implementation; actual GPU outcome unknown."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_fixed_truncation_literal_folding_and_temporal_resident_groups",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Fixed aligned day/week/second/minute/hour truncation, negative floor and Monday origin, literal parsing/folding, temporal groups and resident consumers."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_fixed_logical_metadata_survives_nullable_rows_and_extrema",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity"
+        ]
+      },
+      "independent_obligation": "Date, Time, all Datetime units including timezone metadata, duration, Decimal32/64 exact logical types through null fill, comparisons and extrema."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_temporal_and_decimal_unsupported_requests_reject_before_device_setup",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype"
+        ]
+      },
+      "independent_obligation": "Timezone field extraction, calendar-month truncation and decimal SUM unsupported preflight before device initialization."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_unary_lookup_tables_preserve_utf8_nulls_and_report_host_staging",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data",
+          "budget boundaries"
+        ]
+      },
+      "independent_obligation": "Independent UTF8/null literal expectations for unary string dictionary lookup tables; real host staging/operation-table counters, budget rejection and recovery."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_categorical_join_styles_reconcile_independent_codes_and_restore_dictionary_identity",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Seven categorical join styles with independently assigned codebooks; exact row-pair/payload/decoded-key expectations, null matching rules and source dictionary identity."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_dictionaries.mojo::test_native_metal_dictionary_distinct_counts_include_nulls_and_feed_aggregate_compositions",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Distinct counts include null as a class, global/first-seen grouped/empty inputs and composed text aggregate resident consumers."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_nested_union_and_extreme_slices_preserve_all_typed_payloads_and_order",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data",
+          "budget boundaries"
+        ]
+      },
+      "independent_obligation": "Reordered concat schemas, nested resident unions, extreme signed slice offsets/counts, typed IEEE/UInt64/decimal/temporal/string payloads, post-filter/sort slices and reduction consumers."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_resident.mojo::test_native_metal_distinct_keep_modes_use_logical_null_nan_zero_classes_and_current_slice_positions",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "First/last/none/any unique representatives preserve complete typed rows, logical null/NaN/signed-zero classes and current sliced positions."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_dispatch.mojo::test_native_metal_filtered_scalar_reductions_observe_predicates_without_row_compaction",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Independent filtered global SUM/count/len plus actual native predicate-reduction algorithm profile."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_dispatch.mojo::test_native_metal_group_dispatch_boundary_preserves_nullable_composite_first_seen_groups",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Nullable composite first-seen grouped SUM/count/len at 4095/4096/4097 rows plus actual hash-group algorithm profile threshold."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_dispatch.mojo::test_native_metal_integer_sort_dispatch_boundary_keeps_exact_words_null_placement_and_stable_ties",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Stable exact UInt64 sorting with null placement and Int8 ties at 65535/65536/65537 rows; independent counting-class order plus actual radix algorithm profile."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_dispatch.mojo::test_native_metal_float_join_keys_canonicalize_nan_and_signed_zero_without_matching_nulls",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Full Float32 join independently enumerates NaN/signed-zero matches, duplicate products, unmatched keys and nonmatching nulls."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_row_graphs_copy_literal_null_padding_and_positional_ieee_words",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Literal IEEE UInt64 words, including quiet/signaling NaN payloads, signed zeros and subnormals, remain exact through projection/conditional/null fill, union/slice, unique, grouped/scalar first/last and all7 join styles with independent pair/null padding."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_opaque.mojo::test_native_metal_opaque_float64_computation_rejects_before_device_setup",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype"
+        ]
+      },
+      "independent_obligation": "Float64 arithmetic/comparison/casts/extrema/sort/group/join keys reject before intentionally invalid device initialization."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Dedicated21-output Float32 shape independently checks typed results and value-blind rows/bytes/nodes/upload/allocation/synchronization facts; actual native execution changes only cold-cache fact; changed row count/names/literals reuse warm shader; calibration identity includes exact build/device/host/worker/request settings."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_cost.mojo::test_native_metal_analytical_unsupported_requests_reject_before_source_or_device_access",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype"
+        ]
+      },
+      "independent_obligation": "Analytical estimates reject unsupportedFloat64 and file scans without reading missing files or initializing invalid device."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_typed_composite_join_styles_coalescing_and_empty_sides_match_scalar_pairs",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "supported/unsupported dtype",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Independent nested pair enumeration for12 native numeric/Bool/Date/Decimal domains, composite nullable keys,7 join styles, coalescing±, empty sides and full typed nullable payload rows."
+    },
+    {
+      "id": "tests/execution_modes/test_backend_metal_join_domains.mojo::test_native_metal_bounded_cross_product_heads_preserve_pair_order_without_materializing_fanout",
+      "capabilities": [
+        "metal"
+      ],
+      "contracts": {
+        "execution.backends": [
+          "budget boundaries",
+          "provider absent/present",
+          "mode parity",
+          "resident/exported data"
+        ]
+      },
+      "independent_obligation": "Independent lexicographic pair model for smallCPU/native fixture; actual40Kx40K native cross head513 stays below8MiB without materializing1.6B fanout, direct/projected variants and zero budget rejection."
+    }
+  ],
+  "new_portable_cases": [
+    {
+      "id": "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_dictionary_codes_are_query_wide_ordered_and_keep_empty_source_dictionary_identity",
+      "capabilities": [],
+      "contracts": {
+        "planner.routing": [
+          "eligibility boundaries",
+          "unsupported inputs"
+        ]
+      },
+      "independent_obligation": "Ordered literal query-wide UTF8codebook, differing categorical source dictionaries and exact physical codes/nulls; empty categorical retains unused members and original dictionary identity."
+    },
+    {
+      "id": "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_feature_capabilities_are_independent_opt_in_gates",
+      "capabilities": [],
+      "contracts": {
+        "planner.routing": [
+          "eligibility boundaries",
+          "unsupported inputs"
+        ]
+      },
+      "independent_obligation": "12 independent opt-in flags each accept exact documented domain then reject when that flag alone disabled; unsupported tag asserted."
+    },
+    {
+      "id": "tests/planner_correctness/test_accelerator_edges.mojo::test_accelerator_cpu_work_is_value_blind_and_custom_launch_geometry_covers_each_row",
+      "capabilities": [],
+      "contracts": {
+        "planner.routing": [
+          "eligibility boundaries",
+          "bounded state",
+          "estimation failure"
+        ]
+      },
+      "independent_obligation": "Exact independent15-feature CPU metadata vector over0/1/7/128/129/1025rows, value/null-blindness and query immutability; custom launch geometry1/7/128/256threads ×1/2/17blocks covers each row once and invalid dimensions reject."
+    },
+    {
+      "id": "tests/public_contracts/test_temporal_transitions.mojo::test_time_zone_transition_models_cover_political_half_hour_historical_footer_and_dst_boundaries",
+      "capabilities": [],
+      "contracts": {
+        "expr.temporal": [
+          "date/time/datetime/duration units",
+          "calendar fields/negative epochs/leap days",
+          "truncation/offset/duration arithmetic",
+          "ambiguous/nonexistent local times and timezone conversion",
+          "format/parse and invalid values",
+          "overflow/null/binding errors",
+          "political and historical transition sides"
+        ]
+      },
+      "independent_obligation": "PureMojo12 piecewise transition fixtures cover NYfutureTZiffooter/1918, London1968permanentBST, LordHowehalf-hour gap/overlap, Apia skipped day, Moscowpermanentoffset, Caracas half-hour politicalchange; ms/us/ns ×plain/offset/chunk, fullfields/numericformats/naivewall/localization policies/calendar day vs24h/truncation."
+    }
+  ],
+  "new_strict_known_failures": [
+    {
+      "id": "tests/public_contracts/test_temporal_extremes.mojo::test_maximum_date_weekday_does_not_wrap_the_epoch_alignment_shift",
+      "contract": "expr.temporal",
+      "dimensions": [
+        "calendar fields/negative epochs/leap days",
+        "overflow/null/binding errors"
+      ],
+      "verified_exact_diagnostic": "maximum Date weekday must be Thursday(4); got 2",
+      "evidence": "/tmp/df-temporal-extreme-strict.log"
+    },
+    {
+      "id": "tests/public_contracts/test_temporal_extremes.mojo::test_extreme_date_calendar_fields_do_not_wrap_the_epoch_conversion",
+      "contract": "expr.temporal",
+      "dimensions": [
+        "calendar fields/negative epochs/leap days",
+        "overflow/null/binding errors"
+      ],
+      "verified_exact_diagnostic": "extreme Date calendar year must remain positive; got -25252734927766555",
+      "evidence": "/tmp/df-temporal-extreme-strict.log"
+    }
+  ],
+  "verification": {
+    "strict_date_wrappers": {
+      "exit_code": 0,
+      "passed": 2,
+      "log": "/tmp/df-temporal-extreme-strict.log"
+    },
+    "cpu_models": [
+      {
+        "scope": "reduction memberships/compositions/Bool/Float32/wide sums",
+        "exit_code": 0,
+        "log": "/tmp/df-metal-models-v3.log"
+      },
+      {
+        "scope": "temporal fields/truncation/logical metadata/unsupported preflight",
+        "exit_code": 0,
+        "log": "/tmp/df-metal-temporal-models-v4.log"
+      },
+      {
+        "scope": "UTF8 dictionary operations/categorical join pairs/distinct counts",
+        "exit_code": 0,
+        "log": "/tmp/df-metal-dictionary-models.log"
+      },
+      {
+        "scope": "resident concat/extreme slices/unique complete rows",
+        "exit_code": 0,
+        "log": "/tmp/df-metal-resident-models-v2.log"
+      },
+      {
+        "scope": "predicate/hash/radix threshold and float-join independent models",
+        "exit_code": 0,
+        "log": "/tmp/df-metal-dispatch-models-v2.log"
+      },
+      {
+        "scope": "final numeric all-width matrices/identity floor ceil round/masks/negative-power preflight/Float32 zero-normalized rounding",
+        "log": "/tmp/df-metal-numeric-models-v5.log",
+        "exit_code": 0
+      },
+      {
+        "scope": "opaque IEEE row graphs/joins/positional reductions and unsupported preflight",
+        "log": "/tmp/df-metal-opaque-cpu-v7.log",
+        "exit_code": 0
+      },
+      {
+        "scope": "21-output analytical fixture actual lower_rows eligibility, scalar expected results and invalid-device preflight",
+        "log": "/tmp/df-metal-cost-cpu-v4.log",
+        "exit_code": 0
+      },
+      {
+        "scope": "12 typed composite join domains across styles/coalescing/empty sides",
+        "log": "/tmp/df-metal-join-cpu.log",
+        "exit_code": 0
+      }
+    ],
+    "native_compile": {
+      "exit_code": 0,
+      "case_count": 22,
+      "log": "/tmp/df-metal-domains-native-build.log",
+      "driver": "/tmp/df-metal-domains-native-driver.mojo",
+      "binary": "/tmp/df-metal-domains-native",
+      "scope": "Original22 native branches, supplemented by final focused numeric8+opaque2+cost2 and join2 builds below."
+    },
+    "actual_native_gpu_execution": "Not available on Linux. Every native case still requires actual macOS Metal validation; no actualGPU success claimed.",
+    "native_compile_followups": [
+      {
+        "exit_code": 0,
+        "case_count": 12,
+        "log": "/tmp/df-metal-final-domains-native-build.log",
+        "driver": "/tmp/df-metal-final-domains-native-driver.mojo",
+        "binary": "/tmp/df-metal-final-domains-native",
+        "scope": "Final numeric8 including explicit rounded-zero normalization; opaque2 and cost2. One opaque unique-last expected literal was corrected after compiler start; final CPUv7 verifies corrected literal, no API/type/control-flow change."
+      },
+      {
+        "exit_code": 0,
+        "case_count": 2,
+        "log": "/tmp/df-metal-join-native-build-v2.log",
+        "driver": "/tmp/df-metal-join-native.mojo",
+        "binary": "/tmp/df-metal-join-native",
+        "scope": "Final typed composite and bounded native cross join branches; no eager1.6B-rowCPU oracle."
+      }
+    ],
+    "portable_additions": [
+      {
+        "exit_code": 0,
+        "passed": 3,
+        "log": "/tmp/df-accelerator-edges-v3.log"
+      },
+      {
+        "exit_code": 0,
+        "passed": 1,
+        "log": "/tmp/df-temporal-transitions.log"
+      }
+    ],
+    "file_backed_asof": {
+      "exit_code": 0,
+      "passed": 1,
+      "log": "/tmp/df-asof-sources-v2.log",
+      "current_native_library": "/tmp/df-parquet-native-current/libdfparquet.so",
+      "runtime_ms": 422.37,
+      "fixtures": "/tmp/df-asof-sources-fixtures"
+    }
+  },
+  "open_obligations": [
+    {
+      "id": "actual-metal-hardware",
+      "detail": "All28 added native cases compiled on Linux. Actual Metal hardware execution remains pending for all native assertions, including extremeDate output and actual cold/warm cache facts. No native success inferred from CPU models or compilation."
+    },
+    {
+      "id": "cpu-global-positional-worker-order",
+      "detail": "Public optimize=True streaming=True filtered global513-row case reproducibly returns scheduling-dependent first/last/arg positions across workers. Expected selected233 valid200 sum1791 first7 last6 arg_min13 arg_max20; observed first16,arg_min25,arg_max1 in one run. Actual pipeline merges interleaved per-worker states by worker index. No timing-sensitive strictXFAIL and no copied caller merge loop test was added. Deterministic public worker-order regression remains an obligation.",
+      "evidence": [
+        "/tmp/df-metal-models-debug.log",
+        "/tmp/df-metal-models.log"
+      ],
+      "production_cause": [
+        "dataframe/pipeline.mojo:2282",
+        "dataframe/lazy.mojo:2344"
+      ]
+    }
+  ],
+  "source_sha256": {
+    "tests/execution_modes/test_backend_metal.mojo": "13be16ed6c39cd5ff1c9f9c8e38fd99c9b0371c9f8a63e41b256d1e9fb1c2a97",
+    "tests/execution_modes/test_backend_metal_cost.mojo": "e1d2bef3a5d6c1f6ebc19b844d9e1c7ffff889f9606f251bca69257da5d53f34",
+    "tests/execution_modes/test_backend_metal_dictionaries.mojo": "4ae10fc3d86b58fc35a58cf18420e96a96cec4e011329b2cb7be82608fa12816",
+    "tests/execution_modes/test_backend_metal_dispatch.mojo": "761ddcf1f237fe4fab1d5f38ea9814fa3cba636ef62e015f60dae0db53dfef91",
+    "tests/execution_modes/test_backend_metal_domains.mojo": "b19b3514667536557af91f3d8583a013bffd3605f15823a81ef9dce623a1d2a7",
+    "tests/execution_modes/test_backend_metal_join_domains.mojo": "257b3bf654a90625bfe3cb8873553b1865a284d9450779a354b829cc52c9be72",
+    "tests/execution_modes/test_backend_metal_opaque.mojo": "6616de3c0ef12a23d9ab802bb83cd6ad7c11a0ba90912fd12d35088c58bfec19",
+    "tests/execution_modes/test_backend_metal_resident.mojo": "39fbef6c3b127a58dedc40393a8aea7b6cfa9c1110569dc697e428b0c223d4da",
+    "tests/execution_modes/test_backend_metal_temporal.mojo": "dd595f3ae1cc6428df91867a2deccc27b60e40b624fd54637d218b16d965f250",
+    "tests/support/metal_domain_checks.mojo": "fa6dbbaf23590dffea9a45a4a604809f52f4c35ef651e39654960722e1dfaa89",
+    "tests/support/metal_domain_reference.mojo": "b1355f0a27cc9ca6879c746be088cb87bcd43133d304a4280d59dff56b77482f",
+    "tests/planner_correctness/test_accelerator_edges.mojo": "c97b9820b4e508a64df69e6e43d0f238a56b1d3515ff6251415214fbbc87d00e",
+    "tests/public_contracts/test_temporal_extremes.mojo": "72ccb6dd2d17e59b416014f23916c328d3d29904bd90d94cd17f5fe4bd28614b",
+    "tests/public_contracts/test_temporal_transitions.mojo": "0e4bd39eb2b6a719c566f3855f2032b3a3d565015445d378cd92006b82a3d754",
+    "tests/support/temporal_transitions.mojo": "95a6ff8dcd7975672f28244e5c0c52a6c21e9dc950282261cdcfff3122537836",
+    "tests/planner_correctness/test_asof_sources.mojo": "10fbf3efcde87e95ef1eaf5ab2861e5b02240e45af3bb5d7193fea0e9595dac5"
+  },
+  "related_prior_audit": "/tmp/df-preservation-interchange-handoff.json",
+  "no_claims": [
+    "ActualGPUexecution unavailableonLinux; compilation/CPUfixturesarenotGPUproof.",
+    "MultiworkerCPUglobalpositionalreduction bug remains preciseopenobligation, nontiming-sensitiveXFAILnotinvented.",
+    "No externalquerycancellationAPIcoverage claimed."
+  ],
+  "file_backed_asof": {
+    "id": "tests/planner_correctness/test_asof_sources.mojo::test_asof_two_parquet_sources_preserve_literal_pairs_through_projection_and_head",
+    "capabilities": [
+      "parquet"
+    ],
+    "contracts": {
+      "planner.relational": [
+        "projection dependencies",
+        "cardinality and slice barriers"
+      ],
+      "table.join": [
+        "inner/left/right/full/semi/anti/cross/asof",
+        "duplicates/unmatched",
+        "null/NaN keys",
+        "composite/string keys"
+      ]
+    },
+    "independent_obligation": "Both inputs are actual scan_parquet children with row-group sizes2/3. Six independently authored pair tables cover backward/forward/nearest × exactfalse/true, interleaved String groups, left null key/group and nullable/empty UTF8 payloads. Every typed output cell is checked; reordered projection and head0/3/6/9 checked under optimizefalse/true × streamingfalse/true × batch3. No production join oracle.",
+    "evidence": {
+      "exit_code": 0,
+      "passed": 1,
+      "log": "/tmp/df-asof-sources-v2.log",
+      "current_native_library": "/tmp/df-parquet-native-current/libdfparquet.so",
+      "runtime_ms": 422.37,
+      "fixtures": "/tmp/df-asof-sources-fixtures"
+    }
+  }
+}

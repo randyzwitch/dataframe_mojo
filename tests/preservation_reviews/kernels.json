@@ -1,0 +1,620 @@
+{
+  "status": "28 frozen witnesses verified:27 PASS and1 narrow known failure. Additional grouping/join/key source-body audit continues separately.",
+  "review_policy": "Principled public contracts and independent scalar generators are the design anchor. Legacy source bodies reviewed only to identify unique regressions or real dispatch/storage obligations. Legacy suite not deleted.",
+  "reviewed_sources": [
+    "tests_legacy/test_conditional_kernels.mojo",
+    "tests_legacy/test_top_k_filter.mojo",
+    "tests_legacy/test_parallel_sort.mojo",
+    "tests_legacy/test_row_prefix_sort.mojo",
+    "tests_legacy/test_packed_sort.mojo",
+    "tests_legacy/test_mask_filter.mojo",
+    "tests_legacy/test_filter_all_rows.mojo",
+    "tests_legacy/test_gather_bulk.mojo",
+    "tests_legacy/test_selective_filter.mojo",
+    "tests_legacy/test_row_encode.mojo",
+    "tests_legacy/test_sort.mojo",
+    "tests_legacy/test_rank_numeric.mojo",
+    "tests_legacy/test_unique.mojo",
+    "tests_legacy/test_pivot.mojo",
+    "tests_legacy/test_concat.mojo",
+    "tests_legacy/test_parallel_rows.mojo",
+    "tests_legacy/test_sorted_range.mojo",
+    "tests_legacy/test_rank_strings.mojo",
+    "tests_legacy/test_string_view_gather.mojo",
+    "tests_legacy/test_bitmap_kernels.mojo",
+    "tests_legacy/test_bool_null_bits.mojo",
+    "tests_legacy/test_window.mojo",
+    "tests_legacy/test_decimal_conditionals.mojo",
+    "tests_legacy/test_top_k_sort.mojo",
+    "tests_legacy/test_nested_ops.mojo",
+    "tests_legacy/test_nested_columns.mojo",
+    "tests_legacy/test_exact_casts.mojo",
+    "tests_legacy/test_parallel_join.mojo",
+    "tests_legacy/test_streaming_group_by.mojo",
+    "tests_legacy/test_stream_collect_group_by.mojo"
+  ],
+  "delegated_reviews": {
+    "tests_legacy/test_chunked_consumers.mojo": {
+      "reviewer": "temporal_contracts",
+      "unique_regression": "same-count/full-chunk-endpoints duplicate indices must not trigger full-chunk reuse",
+      "witness": "tests/storage_ownership/test_gather_aliases.mojo::test_sorted_repeated_positions_with_full_chunk_endpoints_never_reuse_wrong_rows",
+      "log": "/tmp/df-audit-gather.log",
+      "exit_code": 0
+    }
+  },
+  "new_witnesses": {
+    "tests/kernel_equivalence/test_bitmap_words.mojo": [
+      "tests/kernel_equivalence/test_bitmap_words.mojo::test_packed_kleene_words_scalar_fallback_broadcast_and_unaligned_tails_match_literal_truth_tables",
+      "tests/kernel_equivalence/test_bitmap_words.mojo::test_validity_append_all_bit_alignments_vector_boundaries_and_dense_poison_padding_preserve_each_bit"
+    ],
+    "tests/kernel_equivalence/test_boolean_selection_words.mojo": [
+      "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_at_every_bit_alignment",
+      "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_scalar_string_membership_broadcast_preserves_nonnull_literal_validity"
+    ],
+    "tests/kernel_equivalence/test_filter_routes.mojo": [
+      "tests/kernel_equivalence/test_filter_routes.mojo::test_fused_comparison_dtype_operator_bit_offset_and_tail_routes_match_independent_scalars",
+      "tests/kernel_equivalence/test_filter_routes.mojo::test_selective_numeric_first_string_last_narrowing_and_fused_fallback_keep_complete_rows",
+      "tests/kernel_equivalence/test_filter_routes.mojo::test_sorted_window_order_cache_is_shared_by_views_and_invalidated_by_descending_boundary_reassembly"
+    ],
+    "tests/kernel_equivalence/test_parallel_order_selection.mojo": [
+      "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_partition_top_k_replicated_owned_and_bucketed_routes_match_complete_scalar_memberships",
+      "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_partition_top_k_limit_extremes_and_shape_fallbacks_are_explicit",
+      "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_merge_corank_and_every_output_slice_match_independent_stable_literal_order",
+      "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_prefix_bucket_eligibility_fallback_and_full_string_ties_match_scalar_order",
+      "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_packed_heavy_buckets_and_string_settling_preserve_complete_stable_permutations",
+      "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_numeric_rank_large_partition_bucketed_and_sparse_one_sort_routes_reassociate_every_row",
+      "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_rank_word_buckets_validate_domain_cutoff_skew_fallback_and_radix_stability",
+      "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_row_prefix_long_string_remainders_precede_later_numeric_keys_in_parallel_merge_fallback"
+    ],
+    "tests/kernel_equivalence/test_top_rows.mojo": [
+      "tests/kernel_equivalence/test_top_rows.mojo::test_chunked_top_rows_rebases_four_candidates_and_preserves_null_nan_and_full_string_ties"
+    ],
+    "tests/kernel_equivalence/test_set_routes.mojo": [
+      "tests/kernel_equivalence/test_set_routes.mojo::test_parallel_whole_row_unique_no_aggregate_route_preserves_complete_null_nan_zero_text_classes"
+    ],
+    "tests/kernel_equivalence/test_numeric_cast_routes.mojo": [
+      "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_exact_numeric_cast_eligibility_and_masked_fallback_match_independent_typed_cells",
+      "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_bool_cast_exact_routes_keep_unaligned_validity_and_literal_zero_one_values",
+      "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_integer_cast_boundaries_decline_only_on_visible_out_of_range_values_and_report_strict_errors"
+    ],
+    "tests/kernel_equivalence/test_join_routes.mojo": [
+      "tests/kernel_equivalence/test_join_routes.mojo::test_dense_join_progression_eligibility_nullable_chunk_probes_and_integer_edges_have_literal_rows",
+      "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_typed_cell",
+      "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_csr_and_join_fanout_preserve_scalar_group_row_order_and_check_count_overflow"
+    ],
+    "tests/execution_modes/test_top_bound.mojo": [
+      "tests/execution_modes/test_top_bound.mojo::test_top_bound_literal_thresholds_keep_null_nan_equal_keys_and_decline_unsupported_keys",
+      "tests/execution_modes/test_top_bound.mojo::test_streamed_top_n_observably_prunes_input_and_replaced_sort_keys_disable_source_bounds"
+    ],
+    "tests/planner_correctness/test_nested_boundaries.mojo": [
+      "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_explode_keeps_unprojected_list_and_filter_columns_and_preserves_slice_cardinality",
+      "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_unnest_retains_struct_filter_dependencies_and_parent_nulls_after_projection"
+    ],
+    "tests/kernel_equivalence/test_native_string_rank.mojo": [
+      "tests/kernel_equivalence/test_native_string_rank.mojo::test_native_inline_external_string_rank_specialization_and_partition_fallback_match_scalar_ranks"
+    ]
+  },
+  "validation": {
+    "bitmap_words": {
+      "build": "/tmp/df-bitmap-words-build-shared.log",
+      "run": "/tmp/df-bitmap-words-run-shared.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 2
+    },
+    "boolean_selection_words": {
+      "build": "/tmp/df-boolean-selection-words-build-shared.log",
+      "run": "/tmp/df-boolean-selection-words-run-shared.log",
+      "build_exit": 0,
+      "run_exit": 1,
+      "pass": 1,
+      "known_failure": 1
+    },
+    "filter_routes": {
+      "build": "/tmp/df-filter-routes-build-second.log",
+      "run": "/tmp/df-filter-routes-run.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 3
+    },
+    "parallel_order_selection": {
+      "build": "/tmp/df-parallel-order-selection-build-final-eight-two.log",
+      "run": "/tmp/df-parallel-order-selection-run-traced-final.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 8
+    },
+    "top_rows": {
+      "build": "/tmp/df-top-rows-build.log",
+      "run": "/tmp/df-top-rows-run.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 1
+    },
+    "set_routes": {
+      "build": "/tmp/df-set-routes-build-final.log",
+      "run": "/tmp/df-set-routes-run-traced-final.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 1
+    },
+    "numeric_cast_routes": {
+      "build": "/tmp/df-numeric-cast-routes-build-final.log",
+      "run": "/tmp/df-numeric-cast-routes-run-final.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 3
+    },
+    "join_routes": {
+      "build": "/tmp/df-join-routes-build.log",
+      "run": "/tmp/df-join-routes-run.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 3
+    },
+    "top_bound": {
+      "build": "/tmp/df-top-bound-build-final-two.log",
+      "run": "/tmp/df-top-bound-run-final-two.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 2
+    },
+    "nested_boundaries": {
+      "build": "/tmp/df-nested-boundaries-build.log",
+      "run": "/tmp/df-nested-boundaries-run.log",
+      "build_exit": 0,
+      "run_exit": 0,
+      "pass": 2
+    }
+  },
+  "dimension_witnesses": {
+    "kernel.row_ops": {
+      "bitmap densities": [
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_packed_kleene_words_scalar_fallback_broadcast_and_unaligned_tails_match_literal_truth_tables",
+        "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_at_every_bit_alignment",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_fused_comparison_dtype_operator_bit_offset_and_tail_routes_match_independent_scalars"
+      ],
+      "unaligned bitmaps": [
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_packed_kleene_words_scalar_fallback_broadcast_and_unaligned_tails_match_literal_truth_tables",
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_validity_append_all_bit_alignments_vector_boundaries_and_dense_poison_padding_preserve_each_bit",
+        "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_at_every_bit_alignment",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_fused_comparison_dtype_operator_bit_offset_and_tail_routes_match_independent_scalars"
+      ],
+      "tail lanes": [
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_packed_kleene_words_scalar_fallback_broadcast_and_unaligned_tails_match_literal_truth_tables",
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_validity_append_all_bit_alignments_vector_boundaries_and_dense_poison_padding_preserve_each_bit",
+        "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_at_every_bit_alignment",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_fused_comparison_dtype_operator_bit_offset_and_tail_routes_match_independent_scalars"
+      ],
+      "dtype widths": [
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_fused_comparison_dtype_operator_bit_offset_and_tail_routes_match_independent_scalars",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_exact_numeric_cast_eligibility_and_masked_fallback_match_independent_typed_cells",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_bool_cast_exact_routes_keep_unaligned_validity_and_literal_zero_one_values",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_integer_cast_boundaries_decline_only_on_visible_out_of_range_values_and_report_strict_errors"
+      ],
+      "poison null payload": [
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_packed_kleene_words_scalar_fallback_broadcast_and_unaligned_tails_match_literal_truth_tables",
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_validity_append_all_bit_alignments_vector_boundaries_and_dense_poison_padding_preserve_each_bit",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_fused_comparison_dtype_operator_bit_offset_and_tail_routes_match_independent_scalars",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_exact_numeric_cast_eligibility_and_masked_fallback_match_independent_typed_cells",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_integer_cast_boundaries_decline_only_on_visible_out_of_range_values_and_report_strict_errors"
+      ],
+      "specialization/fallback": [
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_packed_kleene_words_scalar_fallback_broadcast_and_unaligned_tails_match_literal_truth_tables",
+        "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_at_every_bit_alignment",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_fused_comparison_dtype_operator_bit_offset_and_tail_routes_match_independent_scalars",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_selective_numeric_first_string_last_narrowing_and_fused_fallback_keep_complete_rows",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_sorted_window_order_cache_is_shared_by_views_and_invalidated_by_descending_boundary_reassembly",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_exact_numeric_cast_eligibility_and_masked_fallback_match_independent_typed_cells",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_integer_cast_boundaries_decline_only_on_visible_out_of_range_values_and_report_strict_errors"
+      ]
+    },
+    "kernel.order_keys": {
+      "dense/sparse ranges": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_partition_top_k_replicated_owned_and_bucketed_routes_match_complete_scalar_memberships",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_partition_top_k_limit_extremes_and_shape_fallbacks_are_explicit",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_numeric_rank_large_partition_bucketed_and_sparse_one_sort_routes_reassociate_every_row",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_rank_word_buckets_validate_domain_cutoff_skew_fallback_and_radix_stability"
+      ],
+      "string inline/external": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_prefix_bucket_eligibility_fallback_and_full_string_ties_match_scalar_order",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_packed_heavy_buckets_and_string_settling_preserve_complete_stable_permutations",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_row_prefix_long_string_remainders_precede_later_numeric_keys_in_parallel_merge_fallback",
+        "tests/kernel_equivalence/test_top_rows.mojo::test_chunked_top_rows_rebases_four_candidates_and_preserves_null_nan_and_full_string_ties"
+      ],
+      "composite collisions": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_prefix_bucket_eligibility_fallback_and_full_string_ties_match_scalar_order",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_packed_heavy_buckets_and_string_settling_preserve_complete_stable_permutations",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_row_prefix_long_string_remainders_precede_later_numeric_keys_in_parallel_merge_fallback",
+        "tests/kernel_equivalence/test_top_rows.mojo::test_chunked_top_rows_rebases_four_candidates_and_preserves_null_nan_and_full_string_ties"
+      ],
+      "dictionary encoding": [
+        "Previously verified test_order_keys direct dictionary decoding/unification/rank witnesses; no duplicate audit test needed."
+      ],
+      "NaN/zero canonicalization": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_partition_top_k_replicated_owned_and_bucketed_routes_match_complete_scalar_memberships",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_numeric_rank_large_partition_bucketed_and_sparse_one_sort_routes_reassociate_every_row",
+        "tests/kernel_equivalence/test_top_rows.mojo::test_chunked_top_rows_rebases_four_candidates_and_preserves_null_nan_and_full_string_ties",
+        "tests/kernel_equivalence/test_set_routes.mojo::test_parallel_whole_row_unique_no_aggregate_route_preserves_complete_null_nan_zero_text_classes"
+      ],
+      "fallback": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_partition_top_k_limit_extremes_and_shape_fallbacks_are_explicit",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_prefix_bucket_eligibility_fallback_and_full_string_ties_match_scalar_order",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_rank_word_buckets_validate_domain_cutoff_skew_fallback_and_radix_stability",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_row_prefix_long_string_remainders_precede_later_numeric_keys_in_parallel_merge_fallback"
+      ]
+    },
+    "table.join": {
+      "dense progression eligibility": [
+        "tests/kernel_equivalence/test_join_routes.mojo::test_dense_join_progression_eligibility_nullable_chunk_probes_and_integer_edges_have_literal_rows"
+      ],
+      "identity ownership": [
+        "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_typed_cell"
+      ],
+      "stable parallel CSR/fanout/empty groups": [
+        "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_csr_and_join_fanout_preserve_scalar_group_row_order_and_check_count_overflow"
+      ],
+      "overflow before allocation": [
+        "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_csr_and_join_fanout_preserve_scalar_group_row_order_and_check_count_overflow"
+      ]
+    },
+    "table.sets_reshape": {
+      "parallel unordered whole-row equality": [
+        "tests/kernel_equivalence/test_set_routes.mojo::test_parallel_whole_row_unique_no_aggregate_route_preserves_complete_null_nan_zero_text_classes"
+      ],
+      "extended type matrices": [
+        "/tmp/set-reshape-types-handoff.json"
+      ]
+    },
+    "expr.order_windows": {
+      "rank strategy routes": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_numeric_rank_large_partition_bucketed_and_sparse_one_sort_routes_reassociate_every_row",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_rank_word_buckets_validate_domain_cutoff_skew_fallback_and_radix_stability"
+      ],
+      "extended type matrices": [
+        "/tmp/extended-windows-handoff.json"
+      ]
+    },
+    "execution.order_batches": {
+      "running TopN bound preserves ties/nulls/NaN": [
+        "tests/execution_modes/test_top_bound.mojo::test_top_bound_literal_thresholds_keep_null_nan_equal_keys_and_decline_unsupported_keys",
+        "tests/execution_modes/test_top_bound.mojo::test_streamed_top_n_observably_prunes_input_and_replaced_sort_keys_disable_source_bounds"
+      ],
+      "column replacement invalidates source-key bound": [
+        "tests/execution_modes/test_top_bound.mojo::test_streamed_top_n_observably_prunes_input_and_replaced_sort_keys_disable_source_bounds"
+      ],
+      "observed pruning before filters": [
+        "tests/execution_modes/test_top_bound.mojo::test_streamed_top_n_observably_prunes_input_and_replaced_sort_keys_disable_source_bounds"
+      ]
+    },
+    "planner.nested_boundaries": {
+      "hidden dependency projection": [
+        "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_explode_keeps_unprojected_list_and_filter_columns_and_preserves_slice_cardinality",
+        "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_unnest_retains_struct_filter_dependencies_and_parent_nulls_after_projection"
+      ],
+      "cardinality and slice barriers": [
+        "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_explode_keeps_unprojected_list_and_filter_columns_and_preserves_slice_cardinality"
+      ],
+      "struct parent validity": [
+        "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_unnest_retains_struct_filter_dependencies_and_parent_nulls_after_projection"
+      ],
+      "empty schema": [
+        "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_explode_keeps_unprojected_list_and_filter_columns_and_preserves_slice_cardinality",
+        "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_unnest_retains_struct_filter_dependencies_and_parent_nulls_after_projection"
+      ]
+    }
+  },
+  "route_evidence": {
+    "bitmap_words": "Calls actual _logical_bits, _logical, _not_bits, _append_bits. Independent three-state truth tables; every source/destination bit alignment and128-bit vector boundaries, poisoned padding.",
+    "boolean_selection_words": "Calls actual _fill_null_bools/_keep_nulls_bits/_keep_nulls_bools across offsets0..7, null densities, broadcast sides, tails. Numeric validity-byte path and nonnumeric fallback separately modelled; public scalar-String broadcast bug isolated.",
+    "filter_routes": "Actual fused comparison Bool eligibility all10numeric widths/6ops/constantlhs; selective131073-row4worker path asserts fused-used flags, low/high selectivity, column-column fallback, flat/misaligned chunks; cached order pointer shared by view and invalidated concat/rechunk. Traces filter.fused_compare, filter.aligned_chunks, filter.sorted_range, filter.selective_and.",
+    "parallel_order_selection": "Actual top_k_mask Optional/pattern eligibility; groups4k1 replicated,4096k20 owned,32768k7 bucketed with n196609/workers4 and dispatch inequalities. Direct merge co_rank/every output slice. Actual prefix-bucket Optional hit/fallback, direct heavy packed sorter guards/full words, actual packed_arg_sort Optional/full rows. rank_numeric n131073 one large/few257/sparse IDs and strategy inequalities; rank word domains64/65/256/257 + skew and Optional. Traces filter.top_k_per_partition, sort.prefix_buckets, rank.one_sort, sort.bucket.",
+    "top_rows": "Actual chunked_top_rows n196609 means4 chunks, worker4; all returned indices versus independently sorted raw literal arrays; packed serial actual Optional; public streamed/nonstreamed slices complete typed Float64/String/null cells and stable row ids.",
+    "set_routes": "Actual public branch condition: multiple workers, every column, keep any, unordered => no-aggregate group-by path, n196609 flat and mismatched chunks. Independent1620 complete scalar equality signatures, NULL/NaN/-0/+0/external NUL UTF8/Bool; no invented/repeated/missing row classes; exact schema. Actual traced final run records group_by.partitioned on all four layout/subset combinations.",
+    "numeric_cast_routes": "Direct _cast_exact eligibility100 numeric pairs and Bool->10; pure typed literal numeric cells, offsets/tails/poison, actual cast_series observed-mask fallback, all64 integer boundary pairs independent Int128 range model + strict errors.",
+    "join_routes": "Actual _dense_right_int64_rows accept/reject tuple flags including chunk/null/extremeInt64/dtype mismatch; public complete rows. n196609 unique-right progression/shuffledkeys all returned cells checked, exact leftInt64/String owner-buffer reuse. Direct _parallel_group_rows and _parallel_join_rows workers1/2/4/8 with scalar stable group scans; _JoinCountJob overflow before any output allocation.",
+    "top_bound": "Public profile actually observes FILTER input_rows <196609 when source first-key bounds apply; replacement disables those bounds and FILTER input_rows==196609. Independent complete Int64/Float64 typed rows, secondary key, keep and id, NULL/NaN, both sort directions/null placements/batches1024/4097; direct _TopBound literal threshold states and rejection boundaries.",
+    "nested_boundaries": "Actual public lazy EXPLODE/UNNEST across optimize±/streaming±/batch1,7/base,offset,chunk/empty. Independent14-row cardinality after dropping exploded field, hidden filter id projected away, exact scalar/null list cells, slice-before-filter barrier; Struct parent NULL labels and hidden id retained through pruning."
+  },
+  "known_failures": {
+    "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_scalar_string_membership_broadcast_preserves_nonnull_literal_validity": {
+      "error_contains": "scalar string membership must broadcast valid literal state",
+      "reason": "Public literal String is_in(column candidate) returns6 unexpected nulls of7; KEEP_NULLS nonnumeric validity fallback packs only one bit rather than broadcasting source validity."
+    }
+  },
+  "retirement_rationale": [
+    "Independent typed literals and complete row permutations replace serial/parallel production-equality or eager/lazy production-equality oracles.",
+    "Actual specialization Optional/eligibility flags, direct kernel calls, threshold inequalities, buffer identity, and observed traces preserve regressions that small public examples would miss.",
+    "Existing principled all-width row kernels, typed selection/windows/sets, actual typed storage destruction, and key dictionary/collision suites retain their dimensions; legacy random loops do not remain the organizing structure.",
+    "Unsupported APIs are tested as explicit binding errors, not counted as semantic implementation passes; separately verified bugs remain strict expected failures or process-failure witnesses.",
+    "Legacy remains present until root integrates final maintained coverage and preservation evidence. No production fixes, shared metadata edits, scripts, or Python semantic code authored."
+  ],
+  "remaining_obligations": [
+    {
+      "owner": "text_binary_contracts",
+      "obligation": "Streaming many-group collect/budget/held selective rows strategy witnesses; legacy bodies reviewed and findings sent."
+    },
+    {
+      "owner": "root/text_binary_contracts",
+      "obligation": "Public Series.equals true/false API behavior from nested_columns is separate from using equals as test oracle; root notified to ensure series_contracts coverage."
+    },
+    {
+      "owner": "root",
+      "obligation": "Planner/execution native, profile source reuse, direct reductions/quantiles, CSV builders handled by root and other agents; not independently claimed by this audit."
+    },
+    {
+      "owner": "nested_contracts",
+      "obligation": "Native StringView actual _rank_strings packed consumer/public rank/incomplete partition fallback validation, test_native_string_rank.mojo."
+    },
+    {
+      "owner": "nested_contracts",
+      "obligation": "Newly assigned remaining CPU grouping/join/key legacy body audit; separate expansion after frozen27."
+    }
+  ],
+  "source_regression_review": {
+    "tests_legacy/test_conditional_kernels.mojo": {
+      "substantive": "Only selected conditional branch values/validity and checked masked arithmetic; materialized mask and nested guard composition.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_row_ops.mojo::test_numeric_conditional_simd_and_fallback_choose_only_selected_validity",
+        "tests/kernel_equivalence/test_row_ops.mojo::test_integer_overflow_is_checked_per_lane_and_never_reads_inactive_payloads"
+      ],
+      "delegated": "Root direct reduction_routes handles fused/masked reductions."
+    },
+    "tests_legacy/test_top_k_filter.mojo": {
+      "substantive": "Replicated per-worker heaps, group-owner heaps, bucketed route and strict/extreme limit semantics.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_partition_top_k_replicated_owned_and_bucketed_routes_match_complete_scalar_memberships",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_partition_top_k_limit_extremes_and_shape_fallbacks_are_explicit"
+      ]
+    },
+    "tests_legacy/test_parallel_sort.mojo": {
+      "substantive": "Co-rank split boundaries, every merge slice, stable parallel low-cardinality rank buckets around64/65/256/257.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_merge_corank_and_every_output_slice_match_independent_stable_literal_order",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_rank_word_buckets_validate_domain_cutoff_skew_fallback_and_radix_stability"
+      ]
+    },
+    "tests_legacy/test_row_prefix_sort.mojo": {
+      "substantive": "Nonfinal long strings must compare remainders before later numeric keys; fixed-width extrema/direction fallback.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_row_prefix_long_string_remainders_precede_later_numeric_keys_in_parallel_merge_fallback",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_composite_key_columns_preserve_boundaries_and_reject_packing_overflow",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_boolean_and_decimal_key_fallbacks_preserve_typed_membership_and_order"
+      ]
+    },
+    "tests_legacy/test_packed_sort.mojo": {
+      "substantive": "Actual eligibility/fallback, skew/heavy buckets, final full-string tie settling; all numeric widths and compound overflow.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_packed_heavy_buckets_and_string_settling_preserve_complete_stable_permutations",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_integer_packed_and_general_sort_preserve_exact_width_and_stable_ties",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_composite_key_columns_preserve_boundaries_and_reject_packing_overflow"
+      ]
+    },
+    "tests_legacy/test_mask_filter.mojo": {
+      "substantive": "Density/null predicate, unaligned/tail selection and parallel/misaligned chunk dispatch.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_row_ops.mojo::test_bitmap_filter_compaction_matches_scalar_rows_at_every_density",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_selective_numeric_first_string_last_narrowing_and_fused_fallback_keep_complete_rows"
+      ]
+    },
+    "tests_legacy/test_filter_all_rows.mojo": {
+      "substantive": "All-true masks and last-row null must preserve/drop exact rows through bit offsets.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_row_ops.mojo::test_bitmap_filter_compaction_matches_scalar_rows_at_every_density"
+      ],
+      "additional": "Public selection_types tests every logical filtered payload."
+    },
+    "tests_legacy/test_gather_bulk.mojo": {
+      "substantive": "Run/repeat/reversed row sequences, missing rows, contiguous/generic and chunk-local selection.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_row_ops.mojo::test_numeric_gather_bulk_runs_and_scalar_fallback_match_typed_rows",
+        "tests/kernel_equivalence/test_row_ops.mojo::test_chunk_local_sorted_and_generic_gathers_preserve_all_storage_widths"
+      ],
+      "additional": "Delegated repeated-full-chunk-endpoints shortcut witness explicitly retained."
+    },
+    "tests_legacy/test_selective_filter.mojo": {
+      "substantive": "Fused six operators/constant lhs, numeric-first/string-last narrowing, high selectivity, column-column fallback, offsets/chunks.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_fused_comparison_dtype_operator_bit_offset_and_tail_routes_match_independent_scalars",
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_selective_numeric_first_string_last_narrowing_and_fused_fallback_keep_complete_rows"
+      ]
+    },
+    "tests_legacy/test_row_encode.mojo": {
+      "substantive": "Signed extrema/UInt64, null/NaN/zero canonicalization and string byte prefixes/NUL/UTF8 with later keys.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_order_keys.mojo::test_float_key_ids_and_order_canonicalize_nan_payloads_and_signed_zero",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_inline_external_and_common_prefix_strings_have_exact_key_and_sort_semantics",
+        "tests/kernel_equivalence/test_order_keys.mojo::test_integer_packed_and_general_sort_preserve_exact_width_and_stable_ties",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_row_prefix_long_string_remainders_precede_later_numeric_keys_in_parallel_merge_fallback"
+      ]
+    },
+    "tests_legacy/test_sort.mojo": {
+      "substantive": "Stable complete row associations across key directions/nulls/NaN, parallel low-cardinality sorter.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_order_keys.mojo::test_integer_packed_and_general_sort_preserve_exact_width_and_stable_ties",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_rank_word_buckets_validate_domain_cutoff_skew_fallback_and_radix_stability",
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_prefix_bucket_eligibility_fallback_and_full_string_ties_match_scalar_order"
+      ],
+      "additional": "Public selection_types all sortable logical types uses independent cells."
+    },
+    "tests_legacy/test_rank_numeric.mojo": {
+      "substantive": "Actual >65536 global partition path, few partitions and sparse IDs choosing both strategy inequalities; five tie methods/NaN directions.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_parallel_order_selection.mojo::test_parallel_numeric_rank_large_partition_bucketed_and_sparse_one_sort_routes_reassociate_every_row"
+      ]
+    },
+    "tests_legacy/test_unique.mojo": {
+      "substantive": "Scalar null/NaN/signed-zero equality, ordered keep flags and actual parallel whole-row any/no-aggregate route.",
+      "witnesses": [
+        "tests/public_contracts/test_set_reshape_types.mojo::test_unique_extended_keys_preserve_complete_payloads_keep_policies_and_boolean_flags",
+        "tests/kernel_equivalence/test_set_routes.mojo::test_parallel_whole_row_unique_no_aggregate_route_preserves_complete_null_nan_zero_text_classes"
+      ],
+      "additional": "Public duplicates and typed_selection cover drop/fill policies."
+    },
+    "tests_legacy/test_pivot.mojo": {
+      "substantive": "Index/column collision policies, null keys, missing combinations, aggregate counts and unpivot associations.",
+      "witnesses": [
+        "tests/public_contracts/test_set_reshape_types.mojo::test_pivot_first_last_missing_cells_and_counts_preserve_all_logical_value_types",
+        "tests/public_contracts/test_set_reshape_types.mojo::test_pivot_count_nullable_decimal128_uses_parent_validity",
+        "tests/public_contracts/test_set_reshape_types.mojo::test_unpivot_preserves_all_logical_value_types_nested_cells_and_column_major_order"
+      ],
+      "additional": "Base reshape covers naming/argument errors; nested pivot reducers explicitly unsupported."
+    },
+    "tests_legacy/test_concat.mojo": {
+      "substantive": "Every validity alignment and127/128/129-vector boundary, owner detach/growth/chunk behavior, all logical payloads and categorical dictionary union.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_validity_append_all_bit_alignments_vector_boundaries_and_dense_poison_padding_preserve_each_bit",
+        "tests/public_contracts/test_set_reshape_types.mojo::test_concat_extended_payloads_preserve_types_null_padding_names_and_row_order",
+        "tests/storage_ownership/test_typed_storage.mojo::test_all_typed_mutable_appends_detach_and_public_append_reuses_source_owners"
+      ]
+    },
+    "tests_legacy/test_parallel_rows.mojo": {
+      "substantive": "Real worker row expression/filter/gather errors and repeated calls; independent exact checked operations.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_row_ops.mojo::test_integer_arithmetic_vector_and_guarded_scalar_routes_match_checked_model",
+        "tests/kernel_equivalence/test_row_ops.mojo::test_bitmap_filter_compaction_matches_scalar_rows_at_every_density"
+      ],
+      "delegated": "Root execution196609-row pipeline, lifecycle helpers/errors, text workers."
+    },
+    "tests_legacy/test_sorted_range.mojo": {
+      "substantive": "Sorted cache sharing, unknown→ascending discovery, null/unordered declines and descending concat boundary/rechunk invalidation.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_filter_routes.mojo::test_sorted_window_order_cache_is_shared_by_views_and_invalidated_by_descending_boundary_reassembly"
+      ]
+    },
+    "tests_legacy/test_rank_strings.mojo": {
+      "substantive": "Five rank methods/directions/null partitions plus borrowed external owner/offset validity.",
+      "witnesses": [
+        "tests/public_contracts/test_extended_windows.mojo::test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions",
+        "tests/storage_ownership/test_typed_storage.mojo::test_borrowed_native_strings_keep_inline_external_blocks_with_owner_and_append_aliases"
+      ]
+    },
+    "tests_legacy/test_string_view_gather.mojo": {
+      "substantive": "Inline/external borrowed view consumers retain blocks and validity across gathers/destruction.",
+      "witnesses": [
+        "tests/storage_ownership/test_typed_storage.mojo::test_borrowed_native_strings_keep_inline_external_blocks_with_owner_and_append_aliases",
+        "tests/storage_ownership/test_typed_storage.mojo::test_native_rechunk_remaps_independent_blocks_and_retains_them_after_both_owners_die"
+      ],
+      "delegated": "Root CSV builder/Arrow ownership and join typed consumer matrices."
+    },
+    "tests_legacy/test_bitmap_kernels.mojo": {
+      "substantive": "Packed comparison/Kleene words, scalar broadcasts, null value-bit canonicalization and offsets.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_row_ops.mojo::test_numeric_comparison_bitmap_routes_preserve_validity_and_tail_bits",
+        "tests/kernel_equivalence/test_bitmap_words.mojo::test_packed_kleene_words_scalar_fallback_broadcast_and_unaligned_tails_match_literal_truth_tables"
+      ]
+    },
+    "tests_legacy/test_bool_null_bits.mojo": {
+      "substantive": "Boolean fill and numeric membership null-retention byte windows, nullable operands/scalar broadcast/unaligned slices.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_at_every_bit_alignment",
+        "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_scalar_string_membership_broadcast_preserves_nonnull_literal_validity"
+      ]
+    },
+    "tests_legacy/test_window.mojo": {
+      "substantive": "Partition/order reassociation, cumulative/shift/fill/rank/rolling/interpolation/cut/qcut/error boundaries.",
+      "witnesses": [
+        "tests/public_contracts/test_order_windows.mojo::test_cumulative_shift_change_and_fill_match_scalar_order",
+        "tests/public_contracts/test_order_windows.mojo::test_rolling_membership_min_samples_and_ddof_match_two_pass_reference",
+        "tests/public_contracts/test_order_windows.mojo::test_ranks_use_declared_ties_null_nan_and_descending_policy",
+        "tests/public_contracts/test_order_windows.mojo::test_interpolation_keeps_end_nulls_nearest_ties_and_coordinate_distances",
+        "tests/public_contracts/test_order_windows.mojo::test_cut_qcut_edges_labels_nulls_and_breakpoint_struct_are_explicit",
+        "tests/public_contracts/test_order_windows.mojo::test_partition_windows_reset_reassociate_and_group_aggregates_broadcast"
+      ],
+      "additional": "Root precision witness and extended/window_types retain full width/metadata axes."
+    },
+    "tests_legacy/test_decimal_conditionals.mojo": {
+      "substantive": "Decimal32/64/128 selected cells, common precision/scale, null/inactive overflow and fill/coalesce.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_row_ops.mojo::test_decimal_conditional_storage_and_common_type_follow_selected_branch",
+        "tests/kernel_equivalence/test_row_ops.mojo::test_decimal_precision_overflow_never_evaluates_null_or_inactive_slots",
+        "tests/public_contracts/test_typed_selection.mojo::test_decimal_branch_fill_and_coalesce_resolve_common_type_without_rounding"
+      ]
+    },
+    "tests_legacy/test_top_k_sort.mojo": {
+      "substantive": "Actual four-chunk candidate rebasing, stable complete ties/nulls/NaN/full strings; streamed dynamic bounds and replaced-key correctness.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_top_rows.mojo::test_chunked_top_rows_rebases_four_candidates_and_preserves_null_nan_and_full_string_ties",
+        "tests/execution_modes/test_top_bound.mojo::test_top_bound_literal_thresholds_keep_null_nan_equal_keys_and_decline_unsupported_keys",
+        "tests/execution_modes/test_top_bound.mojo::test_streamed_top_n_observably_prunes_input_and_replaced_sort_keys_disable_source_bounds"
+      ]
+    },
+    "tests_legacy/test_nested_ops.mojo": {
+      "substantive": "List access/reductions/join, struct fields/pack/unnest/as_struct, ordered grouped implode, supported struct keys, recursive Arrow and unsupported binding.",
+      "witnesses": [
+        "tests/public_contracts/test_nested.mojo::test_list_access_combines_parent_child_validity_and_bounds",
+        "tests/public_contracts/test_nested.mojo::test_list_numeric_reductions_preserve_element_types_and_empty_policy",
+        "tests/public_contracts/test_nested.mojo::test_struct_fields_unnest_and_pack_preserve_schema_and_parent_validity",
+        "tests/public_contracts/test_nested.mojo::test_as_struct_names_expression_fields_and_scalar_broadcast",
+        "tests/public_contracts/test_nested.mojo::test_implode_gathers_ordered_typed_values_and_nulls_per_group",
+        "tests/public_contracts/test_nested.mojo::test_struct_key_equality_and_supported_join_kinds",
+        "tests/interchange/test_arrow.mojo::test_arrow_nested_lists_structs_and_arbitrary_child_metadata_are_owned",
+        "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_explode_keeps_unprojected_list_and_filter_columns_and_preserves_slice_cardinality",
+        "tests/planner_correctness/test_nested_boundaries.mojo::test_lazy_unnest_retains_struct_filter_dependencies_and_parent_nulls_after_projection"
+      ]
+    },
+    "tests_legacy/test_nested_columns.mojo": {
+      "substantive": "Nested type identity/access/parent validity, direct take/slice/append/null slots, explicit public equality/display behavior.",
+      "witnesses": [
+        "tests/public_contracts/test_nested.mojo::test_nested_constructors_and_expression_validation_reject_malformed_inputs",
+        "tests/public_contracts/test_nested.mojo::test_nested_parent_child_bitmaps_cross_window_and_batch_boundaries",
+        "tests/storage_ownership/test_typed_storage.mojo::test_every_typed_window_outlives_actual_owner_and_preserves_nested_bitmap_offsets",
+        "tests/storage_ownership/test_typed_storage.mojo::test_all_typed_mutable_appends_detach_and_public_append_reuses_source_owners"
+      ],
+      "pending": "Public equals/display API coverage root/text audit, separate from production equality as oracle prohibition."
+    },
+    "tests_legacy/test_exact_casts.mojo": {
+      "substantive": "Actual numeric typed-loop eligibility all100 pairs/Bool10 and explicit visible overflow fallback; scalar exact value/null/type expectations.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_exact_numeric_cast_eligibility_and_masked_fallback_match_independent_typed_cells",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_bool_cast_exact_routes_keep_unaligned_validity_and_literal_zero_one_values",
+        "tests/kernel_equivalence/test_numeric_cast_routes.mojo::test_integer_cast_boundaries_decline_only_on_visible_out_of_range_values_and_report_strict_errors"
+      ]
+    },
+    "tests_legacy/test_parallel_join.mojo": {
+      "substantive": "Progression/dense build Optional eligibility nullable/chunks/extrema, left-buffer reuse for unique right, stable CSR/fanout/empty groups and output count overflow.",
+      "witnesses": [
+        "tests/kernel_equivalence/test_join_routes.mojo::test_dense_join_progression_eligibility_nullable_chunk_probes_and_integer_edges_have_literal_rows",
+        "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_unique_build_keys_reuse_all_left_buffers_and_preserve_every_typed_cell",
+        "tests/kernel_equivalence/test_join_routes.mojo::test_parallel_csr_and_join_fanout_preserve_scalar_group_row_order_and_check_count_overflow"
+      ]
+    },
+    "tests_legacy/test_streaming_group_by.mojo": {
+      "substantive": "Few/many groups and per-group single-inline/spilled n_unique sets including null/NaN/zero.",
+      "delegated": "text_binary_contracts new execution_modes/test_group_strategy.mojo; no retirement claim until its evidence integrated."
+    },
+    "tests_legacy/test_stream_collect_group_by.mojo": {
+      "substantive": "Many-group collect once, tiny budget→merged states, held selective batches/end-of-input judgement, unordered full groups.",
+      "delegated": "text_binary_contracts new execution_modes/test_group_strategy.mojo; no retirement claim until its evidence integrated."
+    }
+  },
+  "sources": {
+    "tests/kernel_equivalence/test_bitmap_words.mojo": "b2f348fb15206afc5917384caf350e7a028e2429578f8f4badc948208a34d18f",
+    "tests/kernel_equivalence/test_boolean_selection_words.mojo": "bf34391e589c182209dc973cf276780b2402617ba9acb387a0e3d5cc133bcc9d",
+    "tests/support/boolean_word_reference.mojo": "a6b02da989c5c94fe9748268d0c30ad279e1c360bd0cf7d3c480a1ce9cd514b8",
+    "tests/kernel_equivalence/test_filter_routes.mojo": "c7a763098989bda2d955e8ac4ee549d6f058d4dabd14c528ed39778c809bd35b",
+    "tests/kernel_equivalence/test_parallel_order_selection.mojo": "b004983d2b4a56cd19fb52eee7abbb4722a5d9b4854e9fb416470055f62c6679",
+    "tests/support/parallel_key_reference.mojo": "5490aca36a317c74485fabd4c112334c4ade6c56355606dd561c8dd2dec6b589",
+    "tests/kernel_equivalence/test_top_rows.mojo": "17161cd55a7f2e56b9eac8f1fc2ebb13216f9f0af56aa5e9ead4e2954bdd6dfd",
+    "tests/kernel_equivalence/test_set_routes.mojo": "aa433f8dbddaac20ce05bf6365831e0d477d4accdbd48cb3976b77aec93718bc",
+    "tests/kernel_equivalence/test_numeric_cast_routes.mojo": "ce6213d3c6ac6504e103bc5377de46415550af0824a1c93d2fc0f6ea4e9e5484",
+    "tests/kernel_equivalence/test_join_routes.mojo": "832acd8de5e8bf33f94a335688e0de866a9560767f11c61f36ed078af2453c95",
+    "tests/execution_modes/test_top_bound.mojo": "f671fae70876dc86adafd0668afd20dbb7cc3622e936ad43af48b1b4fd7609f7",
+    "tests/planner_correctness/test_nested_boundaries.mojo": "8c77f8c09c10f652b4c3341b1deeab58e430d5ad8df93de383c959909ea0f69b"
+  },
+  "native_string_rank": {
+    "witness": "tests/kernel_equivalence/test_native_string_rank.mojo::test_native_inline_external_string_rank_specialization_and_partition_fallback_match_scalar_ranks",
+    "source_sha256": "60ad10e7d4ef33ef6f1538d3354c8770724014362b44480580e859394852188f",
+    "build_log": "/tmp/df-native-string-rank-build.log",
+    "build_exit_code": 0,
+    "run_log": "/tmp/df-native-string-rank-run.log",
+    "run_exit_code": 0,
+    "dimensions": [
+      "Arrow/native StringView storage proven through _view_storage",
+      "empty/single/tail65, offsets0/1/7 and all/mixed/allNULL",
+      "five rank methods, ascending/descending, global/noncontiguous complete partitions actual _rank_strings Optional present",
+      "partial groups actual packed decline and generic _rank only explicit members",
+      "independent typed scalar rank expectations and public native rank"
+    ]
+  }
+}

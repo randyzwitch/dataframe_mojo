@@ -50,7 +50,8 @@ corrupted later group. Series preserve the row-group chunk boundaries.
 pixi run -e native build-dfparquet
 pixi run python3 scripts/bench_parquet_stream.py --build
 BENCH_WAIT_FOR_COMPILERS=1 pixi run -e oracle python3 scripts/bench_parquet_stream.py --run
-pixi run -e oracle python3 scripts/check_parquet_stream.py build/dfparquet/libdfparquet.so
+pixi run test --contracts io.parquet
+pixi run -e oracle python3 tests/support/native_stream_oracle.py build/dfparquet/libdfparquet.so
 ```
 
 The optional Java discovery in bundled Thrift is disabled because Java is

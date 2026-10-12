@@ -1,0 +1,178 @@
+{
+  "files": [
+    "tests/planner_correctness/test_join_aggregate_projection.mojo",
+    "tests/public_contracts/test_typed_selection.mojo"
+  ],
+  "source_sha256": {
+    "tests/planner_correctness/test_join_aggregate_projection.mojo": "40f4c36f04bea75b1f439c5b43bf6c456478606f6209ec7d681711ffe31feb59",
+    "tests/public_contracts/test_typed_selection.mojo": "5024fa3a8893fbab55a37ef8e700da01b64a37cc06b43cefdafe553c8cb06ddb"
+  },
+  "status": "frozen verified PASS",
+  "cases": [
+    {
+      "id": "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind",
+      "contract": "planner.relational",
+      "dimensions": [
+        "projection dependencies",
+        "join-side asymmetry",
+        "outer/null joins",
+        "empty schemas",
+        "join aggregate cardinality"
+      ],
+      "proves": "Independent nested-loop ranks plus duplicate-frequency products for173x211 String keys; compound Float64+String canonical NaN/zero, nullable key/payload; empty side, both orientations; all6 equality join kinds. One-row full typed LEN/COUNT outputs compare every scalar and validity for optimizeFalse/True fixedCPUeager. Actual optimized source projections require onlykeys forLEN and only neededpayload columns forCOUNT, with semi/anti right payload pruned. Controls preserve collision despite discarded payload, unknownhow, missing reduction column and mismatched dtype errors under optimizeFalse/True.",
+      "status": "verified PASS"
+    },
+    {
+      "id": "tests/planner_correctness/test_join_aggregate_projection.mojo::test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_cells",
+      "contract": "planner.relational",
+      "dimensions": [
+        "projection dependencies",
+        "join aggregate cardinality"
+      ],
+      "proves": "Independently authored literal CSV+explicit types, quoted unused Unicode/commas, nullable selected payloads, null/duplicate/absent keys, prejoin filter. Hand-anchored exact5row pairs. Actual optimized SCAN_CSV projections asserted: leftkey/filter/collision source and rightkey/selectedpayload; key-only COUNT projections drop unused cells. Full typed result cells plus count compare optimizeFalse/True fixedCPUeager. Suffix-only right projection still retains nonselected colliding left column, preserving right output name.",
+      "status": "verified PASS"
+    }
+  ],
+  "contract_dimension_proposal": {
+    "contract": "planner.relational",
+    "name": "join aggregate cardinality",
+    "statement": "Reductions over projected joins preserve duplicate multiplicity, null validity and join-kind semantics while input projections retain required keys and payload dependencies."
+  },
+  "dimension_witnesses": {
+    "projection dependencies": [
+      "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind",
+      "tests/planner_correctness/test_join_aggregate_projection.mojo::test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_cells"
+    ],
+    "join-side asymmetry": [
+      "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind"
+    ],
+    "outer/null joins": [
+      "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind"
+    ],
+    "empty schemas": [
+      "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind"
+    ],
+    "join aggregate cardinality": [
+      "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind",
+      "tests/planner_correctness/test_join_aggregate_projection.mojo::test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_cells"
+    ]
+  },
+  "additional_contract_witnesses": {
+    "planner.row_rewrites": {
+      "filter pushdown": [
+        "tests/planner_correctness/test_join_aggregate_projection.mojo::test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_cells"
+      ]
+    }
+  },
+  "known_failures": [],
+  "open_obligations": [],
+  "count_shortcut_hypothesis": {
+    "finding": "No dedicated count-only join shortcut exists in current production. LazyFrame._execute_node executes its JOIN child before SELECT; pipeline cursor likewise materializes _join_impl output. Legacy tests never asserted shortcut dispatch, only scalar counts/projection strings.",
+    "rationale": "Do not invent an optimization eligibility contract. Fresh tests assert actual scan/join input pruning and independent cardinality/validity, with fixed eager executor. Streamed execution remains covered by owning execution suites."
+  },
+  "legacy_source_review": {
+    "source": "tests_legacy/test_join_projection.mojo",
+    "source_sha256": "e97080a24f428ef2c9cf1cd1751a68a001995862dd4967be078bc40791727a53",
+    "body_reviewed": true,
+    "helper_bodies": [
+      "lazy_count",
+      "payload_frames"
+    ],
+    "harness_body": "main discovers module tests; retired in favor of maintained catalog runner",
+    "cases": [
+      {
+        "source_test": "test_duplicate_string_key_counts",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind"
+        ],
+        "rationale": "Independent duplicate frequency products and full LEN/COUNT typed outputs replace old large repeated fixture; no count-only dispatch proven by old test."
+      },
+      {
+        "source_test": "test_compound_nan_signed_zero_and_null_counts",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind"
+        ],
+        "rationale": "Independent Float+String key classes, bothzero signs, NaN equivalence and nullnonmatch across alljoin types/empty inputs replace eager height differential."
+      },
+      {
+        "source_test": "test_nullable_payload_counts_and_other_join_types",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind"
+        ],
+        "rationale": "Independent pairs include missing outercells and nullpayload; LEN counts every row, COUNT onlyvalidcells. Precise lazy missing/dtype controls preserved."
+      },
+      {
+        "source_test": "test_counts_match_the_materialized_join",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind",
+          "tests/public_contracts/test_join_types.mojo::test_extended_scalar_keys_match_independent_pairs_in_every_equality_join_kind"
+        ],
+        "rationale": "Independent pair/count models replace eagerjoinheight oracle. Existing verified alltypedkey matrix owns extremeinteger/Bool/composite equality semantics; new test owns projected aggregate dependencies."
+      },
+      {
+        "source_test": "test_explain_shows_joins_reading_only_used_columns",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind",
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_cells"
+        ],
+        "rationale": "Actual optimized SCAN_FRAME/SCAN_CSV names and complete resultcells prove inputpruning, suffix dependencies, semi/anti rightkeyonly behavior without asserting entire explain formatting."
+      },
+      {
+        "source_test": "test_filter_below_a_join_is_narrowed_before_the_join",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_cells",
+          "tests/planner_correctness/test_relational.mojo::test_join_predicates_preserve_outer_null_rows_and_side_dependencies"
+        ],
+        "rationale": "Actual projected CSV key/filter/provider dependencies plus independent exactfilteredpairs replace eagerfilter/join oracle; relational matrix owns outerpushdown barriers."
+      },
+      {
+        "source_test": "test_csv_scans_under_a_join_read_only_used_columns",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_csv_join_projection_keeps_filter_and_collision_dependencies_and_exact_cells"
+        ],
+        "rationale": "Independently authored rawCSV and exactliteralpairs replace production write_csv->read_csv fixture; optimized SCAN_CSV names and completecells/count independentlychecked."
+      },
+      {
+        "source_test": "test_colliding_names_still_raise",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind"
+        ],
+        "rationale": "Precise collision error preserved in lazykey-only projection optimize± so discardedpayload cannot hide invalidoutputnames."
+      },
+      {
+        "source_test": "test_unknown_join_type_raises_from_a_lazy_plan",
+        "replacement_witnesses": [
+          "tests/planner_correctness/test_join_aggregate_projection.mojo::test_projected_join_len_count_follow_duplicate_products_payload_validity_and_join_kind"
+        ],
+        "rationale": "Precise Joinhow diagnostic preserved after projected aggregate planning optimize±."
+      }
+    ]
+  },
+  "membership_followup": {
+    "case": "tests/public_contracts/test_typed_selection.mojo::test_membership_and_interval_endpoints_use_kleene_null_rules",
+    "proves": "Explicit Int64column/Int32lit and Int32column/Int64lit membership must raise eq requires matching dtypes; inherited equality binding preserved by membership lowering.",
+    "legacy_source": "tests_legacy/test_join_key_sets.mojo::test_integer_is_in_matches_the_equalities",
+    "status": "verified PASS"
+  },
+  "python_files": [],
+  "general_oracle_retirement": {
+    "sources": {
+      "scripts/oracle.py": "85b11dff9897a161898836ce95bb9c2c1f8fa3a98535a79601558e70a9b76d29",
+      "tests_legacy/oracle/runner.mojo": "295d5ef97d6e6c422c99fd34e4c168fa34640faf469c93694854a3fe0ae9fbaa"
+    },
+    "body_review": "All16generators/expected branches/runnerdispatch/process handling/seedminimizer/mutation injection inspected; exact operation→witness maps in /tmp/df-borrowed-parser-handoff.json oracle_retirement_review and /tmp/df-preservation-public-handoff.json. Root confirmed temporal12zone domain ownership verification, removing final conditional scope caveat.",
+    "disposition": "General random crossproductionoracle/process orchestrators can retire after parent integration. Maintained independent Mojo contract matrices and mutation tests own semantic obligations; fixed random seeds and seedminimizer tooling are not dataframe behavior contracts.",
+    "remaining_scope": "No outstanding assigned public/oracle body reviews. External Arrow/asof/spatial/Parquet/timewindow fixture author scripts were outside this public-oracle assignment; owning agents/root review those separately."
+  },
+  "checks": {
+    "final_planner_build": "/tmp/join_final_build4.log",
+    "final_planner_run": "/tmp/join_final_run4.log",
+    "exit_code": 0,
+    "combined_passes": 5,
+    "projection_cases_passed": 2,
+    "membership_build": "/tmp/membership_binding_build.log",
+    "membership_run": "/tmp/membership_binding_run.log",
+    "membership_exit_code": 0,
+    "membership_passes": 1
+  }
+}

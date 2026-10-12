@@ -1,0 +1,102 @@
+{
+  "files": [
+    "tests/planner_correctness/test_join_key_pushdown.mojo",
+    "tests/support/join_pushdown_reference.mojo"
+  ],
+  "status": "frozen verified PASS",
+  "source_sha256": {
+    "tests/planner_correctness/test_join_key_pushdown.mojo": "93797836adba9748e4e0662d0082bed815e8fa92b9acfbf6824df3376536c41d",
+    "tests/support/join_pushdown_reference.mojo": "9ee9ca2cdeb3e3cb267ffb5d001f06e8bef9a7b6da4baad20c59823e72258e56"
+  },
+  "checks": {
+    "build": "/tmp/join_final_build3.log",
+    "run": "/tmp/join_final_run3.log",
+    "exit_code": 0,
+    "case_passes": 3,
+    "combined_passes": 5
+  },
+  "known_failures": [],
+  "open_obligations": [],
+  "contract": "planner.relational",
+  "dimension_witnesses": {
+    "sideways join key filters": [
+      "tests/planner_correctness/test_join_key_pushdown.mojo::test_join_key_filter_cutoff_and_scalar_models_have_literal_membership_anchors",
+      "tests/planner_correctness/test_join_key_pushdown.mojo::test_sideways_key_lists_and_ranges_reach_right_join_chains_and_keep_every_pair",
+      "tests/planner_correctness/test_join_key_pushdown.mojo::test_two_sideways_key_sets_follow_separate_providers_through_renamed_join_columns"
+    ],
+    "projection dependencies": [
+      "tests/planner_correctness/test_join_key_pushdown.mojo::test_sideways_key_lists_and_ranges_reach_right_join_chains_and_keep_every_pair",
+      "tests/planner_correctness/test_join_key_pushdown.mojo::test_two_sideways_key_sets_follow_separate_providers_through_renamed_join_columns"
+    ],
+    "join-side asymmetry": [
+      "tests/planner_correctness/test_join_key_pushdown.mojo::test_sideways_key_lists_and_ranges_reach_right_join_chains_and_keep_every_pair",
+      "tests/planner_correctness/test_join_key_pushdown.mojo::test_two_sideways_key_sets_follow_separate_providers_through_renamed_join_columns"
+    ]
+  },
+  "dimension_proposal": {
+    "name": "sideways join key filters",
+    "statement": "Selective key predicates propagated into a joined input, including independent compound-key providers and bare-column renames, retain every matching row and multiplicity; approximate range filters are followed by exact join matching."
+  },
+  "cases": [
+    {
+      "id": "tests/planner_correctness/test_join_key_pushdown.mojo::test_join_key_filter_cutoff_and_scalar_models_have_literal_membership_anchors",
+      "proves": "Pure scalar literal anchors include129-row calendar duplicate fanout, filtered sold-chain rows, and key-list membership versus safe range false positives. Actual _key_set_filter evaluated over null-bearing probe rows for0/1/49/50/51 distinct valid integers; duplicate/null keys do not alter cutoff."
+    },
+    {
+      "id": "tests/planner_correctness/test_join_key_pushdown.mojo::test_sideways_key_lists_and_ranges_reach_right_join_chains_and_keep_every_pair",
+      "proves": "Actual _optimized()._push_join_key_sets eagerly caches both sides of final inner/semi join. Assert complete typed cached right rows before final join against independent scalar predicate+calendar nested loops, including range false positives. Final optimizeFalse/True CPU eager results match complete unordered independent row multisets for counts5/49/50/51, duplicates/null key/absent list key, null fact/day/payload cells, calendar fanout, native/offset/chunk layouts.8192-row facts,1024-item domain are selected solely to meet actual quarter-size and one-eighth selectivity guards."
+    },
+    {
+      "id": "tests/planner_correctness/test_join_key_pushdown.mojo::test_two_sideways_key_sets_follow_separate_providers_through_renamed_join_columns",
+      "proves": "Small left side is itself two joins with filtering and computed wanted_day; right side joins calendar and renames a separate calendar value. Final compound item/day filters reach two distinct provider scans (facts and calendar). Actual cached right full typed rows equal independent conjunction model; final exact inner/semi full row multisets equal independent nested loops for optimizeFalse/True under fixed CPU eager and3layouts."
+    }
+  ],
+  "legacy_reviews": [
+    {
+      "source": "tests_legacy/test_join_key_sets.mojo",
+      "sha256": "00be0c9f5d420b073ef10e95c48b04f5446f7b72f4e163d9bde86a7da30e6a29",
+      "body_reviewed": true,
+      "source_test": "test_key_sets_reach_the_right_side_and_keep_the_answer",
+      "disposition": "superseded",
+      "replacement_witnesses": [
+        "tests/planner_correctness/test_join_key_pushdown.mojo::test_join_key_filter_cutoff_and_scalar_models_have_literal_membership_anchors",
+        "tests/planner_correctness/test_join_key_pushdown.mojo::test_sideways_key_lists_and_ranges_reach_right_join_chains_and_keep_every_pair"
+      ],
+      "rationale": "Independent full rows plus actual cached narrowed right inputs replace optimized-versus-unoptimized-only checks and loose build_rows bound; key-count cutoff explicit rather than6vs400 oldfixture."
+    },
+    {
+      "source": "tests_legacy/test_join_key_sets.mojo",
+      "body_reviewed": true,
+      "source_test": "test_two_key_sets_through_a_rename_from_a_join_chain",
+      "disposition": "superseded",
+      "replacement_witnesses": [
+        "tests/planner_correctness/test_join_key_pushdown.mojo::test_two_sideways_key_sets_follow_separate_providers_through_renamed_join_columns"
+      ],
+      "rationale": "Independent exact compound pairs and provider-specific cached right result prove actual two-key pushdown across renamed calendar join, not just equality of production plans."
+    },
+    {
+      "source": "tests_legacy/test_join_key_sets.mojo",
+      "body_reviewed": true,
+      "source_test": "test_integer_is_in_matches_the_equalities",
+      "disposition": "superseded; final typed-membership binding control verified PASS",
+      "replacement_witnesses": [
+        "tests/public_contracts/test_typed_selection.mojo::test_membership_and_interval_endpoints_use_kleene_null_rules",
+        "tests/kernel_equivalence/test_boolean_selection_words.mojo::test_boolean_fill_and_numeric_membership_null_retention_match_scalar_states_at_every_bit_alignment"
+      ],
+      "rationale": "Independent nullable literal membership/empty sets replace production OR-of-equalities; raw null-retention kernel bit-alignment matrix proves validity path. Final typed Int32/Int64 mismatch controls verified PASS with full existing public membership case in /tmp/membership_binding_run.log (build /tmp/membership_binding_build.log exit0)."
+    },
+    {
+      "source": "tests_legacy/test_join_key_sets.mojo",
+      "body_reviewed": true,
+      "source_test": "test_semi_join_hashes_a_small_left_side",
+      "disposition": "superseded by owning-agent kernel evidence",
+      "replacement_witnesses": [
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_all_integer_widths_prepared_probes_hash_on_read_and_preserve_extreme_null_duplicate_row_pairs",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_join_range_guards_use_exact_bounds_and_bounded_membership_keeps_each_literal_row",
+        "tests/kernel_equivalence/test_hash_join_routes.mojo::test_smaller_build_order_restoration_capacity_boundary_and_compact_progression_have_complete_rows"
+      ],
+      "rationale": "Nested agent verified actual prepared/direct semi/anti, bounded membership and smaller-build threshold routes with independent scalar rows. This handoff read old body but does not independently rerun owning agent checks."
+    }
+  ],
+  "python_files": []
+}

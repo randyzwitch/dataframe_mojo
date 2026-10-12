@@ -189,6 +189,9 @@ order. Sums skip nulls, return zero for empty or all-null input unless
 `min_count` is set, accumulate Int64 exactly in 128 bits, and raise only when
 the final result overflows. Grouped output order is unspecified unless
 `maintain_order=True`.
+Categorical expressions operate on decoded String values, so expression
+reductions such as first/last and min/max return String. A bare column selection
+and direct table row operations retain categorical metadata.
 
 ## Sorting
 
@@ -238,7 +241,9 @@ Output columns are the left columns, then the right non-key columns in right
 schema order. Right names that collide with left names gain `suffix`; any
 remaining collision raises before any work is done. Key columns keep their left
 names and positions. For `right` and `full` joins their values come from
-whichever side is present, so a right-only row still shows its key. With
+whichever side is present, so a right-only row still shows its key. A right
+join retains the right input's key values (including the sign of zero), while
+using the left key names; a full join uses left keys for matched rows. With
 `how="full", coalesce=False`, left keys are null for right-only rows and the
 right key columns are kept as ordinary right columns. `semi` and `anti` return
 only left columns. Empty inputs keep the joined schema; `cross` checks that the

@@ -1,0 +1,54 @@
+{
+  "cases": [
+    {
+      "id": "tests/public_contracts/test_equality_api.mojo::test_dataframe_and_series_equals_compare_structure_and_valid_cells",
+      "status": "passed",
+      "contracts": {
+        "series.api": [
+          "structural equality"
+        ],
+        "table.schema": [
+          "structural equality"
+        ]
+      },
+      "evidence": "Direct API expected Bool truth values: equal NaN/NaN and -0/+0, hidden null payload ignored; dtype/name/columnorder/roworder/height/validity/value mismatches false; Series check_names defaultFalse/True; null_equalFalse on nullable/no-null/empty; all nine plain/offset/chunk cross-layout pairs."
+    },
+    {
+      "id": "tests/public_contracts/test_equality_api.mojo::test_structural_equals_reads_nested_children_and_logical_metadata",
+      "status": "passed",
+      "contracts": {
+        "series.api": [
+          "structural equality"
+        ],
+        "table.schema": [
+          "structural equality"
+        ]
+      },
+      "evidence": "Nested List hidden null-parent child ignored and visible List/Struct child mismatches false, top null_equalFalse, three layouts; Date versus Int64 same physical values false; binary exact byte equality/difference."
+    },
+    {
+      "id": "tests/public_contracts/test_equality_api.mojo::test_structural_equals_ignores_children_hidden_by_a_null_struct_parent",
+      "status": "strict_failure",
+      "contracts": {
+        "series.api": [
+          "structural equality"
+        ],
+        "table.schema": [
+          "structural equality"
+        ]
+      },
+      "expected_failure": {
+        "kind": "ordinary_error",
+        "exit_code": 1,
+        "diagnostic": "Structural equality compared child payload hidden by a null struct parent"
+      },
+      "evidence": "Two one-row null Struct parents, physically valid Int64 children123/-456. Same schema; self-equalityTrue and null_equalFalseFalse controls pass. Public equals must ignore hidden payload per semantics.md79ff but returnsFalse. Own precise error isolates assertion; unrelated failures propagate."
+    }
+  ],
+  "authoritative_checks": {
+    "normal": "/tmp/public_equality_run2.log",
+    "known": "/tmp/public_equality_struct_run.log",
+    "build": "/tmp/public_equality_build3.log"
+  },
+  "frozen": true
+}

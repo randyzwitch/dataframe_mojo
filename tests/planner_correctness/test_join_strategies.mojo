@@ -1,0 +1,215 @@
+"""Join order changes preserve coalesced names and position-sensitive barriers."""
+from std.testing import assert_equal, assert_true
+from dataframe import Column, DataFrame, Expr, LazyFrame, Series, col
+from dataframe.lazy import JOIN, SELECT, PlanNode, _late_key_build
+
+
+def _inputs() raises -> Tuple[DataFrame, DataFrame]:
+    var small = DataFrame(
+        [
+            Series("a", Column[Int64]([2, 0, 1])),
+            Series("label", Column[String](["two", "zero", "one"])),
+        ]
+    )
+    var keys = List[Int64]()
+    var values = List[Int64]()
+    var valid = List[Bool]()
+    for row in range(299):
+        keys.append(Int64(row * 17 % 7))
+        values.append(Int64(row - 149))
+        valid.append(row % 11 != 3)
+    return (
+        small^,
+        DataFrame(
+            [
+                Series("b", Column[Int64](keys^, valid^)),
+                Series("value", Column[Int64](values^)),
+            ]
+        ),
+    )
+
+
+def _check_groups(actual: DataFrame, first: Bool, ordered: Bool) raises:
+    assert_equal(actual.height(), 3)
+    var result = actual.copy() if ordered else actual.sort("a")
+    for position in range(3):
+        var key = [2, 0, 1][position] if ordered else position
+        var total = Int128(0)
+        var earliest = Int64(0)
+        var count = 0
+        for row in range(299):
+            if row * 17 % 7 == key and row % 11 != 3:
+                if count == 0:
+                    earliest = Int64(row - 149)
+                total += Int128(row - 149)
+                count += 1
+        assert_equal(result.item(position, "a").int64(), Int64(key))
+        assert_equal(
+            result.item(position, "answer").int64(),
+            earliest if first else Int64(total),
+        )
+        assert_equal(result.item(position, "n").int64(), Int64(count))
+
+
+def test_join_rerooting_restores_coalesced_key_names_and_respects_order_sensitive_reductions() raises:
+    var inputs = _inputs()
+    for first in [False, True]:
+        for ordered in [False, True]:
+            var joined = (
+                inputs[0]
+                .lazy()
+                .select(["a"])
+                .join(inputs[1].lazy(), left_on=["a"], right_on=["b"])
+            )
+            var query = joined.group_by("a", maintain_order=ordered).agg(
+                [
+                    (
+                        col("value").first() if first else col("value").sum()
+                    ).alias("answer"),
+                    col("value").count().alias("n"),
+                ]
+            )
+            for streaming in [False, True]:
+                var planned = query._optimized()
+                var root = len(planned._nodes) - 1
+                assert_equal(
+                    planned._probe_largest_inputs(root, streaming, 7),
+                    not first and not ordered,
+                )
+                var actual = planned._execute(root, False, streaming, 7)
+                assert_equal(actual.columns(), ["a", "answer", "n"])
+                _check_groups(actual, first, ordered)
+                for optimize in [False, True]:
+                    _check_groups(
+                        query.collect(
+                            optimize=optimize,
+                            streaming=streaming,
+                            batch_size=7,
+                            engine="cpu",
+                        ),
+                        first,
+                        ordered,
+                    )
+
+
+def test_join_rerooting_keeps_payload_sources_and_progression_lookup_plans_in_place() raises:
+    var inputs = _inputs()
+    var query = (
+        inputs[0]
+        .lazy()
+        .join(inputs[1].lazy(), left_on=["a"], right_on=["b"])
+        .group_by(["a", "label"])
+        .agg(
+            [
+                col("value").sum().alias("answer"),
+                col("value").count().alias("n"),
+            ]
+        )
+    )
+    var planned = query._optimized()
+    assert_true(
+        not planned._probe_largest_inputs(len(planned._nodes) - 1, True, 7)
+    )
+    var actual = query.collect(engine="cpu")
+    _check_groups(actual, False, False)
+    var ordered = actual.sort("a")
+    for row in range(3):
+        assert_equal(
+            ordered.item(row, "label").string(), ["zero", "one", "two"][row]
+        )
+    var keys = List[Int64]()
+    var values = List[Int64]()
+    for row in range(299):
+        keys.append(Int64(row))
+        values.append(Int64(row - 149))
+    var progression = DataFrame(
+        [
+            Series("b", Column[Int64](keys^)),
+            Series("value", Column[Int64](values^)),
+        ]
+    )
+    var direct = (
+        inputs[0]
+        .lazy()
+        .select(["a"])
+        .join(progression.lazy(), left_on=["a"], right_on=["b"])
+        .group_by("a")
+        .agg(col("value").sum().alias("answer"))
+    )
+    planned = direct._optimized()
+    assert_true(
+        not planned._probe_largest_inputs(len(planned._nodes) - 1, True, 7)
+    )
+    actual = direct.collect(engine="cpu").sort("a")
+    assert_equal(actual.height(), 3)
+    for row in range(3):
+        assert_equal(actual.item(row, "a").int64(), Int64(row))
+        assert_equal(actual.item(row, "answer").int64(), Int64(row - 149))
+
+
+def test_late_materialized_join_string_keys_are_eligible_only_when_no_expression_reads_or_replaces_them() raises:
+    var source = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2, 1, 3])),
+            Series("value", Column[Int64]([4, 7, -1, 9])),
+        ]
+    )
+    var build = DataFrame(
+        [
+            Series("k", Column[Int64]([1, 2])),
+            Series(
+                "label",
+                Column[String](
+                    ["long external group alpha", "long external group beta"]
+                ),
+            ),
+        ]
+    )
+    var joined = source.lazy().join(build.lazy(), "k", how="left")
+    var operations = List[PlanNode]()
+    var join_index = -1
+    for index in range(len(joined._nodes)):
+        if joined._nodes[index].kind == JOIN:
+            join_index = index
+    assert_true(join_index >= 0)
+    var operation = joined._nodes[join_index].copy()
+    operation.offset = 0
+    operations.append(operation^)
+    var builds: List[DataFrame] = [build.copy()]
+    var aggregates: List[Expr] = [col("value").sum().alias("total")]
+    assert_equal(
+        _late_key_build(
+            "label", source.columns(), builds, operations, aggregates
+        ),
+        0,
+    )
+    assert_equal(
+        _late_key_build(
+            "label",
+            source.columns(),
+            builds,
+            operations,
+            [col("label").first()],
+        ),
+        -1,
+    )
+    assert_equal(
+        _late_key_build(
+            "label", ["k", "label"], builds, operations, aggregates
+        ),
+        -1,
+    )
+    var result = (
+        joined.group_by("label", maintain_order=True)
+        .agg(col("value").sum().alias("total"))
+        .collect(optimize=False, streaming=True, batch_size=1, engine="cpu")
+    )
+    assert_equal(result.height(), 3)
+    for row in range(3):
+        assert_equal(result.item(row, "label").is_null(), row == 2)
+        if row != 2:
+            assert_equal(
+                result.item(row, "label").string(),
+                ["long external group alpha", "long external group beta"][row],
+            )
+        assert_equal(result.item(row, "total").int64(), Int64([3, 7, 9][row]))

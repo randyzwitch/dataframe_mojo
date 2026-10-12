@@ -1,0 +1,253 @@
+{
+  "files": [
+    "tests/kernel_equivalence/test_borrowed_parsers.mojo",
+    "tests/support/parser_reference.mojo"
+  ],
+  "checks": {
+    "build": "/tmp/borrowed_parser_build4.log",
+    "run": "/tmp/borrowed_parser_run4.log",
+    "exit_code": 0,
+    "passed": 8,
+    "failed": 0
+  },
+  "known_failures": [],
+  "open_obligations": [],
+  "contract_proposal": {
+    "id": "kernel.parse",
+    "area": "kernel_equivalence",
+    "statement": "Borrowed decimal parser kernels consume exactly their bounded byte slice, enforce strict grammar and numeric range, and preserve independently specified integer values and Float64 rounding.",
+    "semantic_source": "dataframe/parse.mojo parser grammar/error contract plus docs/expressions.md strict casts",
+    "oracle": "Independent checked Int128 grammar/range/error-order model; independent byte FSM and libc strtod with owned terminated buffer/endptr; literal UInt64 Float64 bit anchors.",
+    "required_dimensions": [
+      "integer widths and checked range/error order",
+      "packed blocks and tails",
+      "borrowed offsets and bounds",
+      "strict float grammar and nonfinite/range policy",
+      "Float64 rounding and IEEE classes"
+    ],
+    "dimension_witnesses": {
+      "integer widths and checked range/error order": [
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_parser_references_have_literal_limits_rounding_and_grammar_anchors",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_integer_parser_ranges_signs_and_first_error_use_checked_int128",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_packed_integer_blocks_validate_every_byte_at_each_borrowed_alignment"
+      ],
+      "packed blocks and tails": [
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_packed_integer_blocks_validate_every_byte_at_each_borrowed_alignment"
+      ],
+      "borrowed offsets and bounds": [
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_integer_parser_ranges_signs_and_first_error_use_checked_int128",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_packed_integer_blocks_validate_every_byte_at_each_borrowed_alignment",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_parser_strict_grammar_ieee_ranges_and_slice_ends",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_4441829661224440_750_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_9651576341293971_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_41900288798_355793_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_generated_mantissas_scales_and_exponents_match_strtod"
+      ],
+      "strict float grammar and nonfinite/range policy": [
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_parser_references_have_literal_limits_rounding_and_grammar_anchors",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_parser_strict_grammar_ieee_ranges_and_slice_ends",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_generated_mantissas_scales_and_exponents_match_strtod"
+      ],
+      "Float64 rounding and IEEE classes": [
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_parser_references_have_literal_limits_rounding_and_grammar_anchors",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_parser_strict_grammar_ieee_ranges_and_slice_ends",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_4441829661224440_750_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_9651576341293971_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_41900288798_355793_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_generated_mantissas_scales_and_exponents_match_strtod"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_parser_references_have_literal_limits_rounding_and_grammar_anchors",
+      "status": "verified PASS",
+      "proves": "Literal oracle checks: Int8 limits and first-error precedence, UInt64 exact MAX and unsigned -0; Float64 negative-zero sign, 0.1 exact hex bits, least-subnormal bit1, 2^53+1 rounds to 2^53; grammar accept/refuse anchors."
+    },
+    {
+      "id": "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_integer_parser_ranges_signs_and_first_error_use_checked_int128",
+      "status": "verified PASS",
+      "proves": "All8 integer widths + explicit parse_int64, exact bounds\u00b11, signs, leading-zero long input, invalid grammar, early overflow versus later invalid byte, lengths1/2/3/4/7/8/9/15/16/17/18/19/20, every offset0..7 numeric outside bytes."
+    },
+    {
+      "id": "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_packed_integer_blocks_validate_every_byte_at_each_borrowed_alignment",
+      "status": "verified PASS",
+      "proves": "Every byte0..255 at every position of lengths4/8/9/16/18/19, unsigned and + forms, all8 integer widths plus parse_int64, every borrowed offset0..7 with out-of-slice numeric padding. Unsafe UTF8 byte slice prevents host string validation from hiding parser byte errors."
+    },
+    {
+      "id": "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_parser_strict_grammar_ieee_ranges_and_slice_ends",
+      "status": "verified PASS",
+      "proves": "Literal strict float grammar, every special policy, finite normal/subnormal/overflow/underflow and signed zero, 2^53 boundaries, long mantissa fallback, long exponent digits, embedded NUL and malformed input; borrowed offsets0/1/3/7/15 numeric padding."
+    },
+    {
+      "id": "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_4441829661224440_750_matches_strtod",
+      "status": "verified PASS",
+      "proves": "Historical4441829661224440.750 positive/+/- all five borrowed offsets, exact strtod bits."
+    },
+    {
+      "id": "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_9651576341293971_matches_strtod",
+      "status": "verified PASS",
+      "proves": "Historical9651576341293971.0 positive/+/- all five borrowed offsets, exact strtod bits."
+    },
+    {
+      "id": "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_41900288798_355793_matches_strtod",
+      "status": "verified PASS",
+      "proves": "Historical41900288798.355793 positive/+/- all five borrowed offsets, exact strtod bits."
+    },
+    {
+      "id": "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_generated_mantissas_scales_and_exponents_match_strtod",
+      "status": "verified PASS",
+      "proves": "32 deterministic new coefficients,17/19 significant digits, every interior decimal position, exponent -343/-342/-324/-308/-23/-22/-1/0/1/22/23/308/309/999, both signs, five offsets; exact strtod bits and grammar/range refusals."
+    }
+  ],
+  "legacy_body_reviews": [
+    {
+      "source": "tests_legacy/test_parse_integer_simd.mojo",
+      "reviewed_tests": [
+        "test_packed_values_signs_and_slice_boundaries",
+        "test_each_short_digit_position_preserves_error_order",
+        "test_syntax_and_long_overflow_fallbacks_match_scalar",
+        "test_every_byte_in_packed_blocks"
+      ],
+      "disposition": "superseded",
+      "replacement_witnesses": [
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_parser_references_have_literal_limits_rounding_and_grammar_anchors",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_integer_parser_ranges_signs_and_first_error_use_checked_int128",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_packed_integer_blocks_validate_every_byte_at_each_borrowed_alignment"
+      ],
+      "rationale": "All packed byte/position/width and borrowed offset obligations are explicit. Independent Int128 arithmetic replaces copied legacy UInt64 parser. Exact old seeded valid digits need not be copied; grammar/range plus every byte domains prove contracts."
+    },
+    {
+      "source": "tests_legacy/test_parse_float.mojo",
+      "reviewed_tests": [
+        "test_signed_decimals_agree_with_the_reference",
+        "test_signed_text_the_fast_path_must_not_take",
+        "test_wide_mantissas_exponents_and_extremes_agree",
+        "test_every_sign_and_magnitude_round_trips",
+        "test_decimal_rounding_across_scales",
+        "test_seventeen_digit_decimal_rounding",
+        "test_borrowed_conversion_boundaries",
+        "test_exponent_conversion_matches_reference"
+      ],
+      "disposition": "superseded",
+      "replacement_witnesses": [
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_parser_references_have_literal_limits_rounding_and_grammar_anchors",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_parser_strict_grammar_ieee_ranges_and_slice_ends",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_4441829661224440_750_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_9651576341293971_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_rounding_41900288798_355793_matches_strtod",
+        "tests/kernel_equivalence/test_borrowed_parsers.mojo::test_borrowed_float_generated_mantissas_scales_and_exponents_match_strtod"
+      ],
+      "rationale": "Direct borrowed production fast parser versus independent libc and grammar model replaces production-fast versus production-strict comparisons. Three unique historical rounding literals retained as focused independent cases; mantissa/exponent/IEEE/grammar/slice domains explicit. Old exact random seeds/roundtrip-generated strings are not contractual; new generated17/19digit coefficient matrix tests scalar decimal inputs directly."
+    }
+  ],
+  "oracle_retirement_review": {
+    "sources": [
+      "scripts/oracle.py",
+      "tests_legacy/oracle/runner.mojo"
+    ],
+    "body_review": "All16 operation generators, expected-result branches, fixed prep fixture, timezone generator/table, pairwise prefilter, CSV normalization, process error handling, seed/minimizer/build orchestrator and mutation injection inspected; all runner dispatch and temporal branches inspected.",
+    "generator_domain": "Seeded0..12leftrows/0..6rightrows; nullableString/Int64/Float64/Bool; finite narrow numeric literal pool with NaN synthesized by x*(x/x); row/null cases now explicit fresh Mojo generators, full logical metadata/cells.",
+    "operation_witnesses": {
+      "filter": [
+        "tests/public_contracts/test_arithmetic.mojo::test_all_integer_comparisons_unary_extrema_and_rounding_identity",
+        "tests/public_contracts/test_typed_selection.mojo::test_boolean_comparisons_order_false_before_true_and_propagate_either_null",
+        "tests/public_contracts/test_text_binary.mojo::test_unicode_lengths_slices_reverse_and_physical_string_layouts",
+        "tests/public_contracts/test_tables.mojo::test_projection_and_filter_obey_row_contract"
+      ],
+      "arith": [
+        "tests/public_contracts/test_arithmetic.mojo::test_integer_width_operator_matrix_checks_every_valid_cell_and_null_poison",
+        "tests/public_contracts/test_arithmetic.mojo::test_float_width_operators_ieee_specials_and_scalar_directions"
+      ],
+      "agg": [
+        "tests/public_contracts/test_reduction_types.mojo::test_global_reductions_match_scalar_models_across_logical_types",
+        "tests/public_contracts/test_grouped_types.mojo::test_grouped_type_aggregation_matrix_compares_complete_unordered_rows",
+        "tests/public_contracts/test_order_reductions.mojo::test_public_first_last_preserve_positions_nulls_and_logical_schemas"
+      ],
+      "sort": [
+        "tests/public_contracts/test_tables.mojo::test_take_slice_sort_and_empty_projection_match_reference",
+        "tests/public_contracts/test_selection_types.mojo::test_public_categorical_sort_uses_dictionary_values_and_preserves_categorical_dtype"
+      ],
+      "join": [
+        "tests/public_contracts/test_join_types.mojo::test_extended_scalar_keys_match_independent_pairs_in_every_equality_join_kind",
+        "tests/public_contracts/test_join_types.mojo::test_categorical_join_keys_match_values_across_independent_dictionaries",
+        "tests/public_contracts/test_join_categorical_coercion.mojo::test_mixed_categorical_string_keys_share_value_identity_in_both_directions"
+      ],
+      "unique": [
+        "tests/public_contracts/test_set_reshape_types.mojo::test_unique_extended_keys_preserve_complete_payloads_keep_policies_and_boolean_flags"
+      ],
+      "cum_sum": [
+        "tests/public_contracts/test_order_windows.mojo::test_cumulative_shift_change_and_fill_match_scalar_order"
+      ],
+      "cast": [
+        "tests/public_contracts/test_casts.mojo::test_all_integer_width_pairs_preserve_exact_values_or_reject_range",
+        "tests/public_contracts/test_casts.mojo::test_float_to_integer_truncates_and_rejects_nonfinite_and_out_of_range",
+        "tests/public_contracts/test_cast_sources.mojo::test_numeric_boolean_casts_use_nonzero_and_reject_valid_nan_only",
+        "tests/public_contracts/test_cast_boundaries.mojo::test_string_and_categorical_float_parsing_follow_explicit_literal_grammar"
+      ],
+      "stat": [
+        "tests/public_contracts/test_reduction_types.mojo::test_global_reductions_match_scalar_models_across_logical_types",
+        "tests/public_contracts/test_pair_reductions.mojo::test_public_pairwise_statistics_cover_every_numeric_width_and_complete_group_rows",
+        "tests/public_contracts/test_reduction_types.mojo::test_global_modes_and_value_counts_keep_typed_values_nulls_and_frequency_order",
+        "tests/public_contracts/test_order_windows.mojo::test_partition_windows_reset_reassociate_and_group_aggregates_broadcast"
+      ],
+      "describe": [
+        "tests/public_contracts/test_inspection.mojo::test_describe_orders_percentiles_and_preserves_typed_statistic_policies",
+        "tests/public_contracts/test_inspection.mojo::test_describe_numeric_nonfinite_values_distinguish_nan_from_null"
+      ],
+      "value_counts": [
+        "tests/public_contracts/test_reduction_types.mojo::test_global_modes_and_value_counts_keep_typed_values_nulls_and_frequency_order",
+        "tests/public_contracts/test_grouped_types.mojo::test_grouped_type_aggregation_matrix_compares_complete_unordered_rows"
+      ],
+      "decimal": [
+        "tests/public_contracts/test_arithmetic.mojo::test_decimal_arithmetic_uses_exact_scale_half_even_and_null_zero_divisor",
+        "tests/public_contracts/test_casts.mojo::test_decimal_scale_precision_and_half_even_rounding_are_exact",
+        "tests/public_contracts/test_reduction_precision.mojo::test_decimal_means_allow_exact_totals_beyond_input_precision",
+        "tests/public_contracts/test_reduction_precision.mojo::test_decimal_distinct_counts_compare_full_int128_values"
+      ],
+      "prep": [
+        "tests/public_contracts/test_order_windows.mojo::test_interpolation_keeps_end_nulls_nearest_ties_and_coordinate_distances",
+        "tests/public_contracts/test_order_windows.mojo::test_cut_qcut_edges_labels_nulls_and_breakpoint_struct_are_explicit"
+      ],
+      "rank": [
+        "tests/public_contracts/test_order_windows.mojo::test_ranks_use_declared_ties_null_nan_and_descending_policy",
+        "tests/public_contracts/test_extended_windows.mojo::test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions"
+      ],
+      "cat": [
+        "tests/public_contracts/test_typed_selection.mojo::test_categorical_expressions_read_decoded_strings_and_derived_casts_reencode_values",
+        "tests/public_contracts/test_cast_boundaries.mojo::test_categorical_encoding_and_decoding_preserve_unicode_empty_null_and_dictionary_order",
+        "tests/public_contracts/test_join_categorical_coercion.mojo::test_mixed_categorical_string_keys_share_value_identity_in_both_directions",
+        "tests/public_contracts/test_selection_types.mojo::test_public_categorical_sort_uses_dictionary_values_and_preserves_categorical_dtype",
+        "tests/public_contracts/test_set_reshape_types.mojo::test_unique_extended_keys_preserve_complete_payloads_keep_policies_and_boolean_flags"
+      ],
+      "tz": [
+        "tests/public_contracts/test_temporal.mojo::test_temporal_dst_localization_conversion_and_calendar_shifts",
+        "tests/public_contracts/test_temporal_edges.mojo::test_temporal_zone_footer_historical_and_half_hour_rules_apply_to_public_fields",
+        "tests/public_contracts/test_temporal.mojo::test_temporal_parsing_formatting_and_invalid_text"
+      ]
+    },
+    "timezone_scope": "Temporal witness names identify owning-agent work; this audit inspected old oracle TZ generator semantics but does not independently certify all twelve zone/base combinations, all wall replace policies, footer/historical/truncate/calendar branches. Temporal owner/root must confirm domain coverage before deleting this generator.",
+    "mutation_sensitivity": {
+      "old": "DATAFRAME_ORACLE_INJECT=1 drops last nonempty result row. Python counts cases with no expected rows or expected errors as detected without actual observable mutation; does not check dtype (check_dtypes=False), uses CSV typed by expected schema, normalizes Bool and numeric strings, loose float budgets.",
+      "replacement_witnesses": [
+        "tests/public_contracts/test_tables.mojo::test_comparator_rejects_structural_and_cell_mutations",
+        "tests/public_contracts/test_comparison_policy.mojo::test_model_comparator_rejects_association_null_and_schema_mutations",
+        "tests/public_contracts/test_comparison_policy.mojo::test_extended_comparator_reads_payloads_and_nested_children",
+        "tests/public_contracts/test_comparison_policy.mojo::test_unordered_comparison_preserves_multiplicity_and_complete_rows",
+        "tests/kernel_equivalence/test_state_merge.mojo::test_state_reference_and_error_budgets_have_literal_and_mutation_anchors"
+      ],
+      "rationale": "Explicit valid baseline then wrong rowcount/association/null/name/order/dtype/value/float-sign/nonfinite/nested-byte changes each must raise; unique/grouped unordered multiplicities checked. This directly preserves row-drop sensitivity and strengthens schema/logical cell validation, without retaining old process orchestrator as a semantic anchor."
+    },
+    "disposition": "Retire general random orchestrator once parent confirms owning-agent temporal/window/table routes and mutation witnesses. Exact type/model contract matrices replace random operation registry; seed replay/minimization scaffolding is not a public dataframe obligation.",
+    "out_of_scope_generators": "tests_legacy/oracle/* Arrow/asof/spatial/Parquet/time-window external fixture authors except runner.mojo were not audited here; owning interchange/temporal agents/root must read actual bodies."
+  },
+  "python_files": [],
+  "environment_helper_followup": {
+    "files": [
+      "tests/support/group_strategy_reference.mojo",
+      "tests/execution_modes/test_group_strategy.mojo"
+    ],
+    "change": "Removed raw getenv declaration entirely; std.os.getenv(name, NUL sentinel) separates absent/empty. setenv/unsetenv receive Int addresses of owned terminated byte buffers. Explicit helper restored.existed/previous probe in maintained decision case.",
+    "check": "/tmp/group_fixture_build4.log and /tmp/group_fixture_run4.log exit0; final formatting only after check; root full integration validates combined source."
+  }
+}

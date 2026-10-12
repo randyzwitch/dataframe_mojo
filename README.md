@@ -37,7 +37,9 @@ in `pixi.toml` allows, so each tag targets one Mojo version. `v0.2.0` targets
 With [Pixi](https://pixi.sh) installed, from this directory:
 
 ```bash
-pixi run test          # runs every tests/test_*.mojo, in parallel
+pixi run -e native build-dfparquet # native dependency for interchange tests
+pixi run test           # maintained dataframe contract suite
+pixi run coverage-check # validate the coverage plan and regression evidence
 pixi run example
 pixi run build
 pixi run bench          # CPU benchmark suite; see the [benchmark guide](https://github.com/randyzwitch/dataframe_mojo/wiki/benchmarks)
@@ -45,6 +47,9 @@ pixi run bench-csv
 ./build/sales
 
 ```
+
+See the [testing guide](docs/testing.md) for native prerequisites, independent
+interchange consumers, case selection and explicit hardware capability skips.
 
 Mojo 1.2 is required from 0.2.0. It is a nightly series today, so the
 nightly channel is one of the workspace channels and `pixi install`

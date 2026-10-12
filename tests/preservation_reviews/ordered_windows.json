@@ -1,0 +1,241 @@
+{
+  "contract": "expr.order_windows",
+  "test_file": "tests/public_contracts/test_extended_windows.mojo",
+  "support_file": "tests/support/extended_window_reference.mojo",
+  "cases": [
+    {
+      "id": "test_extended_window_scalar_sources_and_ranks_have_literal_anchors",
+      "status": "pass"
+    },
+    {
+      "id": "test_binary_categorical_decimal_geometry_shift_fill_and_counts_preserve_typed_cells",
+      "status": "pass"
+    },
+    {
+      "id": "test_extended_cumulative_and_rolling_extrema_preserve_exact_types_and_partition_order",
+      "status": "pass"
+    },
+    {
+      "id": "test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions",
+      "status": "pass"
+    },
+    {
+      "id": "test_decimal_cumulative_prefixes_are_exact_promoted_and_partitioned_at_every_width",
+      "status": "pass"
+    },
+    {
+      "id": "test_decimal_rolling_mean_and_moments_use_float_results_and_independent_window_membership",
+      "status": "pass"
+    },
+    {
+      "id": "test_extended_windows_reject_nested_and_non_numeric_operations_even_when_empty",
+      "status": "pass"
+    },
+    {
+      "id": "test_decimal_pct_change_obeys_documented_float64_result_contract",
+      "status": "knownfailure"
+    }
+  ],
+  "dimensions": {
+    "scalar_literal_anchors": [
+      "test_extended_window_scalar_sources_and_ranks_have_literal_anchors"
+    ],
+    "extended_shift_fill_counts": [
+      "test_binary_categorical_decimal_geometry_shift_fill_and_counts_preserve_typed_cells"
+    ],
+    "bitmap_densities": [
+      "test_binary_categorical_decimal_geometry_shift_fill_and_counts_preserve_typed_cells",
+      "test_extended_cumulative_and_rolling_extrema_preserve_exact_types_and_partition_order",
+      "test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions",
+      "test_decimal_cumulative_prefixes_are_exact_promoted_and_partitioned_at_every_width"
+    ],
+    "unaligned_offsets": [
+      "test_binary_categorical_decimal_geometry_shift_fill_and_counts_preserve_typed_cells",
+      "test_extended_cumulative_and_rolling_extrema_preserve_exact_types_and_partition_order",
+      "test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions",
+      "test_decimal_cumulative_prefixes_are_exact_promoted_and_partitioned_at_every_width"
+    ],
+    "tail_lanes": [
+      "test_binary_categorical_decimal_geometry_shift_fill_and_counts_preserve_typed_cells",
+      "test_extended_cumulative_and_rolling_extrema_preserve_exact_types_and_partition_order",
+      "test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions",
+      "test_decimal_cumulative_prefixes_are_exact_promoted_and_partitioned_at_every_width"
+    ],
+    "all_logical_dtypes": [
+      "test_binary_categorical_decimal_geometry_shift_fill_and_counts_preserve_typed_cells",
+      "test_extended_cumulative_and_rolling_extrema_preserve_exact_types_and_partition_order",
+      "test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions",
+      "test_extended_windows_reject_nested_and_non_numeric_operations_even_when_empty"
+    ],
+    "poison_null_payloads": [
+      "test_binary_categorical_decimal_geometry_shift_fill_and_counts_preserve_typed_cells",
+      "test_extended_cumulative_and_rolling_extrema_preserve_exact_types_and_partition_order",
+      "test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions",
+      "test_decimal_cumulative_prefixes_are_exact_promoted_and_partitioned_at_every_width",
+      "test_decimal_rolling_mean_and_moments_use_float_results_and_independent_window_membership"
+    ],
+    "partition_order_reset_and_reassociation": [
+      "test_binary_categorical_decimal_geometry_shift_fill_and_counts_preserve_typed_cells",
+      "test_extended_cumulative_and_rolling_extrema_preserve_exact_types_and_partition_order",
+      "test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions",
+      "test_decimal_cumulative_prefixes_are_exact_promoted_and_partitioned_at_every_width"
+    ],
+    "typed_extrema": [
+      "test_extended_cumulative_and_rolling_extrema_preserve_exact_types_and_partition_order"
+    ],
+    "rank_all_methods": [
+      "test_extended_rank_methods_compare_values_and_reassociate_noncontiguous_partitions"
+    ],
+    "decimal_exact_prefix_and_diff": [
+      "test_decimal_cumulative_prefixes_are_exact_promoted_and_partitioned_at_every_width"
+    ],
+    "decimal_rolling_moments": [
+      "test_decimal_rolling_mean_and_moments_use_float_results_and_independent_window_membership"
+    ],
+    "unsupported_api_boundaries": [
+      "test_extended_windows_reject_nested_and_non_numeric_operations_even_when_empty"
+    ],
+    "documented_result_type": [
+      "test_decimal_pct_change_obeys_documented_float64_result_contract"
+    ]
+  },
+  "matrix": {
+    "shift_fill_count_kinds": [
+      12,
+      13,
+      14,
+      15,
+      16,
+      28
+    ],
+    "extrema_rank_kinds": [
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      28
+    ],
+    "sizes": [
+      0,
+      1,
+      9,
+      65
+    ],
+    "shift_offsets": [
+      0,
+      1,
+      7
+    ],
+    "ordered_offset": 7,
+    "masks": [
+      "all-valid",
+      "row%5!=2",
+      "all-null"
+    ],
+    "partitions": [
+      "global",
+      "nullable noncontiguous group"
+    ],
+    "shifts": [
+      -66,
+      -3,
+      -1,
+      0,
+      1,
+      3,
+      66
+    ],
+    "fill_limits": [
+      -1,
+      0,
+      1,
+      3
+    ],
+    "rank_methods": [
+      "average",
+      "min",
+      "max",
+      "dense",
+      "ordinal"
+    ],
+    "rolling_sizes": [
+      1,
+      3,
+      7,
+      66
+    ],
+    "rolling_minimums": [
+      "0",
+      "1",
+      "window",
+      "window+1"
+    ],
+    "decimal_stats_windows": [
+      1,
+      3,
+      8
+    ],
+    "decimal_stats_ddof": [
+      0,
+      1,
+      3
+    ],
+    "decimal_expected_result": "cum_sum/diff Decimal(38,2); moments Float64"
+  },
+  "policies": {
+    "categorical": "Bare source retains categorical; every nontrivial expression reads decoded String by explicit binding policy; ranks/counts numeric. These tests require decoded String window results.",
+    "oracle": "Pure positional models + literal anchors, independent typed expected cells; no production equality as oracle.",
+    "decimal_stats_error_budget": "Independent two-pass scalar window model with explicit finite/null behavior and variance-unit 1e-12 budget."
+  },
+  "knownfailures": [
+    {
+      "case": "test_decimal_pct_change_obeys_documented_float64_result_contract",
+      "marker": "decimal pct_change must return Float64",
+      "actual": "All three input decimal widths return Decimal(38,2).",
+      "expected": "docs/expressions.md says pct_change Float64",
+      "scope": "Only exact Decimal(38,2) mismatches counted; other output dtype or values fail separately."
+    }
+  ],
+  "unsupported_api_boundaries": [
+    {
+      "case": "test_extended_windows_reject_nested_and_non_numeric_operations_even_when_empty",
+      "boundary": "List/Struct order windows reject at bind time including empty inputs."
+    },
+    {
+      "case": "test_extended_windows_reject_nested_and_non_numeric_operations_even_when_empty",
+      "boundary": "Decimal rolling_sum explicitly raises not supported yet, even empty. Tested as current unsupported API, not relabeled passing numerical implementation."
+    },
+    {
+      "case": "test_extended_windows_reject_nested_and_non_numeric_operations_even_when_empty",
+      "boundary": "Non-numeric cum_sum/rolling numeric statistics/interpolation reject."
+    }
+  ],
+  "validation": {
+    "build_log": "/tmp/df-extended-windows-build-fourth.log",
+    "build_exit": 0,
+    "run_log": "/tmp/df-extended-windows-run-fourth.log",
+    "run_exit": 1,
+    "result": "7 PASS + 1 verified narrow knownfailure; every passing case completed its full matrix.",
+    "driver": "/tmp/df-extended-windows-driver.mojo",
+    "binary": "/tmp/df-extended-windows-suite-fourth",
+    "environment": "Linux DATAFRAME_THREADS=1"
+  },
+  "sha256": {
+    "tests/public_contracts/test_extended_windows.mojo": "5b06f4e4a2618888053b41edef0882b999d9787abc236e3aea7d856d7e1438a8",
+    "tests/support/extended_window_reference.mojo": "55d5efcd9897119b6c964254dea93d9d227eeca4dc0a8b8ba0a30b7d928307e1"
+  },
+  "open_obligations": [],
+  "owned_python_files": []
+}

@@ -1,0 +1,31 @@
+{
+  "case": {
+    "id": "tests/public_contracts/test_group_indices_api.mojo::test_group_indices_match_first_observed_scalar_keys_and_owned_memberships",
+    "status": "passed",
+    "contract_proposal": {
+      "id": "table.group_indices",
+      "statement": "Row-index grouping assigns first-observed group identities, covers every row exactly once with ordered memberships and first representatives, and returns caller-owned metadata arrays with validated key and index errors.",
+      "dimensions": [
+        "first-observed identities and complete memberships",
+        "null/NaN/signed-zero composite equality",
+        "owned metadata arrays",
+        "empty/single and errors"
+      ],
+      "witnesses": [
+        "tests/public_contracts/test_group_indices_api.mojo::test_group_indices_match_first_observed_scalar_keys_and_owned_memberships"
+      ]
+    },
+    "evidence": "Independent pure KeyCell expected_key_ids quadratic equality model plus exact11-row NaN/zero/null literal IDs+representatives. Float64/Float32/String/Int64/single/composite keys; lengths0/1/11 and three layouts. Every API (count,height,ids,group_of,representative,representatives,rows,all_rows,sizes); independent payload associations through caller take; mutate returned metadata without corrupting source; exact no-key/duplicate/unknown and row/group bounds errors."
+  },
+  "source_review": {
+    "source": "tests_legacy/test_group_indices.mojo",
+    "body_review": "All eight tests/helpers read; replaces old cross-production group-count comparison with complete independently modeled grouping, preserves caller subframe use and ownership guarantees.",
+    "disposition": "retire_after_integrated_check",
+    "all_cases_share_fresh_contract_witness": true
+  },
+  "checks": {
+    "build": "/tmp/group_indices_api_build2.log",
+    "run": "/tmp/group_indices_api_run.log"
+  },
+  "frozen": true
+}
