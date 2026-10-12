@@ -1,3 +1,29 @@
+std::string partitionSource(const DFMRequest &r, const Layout &layout, int64_t i) {
+  auto &step = r.steps[i];
+  auto name = std::to_string(i);
+  auto equal = [&](int64_t slot) {
+    auto base = std::to_string(layout.physical[slot]) + "UL*meta.z";
+    auto type = slotType(r, slot);
+    std::string words = "ulong aa=x[ai],bb=x[bi];";
+    if (type == DFM_DECIMAL128) words += "if(x[ai+meta.z]!=x[bi+meta.z])return false;";
+    if (type == DFM_FLOAT64_STORAGE)
+      words += "aa=!f64_abs(aa)?0UL:f64_nan(aa)?0x7ff8000000000000UL:aa;"
+               "bb=!f64_abs(bb)?0UL:f64_nan(bb)?0x7ff8000000000000UL:bb;";
+    if (type == DFM_FLOAT32)
+      words += "aa=!(aa&0x7fffffffUL)?0UL:(aa&0x7fffffffUL)>0x7f800000UL?0x7fc00000UL:aa;"
+               "bb=!(bb&0x7fffffffUL)?0UL:(bb&0x7fffffffUL)>0x7f800000UL?0x7fc00000UL:bb;";
+    return "{ulong ai=" + base + "+a,bi=" + base +
+        "+b;if(v[ai]!=v[bi])return false;if(v[ai]){" + words +
+        "if(aa!=bb)return false;}}";
+  };
+  std::string text = "bool window_partition" + name +
+      "(uint a,uint b,device const T *x,device const uchar *v,constant uint4 &meta){";
+  for (int64_t j = 1; j < step.nodes; ++j)
+    text += equal(r.code[4 * (step.start + j) + 1]);
+  text += "return true;}\n";
+  return text;
+}
+
 // Rank reuses the stable sort permutation and the otherwise idle order buffer.
 // Dense ranks use one block scan and one block-offset pass; no row data or
 // permutation is downloaded to the host.
@@ -22,14 +48,10 @@ std::string rankSource(const DFMRequest &r, const Layout &layout, int64_t i) {
         "+b;if(v[ai]!=v[bi])return false;if(v[ai]){" + words +
         "if(aa!=bb)return false;}}";
   };
-  std::string text = "bool rank_partition" + name +
-      "(uint a,uint b,device const T *x,device const uchar *v,constant uint4 &meta){";
-  for (int64_t j = 1; j < step.nodes; ++j)
-    text += equal(r.code[4 * (step.start + j) + 1]);
-  text += "return true;}\n";
+  std::string text = partitionSource(r, layout, i);
   text += "bool rank_equal" + name +
       "(uint a,uint b,device const T *x,device const uchar *v,constant uint4 &meta){"
-      "if(!rank_partition" + name + "(a,b,x,v,meta))return false;" +
+      "if(!window_partition" + name + "(a,b,x,v,meta))return false;" +
       equal(h[1]) + "return true;}\n";
   if (h[3] == 3) {
     text += "kernel void rank_prepare" + name + R"MSL(
@@ -66,7 +88,7 @@ std::string rankSource(const DFMRequest &r, const Layout &layout, int64_t i) {
   text += "ulong out=" + output + "+own;bool valid=v[" + input +
       "+own]!=0;v[out]=uchar(valid);x[out]=T(0);if(!valid)return;"
       "uint lo=0,hi=position;while(lo<hi){uint mid=(lo+hi)/2;"
-      "if(rank_partition" + name + "(order[mid],own,x,v,meta))hi=mid;else lo=mid+1;}"
+      "if(window_partition" + name + "(order[mid],own,x,v,meta))hi=mid;else lo=mid+1;}"
       "uint base=lo;";
   if (h[3] == 4)
     text += "x[out]=T(position-base+1);";

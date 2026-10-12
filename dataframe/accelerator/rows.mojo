@@ -15,6 +15,10 @@ from dataframe.dtype import DataType
 from dataframe.expr import (
     Expr,
     RANK,
+    CUM_SUM,
+    CUM_MIN,
+    CUM_MAX,
+    CUM_COUNT,
     OVER,
     col,
     subtree,
@@ -100,6 +104,7 @@ comptime ROW_GROUP_KEY = 1003
 comptime ROW_GROUP_OUTPUT = 1004
 comptime ROW_GROUP_HEADER_LAST = 1005
 comptime ROW_SLICE = 1006
+comptime ROW_CUMULATIVE_KEY = 1009
 comptime ROW_RANK_KEY = 1007
 comptime ROW_GROUP_HEADER_WINDOW = 1008
 comptime ROW_SORT_KEY = 1001
@@ -899,6 +904,8 @@ def lower_rows(
                             " head"
                         ),
                     )
+            # Both window families evaluate their input first, then use a
+            # stable partition permutation and scatter results to source rows.
             var rank_schema = schema.copy()
             var rank_slots = slots.copy()
             var ranked = bound.expr.copy()
@@ -906,9 +913,20 @@ def lower_rows(
             var rank_scopes = List[Bool](length=len(ranked._nodes), fill=False)
             var has_rank = False
             for r in range(len(ranked._nodes)):
-                if ranked._nodes[r].op != RANK:
+                var window_op = ranked._nodes[r].op
+                var cumulative = (
+                    window_op == CUM_SUM
+                    or window_op == CUM_MIN
+                    or window_op == CUM_MAX
+                    or window_op == CUM_COUNT
+                )
+                if window_op != RANK and not cumulative:
                     continue
-                if not capabilities.ranks:
+                if cumulative and not capabilities.cumulative_windows:
+                    capabilities.reject(
+                        "plan", "cumulative windows require backend support"
+                    )
+                if not cumulative and not capabilities.ranks:
                     capabilities.reject("plan", "rank requires backend support")
                 if node.kind == AGG:
                     capabilities.reject(
@@ -947,6 +965,11 @@ def lower_rows(
                 for m in range(len(methods)):
                     if rank_node.text == methods[m]:
                         method = m
+                if cumulative:
+                    method = 0 if window_op == CUM_SUM else (
+                        1 if window_op
+                        == CUM_MIN else (2 if window_op == CUM_MAX else 3)
+                    )
                 if method < 0:
                     raise Error("unknown rank method: " + rank_node.text)
                 var child = bind(subtree(ranked, rank_node.left), rank_schema)
@@ -976,7 +999,8 @@ def lower_rows(
                             "plan", "checked rank inputs require CPU execution"
                         )
                 if (
-                    next_slot + 2 > capabilities.max_slots
+                    1 + len(partitions) > capabilities.max_nodes
+                    or next_slot + 2 > capabilities.max_slots
                     or len(steps) + 2 > capabilities.max_steps
                 ):
                     capabilities.reject(
@@ -1011,13 +1035,23 @@ def lower_rows(
                 var rank_start = len(literals)
                 code.extend(
                     [
-                        Int64(ROW_RANK_KEY),
+                        Int64(
+                            ROW_CUMULATIVE_KEY if cumulative else ROW_RANK_KEY
+                        ),
                         Int64(input_slot),
                         Int64(rank_node.min_count == 1),
                         Int64(method),
                     ]
                 )
-                literals.append(0)
+                var result_type = bound.dtypes[r] if cumulative else (
+                    DataType.FLOAT64 if method == 0 else DataType.INT64
+                )
+                literals.append(
+                    bitcast[DType.float64](
+                        Int64(result_type.precision())
+                    ) if cumulative
+                    and result_type.is_decimal() else 0
+                )
                 node_dtypes.append(child.dtypes[len(child.dtypes) - 1])
                 for name in partitions:
                     var key = -1
@@ -1037,9 +1071,6 @@ def lower_rows(
                     )
                     literals.append(0)
                     node_dtypes.append(schema[key].dtype())
-                var result_type = (
-                    DataType.FLOAT64 if method == 0 else DataType.INT64
-                )
                 slot_dtypes.append(result_type)
                 steps.append(
                     RowStep(

@@ -192,7 +192,7 @@ struct Layout {
       if (r.steps[first].filter >= 2) {
         ends.push_back(first);
         auto &step = r.steps[first];
-        if (step.filter == 4) {
+        if (step.filter == 4 || step.filter == 5) {
           keep(step.slot);
           for (int64_t j = 0; j < step.nodes; ++j)
             keep(r.code[4 * (step.start + j) + 1]);
@@ -257,8 +257,8 @@ struct Layout {
         }
         for (int64_t j = 1; j < step.nodes; ++j)
           live[r.code[4 * (step.start + j) + 1]] = true;
-      } else if (step.filter == 2 || step.filter == 4) {
-        if (step.filter == 4) live[step.slot] = false;
+      } else if (step.filter == 2 || step.filter == 4 || step.filter == 5) {
+        if (step.filter == 4 || step.filter == 5) live[step.slot] = false;
         for (int64_t j = 0; j < step.nodes; ++j)
           live[r.code[4 * (step.start + j) + 1]] = true;
       } else {
@@ -275,6 +275,7 @@ struct Layout {
   }
 };
 #include "dfmetal_rank.inc"
+#include "dfmetal_window.inc"
 struct Shape {
   int64_t cap, packed, blocks, bitmap, matrix, validity, literal, outputBits,
       partial;
@@ -391,8 +392,38 @@ Shape validate(const DFMRequest &r, bool storage = false,
         (v.filter != 2 && v.slot < r.input_count) || v.slot < 0 ||
         v.slot >= r.slots || v.gather_start < 0 || v.gather_count < 0 ||
         add(v.gather_start, v.gather_count) > r.gather_count ||
-        (v.filter < 0 || v.filter > 4))
+        (v.filter < 0 || v.filter > 5))
       fail("Invalid Metal expression step");
+    if (v.filter == 5) {
+      auto h = r.code + 4 * v.start;
+      if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_CUMULATIVE_KEY ||
+          h[1] < 0 || h[1] >= r.slots || h[2] < 0 || h[2] > 1 || h[3] < 0 || h[3] > 3)
+        fail("Invalid Metal cumulative descriptor");
+      auto input = slotType(r, h[1]), output = slotType(r, v.slot);
+      if ((h[3] == 3 && output != DFM_INT64) ||
+          ((h[3] == 1 || h[3] == 2) && output != input) ||
+          (h[3] == 0 && (input == DFM_BOOL ||
+            (output != DFM_DECIMAL128 || (input != DFM_INT32 && input != DFM_INT64 && input != DFM_DECIMAL128)) &&
+            output != (input == DFM_INT8 || input == DFM_INT16 || input == DFM_UINT8 || input == DFM_UINT16
+              ? DFM_INT64 : input))))
+        fail("Invalid Metal cumulative result type");
+      // Decimal32/64 storage also uses the signed integer word types. Its
+      // widened result distinguishes decimal sums from primitive sums.
+      if (h[3] == 0 && output == DFM_DECIMAL128 &&
+          (r.literals[v.start] < 1 || r.literals[v.start] > 38 ||
+           r.literals[v.start] != int64_t(r.literals[v.start])))
+        fail("Invalid Metal cumulative decimal precision");
+      for (int64_t j = 0; j < v.nodes; ++j) {
+        auto key = r.code + 4 * (v.start + j);
+        if (key[1] < 0 || key[1] >= r.slots || !defined[key[1]] ||
+            r.node_types[v.start + j] != slotType(r, key[1]) ||
+            (j && (key[0] != DFM_SORT_KEY || key[2] != 0 || key[3] != 1)))
+          fail("Invalid Metal cumulative input or partition key");
+      }
+      defined[v.slot] = true;
+      s.order = true;
+      continue;
+    }
     if (v.filter == 4) {
       auto h = r.code + 4 * v.start;
       if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_RANK_KEY ||
@@ -805,6 +836,7 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
           ++m.launches;
       if (r.steps[i].filter == 3)
         m.launches += 5;
+      if (r.steps[i].filter == 5) m.launches += 1;
       if (r.steps[i].filter == 4)
         m.launches += r.code[4 * r.steps[i].start + 3] == 3 ? 3 : 1;
       for (int64_t j = 0; j < r.steps[i].gather_count; ++j)
@@ -1535,9 +1567,9 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
               "(uint a,uint b,device const T *x,device const uchar *v,constant "
               "uint4 &meta){";
       auto keyCount =
-          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes;
+          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes - (step.filter == 5);
       for (int64_t j = 0; j < keyCount; ++j) {
-        auto key = r.code + 4 * (step.start + (step.filter == 4
+        auto key = r.code + 4 * (step.start + (step.filter == 5 ? j + 1 : step.filter == 4
             ? (j + 1 < keyCount ? j + 1 : 0) : j + (step.filter == 3)));
         auto slot = std::to_string(layout.physical[key[1]]) + "UL*meta.z";
         text += "{ulong ai=" + slot + "+a,bi=" + slot +
@@ -1581,6 +1613,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
     }
   for (int64_t i = 0; i < r.step_count; ++i)
     if (r.steps[i].filter == 4) text += rankSource(r, layout, i);
+    else if (r.steps[i].filter == 5) text += cumulativeSource(r, layout, i);
   if (shape.radixSort)
     for (int64_t i = 0; i < r.step_count; ++i) {
       if (!radixPasses(r, i)) continue;
@@ -2392,6 +2425,12 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         dispatch("order_merge" + std::to_string(i), shape.cap);
         std::swap(orderA, orderB);
       }
+      if (step.filter == 5) {
+        buffer(0, x); buffer(1, v); buffer(2, orderA); buffer(3, meta);
+        buffer(4, arithmeticError);
+        dispatch("cumulative_assign" + std::to_string(i), shape.cap);
+        continue;
+      }
       if (step.filter == 4) {
         auto name = std::to_string(i);
         auto h = r.code + 4 * step.start;
@@ -2585,6 +2624,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if (fault == 0xE0000000U)
       fail("Metal unsupported [accumulator]: cannot prove exact wide accumulation "
            "within the native Int64/UInt64 range");
+    if (fault == 0xD0000000U)
+      fail("Integer or decimal overflow in Metal cumulative sum");
     if (fault == 0xF0000000U)
       fail("Integer overflow in Metal grouped sum");
     if (fault & 0x40000000u)

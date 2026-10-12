@@ -53,6 +53,7 @@ struct RowCapabilities(Copyable):
     var decimal_mean: Bool
     var decimal_float_cast: Bool
     var ranks: Bool
+    var cumulative_windows: Bool
     var reuse_column_slots: Bool
     var proven_integer_operations: Bool
     var max_nodes: Int
@@ -87,6 +88,7 @@ struct RowCapabilities(Copyable):
         scalar_regions: Bool = False,
         temporal_fields: Bool = False,
         ranks: Bool = False,
+        cumulative_windows: Bool = False,
         decimal128: Bool = False,
         decimal_mean: Bool = False,
         decimal_float_cast: Bool = False,
@@ -121,6 +123,7 @@ struct RowCapabilities(Copyable):
         self.scalar_regions = scalar_regions
         self.temporal_fields = temporal_fields
         self.ranks = ranks
+        self.cumulative_windows = cumulative_windows
         self.decimal128 = decimal128
         self.decimal_mean = decimal_mean
         self.decimal_float_cast = decimal_float_cast
