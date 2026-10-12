@@ -307,8 +307,9 @@ broadcast null. Temporary columns do not appear in the output.
 
 Conditional Int64/UInt64 means use exact wide accumulation and can broadcast
 through either branch, including when that branch is unselected. Empty and
-all-null means remain null. Conditional scalar Float32 arithmetic retains its
-preflight rejection because eager evaluation can expose a precision failure.
+all-null means remain null. Conditional scalar Float32 arithmetic uses exact
+binary32 operations and can broadcast without exposing precision errors from
+an unselected branch.
 Nonthrowing Float64 leaves and direct Float32 column reductions can also
 broadcast through conditional expressions. File-backed inputs still reject before source
 reads. Automatic placement keeps these multi-region plans on CPU until it can
@@ -355,17 +356,20 @@ dtype. They accumulate exactly in two words, so intermediate totals may exceed
 nothing; an unmet `min_count` suppresses the result and its overflow check.
 A final total outside the result dtype raises an integer overflow error before
 caller outputs change. A later query can reuse the runtime after rejection.
-Float32 row arithmetic preserves separate operator
-rounding for supported operations and disables shader contraction and unsafe math
-optimizations. Metal can flush Float32 subnormal operands and results even in
-safe math mode ([Metal specification, sections 8.1 and 8.5](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)). Native kernels detect subnormal arithmetic and
-potential underflow, then reject the result with a precision error after draining
-the command buffer. Copying subnormal values and flipping their sign preserve
+Float32 row arithmetic preserves separate operator rounding and disables shader
+contraction and unsafe math optimizations. Metal can flush Float32 subnormal
+operands and results even in safe math mode. Addition, subtraction and
+multiplication retain native arithmetic for normal operands and results, then
+use integer-only binary32 recovery for subnormal operands or underflow. True
+division uses integer-only arithmetic and rounds once to Float32. Valid inputs
+including signed zeros, subnormals, infinities and NaNs no longer raise a
+precision error. Copying subnormal values and flipping their sign preserve
 their bits. Float32 comparisons, predicates, clipping, floor, and ceiling use native
 encodings and support subnormals. Float32 rounding widens the encoding to
-emulated Float64, then narrows once, also preserving subnormal behavior. This guard is conservative: a tiny product that would correctly round
-to zero can also require CPU execution. These Float32 row operations retain
-native arithmetic and its conservative precision guard. There is no automatic CPU retry after submission.
+emulated Float64, then narrows once, also preserving subnormal behavior.
+Rebuild the optional native runtime for complete Float32 arithmetic. Estimates
+use `metal-float32-arithmetic-v1`, invalidating earlier arithmetic calibration.
+There is no automatic CPU retry after submission.
 
 Float32 and Float64 sum/mean accumulate with emulated Float64 arithmetic;
 Float32 sum narrows only once at completion, while means return Float64.

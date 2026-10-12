@@ -1117,14 +1117,16 @@ for op, a, b in [
     (6, 2.0**-126, f32(2.0**-126 + tiny)),
     (7, 1e-20, 1e-20),
 ]:
-    execute(
+    a, b = f32(a), f32(b)
+    result, bits, _ = execute(
         [a],
         1,
         [col, (2, -1, -1, -1), (op, 0, 1, -1)],
         [0.0, b, 0.0],
         output_bool=op == 8,
-        expect_error="subnormal",
     )
+    expected = f32(a + b if op == 5 else a - b if op == 6 else a * b)
+    assert result == [expected], (op, a, b, result, expected)
 
 
 # Two filter boundaries retain an early branch and the original input while

@@ -700,10 +700,13 @@ Shape validate(const DFMRequest &r, bool storage = false,
             (r.node_types[v.start + c[1]] != DFM_BOOL ||
              (c[0] != DFM_NOT && r.node_types[v.start + c[2]] != DFM_BOOL)))
           fail("Metal Boolean operand dtype mismatch");
-        if (c[0] == DFM_DIV &&
-            (t != DFM_FLOAT64_STORAGE || r.node_types[v.start+c[1]] == DFM_BOOL ||
-             r.node_types[v.start+c[1]] != r.node_types[v.start+c[2]]))
-          fail("Invalid Metal floating division dtype");
+        if (c[0] == DFM_DIV) {
+          auto operand = r.node_types[v.start+c[1]];
+          if (t != (operand == DFM_FLOAT32 ? DFM_FLOAT32 : DFM_FLOAT64_STORAGE) ||
+              operand == DFM_BOOL || operand == DFM_DECIMAL128 ||
+              operand != r.node_types[v.start+c[2]])
+            fail("Invalid Metal floating division dtype");
+        }
         bool wideCompare = compare && (r.node_types[v.start+c[1]] == DFM_DECIMAL128 || r.node_types[v.start+c[2]] == DFM_DECIMAL128);
         if (wideCompare) {
           for (auto child : {c[1], c[2]}) {
@@ -1046,25 +1049,34 @@ std::string arithmeticSource(int64_t dtype) {
 bool checked_add(T a,T b,thread T &z) {
 )MSL";
   if (dtype == DFM_FLOAT32) {
-    // Metal permits FTZ even in safe mode. Reject value-dependent precision
-    // requirements instead of silently flushing or emulating arithmetic.
+    // Keep native arithmetic for normal results, and recover exact binary32
+    // encodings with integer arithmetic when Metal may flush a value to zero.
     text += R"MSL(
 uint ab=as_type<uint>(a)&0x7fffffffu,bb=as_type<uint>(b)&0x7fffffffu;
-if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u))return false;
+if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u)){
+ z=as_type<float>(f32_add(as_type<uint>(a),as_type<uint>(b)));return true;}
 z=a+b;uint zb=as_type<uint>(z)&0x7fffffffu;
-return !(zb&&zb<0x00800000u)&&!(zb==0&&a!=-b);
+if((zb&&zb<0x00800000u)||(zb==0&&a!=-b))
+ z=as_type<float>(f32_add(as_type<uint>(a),as_type<uint>(b)));
+return true;
 }
 bool checked_sub(T a,T b,thread T &z){
 uint ab=as_type<uint>(a)&0x7fffffffu,bb=as_type<uint>(b)&0x7fffffffu;
-if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u))return false;
+if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u)){
+ z=as_type<float>(f32_sub(as_type<uint>(a),as_type<uint>(b)));return true;}
 z=a-b;uint zb=as_type<uint>(z)&0x7fffffffu;
-return !(zb&&zb<0x00800000u)&&!(zb==0&&a!=b);
+if((zb&&zb<0x00800000u)||(zb==0&&a!=b))
+ z=as_type<float>(f32_sub(as_type<uint>(a),as_type<uint>(b)));
+return true;
 }
 bool checked_mul(T a,T b,thread T &z){
 uint ab=as_type<uint>(a)&0x7fffffffu,bb=as_type<uint>(b)&0x7fffffffu;
-if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u))return false;
+if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u)){
+ z=as_type<float>(f32_mul(as_type<uint>(a),as_type<uint>(b)));return true;}
 z=a*b;uint zb=as_type<uint>(z)&0x7fffffffu;
-return !(zb&&zb<0x00800000u)&&!(zb==0&&ab&&bb);
+if((zb&&zb<0x00800000u)||(zb==0&&ab&&bb))
+ z=as_type<float>(f32_mul(as_type<uint>(a),as_type<uint>(b)));
+return true;
 }
 bool checked_neg(T a,thread T &z){z=as_type<float>(as_type<uint>(a)^0x80000000u);return true;}
 bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x00800000u;}
@@ -1895,7 +1907,9 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           text += valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid +
                   "){";
           auto operandType = nodeType(r, s.start + c[1]);
-          if (op == DFM_DIV) {
+          if (op == DFM_DIV && operandType == DFM_FLOAT32) {
+            text += z + "=as_type<float>(f32_div(as_type<uint>(" + a + "),as_type<uint>(" + b + ")));";
+          } else if (op == DFM_DIV) {
             text += z + "=f64_div(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) +
                     "),f64_word(" + encode(operandType,b) + "," + std::to_string(operandType) + "));";
           } else if (op == DFM_SQRT) {

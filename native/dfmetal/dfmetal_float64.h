@@ -381,10 +381,27 @@ inline ulong f64_integral(ulong value, int op) {
   if (rest && ((op == 55 && sign) || (op == 56 && !sign))) whole += unit;
   return whole;
 }
+// A binary32 product has at most 48 significant bits. For addition and
+// division, rounding through binary64 cannot cross a binary32 halfway point:
+// two 24-bit operands are either exactly at that point or farther away than
+// a binary64 rounding error. The binary64 exponent range also contains every
+// finite binary32 product/quotient. Narrow once, preserving gradual underflow.
+inline uint f32_add(uint a, uint b) {
+  return f64_to_float32(f64_add(f64_from_float32(a), f64_from_float32(b)));
+}
+inline uint f32_sub(uint a, uint b) {
+  return f64_to_float32(f64_sub(f64_from_float32(a), f64_from_float32(b)));
+}
+inline uint f32_mul(uint a, uint b) {
+  return f64_to_float32(f64_mul(f64_from_float32(a), f64_from_float32(b)));
+}
+inline uint f32_div(uint a, uint b) {
+  return f64_to_float32(f64_div(f64_from_float32(a), f64_from_float32(b)));
+}
 inline uint f32_floor_div(uint a, uint b) {
   // The CPU floors the quotient after binary32 rounding, which can differ
   // from flooring a binary64 quotient near an integer boundary.
-  uint quotient = f64_to_float32(f64_div(f64_from_float32(a), f64_from_float32(b)));
+  uint quotient = f32_div(a, b);
   return f64_to_float32(f64_integral(f64_from_float32(quotient), 55));
 }
 inline uint f32_fma(uint a, uint b, uint c) {
