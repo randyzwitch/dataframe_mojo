@@ -49,6 +49,7 @@ struct RowCapabilities(Copyable):
     var slices: Bool
     var scalar_regions: Bool
     var temporal_fields: Bool
+    var ranks: Bool
 
     def __init__(
         out self,
@@ -76,6 +77,7 @@ struct RowCapabilities(Copyable):
         slices: Bool = False,
         scalar_regions: Bool = False,
         temporal_fields: Bool = False,
+        ranks: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -100,6 +102,7 @@ struct RowCapabilities(Copyable):
         self.slices = slices
         self.scalar_regions = scalar_regions
         self.temporal_fields = temporal_fields
+        self.ranks = ranks
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)

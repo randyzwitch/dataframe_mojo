@@ -113,6 +113,9 @@ enum DFMOp {
   // Bool predicate over current resident row positions. Operands name two
   // Int64 literals containing offset and length; negative offsets count back.
   DFM_SLICE = 206,
+  // Rank header: input slot, descending flag, method (average/min/max/dense/ordinal).
+  // Optional following SORT_KEY descriptors name partition columns.
+  DFM_RANK_KEY = 207,
 };
 
 typedef struct DFMInput {
@@ -128,7 +131,7 @@ typedef struct DFMStep {
   int64_t nodes;
   int64_t slot;
   int64_t filter; // 0 projection, 1 stable filter, 2 stable sort, 3 grouped
-                  // reduction.
+                  // reduction, 4 rank (keeps original row order).
   int64_t gather_start;
   int64_t gather_count;
 } DFMStep;
