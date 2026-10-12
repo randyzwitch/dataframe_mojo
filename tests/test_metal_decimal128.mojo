@@ -1,6 +1,6 @@
-"""Exact two-word decimal transport and Decimal32/64 sums on Metal."""
-from std.testing import assert_true, assert_equal, assert_raises
+"""Exact two-word decimal transport and reductions on Metal."""
 from tests.execution_modes.test_backend_metal import require_metal
+from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, col, lit, when
 from dataframe.dtype import DataType
 from dataframe.lazy import LazyFrame
@@ -108,8 +108,10 @@ def test_native_metal_decimal128_literal_preflight_and_remaining_boundaries() ra
     var query = sums_fixture(3).lazy().select(col("a").sum())
     var plan = lower_rows(query, _capabilities())
     assert_equal(plan.outputs[0].dtype, DataType.decimal(38, 2))
-    with assert_raises(contains="Decimal128 input reductions"):
-        _ = lower_rows(frame.lazy().select(col("v").sum()), _capabilities())
+    var wide_sum = lower_rows(
+        frame.lazy().select(col("v").sum()), _capabilities()
+    )
+    assert_equal(wide_sum.outputs[0].dtype, DataType.decimal(38, 2))
     with assert_raises(contains="Decimal128 row arithmetic"):
         _ = lower_rows(
             frame.lazy().select(col("v") + col("v")), _capabilities()
@@ -119,6 +121,147 @@ def test_native_metal_decimal128_literal_preflight_and_remaining_boundaries() ra
     var bad = frame.lazy().select(lit("1000.00").cast(DataType.decimal(3, 2)))
     with assert_raises(contains="literal text parsing"):
         _ = fold_literal_text_parsing(bad)
+
+
+def test_native_metal_decimal128_sum_mean_global_grouped_nulls_and_consumers() raises:
+    _ = require_metal()
+    for n in List[Int]([0, 1, 513, 65537]):
+        var frame = wide_fixture(n)
+        check(
+            frame.lazy().select_exprs(
+                [
+                    col("v").sum().alias("sum"),
+                    col("v").sum(min_count=1).alias("nonempty"),
+                    col("v").sum(min_count=n + 1).alias("missing"),
+                    col("v").mean().alias("mean"),
+                ]
+            )
+        )
+        for maintain_order in List[Bool]([False, True]):
+            var grouped = (
+                frame.lazy()
+                .group_by("k", maintain_order=maintain_order)
+                .agg(
+                    [
+                        col("v").sum().alias("sum"),
+                        col("v").mean().alias("mean"),
+                        col("v").sum(min_count=n + 1).alias("missing"),
+                    ]
+                )
+            )
+            if not maintain_order:
+                grouped = grouped.sort("k")
+            check(grouped)
+            check(grouped.filter(col("mean") > lit(0.0)).sort("sum").head(5))
+        check(
+            frame.lazy()
+            .with_columns(col("v").sum().alias("total"))
+            .filter(col("total").is_not_null())
+            .head(7)
+        )
+    var maximum = Int128(1)
+    for _ in range(38):
+        maximum *= 10
+    maximum -= 1
+    var boundary_values = List[Int128](
+        [maximum, -maximum + 1, Int128(1) << 100, -(Int128(1) << 99), 0]
+    )
+    var boundary_keys = List[Int32](
+        [Int32(0), Int32(0), Int32(1), Int32(1), Int32(1)]
+    )
+    var boundary_valid = List[Bool]([True, True, True, True, False])
+    for scale in List[Int]([0, 19, 38]):
+        var boundary = DataFrame(
+            [
+                Series("k", Column[Int32](boundary_keys.copy())),
+                Series(
+                    "v", Column[Int128](boundary_values.copy(), boundary_valid)
+                ).with_dtype(DataType.decimal(38, scale)),
+            ]
+        )
+        check(
+            boundary.lazy().select_exprs(
+                [
+                    col("v").sum().alias("sum"),
+                    col("v").mean().alias("mean"),
+                ]
+            )
+        )
+        check(
+            boundary.lazy()
+            .filter(col("k") == lit(Int32(1)))
+            .select_exprs(
+                [
+                    col("v").sum().alias("sum"),
+                    col("v").mean().alias("mean"),
+                ]
+            )
+        )
+        check(
+            boundary.lazy()
+            .group_by("k", maintain_order=True)
+            .agg(
+                [
+                    col("v").sum().alias("sum"),
+                    col("v").mean().alias("mean"),
+                ]
+            )
+        )
+
+
+def _sparse_decimal(
+    n: Int, first: Int128, second_at: Int, second: Int128, grouped: Bool = False
+) raises -> DataFrame:
+    var values = List[Int128](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=False)
+    var keys = List[Int32](length=n, fill=0)
+    if n:
+        values[0] = first
+        valid[0] = True
+    if second_at >= 0 and second_at < n:
+        values[second_at] = second
+        valid[second_at] = True
+    if grouped:
+        for i in range(n):
+            keys[i] = Int32(i % 2)
+        if second_at >= 0 and second_at < n:
+            keys[second_at] = 0
+    return DataFrame(
+        [
+            Series("k", Column[Int32](keys^)),
+            Series("v", Column[Int128](values^, valid^)).with_dtype(
+                DataType.decimal(3, 0)
+            ),
+        ]
+    )
+
+
+def test_native_metal_decimal128_prefix_and_worker_merge_overflow_observable() raises:
+    _ = require_metal()
+    var prefix = _sparse_decimal(3, 999, 1, 1)
+    var merge = _sparse_decimal(131072, 600, 65536, 500)
+    var grouped = _sparse_decimal(131072, 600, 65536, 500, True)
+    for query in List[LazyFrame](
+        [
+            prefix.lazy().select(col("v").sum()),
+            prefix.lazy().select(col("v").mean()),
+            merge.lazy().select(col("v").sum()),
+            merge.lazy().select(col("v").mean()),
+            grouped.lazy().group_by("k").agg(col("v").sum()),
+            grouped.lazy().group_by("k").agg(col("v").mean()),
+        ]
+    ):
+        with assert_raises(contains="decimal precision"):
+            _ = query.collect(engine="cpu")
+        with assert_raises(contains="decimal precision"):
+            _ = query.collect(accelerator=MetalRuntime())
+    # Each worker and the ordered merge fit after cancellation.
+    var valid = _sparse_decimal(131072, 600, 65536, -500)
+    check(
+        valid.lazy().select_exprs(
+            [col("v").sum().alias("sum"), col("v").mean().alias("mean")]
+        )
+    )
 
 
 def test_native_metal_decimal_wide_scalar_sums_exact_extremes_nulls_and_empty() raises:
@@ -377,14 +520,22 @@ def test_native_metal_decimal128_extrema_first_last_and_resident_reductions() ra
 def test_native_metal_decimal128_cost_memory_budget_and_literal_pipeline_cache() raises:
     var frame = wide_fixture(17)
     var query = frame.lazy().select_exprs([col("k"), col("v")])
+    var reduction = frame.lazy().select_exprs(
+        [col("v").sum(), col("v").mean().alias("mean")]
+    )
     var work = cpu_features(query)
     assert_equal(work[0][2], Float64(17 * 20))
     assert_true("decimal128-v1" in work[1])
+    assert_true("decimal128-reductions-v1" in cpu_features(reduction)[1])
     _ = require_metal()
     var runtime = MetalRuntime()
     var estimate = runtime.estimate_auto(query)
     assert_equal(estimate.cpu[2], Float64(17 * 20))
     assert_true("metal-decimal128-v1" in estimate.family)
+    assert_true(
+        "metal-decimal128-reductions-v1"
+        in runtime.estimate_auto(reduction).family
+    )
     var measured = query.profile(accelerator=runtime)
     assert_true(measured[0].equals(query.collect(engine="cpu")))
     assert_equal(

@@ -375,6 +375,23 @@ def check_group_preflight_without_device():
             assert b"decimal mean scale" in C.string_at(err)
             lib.dfm_free(err)
 
+    # Group outputs use the same packed metadata in the node literal.
+    inputs[0].dtype = st[0] = nt[1] = 12
+    request.rows = 131072
+    metadata = 1 | (38 << 32) | (2 << 38) | (8 << 44)
+    for opcode, result_type in ((215, 12), (216, 11)):
+        code[11] = opcode
+        nt[2] = st[4] = outputs[0].dtype = result_type
+        literals[2] = metadata
+        err = P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for invalid in (0, (39 << 32) | (8 << 44), metadata | (1 << 60), -1):
+        literals[2] = invalid
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Decimal128 reduction metadata" in C.string_at(err)
+        lib.dfm_free(err)
+
 
 check_group_preflight_without_device()
 
@@ -549,6 +566,14 @@ def check_rank_preflight_without_device():
 check_rank_preflight_without_device()
 
 def check_decimal128_preflight_without_device():
+    def reduction_metadata(min_count=0, precision=38, scale=2, workers=8):
+        return (
+            min_count
+            | (precision << 32)
+            | (scale << 38)
+            | (workers << 44)
+        )
+
     inputs = (Input * 1)(Input(None, None, 3, 0, 0))
     outputs = (Output * 2)(Output(None, None, 12, 0, 208, 0),
                            Output(None, None, 3, 0, 11, 0))
@@ -566,6 +591,46 @@ def check_decimal128_preflight_without_device():
     err = P()
     assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
     assert b"unsupported accumulator" in C.string_at(err)
+    lib.dfm_free(err)
+
+    # Decimal128 SUM and MEAN carry the logical decimal contract and CPU
+    # worker count in one signed-positive metadata word.
+    inputs = (Input * 1)(Input(None, None, 12, 0, 0))
+    metadata = reduction_metadata(min_count=1)
+    outputs = (Output * 2)(
+        Output(None, None, 12, 0, 215, metadata),
+        Output(None, None, 11, 0, 216, metadata),
+    )
+    nodes, slots = (I * 1)(12), (I * 1)(12)
+    request = Request(
+        2, 131072, 0, 1, 1, 0, 0, 0, 0, 2, -1, 1, 0, -1,
+        ptr(inputs), None, None, None, None, ptr(outputs), ptr(nodes), ptr(slots)
+    )
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 26
+    for invalid in (
+        reduction_metadata(precision=0),
+        reduction_metadata(precision=39),
+        reduction_metadata(precision=2, scale=3),
+        reduction_metadata(workers=0),
+        reduction_metadata() | (1 << 60),
+    ):
+        outputs[0].min_count = invalid
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Decimal128 reduction metadata" in C.string_at(err)
+        lib.dfm_free(err)
+    outputs[0].min_count = -1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"Invalid Metal output descriptor" in C.string_at(err)
+    lib.dfm_free(err)
+    outputs[0].min_count = metadata
+    outputs[0].dtype = 11
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"Invalid Metal reduction dtype" in C.string_at(err)
     lib.dfm_free(err)
 
     # Wide literals require a valid typed high-word payload. Estimates do not

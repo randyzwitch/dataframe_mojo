@@ -350,6 +350,7 @@ def _capabilities() -> RowCapabilities:
         ranks=True,
         cumulative_windows=True,
         decimal128=True,
+        decimal128_reductions=True,
         decimal_mean=True,
         decimal_float_cast=True,
         reuse_column_slots=True,
@@ -558,6 +559,11 @@ def _input_series(column: Series) raises -> List[Int64]:
 
 
 def _reduction_op(op: Int, source_dtype: DataType) raises -> Int64:
+    if source_dtype.is_decimal() and source_dtype.decimal_width() == 128:
+        if op == SUM:
+            return 215
+        if op == MEAN:
+            return 216
     if op == SUM and source_dtype.is_decimal():
         return 208
     if op == MEAN and source_dtype.is_decimal():
@@ -572,6 +578,20 @@ def _reduction_op(op: Int, source_dtype: DataType) raises -> Int64:
     ):
         return 211
     return _op(op)
+
+
+def _decimal128_reduction_metadata(
+    dtype: DataType, min_count: Int, workers: Int
+) raises -> Int64:
+    """Pack worker and logical decimal metadata into the native descriptor."""
+    if min_count < 0 or min_count > Int(Int32.MAX):
+        raise Error("Decimal128 reduction min_count exceeds native row bounds")
+    return (
+        Int64(min_count)
+        | Int64(dtype.precision()) << 32
+        | Int64(dtype.scale()) << 38
+        | Int64(min(max(1, workers), 0xFFFF)) << 44
+    )
 
 
 struct _Descriptors(Movable):
@@ -639,6 +659,15 @@ struct _Descriptors(Movable):
                     self.literals[i // 4] = bitcast[DType.float64](
                         Int64(plan.slot_dtypes[Int(self.code[i + 1])].scale())
                     )
+                elif self.code[i + 3] == 215 or self.code[i + 3] == 216:
+                    var source = plan.slot_dtypes[Int(self.code[i + 1])]
+                    self.literals[i // 4] = bitcast[DType.float64](
+                        _decimal128_reduction_metadata(
+                            source,
+                            Int(bitcast[DType.int64](self.literals[i // 4])),
+                            configured_workers(),
+                        )
+                    )
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
             self.inputs.extend(_input_series(column))
@@ -689,7 +718,25 @@ struct _Descriptors(Movable):
                         output.reduction, plan.slot_dtypes[output.slot]
                     ) if output.reduction
                     >= 0 else Int64(-1),
-                    Int64(
+                    _decimal128_reduction_metadata(
+                        plan.slot_dtypes[output.slot],
+                        output.min_count,
+                        min(
+                            configured_workers(),
+                            min(
+                                8,
+                                max(
+                                    1,
+                                    plan.source.height() * 16 >> 22,
+                                ),
+                            ),
+                        ) if output.slot
+                        < plan.source.width() else configured_workers(),
+                    ) if plan.slot_dtypes[output.slot].is_decimal()
+                    and plan.slot_dtypes[output.slot].decimal_width() == 128
+                    and (
+                        output.reduction == SUM or output.reduction == MEAN
+                    ) else Int64(
                         plan.slot_dtypes[output.slot].scale()
                     ) if output.reduction
                     == MEAN
@@ -1522,6 +1569,23 @@ struct MetalRuntime(AcceleratorBackend):
             )
         if wide_decimal:
             family += ";metal-decimal128-v1"
+        var wide_decimal_reduction = False
+        for output in plan.outputs:
+            wide_decimal_reduction |= (
+                (output.reduction == SUM or output.reduction == MEAN)
+                and plan.slot_dtypes[output.slot].is_decimal()
+                and plan.slot_dtypes[output.slot].decimal_width() == 128
+            )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                var source = plan.slot_dtypes[Int(plan.code[i + 1])]
+                wide_decimal_reduction |= (
+                    (plan.code[i + 3] == SUM or plan.code[i + 3] == MEAN)
+                    and source.is_decimal()
+                    and source.decimal_width() == 128
+                )
+        if wide_decimal_reduction:
+            family += ";metal-decimal128-reductions-v1"
         var decimal_float_cast = False
         for step in plan.steps:
             for i in range(step.start, step.start + step.nodes):
