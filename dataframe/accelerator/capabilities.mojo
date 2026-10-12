@@ -51,6 +51,10 @@ struct RowCapabilities(Copyable):
     var temporal_fields: Bool
     var decimal128: Bool
     var ranks: Bool
+    var max_nodes: Int
+    var max_slots: Int
+    var max_steps: Int
+    var max_join_columns: Int
 
     def __init__(
         out self,
@@ -80,6 +84,10 @@ struct RowCapabilities(Copyable):
         temporal_fields: Bool = False,
         ranks: Bool = False,
         decimal128: Bool = False,
+        max_nodes: Int = 64,
+        max_slots: Int = 64,
+        max_steps: Int = 64,
+        max_join_columns: Int = 64,
     ):
         self.backend = backend
         self.float64 = float64
@@ -106,6 +114,10 @@ struct RowCapabilities(Copyable):
         self.temporal_fields = temporal_fields
         self.ranks = ranks
         self.decimal128 = decimal128
+        self.max_nodes = max_nodes
+        self.max_slots = max_slots
+        self.max_steps = max_steps
+        self.max_join_columns = max_join_columns
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)

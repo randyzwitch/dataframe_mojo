@@ -575,6 +575,44 @@ def check_decimal128_preflight_without_device():
 
 
 check_decimal128_preflight_without_device()
+def check_extended_shapes_without_device():
+    # Descriptor-only probes must accept the new boundaries without reading
+    # caller input/output addresses, and reject the next shape before indexing.
+    inputs = (Input * 128)(*(Input(None, None, 3, 5, 1) for _ in range(128)))
+    outputs = (Output * 128)(*(Output(None, None, 3, i, -1, 0) for i in range(128)))
+    slots = (I * 128)(*([3] * 128))
+    request = Request(2, 17, 0, 128, 128, 0, 0, 0, 0, 128, -1, 0, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result >= 128 * (17 * 8 + 3)
+    for field in ("slots", "input_count", "output_count", "step_count"):
+        original = getattr(request, field)
+        setattr(request, field, 129)
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Invalid Metal request shape" in C.string_at(err)
+        lib.dfm_free(err)
+        setattr(request, field, original)
+
+    # Sorting reuses the source slot, exercising 128 device steps separately
+    # from the slot limit and the 128-by-128 boundary-liveness storage.
+    inputs = (Input * 1)(Input(None, None, 2, 0, 0))
+    code = (I * 512)(*([200, 0, 0, 1] * 128))
+    literals = (I * 128)()
+    steps = (Step * 128)(*(Step(i, 1, 0, 2, i, 1) for i in range(128)))
+    gathers = (I * 128)()
+    outputs = (Output * 1)(Output(None, None, 2, 0, -1, 0))
+    nodes, slots = (I * 128)(*([2] * 128)), (I * 1)(2)
+    request = Request(2, 17, 0, 1, 1, 512, 128, 128, 128, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), ptr(gathers),
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.launches >= 128 and memory.peak >= memory.result
+
+
+check_extended_shapes_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
@@ -3091,6 +3129,22 @@ def test_temporal_truncate():
 
 
 test_temporal_truncate()
+
+def test_extended_expression_nodes():
+    values, valid = [-7, 0, 9] * 9, [True, False, True] * 9
+    for count in (65, 127, 128):
+        nodes = [col] + [(50, i - 1, -1, -1) for i in range(1, count)]
+        result, bitmap, _ = execute(values, 2, nodes, [0] * count,
+                                     valid=valid, offset=5, typed=True)
+        sign = -1 if (count - 1) % 2 else 1
+        assert bitmap == valid
+        assert all(not ok or got == sign * want for got, want, ok in zip(result, values, valid))
+    nodes = [col] + [(50, i - 1, -1, -1) for i in range(1, 129)]
+    execute(values, 2, nodes, [0] * 129, valid=valid, typed=True,
+            expect_error="Invalid Metal expression step")
+
+
+test_extended_expression_nodes()
 
 lib.dfm_context_release(ctx)
 print(

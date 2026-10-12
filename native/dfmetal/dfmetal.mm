@@ -166,8 +166,9 @@ int64_t aligned(int64_t n) { return mul(add(n, 7) / 8, 8); }
 // inside one segment stay in per-thread variables; only boundary-live slots
 // occupy shared memory. Logical ABI slot identifiers remain unchanged.
 struct Layout {
-  std::array<int64_t, 64> physical;
-  std::array<std::array<bool, 64>, 64> gathered{}, group_after{};
+  std::array<int64_t, DFM_MAX_SLOTS> physical;
+  std::array<std::array<bool, DFM_MAX_SLOTS>, DFM_MAX_STEPS> gathered{},
+      group_after{};
   std::vector<int64_t> ends;
   int64_t slots = 0;
   explicit Layout(const DFMRequest &r) {
@@ -210,7 +211,7 @@ struct Layout {
              r.steps[end + 1].filter < 2)
         ++end;
       ends.push_back(end);
-      std::array<bool, 64> local{};
+      std::array<bool, DFM_MAX_SLOTS> local{};
       for (int64_t k = first; k <= end; ++k) {
         for (int64_t j = 0; j < r.steps[k].nodes; ++j) {
           auto *c = r.code + 4 * (r.steps[k].start + j);
@@ -227,7 +228,7 @@ struct Layout {
       keep(r.outputs[i].slot);
     // A column can need physical storage before a boundary without needing a
     // gather after it. Walk uses backward to distinguish those lifetimes.
-    std::array<bool, 64> live{};
+    std::array<bool, DFM_MAX_SLOTS> live{};
     for (int64_t i = 0; i < r.output_count; ++i)
       live[r.outputs[i].slot] = true;
     for (int64_t i = r.step_count; i-- > 0;) {
@@ -318,9 +319,9 @@ Shape validate(const DFMRequest &r, bool storage = false,
                bool resident_output = false) {
   if (r.abi_version != DFM_ABI_VERSION)
     fail("Metal ABI version mismatch");
-  if (r.rows < 0 || r.rows > INT32_MAX || r.slots < 1 || r.slots > 64 ||
+  if (r.rows < 0 || r.rows > INT32_MAX || r.slots < 1 || r.slots > DFM_MAX_SLOTS ||
       r.input_count < 1 || r.input_count > r.slots || r.step_count < 0 ||
-      r.step_count > 64 || r.output_count < 1 || r.output_count > 64 ||
+      r.step_count > DFM_MAX_STEPS || r.output_count < 1 || r.output_count > DFM_MAX_SLOTS ||
       r.literal_count < 0 || r.literal_count > 4096 ||
       r.code_words != mul(r.literal_count, 4) || r.gather_count < 0 ||
       r.gather_count > 4096 || r.limit < -1 || r.memory_budget_bytes < -1 ||
@@ -372,12 +373,12 @@ Shape validate(const DFMRequest &r, bool storage = false,
     if (v.has_validity)
       s.bitmap = add(s.bitmap, bytes);
   }
-  std::array<bool, 64> defined{};
+  std::array<bool, DFM_MAX_SLOTS> defined{};
   for (int64_t i = 0; i < r.input_count; ++i)
     defined[i] = true;
   for (int64_t i = 0; i < r.step_count; ++i) {
     const auto &v = r.steps[i];
-    if (v.start < 0 || v.nodes < 1 || v.nodes > 64 ||
+    if (v.start < 0 || v.nodes < 1 || v.nodes > DFM_MAX_NODES ||
         add(v.start, v.nodes) > r.literal_count ||
         (v.filter != 2 && v.slot < r.input_count) || v.slot < 0 ||
         v.slot >= r.slots || v.gather_start < 0 || v.gather_count < 0 ||
@@ -418,7 +419,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           slotType(r, v.slot) != DFM_INT64 || slotType(r, h[2]) != DFM_INT64 ||
           slotType(r, h[3]) != DFM_INT64)
         fail("Invalid Metal group temporary slots");
-      std::array<bool, 64> targets{};
+      std::array<bool, DFM_MAX_SLOTS> targets{};
       for (int64_t j = 1; j < v.nodes; ++j) {
         auto c = r.code + 4 * (v.start + j);
         if (c[1] < 0 || c[1] >= r.slots || !defined[c[1]])
@@ -1566,7 +1567,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
       first = end + 1;
       continue;
     }
-    std::array<bool, 64> local{};
+    std::array<bool, DFM_MAX_SLOTS> local{};
     text += "kernel void project" + std::to_string(end) +
             "(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],device "
             "const T *lit[[buffer(2)]],constant uint4 "

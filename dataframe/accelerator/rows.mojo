@@ -179,9 +179,12 @@ def _program(
     mut node_dtypes: List[DataType],
     capabilities: RowCapabilities,
 ) raises:
-    if count < 1 or count > ROW_MAX_NODES:
+    if count < 1 or count > capabilities.max_nodes:
         capabilities.reject(
-            "plan", "expression must contain 1 to 64 row-local nodes"
+            "plan",
+            "expression must contain 1 to "
+            + String(capabilities.max_nodes)
+            + " row-local nodes",
         )
     var program_start = len(literals)
     var memberships = List[Int]()
@@ -602,9 +605,12 @@ def lower_rows(
             )
         chain.append(cursor)
         cursor = query._nodes[cursor].left
-        if len(chain) > ROW_MAX_STEPS:
+        if len(chain) > capabilities.max_steps:
             capabilities.reject(
-                "plan", "resident region supports at most 64 plan steps"
+                "plan",
+                "resident region supports at most "
+                + String(capabilities.max_steps)
+                + " plan steps",
             )
     if cursor < 0:
         capabilities.reject(
@@ -617,9 +623,12 @@ def lower_rows(
     var frame = query._frames[query._nodes[cursor].offset].copy()
     if len(projected_query._nodes[cursor].names):
         frame = frame.select(projected_query._nodes[cursor].names)
-    if frame.width() < 1 or frame.width() > ROW_MAX_SLOTS:
+    if frame.width() < 1 or frame.width() > capabilities.max_slots:
         capabilities.reject(
-            "plan", "resident region requires 1 to 64 source columns"
+            "plan",
+            "resident region requires 1 to "
+            + String(capabilities.max_slots)
+            + " source columns",
         )
     var dtype = DataType.BOOL
     var schema = frame._columns.copy()
@@ -667,8 +676,13 @@ def lower_rows(
         if node.kind == SLICE:
             if node.length < -1:
                 raise Error("Slice length must be nonnegative")
-            if next_slot >= ROW_MAX_SLOTS:
-                capabilities.reject("plan", "slice exceeds 64 value slots")
+            if next_slot >= capabilities.max_slots:
+                capabilities.reject(
+                    "plan",
+                    "slice exceeds "
+                    + String(capabilities.max_slots)
+                    + " value slots",
+                )
             var start = len(literals)
             code.extend(
                 [
@@ -922,8 +936,8 @@ def lower_rows(
                             "plan", "checked rank inputs require CPU execution"
                         )
                 if (
-                    next_slot + 2 > ROW_MAX_SLOTS
-                    or len(steps) + 2 > ROW_MAX_STEPS
+                    next_slot + 2 > capabilities.max_slots
+                    or len(steps) + 2 > capabilities.max_steps
                 ):
                     capabilities.reject(
                         "plan", "rank exceeds resident slot or step limits"
@@ -1134,9 +1148,12 @@ def lower_rows(
                 has_rows |= row_shape
             if node.kind == FILTER and result_dtype != DataType.BOOL:
                 capabilities.reject("plan", "filter predicate must be Boolean")
-            if next_slot >= ROW_MAX_SLOTS:
+            if next_slot >= capabilities.max_slots:
                 capabilities.reject(
-                    "plan", "resident region supports at most 64 value slots"
+                    "plan",
+                    "resident region supports at most "
+                    + String(capabilities.max_slots)
+                    + " value slots",
                 )
             var start = len(literals)
             _program(
@@ -1189,9 +1206,12 @@ def lower_rows(
                 capabilities.reject(
                     "plan", "group aggregation requires reductions"
                 )
-            if next_slot + 3 + len(aggregate_outputs) > ROW_MAX_SLOTS:
+            if next_slot + 3 + len(aggregate_outputs) > capabilities.max_slots:
                 capabilities.reject(
-                    "plan", "group aggregation exceeds 64 value slots"
+                    "plan",
+                    "group aggregation exceeds "
+                    + String(capabilities.max_slots)
+                    + " value slots",
                 )
             var index_slot = next_slot
             var start_slot = next_slot + 1
@@ -1341,9 +1361,12 @@ def lower_rows(
             outputs.append(
                 RowOutput(schema[i].name(), schema[i].dtype(), slots[i], -1, 0)
             )
-    if len(steps) > ROW_MAX_STEPS:
+    if len(steps) > capabilities.max_steps:
         capabilities.reject(
-            "plan", "resident region supports at most 64 device steps"
+            "plan",
+            "resident region supports at most "
+            + String(capabilities.max_steps)
+            + " device steps",
         )
     if len(outputs) == 0:
         capabilities.reject(
