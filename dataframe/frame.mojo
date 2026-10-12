@@ -145,6 +145,14 @@ from .hashing import (
 from .groups import GroupIndices
 from .top_k import top_k_mask
 from .hash_agg import hash_agg_eligible, hash_aggregate
+from .aggregate_table import (
+    AggregateResult,
+    ReducerSpec,
+    aggregate_table,
+    key_supported,
+    reduction_supported,
+    states_supported,
+)
 from .huge_pages import huge_list
 from .row_sort import row_arg_sort
 from .indexed_reduce import (
@@ -5729,6 +5737,19 @@ struct GroupBy(Copyable):
         # Keys are unchanged throughout this aggregation. Reuse the sampled
         # preference across hash, range and partitioned strategy selection.
         var whole = low_cardinality(self._keys) if workers > 1 else False
+        # Few groups (the sample above, or keys with few values each) keep
+        # the routes that reduce each range into a small private state, in
+        # first-occurrence order; more go through the aggregate table,
+        # whose per-thread tables adapt to however many there are.
+        if (
+            workers > 1
+            and not whole
+            and not small_key_product(self._keys)
+            and self._table_supported(expressions)
+        ):
+            var table = self._agg_table(expressions, workers)
+            if table:
+                return _pack_struct_keys(table.value())
         if (
             workers > 1
             and len(self._keys) == 1
@@ -5752,6 +5773,73 @@ struct GroupBy(Copyable):
         else:
             result = self._agg_whole(bound, batch_size)
         return _pack_struct_keys(result)
+
+    def _table_supported(self, expressions: List[Expr]) raises -> Bool:
+        """Whether the aggregate table (`aggregate_table.mojo`) groups these
+        keys and reduces these expressions."""
+        if len(self._keys) == 0 or not _stream_reductions(expressions):
+            return False
+        for expression in expressions:
+            for node in expression._nodes:
+                if is_reduction(node.op) and not reduction_supported(node.op):
+                    return False
+        for key in self._keys:
+            if not key_supported(key):
+                return False
+        return True
+
+    def _agg_table(
+        self, expressions: List[Expr], workers: Int
+    ) raises -> Optional[DataFrame]:
+        """Grouped reductions through the aggregate table: each worker
+        hashes its morsels' keys where they are and probes its own table,
+        updating its states by group; partitions of the groups then merge
+        across workers in parallel (`aggregate_table.mojo`, after DuckDB's
+        radix-partitioned hash aggregate). None when some reduction's
+        state does not fit inline in a group row."""
+        var empty_keys = List[Series](capacity=len(self._keys))
+        for key in self._keys:
+            empty_keys.append(key.slice(0, 0))
+        var template = _StreamReduction(
+            self._frame.clear(), expressions, empty_keys, self._key_names()
+        )
+        var specs = table_specs(template)
+        var inputs = table_inputs(self._frame, self._keys, expressions)
+        if not states_supported(specs, inputs):
+            return None
+        trace_path("group_by.aggregate_table")
+        # Morsels within chunks: the columns' common chunks, or one
+        # contiguous copy of each chunked column when they differ.
+        var keys = self._keys.copy()
+        var all_columns = keys.copy()
+        for item in inputs:
+            all_columns.append(item.copy())
+        var ends = List[Int]()
+        if can_filter_aligned_chunks(all_columns):
+            ends = all_columns[0]._chunked.value()[].ends.copy()
+        else:
+            for k in range(len(keys)):
+                if keys[k].is_chunked():
+                    keys[k] = keys[k].rechunk()
+            for k in range(len(inputs)):
+                if inputs[k].is_chunked():
+                    inputs[k] = inputs[k].rechunk()
+            ends.append(self._frame.height())
+        var ranges = List[Int]()
+        var start = 0
+        var morsel = max(
+            4096, min(1 << 16, self._frame.height() // (4 * workers) + 1)
+        )
+        for end in ends:
+            var at = start
+            while at < end:
+                var length = min(morsel, end - at)
+                ranges.append(at)
+                ranges.append(length)
+                at += length
+            start = end
+        var result = aggregate_table(keys, inputs, specs, ranges, workers)
+        return table_frame(template, result^, self._maintain_order)
 
     def _agg_hash(
         self, bound: List[BoundExpr], workers: Int
@@ -6641,6 +6729,121 @@ def _finish_parts(var parts: List[_StreamReduction]) raises -> DataFrame:
             heap_key[0] = firsts[part][cursor[part]]
         sift_down(heap_part, heap_key, size, 0)
     return concat(frames^).rechunk().take(order^)
+
+
+def table_specs(template: _StreamReduction) -> List[ReducerSpec]:
+    """Each reduction's state, as the aggregate table makes it."""
+    var specs = List[ReducerSpec](capacity=len(template.states))
+    for s in range(len(template.states)):
+        specs.append(ReducerSpec.of(template.states[s]))
+    return specs^
+
+
+def table_inputs(
+    frame: DataFrame, keys: List[Series], expressions: List[Expr]
+) raises -> List[Series]:
+    """Each reduction's input over every row of `frame`, in the order of
+    the template's states: its column, or its input expression evaluated
+    once (a row count reads the first key)."""
+    var inputs = List[Series]()
+    for expression in expressions:
+        for i in range(len(expression._nodes)):
+            ref node = expression._nodes[i]
+            if not is_reduction(node.op):
+                continue
+            if node.left < 0:
+                inputs.append(keys[0].copy())
+            elif (
+                expression._nodes[node.left].op == COL
+                and expression._nodes[node.left].text in frame.columns()
+            ):
+                inputs.append(frame.column(expression._nodes[node.left].text))
+            else:
+                var evaluated = frame.select_exprs(
+                    [subtree(expression, node.left).alias("__input")]
+                )
+                inputs.append(evaluated._columns[0].copy())
+    return inputs^
+
+
+def table_supported(
+    frame: DataFrame, keys: List[String], expressions: List[Expr]
+) raises -> Bool:
+    """Whether the aggregate table groups `frame` (empty is enough: only
+    types are read) by `keys` and keeps every reduction's state of
+    `expressions` inline."""
+    if len(keys) == 0 or not _stream_reductions(expressions):
+        return False
+    for expression in expressions:
+        for node in expression._nodes:
+            if is_reduction(node.op) and not reduction_supported(node.op):
+                return False
+    var columns = List[Series](capacity=len(keys))
+    for name in keys:
+        if name not in frame.columns():
+            return False
+        var column = frame.column(name)
+        if not key_supported(column):
+            return False
+        columns.append(column^)
+    var template = _StreamReduction(frame.clear(), expressions, keys)
+    return states_supported(
+        table_specs(template), table_inputs(frame, columns, expressions)
+    )
+
+
+def table_frame(
+    template: _StreamReduction, var result: AggregateResult, ordered: Bool
+) raises -> DataFrame:
+    """The aggregate table's partitions finished into a frame: each part's
+    states loaded into a `_StreamReduction` like `template`, finished on
+    its own thread (DuckDB scans its partitions out in parallel), each
+    output column keeping the parts as its chunks; in first-occurrence
+    order when `ordered`."""
+    var parts = List[_StreamReduction](capacity=len(result.firsts))
+    for p in range(len(result.firsts)):
+        var size = len(result.firsts[p])
+        if size == 0:
+            continue
+        var columns = List[Series]()
+        swap(columns, result.keys[p])
+        var states = List[Reducer]()
+        swap(states, result.states[p])
+        parts.append(
+            _StreamReduction(
+                keys=DataFrame(columns^, height=size),
+                states=states^,
+                names=template.names,
+                dtypes=template.dtypes,
+                outputs=template.outputs,
+                grouped=True,
+                firsts=result.firsts[p].copy(),
+                rows=0,
+            )
+        )
+    if len(parts) == 0:
+        return template.finish()
+    if ordered:
+        for p in range(len(parts)):
+            parts[p].order_by_firsts()
+        return _finish_parts(parts^)
+    var count = len(parts)
+    var jobs = List[_FinishJob](capacity=count)
+    while len(parts) > 0:
+        jobs.append(_FinishJob(parts.pop(0)))
+    run_jobs(jobs)
+    if count == 1:
+        return jobs[0].frame.copy()
+    var columns = List[Series](capacity=jobs[0].frame.width())
+    var height = 0
+    for j in range(count):
+        height += jobs[j].frame.height()
+    for c in range(jobs[0].frame.width()):
+        var pieces = List[Series](capacity=count)
+        for j in range(count):
+            pieces.append(jobs[j].frame._columns[c].copy())
+        columns.append(Series._from_chunks(pieces))
+    return DataFrame(columns^, height=height)
 
 
 struct _StreamReduction(Movable):

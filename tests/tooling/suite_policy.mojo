@@ -878,6 +878,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "reduce.grouped",
             [
+                "tests/kernel_equivalence/test_aggregate_table.mojo",
                 "tests/public_contracts/test_distribution_shapes.mojo",
                 "tests/public_contracts/test_expression_boundaries.mojo",
                 "tests/public_contracts/test_grouped_types.mojo",
@@ -984,6 +985,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "storage.release",
             [
+                "tests/storage_ownership/test_aggregate_key_lifetime.mojo",
                 "tests/storage_ownership/test_release.mojo",
             ],
         )
@@ -993,6 +995,7 @@ def production_policy() -> SuitePolicy:
             "kernel.reduce",
             [
                 "tests/execution_modes/test_lifecycle.mojo",
+                "tests/kernel_equivalence/test_aggregate_table.mojo",
                 "tests/kernel_equivalence/test_grouped_routes.mojo",
                 "tests/kernel_equivalence/test_quantile_routes.mojo",
                 "tests/kernel_equivalence/test_reduction_routes.mojo",
@@ -1091,6 +1094,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.modes",
             [
+                "tests/execution_modes/test_aggregate_table_modes.mojo",
                 "tests/execution_modes/test_batches.mojo",
                 "tests/execution_modes/test_group_strategy.mojo",
                 "tests/execution_modes/test_lifecycle.mojo",
