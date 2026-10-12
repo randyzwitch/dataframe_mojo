@@ -348,9 +348,9 @@ def _capabilities() -> RowCapabilities:
         reuse_column_slots=True,
         proven_integer_operations=True,
         max_nodes=128,
-        max_slots=128,
+        max_slots=256,
         max_steps=128,
-        max_join_columns=128,
+        max_join_columns=256,
     )
 
 

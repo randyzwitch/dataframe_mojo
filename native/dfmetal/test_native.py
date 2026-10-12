@@ -595,17 +595,25 @@ check_decimal128_preflight_without_device()
 def check_extended_shapes_without_device():
     # Descriptor-only probes must accept the new boundaries without reading
     # caller input/output addresses, and reject the next shape before indexing.
-    inputs = (Input * 128)(*(Input(None, None, 3, 5, 1) for _ in range(128)))
-    outputs = (Output * 128)(*(Output(None, None, 3, i, -1, 0) for i in range(128)))
-    slots = (I * 128)(*([3] * 128))
-    request = Request(2, 17, 0, 128, 128, 0, 0, 0, 0, 128, -1, 0, 0, -1,
+    inputs = (Input * 256)(*(Input(None, None, 3, 5, 1) for _ in range(256)))
+    outputs = (Output * 256)(*(Output(None, None, 3, i, -1, 0) for i in range(256)))
+    slots = (I * 256)(*([3] * 256))
+    request = Request(2, 17, 0, 256, 256, 0, 0, 0, 0, 256, -1, 0, 0, -1,
                       ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
     memory, err = Memory(), P()
     check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
-    assert memory.result >= 128 * (17 * 8 + 3)
-    for field in ("slots", "input_count", "output_count", "step_count"):
+    assert memory.result >= 256 * (17 * 8 + 3)
+    # Physical two-word storage is independent of the logical slot bound.
+    for i in range(256):
+        inputs[i].dtype = outputs[i].dtype = slots[i] = 12
+    err = P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 256 * (17 * 16 + 3)
+    for i in range(256):
+        inputs[i].dtype = outputs[i].dtype = slots[i] = 3
+    for field, invalid in (("slots", 257), ("input_count", 257), ("output_count", 257), ("step_count", 129)):
         original = getattr(request, field)
-        setattr(request, field, 129)
+        setattr(request, field, invalid)
         err = P()
         assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
         assert b"Invalid Metal request shape" in C.string_at(err)
@@ -613,7 +621,7 @@ def check_extended_shapes_without_device():
         setattr(request, field, original)
 
     # Sorting reuses the source slot, exercising 128 device steps separately
-    # from the slot limit and the 128-by-128 boundary-liveness storage.
+    # from the slot limit and the 128-by-256 boundary-liveness storage.
     inputs = (Input * 1)(Input(None, None, 2, 0, 0))
     code = (I * 512)(*([200, 0, 0, 1] * 128))
     literals = (I * 128)()
