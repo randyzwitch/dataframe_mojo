@@ -126,8 +126,11 @@ These aggregate-window producers are full observation boundaries, matching the
 CPU's eager preparation of window states even inside a conditional or before
 head. Checked sums and checked expressions inside these producers retain their
 normal overflow checks. Ordinary checked join inputs keep their existing
-restrictions. Nested windows and row-valued expressions inside an aggregate
-window still require CPU execution, as do unsupported underlying reductions.
+restrictions. Nested aggregate windows materialize their inner results before
+feeding them to the outer partition aggregate, retaining the original row order
+and the same observation boundaries at each level. Row-valued partition
+expressions, selectors, other nested window operations, and unsupported
+underlying reductions still require CPU execution.
 Automatic placement keeps these plans on CPU until their complete DAG has a
 supported estimate and matching calibration.
 

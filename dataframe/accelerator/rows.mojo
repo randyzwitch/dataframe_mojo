@@ -4,6 +4,7 @@ Expressions use the shared binder and retain their logical dtypes. Programs
 are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
+from .metadata import prune_projections
 from std.memory import bitcast
 from std.math import pow, abs
 from dataframe.parallel import configured_workers
@@ -612,7 +613,7 @@ def lower_rows(
     # Reuse core projection analysis after validating the resident chain.
     # This only narrows the source: no expression evaluation or row movement.
     var projected_query = query.copy()
-    projected_query._push_projections()
+    prune_projections(projected_query)
     var frame = query._frames[query._nodes[cursor].offset].copy()
     if len(projected_query._nodes[cursor].names):
         frame = frame.select(projected_query._nodes[cursor].names)

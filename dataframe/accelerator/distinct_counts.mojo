@@ -1,4 +1,5 @@
 """Distinct counts through resident deduplication and row counting."""
+from .metadata import schema_frame
 from std.collections import Dict
 from dataframe.binding import bind
 from dataframe.expr import Expr, COL, N_UNIQUE, col, subtree
@@ -41,7 +42,7 @@ def lower_distinct_counts(query: LazyFrame) raises -> LazyFrame:
     No source rows are evaluated while constructing these native GPU operators.
     """
     _in_memory_sources(query)
-    var expected = query._execute(len(query._nodes) - 1, True)
+    var expected = schema_frame(query, len(query._nodes) - 1)
     var names = Dict[String, Bool]()
     for frame in query._frames:
         for name in frame.columns():
@@ -69,7 +70,7 @@ def lower_distinct_counts(query: LazyFrame) raises -> LazyFrame:
             result._nodes.append(operation^)
             roots.append(len(result._nodes) - 1)
             continue
-        var schema = query._execute(query._nodes[index].left, True)
+        var schema = schema_frame(query, query._nodes[index].left)
         if len(operation.exprs) > 1:
             split = True
             var required = Dict[String, Bool]()
@@ -170,7 +171,7 @@ def lower_distinct_counts(query: LazyFrame) raises -> LazyFrame:
         operation.exprs = [col(name).len().alias(operation.exprs[0]._name)]
         result._nodes.append(operation^)
         roots.append(len(result._nodes) - 1)
-    var actual = result._execute(len(result._nodes) - 1, True)
+    var actual = schema_frame(result, len(result._nodes) - 1)
     if actual.columns() != expected.columns():
         raise Error("Metal unsupported [distinct count]: output names differ")
     for i in range(actual.width()):

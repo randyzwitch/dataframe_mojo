@@ -4,6 +4,7 @@ Code equality is string equality across all resident inputs. Code order is byte
 lexicographic string order. Providers retain this owner until final decoding;
 encoding and decoding are host staging work and belong in end-to-end costs.
 """
+from .metadata import schema_frame
 from std.collections import Dict
 from dataframe.categorical import _values_of, decode, recode
 from dataframe.dtype import CategoricalDictionary, DataType
@@ -228,9 +229,10 @@ def lower_dictionary_operations(
             for node in expression._nodes:
                 if node.op == SELECTOR:
                     raise Error(
-                        "Metal unsupported [dictionary]: String operations with selectors"
+                        "Metal unsupported [dictionary]: String operations with"
+                        " selectors"
                     )
-            var original_input = query._execute(query._nodes[index].left, True)
+            var original_input = schema_frame(query, query._nodes[index].left)
             for name in original_input.columns():
                 names[name] = True
             var bound = bind(expression, original_input._columns)
@@ -241,7 +243,8 @@ def lower_dictionary_operations(
                     continue
                 if bound.shapes[n] != ROWS:
                     raise Error(
-                        "Metal unsupported [dictionary]: scalar String operation"
+                        "Metal unsupported [dictionary]: scalar String"
+                        " operation"
                     )
                 var key_name = "__dataframe_metal_dictionary_key_" + String(
                     lookups
@@ -271,7 +274,8 @@ def lower_dictionary_operations(
                         )
                     if reserve > budget - generated_bytes:
                         raise Error(
-                            "Metal dictionary operation staging exceeds payload budget"
+                            "Metal dictionary operation staging exceeds payload"
+                            " budget"
                         )
                 var mapped = string_op(node, keys).renamed(value_name)
                 generated_bytes = checked_add(
@@ -283,7 +287,8 @@ def lower_dictionary_operations(
                 )
                 if budget >= 0 and generated_bytes > budget:
                     raise Error(
-                        "Metal dictionary operation staging exceeds payload budget"
+                        "Metal dictionary operation staging exceeds payload"
+                        " budget"
                     )
                 if mapped.dtype() == DataType.STRING:
                     var values = _values_of(mapped)
@@ -321,7 +326,7 @@ def lower_dictionary_operations(
         if changed:
             # Filter/with-columns preserve their input columns. Restore exactly
             # the original visible schema and column order after the operation.
-            var schema = query._execute(index, True)
+            var schema = schema_frame(query, index)
             var projected = List[Expr]()
             for name in schema.columns():
                 projected.append(col(name))
@@ -349,7 +354,8 @@ def encode_query(
                     or is_string_op(node.op)
                 ):
                     raise Error(
-                        "Metal unsupported [dictionary]: unlowered text operation"
+                        "Metal unsupported [dictionary]: unlowered text"
+                        " operation"
                     )
     for f in range(len(encoded._frames)):
         ref frame = encoded._frames[f]
@@ -374,13 +380,14 @@ def encode_query(
                 elif node.op == CAST:
                     # Numeric-to-string formatting and string parsing are not
                     # dictionary operations and cannot run on numeric codes.
-                    var schema = query._execute(operation.left, True)
+                    var schema = schema_frame(query, operation.left)
                     var bound = bind(query._nodes[o].exprs[e], schema._columns)
                     if dictionary_dtype(bound.dtypes[n]) or dictionary_dtype(
                         bound.dtypes[node.left]
                     ):
                         raise Error(
-                            "Accelerator dictionary plans do not support String/categorical casts"
+                            "Accelerator dictionary plans do not support"
+                            " String/categorical casts"
                         )
                 elif node.op == LIT_NULL:
                     for d in range(len(node.dtypes)):

@@ -1,4 +1,5 @@
 """Metadata-only lowering of set operations to resident GPU operators."""
+from .metadata import schema_frame
 from dataframe.expr import Expr, col, lit
 from dataframe.lazy import (
     LazyFrame,
@@ -29,7 +30,7 @@ def lower_set_operations(query: LazyFrame) raises -> LazyFrame:
     maintain_order sorts groups by their first source position. No source
     values or duplicate decisions are evaluated by this transformation.
     """
-    _ = query._execute(len(query._nodes) - 1, True)
+    _ = schema_frame(query, len(query._nodes) - 1)
     var result = query.copy()
     result._nodes = List[PlanNode]()
     var roots = List[Int]()
@@ -40,7 +41,7 @@ def lower_set_operations(query: LazyFrame) raises -> LazyFrame:
         if node.right >= 0:
             node.right = roots[node.right]
         if node.kind == CONCAT:
-            var schema = query._execute(query._nodes[index].left, True)
+            var schema = schema_frame(query, query._nodes[index].left)
             var names = schema.columns()
             var tag = "__dataframe_concat_side"
             while tag in names:
@@ -96,7 +97,7 @@ def lower_set_operations(query: LazyFrame) raises -> LazyFrame:
             result._nodes.append(node^)
             roots.append(len(result._nodes) - 1)
             continue
-        var schema = query._execute(query._nodes[index].left, True)
+        var schema = schema_frame(query, query._nodes[index].left)
         var names = schema.columns()
         var keys = node.names.copy()
         if len(keys) == 0:

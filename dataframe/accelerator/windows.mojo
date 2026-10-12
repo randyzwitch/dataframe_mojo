@@ -1,4 +1,5 @@
 """Partition aggregates materialized and broadcast entirely on the GPU."""
+from .metadata import schema_frame
 from std.collections import Dict
 from dataframe.binding import bind, ROWS
 from dataframe.expr import (
@@ -55,7 +56,7 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
     checked expressions elsewhere retain the normal child-region restrictions.
     """
     _in_memory_sources(query)
-    var expected = query._execute(len(query._nodes) - 1, True)
+    var expected = schema_frame(query, len(query._nodes) - 1)
     var names = Dict[String, Bool]()
     for frame in query._frames:
         for name in frame.columns():
@@ -92,13 +93,21 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
             and operation.kind != WITH_COLUMNS
         ):
             raise Error(
-                "Metal unsupported [window]: partition aggregates require a row consumer"
+                "Metal unsupported [window]: partition aggregates require a row"
+                " consumer"
             )
-        var schema = query._execute(query._nodes[index].left, True)
+        var schema = schema_frame(query, query._nodes[index].left)
         var columns = List[Expr]()
         for name in schema.columns():
             columns.append(col(name))
-        result._nodes.append(_plan_node(SELECT, operation.left, exprs=columns))
+        result._nodes.append(
+            _plan_node(
+                SELECT,
+                operation.left,
+                exprs=columns,
+                text="metal_shared_prefix",
+            )
+        )
         var prefix = len(result._nodes) - 1
         var aligned = prefix
         var temporary = List[String]()
@@ -111,7 +120,12 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                 var node = bound.expr._nodes[n].copy()
                 positions[n] = len(rewritten)
                 if _aggregate_over(bound.expr, n):
-                    var inner = subtree(bound.expr, node.left)
+                    # Earlier OVER nodes already name their aligned resident
+                    # results. Extract from that rewritten graph so a nested
+                    # aggregate consumes the inner window's rows.
+                    var prepared = Expr(rewritten.copy(), expression._name)
+                    var inner = subtree(prepared, positions[node.left])
+                    var dependent = False
                     for child in inner._nodes:
                         if (
                             child.op == OVER
@@ -119,12 +133,34 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                             or child.op == SELECTOR
                         ):
                             raise Error(
-                                "Metal unsupported [window]: nested windows and selectors"
+                                "Metal unsupported [window]: nested windows and"
+                                " selectors"
                             )
-                    var inner_bound = bind(inner, schema._columns)
+                        dependent |= child.op == COL and child.text in temporary
+                    var producer = prefix
+                    if dependent:
+                        # A row owner above the preceding join is shared by
+                        # the outer aggregate and its broadcast side.
+                        var current = schema_frame(result, aligned)
+                        var shared = List[Expr]()
+                        for column in current.columns():
+                            shared.append(col(column))
+                        result._nodes.append(
+                            _plan_node(
+                                SELECT,
+                                aligned,
+                                exprs=shared,
+                                text="metal_shared_prefix",
+                            )
+                        )
+                        producer = len(result._nodes) - 1
+                        aligned = producer
+                    var producer_schema = schema_frame(result, producer)
+                    var inner_bound = bind(inner, producer_schema._columns)
                     if inner_bound.shape() == ROWS:
                         raise Error(
-                            "Metal unsupported [window]: row-valued partition expression"
+                            "Metal unsupported [window]: row-valued partition"
+                            " expression"
                         )
                     var name = "__dataframe_metal_window_" + String(serial)
                     serial += 1
@@ -136,7 +172,7 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                     result._nodes.append(
                         _plan_node(
                             AGG,
-                            prefix,
+                            producer,
                             exprs=[inner.alias(name)],
                             names=keys,
                             maintain_order=True,
@@ -182,7 +218,7 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                 _plan_node(DROP, len(result._nodes) - 1, names=temporary)
             )
         roots.append(len(result._nodes) - 1)
-    var actual = result._execute(len(result._nodes) - 1, True)
+    var actual = schema_frame(result, len(result._nodes) - 1)
     if actual.columns() != expected.columns():
         raise Error("Metal unsupported [window]: output names differ")
     for i in range(actual.width()):
