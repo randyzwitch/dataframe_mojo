@@ -113,9 +113,20 @@ def next_batch(stream):
         if not array.release:
             return None
         assert GET(stream.get_schema)(c.byref(stream), c.byref(schema)) == 0
-        return pa.RecordBatch._import_from_c(
+        children = c.cast(array.children, c.POINTER(c.POINTER(Array)))
+        fields = c.cast(schema.children, c.POINTER(c.POINTER(Schema)))
+        for child_index in range(array.n_children):
+            child = children[child_index].contents
+            field = fields[child_index].contents
+            if c.string_at(field.format) == b"l" and child.length:
+                pointers = c.cast(child.buffers, c.POINTER(c.c_void_p))
+                words = c.cast(pointers[1], c.POINTER(c.c_int64))
+                print("Raw native int64", {"length": child.length, "offset": child.offset, "values_address": pointers[1], "head": [words[child.offset + i] for i in range(min(3, child.length))]}, flush=True)
+        result = pa.RecordBatch._import_from_c(
             c.addressof(array), c.addressof(schema)
         )
+        print("Imported column offsets", [(str(column.type), column.offset) for column in result.columns], flush=True)
+        return result
     finally:
         if array.release:
             RELEASE(array.release)(c.byref(array))
