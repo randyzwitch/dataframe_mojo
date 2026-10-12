@@ -112,10 +112,11 @@ def test_native_metal_decimal128_literal_preflight_and_remaining_boundaries() ra
         frame.lazy().select(col("v").sum()), _capabilities()
     )
     assert_equal(wide_sum.outputs[0].dtype, DataType.decimal(38, 2))
+    _ = lower_rows(frame.lazy().select(col("v") + col("v")), _capabilities())
+    var caps = _capabilities()
+    caps.decimal_arithmetic = False
     with assert_raises(contains="Decimal128 row arithmetic"):
-        _ = lower_rows(
-            frame.lazy().select(col("v") + col("v")), _capabilities()
-        )
+        _ = lower_rows(frame.lazy().select(col("v") + col("v")), caps)
     with assert_raises(contains="Decimal128 input reductions"):
         _ = lower_rows(frame.lazy().select(col("v").arg_min()), _capabilities())
     var bad = frame.lazy().select(lit("1000.00").cast(DataType.decimal(3, 2)))
