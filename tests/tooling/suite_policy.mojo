@@ -1105,6 +1105,19 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo::test_native_metal_exact_wide_integer_limits_partials_means_and_nulls",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo::test_native_metal_exact_wide_integer_resident_inputs_consumers_and_budget",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -1477,6 +1490,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_rank.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo",
                 "tests/execution_modes/test_backend_metal_wide_plans.mojo",
+                "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo",
                 "tests/execution_modes/test_backends.mojo",
             ],
         )

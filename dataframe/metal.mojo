@@ -545,6 +545,21 @@ def _input_series(column: Series) raises -> List[Int64]:
     raise Error("Metal unsupported input dtype")
 
 
+def _reduction_op(op: Int, source_dtype: DataType) raises -> Int64:
+    if op == SUM and source_dtype.is_decimal():
+        return 208
+    if op == SUM and (
+        source_dtype.physical() == DataType.INT64
+        or source_dtype == DataType.UINT64
+    ):
+        return 210
+    if op == MEAN and (
+        source_dtype == DataType.INT64 or source_dtype == DataType.UINT64
+    ):
+        return 211
+    return _op(op)
+
+
 struct _Descriptors(Movable):
     var inputs: List[Int64]
     var code: List[Int64]
@@ -602,10 +617,9 @@ struct _Descriptors(Movable):
                 )
             )
             if self.code[i] == ROW_GROUP_OUTPUT:
-                self.code[i + 3] = Int64(208) if self.code[
-                    i + 3
-                ] == SUM and plan.node_dtypes[i // 4].is_decimal() else _op(
-                    Int(self.code[i + 3])
+                self.code[i + 3] = _reduction_op(
+                    Int(self.code[i + 3]),
+                    plan.slot_dtypes[Int(self.code[i + 1])],
                 )
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
@@ -627,15 +641,18 @@ struct _Descriptors(Movable):
                 ]
             )
         for output in plan.outputs:
+            self.typed |= output.reduction == SUM and (
+                plan.slot_dtypes[output.slot].physical() == DataType.INT64
+                or plan.slot_dtypes[output.slot] == DataType.UINT64
+            )
             self.outputs.extend(
                 [
                     Int64(0),
                     Int64(0),
                     _type(output.dtype),
                     Int64(output.slot),
-                    Int64(208) if output.reduction == SUM
-                    and output.dtype.is_decimal() else _op(
-                        output.reduction
+                    _reduction_op(
+                        output.reduction, plan.slot_dtypes[output.slot]
                     ) if output.reduction
                     >= 0 else Int64(-1),
                     Int64(output.min_count),
@@ -1414,6 +1431,30 @@ struct MetalRuntime(AcceleratorBackend):
             if plan.code[step.start * 4] == ROW_RANK_KEY:
                 family += ";metal-rank-v1"
                 break
+        var wide_integer = False
+        for output in plan.outputs:
+            wide_integer |= (
+                (output.reduction == SUM or output.reduction == MEAN)
+                and not plan.slot_dtypes[output.slot].is_decimal()
+                and (
+                    plan.slot_dtypes[output.slot].physical() == DataType.INT64
+                    or plan.slot_dtypes[output.slot] == DataType.UINT64
+                )
+            )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                wide_integer |= (
+                    (plan.code[i + 3] == SUM or plan.code[i + 3] == MEAN)
+                    and not plan.slot_dtypes[Int(plan.code[i + 1])].is_decimal()
+                    and (
+                        plan.slot_dtypes[Int(plan.code[i + 1])].physical()
+                        == DataType.INT64
+                        or plan.slot_dtypes[Int(plan.code[i + 1])]
+                        == DataType.UINT64
+                    )
+                )
+        if wide_integer:
+            family += ";metal-wide-integer-reductions-v1"
         var wide_decimal = False
         for dtype in plan.node_dtypes:
             wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128

@@ -287,6 +287,28 @@ inline ulong f64_from_signed(long value) {
   ulong magnitude = value < 0 ? 0UL - ulong(value) : ulong(value);
   return sign | f64_from_unsigned(magnitude);
 }
+// Round a two-word integer directly to binary64, retaining guard/round/sticky.
+// Shared C++/MSL source avoids floating-point intermediates and double rounding.
+inline ulong f64_from_wide(ulong low, ulong high, bool is_unsigned) {
+  ulong sign = !is_unsigned && (high >> 63) ? 0x8000000000000000UL : 0;
+  if (sign) {
+    low = ~low + 1UL;
+    high = ~high + ulong(low == 0);
+  }
+  if (!(low | high)) return 0;
+  uint leading = high ? 64 : 0;
+  for (ulong rest = high ? high : low; rest >>= 1;) ++leading;
+  ulong significand;
+  if (leading <= 55) significand = low << (55 - leading);
+  else {
+    uint distance = leading - 55;
+    if (distance < 64) {
+      significand = (high << (64 - distance)) | (low >> distance);
+      significand |= ulong((low << (64 - distance)) != 0);
+    } else significand = f64_jam(high, distance - 64) | ulong(low != 0);
+  }
+  return f64_pack(sign, int(leading), significand);
+}
 inline ulong f64_from_float32(uint value) {
   ulong sign = ulong(value & 0x80000000U) << 32;
   uint fraction = value & 0x007fffffU;

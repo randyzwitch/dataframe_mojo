@@ -99,6 +99,18 @@ int main() { @autoreleasepool {
       left.push_back(square + adjacent); right.push_back(0);
     }
   }
+  // Direct integer conversions, including ties around every 128-bit exponent.
+  for (uint bit=0;bit<128;++bit) {
+    unsigned __int128 base=(static_cast<unsigned __int128>(1)<<bit);
+    for (int delta=-4;delta<=4;++delta) {
+      auto value=base+delta;
+      left.push_back(ulong(value)); right.push_back(ulong(value>>64));
+      if(bit>=53) {
+        auto halfway=value+(static_cast<unsigned __int128>(1)<<(bit-53));
+        left.push_back(ulong(halfway)); right.push_back(ulong(halfway>>64));
+      }
+    }
+  }
   if (f64_add(0x7ff0000000000042UL, 0) != 0x7ff8000000000042UL ||
       f64_sub(0, 0xfff0000000000042UL) != 0xfff8000000000042UL)
     return 2;
@@ -130,7 +142,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
           op==31 ? ulong(f32_mod(uint(a[i]),uint(b[i]))) :
           op==32 ? ulong(f32_fma(uint(a[i]),uint(b[i]),f64_to_float32(f64_mul(f64_from_float32(uint(a[i])),f64_from_float32(uint(b[i]))))^0x80000000U)) :
           op==33 ? ulong(f32_fma(uint(a[i]),uint(b[i]),uint((a[i]>>13)|(a[i]<<19)))) :
-          op==34||op==35 ? ulong(f32_fma(uint(a[i]),uint(b[i]),op==34?0x17800000U:0x97800000U)) : test_integer(a[i],op);
+          op==34||op==35 ? ulong(f32_fma(uint(a[i]),uint(b[i]),op==34?0x17800000U:0x97800000U)) : op==36||op==37 ? f64_from_wide(a[i],b[i],op==37) : test_integer(a[i],op);
 }
 )shader";
   NSError *error = nil;
@@ -147,7 +159,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
   id<MTLBuffer> b = [device newBufferWithBytes:right.data() length:bytes options:MTLResourceStorageModeShared];
   id<MTLBuffer> out = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
   size_t checked = 0;
-  for (uint op = 0; op < 36; ++op) {
+  for (uint op = 0; op < 38; ++op) {
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:pipeline];
@@ -223,6 +235,11 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
         bool valid=std::isfinite(x)&&whole<upper&&whole>=(uns?0.0:-upper);
         expected=(op&1) ? (valid?(uns?ulong(whole):std::bit_cast<ulong>(int64_t(whole))):0UL) : ulong(valid);
       }
+      if (op==36||op==37) {
+        unsigned __int128 integer=(static_cast<unsigned __int128>(right[i])<<64)|left[i];
+        double rounded=op==37 ? double(integer) : double(std::bit_cast<__int128>(integer));
+        expected=std::bit_cast<ulong>(rounded);
+      }
       ulong host = op==0 ? f64_add(left[i],right[i]) : op==1 ? f64_sub(left[i],right[i]) :
                    op==2 ? f64_mul(left[i],right[i]) : op==3 ? f64_div(left[i],right[i]) :
                    op==4 ? ulong(f64_equal(left[i],right[i])) : op==5 ? ulong(f64_less(left[i],right[i])) :
@@ -241,7 +258,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
                    op==31 ? ulong(f32_mod(uint(left[i]),uint(right[i]))) :
                    op==32 ? ulong(f32_fma(uint(left[i]),uint(right[i]),f64_to_float32(f64_mul(f64_from_float32(uint(left[i])),f64_from_float32(uint(right[i]))))^0x80000000U)) :
                    op==33 ? ulong(f32_fma(uint(left[i]),uint(right[i]),uint((left[i]>>13)|(left[i]<<19)))) :
-                   op==34||op==35 ? ulong(f32_fma(uint(left[i]),uint(right[i]),op==34?0x17800000U:0x97800000U)) : test_integer(left[i],op);
+                   op==34||op==35 ? ulong(f32_fma(uint(left[i]),uint(right[i]),op==34?0x17800000U:0x97800000U)) : op==36||op==37 ? f64_from_wide(left[i],right[i],op==37) : test_integer(left[i],op);
       bool narrow=op==9||op==24||op==29||op==30||(op>=31&&op<=35);
       bool nan = op>=13 && op<21 ? false : narrow ? (expected&0x7fffffffUL)>0x7f800000UL : f64_nan(expected);
       bool actualNan = narrow ? (host&0x7fffffffUL)>0x7f800000UL && (gpu[i]&0x7fffffffUL)>0x7f800000UL : f64_nan(host) && f64_nan(gpu[i]);

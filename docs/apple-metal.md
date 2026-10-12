@@ -213,6 +213,16 @@ so no value-dependent range proof or CPU row evaluation is needed. Empty,
 all-null, and `min_count` results match the CPU. Reductions of Decimal128 inputs
 support counts, minimum, maximum, first, and last. Sums of Decimal128 inputs and decimal means still require CPU execution.
 
+Int64 and UInt64 sums and means accumulate exactly in two words on the GPU.
+The Int32.MAX row bound keeps every partial below 2**95, including unsigned
+inputs. Large intermediate totals may cancel before the final sum is checked
+against its result dtype. Mean rounds the exact total to Float64 and then divides
+by the valid count, matching the CPU integer accumulator. Empty, all-null and
+`min_count` results retain CPU semantics. Rebuild the optional native runtime
+for these reduction opcodes; legacy native sum and mean opcodes retain their
+existing range-proof behavior. Cost estimates identify the new accumulator
+family separately from older calibrations.
+
 Native Int64 kernels extract year, month, day, hour, minute, second,
 nanosecond, ISO weekday and ordinal day from dates, naive datetimes and times
 where the CPU API permits each field. Datetime date/time extraction preserves
@@ -234,9 +244,8 @@ form one equality class, and signed zeros compare equal. `maintain_order=True`
 returns groups in first-seen order, while rows within each group retain their
 input order. The default group order is key order. Projections, filtering,
 sorting, further grouping, and final reductions can follow a grouped result
-without returning intermediate data to the CPU. Checked Int32/UInt32 grouped
-sums, and sums requiring the Int64/UInt64 range proof, currently require
-terminal aggregation without head.
+without returning intermediate data to the CPU. Checked Int32/UInt32/Int64/UInt64
+grouped sums require terminal aggregation without head.
 
 The GPU sorts row indices, marks group boundaries, and builds group ranges.
 Each group reduction uses a 256-thread workgroup; GPU-produced dispatch
@@ -254,9 +263,9 @@ feeds the scalar reduction and row branch, and a GPU cross join broadcasts the
 scalar result. Empty inputs stay empty in row-valued consumers; all-null means
 broadcast null. Temporary columns do not appear in the output.
 
-Conditional scalar leaves remain restricted when eager evaluation could expose
-a data-dependent precision rejection: Float32 arithmetic inside such a leaf,
-and Int64/UInt64 means needing a range proof, reject before device execution.
+Conditional scalar Float32 arithmetic and Int64/UInt64 means retain their
+existing preflight rejection. Float32 arithmetic can still expose a precision
+failure during eager scalar evaluation.
 Nonthrowing Float64 leaves and direct Float32 column reductions can broadcast
 through conditional expressions. File-backed inputs still reject before source
 reads. Automatic placement keeps these multi-region plans on CPU until it can
@@ -298,14 +307,11 @@ Int32 and UInt32 sums retain their input dtype with a final range check. These
 sums use an exact Int64 accumulator. The initial input has at most Int32.MAX
 rows, so this accumulator cannot overflow even when partial sums cancel. Sum's
 `min_count` is retained. Int64, UInt64, and duration sums retain their result
-dtype and require a GPU range proof. For N input rows (or rows in a group),
-every valid positive value must fit the native positive maximum divided by N;
-every negative magnitude must fit 2**63 divided by N. Null rows do not trigger
-the check. This proves that every parallel subset and merge fits, without a
-wider accumulator. Scalar filtered reductions conservatively use the original
-row count when they skip compaction. An unproved input raises an unsupported
-accumulator error before caller outputs change, even when cancellation could
-make the final result fit. A later query can reuse the runtime after rejection.
+dtype. They accumulate exactly in two words, so intermediate totals may exceed
+64 bits and cancel before the final checked conversion. Null rows contribute
+nothing; an unmet `min_count` suppresses the result and its overflow check.
+A final total outside the result dtype raises an integer overflow error before
+caller outputs change. A later query can reuse the runtime after rejection.
 Float32 row arithmetic preserves separate operator
 rounding for supported operations and disables shader contraction and unsafe math
 optimizations. Metal can flush Float32 subnormal operands and results even in
@@ -323,11 +329,11 @@ Float32 sum narrows only once at completion, while means return Float64.
 As in the CPU mergeable floating state, reduction reassociation is allowed and
 bitwise reproducibility across execution schedules is not promised. Integer
 means retain an exact integer total before Float64 conversion and division.
-Their Int64/UInt64 inputs require the same native range proof as wide sums.
-Sums of Decimal128 inputs and decimal means still require CPU execution.
-Int64/UInt64 sums retain native accumulation with a range proof. Forced accelerator execution rejects statically
-unsupported operations before submission; Int64/UInt64 sum and integer mean
-range proofs can reject during GPU execution.
+Int64/UInt64 inputs use the exact two-word accumulator without a value-dependent
+range proof. Sums of Decimal128 inputs and decimal means still require CPU
+execution. Forced accelerator execution rejects statically unsupported
+operations before submission; checked final sums can raise overflow during
+execution.
 Int64/UInt64-to-Float32 casts emulate the CPU contract of rounding through
 Float64 before narrowing, including halfway boundaries above 2**53.
 Value-dependent precision failures are reported during execution. Automatic selection uses the shared
