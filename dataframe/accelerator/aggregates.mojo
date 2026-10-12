@@ -249,7 +249,12 @@ def lower_aggregate_compositions(query: LazyFrame) raises -> LazyFrame:
         operation.exprs = leaves^
         result._nodes.append(operation^)
         result._nodes.append(
-            _plan_node(SELECT, len(result._nodes) - 1, exprs=projected)
+            _plan_node(
+                SELECT,
+                len(result._nodes) - 1,
+                exprs=projected,
+                text=query._nodes[index].text,
+            )
         )
         roots.append(len(result._nodes) - 1)
     try:

@@ -6,6 +6,7 @@ before a provider context or device allocation is created.
 """
 from std.memory import bitcast
 from std.math import pow, abs
+from dataframe.parallel import configured_workers
 from .capabilities import RowCapabilities
 from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.dtype import DataType
@@ -98,6 +99,7 @@ comptime ROW_GROUP_OUTPUT = 1004
 comptime ROW_GROUP_HEADER_LAST = 1005
 comptime ROW_SLICE = 1006
 comptime ROW_RANK_KEY = 1007
+comptime ROW_GROUP_HEADER_WINDOW = 1008
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -1199,7 +1201,10 @@ def lower_rows(
             code.extend(
                 [
                     Int64(
-                        ROW_GROUP_HEADER_LAST if len(node.flags)
+                        ROW_GROUP_HEADER_WINDOW if node.text
+                        == "metal_window_materialization" else ROW_GROUP_HEADER_LAST if len(
+                            node.flags
+                        )
                         and node.flags[0] else ROW_GROUP_HEADER
                     ),
                     Int64(len(group_keys)),
@@ -1207,7 +1212,12 @@ def lower_rows(
                     Int64(first_slot),
                 ]
             )
-            literals.append(0)
+            literals.append(
+                bitcast[DType.float64](
+                    Int64(min(configured_workers(), Int(Int32.MAX)))
+                ) if node.text
+                == "metal_window_materialization" else 0
+            )
             node_dtypes.append(DataType.INT64)
             var grouped_schema = List[Series]()
             var grouped_slots = List[Int]()

@@ -32,6 +32,10 @@ from .accelerator.distinct_counts import (
     has_distinct_counts,
     lower_distinct_counts,
 )
+from .accelerator.windows import (
+    has_partition_aggregates,
+    lower_partition_aggregates,
+)
 from .accelerator.aggregates import (
     has_aggregate_compositions,
     lower_aggregate_compositions,
@@ -123,6 +127,7 @@ from .lazy import AcceleratorBackend, LazyFrame
 from .accelerator.rows import (
     ROW_GROUP_HEADER,
     ROW_GROUP_HEADER_LAST,
+    ROW_GROUP_HEADER_WINDOW,
     ROW_SLICE,
     ROW_GROUP_KEY,
     ROW_GROUP_OUTPUT,
@@ -386,6 +391,8 @@ def _op(op: Int) raises -> Int64:
         return 201
     if op == ROW_GROUP_HEADER_LAST:
         return 205
+    if op == ROW_GROUP_HEADER_WINDOW:
+        return 209
     if op == ROW_SLICE:
         return 206
     if op == ROW_GROUP_KEY:
@@ -1544,6 +1551,22 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_partition_aggregates(query):
+            var executed = self._run(
+                lower_partition_aggregates(query), profiling
+            )
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
         if has_aggregate_compositions(query):
             var executed = self._run(
                 lower_aggregate_compositions(query), profiling
@@ -1696,6 +1719,10 @@ struct MetalRuntime(AcceleratorBackend):
             if has_literal_text_parsing(query):
                 return "Metal literal text parsing; " + self.describe(
                     fold_literal_text_parsing(query)
+                )
+            if has_partition_aggregates(query):
+                return "Metal resident partition aggregates; " + self.describe(
+                    lower_partition_aggregates(query)
                 )
             if has_aggregate_compositions(query):
                 return "Metal resident aggregate expressions; " + self.describe(
