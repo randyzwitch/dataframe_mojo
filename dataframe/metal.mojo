@@ -357,6 +357,7 @@ def _capabilities() -> RowCapabilities:
         decimal_casts=True,
         decimal_comparisons=True,
         decimal_arithmetic=True,
+        decimal_multiplicative=True,
         reuse_column_slots=True,
         proven_integer_operations=True,
         max_nodes=128,
@@ -702,10 +703,17 @@ struct _Descriptors(Movable):
                     or plan.code[4 * i] == SUB
                     or plan.code[4 * i] == NEG
                     or plan.code[4 * i] == ABS
+                    or plan.code[4 * i] == MUL
+                    or plan.code[4 * i] == DIV
                 ):
                     var operand = Int(plan.code[4 * i + 1])
                     var source = plan.node_dtypes[step.start + operand]
-                    if plan.code[4 * i] == ADD or plan.code[4 * i] == SUB:
+                    if (
+                        plan.code[4 * i] == ADD
+                        or plan.code[4 * i] == SUB
+                        or plan.code[4 * i] == MUL
+                        or plan.code[4 * i] == DIV
+                    ):
                         var other = Int(plan.code[4 * i + 2])
                         self.code[4 * i + 3] = (
                             Int64(source.scale())
@@ -1695,6 +1703,13 @@ struct MetalRuntime(AcceleratorBackend):
             )
         if decimal_arithmetic:
             family += ";metal-decimal-arithmetic-v1"
+        var decimal_multiplicative = False
+        for i in range(len(plan.node_dtypes)):
+            decimal_multiplicative |= plan.node_dtypes[i].is_decimal() and (
+                plan.code[4 * i] == MUL or plan.code[4 * i] == DIV
+            )
+        if decimal_multiplicative:
+            family += ";metal-decimal-multiplicative-v1"
         var decimal_comparisons = False
         for step in plan.steps:
             for i in range(step.start, step.start + step.nodes):

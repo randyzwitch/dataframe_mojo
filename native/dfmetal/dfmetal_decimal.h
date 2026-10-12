@@ -139,6 +139,95 @@ inline DecimalArithmetic decimal_unary(ulong2 value, uint bits, bool absolute) {
   if (value.x == minimum.x && value.y == minimum.y) return {ulong2(0), 3};
   return {(!absolute || (value.y >> 63)) ? decimal_negate(value) : value, 0};
 }
+inline ulong2 decimal_wide_add(ulong2 a, ulong2 b) {
+  ulong low = a.x + b.x;
+  return ulong2(low, a.y + b.y + ulong(low < a.x));
+}
+inline ulong2 decimal_wide_multiply(ulong2 a, ulong2 b) {
+  return ulong2(a.x * b.x, a.y * b.x + a.x * b.y + mulhi(a.x, b.x));
+}
+inline bool decimal_signed_less(ulong2 a, ulong2 b) {
+  bool sa = (a.y >> 63) != 0, sb = (b.y >> 63) != 0;
+  return sa != sb ? sa : (a.y < b.y || (a.y == b.y && a.x < b.x));
+}
+inline bool decimal_is_zero(ulong2 value) { return !(value.x | value.y); }
+inline bool decimal_precision_overflow(ulong2 value) {
+  return decimal_wide_ge(decimal_magnitude(value), decimal_wide_pow10(38));
+}
+// Mojo '/' truncates signed integer division, while '%' is floor modulo.
+// Return that pair explicitly; it differs from C++ signed div/rem.
+inline DecimalWideDivision decimal_signed_divide(ulong2 a, ulong2 b) {
+  bool sa = (a.y >> 63) != 0, sb = (b.y >> 63) != 0;
+  ulong2 divisor = decimal_magnitude(b);
+  DecimalWideDivision parts = decimal_wide_divide(decimal_magnitude(a), divisor);
+  if (sa != sb) parts.value = decimal_negate(parts.value);
+  if (!decimal_is_zero(parts.remainder)) {
+    if (sa != sb) parts.remainder = decimal_wide_subtract(divisor, parts.remainder);
+    if (sb) parts.remainder = decimal_negate(parts.remainder);
+  }
+  return parts;
+}
+inline ulong2 decimal_round_signed(ulong2 value, ulong2 remainder, ulong2 divisor) {
+  ulong2 rest = decimal_wide_subtract(divisor, remainder);
+  bool equal = rest.x == remainder.x && rest.y == remainder.y;
+  if (decimal_signed_less(rest, remainder) || (equal && (value.x & 1UL)))
+    value = decimal_increment(value);
+  return value;
+}
+inline DecimalArithmetic decimal_multiply(ulong2 left, ulong2 right,
+                                           uint leftScale, uint rightScale) {
+  uint common = leftScale > rightScale ? leftScale : rightScale;
+  if (!decimal_scale_checked(left, common-leftScale).valid ||
+      !decimal_scale_checked(right, common-rightScale).valid)
+    return {ulong2(0), 1};
+  // Preserve _decimal_mul's signed bounds and its abs(Int128.MIN) behavior.
+  bool leftMinimum = left.x == 0 && left.y == 0x8000000000000000UL;
+  if (leftMinimum) return {ulong2(0), 1};
+  if (decimal_is_zero(left)) return {ulong2(0), 0};
+  ulong2 maximum = (right.y >> 63) ? ulong2(0, 0x8000000000000000UL)
+                                  : ulong2(~0UL, 0x7fffffffffffffffUL);
+  ulong2 permitted = decimal_wide_divide(maximum, decimal_magnitude(left)).value;
+  ulong2 magnitude = decimal_magnitude(right);
+  if (decimal_wide_ge(magnitude, permitted) &&
+      (magnitude.x != permitted.x || magnitude.y != permitted.y))
+    return {ulong2(0), 1};
+  ulong2 value = decimal_wide_multiply(left, right);
+  uint scale = leftScale < rightScale ? leftScale : rightScale;
+  if (scale) {
+    bool minimum = value.x == 0 && value.y == 0x8000000000000000UL;
+    if (minimum && scale <= 18) value = ulong2(0);
+    else {
+      value = decimal_half_even(value, scale);
+      if (minimum) value = decimal_negate(value);
+    }
+  }
+  return {value, decimal_precision_overflow(value) ? 2U : 0U};
+}
+inline DecimalArithmetic decimal_divide_rows(ulong2 left, ulong2 right,
+                                              uint leftScale, uint rightScale) {
+  uint common = leftScale > rightScale ? leftScale : rightScale;
+  if (!decimal_scale_checked(left, common-leftScale).valid ||
+      !decimal_scale_checked(right, common-rightScale).valid)
+    return {ulong2(0), 1};
+  if (decimal_is_zero(right)) return {ulong2(0), 4}; // CPU null quotient.
+  bool negative = ((left.y ^ right.y) >> 63) != 0;
+  ulong2 numerator = decimal_magnitude(left), divisor = decimal_magnitude(right);
+  DecimalWideDivision parts = decimal_signed_divide(numerator, divisor);
+  ulong2 value = parts.value, remainder = parts.remainder;
+  if (decimal_precision_overflow(value)) return {ulong2(0), 2};
+  uint shift = common + rightScale - leftScale;
+  for (uint i = 0; i < shift; ++i) {
+    value = decimal_wide_multiply(value, ulong2(10, 0));
+    if (decimal_precision_overflow(value)) return {ulong2(0), 2};
+    remainder = decimal_wide_multiply(remainder, ulong2(10, 0));
+    parts = decimal_signed_divide(remainder, divisor);
+    value = decimal_wide_add(value, parts.value);
+    remainder = parts.remainder;
+  }
+  value = decimal_round_signed(value, remainder, divisor);
+  if (decimal_precision_overflow(value)) return {ulong2(0), 2};
+  return {negative ? decimal_negate(value) : value, 0};
+}
 inline DecimalComparison decimal_compare(ulong2 left, ulong2 right,
                                           uint leftScale, uint rightScale,
                                           uint op) {
