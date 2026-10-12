@@ -1,4 +1,4 @@
-"""Partition aggregates materialized and broadcast entirely on the GPU."""
+"""Partition aggregates and nested window scopes materialized on the GPU."""
 from .metadata import schema_frame
 from std.collections import Dict
 from dataframe.binding import bind, ROWS
@@ -7,6 +7,10 @@ from dataframe.expr import (
     Node,
     COL,
     OVER,
+    CUM_SUM,
+    CUM_MIN,
+    CUM_MAX,
+    CUM_COUNT,
     SELECTOR,
     col,
     is_reduction,
@@ -29,27 +33,36 @@ from dataframe.lazy import (
 from .aggregates import _in_memory_sources
 
 
-def _aggregate_over(expression: Expr, index: Int) -> Bool:
+def _staged_over(expression: Expr, index: Int) -> Bool:
     if expression._nodes[index].op != OVER:
         return False
     var inner = subtree(expression, expression._nodes[index].left)
     for node in inner._nodes:
-        if is_reduction(node.op):
+        if (
+            is_reduction(node.op)
+            or node.op == OVER
+            or node.op == CUM_SUM
+            or node.op == CUM_MIN
+            or node.op == CUM_MAX
+            or node.op == CUM_COUNT
+        ):
             return True
     return False
 
 
 def has_partition_aggregates(query: LazyFrame) -> Bool:
     for operation in query._nodes:
+        if operation.text == "metal_window_materialization":
+            continue
         for expression in operation.exprs:
             for i in range(len(expression._nodes)):
-                if _aggregate_over(expression, i):
+                if _staged_over(expression, i):
                     return True
     return False
 
 
 def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
-    """Group a shared resident prefix, then align aggregates to its row order.
+    """Stage scopes bottom-up, aligning aggregates and preserving row windows.
 
     CPU evaluate() prepares every OVER state before evaluating its consumer.
     Only these internal producers are marked as observable materializations;
@@ -82,8 +95,8 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
         var changed = False
         for expression in operation.exprs:
             for i in range(len(expression._nodes)):
-                changed |= _aggregate_over(expression, i)
-        if not changed:
+                changed |= _staged_over(expression, i)
+        if not changed or operation.text == "metal_window_materialization":
             result._nodes.append(operation^)
             roots.append(len(result._nodes) - 1)
             continue
@@ -119,24 +132,22 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
             for n in range(len(bound.expr._nodes)):
                 var node = bound.expr._nodes[n].copy()
                 positions[n] = len(rewritten)
-                if _aggregate_over(bound.expr, n):
+                if node.op == OVER:
                     # Earlier OVER nodes already name their aligned resident
                     # results. Extract from that rewritten graph so a nested
-                    # aggregate consumes the inner window's rows.
+                    # window consumes the inner window's rows.
                     var prepared = Expr(rewritten.copy(), expression._name)
                     var inner = subtree(prepared, positions[node.left])
                     var dependent = False
+                    var windowed = False
                     for child in inner._nodes:
-                        if (
-                            child.op == OVER
-                            or is_window(child.op)
-                            or child.op == SELECTOR
-                        ):
+                        if child.op == OVER or child.op == SELECTOR:
                             raise Error(
                                 "Metal unsupported [window]: nested windows and"
                                 " selectors"
                             )
                         dependent |= child.op == COL and child.text in temporary
+                        windowed |= is_window(child.op)
                     var producer = prefix
                     if dependent:
                         # A row owner above the preceding join is shared by
@@ -157,11 +168,6 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                         aligned = producer
                     var producer_schema = schema_frame(result, producer)
                     var inner_bound = bind(inner, producer_schema._columns)
-                    if inner_bound.shape() == ROWS:
-                        raise Error(
-                            "Metal unsupported [window]: row-valued partition"
-                            " expression"
-                        )
                     var name = "__dataframe_metal_window_" + String(serial)
                     serial += 1
                     while name in names:
@@ -169,30 +175,46 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                     names[name] = True
                     temporary.append(name)
                     var keys = split_names(node.text2)
-                    result._nodes.append(
-                        _plan_node(
-                            AGG,
-                            producer,
-                            exprs=[inner.alias(name)],
-                            names=keys,
-                            maintain_order=True,
-                            text="metal_window_materialization",
+                    if inner_bound.shape() == ROWS:
+                        result._nodes.append(
+                            _plan_node(
+                                WITH_COLUMNS,
+                                aligned,
+                                exprs=[
+                                    (
+                                        inner.over(
+                                            keys
+                                        ) if windowed else inner.copy()
+                                    ).alias(name)
+                                ],
+                                text="metal_window_materialization",
+                            )
                         )
-                    )
-                    var grouped = len(result._nodes) - 1
-                    result._nodes.append(
-                        _plan_node(
-                            JOIN,
-                            aligned,
-                            grouped,
-                            names=keys,
-                            right_keys=keys,
-                            names2=["_right"],
-                            how=1,
-                            text="left",
-                            flags=[True],
+                    else:
+                        result._nodes.append(
+                            _plan_node(
+                                AGG,
+                                producer,
+                                exprs=[inner.alias(name)],
+                                names=keys,
+                                maintain_order=True,
+                                text="metal_window_materialization",
+                            )
                         )
-                    )
+                        var grouped = len(result._nodes) - 1
+                        result._nodes.append(
+                            _plan_node(
+                                JOIN,
+                                aligned,
+                                grouped,
+                                names=keys,
+                                right_keys=keys,
+                                names2=["_right"],
+                                how=1,
+                                text="left",
+                                flags=[True],
+                            )
+                        )
                     aligned = len(result._nodes) - 1
                     rewritten.append(_node(COL, text=name))
                 else:
