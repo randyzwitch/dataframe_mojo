@@ -52,6 +52,7 @@ struct RowCapabilities(Copyable):
     var decimal128: Bool
     var ranks: Bool
     var reuse_column_slots: Bool
+    var proven_integer_operations: Bool
     var max_nodes: Int
     var max_slots: Int
     var max_steps: Int
@@ -90,6 +91,7 @@ struct RowCapabilities(Copyable):
         max_steps: Int = 64,
         max_join_columns: Int = 64,
         reuse_column_slots: Bool = False,
+        proven_integer_operations: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -117,6 +119,7 @@ struct RowCapabilities(Copyable):
         self.ranks = ranks
         self.decimal128 = decimal128
         self.reuse_column_slots = reuse_column_slots
+        self.proven_integer_operations = proven_integer_operations
         self.max_nodes = max_nodes
         self.max_slots = max_slots
         self.max_steps = max_steps

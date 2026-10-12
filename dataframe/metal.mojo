@@ -343,6 +343,7 @@ def _capabilities() -> RowCapabilities:
         ranks=True,
         decimal128=True,
         reuse_column_slots=True,
+        proven_integer_operations=True,
         max_nodes=128,
         max_slots=128,
         max_steps=128,
