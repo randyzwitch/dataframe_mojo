@@ -78,6 +78,52 @@ inline ulong2 decimal_wide_pow10(uint scale) {
   }
   return value;
 }
+inline ulong2 decimal_negate(ulong2 value) {
+  ulong low = ~value.x + 1UL;
+  return ulong2(low, ~value.y + ulong(low == 0));
+}
+inline ulong2 decimal_magnitude(ulong2 value) {
+  return (value.y >> 63) ? decimal_negate(value) : value;
+}
+inline ulong2 decimal_increment(ulong2 value) {
+  ulong low = value.x + 1UL;
+  return ulong2(low, value.y + ulong(low == 0));
+}
+inline ulong2 decimal_half_even(ulong2 value, uint scale) {
+  bool negative = (value.y >> 63) != 0;
+  ulong2 unit = decimal_wide_pow10(scale);
+  DecimalWideDivision divided = decimal_wide_divide(decimal_magnitude(value), unit);
+  ulong2 rest = decimal_wide_subtract(unit, divided.remainder);
+  if (decimal_wide_ge(divided.remainder, rest) &&
+      (divided.remainder.x != rest.x || divided.remainder.y != rest.y ||
+       (divided.value.x & 1UL)))
+    divided.value = decimal_increment(divided.value);
+  return negative ? decimal_negate(divided.value) : divided.value;
+}
+struct DecimalCast { ulong2 value; bool valid; };
+inline DecimalCast decimal_cast(ulong2 value, uint fromScale, uint toScale,
+                                uint precision, uint bits, bool isUnsigned,
+                                bool isBoolean) {
+  if (fromScale > toScale) {
+    value = decimal_half_even(value, fromScale - toScale);
+  } else {
+    // Match CPU Int128 rescaling, including its fixed-width intermediate.
+    for (uint i = fromScale; i < toScale; ++i)
+      value = ulong2(value.x * 10UL, value.y * 10UL + mulhi(value.x, 10UL));
+  }
+  bool negative = (value.y >> 63) != 0;
+  ulong2 magnitude = decimal_magnitude(value);
+  if (precision)
+    return {value, !decimal_wide_ge(magnitude, decimal_wide_pow10(precision))};
+  if (isBoolean)
+    return {ulong2(ulong(magnitude.x != 0 || magnitude.y != 0), 0), true};
+  ulong maximum = isUnsigned
+      ? (bits == 64 ? ~0UL : (1UL << bits) - 1UL)
+      : (1UL << (bits - 1)) - ulong(!negative);
+  bool valid = magnitude.y == 0 && magnitude.x <= maximum &&
+               !(isUnsigned && negative);
+  return {value, valid};
+}
 // Decimal128 totals and scale divisors may both exceed one word. Retain the
 // CPU decimal_mean quotient/remainder sequence and each separate Float64
 // conversion rather than dividing rounded binary64 values.

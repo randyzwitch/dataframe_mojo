@@ -242,7 +242,20 @@ because every valid decimal fits Float64. These casts can appear in filters,
 join branches, aggregate consumers, windows, or before a head. Decimal32/64
 SUM results can consequently be cast from their Decimal128 result to Float64.
 Estimates include `metal-decimal-float-casts-v1`; prior calibrations do not apply.
-Other logical arithmetic and cast combinations retain their existing limits.
+
+Decimal32/64/128 casts also support changing scale or storage width, converting
+to every supported signed or unsigned integer width, Bool, or Float32, and
+converting integer or Boolean inputs to decimals. Reducing scale and converting
+to integers rounds half to even, including negative ties. Float32 conversion
+follows the CPU sequence: convert the integer to Float64, divide by the
+Float64 scale divisor, then narrow to Float32. Rescaling and range checks use
+integer arithmetic. Strict casts raise for observed
+invalid values; lax casts produce nulls. Conditional branches, nulls, filters,
+resident joins, reductions, windows, and final heads retain CPU error observation.
+Strict casts without a static range proof retain the requirement for a terminal
+projection without a head; lax casts can appear throughout resident regions.
+Rebuild the native library for these cast descriptors. Estimates include
+`metal-decimal-casts-v1`, so previous cast calibrations do not apply.
 
 Decimal32/64 means return Float64. The GPU divides the exact two-word total
 by the valid count and then by the decimal scale, retaining both integer
@@ -519,6 +532,7 @@ python3 native/dfmetal/test_join.py
 python3 native/dfmetal/test_resident.py
 python3 native/dfmetal/test_float64.py
 python3 native/dfmetal/test_decimal.py
+python3 native/dfmetal/test_decimal_casts.py
 pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
 pixi run mojo run -I . tests/test_metal_completeness.mojo
