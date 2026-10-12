@@ -200,5 +200,3 @@ def test_native_metal_concat_dictionary_pair_capacity_byte_budget_and_recovery()
     assert_true(
         query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
     )
-
-
