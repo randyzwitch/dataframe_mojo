@@ -22,8 +22,8 @@ imports. Independent reference semantics have no dataframe dependency.
 Shared comparators check names, logical types, shapes, ordered cells and validity.
 Known implementation defects run with exact diagnostic matching; an unrelated
 failure or unexpected pass fails the suite. Fatal defects run in isolated
-processes with exact exit-status matching. Native hardware cases report explicit
-capability skips and require actual device execution when enabled. Named module
+processes with exact platform-specific exit-status matching. Native hardware
+cases report explicit capability skips and require actual device execution when enabled. Named module
 groups, failure signatures and capability gates live in
 [`tests/tooling/suite_policy.mojo`](../tests/tooling/suite_policy.mojo).
 

@@ -1,5 +1,8 @@
 """Runner sensitivity: discovery, quoting, strict failure matching and continuation."""
 from std.testing import TestSuite, assert_equal, assert_true, assert_raises
+from std.ffi import external_call
+from std.sys import CompilationTarget
+from tests.support.mapped_pages import assert_mapped_page, assert_unmapped_page
 from dataframe.json_value import JsonValue
 from tests.tooling.suite_policy import (
     SuitePolicy,
@@ -355,6 +358,30 @@ def test_capability_requirements_omit_imports_and_record_skips_separately() rais
         )
 
 
+def test_mapping_probe_rejects_mapped_pages_and_observes_each_unmap() raises:
+    var page = Int(external_call["getpagesize", Int32]())
+    var anonymous = 0x1000 if CompilationTarget.is_macos() else 0x20
+    var region = external_call["mmap", Int](
+        Int(0), 2 * page, Int32(3), Int32(anonymous | 2), Int32(-1), Int(0)
+    )
+    assert_true(region != -1)
+    # Do not touch the pages first: mapped, nonresident pages must not be
+    # mistaken for released memory by a residency-only check.
+    assert_mapped_page(region)
+    assert_mapped_page(region + page)
+    with assert_raises(
+        contains="producer backing page must really be unmapped"
+    ):
+        assert_unmapped_page(region)
+    assert_equal(external_call["munmap", Int32](region, page), Int32(0))
+    assert_unmapped_page(region)
+    assert_mapped_page(region + page)
+    assert_equal(external_call["munmap", Int32](region + page, page), Int32(0))
+    assert_unmapped_page(region + page)
+    with assert_raises(contains="source page must be mapped"):
+        assert_mapped_page(region)
+
+
 def main() raises:
     var suite = TestSuite()
     suite.test[
@@ -375,5 +402,8 @@ def main() raises:
     ]()
     suite.test[
         test_capability_requirements_omit_imports_and_record_skips_separately
+    ]()
+    suite.test[
+        test_mapping_probe_rejects_mapped_pages_and_observes_each_unmap
     ]()
     suite^.run()

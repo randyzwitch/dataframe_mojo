@@ -32,8 +32,8 @@ after build or process failures. `--packaging combined` explicitly shares one
 executable. Run metadata and logs are stored under `build/contract-tests/`.
 
 An unrelated error or unexpected pass fails a strict expected-failure check.
-Fatal defects run in isolated processes and must match both the recorded exit
-status and diagnostic. An XFAIL establishes the first reached defect; later
+Fatal defects run in isolated processes and must match both the recorded
+platform-specific exit status and diagnostic. An XFAIL establishes the first reached defect; later
 combinations in that test remain unvalidated.
 
 Hardware omissions are recorded as `SKIP(capability)`. Enable actual Metal checks

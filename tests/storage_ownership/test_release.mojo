@@ -1,6 +1,7 @@
 """Resource ownership verified with real foreign callbacks and production cursors."""
 from std.memory import Pointer
 from std.testing import assert_equal, assert_true, assert_raises
+from tests.support.mapped_pages import assert_mapped_page, assert_unmapped_page
 from dataframe import (
     ArrowArray,
     ArrowSchema,
@@ -241,14 +242,7 @@ def consume_discarded_csv_pages(path: String) raises -> List[DataFrame]:
     var mapping = _map_file(path)
     assert_true(mapping.address != 0)
     var first_page = mapping.address
-    var page = Int(external_call["getpagesize", Int32]())
-    var residency: List[UInt8] = [0]
-    assert_equal(
-        external_call["mincore", Int32](
-            first_page, page, residency.unsafe_ptr()
-        ),
-        Int32(0),
-    )
+    assert_mapped_page(first_page)
     var schema = CsvSchema([CsvField.int64("x"), CsvField.string("s")])
     var cursor = _CsvBatches(mapping^, schema^, [], -1, 37)
     var frames = List[DataFrame]()
@@ -264,12 +258,7 @@ def consume_discarded_csv_pages(path: String) raises -> List[DataFrame]:
         if not proved_unmapped and cursor.mapping.address != first_page:
             # Probe the actual mapping; a counter or a copied result alone
             # would not prove that the source pages ceased to exist.
-            assert_equal(
-                external_call["mincore", Int32](
-                    first_page, page, residency.unsafe_ptr()
-                ),
-                Int32(-1),
-            )
+            assert_unmapped_page(first_page)
             proved_unmapped = True
     assert_true(proved_unmapped)
     return frames^

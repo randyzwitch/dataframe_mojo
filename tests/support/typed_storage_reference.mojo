@@ -22,6 +22,7 @@ from dataframe import (
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.arrow import _read_c_string
 from tests.support.lifecycle_stream import ArrayRelease, array_release, at
+from tests.support.mapped_pages import assert_mapped_page, assert_unmapped_page
 from tests.support.selection_types_reference import (
     assert_selection_cell,
     selection_column,
@@ -261,7 +262,7 @@ def foreign_page(
     var page = Int(external_call["getpagesize", Int32]())
     var length = ((bytes + page - 1) // page) * page
     # MAP_ANON is 0x1000 on Darwin and 0x20 on Linux; MAP_PRIVATE is
-    # 0x2 on both. mincore uses a byte vector on both platforms.
+    # 0x2 on both.
     comptime MAP_FLAGS = 0x1002 if CompilationTarget.is_macos() else 0x22
     var address = external_call["mmap", Int](
         0, length, Int32(3), Int32(MAP_FLAGS), Int32(-1), Int64(0)
@@ -346,37 +347,23 @@ def make_foreign_pages(
     var release: ArrayRelease = release_foreign_pages
     array.release = Pointer(to=release).unsafe_bitcast[Int]()[]
     array.private_data = Int(Pointer(to=state))
-    var resident: List[UInt8] = [0]
     var page = Int(external_call["getpagesize", Int32]())
     for i in range(len(state.pages)):
         for address in [
             state.pages[i],
             state.pages[i] + state.lengths[i] - page,
         ]:
-            assert_equal(
-                external_call["mincore", Int32](
-                    address, page, resident.unsafe_ptr()
-                ),
-                Int32(0),
-                "foreign source pages must be mapped before import",
-            )
+            assert_mapped_page(address)
 
 
 def assert_foreign_unmapped(state: ForeignPages) raises:
     assert_equal(state.calls, 1)
     assert_equal(state.unmapped, len(state.pages))
     assert_equal(state.failed_unmaps, 0)
-    var resident: List[UInt8] = [0]
     var page = Int(external_call["getpagesize", Int32]())
     for i in range(len(state.pages)):
         for address in [
             state.pages[i],
             state.pages[i] + state.lengths[i] - page,
         ]:
-            assert_equal(
-                external_call["mincore", Int32](
-                    address, page, resident.unsafe_ptr()
-                ),
-                Int32(-1),
-                "producer backing pages must really be unmapped",
-            )
+            assert_unmapped_page(address)
