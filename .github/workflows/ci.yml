@@ -22,10 +22,28 @@ jobs:
       - uses: ./.github/actions/setup-parquet
       - name: Verify native Parquet exported ABI
         run: pixi run --locked check-parquet-abi
-      - name: Validate native Arrow C stream independently with diagnostics
+      - name: Diagnose cached native library with system memory pool
         continue-on-error: true
+        env:
+          ARROW_DEFAULT_MEMORY_POOL: system
         run: pixi run --locked -e oracle python3 tests/support/native_stream_oracle.py build/dfparquet/libdfparquet.dylib
-      - name: Diagnose native library loading before PyArrow
-        run: >-
-          pixi run --locked -e oracle python3 -c
-          'import ctypes, runpy, sys; native = ctypes.CDLL("build/dfparquet/libdfparquet.dylib"); sys.argv = ["tests/support/native_stream_oracle.py", "build/dfparquet/libdfparquet.dylib"]; runpy.run_path(sys.argv[0], run_name="__main__")'
+
+  oracle-macos-clean:
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          cache: true
+      - name: Install locked independent consumers
+        run: pixi install --locked -e oracle
+      - name: Build native Parquet library without binary cache
+        run: pixi run --locked -e native bash native/dfparquet/build.sh build/dfparquet-clean
+      - name: Validate clean native library with default memory pool
+        run: pixi run --locked -e oracle python3 tests/support/native_stream_oracle.py build/dfparquet-clean/libdfparquet.dylib
+      - name: Validate clean native library with system memory pool
+        if: always()
+        env:
+          ARROW_DEFAULT_MEMORY_POOL: system
+        run: pixi run --locked -e oracle python3 tests/support/native_stream_oracle.py build/dfparquet-clean/libdfparquet.dylib
