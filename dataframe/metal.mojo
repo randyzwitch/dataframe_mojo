@@ -641,6 +641,7 @@ struct _Descriptors(Movable):
         for i in range(0, len(self.code), 4):
             self.typed |= (
                 self.code[i] == CAST
+                or self.code[i] == DIV
                 or self.code[i] == WHEN
                 or self.code[i] == INT_IS_IN
                 or self.code[i] == ROW_SLICE
@@ -1606,6 +1607,7 @@ struct MetalRuntime(AcceleratorBackend):
                 emulated = True
             if plan.node_dtypes[i].is_float() and (
                 plan.code[i * 4] == ROUND
+                or plan.code[i * 4] == DIV
                 or plan.code[i * 4] == SQRT
                 or plan.code[i * 4] == FLOORDIV
                 or plan.code[i * 4] == MOD
@@ -1636,6 +1638,15 @@ struct MetalRuntime(AcceleratorBackend):
                 )
         if emulated:
             family += ";metal-emulated-float64-v1"
+        for i in range(len(plan.node_dtypes)):
+            if plan.node_dtypes[i] == DataType.FLOAT32 and (
+                plan.code[i * 4] == ADD
+                or plan.code[i * 4] == SUB
+                or plan.code[i * 4] == MUL
+                or plan.code[i * 4] == DIV
+            ):
+                family += ";metal-float32-arithmetic-v1"
+                break
         return PlanEstimate(
             work[0].copy(), device^, Int(memory[2]), family^, "accel"
         )
@@ -1754,7 +1765,8 @@ struct MetalRuntime(AcceleratorBackend):
             return (executed[0].copy(), report^)
         if has_aggregate_compositions(query):
             var executed = self._run(
-                lower_aggregate_compositions(query), profiling
+                lower_aggregate_compositions(query, exact_float32=True),
+                profiling,
             )
             var report = executed[1].with_column(
                 Series(
@@ -1911,7 +1923,7 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             if has_aggregate_compositions(query):
                 return "Metal resident aggregate expressions; " + self.describe(
-                    lower_aggregate_compositions(query)
+                    lower_aggregate_compositions(query, exact_float32=True)
                 )
             if has_distinct_counts(query):
                 return "Metal resident distinct counts; " + self.describe(

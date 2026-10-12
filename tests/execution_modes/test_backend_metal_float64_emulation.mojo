@@ -181,7 +181,7 @@ def test_native_metal_float64_emulation_has_separate_automatic_cost_family() rai
         runtime.estimate_auto(
             narrow.lazy().select(col("x") + lit(Float32(1)))
         ).family,
-        "float32",
+        "float32;metal-float32-arithmetic-v1",
     )
 
 

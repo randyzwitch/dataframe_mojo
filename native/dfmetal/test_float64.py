@@ -142,7 +142,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
           op==31 ? ulong(f32_mod(uint(a[i]),uint(b[i]))) :
           op==32 ? ulong(f32_fma(uint(a[i]),uint(b[i]),f64_to_float32(f64_mul(f64_from_float32(uint(a[i])),f64_from_float32(uint(b[i]))))^0x80000000U)) :
           op==33 ? ulong(f32_fma(uint(a[i]),uint(b[i]),uint((a[i]>>13)|(a[i]<<19)))) :
-          op==34||op==35 ? ulong(f32_fma(uint(a[i]),uint(b[i]),op==34?0x17800000U:0x97800000U)) : op==36||op==37 ? f64_from_wide(a[i],b[i],op==37) : test_integer(a[i],op);
+          op==34||op==35 ? ulong(f32_fma(uint(a[i]),uint(b[i]),op==34?0x17800000U:0x97800000U)) : op==36||op==37 ? f64_from_wide(a[i],b[i],op==37) : op==38 ? ulong(f32_add(uint(a[i]),uint(b[i]))) : op==39 ? ulong(f32_sub(uint(a[i]),uint(b[i]))) : op==40 ? ulong(f32_mul(uint(a[i]),uint(b[i]))) : op==41 ? ulong(f32_div(uint(a[i]),uint(b[i]))) : test_integer(a[i],op);
 }
 )shader";
   NSError *error = nil;
@@ -159,7 +159,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
   id<MTLBuffer> b = [device newBufferWithBytes:right.data() length:bytes options:MTLResourceStorageModeShared];
   id<MTLBuffer> out = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
   size_t checked = 0;
-  for (uint op = 0; op < 38; ++op) {
+  for (uint op = 0; op < 42; ++op) {
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:pipeline];
@@ -225,6 +225,11 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
         else result=std::fma(a32,b32,std::bit_cast<float>(op==34?0x17800000U:0x97800000U));
         expected=std::bit_cast<uint>(result);
       }
+      if (op>=38) {
+        volatile float a32=std::bit_cast<float>(uint(left[i])), b32=std::bit_cast<float>(uint(right[i]));
+        float result=op==38 ? a32+b32 : op==39 ? a32-b32 : op==40 ? a32*b32 : a32/b32;
+        expected=std::bit_cast<uint>(result);
+      }
       if (op==29) expected=std::bit_cast<uint>(std::sqrt(std::bit_cast<float>(uint(left[i]))));
       if (op==28) expected=std::bit_cast<ulong>(std::sqrt(x));
       if (op==27) expected=std::bit_cast<ulong>(std::fma(x,y,std::bit_cast<double>((left[i]>>31)|(left[i]<<33))));
@@ -258,8 +263,8 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
                    op==31 ? ulong(f32_mod(uint(left[i]),uint(right[i]))) :
                    op==32 ? ulong(f32_fma(uint(left[i]),uint(right[i]),f64_to_float32(f64_mul(f64_from_float32(uint(left[i])),f64_from_float32(uint(right[i]))))^0x80000000U)) :
                    op==33 ? ulong(f32_fma(uint(left[i]),uint(right[i]),uint((left[i]>>13)|(left[i]<<19)))) :
-                   op==34||op==35 ? ulong(f32_fma(uint(left[i]),uint(right[i]),op==34?0x17800000U:0x97800000U)) : op==36||op==37 ? f64_from_wide(left[i],right[i],op==37) : test_integer(left[i],op);
-      bool narrow=op==9||op==24||op==29||op==30||(op>=31&&op<=35);
+                   op==34||op==35 ? ulong(f32_fma(uint(left[i]),uint(right[i]),op==34?0x17800000U:0x97800000U)) : op==36||op==37 ? f64_from_wide(left[i],right[i],op==37) : op==38 ? ulong(f32_add(uint(left[i]),uint(right[i]))) : op==39 ? ulong(f32_sub(uint(left[i]),uint(right[i]))) : op==40 ? ulong(f32_mul(uint(left[i]),uint(right[i]))) : op==41 ? ulong(f32_div(uint(left[i]),uint(right[i]))) : test_integer(left[i],op);
+      bool narrow=op>=38||op==9||op==24||op==29||op==30||(op>=31&&op<=35);
       bool nan = op>=13 && op<21 ? false : narrow ? (expected&0x7fffffffUL)>0x7f800000UL : f64_nan(expected);
       bool actualNan = narrow ? (host&0x7fffffffUL)>0x7f800000UL && (gpu[i]&0x7fffffffUL)>0x7f800000UL : f64_nan(host) && f64_nan(gpu[i]);
       if ((nan ? !actualNan : host != expected || gpu[i] != expected)) {
