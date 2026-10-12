@@ -50,6 +50,7 @@ struct RowCapabilities(Copyable):
     var scalar_regions: Bool
     var temporal_fields: Bool
     var decimal128: Bool
+    var decimal_mean: Bool
     var ranks: Bool
     var reuse_column_slots: Bool
     var proven_integer_operations: Bool
@@ -86,6 +87,7 @@ struct RowCapabilities(Copyable):
         temporal_fields: Bool = False,
         ranks: Bool = False,
         decimal128: Bool = False,
+        decimal_mean: Bool = False,
         max_nodes: Int = 64,
         max_slots: Int = 64,
         max_steps: Int = 64,
@@ -118,6 +120,7 @@ struct RowCapabilities(Copyable):
         self.temporal_fields = temporal_fields
         self.ranks = ranks
         self.decimal128 = decimal128
+        self.decimal_mean = decimal_mean
         self.reuse_column_slots = reuse_column_slots
         self.proven_integer_operations = proven_integer_operations
         self.max_nodes = max_nodes
@@ -227,7 +230,12 @@ struct RowCapabilities(Copyable):
             return
         if op == COUNT or op == LEN:
             return
-        if op == MEAN and dtype.is_decimal() and self.float64_emulated:
+        if (
+            op == MEAN
+            and dtype.is_decimal()
+            and self.float64_emulated
+            and not self.decimal_mean
+        ):
             self.reject(
                 "logical", "decimal mean requires scaled Float64 conversion"
             )
