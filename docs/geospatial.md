@@ -165,45 +165,26 @@ is no spatial bounding-box pruning yet.
 
 ## Validation
 
-`tests/test_geospatial.mojo` covers storage, GeoJSON, malformed inputs,
-metadata, dataframe operations, and Arrow round-trips.
-`tests/test_geoparquet.mojo` uses external PyArrow-generated fixtures and checks
-reads/writes, CRS rules, projections, lazy execution, and empty files.
-Regenerate fixtures with `pixi run -e oracle python scripts/make_geospatial_fixtures.py`.
-Run the independent producer/consumer check with
-`pixi run -e oracle oracle-geospatial` after building `libdfparquet`.
+[`test_spatial.mojo`](../tests/interchange/test_spatial.mojo) and
+[`test_spatial_edges.mojo`](../tests/interchange/test_spatial_edges.mojo) exercise
+WKB, GeoJSON, Shapefile and GeoParquet against independent literal geometry and
+record models. They cover all seven WKB families, four coordinate layouts, both
+byte orders and mixed-order children, nulls and empties, malformed records, CRS
+metadata, projection and group ordering, and fresh writer type/bounds inventories.
 
-`pixi run -e oracle oracle-geoparquet` runs the GeoParquet interoperability
-checks used in CI. GeoPandas produces both 1.0 and 1.1 files, and DuckDB Spatial
-produces 1.0 files through its native Parquet writer. Both engines read the
-Mojo-written full, empty, filtered, empty-geometry and null-only outputs with
-warnings treated as errors.
-The checks compare exact WKB, CRS, geometry types and fresh file bounds across
-all seven geometry families, XY/XYZ, nulls and empties. CRS cases include unknown,
-CRS84 and projected coordinates. DuckDB's V1 writer omits CRS for untagged
-geometry, which declares CRS84; GeoPandas supplies the explicit-null CRS case.
-The suite also checks row-group selection and lazy pruning past corrupted row
-groups, eager/lazy projections over invalid WKB and corrupted geometry pages,
-unknown-version rejection, and ordinary binary Parquet. Mutation checks reject
-changed CRS, type inventories, bounds, WKB and missing metadata.
-It uses the same Spatial extension installation/cache as the Arrow
-oracle below; installation failures fail the check.
+```sh
+pixi run -e native build-dfparquet
+pixi run test --areas interchange
+pixi run -e oracle test-interchange-oracles
+```
 
-`tests/test_geometry_accessors.mojo` covers all seven WKB families, all four
-coordinate layouts, both byte orders (including mixed-order children), empty
-and null rows, chunked errors, display, and CRS-preserving operations.
-`pixi run -e oracle oracle-geometry` compares WKB, types, per-row and total bounds,
-and CRS with GeoPandas/GEOS, then checks GeoParquet output through GeoPandas.
-GeoPandas and Shapely are development-only dependencies in the oracle environment.
-
-The same `oracle-geometry` CI task also runs the DuckDB Spatial Arrow C oracle.
-Run it alone with `pixi run -e oracle oracle-duckdb-spatial`. Its setup installs
-DuckDB's official Spatial extension over HTTPS into `build/duckdb_extensions`
-(the first run needs network access). Installation or loading failures fail the
-check rather than skipping it. DuckDB itself constructs and exports the WKB
-and GeoArrow metadata: seven geometry families, XY/XYZ/XYM/XYZM, nulls, empties,
-unknown CRS, EPSG:4326 and EPSG:3857, with binary and large_binary layouts.
-Mojo imports/exports through the C interface, then DuckDB consumes the result
-as GEOMETRY and checks WKB bytes, CRS, type, dimensions, emptiness and coordinate
-counts. Reordered rows and a Mojo-originated GeoJSON round trip are covered.
-Mutation checks ensure metadata loss, CRS changes and changed WKB are detected.
+The final command consumes actual suite writer outputs using PyArrow, GeoPandas
+and an installed DuckDB Spatial extension. PyArrow checks schemas, WKB, CRS,
+primary geometry, row groups and filtered bounds. GeoPandas checks geometry
+recognition, exact coordinates, XYZ, empty schema and CRS with warnings treated
+as errors. DuckDB Spatial checks actual GeoParquet interpretation when available.
+The adapter reports missing optional engines or an absent compatible Spatial
+extension as unavailable and attempts no extension download; semantic or loading
+errors for available engines fail. An unavailable engine is not passing
+interoperability evidence. See [the testing guide](testing.md) and
+[coverage guide](test-coverage-plan.md) for validation scope and test design.

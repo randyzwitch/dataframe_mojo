@@ -87,13 +87,16 @@ Import is a bulk memory copy.
 
 ## Testing
 
-`tests/test_arrow.mojo` round-trips every dtype, window offsets, and empty
-frames, and checks that every release runs exactly once. `pixi run -e oracle
-oracle-arrow` (dev only) checks interop with pyarrow, in both directions:
-- exports pass `validate(full=True)`;
-- pyarrow reads our buffers in place (buffer addresses match);
-- pyarrow-produced arrays, including sliced ones, import correctly;
-- unsupported types are rejected and still released.
+[`test_arrow.mojo`](../tests/interchange/test_arrow.mojo) and
+[`test_arrow_edges.mojo`](../tests/interchange/test_arrow_edges.mojo) exercise typed
+cells, offset buffers, nested/dictionary layouts, arbitrary field metadata,
+malformed inputs and exactly-once release callbacks. Expected values come from
+independent fixtures and typed literals. Run `pixi run test --contracts io.arrow`.
+
+After the interchange suite, `pixi run -e oracle test-interchange-oracles`
+validates independent PyArrow fixtures and consumes actual Parquet/GeoParquet
+writer artifacts. The [coverage guide](test-coverage-plan.md) describes boundary
+and lifetime evidence; a roundtrip alone does not establish interoperability.
 
 Large record batches can copy columns in parallel on Linux. Release remains
 owned by the caller after all jobs finish; Parquet reuses the pool between
@@ -126,5 +129,5 @@ clears metadata when the dtype changes, avoiding stale extension declarations.
 unrelated application metadata. Root schema application metadata is outside
 this field-metadata contract.
 
-Run the independent registered/unknown extension oracle with
-`pixi run -e oracle oracle-arrow-metadata`.
+Run registered/unknown extension and field-metadata contracts with
+`pixi run test --contracts io.arrow`.

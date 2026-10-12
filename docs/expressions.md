@@ -37,6 +37,14 @@ expression in an operation is bound before any expression kernel executes.
 Duplicate output names, unknown columns, invalid types, negative `min_count`,
 and nested aggregates raise even on empty dataframes.
 
+A bare `col("category")` retains its categorical dtype and dictionary. An
+expression that operates on categorical values reads their decoded String
+values. Its result follows the String operation's type, including String
+extrema and first/last, String mode values, and String fields in value counts.
+The reduction table's "same" and "input type" refer to this decoded input.
+Direct table operations such as filtering, sorting, taking rows, and joining
+retain categorical metadata under their own contracts.
+
 Operands must have matching dtypes; there is no implicit promotion or index
 alignment (`cast` mixed widths explicitly). Nulls propagate through every
 operator below; NaN is distinct from null. Numeric types are Int8, Int16,
@@ -58,6 +66,11 @@ and UInt64 compute in 128 bits and range-check the result.
 | `.sqrt()`, `.exp()`, `.log()` | numeric | Float64 (Float32 for Float32) | natural log; IEEE results for negative inputs and zero |
 | `.floor()`, `.ceil()`, `.round(decimals=0)` | numeric | same | identity for integers; `round` is half away from zero and accepts negative decimals |
 | `.clip(lower, upper)`, `.clip_min`, `.clip_max` | numeric | same | NaN inputs and NaN bounds leave the value unchanged |
+
+For a finite float numerator and an infinite divisor, `%` follows Python's
+remainder rule. A nonzero numerator with the divisor's sign is unchanged;
+a nonzero numerator with the opposite sign yields the signed infinite divisor.
+A zero numerator yields zero with the divisor's sign, including signed zero.
 
 Float `+ - * /` use explicit SIMD kernels (Float64 and Float32 alike); the
 other float operations run per lane. Comparisons on every numeric type, and

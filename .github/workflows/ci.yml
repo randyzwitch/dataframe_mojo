@@ -5,17 +5,6 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      macos-groups:
-        description: Number of macOS unit-test drivers (for measured calibration)
-        default: '10'
-        type: choice
-        options: ['10', '8', '6', '4']
-      macos-jobs:
-        description: Concurrent macOS compiler processes
-        default: '3'
-        type: choice
-        options: ['3', '2', '1']
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -41,9 +30,13 @@ jobs:
           BASE_REF: origin/${{ github.base_ref }}
         run: bash scripts/check_benchmark_separation.sh "$BASE_REF"
       - name: Check benchmark report provenance and coverage
-        run: pixi run -e oracle python3 tests/test_bench_reports.py
-      - name: Check CI runner orchestration
-        run: python3 tests/test_ci_runners.py
+        run: |
+          pixi run -e oracle python3 tests/tooling/test_bench_reports.py
+          pixi run -e oracle python3 tests/tooling/test_accelerator_cost_driver.py
+          pixi run -e oracle python3 tests/tooling/test_metal_suite_driver.py
+          pixi run -e oracle python3 tests/tooling/test_query_diagrams.py
+      - name: Check Mojo test runner
+        run: pixi run mojo run -I . tests/tooling/test_contract_runner.mojo
       - name: Check dtype literals
         run: bash scripts/check_dtype_literals.sh
       - name: Check public docstrings and API reference
@@ -82,21 +75,22 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
+      - name: Install independent format consumers
+        run: |
+          pixi install --locked -e oracle
+          pixi run --locked -e oracle python3 -c 'import geopandas, pyproj, pyarrow, shapely'
       - name: Download native Parquet artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
           --name dfparquet-linux --dir build/dfparquet
-      - name: Verify Parquet exports and loader search paths
-        run: python3 scripts/ci_time.py --label parquet-loader -- pixi run bash scripts/check_parquet_library.sh build/ci-tests/test_parquet
-      # Keep the measured Linux memory bound: two grouped programs, serial.
-      - name: Run tests
-        env:
-          TEST_PARQUET_BINARY: build/ci-tests/test_parquet
-          TEST_GROUPS: '2'
-          TEST_JOBS: '1'
-        run: python3 scripts/ci_time.py --label unit-tests --budget-seconds 2400 -- pixi run test
+      - name: Verify native Parquet exported ABI
+        run: pixi run check-parquet-abi
+      - name: Run maintained contract suite
+        run: python3 scripts/ci_time.py --label contract-tests -- pixi run test --output build/contract-tests
+      - name: Validate actual contract outputs with independent format consumers
+        run: pixi run -e oracle test-interchange-oracles
       - uses: ./.github/actions/ci-timings
         if: always()
         with:
@@ -111,45 +105,21 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
+      - name: Install independent format consumers
+        run: |
+          pixi install --locked -e oracle
+          pixi run --locked -e oracle python3 -c 'import geopandas, pyproj, pyarrow, shapely'
       - uses: ./.github/actions/setup-parquet
-      - name: Verify Parquet exports and loader search paths
-        run: python3 scripts/ci_time.py --label parquet-loader -- pixi run bash scripts/check_parquet_library.sh build/ci-tests/test_parquet
-      - name: Run tests
-        env:
-          TEST_PARQUET_BINARY: build/ci-tests/test_parquet
-          TEST_GROUPS: ${{ inputs.macos-groups || '10' }}
-          TEST_JOBS: ${{ inputs.macos-jobs || '3' }}
-        run: python3 scripts/ci_time.py --label unit-tests --budget-seconds 3300 -- pixi run test
+      - name: Verify native Parquet exported ABI
+        run: pixi run check-parquet-abi
+      - name: Run maintained contract suite
+        run: python3 scripts/ci_time.py --label contract-tests -- pixi run test --output build/contract-tests
+      - name: Validate actual contract outputs with independent format consumers
+        run: pixi run -e oracle test-interchange-oracles
       - uses: ./.github/actions/ci-timings
         if: always()
         with:
           name: ci-timings-unit-macos
-
-  oracles:
-    needs: native-linux
-    permissions:
-      contents: read
-      actions: read
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: prefix-dev/setup-pixi@v0.10.2
-        with:
-          cache: true
-      - name: Download native Parquet artifact
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
-          --name dfparquet-linux --dir build/dfparquet
-      - name: Differential tests against Polars
-        env:
-          ORACLE_SEED: ${{ github.run_number }}
-        run: python3 scripts/ci_time.py --label oracles --budget-seconds 1500 -- bash scripts/ci_oracles.sh
-      - uses: ./.github/actions/ci-timings
-        if: always()
-        with:
-          name: ci-timings-oracles
 
   answers:
     needs: native-linux
@@ -200,7 +170,7 @@ jobs:
     # Keep the existing required check, now aggregating every Linux check.
     name: test (ubuntu-latest)
     if: always()
-    needs: [checks, native-linux, unit-linux, oracles, answers]
+    needs: [checks, native-linux, unit-linux, answers]
     runs-on: ubuntu-latest
     steps:
       - name: Require all Linux checks to pass

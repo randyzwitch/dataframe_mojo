@@ -51,7 +51,8 @@ mojo = ">=1.2.0.dev2026092105,<1.3"
 
 [tasks]
 build-dfmetal = "bash native/dfmetal/build.sh"
-test = "bash scripts/run_tests.sh"
+test = "bash tests/run_tests.sh"
+test-interchange-oracles = "mojo run -I . tests/tooling/interchange_oracles.mojo build/contract-tests"
 check-version = "python3 scripts/check_version.py"
 example = "mojo run -I . examples/sales.mojo && mojo run -I . examples/expressions.mojo && mojo run -I . examples/read_csv.mojo"
 format = "mblack --target-version mojo --line-length 80 dataframe tests examples benchmarks"
@@ -61,7 +62,8 @@ bench-csv = "mojo run -I . benchmarks/bench_csv.mojo"
 bench = "mojo run -I . benchmarks/bench_suite.mojo"
 bench-smoke = "BENCH_SMOKE=1 mojo run -I . benchmarks/bench_suite.mojo"
 package = "python3 scripts/build_package.py --output dist"
-package-smoke = "bash scripts/package_smoke.sh"
+check-parquet-abi = "mojo run -I . tests/tooling/check_parquet_abi.mojo"
+package-smoke = "bash tests/tooling/package_smoke.sh"
 docs = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json docs/api.md"
 docs-check = "mkdir -p build && mojo doc dataframe -o build/api.json && python3 scripts/api_docs.py build/api.json --check"
 bench-concat = "mojo run -I . benchmarks/bench_concat.mojo"
@@ -75,18 +77,11 @@ bench-joins-duckdb = "python3 scripts/bench_join_duckdb.py"
 polars = ">=1.0"
 pyarrow = ">=15"
 python = ">=3.11"
+# Use compiled PROJ packages: pyproj's macOS wheels require a newer OS than
+# the supported macOS 13 baseline, otherwise GeoPandas triggers a source build.
+pyproj = ">=3.5,<4"
 
 [feature.oracle.tasks]
-oracle = "python3 scripts/oracle.py"
-oracle-arrow = "mojo run -I . tests/oracle/arrow_pyarrow.mojo && mojo run -I . tests/oracle/arrow_metadata.mojo"
-oracle-arrow-metadata = "mojo run -I . tests/oracle/arrow_metadata.mojo"
-oracle-geospatial = "python3 scripts/check_geospatial.py"
-oracle-geometry = "python3 scripts/check_geometry_accessors.py"
-oracle-duckdb-spatial = "python3 scripts/check_duckdb_spatial.py"
-oracle-geoparquet = "python3 scripts/check_geoparquet.py"
-oracle-shapefile = "python3 scripts/check_shapefile.py"
-oracle-asof = "python3 scripts/check_asof.py"
-oracle-time-windows = "mojo run -I . tests/oracle/time_windows.mojo"
 bench-suites = "python3 scripts/bench_suites.py"
 
 [feature.oracle.pypi-dependencies]

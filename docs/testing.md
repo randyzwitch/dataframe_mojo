@@ -1,90 +1,75 @@
 # Testing
 
-`pixi run test` runs every `tests/test_*.mojo` module, several at once:
-`TEST_JOBS` sets the concurrency (default: CPU count; `TEST_JOBS=1` is serial),
-and `bash scripts/run_tests.sh tests/test_x.mojo ...` runs chosen modules.
-Output is printed per module in a stable order, followed by a summary naming
-every failed module. Modules must not share temporary file paths.
+The suite starts from public dataframe contracts and independent expected values.
+[The coverage guide](test-coverage-plan.md) describes the contracts, independent
+models and adversarial dimensions to maintain. Physical layout, planner settings
+and execution modes vary independently of the logical input.
+The full suite requires `libdfparquet`; build it with
+`pixi run -e native build-dfparquet` before the first full run.
 
-Compiling, not running, is nearly all of a test run: each program compiles
-the library code it uses again, 30 to 180 seconds per module, while every
-test together runs in under a minute. So a full run builds about
-`TEST_GROUPS` programs (default 10), each running several modules' tests
-(`scripts/test_drivers.py`), instead of one program per module. A module
-joins a group when its `main` only runs its tests; one whose `main` does more
-(the Parquet modules) stays a program of its own. Modules in a group share a
-process, so a test that changes process state, such as `DATAFRAME_THREADS`,
-affects the modules after it: the driver resets `DATAFRAME_THREADS` before
-each module, and anything else a test changes it must undo. Test functions
-are imported by name, so every test is a top-level `def test_...() raises`.
-Tests that declare a C function with `external_call`, such as `setenv`,
-must pass it the same argument types everywhere, or a group fails to link;
-pass addresses as `Int`. Beyond hand-written
-contract tests, three generative layers look for interaction bugs.
+```sh
+pixi run test
+pixi run test --areas public storage
+pixi run test --contracts table.join types.cast
+```
 
-## Differential testing against Polars
+The six areas separate public behavior, storage and ownership, kernel equivalence,
+planner correctness, execution modes and interchange. Shared Mojo models,
+generators and typed comparisons live in `tests/support/`; orchestration and its
+own failure checks live in `tests/tooling/`. Test modules exercise production
+imports. Independent reference semantics have no dataframe dependency.
 
-`scripts/oracle.py` generates random inputs (all four dtypes, 15% nulls,
-`-0.0`, large floats, empty strings, quotes, separators, and multi-byte text)
-and a random operation from a registry: filters, arithmetic, grouped
-aggregates, multi-column sorts, joins, `unique`, `cum_sum`, and casts. Polars
-computes the expected result with its ordering options pinned
-(`maintain_order=True`, `maintain_order="left_right"` for joins) so both sides
-are deterministic; the Mojo runner (`tests/oracle/runner.mojo`) executes the
-same operation. Both results are read back through Polars' CSV reader with one
-schema, and floats compare with a relative tolerance of 1e-9.
+Shared comparators check names, logical types, shapes, ordered cells and validity.
+Known implementation defects run with exact diagnostic matching; an unrelated
+failure or unexpected pass fails the suite. Fatal defects run in isolated
+processes with exact platform-specific exit-status matching. Native hardware
+cases report explicit capability skips and require actual device execution when enabled. Named module
+groups, failure signatures and capability gates live in
+[`tests/tooling/suite_policy.mojo`](../tests/tooling/suite_policy.mojo).
 
-    pixi run -e oracle oracle --cases 200 --seed 1
-    pixi run -e oracle oracle --mutation-check
+Run metadata and compile/execute logs are written under `build/contract-tests/`.
+They record the compiler, source fingerprints, revision, selected cases, settings
+and capability omissions.
+By default, each area runs in its own executable and later areas still run after
+a build or process failure. `--packaging combined` explicitly selects a shared
+executable when that packaging is useful for investigation.
+Test functions are discovered automatically. `--contracts` selects named module
+groups; it does not require assigning every test to a coverage registry.
 
-Polars lives only in the `oracle` pixi environment; it is never a runtime
-dependency. A failure prints its seed, the operation, and inputs minimized by
-removing rows while the mismatch persists, so it reproduces with
-`--seed N --cases 1`. `--mutation-check` makes the runner drop a result row and
-requires every case to be caught, proving the comparison is not vacuous. CI runs
-150 cases with a seed that changes per run, plus the mutation check.
+Native Metal contracts execute in macOS CI when a device is exposed. Extreme
+Date epoch-shift overflow has strict expected failures on CPU and Metal.
+Capability skips do not establish GPU parity. Multiworker positional global
+FIRST/LAST and ARGMIN/ARGMAX also remain a known coverage limit: schedule-dependent results were
+observed, so their deterministic assertions currently use one worker. No flaky
+expected-failure test substitutes for a deterministic regression.
 
-To cover a new operation, add it to `gen_op`, `expected`, and the runner's
-`run` function, choosing Polars options that pin the same semantics.
+## Interchange and native interfaces
 
-## CSV tokenizer fuzzing
+Build the native Parquet library before running interchange contracts:
 
-`tests/test_csv_fuzz.mojo` feeds random byte strings made of CSV-significant
-bytes (separators, quotes, CR, LF, digits, signs, multi-byte and invalid
-UTF-8) to `read_csv` under strict, text-only, lossy, and permissive settings.
-Every input must parse or raise a clean `Error`, and the outcome, including
-the error message, must be identical for buffer sizes 1, 2, 3, 7, and the
-whole file. `tests/test_csv_options.mojo` additionally splits fixed fixtures at
-every byte position.
+```sh
+pixi run -e native build-dfparquet
+pixi run check-parquet-abi
+pixi run test --areas interchange
+pixi run -e oracle test-interchange-oracles
+```
 
-## Mergeable reduction states
+The Mojo ABI check compares actual exports with the maintained C symbol allowlist.
+Parquet contracts exercise real explicit, prefix and fallback library discovery,
+projection and row-group requests, malformed input and observed release callbacks.
+Arrow ownership tests retain aliases after foreign buffers are released and pages
+unmapped. CSV fixtures use an independent field parser and literal typed models.
+Spatial tests construct and consume independent WKB and format metadata.
 
-Reduction states (`IntSumState`, `FloatSumState`, `LogicState`, `VarState`) are
-merged across every split point and association order in
-`tests/test_expressions.mojo`, `tests/test_expr_logic.mojo`, and
-`tests/test_expr_reductions.mojo`: integer results must be identical and float
-results equal within tolerance. These are the properties parallel execution
-relies on.
+External PyArrow adapters validate actual public writer artifacts; GeoPandas and
+DuckDB Spatial adapters distinguish unavailable engines from semantic failures.
+Python is used for these external engines and unit tests of Python tooling.
+Dataframe tests, semantic references and suite orchestration use Mojo.
 
-## Parquet tests in CI
-
-`tests/test_parquet.mojo` needs `libdfparquet` and skips itself, with a
-notice, when the library is missing, so `pixi run test` passes on a machine
-without a C++ toolchain. CI on Linux and Apple Silicon builds the library
-first (`pixi run -e native build-dfparquet`, cached by OS, architecture and
-the contents of `native/dfparquet/`). Then
-`pixi run bash scripts/check_parquet_library.sh` checks that the stripped
-library exports exactly the declared C entry points and runs the compiled
-Parquet tests twice: once loading from `build/dfparquet`, and once from an
-isolated `$CONDA_PREFIX/lib` with no build-directory fallback. An explicit
-`DATAFRAME_PARQUET_LIBRARY` override is removed for both runs. Either run
-failing or reporting `skipped` fails CI, so type coercions, row-group pruning,
-chunk preservation, and both library search paths are exercised on every push.
-`tests/test_parquet_stream.mojo` uses a fake producer to count releases on
-EOF, schema/import errors and failure after a consumed batch. It requires no
-native library. `scripts/check_parquet_stream.py` uses PyArrow and the real
-shim to check projection, reordered/duplicate groups, empty selections,
-early close and a corrupted later row group.
+`pixi run package-smoke` builds an identified package and compiles consumers outside
+the checkout. It checks independent example output, typed cells and build identity.
+Native calibration and execution checks additionally require a provisioned device;
+`tests/tooling/package_contracts.mojo PACKAGE_DIRECTORY --native` enables them.
 
 ## Benchmarks
 
@@ -159,7 +144,7 @@ The [upstream join baseline](upstream-join-baseline.md) records an earlier
 adaptation of two DuckDB join queries; its scripts are retired (see
 benchmarks.md) and the external suites supersede it.
 
-## CI cost and feedback
+## CI checks and feedback
 
 Required PR CI preserves unit, interoperability, and query-answer checks.
 Example compilation runs separately on main, tags, manual dispatch, and PRs
@@ -175,24 +160,12 @@ not aggregate concurrent memory. GitHub's job timestamps remain the source
 for setup/cache time and queue delay. Compare elapsed time and runner minutes
 separately, and compare native-cache hits with hits (misses with misses).
 
-Before adding another compiled program, check whether an existing driver can
-run its cases. Review timing changes across several runs when adding checks.
-The October 8 baseline was 72–91 minutes on Linux and 42–70 on macOS, excluding
-queue time. Example compilation alone cost 8–10 and 7–8.5 minutes respectively.
-Initial targets are under 60 minutes per required job, then under 45 after
-measured driver tuning, without dropping test modules, cases, or query variants.
-These are review targets, not timeouts that terminate correctness coverage.
-
-CI builds the random-oracle runner once with `oracle --build-only`, then uses
-`oracle --runner build/oracle_runner` for both normal and mutation cases.
-Local invocations without `--runner` still rebuild. Reuse is explicitly scoped
-to the same checkout and job, not a persistent executable cache.
-
-The Parquet loader check accepts an optional output executable path. CI passes
-`build/ci-tests/test_parquet`, then sets `TEST_PARQUET_BINARY` to that path for
-the unit suite. The suite still runs the module; it reuses its compilation.
-An absent/non-executable explicit binary fails instead of silently rebuilding.
-Other modules build and execute separately, with separate timing records.
+Linux and macOS run `pixi run test` after building the native Parquet library
+and checking its exported ABI. Independent consumers then validate the actual
+writer artifacts with `pixi run -e oracle test-interchange-oracles`. Runner
+failure handling, formatting, version consistency, public
+docstrings and Python production-tool checks run separately. Compilation cost
+does not constrain semantic coverage.
 
 Query-answer CI uses `bench_suites.py --correctness-only`: each selected query
 runs once per engine and variant, with no timed repetitions, trace reruns,
@@ -205,25 +178,23 @@ from performance results. Normal benchmark commands keep their existing behavior
 
 ### Independent required jobs
 
-Fast checks, Linux units, macOS units, Linux oracles, and two query-answer
+Fast checks, Linux contracts, macOS contracts, and two query-answer
 jobs run independently. One Linux job restores/builds `libdfparquet` and
 publishes it for the Linux consumers, avoiding multiple cold native builds.
 macOS restores/builds its own library and does not wait for Linux.
 
 The existing `test (ubuntu-latest)` check aggregates every Linux job and
 fails for failed, cancelled, or skipped dependencies. `test (macos-latest)`
-continues to cover the full macOS suite and both Parquet loader paths.
-Existing branch-protection names remain valid; no tests become optional.
-Job separation trades some repeated checkout/environment setup for shorter
-elapsed time. Timing artifacts have unique names for every job.
+continues to select the maintained macOS suite and independent interchange
+consumers. These workflow definitions are not evidence that a new macOS run has
+passed. Existing branch-protection names remain valid. Timing artifacts have
+unique names for every job.
 
-Command budgets emit annotations without interrupting tests: 40 minutes for
-Linux units, 55 for macOS units, 25 for oracles, and 15 for each answer job.
-Budgets exclude setup and the separate Parquet loader compilation. Compare
-several warm-cache runs and total runner minutes before tightening them.
+The separate Native Metal workflow builds the runtime, checks its ABI and probes
+the device. It enables `--capabilities metal` only when that probe reports an
+actual device. An absent device leaves native witnesses explicitly skipped;
+broken runtime loading and enabled execution failures fail the job.
 
-The manual CI dispatch accepts `macos-groups` and `macos-jobs` for controlled
-calibration. Defaults remain ten drivers and three compiler processes. Try
-one configuration per dispatch (for example 6/2 or 4/1), compare compile times
-and peak memory with 10/3, and change the PR default only after repeated
-measurements without OOMs. Linux retains its measured 2/1 configuration.
+Release validation builds the native Parquet library, runs the maintained suite
+and independent consumers, then checks
+documentation, examples and the packaged consumer before publishing.
