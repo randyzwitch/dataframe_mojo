@@ -1,4 +1,5 @@
 """Metadata-only decomposition of aggregate expressions for resident Metal."""
+from .metadata import schema_frame
 from std.collections import Dict
 from dataframe.binding import bind, ROWS
 from dataframe.dtype import DataType
@@ -91,7 +92,8 @@ def _in_memory_sources(query: LazyFrame) raises:
         ref node = query._nodes[index]
         if _is_scan(node.kind) and node.kind != SCAN_FRAME:
             raise Error(
-                "Metal unsupported [plan]: resident regions require in-memory scans"
+                "Metal unsupported [plan]: resident regions require in-memory"
+                " scans"
             )
         if node.left >= 0:
             pending.append(node.left)
@@ -109,14 +111,16 @@ def _conditional_leaf(expression: Expr, schema: DataFrame) raises:
             node.op == ADD or node.op == SUB or node.op == MUL
         ):
             raise Error(
-                "Metal unsupported [precision]: conditional scalar Float32 arithmetic requires CPU execution"
+                "Metal unsupported [precision]: conditional scalar Float32"
+                " arithmetic requires CPU execution"
             )
         if node.op == MEAN and (
             bound.dtypes[node.left] == DataType.INT64
             or bound.dtypes[node.left] == DataType.UINT64
         ):
             raise Error(
-                "Metal unsupported [precision]: conditional scalar wide integer mean requires CPU execution"
+                "Metal unsupported [precision]: conditional scalar wide integer"
+                " mean requires CPU execution"
             )
 
 
@@ -128,7 +132,7 @@ def lower_aggregate_compositions(query: LazyFrame) raises -> LazyFrame:
     does not broaden which errors may be observed through a later projection.
     """
     _in_memory_sources(query)
-    var expected = query._execute(len(query._nodes) - 1, True)
+    var expected = schema_frame(query, len(query._nodes) - 1)
     var names = Dict[String, Bool]()
     for frame in query._frames:
         for name in frame.columns():
@@ -156,7 +160,7 @@ def lower_aggregate_compositions(query: LazyFrame) raises -> LazyFrame:
             result._nodes.append(operation^)
             roots.append(len(result._nodes) - 1)
             continue
-        var schema = query._execute(query._nodes[index].left, True)
+        var schema = schema_frame(query, query._nodes[index].left)
         var row_mode = (
             operation.kind == FILTER or operation.kind == WITH_COLUMNS
         )
@@ -174,7 +178,8 @@ def lower_aggregate_compositions(query: LazyFrame) raises -> LazyFrame:
             for node in expression._nodes:
                 if node.op == SELECTOR or node.op == OVER or is_window(node.op):
                     raise Error(
-                        "Metal unsupported [aggregate composition]: selectors and windows"
+                        "Metal unsupported [aggregate composition]: selectors"
+                        " and windows"
                     )
             var bound = bind(expression, schema._columns)
             var conditional = False
@@ -258,7 +263,7 @@ def lower_aggregate_compositions(query: LazyFrame) raises -> LazyFrame:
         )
         roots.append(len(result._nodes) - 1)
     try:
-        var actual = result._execute(len(result._nodes) - 1, True)
+        var actual = schema_frame(result, len(result._nodes) - 1)
         if actual.columns() != expected.columns():
             raise Error("output names differ")
         for i in range(actual.width()):

@@ -4,6 +4,7 @@ Every reachable branch is bound before device initialization. Child regions
 are not terminal boundaries for checked expressions. Executing these tasks
 may materialize intermediate frames; the provider reports those boundaries.
 """
+from .metadata import prune_projections
 from .capabilities import RowCapabilities
 from .rows import lower_rows
 from dataframe.dtype import DataType
@@ -312,6 +313,9 @@ def _task(
             or query._nodes[cursor].text != "metal_window_materialization"
         )
         and (
+            cursor == root or query._nodes[cursor].text != "metal_shared_prefix"
+        )
+        and (
             cursor == root
             or not capabilities.scalar_regions
             or not _scalar_reduction(query, cursor)
@@ -331,6 +335,10 @@ def _task(
         or (
             cursor != root
             and query._nodes[cursor].text == "metal_window_materialization"
+        )
+        or (
+            cursor != root
+            and query._nodes[cursor].text == "metal_shared_prefix"
         )
         or (
             capabilities.scalar_regions
@@ -386,7 +394,7 @@ def lower_join_dag(
     """Validate every branch, prune unused inputs, then bind every region."""
     _validate_sources(query, capabilities)
     var projected = query.copy()
-    projected._push_projections()
+    prune_projections(projected)
     var tasks = List[DagTask]()
     var root = _task(
         projected, len(projected._nodes) - 1, True, capabilities, tasks

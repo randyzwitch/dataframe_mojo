@@ -6,6 +6,7 @@ integer means require a GPU proof that all exact integer partials fit the native
 range. Decimal32/64 sums use exact two-word accumulation with Decimal128
 results. Automatic placement requires separate calibration for emulated work.
 """
+from .accelerator.metadata import schema_frame
 from std.ffi import external_call
 from std.math import isfinite
 from std.memory import Pointer
@@ -1614,7 +1615,7 @@ struct MetalRuntime(AcceleratorBackend):
         if has_dictionary_columns(query):
             # Validate original string semantics before replacing values with
             # ordered codes. Schema execution reads no source rows.
-            var schema = query._execute(len(query._nodes) - 1, True)
+            var schema = schema_frame(query, len(query._nodes) - 1)
             var lowered = lower_dictionary_operations(query, self._budget)
             var staged_query = lowered[0].copy()
             var dictionary = DictionaryCodes(staged_query)
@@ -1737,7 +1738,7 @@ struct MetalRuntime(AcceleratorBackend):
                     lower_set_operations(query)
                 )
             if has_dictionary_columns(query):
-                _ = query._execute(len(query._nodes) - 1, True)
+                _ = schema_frame(query, len(query._nodes) - 1)
                 var metadata = query.copy()
                 for i in range(len(metadata._frames)):
                     metadata._frames[i] = metadata._frames[i].slice(0, 0)
