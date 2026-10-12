@@ -1164,7 +1164,6 @@ def production_policy() -> SuitePolicy:
         )
     )
 
-
     policy.requirements.append(
         CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_string_concat.mojo::test_native_metal_concat_dictionary_pairs_nulls_unicode_literals_and_chains",
