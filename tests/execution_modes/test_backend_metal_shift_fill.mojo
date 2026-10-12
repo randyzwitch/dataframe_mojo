@@ -445,7 +445,7 @@ def test_native_metal_shift_fill_proofs_budget_cost_and_runtime_reuse() raises:
     with assert_raises(contains="checked rank inputs"):
         _ = unsafe.collect(accelerator=runtime)
     var safe = frame.lazy().select(
-        (col("k") + lit(Int32(1))).forward_fill().over("k")
+        (col("k").cast(DataType.INT64) + lit(Int64(1))).forward_fill().over("k")
     )
     check(safe, runtime)
     for offset in List[Int]([1, 2, -1, Int(Int64.MIN), 0, Int(Int64.MAX), 1]):
