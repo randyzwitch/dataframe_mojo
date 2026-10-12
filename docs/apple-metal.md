@@ -253,8 +253,12 @@ numeric, Decimal32/64/128, or temporal types are folded before dictionary encodi
 The CPU scalar cast runs once per literal, with exact integer payloads and
 logical metadata retained; input rows stay on the GPU. Invalid strict literals
 remain unsupported. Decimal128 literals retain both words as runtime payloads.
-Row-valued parsing and binary String concatenation reject before encoding, rather than binding text operations to
-integer dictionary codes.
+Row-valued parsing still rejects before encoding. String concatenation uses bounded
+lookup tables keyed by both operand codes. The host evaluates each distinct
+dictionary pair once, and resident left joins map row pairs to result codes.
+Null operands remain null; a literal-only operand has one dictionary value.
+A lookup is rejected before allocation when it exceeds 1,048,576 pairs,
+512 MiB of conservative staging, or the configured payload budget.
 
 Grouped aggregation supports multiple keys with sum, mean, minimum, maximum, count,
 length, first, last, null count, arg-min/arg-max, and Boolean any/all. Null keys form a group; Float32 NaNs
@@ -599,7 +603,7 @@ without converting exact large integers through floating literals.
 
 Encoding and decoding are host staging work. Profiles include
 `dictionary_staging_bytes`, `dictionary_encode_ms`, and `dictionary_decode_ms`.
-`dictionary_operation_tables` counts the generated unary lookup tables.
+`dictionary_operation_tables` counts generated unary and concatenation lookup tables.
 `query_wall_ms` includes both boundaries. An explicit payload budget reserves
 source code storage, generated lookup tables, and dictionary bytes before
 native execution, and checks a conservative restoration bound before allocating decoded outputs. Cross-input
