@@ -23,6 +23,14 @@ def main():
 #include <vector>
 using ulong = uint64_t;
 using uint = uint32_t;
+struct ulong2 {
+  ulong x, y;
+  ulong2(ulong all) : x(all), y(all) {}
+  ulong2(ulong low, ulong high) : x(low), y(high) {}
+};
+inline ulong mulhi(ulong a, ulong b) {
+  return ulong((static_cast<unsigned __int128>(a) * b) >> 64);
+}
 __FLOAT64_SOURCE__
 __DECIMAL_SOURCE__
 struct Input { ulong low, high, count, scale; };

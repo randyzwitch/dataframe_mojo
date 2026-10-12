@@ -759,6 +759,55 @@ def check_decimal_float_cast_preflight_without_device():
 
 
 check_decimal_float_cast_preflight_without_device()
+
+
+def check_decimal_cast_preflight_without_device():
+    def metadata(source=2, target=1, precision=9, strict=True,
+                 source_decimal=True, target_decimal=True):
+        return (source | target << 6 | precision << 12 | int(strict) << 18
+                | int(source_decimal) << 19 | int(target_decimal) << 20)
+
+    inputs = (Input * 1)(Input(None, None, 12, 5, 1))
+    code = (I * 8)(0, -1, -1, 0, 217, 0, -1, metadata())
+    literals = (I * 2)(0, 0)
+    nodes, slots = (I * 2)(12, 2), (I * 2)(12, 2)
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 2, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 513 * 4 + 65
+    for invalid in (-1, metadata(source=39), metadata(target=10),
+                    metadata(precision=0), metadata(precision=10),
+                    metadata(target_decimal=False),
+                    metadata(source_decimal=False), metadata() | 1 << 21):
+        code[7] = invalid
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal cast descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+    code[7] = metadata()
+    code[6] = 0
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"decimal cast descriptor" in C.string_at(err)
+    lib.dfm_free(err)
+    code[6] = -1
+    nodes[1] = slots[1] = outputs[0].dtype = 1
+    code[7] = metadata(target=0, precision=0, target_decimal=False)
+    literals[1] = C.cast(C.pointer(C.c_double(100.0)), C.POINTER(I)).contents.value
+    err = P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    literals[1] ^= 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"decimal Float32 cast divisor" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+check_decimal_cast_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")

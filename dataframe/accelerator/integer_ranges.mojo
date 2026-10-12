@@ -3,6 +3,7 @@ from std.math import abs
 from std.memory import bitcast
 from dataframe.binding import BoundExpr
 from dataframe.dtype import DataType
+from dataframe.decimal import pow10, divide_half_even
 from dataframe.expr import (
     LIT_INT,
     ADD,
@@ -39,6 +40,44 @@ def _type_range(dtype: DataType) -> IntegerRange:
         return IntegerRange(0, (Int128(1) << Int128(bits)) - 1, True)
     var edge = Int128(1) << Int128(bits - 1)
     return IntegerRange(-edge, edge - 1, True)
+
+
+def _decimal_cast_safe(
+    source: DataType, target: DataType, bounds: IntegerRange
+) -> Bool:
+    var source_bounds = bounds.copy()
+    if source.is_decimal():
+        # with_dtype can retag raw storage without validating precision. Prove
+        # against the physical range, never the declared decimal digit count.
+        source_bounds = _type_range(source.physical())
+        if target == DataType.BOOL or target.is_float():
+            return True
+    if not source_bounds.known:
+        return False
+    var from_scale = source.scale() if source.is_decimal() else 0
+    if target == DataType.BOOL or target.is_float():
+        return True
+    var to_scale = target.scale() if target.is_decimal() else 0
+    var limits = _type_range(target)
+    if target.is_decimal():
+        var maximum = pow10(target.precision()) - 1
+        limits = IntegerRange(-maximum, maximum, True)
+    if not limits.known:
+        return False
+    if to_scale > from_scale:
+        var factor = pow10(to_scale - from_scale)
+        return (
+            source_bounds.low >= 0
+            or abs(source_bounds.low) <= abs(limits.low) // factor
+        ) and source_bounds.high <= limits.high // factor
+    if from_scale > to_scale:
+        var divisor = pow10(from_scale - to_scale)
+        source_bounds = IntegerRange(
+            divide_half_even(source_bounds.low, divisor),
+            divide_half_even(source_bounds.high, divisor),
+            True,
+        )
+    return limits.low <= source_bounds.low and source_bounds.high <= limits.high
 
 
 def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
@@ -160,6 +199,17 @@ def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
             if result.low < limits.low or result.high > limits.high:
                 result = limits.copy()
                 proved = False
+        if (
+            node.op == CAST
+            and node.left >= 0
+            and (
+                bound.dtypes[i].is_decimal()
+                or bound.dtypes[node.left].is_decimal()
+            )
+        ):
+            proved = _decimal_cast_safe(
+                bound.dtypes[node.left], bound.dtypes[i], a
+            )
         ranges.append(result^)
         safe.append(proved)
     return safe^
