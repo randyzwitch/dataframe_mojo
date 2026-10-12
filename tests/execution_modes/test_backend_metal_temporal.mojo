@@ -1,12 +1,43 @@
 """Native temporal fields and fixed logical values use independent calendars."""
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
-from dataframe.metal import MetalRuntime
+from dataframe.lazy import LazyFrame
+from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.accelerator.constants import (
+    has_literal_text_parsing,
+    fold_literal_text_parsing,
+)
+from dataframe.accelerator.joins import has_scalar_consumers, lower_join_dag
+from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal import assert_native_report
 from tests.support.coverage_compare import assert_frame
 from tests.support.metal_domain_checks import check_domain
 from tests.support.metal_domain_reference import calendar, floor128
+
+
+def assert_temporal_native_plan(plan: LazyFrame) raises:
+    # Validate every native shape in the portable model run, including plans
+    # later in a hardware test that an earlier failure could otherwise hide.
+    var bound = fold_literal_text_parsing(plan) if has_literal_text_parsing(
+        plan
+    ) else plan.copy()
+    if has_scalar_consumers(bound):
+        _ = lower_join_dag(bound, _capabilities())
+    else:
+        _ = lower_rows(bound, _capabilities())
+
+
+def check_temporal_domain(
+    plan: LazyFrame,
+    expected: DataFrame,
+    runtime: MetalRuntime,
+    native: Bool,
+    submitted: Bool = True,
+    fused: Bool = False,
+) raises:
+    assert_temporal_native_plan(plan)
+    check_domain(plan, expected, runtime, native, submitted, fused=fused)
 
 
 def tagged(
@@ -203,10 +234,10 @@ def temporal_cases(runtime: MetalRuntime, native: Bool) raises:
                 ]
             )
         var expected = DataFrame(columns^)
-        check_domain(
+        check_temporal_domain(
             source.lazy().select_exprs(expressions), expected, runtime, native
         )
-        check_domain(
+        check_temporal_domain(
             source.slice(0, 0).lazy().select_exprs(expressions),
             expected.slice(0, 0),
             runtime,
@@ -219,8 +250,7 @@ def test_native_metal_temporal_all_units_and_extreme_ticks_match_independent_cal
     temporal_cases(require_metal(), True)
 
 
-def test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_fields() raises:
-    var runtime = require_metal()
+def extreme_date_plan() raises -> LazyFrame:
     var source = DataFrame(
         [
             tagged(
@@ -231,7 +261,7 @@ def test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_field
             )
         ]
     )
-    var plan = source.lazy().select_exprs(
+    return source.lazy().select_exprs(
         [
             col("d").dt().year().alias("year"),
             col("d").dt().month().alias("month"),
@@ -240,6 +270,12 @@ def test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_field
             col("d").dt().ordinal_day().alias("ordinal"),
         ]
     )
+
+
+def test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_fields() raises:
+    var runtime = require_metal()
+    var plan = extreme_date_plan()
+    assert_temporal_native_plan(plan)
     var expected = DataFrame(
         [
             tagged(
@@ -317,7 +353,7 @@ def truncation_cases(runtime: MetalRuntime, native: Bool) raises:
                     )
                 )
             var source = DataFrame([tagged("t", dtype, raw^, bits.copy())])
-            check_domain(
+            check_temporal_domain(
                 source.lazy().select(col("t").dt().truncate(periods[at])),
                 DataFrame([tagged("t", dtype, expected^, bits.copy())]),
                 runtime,
@@ -333,7 +369,7 @@ def truncation_cases(runtime: MetalRuntime, native: Bool) raises:
         .group_by("year", maintain_order=True)
         .agg(col("t").len().alias("n"))
     )
-    check_domain(
+    check_temporal_domain(
         plan,
         DataFrame(
             [
@@ -347,21 +383,35 @@ def truncation_cases(runtime: MetalRuntime, native: Bool) raises:
         # no intermediate provider buffer needs to cross a region boundary.
         fused=True,
     )
+    # A row projection makes literal broadcasting a native GPU contract;
+    # scalar-only selects have a separate unsupported-plan preflight below.
     var literals: List[Expr] = [
+        col("t"),
         lit("2000-02-29T12:34:56.123456")
         .str()
         .strptime("datetime[us]")
         .alias("dt"),
         lit("12:34:56.123456789").str().strptime("time").alias("clock"),
     ]
-    check_domain(
+    check_temporal_domain(
         source.lazy().select_exprs(literals),
         DataFrame(
             [
                 tagged(
-                    "dt", DataType.datetime("us"), [951827696123456], [True]
+                    "t", DataType.DATE, [0, 11016, 11017], [True, True, True]
                 ),
-                tagged("clock", DataType.TIME, [45296123456789], [True]),
+                tagged(
+                    "dt",
+                    DataType.datetime("us"),
+                    [951827696123456, 951827696123456, 951827696123456],
+                    [True, True, True],
+                ),
+                tagged(
+                    "clock",
+                    DataType.TIME,
+                    [45296123456789, 45296123456789, 45296123456789],
+                    [True, True, True],
+                ),
             ]
         ),
         runtime,
@@ -405,7 +455,7 @@ def logical_cases(runtime: MetalRuntime, native: Bool) raises:
             ).with_dtype(dtype)
             lo = Series("lo", Column[Int32]([-2])).with_dtype(dtype)
             hi = Series("hi", Column[Int32]([2])).with_dtype(dtype)
-        check_domain(
+        check_temporal_domain(
             source.lazy().select_exprs(
                 [
                     col("x"),
@@ -428,7 +478,7 @@ def logical_cases(runtime: MetalRuntime, native: Bool) raises:
             runtime,
             native,
         )
-        check_domain(
+        check_temporal_domain(
             source.lazy().select_exprs(
                 [col("x").min().alias("lo"), col("x").max().alias("hi")]
             ),
@@ -454,6 +504,25 @@ def temporal_preflight_cases() raises:
             .collect(accelerator=unavailable)
         )
     var dates = DataFrame([tagged("t", DataType.DATE, [0], [True])])
+    with assert_raises(
+        contains="scalar-only select is not a resident row projection"
+    ):
+        _ = (
+            dates.lazy()
+            .select_exprs(
+                [
+                    lit("2000-02-29T12:34:56.123456")
+                    .str()
+                    .strptime("datetime[us]")
+                    .alias("dt"),
+                    lit("12:34:56.123456789")
+                    .str()
+                    .strptime("time")
+                    .alias("clock"),
+                ]
+            )
+            .collect(accelerator=unavailable)
+        )
     with assert_raises(contains="positive fixed interval"):
         _ = (
             dates.lazy()
@@ -482,7 +551,12 @@ def test_native_metal_temporal_and_decimal_unsupported_requests_reject_before_de
 
 def verify_metal_temporal_cpu_models() raises:
     var runtime = MetalRuntime()
+    assert_temporal_native_plan(extreme_date_plan())
     temporal_cases(runtime, False)
     truncation_cases(runtime, False)
     logical_cases(runtime, False)
     temporal_preflight_cases()
+
+
+def test_metal_temporal_lowering_and_cpu_models() raises:
+    verify_metal_temporal_cpu_models()
