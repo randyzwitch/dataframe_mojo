@@ -1164,6 +1164,32 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_string_concat.mojo::test_native_metal_concat_dictionary_pairs_nulls_unicode_literals_and_chains",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_string_concat.mojo::test_native_metal_concat_dictionary_domains_replacement_aliases_and_internal_names",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_string_concat.mojo::test_native_metal_concat_dictionary_group_filter_join_order_and_duplicate_outputs",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_string_concat.mojo::test_native_metal_concat_dictionary_pair_capacity_byte_budget_and_recovery",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -1539,6 +1565,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo",
                 "tests/execution_modes/test_backend_metal_decimal_means.mojo",
                 "tests/execution_modes/test_backend_metal_decimal_casts.mojo",
+                "tests/execution_modes/test_backend_metal_string_concat.mojo",
                 "tests/execution_modes/test_backends.mojo",
             ],
         )
