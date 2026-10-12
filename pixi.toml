@@ -77,6 +77,9 @@ bench-joins-duckdb = "python3 scripts/bench_join_duckdb.py"
 polars = ">=1.0"
 pyarrow = ">=15"
 python = ">=3.11"
+# Use compiled PROJ packages: pyproj's macOS wheels require a newer OS than
+# the supported macOS 13 baseline, otherwise GeoPandas triggers a source build.
+pyproj = ">=3.5,<4"
 
 [feature.oracle.tasks]
 bench-suites = "python3 scripts/bench_suites.py"

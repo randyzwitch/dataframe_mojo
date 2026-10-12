@@ -17,6 +17,11 @@ jobs:
         with:
           cache: true
 
+      - name: Install independent format consumers
+        run: |
+          pixi install --locked -e oracle
+          pixi run --locked -e oracle python3 -c 'import geopandas, pyproj, pyarrow, shapely'
+
       - uses: ./.github/actions/setup-parquet
 
       - name: Verify native Parquet exported ABI
