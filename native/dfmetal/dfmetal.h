@@ -130,6 +130,10 @@ enum DFMOp {
   // Aggregate-window group header. Its literal is the configured CPU worker
   // count; floating sums preserve source order and CPU window partitions.
   DFM_GROUP_HEADER_WINDOW = 209,
+  // Exact signed/unsigned 128-bit accumulation for 64-bit integer sources.
+  // SUM checks the final source-width result; MEAN converts the exact total.
+  DFM_WIDE_INTEGER_SUM = 210,
+  DFM_WIDE_INTEGER_MEAN = 211,
 };
 
 typedef struct DFMInput {

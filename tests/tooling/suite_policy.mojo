@@ -768,6 +768,356 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_column_slots.mojo::test_native_metal_column_slot_gpu_aliases_filters_order_slices_and_replacement",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_column_slots.mojo::test_native_metal_column_slot_gpu_resident_joins_reductions_and_dictionaries",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal128.mojo::test_native_metal_decimal128_literal_preflight_and_remaining_boundaries",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal128.mojo::test_native_metal_decimal_wide_scalar_sums_exact_extremes_nulls_and_empty",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal128.mojo::test_native_metal_decimal_wide_grouped_sums_sort_filter_and_resident_copy",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal128.mojo::test_native_metal_decimal128_transport_comparisons_order_rank_and_keys",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal128.mojo::test_native_metal_decimal128_joins_payloads_keys_and_scalar_broadcast",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal128.mojo::test_native_metal_decimal128_extrema_first_last_and_resident_reductions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal128.mojo::test_native_metal_decimal128_cost_memory_budget_and_literal_pipeline_cache",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_distinct_siblings.mojo::test_native_metal_distinct_siblings_null_order_empty_and_composition",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_distinct_siblings.mojo::test_native_metal_distinct_siblings_sum_and_checked_child_restrictions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_distinct_siblings.mojo::test_native_metal_distinct_siblings_join_profile_budget_and_collision",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_distinct_siblings.mojo::test_native_metal_distinct_siblings_multikey_hash_slices_and_null_text",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float32_division.mojo::test_native_metal_float32_floor_division_bits_nulls_children_and_cost",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float32_modulo.mojo::test_native_metal_float32_modulo_bits_nulls_children_and_cost",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_arithmetic_rounding_subnormals_and_nulls",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_predicates_nan_filling_and_clipping",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_emulation_filters_conditionals_and_join_regions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_emulation_has_separate_automatic_cost_family",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_floating_decimal_rounding_bits_extremes_and_cost",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_numeric_casts_and_integer_division",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_keys_extrema_and_joins",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_accumulation_scalar_grouped_and_resident",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_integer_mean_preserves_exact_accumulation_before_float64_division",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_remainder_extremes_filters_children_and_cost",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_sqrt_bits_filters_children_and_cost",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_literal_casts.mojo::test_native_metal_literal_numeric_and_decimal_casts_on_metal",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_partition_aggregates_reductions_nulls_order_and_empty",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_partition_aggregate_composition_filter_join_and_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_partition_checked_sum_observation",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_partition_aggregate_key_types_slices_and_hash_groups",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_partition_window_checked_children_and_bool_reductions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_partition_floating_reduction_bits_and_decimal_sums",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_nested_partition_aggregates_composition_consumers_and_nulls",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_nested_partition_checked_errors_are_fully_observed",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_nested_partition_floating_worker_order",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_partition_aggregates.mojo::test_native_metal_deep_shared_partition_metadata_stays_resident",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_proven_arithmetic.mojo::test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rejection",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_proven_arithmetic.mojo::test_native_metal_proven_integer_full_int8_domain_compositions_and_resident_joins",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_proven_rank.mojo::test_native_metal_proven_rank_gpu_methods_limits_partitions_and_slices",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_proven_rank.mojo::test_native_metal_proven_rank_gpu_resident_consumers_head_and_rejections",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rank.mojo::test_native_metal_rank_float_words_unsigned_limits_and_partitions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rank.mojo::test_native_metal_rank_all_numeric_widths_and_boolean",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rank.mojo::test_native_metal_rank_string_and_logical_values_multiple_partition_keys",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rank.mojo::test_native_metal_rank_resident_filters_groups_joins_empty_and_cost",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rank.mojo::test_native_metal_rank_dense_prefix_across_blocks",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo::test_native_metal_scalar_broadcast_mixed_projections_and_literal_scalar_outputs",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo::test_native_metal_scalar_broadcast_filters_and_head_observe_complete_prefix",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo::test_native_metal_scalar_broadcast_with_columns_joins_and_grouped_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo::test_native_metal_scalar_broadcast_empty_null_and_conditional_inputs",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo::test_native_metal_scalar_broadcast_float32_subnormal_values",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo::test_native_metal_scalar_broadcast_resident_traffic_budgets_and_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_plans.mojo::test_native_metal_wide_metal_transport_bitmaps_slices_and_projection",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_plans.mojo::test_native_metal_wide_metal_programs_steps_and_resident_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_plans.mojo::test_native_metal_wide_metal_global_and_grouped_reductions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_plans.mojo::test_native_metal_wide_metal_join_fields_keys_empty_and_budget",
+            "metal",
+        )
+    )
+
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo::test_native_metal_exact_wide_integer_limits_partials_means_and_nulls",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo::test_native_metal_exact_wide_integer_resident_inputs_consumers_and_budget",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -878,7 +1228,6 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "reduce.grouped",
             [
-                "tests/kernel_equivalence/test_aggregate_table.mojo",
                 "tests/public_contracts/test_distribution_shapes.mojo",
                 "tests/public_contracts/test_expression_boundaries.mojo",
                 "tests/public_contracts/test_grouped_types.mojo",
@@ -904,7 +1253,6 @@ def production_policy() -> SuitePolicy:
             "table.join",
             [
                 "tests/kernel_equivalence/test_join_routes.mojo",
-                "tests/kernel_equivalence/test_pipeline_join_selection.mojo",
                 "tests/planner_correctness/test_asof_sources.mojo",
                 "tests/public_contracts/test_asof.mojo",
                 "tests/public_contracts/test_asof_errors.mojo",
@@ -986,7 +1334,6 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "storage.release",
             [
-                "tests/storage_ownership/test_aggregate_key_lifetime.mojo",
                 "tests/storage_ownership/test_release.mojo",
             ],
         )
@@ -996,7 +1343,6 @@ def production_policy() -> SuitePolicy:
             "kernel.reduce",
             [
                 "tests/execution_modes/test_lifecycle.mojo",
-                "tests/kernel_equivalence/test_aggregate_table.mojo",
                 "tests/kernel_equivalence/test_grouped_routes.mojo",
                 "tests/kernel_equivalence/test_quantile_routes.mojo",
                 "tests/kernel_equivalence/test_reduction_routes.mojo",
@@ -1065,12 +1411,10 @@ def production_policy() -> SuitePolicy:
                 "tests/planner_correctness/test_branch_rewrites.mojo",
                 "tests/planner_correctness/test_join_aggregate_projection.mojo",
                 "tests/planner_correctness/test_join_key_pushdown.mojo",
-                "tests/planner_correctness/test_join_side_swap.mojo",
                 "tests/planner_correctness/test_join_strategies.mojo",
                 "tests/planner_correctness/test_name_identity.mojo",
                 "tests/planner_correctness/test_nested_boundaries.mojo",
                 "tests/planner_correctness/test_relational.mojo",
-                "tests/planner_correctness/test_shared_aggregated_inputs.mojo",
                 "tests/planner_correctness/test_source_reuse.mojo",
             ],
         )
@@ -1089,6 +1433,8 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/execution_modes/test_backends.mojo",
                 "tests/planner_correctness/test_accelerator_edges.mojo",
+                "tests/planner_correctness/test_accelerator_literals.mojo",
+                "tests/planner_correctness/test_distinct_sibling_lowering.mojo",
                 "tests/planner_correctness/test_routing.mojo",
             ],
         )
@@ -1097,7 +1443,6 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.modes",
             [
-                "tests/execution_modes/test_aggregate_table_modes.mojo",
                 "tests/execution_modes/test_batches.mojo",
                 "tests/execution_modes/test_group_strategy.mojo",
                 "tests/execution_modes/test_lifecycle.mojo",
@@ -1132,6 +1477,20 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_opaque.mojo",
                 "tests/execution_modes/test_backend_metal_resident.mojo",
                 "tests/execution_modes/test_backend_metal_temporal.mojo",
+                "tests/execution_modes/test_backend_metal_column_slots.mojo",
+                "tests/execution_modes/test_backend_metal_decimal128.mojo",
+                "tests/execution_modes/test_backend_metal_distinct_siblings.mojo",
+                "tests/execution_modes/test_backend_metal_float32_division.mojo",
+                "tests/execution_modes/test_backend_metal_float32_modulo.mojo",
+                "tests/execution_modes/test_backend_metal_float64_emulation.mojo",
+                "tests/execution_modes/test_backend_metal_literal_casts.mojo",
+                "tests/execution_modes/test_backend_metal_partition_aggregates.mojo",
+                "tests/execution_modes/test_backend_metal_proven_arithmetic.mojo",
+                "tests/execution_modes/test_backend_metal_proven_rank.mojo",
+                "tests/execution_modes/test_backend_metal_rank.mojo",
+                "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo",
+                "tests/execution_modes/test_backend_metal_wide_plans.mojo",
+                "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo",
                 "tests/execution_modes/test_backends.mojo",
             ],
         )

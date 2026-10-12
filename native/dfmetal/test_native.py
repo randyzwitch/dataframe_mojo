@@ -737,9 +737,10 @@ def execute(
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
     out_type = (
+        11 if reduction == 211 else dtype if reduction == 210 else
         (dtype if dtype in (1, 2, 9, 10) else 3) if reduction == 10 else 3
     ) if reduction >= 0 else (4 if output_bool else dtype)
-    out_scalar = SCALARS[out_type]
+    out_scalar = C.c_uint64 if out_type == 11 else SCALARS[out_type]
     result = (out_scalar * max(1, n))()
     bits = (C.c_uint8 * max(1, (n + 7) // 8))()
     if expect_error:
@@ -3145,6 +3146,51 @@ def test_extended_expression_nodes():
 
 
 test_extended_expression_nodes()
+
+def test_exact_wide_integer_reductions():
+    import struct
+    for dtype in (3, 10):
+        high = (1 << (63 if dtype == 3 else 64)) - 1
+        for n in (0, 1, 4, 257, 4097, 65537):
+            values = [high if dtype == 10 or i % 4 < 2 else -high for i in range(n)]
+            for valid in (None, [i % 7 != 2 for i in range(n)]):
+                selected = values if valid is None else [v for v, ok in zip(values, valid) if ok]
+                total = sum(selected)
+                count = len(selected)
+                for minimum in (0, n + 1):
+                    expected_valid = count >= minimum
+                    fits = -(1 << 63) <= total <= high if dtype == 3 else 0 <= total <= high
+                    fault = "Integer overflow" if expected_valid and not fits else None
+                    result = execute(values, dtype, [col], [0], valid=valid, offset=5,
+                                     reduction=210, minimum=minimum, typed=True, expect_error=fault)
+                    if fault is None:
+                        output, bits, stats = result
+                        assert bits == [expected_valid]
+                        assert output == [total if expected_valid else 0]
+                        assert stats.memory.peak > stats.memory.result
+                output, bits, _ = execute(values, dtype, [col], [0], valid=valid,
+                                         offset=5, reduction=211, typed=True)
+                expected = struct.unpack("Q", struct.pack("d", float(total) / count))[0] if count else 0
+                assert bits == [bool(count)] and output == [expected], (dtype, n, total, count, output, expected)
+        execute([high, 1], dtype, [col], [0], reduction=210, typed=True,
+                expect_error="Integer overflow")
+        output, bits, _ = execute([high, 1], dtype, [col], [0], reduction=210,
+                                 typed=True, limit=0)
+        assert output == bits == []
+    # Final fits after intermediate signed totals cross either 64-bit boundary.
+    for values in ([-(1 << 63), -(1 << 63), (1 << 63)-1, (1 << 63)-1],
+                   [(1 << 63)-1, (1 << 63)-1, -((1 << 63)-1), -((1 << 63)-1)]):
+        output, bits, _ = execute(values, 3, [col], [0], reduction=210, typed=True)
+        assert bits == [True] and output == [sum(values)]
+    for dtype in (1, 2, 4, 5, 6, 7, 8, 9):
+        for op in (210, 211):
+            execute([1], dtype, [col], [0], reduction=op, typed=True,
+                    expect_error="unsupported accumulator precision")
+    print("PASS exact wide integer sum/mean native regressions")
+
+
+test_exact_wide_integer_reductions()
+
 
 lib.dfm_context_release(ctx)
 print(
