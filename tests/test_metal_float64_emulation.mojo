@@ -1,9 +1,10 @@
 """Integer-only binary64 arithmetic through the public Metal query API."""
 from std.memory import bitcast
-from std.testing import TestSuite, assert_true, assert_equal, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
+from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, col, lit, when
 from dataframe.dtype import DataType
-from dataframe.metal import MetalRuntime, metal_installed
+from dataframe.metal import MetalRuntime
 
 
 def fixture() raises -> DataFrame:
@@ -82,9 +83,8 @@ def same(actual: DataFrame, expected: DataFrame) raises:
                 assert_equal(bitcast[DType.uint64](a._get(i)), bits)
 
 
-def test_float64_arithmetic_rounding_subnormals_and_nulls() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float64_arithmetic_rounding_subnormals_and_nulls() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var frame = fixture()
     var query = frame.lazy().select_exprs(
@@ -107,9 +107,8 @@ def test_float64_arithmetic_rounding_subnormals_and_nulls() raises:
     same(empty.collect(accelerator=runtime), empty.collect(engine="cpu"))
 
 
-def test_float64_predicates_nan_filling_and_clipping() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float64_predicates_nan_filling_and_clipping() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var frame = fixture()
     var query = frame.lazy().select_exprs(
@@ -131,9 +130,8 @@ def test_float64_predicates_nan_filling_and_clipping() raises:
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
 
 
-def test_float64_emulation_filters_conditionals_and_join_regions() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float64_emulation_filters_conditionals_and_join_regions() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var frame = fixture()
     var query = (
@@ -160,9 +158,8 @@ def test_float64_emulation_filters_conditionals_and_join_regions() raises:
     same(joined.collect(accelerator=runtime), joined.collect(engine="cpu"))
 
 
-def test_float64_emulation_has_separate_automatic_cost_family() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float64_emulation_has_separate_automatic_cost_family() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var frame = DataFrame([Series("x", Column[Float64]([1, 2, 3]))])
     for expression in List[Expr](
@@ -188,9 +185,8 @@ def test_float64_emulation_has_separate_automatic_cost_family() raises:
     )
 
 
-def test_floating_decimal_rounding_bits_extremes_and_cost() raises:
-    if not metal_installed():
-        return
+def test_native_metal_floating_decimal_rounding_bits_extremes_and_cost() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var base = fixture().column("a").float64()
     var values = List[Float64]()
@@ -294,9 +290,8 @@ def test_floating_decimal_rounding_bits_extremes_and_cost() raises:
     )
 
 
-def test_float64_numeric_casts_and_integer_division() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float64_numeric_casts_and_integer_division() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var frame = fixture()
     var converted = List[Expr]()
@@ -418,9 +413,8 @@ def test_float64_numeric_casts_and_integer_division() raises:
     same(narrowed.collect(accelerator=runtime), narrowed.collect(engine="cpu"))
 
 
-def test_float64_keys_extrema_and_joins() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float64_keys_extrema_and_joins() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var words: List[UInt64] = [
         0,
@@ -517,9 +511,8 @@ def test_float64_keys_extrema_and_joins() raises:
     )
 
 
-def test_float64_accumulation_scalar_grouped_and_resident() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float64_accumulation_scalar_grouped_and_resident() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     for n in List[Int]([0, 1, 257, 4097]):
         var wide = List[Float64]()
@@ -586,9 +579,8 @@ def test_float64_accumulation_scalar_grouped_and_resident() raises:
     same(specials.collect(accelerator=runtime), specials.collect(engine="cpu"))
 
 
-def test_integer_mean_preserves_exact_accumulation_before_float64_division() raises:
-    if not metal_installed():
-        return
+def test_native_metal_integer_mean_preserves_exact_accumulation_before_float64_division() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var frame = DataFrame(
         [
@@ -613,13 +605,12 @@ def test_integer_mean_preserves_exact_accumulation_before_float64_division() rai
         _ = unproved.lazy().select(col("i").mean()).collect(accelerator=runtime)
 
 
-def test_float64_remainder_extremes_filters_children_and_cost() raises:
+def test_native_metal_float64_remainder_extremes_filters_children_and_cost() raises:
     var frame = fixture()
     var query = frame.lazy().select(
         (col("a") % lit(Float64(3))).alias("remainder")
     )
-    if not metal_installed():
-        return
+    _ = require_metal()
     assert_true(
         "metal-emulated-float64-v1"
         in MetalRuntime().estimate_auto(query).family
@@ -670,9 +661,8 @@ def test_float64_remainder_extremes_filters_children_and_cost() raises:
     )
 
 
-def test_float64_sqrt_bits_filters_children_and_cost() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float64_sqrt_bits_filters_children_and_cost() raises:
+    _ = require_metal()
     var frame = fixture()
     var expression = col("a").sqrt()
     var query = frame.lazy().select(expression.alias("root"))
@@ -770,7 +760,3 @@ def test_float64_sqrt_bits_filters_children_and_cost() raises:
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

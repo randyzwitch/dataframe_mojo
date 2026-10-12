@@ -1,9 +1,10 @@
 """Exact two-word decimal transport and Decimal32/64 sums on Metal."""
-from std.testing import TestSuite, assert_true, assert_equal, assert_raises
+from std.testing import assert_true, assert_equal, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, Expr, col, lit, when
 from dataframe.dtype import DataType
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.cpu_work import cpu_features
 from dataframe.accelerator.constants import fold_literal_text_parsing
@@ -79,7 +80,8 @@ def wide_fixture(n: Int = 513) raises -> DataFrame:
     )
 
 
-def test_decimal128_literal_preflight_and_remaining_boundaries() raises:
+def test_native_metal_decimal128_literal_preflight_and_remaining_boundaries() raises:
+    _ = require_metal()
     var frame = wide_fixture(3)
     for value in List[String](
         [
@@ -102,8 +104,7 @@ def test_decimal128_literal_preflight_and_remaining_boundaries() raises:
             folded.collect(engine="cpu").equals(query.collect(engine="cpu"))
         )
         _ = lower_rows(folded, _capabilities())
-        if metal_installed():
-            check(query)
+        check(query)
     var query = sums_fixture(3).lazy().select(col("a").sum())
     var plan = lower_rows(query, _capabilities())
     assert_equal(plan.outputs[0].dtype, DataType.decimal(38, 2))
@@ -120,9 +121,8 @@ def test_decimal128_literal_preflight_and_remaining_boundaries() raises:
         _ = fold_literal_text_parsing(bad)
 
 
-def test_decimal_wide_scalar_sums_exact_extremes_nulls_and_empty() raises:
-    if not metal_installed():
-        return
+def test_native_metal_decimal_wide_scalar_sums_exact_extremes_nulls_and_empty() raises:
+    _ = require_metal()
     for n in List[Int]([0, 1, 257, 4097]):
         for sign in List[Int]([-1, 0, 1]):
             var frame = sums_fixture(n, sign)
@@ -158,9 +158,8 @@ def test_decimal_wide_scalar_sums_exact_extremes_nulls_and_empty() raises:
     )
 
 
-def test_decimal_wide_grouped_sums_sort_filter_and_resident_copy() raises:
-    if not metal_installed():
-        return
+def test_native_metal_decimal_wide_grouped_sums_sort_filter_and_resident_copy() raises:
+    _ = require_metal()
     for n in List[Int]([0, 257, 4097]):
         var frame = sums_fixture(n)
         for maintain_order in List[Bool]([True, False]):
@@ -210,9 +209,8 @@ def test_decimal_wide_grouped_sums_sort_filter_and_resident_copy() raises:
     )
 
 
-def test_decimal128_transport_comparisons_order_rank_and_keys() raises:
-    if not metal_installed():
-        return
+def test_native_metal_decimal128_transport_comparisons_order_rank_and_keys() raises:
+    _ = require_metal()
     for n in List[Int]([0, 1, 513]):
         var frame = wide_fixture(n)
         check(frame.lazy().select_exprs([col("v"), col("k")]))
@@ -294,9 +292,8 @@ def test_decimal128_transport_comparisons_order_rank_and_keys() raises:
     )
 
 
-def test_decimal128_joins_payloads_keys_and_scalar_broadcast() raises:
-    if not metal_installed():
-        return
+def test_native_metal_decimal128_joins_payloads_keys_and_scalar_broadcast() raises:
+    _ = require_metal()
     var frame = wide_fixture(37)
     var right = wide_fixture(23).rename({"v": "w"})
     for how in List[String](["inner", "left", "right", "full", "semi", "anti"]):
@@ -342,9 +339,8 @@ def test_decimal128_joins_payloads_keys_and_scalar_broadcast() raises:
     )
 
 
-def test_decimal128_extrema_first_last_and_resident_reductions() raises:
-    if not metal_installed():
-        return
+def test_native_metal_decimal128_extrema_first_last_and_resident_reductions() raises:
+    _ = require_metal()
     for n in List[Int]([0, 1, 513]):
         var frame = wide_fixture(n)
         var expressions = List[Expr](
@@ -378,14 +374,13 @@ def test_decimal128_extrema_first_last_and_resident_reductions() raises:
     )
 
 
-def test_decimal128_cost_memory_budget_and_literal_pipeline_cache() raises:
+def test_native_metal_decimal128_cost_memory_budget_and_literal_pipeline_cache() raises:
     var frame = wide_fixture(17)
     var query = frame.lazy().select_exprs([col("k"), col("v")])
     var work = cpu_features(query)
     assert_equal(work[0][2], Float64(17 * 20))
     assert_true("decimal128-v1" in work[1])
-    if not metal_installed():
-        return
+    _ = require_metal()
     var runtime = MetalRuntime()
     var estimate = runtime.estimate_auto(query)
     assert_equal(estimate.cpu[2], Float64(17 * 20))
@@ -420,7 +415,3 @@ def test_decimal128_cost_memory_budget_and_literal_pipeline_cache() raises:
     var folded = fold_literal_text_parsing(second)
     assert_equal(runtime.estimate_auto(folded).accelerator[13], Float64(0))
     check(second)
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -1,12 +1,13 @@
 """Static integer error proofs preserve CPU observations across Metal stages."""
-from std.testing import TestSuite, assert_true, assert_raises
+from std.testing import assert_true, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr, when
 from dataframe.binding import bind
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.integer_ranges import proven_integer_nodes
-from test_metal_float64_emulation import same
+from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 
 def frame() raises -> DataFrame:
@@ -83,9 +84,8 @@ def test_integer_proofs_cover_unsigned_product_and_literal_boundaries() raises:
         )
 
 
-def test_proven_integer_gpu_stages_head_nulls_empty_and_checked_rejection() raises:
-    if not metal_installed():
-        return
+def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rejection() raises:
+    _ = require_metal()
     var source = frame()
     var bounded = col("small").clip(lit(Int8(-4)), lit(Int8(4)))
     for count in List[Int]([0, 1, 7]):
@@ -145,9 +145,8 @@ def test_proven_integer_gpu_stages_head_nulls_empty_and_checked_rejection() rais
         )
 
 
-def test_proven_integer_full_int8_domain_compositions_and_resident_joins() raises:
-    if not metal_installed():
-        return
+def test_native_metal_proven_integer_full_int8_domain_compositions_and_resident_joins() raises:
+    _ = require_metal()
     var values = List[Int8]()
     for i in range(-128, 128):
         values.append(Int8(i))
@@ -169,17 +168,3 @@ def test_proven_integer_full_int8_domain_compositions_and_resident_joins() raise
     )
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
-
-
-def main() raises:
-    var suite = TestSuite()
-    suite.test[
-        test_integer_proofs_cover_unsigned_product_and_literal_boundaries
-    ]()
-    suite.test[
-        test_proven_integer_gpu_stages_head_nulls_empty_and_checked_rejection
-    ]()
-    suite.test[
-        test_proven_integer_full_int8_domain_compositions_and_resident_joins
-    ]()
-    suite^.run()

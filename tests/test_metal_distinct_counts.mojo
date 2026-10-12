@@ -1,14 +1,17 @@
 """Distinct counts reuse resident grouping, including null categories."""
-from std.testing import TestSuite, assert_true, assert_raises
+from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, StringColumn, Expr, col
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.distinct_counts import (
     has_distinct_counts,
     lower_distinct_counts,
 )
 from dataframe.accelerator.joins import lower_join_dag, DAG_JOIN
 from dataframe.accelerator.sets import lower_set_operations
+
+
+from tests.execution_modes.test_backend_metal import require_metal
 
 
 def frame() raises -> DataFrame:
@@ -43,83 +46,6 @@ def frame() raises -> DataFrame:
     )
 
 
-def test_distinct_counts_numeric_text_null_empty() raises:
-    if not metal_installed():
-        return
-    var input = frame()
-    var runtime = MetalRuntime()
-    for name in List[String](["x", "s"]):
-        var query = input.lazy().select(col(name).n_unique().alias("distinct"))
-        assert_true(
-            query.collect(accelerator=runtime).equals(
-                query.collect(engine="cpu")
-            )
-        )
-        var grouped = (
-            input.lazy()
-            .group_by("g", maintain_order=True)
-            .agg(col(name).n_unique().alias("distinct"))
-        )
-        assert_true(
-            grouped.collect(accelerator=runtime).equals(
-                grouped.collect(engine="cpu")
-            )
-        )
-        var empty = (
-            input.slice(0, 0)
-            .lazy()
-            .select(col(name).n_unique().alias("distinct"))
-        )
-        assert_true(
-            empty.collect(accelerator=runtime).equals(
-                empty.collect(engine="cpu")
-            )
-        )
-        var empty_grouped = (
-            input.slice(0, 0)
-            .lazy()
-            .group_by("g", maintain_order=True)
-            .agg(col(name).n_unique().alias("distinct"))
-        )
-        assert_true(
-            empty_grouped.collect(accelerator=runtime).equals(
-                empty_grouped.collect(engine="cpu")
-            )
-        )
-
-
-def test_distinct_count_composition_filter_join_budget() raises:
-    if not metal_installed():
-        return
-    var input = frame()
-    var runtime = MetalRuntime()
-    var query = (
-        input.lazy()
-        .filter(col("g") == 1)
-        .select(
-            (col("s").str().to_uppercase().n_unique() + 1).alias("distinct")
-        )
-    )
-    assert_true(
-        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
-    )
-    var right = DataFrame([Series("g", Column[Int32]([1, 2]))])
-    var joined = (
-        input.lazy()
-        .join(right.lazy(), "g")
-        .group_by("g", maintain_order=True)
-        .agg(col("x").n_unique().alias("distinct"))
-    )
-    assert_true(
-        joined.collect(accelerator=runtime).equals(joined.collect(engine="cpu"))
-    )
-    with assert_raises(contains="budget"):
-        _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))
-    assert_true(
-        query.collect(accelerator=runtime).equals(query.collect(engine="cpu"))
-    )
-
-
 def check_siblings(query: LazyFrame) raises:
     assert_true(
         query.collect(accelerator=MetalRuntime()).equals(
@@ -139,9 +65,8 @@ def sibling_expressions() -> List[Expr]:
     ]
 
 
-def test_distinct_siblings_null_order_empty_and_composition() raises:
-    if not metal_installed():
-        return
+def test_native_metal_distinct_siblings_null_order_empty_and_composition() raises:
+    _ = require_metal()
     var input = frame()
     for rows in List[Int]([0, input.height()]):
         var source = input.slice(0, rows)
@@ -176,9 +101,8 @@ def test_distinct_siblings_null_order_empty_and_composition() raises:
     )
 
 
-def test_distinct_siblings_sum_and_checked_child_restrictions() raises:
-    if not metal_installed():
-        return
+def test_native_metal_distinct_siblings_sum_and_checked_child_restrictions() raises:
+    _ = require_metal()
     var input = DataFrame(
         [
             Series("g", Column[Int32]([1, 1, 2, 2])),
@@ -223,9 +147,8 @@ def test_distinct_siblings_sum_and_checked_child_restrictions() raises:
     )
 
 
-def test_distinct_siblings_join_profile_budget_and_collision() raises:
-    if not metal_installed():
-        return
+def test_native_metal_distinct_siblings_join_profile_budget_and_collision() raises:
+    _ = require_metal()
     var input = frame().with_columns(
         col("g").alias("__dataframe_metal_distinct_sibling_0")
     )
@@ -245,47 +168,8 @@ def test_distinct_siblings_join_profile_budget_and_collision() raises:
     check_siblings(query)
 
 
-def test_distinct_siblings_metadata_and_shared_prefix() raises:
-    var input = DataFrame(
-        [
-            Series("g", Column[Int32]([1, 1, 2])),
-            Series("x", Column[Int16]([1, 2, 3])),
-        ]
-    )
-    var expressions = List[Expr](
-        [
-            col("x").n_unique().alias("distinct"),
-            col("x").count().alias("valid"),
-            col("x").max().alias("largest"),
-        ]
-    )
-    for grouped in List[Bool]([False, True]):
-        var query = input.lazy().select_exprs(expressions)
-        if grouped:
-            query = (
-                input.lazy().group_by("g", maintain_order=True).agg(expressions)
-            )
-        var count = len(query._nodes)
-        var lowered = lower_distinct_counts(query)
-        assert_true(len(query._nodes) == count)
-        assert_true(not has_distinct_counts(lowered))
-        var dag = lower_join_dag(lower_set_operations(lowered), _capabilities())
-        assert_true(dag.joins == 2)
-        var joins = 0
-        for task in dag.tasks:
-            if task.kind == DAG_JOIN:
-                assert_true(task.how == (7 if grouped else 6))
-                joins += 1
-        assert_true(joins == 2)
-        assert_true(
-            "resident distinct counts"
-            in MetalRuntime(device_id=999999).describe(query)
-        )
-
-
-def test_distinct_siblings_multikey_hash_slices_and_null_text() raises:
-    if not metal_installed():
-        return
+def test_native_metal_distinct_siblings_multikey_hash_slices_and_null_text() raises:
+    _ = require_metal()
     var gs = List[Int32]()
     var xs = List[UInt64]()
     var ss = List[String]()
@@ -317,7 +201,3 @@ def test_distinct_siblings_multikey_hash_slices_and_null_text() raises:
             ]
         )
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

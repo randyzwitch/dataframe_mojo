@@ -1,8 +1,9 @@
 """GPU partition aggregates preserve null partitions, order and errors."""
 from std.memory import bitcast, ArcPointer
+from tests.execution_modes.test_backend_metal import require_metal
 from dataframe.dtype import DataType
 from dataframe.categorical import encode
-from std.testing import TestSuite, assert_true, assert_raises
+from std.testing import assert_true, assert_raises
 from dataframe import (
     DataFrame,
     Series,
@@ -14,7 +15,7 @@ from dataframe import (
     Expr,
 )
 from dataframe.lazy import LazyFrame, SCAN_FRAME
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.windows import (
     has_partition_aggregates,
     lower_partition_aggregates,
@@ -22,7 +23,7 @@ from dataframe.accelerator.windows import (
 from dataframe.accelerator.joins import lower_join_dag
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.metadata import schema_frame, prune_projections
-from test_metal_float64_emulation import same
+from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 
 def fixture() raises -> DataFrame:
@@ -93,9 +94,8 @@ def test_partition_aggregate_metadata_preflight() raises:
     )
 
 
-def test_partition_aggregates_reductions_nulls_order_and_empty() raises:
-    if not metal_installed():
-        return
+def test_native_metal_partition_aggregates_reductions_nulls_order_and_empty() raises:
+    _ = require_metal()
     var frame = fixture()
     var values: List[Expr] = [
         col("x").sum(),
@@ -127,9 +127,8 @@ def test_partition_aggregates_reductions_nulls_order_and_empty() raises:
         _ = lower_partition_aggregates(invalid)
 
 
-def test_partition_aggregate_composition_filter_join_and_consumers() raises:
-    if not metal_installed():
-        return
+def test_native_metal_partition_aggregate_composition_filter_join_and_consumers() raises:
+    _ = require_metal()
     var frame = fixture()
     check(
         frame.lazy().select_exprs(
@@ -185,9 +184,8 @@ def test_partition_aggregate_composition_filter_join_and_consumers() raises:
         )
 
 
-def test_partition_checked_sum_observation() raises:
-    if not metal_installed():
-        return
+def test_native_metal_partition_checked_sum_observation() raises:
+    _ = require_metal()
     var frame = DataFrame(
         [
             Series("g", Column[Int32]([1, 2, 1, 2])),
@@ -224,9 +222,8 @@ def test_partition_checked_sum_observation() raises:
     check(valid.lazy().filter(col("x").sum().over("g") > 5))
 
 
-def test_partition_aggregate_key_types_slices_and_hash_groups() raises:
-    if not metal_installed():
-        return
+def test_native_metal_partition_aggregate_key_types_slices_and_hash_groups() raises:
+    _ = require_metal()
     var keys = List[Float64]()
     var integers = List[Int64]()
     var wide = List[Int128]()
@@ -306,9 +303,8 @@ def test_partition_aggregate_key_types_slices_and_hash_groups() raises:
     check(many.lazy().select(col("x").sum().over("w").alias("total")))
 
 
-def test_partition_window_checked_children_and_bool_reductions() raises:
-    if not metal_installed():
-        return
+def test_native_metal_partition_window_checked_children_and_bool_reductions() raises:
+    _ = require_metal()
     var frame = fixture()
     check(
         frame.lazy().select_exprs(
@@ -357,9 +353,8 @@ def test_partition_window_checked_children_and_bool_reductions() raises:
         _ = ordinary.collect(accelerator=MetalRuntime())
 
 
-def test_partition_floating_reduction_bits_and_decimal_sums() raises:
-    if not metal_installed():
-        return
+def test_native_metal_partition_floating_reduction_bits_and_decimal_sums() raises:
+    _ = require_metal()
     for n in List[Int]([513, 196609]):
         var a = List[Float64]()
         var b = List[Float32]()
@@ -400,9 +395,8 @@ def test_partition_floating_reduction_bits_and_decimal_sums() raises:
     check(decimal.lazy().select(col("d").sum().over("g").alias("total")))
 
 
-def test_nested_partition_aggregates_composition_consumers_and_nulls() raises:
-    if not metal_installed():
-        return
+def test_native_metal_nested_partition_aggregates_composition_consumers_and_nulls() raises:
+    _ = require_metal()
     var frame = fixture()
     var nested = col("x").sum().over("g").sum().over("h")
     check(
@@ -460,9 +454,8 @@ def test_nested_partition_aggregates_composition_consumers_and_nulls() raises:
         )
 
 
-def test_nested_partition_checked_errors_are_fully_observed() raises:
-    if not metal_installed():
-        return
+def test_native_metal_nested_partition_checked_errors_are_fully_observed() raises:
+    _ = require_metal()
     for outer in List[Bool]([False, True]):
         var gs: List[Int32] = [1, 1]
         var xs = List[Int32]([Int32.MAX, 1])
@@ -500,9 +493,8 @@ def test_nested_partition_checked_errors_are_fully_observed() raises:
     )
 
 
-def test_nested_partition_floating_worker_order() raises:
-    if not metal_installed():
-        return
+def test_native_metal_nested_partition_floating_worker_order() raises:
+    _ = require_metal()
     var gs = List[Int32]()
     var hs = List[Int32]()
     var xs = List[Float64]()
@@ -607,26 +599,12 @@ def test_shared_partition_metadata_preserves_cpu_empty_execution() raises:
     assert_true(dag.joins == 24, String(dag.joins))
     for counter in counters:
         assert_true(counter[] == 0)
-    if metal_installed():
-        expression = col("x")
-        for level in range(8):
-            expression = expression.min().over("g" if level % 2 == 0 else "h")
-        check(frame.lazy().select(expression.alias("deep")))
 
 
-def main() raises:
-    var suite = TestSuite()
-    suite.test[test_partition_aggregate_metadata_preflight]()
-    suite.test[test_partition_aggregates_reductions_nulls_order_and_empty]()
-    suite.test[test_partition_aggregate_composition_filter_join_and_consumers]()
-    suite.test[test_partition_checked_sum_observation]()
-    suite.test[test_partition_aggregate_key_types_slices_and_hash_groups]()
-    suite.test[test_partition_window_checked_children_and_bool_reductions]()
-    suite.test[test_partition_floating_reduction_bits_and_decimal_sums]()
-    suite.test[
-        test_nested_partition_aggregates_composition_consumers_and_nulls
-    ]()
-    suite.test[test_nested_partition_checked_errors_are_fully_observed]()
-    suite.test[test_nested_partition_floating_worker_order]()
-    suite.test[test_shared_partition_metadata_preserves_cpu_empty_execution]()
-    suite^.run()
+def test_native_metal_deep_shared_partition_metadata_stays_resident() raises:
+    _ = require_metal()
+    var frame = fixture()
+    var expression = col("x")
+    for level in range(8):
+        expression = expression.min().over("g" if level % 2 == 0 else "h")
+    check(frame.lazy().select(expression.alias("deep")))

@@ -1,13 +1,17 @@
 """Column aliases share resident values without changing visible schemas."""
-from std.testing import TestSuite, assert_true, assert_raises
+from std.testing import assert_true, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr
 from dataframe.lazy import LazyFrame
 from dataframe.string_column import StringColumn
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
-from test_metal_float64_emulation import same
-from test_metal_wide_plans import wide_frame, numeric_frame
+from tests.execution_modes.test_backend_metal_float64_emulation import same
+from tests.execution_modes.test_backend_metal_wide_plans import (
+    wide_frame,
+    numeric_frame,
+)
 
 
 def aliases(count: Int) -> List[Expr]:
@@ -68,9 +72,8 @@ def test_column_slot_preflight_reuses_values_and_bounds_outputs() raises:
         _ = lower_rows(source.lazy().select_exprs(computed), _capabilities())
 
 
-def test_column_slot_gpu_aliases_filters_order_slices_and_replacement() raises:
-    if not metal_installed():
-        return
+def test_native_metal_column_slot_gpu_aliases_filters_order_slices_and_replacement() raises:
+    _ = require_metal()
     var raw = wide_frame(128)
     var identity = List[Expr]()
     for name in raw.columns():
@@ -110,9 +113,8 @@ def test_column_slot_gpu_aliases_filters_order_slices_and_replacement() raises:
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
 
 
-def test_column_slot_gpu_resident_joins_reductions_and_dictionaries() raises:
-    if not metal_installed():
-        return
+def test_native_metal_column_slot_gpu_resident_joins_reductions_and_dictionaries() raises:
+    _ = require_metal()
     var source = numeric_frame().select(["x"])
     var query = source.lazy().select_exprs(aliases(64))
     var right = source.lazy().select_exprs([col("x").alias("right")])
@@ -157,15 +159,3 @@ def test_column_slot_gpu_resident_joins_reductions_and_dictionaries() raises:
     assert_true(measured[1].height() > 0)
     var last = measured[1].height() - 1
     assert_true(measured[1].column("executor").string()._get(last) == "metal")
-
-
-def main() raises:
-    var suite = TestSuite()
-    suite.test[test_column_slot_preflight_reuses_values_and_bounds_outputs]()
-    suite.test[
-        test_column_slot_gpu_aliases_filters_order_slices_and_replacement
-    ]()
-    suite.test[
-        test_column_slot_gpu_resident_joins_reductions_and_dictionaries
-    ]()
-    suite^.run()

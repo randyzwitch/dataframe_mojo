@@ -1,12 +1,13 @@
 """Metal shape extensions retain strict preflight and exact row semantics."""
-from std.testing import TestSuite, assert_true, assert_raises
+from std.testing import assert_true, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.joins import lower_join_dag
-from test_metal_float64_emulation import same
+from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 
 def wide_frame(
@@ -128,9 +129,8 @@ def test_wide_metal_metadata_and_default_backend_limits() raises:
         _ = lower_rows(numeric.lazy().select_exprs(expressions), metal)
 
 
-def test_wide_metal_transport_bitmaps_slices_and_projection() raises:
-    if not metal_installed():
-        return
+def test_native_metal_wide_metal_transport_bitmaps_slices_and_projection() raises:
+    _ = require_metal()
     for width in List[Int]([64, 65, 127, 128]):
         var frame = wide_frame(width)
         check(frame.lazy())
@@ -147,9 +147,8 @@ def test_wide_metal_transport_bitmaps_slices_and_projection() raises:
         _ = wide_frame(129).lazy().collect(accelerator=MetalRuntime())
 
 
-def test_wide_metal_programs_steps_and_resident_consumers() raises:
-    if not metal_installed():
-        return
+def test_native_metal_wide_metal_programs_steps_and_resident_consumers() raises:
+    _ = require_metal()
     var frame = numeric_frame()
     for size in List[Int]([65, 127, 128]):
         check(frame.lazy().select(negations(size)))
@@ -174,9 +173,8 @@ def test_wide_metal_programs_steps_and_resident_consumers() raises:
     check(sorted.head(3))
 
 
-def test_wide_metal_global_and_grouped_reductions() raises:
-    if not metal_installed():
-        return
+def test_native_metal_wide_metal_global_and_grouped_reductions() raises:
+    _ = require_metal()
     var frame = numeric_frame()
     var globals = List[Expr]()
     for i in range(70):
@@ -203,9 +201,8 @@ def test_wide_metal_global_and_grouped_reductions() raises:
     check(frame.slice(0, 0).lazy().group_by("g").agg(aggregates))
 
 
-def test_wide_metal_join_fields_keys_empty_and_budget() raises:
-    if not metal_installed():
-        return
+def test_native_metal_wide_metal_join_fields_keys_empty_and_budget() raises:
+    _ = require_metal()
     var left = wide_frame(65, 6, "l").slice(1, 4)
     var right = wide_frame(63, 5, "r").slice(1, 3)
     check(left.lazy().join(right.lazy(), how="cross"))
@@ -235,13 +232,3 @@ def test_wide_metal_join_fields_keys_empty_and_budget() raises:
     var last = measured[1].height() - 1
     assert_true(measured[1].column("executor").string()._get(last) == "metal")
     assert_true(measured[1].column("download_bytes").int64()._get(last) > 0)
-
-
-def main() raises:
-    var suite = TestSuite()
-    suite.test[test_wide_metal_metadata_and_default_backend_limits]()
-    suite.test[test_wide_metal_transport_bitmaps_slices_and_projection]()
-    suite.test[test_wide_metal_programs_steps_and_resident_consumers]()
-    suite.test[test_wide_metal_global_and_grouped_reductions]()
-    suite.test[test_wide_metal_join_fields_keys_empty_and_budget]()
-    suite^.run()

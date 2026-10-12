@@ -1,10 +1,11 @@
 """Scalar reductions broadcast through resident GPU branches into row expressions."""
 from std.memory import bitcast
-from std.testing import TestSuite, assert_true, assert_equal, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
+from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit, when, scan_csv
 from dataframe.dtype import DataType
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.aggregates import lower_aggregate_compositions
 from dataframe.accelerator.joins import lower_join_dag, DAG_ROWS, DAG_JOIN
 from dataframe.accelerator.rows import lower_rows
@@ -114,9 +115,8 @@ def test_scalar_broadcast_rejects_file_reads_and_conditional_precision_faults() 
         )
 
 
-def test_scalar_broadcast_mixed_projections_and_literal_scalar_outputs() raises:
-    if not metal_installed():
-        return
+def test_native_metal_scalar_broadcast_mixed_projections_and_literal_scalar_outputs() raises:
+    _ = require_metal()
     var frame = fixture()
     check(
         frame.lazy().select_exprs(
@@ -144,9 +144,8 @@ def test_scalar_broadcast_mixed_projections_and_literal_scalar_outputs() raises:
     )
 
 
-def test_scalar_broadcast_filters_and_head_observe_complete_prefix() raises:
-    if not metal_installed():
-        return
+def test_native_metal_scalar_broadcast_filters_and_head_observe_complete_prefix() raises:
+    _ = require_metal()
     var frame = fixture()
     check(frame.lazy().filter(col("x") > col("x").mean()))
     check(
@@ -169,9 +168,8 @@ def test_scalar_broadcast_filters_and_head_observe_complete_prefix() raises:
     )
 
 
-def test_scalar_broadcast_with_columns_joins_and_grouped_consumers() raises:
-    if not metal_installed():
-        return
+def test_native_metal_scalar_broadcast_with_columns_joins_and_grouped_consumers() raises:
+    _ = require_metal()
     var frame = fixture()
     var broadcast = frame.lazy().with_columns(col("x").mean().alias("mean"))
     check(broadcast)
@@ -190,9 +188,8 @@ def test_scalar_broadcast_with_columns_joins_and_grouped_consumers() raises:
     )
 
 
-def test_scalar_broadcast_empty_null_and_conditional_inputs() raises:
-    if not metal_installed():
-        return
+def test_native_metal_scalar_broadcast_empty_null_and_conditional_inputs() raises:
+    _ = require_metal()
     var frame = fixture()
     var nulls = DataFrame(
         [
@@ -225,9 +222,8 @@ def test_scalar_broadcast_empty_null_and_conditional_inputs() raises:
         )
 
 
-def test_scalar_broadcast_float32_subnormal_values() raises:
-    if not metal_installed():
-        return
+def test_native_metal_scalar_broadcast_float32_subnormal_values() raises:
+    _ = require_metal()
     var tiny = bitcast[DType.float32](UInt32(1))
     var frame = DataFrame(
         [
@@ -246,9 +242,8 @@ def test_scalar_broadcast_float32_subnormal_values() raises:
     )
 
 
-def test_scalar_broadcast_resident_traffic_budgets_and_recovery() raises:
-    if not metal_installed():
-        return
+def test_native_metal_scalar_broadcast_resident_traffic_budgets_and_recovery() raises:
+    _ = require_metal()
     var runtime = MetalRuntime()
     var query = fixture().lazy().with_columns(col("x").mean().alias("mean"))
     var measured = query.profile(accelerator=runtime)
@@ -289,7 +284,3 @@ def test_scalar_broadcast_resident_traffic_budgets_and_recovery() raises:
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

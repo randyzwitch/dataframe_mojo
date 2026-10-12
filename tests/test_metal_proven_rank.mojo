@@ -1,9 +1,13 @@
 """Static no-error proofs admit rank inputs without hiding checked children."""
-from std.testing import TestSuite, assert_true, assert_raises
+from std.testing import assert_true, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.rows import lower_rows
-from test_metal_proven_arithmetic import frame, check
+from tests.execution_modes.test_backend_metal_proven_arithmetic import (
+    frame,
+    check,
+)
 
 
 def test_proven_rank_preflight_preserves_opt_in_and_unsafe_children() raises:
@@ -28,9 +32,8 @@ def test_proven_rank_preflight_preserves_opt_in_and_unsafe_children() raises:
             _ = lower_rows(source.lazy().select(unsafe.rank()), _capabilities())
 
 
-def test_proven_rank_gpu_methods_limits_partitions_and_slices() raises:
-    if not metal_installed():
-        return
+def test_native_metal_proven_rank_gpu_methods_limits_partitions_and_slices() raises:
+    _ = require_metal()
     var source = DataFrame(
         [
             Series(
@@ -75,9 +78,8 @@ def test_proven_rank_gpu_methods_limits_partitions_and_slices() raises:
     check(source.slice(0, 0).lazy().select((col("x") + lit(Int64(0))).rank()))
 
 
-def test_proven_rank_gpu_resident_consumers_head_and_rejections() raises:
-    if not metal_installed():
-        return
+def test_native_metal_proven_rank_gpu_resident_consumers_head_and_rejections() raises:
+    _ = require_metal()
     var source = frame()
     var query = source.lazy().with_columns(
         (col("x") // lit(Int64(2))).rank("dense").alias("rank")
@@ -98,13 +100,3 @@ def test_proven_rank_gpu_resident_consumers_head_and_rejections() raises:
         )
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
-
-
-def main() raises:
-    var suite = TestSuite()
-    suite.test[
-        test_proven_rank_preflight_preserves_opt_in_and_unsafe_children
-    ]()
-    suite.test[test_proven_rank_gpu_methods_limits_partitions_and_slices]()
-    suite.test[test_proven_rank_gpu_resident_consumers_head_and_rejections]()
-    suite^.run()

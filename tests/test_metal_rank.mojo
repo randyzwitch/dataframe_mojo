@@ -1,6 +1,7 @@
 """Stable global and partitioned ranks through the resident Metal API."""
 from std.memory import bitcast
-from std.testing import TestSuite, assert_true, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
+from std.testing import assert_true, assert_raises
 from dataframe import (
     DataFrame,
     Series,
@@ -14,19 +15,18 @@ from dataframe import (
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.categorical import encode
-from dataframe.metal import MetalRuntime, metal_installed, _capabilities
+from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.capabilities import RowCapabilities
-from test_metal_float64_emulation import same
+from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 
 def methods() -> List[String]:
     return ["average", "min", "max", "dense", "ordinal"]
 
 
-def test_rank_float_words_unsigned_limits_and_partitions() raises:
-    if not metal_installed():
-        return
+def test_native_metal_rank_float_words_unsigned_limits_and_partitions() raises:
+    _ = require_metal()
     var words: List[UInt64] = [
         0,
         0x8000000000000000,
@@ -94,9 +94,8 @@ def test_rank_float_words_unsigned_limits_and_partitions() raises:
                     )
 
 
-def test_rank_all_numeric_widths_and_boolean() raises:
-    if not metal_installed():
-        return
+def test_native_metal_rank_all_numeric_widths_and_boolean() raises:
+    _ = require_metal()
     comptime for D in NUMERIC_DTYPES:
         var values = List[Scalar[D]]()
         var valid = List[Bool]()
@@ -130,9 +129,8 @@ def test_rank_all_numeric_widths_and_boolean() raises:
         )
 
 
-def test_rank_string_and_logical_values_multiple_partition_keys() raises:
-    if not metal_installed():
-        return
+def test_native_metal_rank_string_and_logical_values_multiple_partition_keys() raises:
+    _ = require_metal()
     var frame = DataFrame(
         [
             Series(
@@ -172,9 +170,8 @@ def test_rank_string_and_logical_values_multiple_partition_keys() raises:
                 )
 
 
-def test_rank_resident_filters_groups_joins_empty_and_cost() raises:
-    if not metal_installed():
-        return
+def test_native_metal_rank_resident_filters_groups_joins_empty_and_cost() raises:
+    _ = require_metal()
     var frame = DataFrame(
         [
             Series("k", Column[Int32]([0, 1, 0, 1, 0, 1])),
@@ -239,9 +236,8 @@ def test_rank_resident_filters_groups_joins_empty_and_cost() raises:
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
 
 
-def test_rank_dense_prefix_across_blocks() raises:
-    if not metal_installed():
-        return
+def test_native_metal_rank_dense_prefix_across_blocks() raises:
+    _ = require_metal()
     var values = List[Int64]()
     var keys = List[Int32]()
     var valid = List[Bool]()
@@ -281,7 +277,3 @@ def test_rank_capability_and_checked_input_preflight() raises:
     var unknown = frame.lazy().select(col("x").rank("invalid"))
     with assert_raises(contains="rank method must be"):
         _ = lower_rows(unknown, _capabilities())
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

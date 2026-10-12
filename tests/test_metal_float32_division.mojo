@@ -1,14 +1,14 @@
 """Float32 floor division preserves its rounded quotient before flooring."""
 from std.memory import bitcast
-from std.testing import TestSuite, assert_equal, assert_true
+from tests.execution_modes.test_backend_metal import require_metal
+from std.testing import assert_equal, assert_true
 from dataframe import DataFrame, Series, Column, col, lit
-from dataframe.metal import MetalRuntime, metal_installed
-from test_metal_float64_emulation import same
+from dataframe.metal import MetalRuntime
+from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 
-def test_float32_floor_division_bits_nulls_children_and_cost() raises:
-    if not metal_installed():
-        return
+def test_native_metal_float32_floor_division_bits_nulls_children_and_cost() raises:
+    _ = require_metal()
     var words: List[UInt32] = [
         0,
         1,
@@ -84,7 +84,3 @@ def test_float32_floor_division_bits_nulls_children_and_cost() raises:
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),
     )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()
