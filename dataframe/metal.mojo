@@ -342,6 +342,7 @@ def _capabilities() -> RowCapabilities:
         temporal_fields=True,
         ranks=True,
         decimal128=True,
+        reuse_column_slots=True,
         max_nodes=128,
         max_slots=128,
         max_steps=128,
@@ -1406,6 +1407,8 @@ struct MetalRuntime(AcceleratorBackend):
         device[13] = Float64(metadata[4] == 0)
         device[14] = 0
         var family = work[1].copy()
+        if plan.reused_columns:
+            family += ";metal-column-slots-v1"
         for step in plan.steps:
             if plan.code[step.start * 4] == ROW_RANK_KEY:
                 family += ";metal-rank-v1"
@@ -1756,12 +1759,17 @@ struct MetalRuntime(AcceleratorBackend):
             if has_join(query) or has_scalar_consumers(query):
                 var dag = lower_join_dag(query, _capabilities())
                 return (
-                    "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
-                ) + String(dag.joins) + " joins, " + String(
-                    len(dag.tasks)
-                ) + " resident regions; only the final result materializes" " CPU columns; optional runtime " + (
-                    "present" if metal_installed() else "missing"
-                ) + "\n"
+                    (
+                        "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
+                    )
+                    + String(dag.joins)
+                    + " joins, "
+                    + String(len(dag.tasks))
+                    + " resident regions; only the final result materializes"
+                    " CPU columns; optional runtime "
+                    + ("present" if metal_installed() else "missing")
+                    + "\n"
+                )
             var plan = lower_rows(query, _capabilities())
             return (
                 "ENGINE accel: Metal native row expressions; "

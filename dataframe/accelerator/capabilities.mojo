@@ -51,6 +51,7 @@ struct RowCapabilities(Copyable):
     var temporal_fields: Bool
     var decimal128: Bool
     var ranks: Bool
+    var reuse_column_slots: Bool
     var max_nodes: Int
     var max_slots: Int
     var max_steps: Int
@@ -88,6 +89,7 @@ struct RowCapabilities(Copyable):
         max_slots: Int = 64,
         max_steps: Int = 64,
         max_join_columns: Int = 64,
+        reuse_column_slots: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -114,6 +116,7 @@ struct RowCapabilities(Copyable):
         self.temporal_fields = temporal_fields
         self.ranks = ranks
         self.decimal128 = decimal128
+        self.reuse_column_slots = reuse_column_slots
         self.max_nodes = max_nodes
         self.max_slots = max_slots
         self.max_steps = max_steps

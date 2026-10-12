@@ -123,7 +123,7 @@ def test_wide_metal_metadata_and_default_backend_limits() raises:
     # Slots remain independently bounded even when each expression is small.
     var expressions = List[Expr]()
     for i in range(128):
-        expressions.append(col("x").alias("x" + String(i)))
+        expressions.append((col("x") + lit(Float64(i))).alias("x" + String(i)))
     with assert_raises(contains="128 value slots"):
         _ = lower_rows(numeric.lazy().select_exprs(expressions), metal)
 
