@@ -1759,17 +1759,12 @@ struct MetalRuntime(AcceleratorBackend):
             if has_join(query) or has_scalar_consumers(query):
                 var dag = lower_join_dag(query, _capabilities())
                 return (
-                    (
-                        "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
-                    )
-                    + String(dag.joins)
-                    + " joins, "
-                    + String(len(dag.tasks))
-                    + " resident regions; only the final result materializes"
-                    " CPU columns; optional runtime "
-                    + ("present" if metal_installed() else "missing")
-                    + "\n"
-                )
+                    "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
+                ) + String(dag.joins) + " joins, " + String(
+                    len(dag.tasks)
+                ) + " resident regions; only the final result materializes" " CPU columns; optional runtime " + (
+                    "present" if metal_installed() else "missing"
+                ) + "\n"
             var plan = lower_rows(query, _capabilities())
             return (
                 "ENGINE accel: Metal native row expressions; "
