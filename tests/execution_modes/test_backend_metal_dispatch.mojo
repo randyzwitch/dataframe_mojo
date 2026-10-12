@@ -162,32 +162,42 @@ def sort_rows(indices: List[Int]) raises -> DataFrame:
 
 def radix_sort_cases(runtime: MetalRuntime, native: Bool) raises:
     for n in [65535, 65536, 65537]:
-        var input_rows = List[Int]()
-        for row in range(n):
-            input_rows.append(row)
-        var expected_rows = List[Int]()
-        # Stable counting by finite key classes is independent of production
-        # merge/radix sorting and preserves the original row id for every tie.
-        for key in range(-1, 17):
-            for tie in range(5):
-                for row in range(n):
-                    var candidate = -1 if row % 23 == 0 else row % 17
-                    if candidate == key and row % 5 == tie:
-                        expected_rows.append(row)
-        var mechanism = String(
-            "native_metal_integer_radix_sort"
-        ) if n >= 65536 else String("!native_metal_integer_radix_sort")
-        check_domain(
-            sort_rows(input_rows)
-            .lazy()
-            .sort(
-                ["k", "t"], descending=[True, False], nulls_last=[False, True]
-            ),
-            sort_rows(expected_rows),
-            runtime,
-            native,
-            mechanism=mechanism,
-        )
+        for composite in [False, True]:
+            var input_rows = List[Int]()
+            for row in range(n):
+                input_rows.append(row)
+            var expected_rows = List[Int]()
+            # Enumerate finite key classes independently of merge/radix sorting.
+            # A single key preserves source order within every null/value class;
+            # the composite order uses the second key before the stable row id.
+            for key in range(-1, 17):
+                for tie in range(5 if composite else 1):
+                    for row in range(n):
+                        var candidate = -1 if row % 23 == 0 else row % 17
+                        if candidate == key and (
+                            not composite or row % 5 == tie
+                        ):
+                            expected_rows.append(row)
+            # UInt64 alone fits the native radix pass budget. Adding Int8
+            # exceeds that budget, so the composite must use the stable fallback
+            # even above the row threshold. Both retain exact UInt64 payloads.
+            var mechanism = String(
+                "native_metal_integer_radix_sort"
+            ) if n >= 65536 and not composite else String(
+                "!native_metal_integer_radix_sort"
+            )
+            var keys: List[String] = ["k", "t"] if composite else ["k"]
+            var descending: List[Bool] = [True, False] if composite else [True]
+            var nulls_last: List[Bool] = [False, True] if composite else [False]
+            check_domain(
+                sort_rows(input_rows)
+                .lazy()
+                .sort(keys, descending=descending, nulls_last=nulls_last),
+                sort_rows(expected_rows),
+                runtime,
+                native,
+                mechanism=mechanism,
+            )
 
 
 def test_native_metal_integer_sort_dispatch_boundary_keeps_exact_words_null_placement_and_stable_ties() raises:

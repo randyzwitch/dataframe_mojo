@@ -257,6 +257,12 @@ def test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_field
     # Current CPU Date epoch-shift overflow is a separate strict public
     # regression; CPU parity must not turn that implementation into an oracle.
     var measured = plan.profile(accelerator=runtime)
+    var first_year = measured[0].item(0, "year").int64()
+    assert_true(
+        first_year == 25252734927766554,
+        "native Date Gregorian year must remain positive across epoch shift; got "
+        + String(first_year),
+    )
     assert_frame(measured[0], expected)
     assert_native_report(measured[1])
 
@@ -337,7 +343,9 @@ def truncation_cases(runtime: MetalRuntime, native: Bool) raises:
         ),
         runtime,
         native,
-        resident=True,
+        # Filter, projection and aggregation form one fused native region;
+        # no intermediate provider buffer needs to cross a region boundary.
+        fused=True,
     )
     var literals: List[Expr] = [
         lit("2000-02-29T12:34:56.123456")

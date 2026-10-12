@@ -210,7 +210,9 @@ def composition_cases(runtime: MetalRuntime, native: Bool) raises:
             Series("chosen", Column[Int16]([4, 2, -7])),
         ]
     )
-    check_domain(grouped, expected, runtime, native, resident=True)
+    # Grouped aggregation and its projection share one native region. Global
+    # scalar aggregation below deliberately exercises a separate resident edge.
+    check_domain(grouped, expected, runtime, native, fused=True)
     check_domain(
         source.lazy().select_exprs(expressions),
         DataFrame(
@@ -252,7 +254,7 @@ def composition_cases(runtime: MetalRuntime, native: Bool) raises:
         DataFrame([Series("answer", Column[Int64]([4, 4]))]),
         runtime,
         native,
-        resident=True,
+        fused=True,
     )
 
 

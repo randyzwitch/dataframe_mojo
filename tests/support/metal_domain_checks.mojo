@@ -36,6 +36,7 @@ def check_domain(
     resident: Bool = False,
     dictionary: Bool = False,
     mechanism: String = "",
+    fused: Bool = False,
 ) raises:
     if native:
         var measured = plan.profile(accelerator=runtime, engine="accel")
@@ -52,7 +53,11 @@ def check_domain(
                     or measured[1].item(row, "algorithm").string()
                     == expected_mechanism
                 )
-            assert_equal(found, not mechanism.startswith("!"))
+            assert_equal(
+                found,
+                not mechanism.startswith("!"),
+                "native mechanism " + mechanism + " found=" + String(found),
+            )
         if resident:
             var input_bytes = Int64(0)
             var output_bytes = Int64(0)
@@ -67,6 +72,19 @@ def check_domain(
                 input_bytes > 0, "consumer must read resident native data"
             )
             assert_true(output_bytes > 0, "producer must retain native data")
+        if fused:
+            # One row describes an entire native region. Resident byte counters
+            # measure edges between separate regions, not GPU-local operators
+            # fused into this region; only its final result crosses to the CPU.
+            assert_equal(measured[1].height(), 1)
+            assert_equal(
+                measured[1].item(0, "resident_input_bytes").int64(), Int64(0)
+            )
+            assert_equal(
+                measured[1].item(0, "resident_output_bytes").int64(), Int64(0)
+            )
+            assert_true(measured[1].item(0, "upload_bytes").int64() > 0)
+            assert_true(measured[1].item(0, "download_bytes").int64() > 0)
         if dictionary:
             var staging = Int64(0)
             for row in range(measured[1].height()):

@@ -94,7 +94,10 @@ explicit and do not establish GPU parity.
 
 ## Current validation limits
 
-Actual native Metal execution remains pending on suitable macOS hardware.
+Native Metal contracts run on macOS CI after a real device probe. An extreme
+Date epoch-shift overflow is a strict expected failure on both CPU and Metal;
+the independent Gregorian expectation remains unchanged. Capability skips do
+not establish GPU parity.
 Multiworker streamed global FIRST/LAST/ARGMIN/ARGMAX have produced
 schedule-dependent results; deterministic positional checks currently use one
 worker. No flaky expected-failure test substitutes for a deterministic regression.

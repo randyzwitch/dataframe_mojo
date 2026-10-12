@@ -38,8 +38,9 @@ combinations in that test remain unvalidated.
 
 Hardware omissions are recorded as `SKIP(capability)`. Enable actual Metal checks
 with `--capabilities metal` after probing the native device. An enabled test fails
-if its prerequisites are absent. Actual GPU validation remains pending on
-suitable hardware. Multiworker global positional reductions also remain a known
+if its prerequisites are absent. macOS CI runs the native contracts when a device
+is exposed; extreme Date epoch-shift overflow is a strict expected failure.
+Multiworker global positional reductions also remain a known
 limit: deterministic FIRST/LAST/ARGMIN/ARGMAX assertions currently use one worker
 because schedule-dependent results were observed.
 

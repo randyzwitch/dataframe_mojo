@@ -36,9 +36,10 @@ executable when that packaging is useful for investigation.
 Test functions are discovered automatically. `--contracts` selects named module
 groups; it does not require assigning every test to a coverage registry.
 
-Native Metal execution remains unvalidated on the Linux redesign host. Capability
-skips do not establish GPU parity. Multiworker positional global FIRST/LAST and
-ARGMIN/ARGMAX also remain a known coverage limit: schedule-dependent results were
+Native Metal contracts execute in macOS CI when a device is exposed. Extreme
+Date epoch-shift overflow has strict expected failures on CPU and Metal.
+Capability skips do not establish GPU parity. Multiworker positional global
+FIRST/LAST and ARGMIN/ARGMAX also remain a known coverage limit: schedule-dependent results were
 observed, so their deterministic assertions currently use one worker. No flaky
 expected-failure test substitutes for a deterministic regression.
 

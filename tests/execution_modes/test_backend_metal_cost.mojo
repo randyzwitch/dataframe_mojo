@@ -52,7 +52,9 @@ def cost_query(
 def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_warm_shader_metadata() raises:
     var runtime = require_metal()
     var setting = WorkerSetting(1)
-    var a = DataFrame([Series("x", Column[Float32]([1, 2, 3]))])
+    var a = DataFrame(
+        [Series("x", Column[Float32]([1, 2, 3], [True, True, False]))]
+    )
     var b = DataFrame(
         [Series("x", Column[Float32]([99, -7, 0], [False, True, True]))]
     )
@@ -63,8 +65,22 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
     var same = runtime.estimate_auto(alternate[0])
     var repeated = runtime.estimate_auto(first[0])
     assert_equal(cold.cpu, same.cpu)
+    # Both sources have a validity bitmap: payload and bitmap contents must
+    # not influence the estimate, while their physical buffer sizes may.
     assert_equal(cold.accelerator, same.accelerator)
     assert_equal(cold.accelerator, repeated.accelerator)
+    var dense = cost_query(DataFrame([Series("x", Column[Float32]([1, 2, 3]))]))
+    var dense_facts = runtime.estimate_auto(dense[0])
+    assert_equal(cold.cpu, dense_facts.cpu)
+    for at in range(len(cost_feature_names())):
+        # Three rows require one bitmap byte; omitting that buffer saves
+        # exactly one upload byte, without changing any other feature.
+        var bitmap_bytes = Float64(
+            1 if cost_feature_names()[at] == "upload_bytes" else 0
+        )
+        assert_equal(
+            cold.accelerator[at], dense_facts.accelerator[at] + bitmap_bytes
+        )
     assert_equal(cold.family, "float32")
     assert_equal(cold.placement, "accel")
     assert_equal(estimate_feature(cold, "fixed", False), Float64(1))
@@ -83,7 +99,12 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
     assert_true(estimate_feature(cold, "upload_bytes", True) >= 12)
     assert_true(estimate_feature(cold, "launches", True) > 0)
     assert_equal(first[0].explain(engine="cpu"), before)
-    assert_domain(a, DataFrame([Series("x", Column[Float32]([1, 2, 3]))]))
+    assert_domain(
+        a,
+        DataFrame(
+            [Series("x", Column[Float32]([1, 2, 3], [True, True, False]))]
+        ),
+    )
     var measured = first[0].profile(accelerator=runtime)
     assert_domain(measured[0], first[1])
     assert_native_report(measured[1])

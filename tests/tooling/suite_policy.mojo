@@ -60,6 +60,14 @@ def mojo_variant_abort_exit_code() -> Int:
 def production_policy() -> SuitePolicy:
     var policy = empty_policy()
     policy.capabilities = ["metal"]
+    policy.failures.append(
+        ExpectedFailure(
+            "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_fields",
+            "Native Date calendar extraction wraps the Int64 epoch shift, matching the separately recorded CPU defect. An independent Int128 Gregorian model requires positive year25252734927766554; actual Metal CI returns -25252734927766555. Later calendar fields remain unvalidated until this defect is fixed.",
+            "native Date Gregorian year must remain positive across epoch shift; got -25252734927766555",
+            0,
+        )
+    )
     # exit_code zero means an ordinary exception; nonzero means an isolated process.
     policy.failures.append(
         ExpectedFailure(
