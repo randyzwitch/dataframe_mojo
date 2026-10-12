@@ -135,6 +135,8 @@ with tempfile.TemporaryDirectory() as directory:
         compression="NONE",
         use_dictionary=False,
     )
+    print("PyArrow version", pa.__version__, flush=True)
+    print("Independent PyArrow file head", pq.read_table(path).slice(0, 3).to_pydict(), flush=True)
     for columns, groups in [
         ((), None),
         (("text", "id"), [2, 0, 2]),
@@ -145,6 +147,7 @@ with tempfile.TemporaryDirectory() as directory:
             batches = []
             while (batch := next_batch(stream)) is not None:
                 batches.append(batch)
+                print("Imported batch", len(batches), "head", batch.slice(0, 3).to_pydict(), "first retained batch", batches[0].slice(0, 3).to_pydict(), flush=True)
             assert next_batch(stream) is None  # repeated EOF
             selected = list(range(3)) if groups is None else groups
             assert len(batches) == max(1, len(selected))
