@@ -90,8 +90,9 @@ Sliced numeric and bitmap windows are supported. Expressions support literals, a
 comparisons, Kleene Boolean logic, null tests, fill-null, and explicit casts
 among these numeric and Boolean types. Out-of-range casts and NaN-to-Bool
 conversions raise in strict mode and become null in non-strict mode. Nulls stay
-null. Checked casts to integer/Boolean targets currently require terminal
-projections without head. Numeric casts to Float32/Float64 cannot raise range
+null. Checked casts to integer/Boolean targets require terminal
+projections without head unless the input's static range fits the target.
+Numeric casts to Float32/Float64 cannot raise range
 errors and may occur in child regions or before head.
 Integer expressions additionally support floor division, remainder, powers,
 absolute value, clipping, and integral rounding operations. Division and
@@ -152,9 +153,12 @@ underlying reductions still require CPU execution.
 Automatic placement keeps these plans on CPU until their complete DAG has a
 supported estimate and matching calibration.
 
-Checked integer arithmetic currently
-requires terminal projections without head, matching the shared planner's
-observable-overflow boundary.
+Integer arithmetic can precede filters, joins, and head when expression types
+and literals prove that every checked operation is safe for all input values.
+The proof propagates conservative ranges through literals, casts, clipping,
+conditionals, and arithmetic without reading source data. Each checked child
+needs its own proof. Unproved arithmetic still requires terminal projections
+without head, matching the shared planner's observable-overflow boundary.
 
 
 Inner, left, right, full, semi, anti, and cross joins run matching and output
@@ -177,7 +181,7 @@ first consumer; only the final result becomes ordinary CPU columns. Immutable
 result handles retain their query and context and are released after their last
 consumer. Regions still synchronize for errors and cardinality, so a resident
 DAG is not a single command-buffer submission.
-Checked integer arithmetic, checked casts to integer/Boolean targets, and checked Int32/UInt32/Int64/UInt64 sums in
+Unproved integer arithmetic, unproved casts to integer/Boolean targets, and checked Int32/UInt32/Int64/UInt64 sums in
 join inputs require CPU execution because those inputs are not terminal
 observable boundaries. Pure expressions and bounded Int8/Int16/UInt8/UInt16
 sums can feed a join. Each join supports at most 128 combined input columns,

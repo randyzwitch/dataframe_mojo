@@ -5,6 +5,7 @@ are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
 from .metadata import prune_projections
+from .integer_ranges import proven_integer_nodes
 from std.memory import bitcast
 from std.math import pow, abs
 from dataframe.parallel import configured_workers
@@ -816,6 +817,9 @@ def lower_rows(
                     )
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
+            var proven = List[Bool](length=len(bound.expr._nodes), fill=False)
+            if capabilities.proven_integer_operations:
+                proven = proven_integer_nodes(bound)
             for part_index in range(len(bound.expr._nodes)):
                 if bound.dtypes[part_index].is_integer():
                     ref part = bound.expr._nodes[part_index]
@@ -828,10 +832,13 @@ def lower_rows(
                         or part.op == FLOORDIV
                         or part.op == POW
                     ):
-                        # CPU predicate/projection/head pushdown can remove
-                        # checked work. Keep the first integer subset at an
+                        # CPU pushdown can remove checked work. An operation
+                        # without a static no-error proof still needs an
                         # observable terminal boundary, with no final head.
-                        if (
+                        if not (
+                            capabilities.proven_integer_operations
+                            and proven[part_index]
+                        ) and (
                             not terminal_boundary
                             or k != 0
                             or node.kind == FILTER
@@ -857,6 +864,10 @@ def lower_rows(
                 if (
                     part.op == CAST
                     and part.integer
+                    and not (
+                        capabilities.proven_integer_operations
+                        and proven[part_index]
+                    )
                     and not (
                         capabilities.float64_emulated
                         and bound.dtypes[part_index].is_float()
