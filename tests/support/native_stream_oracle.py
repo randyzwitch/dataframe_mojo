@@ -162,7 +162,9 @@ with tempfile.TemporaryDirectory() as directory:
             ) if selected else table.slice(0, 0)
             if columns:
                 expected = expected.select(columns)
-            assert pa.Table.from_batches(batches).equals(expected)
+            assert pa.Table.from_batches(batches).equals(expected), (
+                f"Native stream values/schema differ: columns={columns}, groups={groups}"
+            )
         finally:
             close(stream)
     stream = opened(path)
