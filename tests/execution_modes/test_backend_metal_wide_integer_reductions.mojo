@@ -7,6 +7,7 @@ from dataframe.metal import MetalRuntime
 
 from tests.execution_modes.test_backend_metal import require_metal
 
+
 def test_native_metal_exact_wide_integer_limits_partials_means_and_nulls() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
@@ -104,6 +105,7 @@ def test_native_metal_exact_wide_integer_limits_partials_means_and_nulls() raise
         "metal-wide-integer-reductions-v1"
         in runtime.estimate_auto(query).family
     )
+
 
 def test_native_metal_exact_wide_integer_resident_inputs_consumers_and_budget() raises:
     _ = require_metal()
