@@ -6,6 +6,11 @@
 // The Mojo wrapper passes addresses of these structs; no C++ or Objective-C
 // object crosses the ABI. Bump the version when layouts or meanings change.
 #define DFM_ABI_VERSION 2
+// Bounded shape extensions preserve the existing layouts and opcode meanings.
+#define DFM_MAX_NODES 128
+#define DFM_MAX_SLOTS 128
+#define DFM_MAX_STEPS 128
+#define DFM_MAX_JOIN_COLUMNS 128
 #define DFM_API __attribute__((visibility("default")))
 
 enum DFMType {

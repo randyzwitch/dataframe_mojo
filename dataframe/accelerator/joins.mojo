@@ -173,9 +173,12 @@ def _join_task(
     var right_id = _task(query, node.right, False, capabilities, tasks)
     var left = tasks[left_id].schema.copy()
     var right = tasks[right_id].schema.copy()
-    if left.width() + right.width() > 64:
+    if left.width() + right.width() > capabilities.max_join_columns:
         capabilities.reject(
-            "plan", "join supports at most 64 combined input columns"
+            "plan",
+            "join supports at most "
+            + String(capabilities.max_join_columns)
+            + " combined input columns",
         )
     var keys = List[Int64]()
     var left_keys = List[Int]()
@@ -240,8 +243,13 @@ def _join_task(
                     name, right._columns[c].dtype(), -1, left.width() + c, False
                 )
             )
-    if len(fields) == 0 or len(fields) > 64:
-        capabilities.reject("plan", "join requires 1 to 64 output columns")
+    if len(fields) == 0 or len(fields) > capabilities.max_join_columns:
+        capabilities.reject(
+            "plan",
+            "join requires 1 to "
+            + String(capabilities.max_join_columns)
+            + " output columns",
+        )
     var schema = List[Series]()
     for field in fields:
         capabilities.require_dtype(field.dtype)

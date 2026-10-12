@@ -41,8 +41,9 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
                  const DFMResidentInput *refs = nullptr) {
   if (r.abi_version != DFM_JOIN_ABI_VERSION || r.left_rows < 0 ||
       r.right_rows < 0 || r.left_rows > INT32_MAX || r.right_rows > INT32_MAX ||
-      r.input_count < 0 || r.input_count > 64 || r.key_count < 0 ||
-      r.key_count > 64 || r.output_count < 1 || r.output_count > 64 ||
+      r.input_count < 0 || r.input_count > DFM_MAX_JOIN_COLUMNS ||
+      r.key_count < 0 || r.key_count > DFM_MAX_JOIN_COLUMNS ||
+      r.output_count < 1 || r.output_count > DFM_MAX_JOIN_COLUMNS ||
       r.how < 0 || r.how > 7 || r.limit < -1 || r.memory_budget_bytes < -1 ||
       (r.profiling != 0 && r.profiling != 1) || (r.input_count && !r.inputs) ||
       (r.key_count && !r.keys) || !r.outputs ||
