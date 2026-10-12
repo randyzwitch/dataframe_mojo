@@ -365,5 +365,3 @@ def test_native_metal_cumulative_large_global_partition_preserves_serial_float_o
         [col("x").cum_sum().alias("s"), col("x").cum_count(True).alias("n")]
     )
     same(query.collect(accelerator=MetalRuntime()), query.collect(engine="cpu"))
-
-
