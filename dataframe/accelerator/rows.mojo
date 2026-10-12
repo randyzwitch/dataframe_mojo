@@ -191,7 +191,7 @@ def _program(
                     or op == MOD
                     and capabilities.float_modulo
                 )
-                and bound.dtypes[i] == DataType.FLOAT64
+                and bound.dtypes[i].is_float()
             )
             or (
                 capabilities.temporal_fields
@@ -405,7 +405,6 @@ def _program(
                 and capabilities.float_division
                 or op == MOD
                 and capabilities.float_modulo
-                and bound.dtypes[i] == DataType.FLOAT64
             )
         ):
             capabilities.reject(

@@ -618,13 +618,6 @@ def test_float64_remainder_extremes_filters_children_and_cost() raises:
     var query = frame.lazy().select(
         (col("a") % lit(Float64(3))).alias("remainder")
     )
-    var narrow = DataFrame([Series("x", Column[Float32]([1, 2]))])
-    with assert_raises(contains="floating division, modulo, and power"):
-        _ = (
-            narrow.lazy()
-            .select(col("x") % lit(Float32(3)))
-            .collect(accelerator=MetalRuntime(device_id=999999))
-        )
     if not metal_installed():
         return
     assert_true(
