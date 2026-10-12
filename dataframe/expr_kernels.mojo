@@ -1073,6 +1073,11 @@ def _unary_int[
 def _math[
     op: Int, width: Int
 ](input: Series, integer: Int64, mask: List[Bool]) raises -> Series:
+    comptime if op == NEG or op == ABS:
+        if input._data.isa[Column[Int128]]():
+            return _unary_int[op, DType.int128](
+                input._data[Column[Int128]], mask
+            )
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if input._data.isa[Column[Scalar[D]]]():
@@ -1529,8 +1534,14 @@ def unary[
 ) raises -> Series:
     if input.is_chunked():
         return unary[op, width](input.rechunk(), integer, mask)
-    if input.dtype().is_decimal() and input.dtype().decimal_width() != 128:
-        return unary[op, width](input._decimal128(), integer, mask)
+    comptime if op == NEG or op == ABS:
+        if input.dtype().is_decimal():
+            return _math[op, width](input, integer, mask).with_dtype(
+                input.dtype()
+            )
+    else:
+        if input.dtype().is_decimal() and input.dtype().decimal_width() != 128:
+            return unary[op, width](input._decimal128(), integer, mask)
     comptime if op == IS_NULL or op == IS_NOT_NULL:
         var valid = validity(input)
         var values = List[Bool](capacity=len(valid))

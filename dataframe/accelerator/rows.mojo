@@ -323,6 +323,11 @@ def _program(
                 )
             )
         )
+        var decimal_arithmetic = (
+            capabilities.decimal_arithmetic
+            and left_type.is_decimal()
+            and (op == ADD or op == SUB or op == NEG or op == ABS)
+        )
         if (
             temporal
             and left_type.is_datetime()
@@ -403,6 +408,7 @@ def _program(
                 and op != NE
                 and not decimal_float_cast
                 and not decimal_cast
+                and not decimal_arithmetic
             ):
                 capabilities.reject(
                     "logical",
@@ -420,6 +426,7 @@ def _program(
             logical
             and not decimal_float_cast
             and not decimal_cast
+            and not decimal_arithmetic
             and (
                 op == SQRT
                 or op == ABS
@@ -865,6 +872,7 @@ def lower_rows(
             if (
                 capabilities.proven_integer_operations
                 or capabilities.decimal_comparisons
+                or capabilities.decimal_arithmetic
             ):
                 proven = proven_integer_nodes(bound)
             for part_index in range(len(bound.expr._nodes)):
@@ -911,6 +919,27 @@ def lower_rows(
                 conditional |= candidate.op == WHEN
             for part_index in range(len(bound.expr._nodes)):
                 ref part = bound.expr._nodes[part_index]
+                if (
+                    capabilities.decimal_arithmetic
+                    and bound.dtypes[part_index].is_decimal()
+                    and (
+                        part.op == ADD
+                        or part.op == SUB
+                        or part.op == NEG
+                        or part.op == ABS
+                    )
+                    and not proven[part_index]
+                    and (
+                        not terminal_boundary
+                        or k != 0
+                        or node.kind == FILTER
+                        or limit >= 0
+                    )
+                ):
+                    capabilities.reject(
+                        "plan",
+                        "checked decimal arithmetic requires terminal projections without head",
+                    )
                 if (
                     is_comparison(part.op)
                     and part.left >= 0

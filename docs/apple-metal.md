@@ -222,7 +222,18 @@ The CPU has an unchecked one-row fast path when rescaling Decimal128 against
 Decimal64; this combination requires a static proof on Metal. Safe comparisons
 can feed filters, joins, aggregates, and windows. Estimates
 include `metal-decimal-comparisons-v1`; prior comparison calibrations do not
-apply. Decimal row arithmetic remains unsupported.
+apply.
+
+Decimal addition and subtraction produce Decimal128 at precision 38 and the
+larger input scale. Rescaling checks Int128 overflow, followed by the CPU's
+wrapped Int128 add/subtract and precision check. Negation and absolute value
+preserve the input decimal metadata and storage width and check signed minimum
+values. CPU unary kernels also retain narrow decimal storage and handle Int128
+explicitly. Nulls and conditional masks preserve which rows can raise errors.
+Operations without a static range proof require terminal projections without a
+head. Safe arithmetic can feed resident filters, joins, aggregates, and windows.
+Estimates include `metal-decimal-arithmetic-v1`. Multiplication and division
+remain unsupported.
 
 Decimal32/64 sums accumulate exactly in two words and return Decimal128 with
 precision 38 and the original scale, including through joins and scalar
@@ -540,6 +551,7 @@ python3 native/dfmetal/test_float64.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py
 python3 native/dfmetal/test_decimal_comparisons.py
+python3 native/dfmetal/test_decimal_arithmetic.py
 pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
 pixi run mojo run -I . tests/test_metal_completeness.mojo

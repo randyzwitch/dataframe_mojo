@@ -155,6 +155,11 @@ enum DFMOp {
   // Binary decimal comparison: code[3] packs left scale (6 bits), right scale
   // (6), and the original comparison opcode. Rescaling checks signed Int128.
   DFM_DECIMAL_COMPARE = 218,
+  // Binary decimal ADD/SUB: packed source scales (6 bits each) and opcode.
+  // The output is Decimal128, precision 38, at the larger input scale.
+  DFM_DECIMAL_ARITHMETIC = 219,
+  // Unary decimal NEG/ABS: code[3] is the original unary opcode.
+  DFM_DECIMAL_UNARY = 220,
 };
 
 typedef struct DFMInput {
