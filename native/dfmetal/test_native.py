@@ -332,6 +332,18 @@ def check_group_preflight_without_device():
             passes = ((2 * n - 1).bit_length() + 3) // 4
             expected_launches += 6 + 3 * passes
         assert memory.launches == expected_launches
+    code[0] = 209
+    for workers in (1, 8, 2**31 - 1):
+        literals[0] = workers
+        err = P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for workers in (0, -1, 2**31):
+        literals[0] = workers
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"window worker metadata" in C.string_at(err)
+        lib.dfm_free(err)
+    code[0], literals[0] = 201, 0
     for index, value in [(2, 0), (3, 2), (9, 1), (10, 3), (11, 11)]:
         before = code[index]
         code[index] = value

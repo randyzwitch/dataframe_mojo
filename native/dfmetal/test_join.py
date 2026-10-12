@@ -169,11 +169,15 @@ checked(
 )
 assert memory.peak == memory.shared and memory.result == 0
 assert memory.upload == 68
+request.how = 7
+checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+assert memory.peak > 0
+request.how = 0
 for field, value in (
     ("abi", 2),
     ("left_rows", -1),
     ("right_rows", 2**31),
-    ("how", 7),
+    ("how", 8),
     ("limit", -2),
     ("budget", -2),
     ("profiling", 2),
@@ -325,7 +329,9 @@ def run(
 
     def token(side, i):
         if not (lv if side == 0 else rv)[i]:
-            return None
+            if how != 7:
+                return None
+            return (None, (lk if side == 0 else rk)[i] if second else 0)
         return (
             key_token((left if side == 0 else right)[i]),
             (lk if side == 0 else rk)[i] if second else 0,
@@ -354,7 +360,7 @@ def run(
             for other in matches:
                 expected.append((other, row) if how == 2 else (row, other))
                 matched.add(other)
-            if not matches and how in (1, 2, 3):
+            if not matches and how in (1, 2, 3, 7):
                 expected.append((None, row) if how == 2 else (row, None))
         if limit >= 0 and len(expected) >= limit:
             break
@@ -550,7 +556,7 @@ def run(
 
 try:
     for dtype in SCALARS:
-        for how in range(7):
+        for how in range(8):
             for n, m in [(0, 0), (0, 9), (7, 0), (17, 23), (521, 263)]:
                 run(dtype, n, m, how)
             run(dtype, 17, 23, how, all_null=True)
@@ -558,7 +564,7 @@ try:
             for limit in [0, 1, 29]:
                 run(dtype, 33, 41, how, limit=limit, second=False)
     for dtype in SCALARS:
-        for how in range(6):
+        for how in [0, 1, 2, 3, 4, 5, 7]:
             for build in (4095, 4096, 4097):
                 n, m = (build, 7) if how == 2 else (7, build)
                 run(dtype, n, m, how, limit=257)
@@ -575,7 +581,7 @@ try:
     run(2, 17, 23, 0, budget=-2)
     run(2, 17, 23, 3, bad_finish=True)
     print(
-        "Metal join GPU parity passed: seven joins, ten types, nulls, stable order, slicing, large scans, limits, lifecycle"
+        "Metal join GPU parity passed: seven public joins and null-equal internal join, ten types, nulls, stable order, slicing, large scans, limits, lifecycle"
     )
 finally:
     lib.dfm_context_release(context)

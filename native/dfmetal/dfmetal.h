@@ -122,6 +122,9 @@ enum DFMOp {
   DFM_RANK_KEY = 207,
   // Exact Decimal32/64 sum with Decimal128 output.
   DFM_WIDE_SUM = 208,
+  // Aggregate-window group header. Its literal is the configured CPU worker
+  // count; floating sums preserve source order and CPU window partitions.
+  DFM_GROUP_HEADER_WINDOW = 209,
 };
 
 typedef struct DFMInput {
@@ -252,7 +255,8 @@ typedef struct DFMJoinRequest {
   int64_t abi_version;
   int64_t left_rows, right_rows;
   int64_t input_count, key_count, output_count;
-  int64_t how;   // inner, left, right, full, semi, anti, cross = 0..6.
+  int64_t how;   // inner, left, right, full, semi, anti, cross = 0..6;
+                // 7 is internal left join with null-equal partition keys.
   int64_t limit; // -1 or final head.
   int64_t memory_budget_bytes;
   int64_t profiling;
