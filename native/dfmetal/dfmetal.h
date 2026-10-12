@@ -140,8 +140,10 @@ enum DFMOp {
   // Unary decimal-to-Float64 conversion. code[3] is scale, code[2] is -1;
   // literals[node] is the CPU binary64 conversion of the integer 10**scale.
   DFM_DECIMAL_FLOAT_CAST = 213,
-  // Cumulative header: input slot, reverse flag, method (sum/min/max/count).
-  // SORT_KEY descriptors name partitions; the header literal is decimal precision.
+  // Ordered window header: input slot, reverse flag, method
+  // (sum/min/max/count/shift/forward-fill/backward-fill).
+  // SORT_KEY descriptors name partitions. The header literal is decimal
+  // precision for sums, signed shift offset or fill limit for methods 4..6.
   DFM_CUMULATIVE_KEY = 214,
   // Decimal128 SUM/MEAN preserve CPU worker partitions and check every
   // precision-bounded partial and merge. Packed metadata carries min_count,

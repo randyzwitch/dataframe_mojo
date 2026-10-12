@@ -19,6 +19,9 @@ from dataframe.expr import (
     CUM_MIN,
     CUM_MAX,
     CUM_COUNT,
+    SHIFT,
+    FORWARD_FILL,
+    BACKWARD_FILL,
     OVER,
     col,
     subtree,
@@ -1048,13 +1051,22 @@ def lower_rows(
                     or window_op == CUM_MAX
                     or window_op == CUM_COUNT
                 )
-                if window_op != RANK and not cumulative:
+                var shift_fill = (
+                    window_op == SHIFT
+                    or window_op == FORWARD_FILL
+                    or window_op == BACKWARD_FILL
+                )
+                if window_op != RANK and not cumulative and not shift_fill:
                     continue
+                if shift_fill and not capabilities.shift_fill_windows:
+                    capabilities.reject(
+                        "plan", "shift and fill windows require backend support"
+                    )
                 if cumulative and not capabilities.cumulative_windows:
                     capabilities.reject(
                         "plan", "cumulative windows require backend support"
                     )
-                if not cumulative and not capabilities.ranks:
+                if not cumulative and not shift_fill and not capabilities.ranks:
                     capabilities.reject("plan", "rank requires backend support")
                 if node.kind == AGG:
                     capabilities.reject(
@@ -1093,7 +1105,13 @@ def lower_rows(
                 for m in range(len(methods)):
                     if rank_node.text == methods[m]:
                         method = m
-                if cumulative:
+                if shift_fill:
+                    method = (
+                        4 if window_op
+                        == SHIFT else 5 if window_op
+                        == FORWARD_FILL else 6
+                    )
+                elif cumulative:
                     method = 0 if window_op == CUM_SUM else (
                         1 if window_op
                         == CUM_MIN else (2 if window_op == CUM_MAX else 3)
@@ -1164,18 +1182,25 @@ def lower_rows(
                 code.extend(
                     [
                         Int64(
-                            ROW_CUMULATIVE_KEY if cumulative else ROW_RANK_KEY
+                            ROW_CUMULATIVE_KEY if cumulative
+                            or shift_fill else ROW_RANK_KEY
                         ),
                         Int64(input_slot),
-                        Int64(rank_node.min_count == 1),
+                        Int64(method == 6) if shift_fill else Int64(
+                            rank_node.min_count == 1
+                        ),
                         Int64(method),
                     ]
                 )
-                var result_type = bound.dtypes[r] if cumulative else (
+                var result_type = bound.dtypes[
+                    r
+                ] if cumulative or shift_fill else (
                     DataType.FLOAT64 if method == 0 else DataType.INT64
                 )
                 literals.append(
                     bitcast[DType.float64](
+                        rank_node.integer
+                    ) if shift_fill else bitcast[DType.float64](
                         Int64(result_type.precision())
                     ) if cumulative
                     and result_type.is_decimal() else 0

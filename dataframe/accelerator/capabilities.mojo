@@ -58,6 +58,7 @@ struct RowCapabilities(Copyable):
     var decimal_multiplicative: Bool
     var decimal_arithmetic: Bool
     var ranks: Bool
+    var shift_fill_windows: Bool
     var cumulative_windows: Bool
     var reuse_column_slots: Bool
     var proven_integer_operations: Bool
@@ -94,6 +95,7 @@ struct RowCapabilities(Copyable):
         temporal_fields: Bool = False,
         ranks: Bool = False,
         cumulative_windows: Bool = False,
+        shift_fill_windows: Bool = False,
         decimal128: Bool = False,
         decimal128_reductions: Bool = False,
         decimal_mean: Bool = False,
@@ -134,6 +136,7 @@ struct RowCapabilities(Copyable):
         self.temporal_fields = temporal_fields
         self.ranks = ranks
         self.cumulative_windows = cumulative_windows
+        self.shift_fill_windows = shift_fill_windows
         self.decimal128 = decimal128
         self.decimal128_reductions = decimal128_reductions
         self.decimal_mean = decimal_mean
