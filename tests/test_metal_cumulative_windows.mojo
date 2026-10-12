@@ -218,8 +218,15 @@ def test_cumulative_nested_scopes_resident_consumers_empty_and_budget() raises:
         .select_exprs([col("k"), col("s"), col("s").cum_count().alias("n")])
     )
     same(query.collect(accelerator=MetalRuntime()), query.collect(engine="cpu"))
-    var measured = query.profile(accelerator=MetalRuntime())
-    same(measured[0], query.collect(engine="cpu"))
+    var resident = frame.lazy().select(
+        col("x")
+        .fill_null(col("x").min().over("k"))
+        .cum_max()
+        .over("j")
+        .alias("s")
+    )
+    var measured = resident.profile(accelerator=MetalRuntime())
+    same(measured[0], resident.collect(engine="cpu"))
     assert_true(measured[1].height() > 1)
     for i in range(measured[1].height() - 1):
         assert_true(
