@@ -153,7 +153,24 @@ with tempfile.TemporaryDirectory() as directory:
             ) if selected else table.slice(0, 0)
             if columns:
                 expected = expected.select(columns)
-            assert pa.Table.from_batches(batches).equals(expected)
+            actual = pa.Table.from_batches(batches)
+            assert actual.equals(expected), {
+                "columns": columns,
+                "groups": groups,
+                "actual_schema": str(actual.schema),
+                "expected_schema": str(expected.schema),
+                "actual_rows": actual.num_rows,
+                "expected_rows": expected.num_rows,
+                "actual_head": actual.slice(0, 3).to_pydict(),
+                "expected_head": expected.slice(0, 3).to_pydict(),
+                "actual_tail": actual.slice(max(0, actual.num_rows - 3)).to_pydict(),
+                "expected_tail": expected.slice(max(0, expected.num_rows - 3)).to_pydict(),
+                "column_values_match": {
+                    name: actual[name].to_pylist() == expected[name].to_pylist()
+                    for name in expected.column_names
+                    if name in actual.column_names
+                },
+            }
         finally:
             close(stream)
     stream = opened(path)
