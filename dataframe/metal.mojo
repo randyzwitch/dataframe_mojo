@@ -1467,12 +1467,15 @@ struct MetalRuntime(AcceleratorBackend):
         var family = work[1].copy()
         if plan.reused_columns:
             family += ";metal-column-slots-v1"
+        var ranked = False
+        var cumulative = False
         for step in plan.steps:
-            if plan.code[step.start * 4] == ROW_RANK_KEY:
-                family += ";metal-rank-v1"
-            if plan.code[step.start * 4] == ROW_CUMULATIVE_KEY:
-                family += ";metal-cumulative-v1"
-                break
+            ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
+            cumulative |= plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+        if ranked:
+            family += ";metal-rank-v1"
+        if cumulative:
+            family += ";metal-cumulative-v1"
         var decimal_mean = False
         for output in plan.outputs:
             decimal_mean |= output.reduction == MEAN and (
@@ -1869,17 +1872,12 @@ struct MetalRuntime(AcceleratorBackend):
             if has_join(query) or has_scalar_consumers(query):
                 var dag = lower_join_dag(query, _capabilities())
                 return (
-                    (
-                        "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
-                    )
-                    + String(dag.joins)
-                    + " joins, "
-                    + String(len(dag.tasks))
-                    + " resident regions; only the final result materializes"
-                    " CPU columns; optional runtime "
-                    + ("present" if metal_installed() else "missing")
-                    + "\n"
-                )
+                    "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
+                ) + String(dag.joins) + " joins, " + String(
+                    len(dag.tasks)
+                ) + " resident regions; only the final result materializes" " CPU columns; optional runtime " + (
+                    "present" if metal_installed() else "missing"
+                ) + "\n"
             var plan = lower_rows(query, _capabilities())
             return (
                 "ENGINE accel: Metal native row expressions; "
