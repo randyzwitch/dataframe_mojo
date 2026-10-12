@@ -430,10 +430,11 @@ Shape validate(const DFMRequest &r, bool storage = false,
     if (v.filter == 5) {
       auto h = r.code + 4 * v.start;
       if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_CUMULATIVE_KEY ||
-          h[1] < 0 || h[1] >= r.slots || h[2] < 0 || h[2] > 1 || h[3] < 0 || h[3] > 3)
+          h[1] < 0 || h[1] >= r.slots || h[2] < 0 || h[2] > 1 || h[3] < 0 || h[3] > 6 ||
+          (h[3] >= 4 && h[2] != (h[3] == 6)))
         fail("Invalid Metal cumulative descriptor");
       auto input = slotType(r, h[1]), output = slotType(r, v.slot);
-      if ((h[3] == 3 && output != DFM_INT64) ||
+      if ((h[3] >= 4 && output != input) || (h[3] == 3 && output != DFM_INT64) ||
           ((h[3] == 1 || h[3] == 2) && output != input) ||
           (h[3] == 0 && (input == DFM_BOOL ||
             (output != DFM_DECIMAL128 || (input != DFM_INT32 && input != DFM_INT64 && input != DFM_DECIMAL128)) &&
@@ -2511,7 +2512,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     auto dtype = nodeType(r, i);
     if ((op == DFM_ROUND && r.code[4*i+3] != 0 &&
          (dtype == DFM_FLOAT32 || dtype == DFM_FLOAT64_STORAGE)) ||
-        (op == DFM_DECIMAL_CAST && dtype == DFM_FLOAT32)) {
+        (op == DFM_DECIMAL_CAST && dtype == DFM_FLOAT32) ||
+        op == DFM_CUMULATIVE_KEY) {
       memcpy(static_cast<char *>(literal.contents) + i * 8, r.literals + i, 8);
       continue;
     }
@@ -2666,6 +2668,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
       if (step.filter == 5) {
         buffer(0, x); buffer(1, v); buffer(2, orderA); buffer(3, meta);
         buffer(4, arithmeticError);
+        buffer(5, literal);
         dispatch("cumulative_assign" + std::to_string(i), shape.cap);
         continue;
       }

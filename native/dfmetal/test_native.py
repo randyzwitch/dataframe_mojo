@@ -877,6 +877,35 @@ def check_decimal_arithmetic_preflight_without_device():
 
 
 check_decimal_arithmetic_preflight_without_device()
+def check_shift_fill_preflight_without_device():
+    for dtype in range(1, 13):
+        inputs = (Input * 1)(Input(None, None, dtype, 5, 1))
+        code = (I * 4)(214, 0, 0, 4)
+        literals = (I * 1)(-3)
+        nodes, slots = (I * 1)(dtype), (I * 2)(dtype, dtype)
+        steps = (Step * 1)(Step(0, 1, 1, 5, 0, 0))
+        outputs = (Output * 1)(Output(None, None, dtype, 1, -1, 0))
+        request = Request(2, 513, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                          ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                          ptr(outputs), ptr(nodes), ptr(slots))
+        for method in (4, 5, 6):
+            code[2], code[3] = int(method == 6), method
+            for parameter in (-(1 << 63), -3, -1, 0, 1, (1 << 63)-1):
+                literals[0] = parameter
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                expected = (2 * 65 if dtype == 4 else 513 * 16 + 65 if dtype == 12
+                            else 513 * {1:4,2:4,3:8,5:1,6:2,7:1,8:2,9:4,10:8,11:8}[dtype] + 65)
+                assert memory.result == expected
+        for method, reverse in ((-1, 0), (7, 0), (4, 1), (5, 1), (6, 0)):
+            code[2], code[3] = reverse, method
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"cumulative descriptor" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+check_shift_fill_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")

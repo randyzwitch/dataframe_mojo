@@ -146,6 +146,16 @@ Numeric, Boolean, dictionary, fixed logical, and Decimal128 values retain their
 normal min/max ordering, including NaNs and signed-zero ties. Cumulative plans
 use the `metal-cumulative-v1` calibration family.
 
+`shift`, `forward_fill`, and `backward_fill` also run globally or within
+one or more `over()` keys, following original row order. Shift preserves the
+input type and inserts nulls beyond a partition boundary, including for extreme
+signed offsets. Fill copies the nearest original non-null value in the requested
+direction; its limit counts consecutive null rows, with a limit of -1
+meaning unlimited and zero preserving the input. These operations copy stored
+words, retaining floating-point NaN payloads, signed zeros, dictionary identity,
+logical metadata, and both Decimal128 words. Their parameters remain runtime
+values and their cost family is `metal-shift-fill-v1`.
+
 Supported scalar reductions also run within `over()` partitions: Metal groups a
 shared resident prefix and broadcasts each result back in original row order.
 Null partition keys form one group; multiple keys, dictionary codes, fixed logical
@@ -158,11 +168,11 @@ These aggregate-window producers are full observation boundaries, matching the
 CPU's eager preparation of window states even inside a conditional or before
 head. Checked sums and checked expressions inside these producers retain their
 normal overflow checks. Ordinary checked join inputs keep their existing
-restrictions. Nested aggregate, rank, and cumulative windows materialize their
+restrictions. Nested aggregate, rank, cumulative, shift, and fill windows materialize their
 inner scopes before feeding outer scopes, retaining original row order and the
 same observation boundaries at each level. Cumulative prefixes remain checked
 inside unused conditional branches and before head. Unproved checked inputs to
-rank/cumulative kernels, selectors, other window kernels, and unsupported
+rank/cumulative/shift/fill kernels, selectors, other window kernels, and unsupported
 underlying reductions still require CPU execution.
 Automatic placement keeps these plans on CPU until their complete DAG has a
 supported estimate and matching calibration.
