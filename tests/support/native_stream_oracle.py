@@ -6,8 +6,17 @@ The Mojo lifecycle tests separately count importer releases on error paths.
 """
 import ctypes as c
 from pathlib import Path
+import os
 import sys
 import tempfile
+
+# The native library and PyArrow contain separate Arrow/mimalloc copies. On
+# macOS their default pools corrupt decoded buffers when loaded together; both
+# libraries decode correctly with the system allocator. Keep this independent
+# consumer process on that allocator before either Arrow copy initializes.
+if sys.platform == "darwin":
+    os.environ["ARROW_DEFAULT_MEMORY_POOL"] = "system"
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -113,20 +122,9 @@ def next_batch(stream):
         if not array.release:
             return None
         assert GET(stream.get_schema)(c.byref(stream), c.byref(schema)) == 0
-        children = c.cast(array.children, c.POINTER(c.POINTER(Array)))
-        fields = c.cast(schema.children, c.POINTER(c.POINTER(Schema)))
-        for child_index in range(array.n_children):
-            child = children[child_index].contents
-            field = fields[child_index].contents
-            if c.string_at(field.format) == b"l" and child.length:
-                pointers = c.cast(child.buffers, c.POINTER(c.c_void_p))
-                words = c.cast(pointers[1], c.POINTER(c.c_int64))
-                print("Raw native int64", {"length": child.length, "offset": child.offset, "values_address": pointers[1], "head": [words[child.offset + i] for i in range(min(3, child.length))]}, flush=True)
-        result = pa.RecordBatch._import_from_c(
+        return pa.RecordBatch._import_from_c(
             c.addressof(array), c.addressof(schema)
         )
-        print("Imported column offsets", [(str(column.type), column.offset) for column in result.columns], flush=True)
-        return result
     finally:
         if array.release:
             RELEASE(array.release)(c.byref(array))
@@ -146,11 +144,6 @@ with tempfile.TemporaryDirectory() as directory:
         compression="NONE",
         use_dictionary=False,
     )
-    print("PyArrow version", pa.__version__, flush=True)
-    lib.dfq_arrow_version.restype = c.c_char_p
-    print("Native Arrow version", lib.dfq_arrow_version(), flush=True)
-    assert pq.read_table(path).equals(table), "Independent PyArrow file producer must preserve all values"
-    print("Independent PyArrow file head", pq.read_table(path).slice(0, 3).to_pydict(), flush=True)
     for columns, groups in [
         ((), None),
         (("text", "id"), [2, 0, 2]),
@@ -161,8 +154,6 @@ with tempfile.TemporaryDirectory() as directory:
             batches = []
             while (batch := next_batch(stream)) is not None:
                 batches.append(batch)
-                print("Imported batch", len(batches), "head", batch.slice(0, 3).to_pydict(), "first retained batch", batches[0].slice(0, 3).to_pydict(), flush=True)
-                print("Native batch buffers", [(field.name, str(column.type), [(buffer.address, buffer.size) if buffer is not None else None for buffer in column.buffers()]) for field, column in zip(batch.schema, batch.columns)], flush=True)
             assert next_batch(stream) is None  # repeated EOF
             selected = list(range(3)) if groups is None else groups
             assert len(batches) == max(1, len(selected))
@@ -171,24 +162,7 @@ with tempfile.TemporaryDirectory() as directory:
             ) if selected else table.slice(0, 0)
             if columns:
                 expected = expected.select(columns)
-            actual = pa.Table.from_batches(batches)
-            assert actual.equals(expected), {
-                "columns": columns,
-                "groups": groups,
-                "actual_schema": str(actual.schema),
-                "expected_schema": str(expected.schema),
-                "actual_rows": actual.num_rows,
-                "expected_rows": expected.num_rows,
-                "actual_head": actual.slice(0, 3).to_pydict(),
-                "expected_head": expected.slice(0, 3).to_pydict(),
-                "actual_tail": actual.slice(max(0, actual.num_rows - 3)).to_pydict(),
-                "expected_tail": expected.slice(max(0, expected.num_rows - 3)).to_pydict(),
-                "column_values_match": {
-                    name: actual[name].to_pylist() == expected[name].to_pylist()
-                    for name in expected.column_names
-                    if name in actual.column_names
-                },
-            }
+            assert pa.Table.from_batches(batches).equals(expected)
         finally:
             close(stream)
     stream = opened(path)

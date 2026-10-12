@@ -40,10 +40,7 @@ jobs:
         env:
           ARROW_DEFAULT_MEMORY_POOL: system
         run: build/native-stream-plain build/dfparquet/libdfparquet.dylib build/pure-consumer.parquet
-      - name: Diagnose cached native library with system memory pool
-        continue-on-error: true
-        env:
-          ARROW_DEFAULT_MEMORY_POOL: system
+      - name: Validate exact native stream oracle with adapter allocator isolation
         run: pixi run --locked -e oracle python3 tests/support/native_stream_oracle.py build/dfparquet/libdfparquet.dylib
 
   oracle-macos-clean:
