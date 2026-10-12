@@ -144,6 +144,7 @@ struct RowPlan(Movable):
     var root: Int
     var limit: Int
     var reductions: Bool
+    var reused_columns: Bool
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -563,6 +564,17 @@ def _program(
             node_dtypes.append(bound.dtypes[node.left])
 
 
+def _append_gathers(slots: List[Int], mut gathers: List[Int64]) -> Int:
+    # Several output names may refer to one resident value. Gather its data
+    # and validity once while keeping visible column order in the schema.
+    var unique = List[Int]()
+    for slot in slots:
+        if slot not in unique:
+            unique.append(slot)
+            gathers.append(Int64(slot))
+    return len(unique)
+
+
 def lower_rows(
     query: LazyFrame,
     capabilities: RowCapabilities = RowCapabilities(),
@@ -667,6 +679,7 @@ def lower_rows(
     var outputs = List[RowOutput]()
     var next_slot = len(schema)
     var reduced = False
+    var reused_columns = False
     for k in range(len(chain) - 1, -1, -1):
         ref node = query._nodes[chain[k]]
         if reduced:
@@ -701,8 +714,7 @@ def lower_rows(
                 literals.append(bitcast[DType.float64](Int64(parameter)))
                 node_dtypes.append(DataType.INT64)
             var gather_start = len(gathers)
-            for slot in slots:
-                gathers.append(Int64(slot))
+            var gather_count = _append_gathers(slots, gathers)
             slot_dtypes.append(DataType.BOOL)
             steps.append(
                 RowStep(
@@ -711,7 +723,7 @@ def lower_rows(
                     next_slot,
                     True,
                     gather_start,
-                    len(slots),
+                    gather_count,
                     False,
                     False,
                 )
@@ -743,8 +755,7 @@ def lower_rows(
                 literals.append(0)
                 node_dtypes.append(schema[found].dtype())
             var gather_start = len(gathers)
-            for slot in slots:
-                gathers.append(Int64(slot))
+            var gather_count = _append_gathers(slots, gathers)
             steps.append(
                 RowStep(
                     start,
@@ -752,7 +763,7 @@ def lower_rows(
                     0,
                     False,
                     gather_start,
-                    len(slots),
+                    gather_count,
                     True,
                     False,
                 )
@@ -1148,6 +1159,25 @@ def lower_rows(
                 has_rows |= row_shape
             if node.kind == FILTER and result_dtype != DataType.BOOL:
                 capabilities.reject("plan", "filter predicate must be Boolean")
+            if (
+                capabilities.reuse_column_slots
+                and (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and reduction < 0
+                and row_shape
+                and count == 1
+                and bound.expr._nodes[0].op == COL
+            ):
+                var existing = rank_slots[bound.sources[0]]
+                capabilities.require_dtype(result_dtype)
+                if slot_dtypes[existing] == result_dtype and (
+                    capabilities.mixed_types
+                    or result_dtype == dtype
+                    or result_dtype == DataType.BOOL
+                ):
+                    projected.append(_empty(expr._name, result_dtype))
+                    projected_slots.append(existing)
+                    reused_columns = True
+                    continue
             if next_slot >= capabilities.max_slots:
                 capabilities.reject(
                     "plan",
@@ -1168,9 +1198,9 @@ def lower_rows(
             )
             slot_dtypes.append(bound.dtypes[count - 1])
             var gather_start = len(gathers)
+            var gather_count = len(slots)
             if node.kind == FILTER:
-                for slot in slots:
-                    gathers.append(Int64(slot))
+                gather_count = _append_gathers(slots, gathers)
             steps.append(
                 RowStep(
                     start,
@@ -1178,7 +1208,7 @@ def lower_rows(
                     next_slot,
                     node.kind == FILTER,
                     gather_start,
-                    len(slots),
+                    gather_count,
                     False,
                     False,
                 )
@@ -1297,8 +1327,7 @@ def lower_rows(
                 literals.append(0)
                 node_dtypes.append(DataType.INT64)
                 var gather_start = len(gathers)
-                for slot in grouped_slots:
-                    gathers.append(Int64(slot))
+                var gather_count = _append_gathers(grouped_slots, gathers)
                 steps.append(
                     RowStep(
                         order_start,
@@ -1306,7 +1335,7 @@ def lower_rows(
                         0,
                         False,
                         gather_start,
-                        len(grouped_slots),
+                        gather_count,
                         True,
                         False,
                     )
@@ -1368,6 +1397,13 @@ def lower_rows(
             + String(capabilities.max_steps)
             + " device steps",
         )
+    if len(outputs) > capabilities.max_slots:
+        capabilities.reject(
+            "plan",
+            "resident region supports at most "
+            + String(capabilities.max_slots)
+            + " output columns",
+        )
     if len(outputs) == 0:
         capabilities.reject(
             "plan", "resident region requires at least one output column"
@@ -1386,4 +1422,5 @@ def lower_rows(
         root,
         limit,
         reduced,
+        reused_columns,
     )
