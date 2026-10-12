@@ -6,8 +6,17 @@ The Mojo lifecycle tests separately count importer releases on error paths.
 """
 import ctypes as c
 from pathlib import Path
+import os
 import sys
 import tempfile
+
+# The native library and PyArrow contain separate Arrow/mimalloc copies. On
+# macOS their default pools corrupt decoded buffers when loaded together; both
+# libraries decode correctly with the system allocator. Keep this independent
+# consumer process on that allocator before either Arrow copy initializes.
+if sys.platform == "darwin":
+    os.environ["ARROW_DEFAULT_MEMORY_POOL"] = "system"
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -153,7 +162,9 @@ with tempfile.TemporaryDirectory() as directory:
             ) if selected else table.slice(0, 0)
             if columns:
                 expected = expected.select(columns)
-            assert pa.Table.from_batches(batches).equals(expected)
+            assert pa.Table.from_batches(batches).equals(expected), (
+                f"Native stream values/schema differ: columns={columns}, groups={groups}"
+            )
         finally:
             close(stream)
     stream = opened(path)
