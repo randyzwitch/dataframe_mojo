@@ -2,14 +2,14 @@
 
 Importing this module loads no driver. Binary64 arithmetic uses integer-only
 GPU emulation, including floating sum/mean accumulation. Int64/UInt64 sums and
-integer means require a GPU proof that all exact integer partials fit the native
-range. Decimal32/64 sums use exact two-word accumulation with Decimal128
-results. Automatic placement requires separate calibration for emulated work.
+means use exact two-word accumulation. Decimal32/64 sums return Decimal128;
+their means preserve the CPU scaled quotient/remainder conversion sequence.
+Automatic placement requires separate calibration for emulated work.
 """
 from .accelerator.metadata import schema_frame
 from std.ffi import external_call
 from std.math import isfinite
-from std.memory import Pointer
+from std.memory import Pointer, bitcast
 from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
@@ -342,6 +342,7 @@ def _capabilities() -> RowCapabilities:
         temporal_fields=True,
         ranks=True,
         decimal128=True,
+        decimal_mean=True,
         reuse_column_slots=True,
         proven_integer_operations=True,
         max_nodes=128,
@@ -548,6 +549,8 @@ def _input_series(column: Series) raises -> List[Int64]:
 def _reduction_op(op: Int, source_dtype: DataType) raises -> Int64:
     if op == SUM and source_dtype.is_decimal():
         return 208
+    if op == MEAN and source_dtype.is_decimal():
+        return 212
     if op == SUM and (
         source_dtype.physical() == DataType.INT64
         or source_dtype == DataType.UINT64
@@ -621,6 +624,10 @@ struct _Descriptors(Movable):
                     Int(self.code[i + 3]),
                     plan.slot_dtypes[Int(self.code[i + 1])],
                 )
+                if self.code[i + 3] == 212:
+                    self.literals[i // 4] = bitcast[DType.float64](
+                        Int64(plan.slot_dtypes[Int(self.code[i + 1])].scale())
+                    )
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
             self.inputs.extend(_input_series(column))
@@ -655,7 +662,13 @@ struct _Descriptors(Movable):
                         output.reduction, plan.slot_dtypes[output.slot]
                     ) if output.reduction
                     >= 0 else Int64(-1),
-                    Int64(output.min_count),
+                    Int64(
+                        plan.slot_dtypes[output.slot].scale()
+                    ) if output.reduction
+                    == MEAN
+                    and plan.slot_dtypes[output.slot].is_decimal() else Int64(
+                        output.min_count
+                    ),
                 ]
             )
 
@@ -1431,6 +1444,18 @@ struct MetalRuntime(AcceleratorBackend):
             if plan.code[step.start * 4] == ROW_RANK_KEY:
                 family += ";metal-rank-v1"
                 break
+        var decimal_mean = False
+        for output in plan.outputs:
+            decimal_mean |= output.reduction == MEAN and (
+                plan.slot_dtypes[output.slot].is_decimal()
+            )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                decimal_mean |= plan.code[i + 3] == MEAN and (
+                    plan.slot_dtypes[Int(plan.code[i + 1])].is_decimal()
+                )
+        if decimal_mean:
+            family += ";metal-decimal-means-v1"
         var wide_integer = False
         for output in plan.outputs:
             wide_integer |= (

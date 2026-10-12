@@ -134,6 +134,9 @@ enum DFMOp {
   // SUM checks the final source-width result; MEAN converts the exact total.
   DFM_WIDE_INTEGER_SUM = 210,
   DFM_WIDE_INTEGER_MEAN = 211,
+  // Exact Decimal32/64 mean with CPU quotient/remainder rounding. Metadata
+  // carries the source scale in min_count (or the GROUP_OUTPUT literal).
+  DFM_WIDE_DECIMAL_MEAN = 212,
 };
 
 typedef struct DFMInput {
@@ -160,7 +163,7 @@ typedef struct DFMOutput {
   int64_t dtype;
   int64_t slot;
   int64_t reduction; // -1 for row output.
-  int64_t min_count; // Sum minimum; Boolean any/all ignore_nulls flag.
+  int64_t min_count; // Sum minimum; Boolean ignore_nulls; decimal mean scale.
 } DFMOutput;
 
 typedef struct DFMRequest {
