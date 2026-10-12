@@ -105,8 +105,16 @@ def test_scalar_broadcast_rejects_file_reads_and_conditional_precision_faults() 
         .then(col("x").mean())
         .otherwise(col("x").cast(DataType.FLOAT64))
     )
-    with assert_raises(contains="conditional scalar wide integer mean"):
-        _ = mean.collect(accelerator=runtime)
+    var planned = runtime.describe(mean)
+    assert_true("Metal resident aggregate expressions" in planned)
+    assert_true("unsupported" not in planned)
+    var invalid_child = wide.lazy().select(
+        when(lit(False))
+        .then((col("x") + lit(Int64(1))).mean())
+        .otherwise(col("x").cast(DataType.FLOAT64))
+    )
+    with assert_raises(contains="checked integer arithmetic"):
+        _ = invalid_child.collect(accelerator=runtime)
     with assert_raises(contains="terminal boundary"):
         _ = (
             wide.lazy()
@@ -284,3 +292,171 @@ def test_native_metal_scalar_broadcast_resident_traffic_budgets_and_recovery() r
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),
     )
+
+
+def test_native_metal_conditional_integer_means_limits_nulls_empty_and_partitions() raises:
+    _ = require_metal()
+    var frame = DataFrame(
+        [
+            Series(
+                "k",
+                Column[Int32](
+                    [0, 0, 1, 1, 2, 2], [True, True, False, False, True, True]
+                ),
+            ),
+            Series(
+                "p",
+                Column[Bool](
+                    [True, False, True, False, True, False],
+                    [True, True, False, True, True, False],
+                ),
+            ),
+            Series(
+                "i",
+                Column[Int64](
+                    [Int64.MIN, Int64.MIN, Int64.MAX, Int64.MAX, 0, 1],
+                    [True, False, True, True, False, True],
+                ),
+            ),
+            Series(
+                "u",
+                Column[UInt64](
+                    [UInt64.MAX, UInt64.MAX, 1, UInt64.MAX, 2, UInt64.MAX],
+                    [True, True, False, True, True, True],
+                ),
+            ),
+        ]
+    )
+    var nulls = DataFrame(
+        [
+            Series("k", Column[Int32]([0, 0, 1])),
+            Series("p", Column[Bool]([True, False, True])),
+            Series(
+                "i",
+                Column[Int64](
+                    [Int64.MIN, Int64.MAX, Int64.MAX], [False, False, False]
+                ),
+            ),
+            Series(
+                "u",
+                Column[UInt64](
+                    [UInt64.MAX, UInt64.MAX, UInt64.MAX], [False, False, False]
+                ),
+            ),
+        ]
+    )
+    for sample in List[DataFrame](
+        [frame.copy(), frame.slice(1, 4), frame.slice(0, 0), nulls^]
+    ):
+        for name in List[String](["i", "u"]):
+            for predicate in [lit(False), lit(True), col("p")]:
+                check(
+                    sample.lazy().select(
+                        when(predicate)
+                        .then(col(name).mean())
+                        .otherwise(col(name).cast(DataType.FLOAT64))
+                        .alias("value")
+                    )
+                )
+            check(
+                sample.lazy()
+                .group_by("k", maintain_order=True)
+                .agg(
+                    when(lit(False))
+                    .then(col(name).mean())
+                    .otherwise(lit(Float64(-1)))
+                    .alias("value")
+                )
+            )
+            check(
+                sample.lazy()
+                .group_by("k", maintain_order=True)
+                .agg(
+                    when(lit(True))
+                    .then(col(name).mean())
+                    .otherwise(lit(Float64(-1)))
+                    .alias("value")
+                )
+            )
+            check(
+                sample.lazy().select(
+                    when(col("p"))
+                    .then(col(name).cast(DataType.FLOAT64))
+                    .otherwise(col(name).mean())
+                    .alias("value")
+                )
+            )
+        check(
+            sample.lazy()
+            .with_columns(
+                when(col("p"))
+                .then(col("i").mean())
+                .otherwise(col("u").mean())
+                .alias("value")
+            )
+            .head(2)
+        )
+        check(
+            sample.lazy().filter(
+                when(col("p"))
+                .then(col("u").mean())
+                .otherwise(col("u").cast(DataType.FLOAT64))
+                > lit(Float64(0))
+            )
+        )
+    var extremes = DataFrame(
+        [
+            Series("i", Column[Int64]([Int64.MIN, Int64.MIN, Int64.MIN])),
+            Series("u", Column[UInt64]([UInt64.MAX, UInt64.MAX, UInt64.MAX])),
+        ]
+    )
+    check(
+        extremes.lazy().select_exprs(
+            [
+                when(lit(True))
+                .then(col("i").mean())
+                .otherwise(lit(Float64(0)))
+                .alias("i"),
+                when(lit(True))
+                .then(col("u").mean())
+                .otherwise(lit(Float64(0)))
+                .alias("u"),
+            ]
+        )
+    )
+
+
+def test_native_metal_conditional_integer_means_resident_joins_filters_and_budget() raises:
+    _ = require_metal()
+    var n = 8193
+    var keys = List[Int32]()
+    var values = List[UInt64]()
+    for i in range(n):
+        keys.append(Int32(i % 7))
+        values.append(UInt64.MAX - UInt64(i % 9))
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int32](keys^)),
+            Series("u", Column[UInt64](values^)),
+        ]
+    )
+    var branch = (
+        when(col("k") < lit(Int32(3)))
+        .then(col("u").mean())
+        .otherwise(col("u").cast(DataType.FLOAT64))
+    )
+    var right = DataFrame([Series("k", Column[Int32]([0, 1, 2, 3, 4, 5, 6]))])
+    var query = frame.lazy().with_columns(branch.alias("value"))
+    check(query.join(right.lazy(), "k").select_exprs([col("k"), col("value")]))
+    check(
+        frame.lazy()
+        .join(right.lazy(), "k")
+        .filter(branch > lit(Float64(0)))
+        .head(17)
+    )
+    var runtime = MetalRuntime()
+    var measured = query.profile(accelerator=runtime)
+    same(measured[0], query.collect(engine="cpu"))
+    with assert_raises(contains="budget"):
+        _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
+    check(query)
