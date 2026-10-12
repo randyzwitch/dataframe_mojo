@@ -48,12 +48,79 @@ std::string shiftFillSource(const DFMRequest &r, const Layout &layout, int64_t i
   return text + "}}}\n";
 }
 
+// Recompute each trailing window in source order, matching CPU association.
+std::string rollingSource(const DFMRequest &r, const Layout &layout, int64_t i) {
+  auto &step = r.steps[i];
+  auto h = r.code + 4 * step.start;
+  auto name = std::to_string(i);
+  auto inputType = slotType(r, h[1]), outputType = slotType(r, step.slot);
+  auto input = std::to_string(layout.physical[h[1]]) + "UL*meta.z";
+  auto output = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
+  bool arithmetic = h[3] == 7 || h[3] == 8;
+  bool integer = h[3] == 7 && inputType != DFM_FLOAT32 && inputType != DFM_FLOAT64_STORAGE;
+  bool wide = inputType == DFM_DECIMAL128;
+  std::string text = partitionSource(r, layout, i);
+  text += "kernel void cumulative_assign" + name + R"MSL(
+(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],
+ device const uint *order[[buffer(2)]],constant uint4 &meta[[buffer(3)]],
+ device atomic_uint *error[[buffer(4)]],device const ulong *lit[[buffer(5)]],
+ uint position[[thread_position_in_grid]]){
+ if(position>=meta.x)return;uint own=order[position];
+)MSL";
+  if (arithmetic && inputType == DFM_UINT64)
+    text += "{ulong at=" + input + "+own;if(v[at]&&x[at]>0x7fffffffffffffffUL){"
+            "atomic_fetch_min_explicit(error,0xD0000000U,memory_order_relaxed);return;}}";
+  text += "uint lo=0,hi=position;while(lo<hi){uint mid=(lo+hi)/2;"
+          "if(window_partition" + name + "(order[mid],own,x,v,meta))hi=mid;else lo=mid+1;}"
+          "uint begin=lo;ulong window=lit[" + std::to_string(step.start) + "];"
+          "uint start=ulong(position-begin+1)>window?position-uint(window)+1:begin;"
+          "ulong state=0UL,upper=0UL;uint count=0;"
+          "for(uint atPosition=start;atPosition<=position;++atPosition){uint row=order[atPosition];"
+          "ulong at=" + input + "+row;if(!v[at])continue;ulong word=x[at];";
+  if (integer)
+    text += "ulong other=long(word)<0?~0UL:0UL;ulong next=state+word;"
+            "upper+=other+ulong(next<state);state=next;";
+  else if (arithmetic) {
+    auto word = inputType == DFM_FLOAT32 ? "f64_from_float32(uint(word))" :
+        inputType == DFM_FLOAT64_STORAGE ? "word" : "f64_from_signed(long(word))";
+    text += "state=f64_add(state," + std::string(word) + ");";
+  } else {
+    if (wide)
+      text += "ulong other=x[at+meta.z];if(!count||" +
+          std::string(h[3] == 10 ? "wide_less(ulong2(state,upper),ulong2(word,other))" :
+                                  "wide_less(ulong2(word,other),ulong2(state,upper))") +
+          "){state=word;upper=other;}";
+    else
+      text += "if(!count||extrema_better(word,state," + std::to_string(inputType) + "," +
+          std::string(h[3] == 10 ? "true" : "false") + "))state=word;";
+  }
+  text += "++count;}ulong out=" + output + "+own;x[out]=T(0);v[out]=0;";
+  if (wide) text += "x[out+meta.z]=T(0);v[out+meta.z]=0;";
+  text += "if(!count||ulong(count)<" + std::to_string(h[2]) + "UL)return;";
+  if (integer) {
+    text += "bool overflow=upper!=(long(state)<0?~0UL:0UL);";
+    if (outputType == DFM_INT32)
+      text += "overflow=overflow||long(state)<(-2147483647L-1L)||long(state)>2147483647L;";
+    if (outputType == DFM_UINT32)
+      text += "overflow=overflow||long(state)<0L||state>4294967295UL;";
+    if (outputType == DFM_UINT64)
+      text += "overflow=overflow||long(state)<0L;";
+    text += "if(overflow){atomic_fetch_min_explicit(error,0xD0000000U,memory_order_relaxed);return;}";
+  }
+  if (h[3] == 8) text += "state=f64_div(state,f64_from_unsigned(ulong(count)));";
+  if (h[3] == 7 && inputType == DFM_FLOAT32) text += "state=ulong(f64_to_float32(state));";
+  text += "x[out]=T(state);v[out]=1;";
+  if (wide) text += "x[out+meta.z]=T(upper);v[out+meta.z]=1;";
+  return text + "}\n";
+}
+
 // Stable partition ordering groups the rows without changing the table. A
 // partition owner walks its rows sequentially, preserving CPU floating-point
 // association and validating every integer/decimal prefix before head/filter.
 std::string cumulativeSource(const DFMRequest &r, const Layout &layout, int64_t i) {
   auto &step = r.steps[i];
   auto h = r.code + 4 * step.start;
+  if (h[3] >= 7) return rollingSource(r, layout, i);
   if (h[3] >= 4) return shiftFillSource(r, layout, i);
   auto name = std::to_string(i);
   auto inputType = slotType(r, h[1]), outputType = slotType(r, step.slot);

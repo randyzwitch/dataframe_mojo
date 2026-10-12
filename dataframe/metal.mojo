@@ -350,6 +350,7 @@ def _capabilities() -> RowCapabilities:
         temporal_fields=True,
         ranks=True,
         cumulative_windows=True,
+        rolling_windows=True,
         shift_fill_windows=True,
         decimal128=True,
         decimal128_reductions=True,
@@ -1598,6 +1599,7 @@ struct MetalRuntime(AcceleratorBackend):
             family += ";metal-column-slots-v1"
         var ranked = False
         var cumulative = False
+        var rolling = False
         var shift_fill = False
         for step in plan.steps:
             ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
@@ -1608,6 +1610,12 @@ struct MetalRuntime(AcceleratorBackend):
             shift_fill |= (
                 plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
                 and plan.code[step.start * 4 + 3] >= 4
+                and plan.code[step.start * 4 + 3] <= 6
+            )
+        for step in plan.steps:
+            rolling |= (
+                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                and plan.code[step.start * 4 + 3] >= 7
             )
         if ranked:
             family += ";metal-rank-v1"
@@ -1615,6 +1623,8 @@ struct MetalRuntime(AcceleratorBackend):
             family += ";metal-cumulative-v1"
         if shift_fill:
             family += ";metal-shift-fill-v1"
+        if rolling:
+            family += ";metal-rolling-v1"
         var decimal_mean = False
         for output in plan.outputs:
             decimal_mean |= output.reduction == MEAN and (

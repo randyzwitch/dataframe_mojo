@@ -12,6 +12,10 @@ from dataframe.expr import (
     CUM_MAX,
     CUM_COUNT,
     SHIFT,
+    ROLLING_SUM,
+    ROLLING_MEAN,
+    ROLLING_MIN,
+    ROLLING_MAX,
     FORWARD_FILL,
     BACKWARD_FILL,
     SELECTOR,
@@ -48,6 +52,10 @@ def _staged_over(expression: Expr, index: Int) -> Bool:
             or node.op == CUM_MIN
             or node.op == CUM_MAX
             or node.op == CUM_COUNT
+            or node.op == ROLLING_SUM
+            or node.op == ROLLING_MEAN
+            or node.op == ROLLING_MIN
+            or node.op == ROLLING_MAX
             or node.op == SHIFT
             or node.op == FORWARD_FILL
             or node.op == BACKWARD_FILL
