@@ -12,7 +12,10 @@ from dataframe.metal import (
 )
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
-from tests.execution_modes.test_backend_metal_scalar_broadcasts import same, check
+from tests.execution_modes.test_backend_metal_scalar_broadcasts import (
+    same,
+    check,
+)
 
 
 def fixture(n: Int, scale: Int) raises -> DataFrame:
@@ -250,5 +253,3 @@ def test_native_metal_decimal_cast_profile_budget_and_recovery() raises:
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=tiny)
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
-
-
