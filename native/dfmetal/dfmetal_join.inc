@@ -36,21 +36,22 @@ int64_t jOutputSlots(const DFMJoinRequest &r) {
     slots = add(slots, r.outputs[i].dtype == DFM_DECIMAL128 ? 2 : 1);
   return slots;
 }
+int64_t jHow(const DFMJoinRequest &r) { return r.how == 7 ? 1 : r.how; }
 JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
                  const DFMResidentInput *refs = nullptr) {
   if (r.abi_version != DFM_JOIN_ABI_VERSION || r.left_rows < 0 ||
       r.right_rows < 0 || r.left_rows > INT32_MAX || r.right_rows > INT32_MAX ||
       r.input_count < 0 || r.input_count > 64 || r.key_count < 0 ||
       r.key_count > 64 || r.output_count < 1 || r.output_count > 64 ||
-      r.how < 0 || r.how > 6 || r.limit < -1 || r.memory_budget_bytes < -1 ||
+      r.how < 0 || r.how > 7 || r.limit < -1 || r.memory_budget_bytes < -1 ||
       (r.profiling != 0 && r.profiling != 1) || (r.input_count && !r.inputs) ||
       (r.key_count && !r.keys) || !r.outputs ||
-      ((r.how == 6) != (r.key_count == 0)))
+      ((jHow(r) == 6) != (r.key_count == 0)))
     fail("Invalid Metal join request");
   JShape s;
-  s.probe = r.how == 2 ? r.right_rows : r.left_rows;
-  s.build = r.how == 2 ? r.left_rows : r.right_rows;
-  s.hash = r.how != 6 && r.memory_budget_bytes == -1 && hashCandidate(s.build);
+  s.probe = jHow(r) == 2 ? r.right_rows : r.left_rows;
+  s.build = jHow(r) == 2 ? r.left_rows : r.right_rows;
+  s.hash = jHow(r) != 6 && r.memory_budget_bytes == -1 && hashCandidate(s.build);
   s.pb = std::max<int64_t>(1, (s.probe + 255) / 256);
   s.bb = std::max<int64_t>(1, (s.build + 255) / 256);
   for (int64_t i = 0; i < r.input_count; ++i) {
@@ -97,7 +98,7 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
     if (o.left < -1 || o.right < -1 || (o.left == -1 && o.right == -1) ||
         (o.prefer_right != 0 && o.prefer_right != 1) ||
         (o.prefer_right && o.right < 0) ||
-        ((r.how == 4 || r.how == 5) && o.right >= 0))
+        ((jHow(r) == 4 || jHow(r) == 5) && o.right >= 0))
       fail("Invalid Metal join output");
     if (o.left >= 0) {
       input(o.left, 0);
@@ -130,15 +131,15 @@ JShape jvalidate(const DFMJoinRequest &r, bool pointers = false,
   s.memory.peak_bytes = s.memory.shared_bytes;
   s.memory.blocks = s.pb;
   s.memory.capacity = std::max<int64_t>(1, s.probe);
-  s.memory.launches = (r.input_count ? 1 : 0) + (r.how == 6 ? 0 : 1) + 5;
+  s.memory.launches = (r.input_count ? 1 : 0) + (jHow(r) == 6 ? 0 : 1) + 5;
   if (s.hash) {
     auto bits = 0;
     for (auto cap = hashCapacity(s.build); cap; cap >>= 1) ++bits;
     s.memory.launches += 3 + 3 * ((bits + 3) / 4);
-  } else if (r.how != 6)
+  } else if (jHow(r) != 6)
     for (int64_t width = 1; width < s.build; width *= 2)
       ++s.memory.launches;
-  if (r.how == 3)
+  if (jHow(r) == 3)
     s.memory.launches += 6;
   return s;
 }
@@ -146,7 +147,8 @@ std::string jsource(int64_t keys, int64_t how, bool hash) {
   std::string src = "#include <metal_stdlib>\nusing namespace metal;\n";
   src += residentSource();
   src += "constant uint KEYS=" + std::to_string(keys) +
-         ";\nconstant uint HOW=" + std::to_string(how) + ";\n";
+         ";\nconstant uint HOW=" + std::to_string(how == 7 ? 1 : how) +
+         ";\nconstant bool NULL_MATCH=" + (how == 7 ? "true" : "false") + ";\n";
   src += orderingSource();
   if (hash) src += radixSource();
   src += R"MSL(
@@ -195,7 +197,7 @@ kernel void j_match(device const uint *index[[buffer(0)]],device const ulong *x[
  device const Col *cols[[buffer(3)]],device const long2 *keys[[buffer(4)]],constant Meta &m[[buffer(5)]],
  device ulong *range[[buffer(6)]],device ulong *count[[buffer(7)]],device atomic_int *diff[[buffer(8)]],uint i[[thread_position_in_grid]]){
  if(i>=m.probe)return;uint low=0,high=0;bool valid=true;
- for(uint k=0;k<KEYS;++k){long2 pair=keys[k];Col c=cols[m.side?pair.y:pair.x];if(!v[c.word+i])valid=false;}
+ for(uint k=0;k<KEYS;++k){long2 pair=keys[k];Col c=cols[m.side?pair.y:pair.x];if(!v[c.word+i]&&!NULL_MATCH)valid=false;}
  if(HOW==6){high=m.build;}else if(valid){uint lo=0,hi=m.build;
  while(lo<hi){uint q=lo+(hi-lo)/2;if(j_cmp(index[q],i,true,x,v,cols,keys,m)<0)lo=q+1;else hi=q;}low=lo;
  hi=m.build;while(lo<hi){uint q=lo+(hi-lo)/2;if(j_cmp(index[q],i,true,x,v,cols,keys,m)<=0)lo=q+1;else hi=q;}high=lo;}
@@ -256,7 +258,8 @@ ulong j_hash_key(uint row,bool build,device const ulong *x,device const uchar *v
  ulong hash=0x9e3779b97f4a7c15UL;valid=true;
  for(uint k=0;k<KEYS;++k){long2 pair=keys[k];
   Col c=cols[build?(m.side?pair.x:pair.y):(m.side?pair.y:pair.x)];
-  ulong at=c.word+row;if(!v[at])valid=false;
+  ulong at=c.word+row;if(!v[at]){if(!NULL_MATCH)valid=false;
+   hash=key_hash(hash^0xd1b54a32d192ed03UL);continue;}
   hash=key_hash(hash^canonical_key(x[at],c.type));if(c.type==12)hash=key_hash(hash^x[at+max(c.rows,1L)]);}
  return hash;
 }
@@ -476,7 +479,7 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r,
   }
   *static_cast<JMeta *>(q.meta.contents) = {uint32_t(shape.probe),
                                             uint32_t(shape.build),
-                                            uint32_t(r.how == 2),
+                                            uint32_t(jHow(r) == 2),
                                             uint32_t(r.input_count),
                                             0,
                                             0,
@@ -507,7 +510,7 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r,
       e.val(4, params);
       e.launch("resident_copy", table.rows);
     }
-  if (r.how != 6) {
+  if (jHow(r) != 6) {
     e.buf(0, q.sorted);
     e.buf(1, q.meta);
     e.launch("j_init", shape.build);
@@ -557,7 +560,7 @@ std::unique_ptr<JSession> jprepare(Context &c, const DFMJoinRequest &r,
   }
   e.launch("j_match", shape.probe);
   jscan(e, q.prefix, q.pblocks, shape.probe, 0, q.scratch);
-  if (r.how == 3) {
+  if (jHow(r) == 3) {
     jscan(e, q.bprefix, q.bblocks, shape.build, 1, q.scratch);
     e.buf(0, q.bprefix);
     e.buf(1, q.bblocks);

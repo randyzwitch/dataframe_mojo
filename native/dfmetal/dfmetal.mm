@@ -405,11 +405,15 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if (!typed(r) || v.gather_count || v.nodes < 1)
         fail("Invalid Metal group storage");
       auto h = r.code + 4 * v.start;
-      if ((h[0] != DFM_GROUP_HEADER && h[0] != DFM_GROUP_HEADER_LAST) ||
+      if ((h[0] != DFM_GROUP_HEADER && h[0] != DFM_GROUP_HEADER_LAST &&
+           h[0] != DFM_GROUP_HEADER_WINDOW) ||
           h[1] < 0 || h[1] >= v.nodes ||
           h[2] < r.input_count || h[2] >= r.slots || h[3] < r.input_count ||
           h[3] >= r.slots || h[2] == h[3] || h[2] == v.slot || h[3] == v.slot)
         fail("Invalid Metal group header");
+      if (h[0] == DFM_GROUP_HEADER_WINDOW &&
+          (r.literals[v.start] < 1 || r.literals[v.start] > uint64_t(INT32_MAX)))
+        fail("Invalid Metal window worker metadata");
       if (defined[v.slot] || defined[h[2]] || defined[h[3]] ||
           slotType(r, v.slot) != DFM_INT64 || slotType(r, h[2]) != DFM_INT64 ||
           slotType(r, h[3]) != DFM_INT64)
@@ -1067,6 +1071,7 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
     auto h = r.code + 4 * step.start;
     auto keys = h[1];
     bool lastRepresentative = h[0] == DFM_GROUP_HEADER_LAST;
+    bool windowFloating = h[0] == DFM_GROUP_HEADER_WINDOW;
     auto name = std::to_string(i);
     auto index = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
     auto starts = std::to_string(layout.physical[h[2]]) + "UL*meta.z";
@@ -1146,6 +1151,24 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
         index +
         "+" + std::string(lastRepresentative ? "end-1" : "begin") +
         R"MSL(]);ulong from=ulong(o.slot)*meta.z+row;y[to]=x[from];w[to]=v[from];if(o.type==12){y[to+meta.z]=x[from+meta.z];w[to+meta.z]=v[from];}}return;}
+)MSL" + (windowFloating ?
+        // CPU OVER reductions add rows in source order within each worker,
+        // then merge contiguous workers in order. Eager select/with_columns
+        // use 8192-row batches, which align those worker boundaries.
+        "if((o.kind==10||o.kind==82)&&(o.type==1||o.type==11)){if(lane)return;"
+        "ulong workers=max(1UL,min(min(ulong(lit[" + std::to_string(step.start) +
+        "]),ulong(meta.y)/65536UL),ulong(meta.y)/max(1UL,4UL*ulong(meta.x))));"
+        "ulong step=((ulong(meta.y)+workers-1UL)/workers+8191UL)/8192UL*8192UL;"
+        "ulong total=0UL;long count=0;uint at=begin;"
+        "for(ulong worker=0;worker<workers;++worker){ulong partial=0UL;"
+        "ulong stop=min(ulong(meta.y),(worker+1UL)*step);"
+        "while(at<end){uint row=uint(x[" + index +
+        "+at]);if(ulong(row)>=stop)break;++at;ulong from=ulong(o.slot)*meta.z+row;"
+        "if(v[from]){partial=f64_add(partial,f64_word(x[from],o.type));++count;}}"
+        "total=worker?f64_add(total,partial):partial;}"
+        "long sum=long(total);state_finish(sum,count,o,end-begin);"
+        "bool valid=state_valid(o,count);y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);return;}\n"
+        : "") + R"MSL(
  threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  bool first=group.y==0;
  for(uint at=begin+lane;at<end;at+=256){uint row=uint(x[)MSL" +

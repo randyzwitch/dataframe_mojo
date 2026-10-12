@@ -114,6 +114,23 @@ rank operations. Checked rank inputs and rank inside grouped aggregation remain
 unsupported. Rank plans carry a separate `metal-rank-v1` calibration family;
 automatic placement stays on CPU without matching validated evidence.
 
+Supported scalar reductions also run within `over()` partitions: Metal groups a
+shared resident prefix and broadcasts each result back in original row order.
+Null partition keys form one group; multiple keys, dictionary codes, fixed logical
+types, and two-word decimal keys retain their normal equality. Composed aggregate
+expressions and windows in select, with-columns, or filter remain resident,
+including after joins and before later consumers. Empty inputs remain empty.
+Floating sums and means preserve source order within the CPU window worker
+partitions and merge those partials in worker order using binary64 emulation.
+These aggregate-window producers are full observation boundaries, matching the
+CPU's eager preparation of window states even inside a conditional or before
+head. Checked sums and checked expressions inside these producers retain their
+normal overflow checks. Ordinary checked join inputs keep their existing
+restrictions. Nested windows and row-valued expressions inside an aggregate
+window still require CPU execution, as do unsupported underlying reductions.
+Automatic placement keeps these plans on CPU until their complete DAG has a
+supported estimate and matching calibration.
+
 Checked integer arithmetic currently
 requires terminal projections without head, matching the shared planner's
 observable-overflow boundary.

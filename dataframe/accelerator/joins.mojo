@@ -256,7 +256,9 @@ def _join_task(
             right_id,
             frame^,
             terminal,
-            node.how,
+            7 if node.how == 1
+            and len(node.flags)
+            and node.flags[0] else node.how,
             limit,
             keys^,
             fields^,
@@ -279,11 +281,14 @@ def _task(
     capabilities: RowCapabilities,
     mut tasks: List[DagTask],
 ) raises -> Int:
+    var boundary = (
+        terminal or query._nodes[root].text == "metal_window_materialization"
+    )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
         return cached
     if query._nodes[root].kind == JOIN:
-        return _join_task(query, root, terminal, -1, capabilities, tasks)
+        return _join_task(query, root, boundary, -1, capabilities, tasks)
     # A direct head is a join output limit, so large fanout can be bounded
     # without allocating the unobserved Cartesian-sized result.
     ref top = query._nodes[root]
@@ -293,7 +298,7 @@ def _task(
         and query._nodes[top.left].kind == JOIN
     ):
         return _join_task(
-            query, top.left, terminal, top.length, capabilities, tasks
+            query, top.left, boundary, top.length, capabilities, tasks
         )
     var chain = List[Int]()
     var cursor = root
@@ -302,6 +307,10 @@ def _task(
         and _cached_rows(tasks, cursor) < 0
         and query._nodes[cursor].kind != JOIN
         and (cursor == root or query._nodes[cursor].kind != SLICE)
+        and (
+            cursor == root
+            or query._nodes[cursor].text != "metal_window_materialization"
+        )
         and (
             cursor == root
             or not capabilities.scalar_regions
@@ -320,6 +329,10 @@ def _task(
         query._nodes[cursor].kind == JOIN
         or query._nodes[cursor].kind == SLICE
         or (
+            cursor != root
+            and query._nodes[cursor].text == "metal_window_materialization"
+        )
+        or (
             capabilities.scalar_regions
             and _scalar_reduction(query, cursor)
             and cursor != root
@@ -333,7 +346,7 @@ def _task(
         if len(scan.names):
             frame = frame.select(scan.names)
     var region = _region_query(query, chain, frame)
-    var plan = lower_rows(region, capabilities, terminal_boundary=terminal)
+    var plan = lower_rows(region, capabilities, terminal_boundary=boundary)
     # Pure projections preserve the prefix. Push their final head into a join
     # only after binding proves that no reduction or row reordering intervenes.
     var prefix = plan.limit >= 0 and not plan.reductions
@@ -357,7 +370,7 @@ def _task(
             source,
             -1,
             DataFrame(columns^),
-            terminal,
+            boundary,
             -1,
             -1,
             List[Int64](),
