@@ -20,6 +20,7 @@ from dataframe.expr import (
     KEEP_NULLS,
     WHEN,
     LIT_BOOL,
+    is_comparison,
 )
 
 
@@ -78,6 +79,17 @@ def _decimal_cast_safe(
             True,
         )
     return limits.low <= source_bounds.low and source_bounds.high <= limits.high
+
+
+def _decimal_scale_safe(dtype: DataType, scale: Int) -> Bool:
+    if scale == dtype.scale():
+        return True
+    var bounds = _type_range(dtype.physical())
+    if not bounds.known:
+        return False
+    return max(abs(bounds.low), abs(bounds.high)) <= (
+        Int128.MAX // pow10(scale - dtype.scale())
+    )
 
 
 def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
@@ -211,5 +223,13 @@ def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
                 bound.dtypes[node.left], bound.dtypes[i], a
             )
         ranges.append(result^)
+        if is_comparison(node.op) and node.left >= 0 and node.right >= 0:
+            var left_type = bound.dtypes[node.left]
+            var right_type = bound.dtypes[node.right]
+            if left_type.is_decimal() and right_type.is_decimal():
+                var scale = max(left_type.scale(), right_type.scale())
+                proved = _decimal_scale_safe(
+                    left_type, scale
+                ) and _decimal_scale_safe(right_type, scale)
         safe.append(proved)
     return safe^

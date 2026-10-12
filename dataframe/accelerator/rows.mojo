@@ -25,6 +25,7 @@ from dataframe.expr import (
     split_names,
     is_window,
     is_reduction,
+    is_comparison,
     DIV,
     FLOORDIV,
     MOD,
@@ -441,13 +442,16 @@ def _program(
         if left_type.is_decimal() and (
             op == GT or op == LT or op == GE or op == LE or op == EQ or op == NE
         ):
-            if left_type.scale() != right_type.scale() or (
-                left_type.physical() != right_type.physical()
-                and not (
-                    capabilities.decimal128
-                    and (
-                        left_type.decimal_width() == 128
-                        or right_type.decimal_width() == 128
+            if not capabilities.decimal_comparisons and (
+                left_type.scale() != right_type.scale()
+                or (
+                    left_type.physical() != right_type.physical()
+                    and not (
+                        capabilities.decimal128
+                        and (
+                            left_type.decimal_width() == 128
+                            or right_type.decimal_width() == 128
+                        )
                     )
                 )
             ):
@@ -858,7 +862,10 @@ def lower_rows(
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
             var proven = List[Bool](length=len(bound.expr._nodes), fill=False)
-            if capabilities.proven_integer_operations:
+            if (
+                capabilities.proven_integer_operations
+                or capabilities.decimal_comparisons
+            ):
                 proven = proven_integer_nodes(bound)
             for part_index in range(len(bound.expr._nodes)):
                 if bound.dtypes[part_index].is_integer():
@@ -901,6 +908,46 @@ def lower_rows(
                         )
             for part_index in range(len(bound.expr._nodes)):
                 ref part = bound.expr._nodes[part_index]
+                if (
+                    is_comparison(part.op)
+                    and part.left >= 0
+                    and bound.dtypes[part.left].is_decimal()
+                    and capabilities.decimal_comparisons
+                    and not proven[part_index]
+                ):
+                    var left = bound.dtypes[part.left]
+                    var right = bound.dtypes[part.right]
+                    # CPU's one-row Decimal128/Decimal64 comparison fast path
+                    # rescales the wide operand without checking overflow.
+                    # A resident filter can change the row count to one, so
+                    # admit this combination only with a static proof.
+                    if (
+                        left.decimal_width() == 128
+                        and right.decimal_width() == 64
+                        and left.scale() < right.scale()
+                    ) or (
+                        right.decimal_width() == 128
+                        and left.decimal_width() == 64
+                        and right.scale() < left.scale()
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "checked decimal comparisons with a rescaled Decimal128 and Decimal64 require a static proof",
+                        )
+                    var conditional = False
+                    for candidate in bound.expr._nodes:
+                        conditional |= candidate.op == WHEN
+                    if (
+                        not terminal_boundary
+                        or k != 0
+                        or node.kind == FILTER
+                        or limit >= 0
+                        or conditional
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "checked decimal comparisons require terminal projections without head or conditional branches",
+                        )
                 if (
                     part.op == CAST
                     and part.integer

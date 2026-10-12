@@ -1146,6 +1146,24 @@ def production_policy() -> SuitePolicy:
 
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_comparisons.mojo::test_native_metal_decimal_comparisons_width_scale_matrix_and_exact_words",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_comparisons.mojo::test_native_metal_decimal_comparisons_resident_consumers_and_conditionals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_decimal_comparisons.mojo::test_native_metal_decimal_comparison_overflow_observation_budget_and_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_decimal_rescaling.mojo::test_native_metal_decimal_rescaling_all_scales_widths_and_numeric_targets",
             "metal",
         )
@@ -1646,6 +1664,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_decimal_means.mojo",
                 "tests/execution_modes/test_backend_metal_decimal_casts.mojo",
                 "tests/execution_modes/test_backend_metal_decimal_rescaling.mojo",
+                "tests/execution_modes/test_backend_metal_decimal_comparisons.mojo",
                 "tests/execution_modes/test_backend_metal_string_concat.mojo",
                 "tests/execution_modes/test_backend_metal_cumulative_windows.mojo",
                 "tests/execution_modes/test_backends.mojo",

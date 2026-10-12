@@ -808,6 +808,38 @@ def check_decimal_cast_preflight_without_device():
 
 
 check_decimal_cast_preflight_without_device()
+def check_decimal_comparison_preflight_without_device():
+    inputs = (Input * 2)(Input(None, None, 2, 5, 1), Input(None, None, 12, 0, 0))
+    code = (I * 12)(0, -1, -1, 0, 0, -1, -1, 1, 218, 0, 1, 1 | 38 << 6 | 20 << 12)
+    literals = (I * 3)(0, 0, 0)
+    nodes, slots = (I * 3)(2, 12, 4), (I * 3)(2, 12, 4)
+    steps = (Step * 1)(Step(0, 3, 2, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 4, 2, -1, 0))
+    request = Request(2, 513, 0, 3, 2, 12, 3, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for op in (8, 9, 20, 21, 22, 23):
+        code[11] = 1 | 38 << 6 | op << 12
+        memory, err = Memory(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        assert memory.result == 2 * 65
+    for invalid in (-1, 10 | 20 << 12, 39 << 6 | 20 << 12,
+                    7 << 12, 24 << 12, 20 << 12 | 1 << 18):
+        code[11] = invalid
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal comparison descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+    code[11] = 20 << 12
+    for bad_type in (1, 4, 5, 6, 7, 8, 9, 10, 11):
+        nodes[0] = slots[0] = inputs[0].dtype = bad_type
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal comparison descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_decimal_comparison_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")

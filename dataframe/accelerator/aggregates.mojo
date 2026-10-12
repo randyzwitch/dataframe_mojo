@@ -1,5 +1,6 @@
 """Metadata-only decomposition of aggregate expressions for resident Metal."""
 from .metadata import schema_frame
+from .integer_ranges import proven_integer_nodes
 from std.collections import Dict
 from dataframe.binding import bind, ROWS
 from dataframe.dtype import DataType
@@ -17,6 +18,7 @@ from dataframe.expr import (
     MUL,
     col,
     is_reduction,
+    is_comparison,
     is_window,
     subtree,
     _node,
@@ -107,8 +109,18 @@ def _conditional_leaf(
     # A lifted scalar is evaluated before its row consumer. Keep data-dependent
     # precision failures out of conditionally unobserved scalar branches.
     var bound = bind(expression, schema._columns)
+    var proven = proven_integer_nodes(bound)
     for i in range(len(bound.expr._nodes)):
         ref node = bound.expr._nodes[i]
+        if (
+            is_comparison(node.op)
+            and node.left >= 0
+            and bound.dtypes[node.left].is_decimal()
+            and not proven[i]
+        ):
+            raise Error(
+                "Metal unsupported [plan]: conditional checked decimal comparisons require CPU execution"
+            )
         if (
             not exact_float32
             and bound.dtypes[i] == DataType.FLOAT32
