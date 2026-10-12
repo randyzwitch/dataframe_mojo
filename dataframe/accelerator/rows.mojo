@@ -906,6 +906,9 @@ def lower_rows(
                                 " execution"
                             ),
                         )
+            var conditional = False
+            for candidate in bound.expr._nodes:
+                conditional |= candidate.op == WHEN
             for part_index in range(len(bound.expr._nodes)):
                 ref part = bound.expr._nodes[part_index]
                 if (
@@ -934,9 +937,6 @@ def lower_rows(
                             "plan",
                             "checked decimal comparisons with a rescaled Decimal128 and Decimal64 require a static proof",
                         )
-                    var conditional = False
-                    for candidate in bound.expr._nodes:
-                        conditional |= candidate.op == WHEN
                     if (
                         not terminal_boundary
                         or k != 0
