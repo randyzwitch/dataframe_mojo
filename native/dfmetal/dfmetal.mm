@@ -164,7 +164,11 @@ struct Layout {
       if (r.steps[first].filter >= 2) {
         ends.push_back(first);
         auto &step = r.steps[first];
-        if (step.filter == 2) {
+        if (step.filter == 4) {
+          keep(step.slot);
+          for (int64_t j = 0; j < step.nodes; ++j)
+            keep(r.code[4 * (step.start + j) + 1]);
+        } else if (step.filter == 2) {
           for (int64_t j = 0; j < step.nodes; ++j)
             keep(r.code[4 * (step.start + j) + 1]);
         } else {
@@ -225,7 +229,8 @@ struct Layout {
         }
         for (int64_t j = 1; j < step.nodes; ++j)
           live[r.code[4 * (step.start + j) + 1]] = true;
-      } else if (step.filter == 2) {
+      } else if (step.filter == 2 || step.filter == 4) {
+        if (step.filter == 4) live[step.slot] = false;
         for (int64_t j = 0; j < step.nodes; ++j)
           live[r.code[4 * (step.start + j) + 1]] = true;
       } else {
@@ -241,6 +246,7 @@ struct Layout {
     }
   }
 };
+#include "dfmetal_rank.inc"
 struct Shape {
   int64_t cap, packed, blocks, bitmap, matrix, validity, literal, outputBits,
       partial;
@@ -355,8 +361,25 @@ Shape validate(const DFMRequest &r, bool storage = false,
         (v.filter != 2 && v.slot < r.input_count) || v.slot < 0 ||
         v.slot >= r.slots || v.gather_start < 0 || v.gather_count < 0 ||
         add(v.gather_start, v.gather_count) > r.gather_count ||
-        (v.filter < 0 || v.filter > 3))
+        (v.filter < 0 || v.filter > 4))
       fail("Invalid Metal expression step");
+    if (v.filter == 4) {
+      auto h = r.code + 4 * v.start;
+      if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_RANK_KEY ||
+          h[2] < 0 || h[2] > 1 || h[3] < 0 || h[3] > 4 ||
+          slotType(r, v.slot) != (h[3] == 0 ? DFM_FLOAT64_STORAGE : DFM_INT64))
+        fail("Invalid Metal rank descriptor");
+      for (int64_t j = 0; j < v.nodes; ++j) {
+        auto key = r.code + 4 * (v.start + j);
+        if (key[1] < 0 || key[1] >= r.slots || !defined[key[1]] ||
+            r.node_types[v.start + j] != slotType(r, key[1]) ||
+            (j && (key[0] != DFM_SORT_KEY || key[2] != 0 || key[3] != 1)))
+          fail("Invalid Metal rank input or partition key");
+      }
+      defined[v.slot] = true;
+      s.order = true;
+      continue;
+    }
     if (v.filter == 3) {
       if (!typed(r) || v.gather_count || v.nodes < 1)
         fail("Invalid Metal group storage");
@@ -708,6 +731,8 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
           ++m.launches;
       if (r.steps[i].filter == 3)
         m.launches += 5;
+      if (r.steps[i].filter == 4)
+        m.launches += r.code[4 * r.steps[i].start + 3] == 3 ? 3 : 1;
       for (int64_t j = 0; j < r.steps[i].gather_count; ++j)
         m.launches += layout.gathered[i][r.gathers[r.steps[i].gather_start + j]];
     }
@@ -1340,17 +1365,19 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
       auto keyCount =
           step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes;
       for (int64_t j = 0; j < keyCount; ++j) {
-        auto key = r.code + 4 * (step.start + j + (step.filter == 3));
+        auto key = r.code + 4 * (step.start + (step.filter == 4
+            ? (j + 1 < keyCount ? j + 1 : 0) : j + (step.filter == 3)));
         auto slot = std::to_string(layout.physical[key[1]]) + "UL*meta.z";
         text += "{ulong ai=" + slot + "+a,bi=" + slot +
                 "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return " +
-                std::string(key[3] ? "av" : "!av") + ";if(av){";
+                std::string(step.filter == 4 || key[3] ? "av" : "!av") + ";if(av){";
+        auto nanFirst = step.filter == 4 && key[0] == DFM_RANK_KEY && key[2] ? "an" : "!an";
         if (slotType(r, key[1]) == DFM_FLOAT32)
           text += "bool "
                   "an=(uint(x[ai])&0x7fffffffU)>0x7f800000U,bn=(uint(x[bi])&"
-                  "0x7fffffffU)>0x7f800000U;if(an!=bn)return !an;";
+                  "0x7fffffffU)>0x7f800000U;if(an!=bn)return " + std::string(nanFirst) + ";";
         if (slotType(r, key[1]) == DFM_FLOAT64_STORAGE)
-          text += "bool an=f64_nan(ulong(x[ai])),bn=f64_nan(ulong(x[bi]));if(an!=bn)return !an;";
+          text += "bool an=f64_nan(ulong(x[ai])),bn=f64_nan(ulong(x[bi]));if(an!=bn)return " + std::string(nanFirst) + ";";
         auto type = std::to_string(slotType(r, key[1])),
              maximum = std::string(key[2] ? "true" : "false");
         text += "if(extrema_better(ulong(x[ai]),ulong(x[bi])," + type + "," +
@@ -1375,6 +1402,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           "(index[mid],own,x,v,meta))lo=mid+1;else "
           "hi=mid;}target[base+(row-(left?base:middle))+(lo-first)]=own;}\n";
     }
+  for (int64_t i = 0; i < r.step_count; ++i)
+    if (r.steps[i].filter == 4) text += rankSource(r, layout, i);
   if (shape.radixSort)
     for (int64_t i = 0; i < r.step_count; ++i) {
       if (!radixPasses(r, i)) continue;
@@ -2156,6 +2185,21 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         bytes(5, &span, 4);
         dispatch("order_merge" + std::to_string(i), shape.cap);
         std::swap(orderA, orderB);
+      }
+      if (step.filter == 4) {
+        auto name = std::to_string(i);
+        auto h = r.code + 4 * step.start;
+        if (h[3] == 3) {
+          buffer(0, x); buffer(1, v); buffer(2, orderA); buffer(3, y);
+          buffer(4, orderB); buffer(5, meta);
+          dispatch("rank_prepare" + name, shape.cap, 1, true);
+          buffer(0, orderB); buffer(1, meta);
+          dispatch("rank_offsets" + name, 1);
+        }
+        buffer(0, x); buffer(1, v); buffer(2, orderA); buffer(3, y);
+        buffer(4, orderB); buffer(5, meta);
+        dispatch("rank_assign" + name, shape.cap);
+        continue;
       }
       if (step.filter == 3) {
         auto name = std::to_string(i);

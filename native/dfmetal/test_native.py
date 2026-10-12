@@ -495,6 +495,30 @@ def check_float32_floor_division_preflight_without_device():
 
 check_float32_floor_division_preflight_without_device()
 
+def check_rank_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 1, 0, 0))
+    code = (I * 4)(207, 0, 1, 0)
+    literals = (I * 1)()
+    steps = (Step * 1)(Step(0, 1, 1, 4, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+    nt, st = (I * 1)(1), (I * 2)(1, 11)
+    request = Request(2, 0, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nt), ptr(st))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for at, invalid in ((0, 0), (1, 1), (2, 2), (3, 5)):
+        original = code[at]
+        code[at] = invalid
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Metal rank" in C.string_at(err)
+        lib.dfm_free(err)
+        code[at] = original
+
+
+check_rank_preflight_without_device()
+
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
