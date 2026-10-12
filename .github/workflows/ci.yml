@@ -23,4 +23,9 @@ jobs:
       - name: Verify native Parquet exported ABI
         run: pixi run --locked check-parquet-abi
       - name: Validate native Arrow C stream independently with diagnostics
+        continue-on-error: true
         run: pixi run --locked -e oracle python3 tests/support/native_stream_oracle.py build/dfparquet/libdfparquet.dylib
+      - name: Diagnose native library loading before PyArrow
+        run: >-
+          pixi run --locked -e oracle python3 -c
+          'import ctypes, runpy, sys; native = ctypes.CDLL("build/dfparquet/libdfparquet.dylib"); sys.argv = ["tests/support/native_stream_oracle.py", "build/dfparquet/libdfparquet.dylib"]; runpy.run_path(sys.argv[0], run_name="__main__")'
