@@ -1275,6 +1275,31 @@ def production_policy() -> SuitePolicy:
 
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rolling.mojo::test_native_metal_rolling_numeric_widths_windows_thresholds_and_literal_anchors",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rolling.mojo::test_native_metal_rolling_float_order_decimal_means_and_exact_logical_extrema",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rolling.mojo::test_native_metal_rolling_wide_sum_failures_observation_and_unsigned_inputs",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_rolling.mojo::test_native_metal_rolling_nested_scopes_consumers_cost_budget_and_reuse",
+            "metal",
+        )
+    )
+
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_shift_fill.mojo::test_native_metal_shift_fill_numeric_widths_offsets_limits_and_slices",
             "metal",
         )
@@ -1729,6 +1754,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_decimal_arithmetic.mojo",
                 "tests/execution_modes/test_backend_metal_decimal_multiplicative.mojo",
                 "tests/execution_modes/test_backend_metal_string_concat.mojo",
+                "tests/execution_modes/test_backend_metal_rolling.mojo",
                 "tests/execution_modes/test_backend_metal_shift_fill.mojo",
                 "tests/execution_modes/test_backend_metal_cumulative_windows.mojo",
                 "tests/execution_modes/test_backends.mojo",

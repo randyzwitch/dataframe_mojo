@@ -144,6 +144,8 @@ enum DFMOp {
   // (sum/min/max/count/shift/forward-fill/backward-fill).
   // SORT_KEY descriptors name partitions. The header literal is decimal
   // precision for sums, signed shift offset or fill limit for methods 4..6.
+  // Methods 7/8/9/10: rolling sum/mean/min/max. Header operand 2 is
+  // min_samples; the literal stores the signed Int64 window size bits.
   DFM_CUMULATIVE_KEY = 214,
   // Decimal128 SUM/MEAN preserve CPU worker partitions and check every
   // precision-bounded partial and merge. Packed metadata carries min_count,
