@@ -2,6 +2,10 @@ name: Focused macOS oracle validation
 
 on:
   workflow_dispatch:
+    inputs:
+      run_clean:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,6 +26,20 @@ jobs:
       - uses: ./.github/actions/setup-parquet
       - name: Verify native Parquet exported ABI
         run: pixi run --locked check-parquet-abi
+      - name: Produce independent fixture in a separate process
+        run: >-
+          pixi run --locked -e oracle python3 -c
+          'import pyarrow as pa, pyarrow.parquet as pq; table = pa.table({"id": range(3000), "text": [f"row-{i}" for i in range(3000)]}); pq.write_table(table, "build/pure-consumer.parquet", row_group_size=1000, compression="NONE", use_dictionary=False); assert pq.read_table("build/pure-consumer.parquet").equals(table)'
+      - name: Compile C ABI consumer without Arrow linkage
+        run: c++ -std=c++17 tests/diagnostics/native_stream_plain.cc -o build/native-stream-plain
+      - name: Validate pure C ABI consumer with default memory pool
+        continue-on-error: true
+        run: build/native-stream-plain build/dfparquet/libdfparquet.dylib build/pure-consumer.parquet
+      - name: Validate pure C ABI consumer with system memory pool
+        continue-on-error: true
+        env:
+          ARROW_DEFAULT_MEMORY_POOL: system
+        run: build/native-stream-plain build/dfparquet/libdfparquet.dylib build/pure-consumer.parquet
       - name: Diagnose cached native library with system memory pool
         continue-on-error: true
         env:
@@ -29,6 +47,7 @@ jobs:
         run: pixi run --locked -e oracle python3 tests/support/native_stream_oracle.py build/dfparquet/libdfparquet.dylib
 
   oracle-macos-clean:
+    if: inputs.run_clean
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
