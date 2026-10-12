@@ -182,6 +182,7 @@ def _program(
         )
     var program_start = len(literals)
     var memberships = List[Int]()
+    var wide_literals = List[Int]()
     for i in range(count):
         ref node = bound.expr._nodes[i]
         var op = node.op
@@ -340,6 +341,29 @@ def _program(
             capabilities.reject(
                 "precision", "Float64 requires CPU execution for this operation"
             )
+        if (left_type.is_decimal() and left_type.decimal_width() == 128) or (
+            right_type.is_decimal() and right_type.decimal_width() == 128
+        ):
+            if (
+                op != COL
+                and op != LIT_NULL
+                and op != IS_NULL
+                and op != IS_NOT_NULL
+                and op != WHEN
+                and op != FILL_NULL
+                and op != KEEP_NULLS
+                and op != LIT_INT
+                and op != GT
+                and op != LT
+                and op != GE
+                and op != LE
+                and op != EQ
+                and op != NE
+            ):
+                capabilities.reject(
+                    "logical",
+                    "Decimal128 row arithmetic requires CPU execution",
+                )
         var logical = (
             bound.dtypes[i].is_temporal()
             or bound.dtypes[i].is_decimal()
@@ -369,13 +393,22 @@ def _program(
         if left_type.is_decimal() and (
             op == GT or op == LT or op == GE or op == LE or op == EQ or op == NE
         ):
-            if (
-                left_type.scale() != right_type.scale()
-                or left_type.physical() != right_type.physical()
+            if left_type.scale() != right_type.scale() or (
+                left_type.physical() != right_type.physical()
+                and not (
+                    capabilities.decimal128
+                    and (
+                        left_type.decimal_width() == 128
+                        or right_type.decimal_width() == 128
+                    )
+                )
             ):
                 capabilities.reject(
                     "logical",
-                    "decimal comparisons require matching scales and storage widths",
+                    (
+                        "decimal comparisons require matching scales and"
+                        " storage widths"
+                    ),
                 )
         if (
             op == ADD
@@ -422,7 +455,10 @@ def _program(
         ):
             capabilities.reject(
                 "precision",
-                "Float32 decimal rounding requires Float64 intermediate arithmetic",
+                (
+                    "Float32 decimal rounding requires Float64 intermediate"
+                    " arithmetic"
+                ),
             )
         if (
             (op == FLOORDIV or op == MOD or op == POW)
@@ -462,7 +498,10 @@ def _program(
             ):
                 capabilities.reject(
                     "temporal",
-                    "truncate requires a positive fixed interval aligned to the storage unit",
+                    (
+                        "truncate requires a positive fixed interval aligned to"
+                        " the storage unit"
+                    ),
                 )
             right = interval[1] // per_tick
         node_dtypes.append(bound.dtypes[i])
@@ -484,8 +523,25 @@ def _program(
                 )
             )
         )
+        if (
+            op == LIT_INT
+            and bound.dtypes[i].is_decimal()
+            and bound.dtypes[i].decimal_width() == 128
+        ):
+            wide_literals.append(i)
         if op == INT_IS_IN:
             memberships.append(i)
+    # Upper words are runtime payloads, like membership lists. Values do not
+    # enter shader source or require a different pipeline cache entry.
+    for i in wide_literals:
+        ref node = bound.expr._nodes[i]
+        var high = Int64(atol(node.text2)) if node.text2 else (
+            Int64(-1) if node.integer < 0 else Int64(0)
+        )
+        code[4 * (program_start + i) + 3] = Int64(len(literals))
+        code.extend([Int64(LIT_INT), Int64(-1), Int64(-1), Int64(-1)])
+        literals.append(bitcast[DType.float64](high))
+        node_dtypes.append(DataType.INT64)
     # Membership values are runtime literal payloads, outside the executable
     # expression's local node range. Changing values reuses the same shader.
     # Preserve exact signed/unsigned 64-bit words without Float64 conversion.
@@ -536,7 +592,10 @@ def lower_rows(
         ):
             capabilities.reject(
                 "plan",
-                "resident region requires an in-memory scan and row-local steps",
+                (
+                    "resident region requires an in-memory scan and row-local"
+                    " steps"
+                ),
             )
         chain.append(cursor)
         cursor = query._nodes[cursor].left
@@ -752,12 +811,18 @@ def lower_rows(
                         ):
                             capabilities.reject(
                                 "plan",
-                                "checked integer arithmetic requires terminal projections without head",
+                                (
+                                    "checked integer arithmetic requires"
+                                    " terminal projections without head"
+                                ),
                             )
                     if part.op == SUM and limit >= 0 and node.kind != AGG:
                         capabilities.reject(
                             "plan",
-                            "integer sum with final head requires CPU execution",
+                            (
+                                "integer sum with final head requires CPU"
+                                " execution"
+                            ),
                         )
             for part_index in range(len(bound.expr._nodes)):
                 ref part = bound.expr._nodes[part_index]
@@ -777,7 +842,10 @@ def lower_rows(
                 ):
                     capabilities.reject(
                         "plan",
-                        "strict casts require terminal projections without head",
+                        (
+                            "strict casts require terminal projections without"
+                            " head"
+                        ),
                     )
             var rank_schema = schema.copy()
             var rank_slots = slots.copy()
@@ -793,7 +861,10 @@ def lower_rows(
                 if node.kind == AGG:
                     capabilities.reject(
                         "plan",
-                        "rank inside grouped aggregation requires CPU execution",
+                        (
+                            "rank inside grouped aggregation requires CPU"
+                            " execution"
+                        ),
                     )
                 var rank_node = ranked._nodes[r].copy()
                 var replacement = r
@@ -958,7 +1029,10 @@ def lower_rows(
                         ):
                             capabilities.reject(
                                 "plan",
-                                "rank scopes containing other windows or reductions require CPU execution",
+                                (
+                                    "rank scopes containing other windows or"
+                                    " reductions require CPU execution"
+                                ),
                             )
                     ranked._nodes[scope] = ranked._nodes[child].copy()
                 bound = bind(
@@ -1002,6 +1076,7 @@ def lower_rows(
                     or result_dtype == DataType.UINT32
                     or (
                         capabilities.bounded_integer_sum
+                        and not bound.dtypes[last.left].is_decimal()
                         and (
                             bound.dtypes[last.left].physical() == DataType.INT64
                             or bound.dtypes[last.left] == DataType.UINT64
@@ -1020,7 +1095,10 @@ def lower_rows(
                 ):
                     capabilities.reject(
                         "plan",
-                        "checked grouped sums require terminal aggregation without head",
+                        (
+                            "checked grouped sums require terminal aggregation"
+                            " without head"
+                        ),
                     )
                 min_count = (
                     Int(last.integer) if reduction == ANY
@@ -1039,7 +1117,10 @@ def lower_rows(
                 ):
                     capabilities.reject(
                         "plan",
-                        "resident numeric reduction requires the common numeric input dtype",
+                        (
+                            "resident numeric reduction requires the common"
+                            " numeric input dtype"
+                        ),
                     )
                 has_aggregate = True
             elif bound.aggregated[len(bound.aggregated) - 1]:

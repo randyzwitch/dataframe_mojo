@@ -49,6 +49,7 @@ struct RowCapabilities(Copyable):
     var slices: Bool
     var scalar_regions: Bool
     var temporal_fields: Bool
+    var decimal128: Bool
     var ranks: Bool
 
     def __init__(
@@ -78,6 +79,7 @@ struct RowCapabilities(Copyable):
         scalar_regions: Bool = False,
         temporal_fields: Bool = False,
         ranks: Bool = False,
+        decimal128: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -103,6 +105,7 @@ struct RowCapabilities(Copyable):
         self.scalar_regions = scalar_regions
         self.temporal_fields = temporal_fields
         self.ranks = ranks
+        self.decimal128 = decimal128
 
     def reject(self, category: String, reason: String) raises:
         raise Error(self.backend + " unsupported [" + category + "]: " + reason)
@@ -118,7 +121,7 @@ struct RowCapabilities(Copyable):
             if dtype.is_temporal():
                 return
             if dtype.is_decimal():
-                if dtype.decimal_width() <= 64:
+                if dtype.decimal_width() <= 64 or self.decimal128:
                     return
                 self.reject("dtype", "Decimal128 requires CPU execution")
         if self.extended_integers and dtype.is_integer():
@@ -158,6 +161,21 @@ struct RowCapabilities(Copyable):
             )
 
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
+        if (
+            dtype.is_decimal()
+            and dtype.decimal_width() == 128
+            and op != COUNT
+            and op != LEN
+            and op != NULL_COUNT
+            and op != MIN
+            and op != MAX
+            and op != FIRST
+            and op != LAST
+        ):
+            self.reject(
+                "accumulator",
+                "Decimal128 input reductions require CPU execution",
+            )
         if (
             dtype == DataType.FLOAT64
             and not self.float64
@@ -207,7 +225,11 @@ struct RowCapabilities(Copyable):
                 "accumulator", "integer mean requires exact wide accumulation"
             )
         if op == SUM:
-            if dtype.is_decimal() and not self.wide_integer:
+            if (
+                dtype.is_decimal()
+                and not self.wide_integer
+                and not self.decimal128
+            ):
                 self.reject(
                     "accumulator",
                     "decimal sum requires exact Decimal128 accumulation",

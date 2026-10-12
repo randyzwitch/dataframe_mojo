@@ -45,7 +45,7 @@ runtime data; changing those does not require recompiling an identical shader.
 ## Precision and supported operations
 
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
-width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64 columns.
+width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64/128 columns.
 Float64 columns use IEEE words throughout resident execution. Add, subtract,
 multiply, divide, floor division, remainder, square root, comparisons, numeric/Boolean casts,
 absolute value, negation,
@@ -107,7 +107,7 @@ within one or more `over()` partition keys. Ranks retain original row order;
 ordinal ties follow input order. Null values remain null, null partition keys
 form a group, signed zeros tie, and NaNs form one tie class (last ascending,
 first descending), matching the CPU rank contract. Numeric, Boolean, String,
-categorical, temporal, and Decimal32/64 inputs use the same stable sort
+categorical, temporal, and Decimal32/64/128 inputs use the same stable sort
 workspace. Dense ranks scan tie boundaries without downloading row data.
 Filters, projections, grouped results, joins, slices, and final head can surround
 rank operations. Checked rank inputs and rank inside grouped aggregation remain
@@ -153,14 +153,21 @@ aggregations. String and categorical columns use query-wide dictionary codes
 for native matching and gathering, as described below. Nested values still
 require CPU execution.
 
-Temporal and Decimal32/64 columns retain their complete logical metadata
-through projection, stable filtering, null tests, fill-null, counts, and
-extrema. Comparisons use the native physical integer representation; decimal
-comparisons currently require matching scales and storage widths. Logical
-arithmetic and casts are checked separately and currently require CPU
-execution. Decimal sums retain the CPU contract of Decimal128 accumulation
-and require CPU execution; Decimal128 storage is not yet supported by this
-row backend.
+Temporal and decimal columns retain their complete logical metadata through
+projection, stable filtering, null tests, fill-null, counts, and extrema.
+Decimal128 values use two 64-bit words throughout resident storage, sorting,
+ranking, grouping, and joins; final export reconstructs the complete 16-byte
+payload. Decimal comparisons require matching scales. They also require matching
+storage widths unless one operand is Decimal128, in which case Decimal32/64
+operands are sign-extended exactly. Logical arithmetic and row-valued casts
+remain unsupported.
+
+Decimal32/64 sums accumulate exactly in two words and return Decimal128 with
+precision 38 and the original scale, including through joins and scalar
+broadcasts. The Int32.MAX row bound keeps every possible partial below 2**94,
+so no value-dependent range proof or CPU row evaluation is needed. Empty,
+all-null, and `min_count` results match the CPU. Reductions of Decimal128 inputs
+support counts, minimum, maximum, first, and last. Sums of Decimal128 inputs and decimal means still require CPU execution.
 
 Native Int64 kernels extract year, month, day, hour, minute, second,
 nanosecond, ISO weekday and ordinal day from dates, naive datetimes and times
@@ -170,11 +177,11 @@ nulls retain CPU semantics. Fixed-interval truncation supports storage-aligned
 positive intervals, including Monday-aligned whole weeks. Month/year truncation,
 zone-aware temporal operations, offsets and logical arithmetic/casts remain
 unsupported. Source-independent literal `strptime` expressions and casts to
-numeric, Decimal32/64, or temporal types are folded before dictionary encoding.
+numeric, Decimal32/64/128, or temporal types are folded before dictionary encoding.
 The CPU scalar cast runs once per literal, with exact integer payloads and
 logical metadata retained; input rows stay on the GPU. Invalid strict literals
-and Decimal128 literals remain unsupported. Row-valued parsing and binary String
-concatenation reject before encoding, rather than binding text operations to
+remain unsupported. Decimal128 literals retain both words as runtime payloads.
+Row-valued parsing and binary String concatenation reject before encoding, rather than binding text operations to
 integer dictionary codes.
 
 Grouped aggregation supports multiple keys with sum, mean, minimum, maximum, count,
@@ -268,8 +275,8 @@ As in the CPU mergeable floating state, reduction reassociation is allowed and
 bitwise reproducibility across execution schedules is not promised. Integer
 means retain an exact integer total before Float64 conversion and division.
 Their Int64/UInt64 inputs require the same native range proof as wide sums.
-Decimal sums and decimal means still require CPU execution; wide integer
-accumulation is not emulated. Forced accelerator execution rejects statically
+Sums of Decimal128 inputs and decimal means still require CPU execution.
+Int64/UInt64 sums retain native accumulation with a range proof. Forced accelerator execution rejects statically
 unsupported operations before submission; Int64/UInt64 sum and integer mean
 range proofs can reject during GPU execution.
 Int64/UInt64-to-Float32 casts emulate the CPU contract of rounding through
@@ -301,8 +308,8 @@ filters, sorting, grouping, distinct rows, or joins and before reductions.
 Row requests use ABI version 2. Joins add a separate version 1 two-phase
 interface without changing row request layouts; rebuild the optional library
 when upgrading. Homogeneous plans retain their original native-width matrices.
-Mixed plans and extrema reductions store each value as an exact 64-bit word,
-with generated native operations for each expression dtype. Numeric inputs are staged at their original
+Mixed plans and extrema reductions store each value as an exact 64-bit word
+or two words for Decimal128, with generated operations for each expression dtype. Numeric inputs are staged at their original
 width and packed on the GPU. Output words are copied into the matching CPU
 column width after synchronization; CPU code does not evaluate expressions.
 
@@ -418,6 +425,7 @@ pixi run mojo run -I . tests/test_metal_concat.mojo
 pixi run mojo run -I . tests/test_metal_float64_storage.mojo
 pixi run mojo run -I . tests/test_metal_float64_emulation.mojo
 pixi run mojo run -I . tests/test_metal_bounded_sums.mojo
+pixi run mojo run -I . tests/test_metal_decimal128.mojo
 pixi run mojo run -I . tests/test_metal_constants.mojo
 pixi run mojo run -I . tests/test_metal_aggregate_compositions.mojo
 pixi run mojo run -I . tests/test_metal_distinct_counts.mojo

@@ -519,6 +519,50 @@ def check_rank_preflight_without_device():
 
 check_rank_preflight_without_device()
 
+def check_decimal128_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 3, 0, 0))
+    outputs = (Output * 2)(Output(None, None, 12, 0, 208, 0),
+                           Output(None, None, 3, 0, 11, 0))
+    slots = (I * 1)(3)
+    request = Request(2, (1 << 31) - 1, 0, 1, 1, 0, 0, 0, 0, 2,
+                      -1, 1, 0, -1, ptr(inputs), None, None, None,
+                      None, ptr(outputs), None, ptr(slots))
+    # Typed requests require a node-types pointer even when there is no code.
+    nodes = (I * 1)(3)
+    request.node_types = ptr(nodes)
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 26 and memory.upload == 8 * request.rows
+    inputs[0].dtype = slots[0] = 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"unsupported accumulator" in C.string_at(err)
+    lib.dfm_free(err)
+
+    # Wide literals require a valid typed high-word payload. Estimates do not
+    # read caller row pointers, including when the physical payload is 16 bytes.
+    inputs[0].dtype = slots[0] = 12
+    code = (I * 8)(1, -1, -1, 1, 1, -1, -1, -1)
+    literals = (I * 2)(0, -2)
+    nodes = (I * 2)(12, 3)
+    slots = (I * 2)(12, 12)
+    steps = (Step * 1)(Step(0, 1, 1, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 12, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 513 * 16 + 65
+    for payload in [-1, 0, 2]:
+        code[3] = payload
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"literal high-word" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_decimal128_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
