@@ -327,6 +327,12 @@ inline ulong f64_integral(ulong value, int op) {
   if (rest && ((op == 55 && sign) || (op == 56 && !sign))) whole += unit;
   return whole;
 }
+inline uint f32_floor_div(uint a, uint b) {
+  // The CPU floors the quotient after binary32 rounding, which can differ
+  // from flooring a binary64 quotient near an integer boundary.
+  uint quotient = f64_to_float32(f64_div(f64_from_float32(a), f64_from_float32(b)));
+  return f64_to_float32(f64_integral(f64_from_float32(quotient), 55));
+}
 inline ulong f64_mod(ulong a, ulong b) {
   // Match the CPU SIMD operation sequence, including a rounded quotient,
   // its truncation, fused multiply/subtract, and final addition of zero.

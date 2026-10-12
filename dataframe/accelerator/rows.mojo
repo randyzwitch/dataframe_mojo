@@ -170,6 +170,11 @@ def _program(
         if not (
             op == COL
             or (
+                op == FLOORDIV
+                and capabilities.float_division
+                and bound.dtypes[i] == DataType.FLOAT32
+            )
+            or (
                 op == SQRT
                 and capabilities.float_sqrt
                 and bound.dtypes[i].is_float()
@@ -396,12 +401,10 @@ def _program(
             (op == FLOORDIV or op == MOD or op == POW)
             and bound.dtypes[i].is_float()
             and not (
-                (
-                    op == FLOORDIV
-                    and capabilities.float_division
-                    or op == MOD
-                    and capabilities.float_modulo
-                )
+                op == FLOORDIV
+                and capabilities.float_division
+                or op == MOD
+                and capabilities.float_modulo
                 and bound.dtypes[i] == DataType.FLOAT64
             )
         ):

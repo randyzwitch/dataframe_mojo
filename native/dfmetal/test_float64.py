@@ -67,6 +67,17 @@ int main() { @autoreleasepool {
     left.push_back(a);
     right.push_back((a ^ (1UL << 63)) + (i % 9) - 4);
   }
+  std::vector<ulong> narrowBoundary = {
+    0, 1, 2, 3, 0x007ffffeUL, 0x007fffffUL, 0x00800000UL, 0x00800001UL,
+    0x3dcccccdUL, 0x3e99999aUL, 0x3f000000UL, 0x3f7fffffUL, 0x3f800000UL, 0x3f800001UL,
+    0x40000000UL, 0x40400000UL, 0x7f7fffffUL, 0x7f800000UL,
+    0x7f800042UL, 0x7fc00042UL
+  };
+  auto narrowCount=narrowBoundary.size();
+  for (size_t i=0;i<narrowCount;++i) narrowBoundary.push_back(narrowBoundary[i]|0x80000000UL);
+  for (auto a:narrowBoundary) for (auto b:narrowBoundary) {
+    left.push_back(a); right.push_back(b);
+  }
   // Every normal exponent and both sides of exact squares stress root
   // normalization and rounding beyond uniform random binary64 encodings.
   for (ulong exponent = 1; exponent < 2047; ++exponent) {
@@ -112,7 +123,8 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
           op==26 ? f64_fma(a[i],b[i],f64_mul(a[i],b[i])^0x8000000000000000UL) :
           op==27 ? f64_fma(a[i],b[i],(a[i]>>31)|(a[i]<<33)) :
           op==28 ? f64_sqrt(a[i]) :
-          op==29 ? ulong(f64_to_float32(f64_sqrt(f64_from_float32(uint(a[i]))))) : test_integer(a[i],op);
+          op==29 ? ulong(f64_to_float32(f64_sqrt(f64_from_float32(uint(a[i]))))) :
+          op==30 ? ulong(f32_floor_div(uint(a[i]),uint(b[i]))) : test_integer(a[i],op);
 }
 )shader";
   NSError *error = nil;
@@ -129,7 +141,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
   id<MTLBuffer> b = [device newBufferWithBytes:right.data() length:bytes options:MTLResourceStorageModeShared];
   id<MTLBuffer> out = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
   size_t checked = 0;
-  for (uint op = 0; op < 30; ++op) {
+  for (uint op = 0; op < 31; ++op) {
     id<MTLCommandBuffer> command = [queue commandBuffer];
     id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
     [encoder setComputePipelineState:pipeline];
@@ -176,6 +188,7 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
         expected=op==24?ulong(std::bit_cast<uint>(float(rounded))):std::bit_cast<ulong>(rounded);
       }
       if (op==26) { volatile double product=x*y; expected=std::bit_cast<ulong>(std::fma(x,y,-product)); }
+      if (op==30) { volatile float x32=std::bit_cast<float>(uint(left[i])), y32=std::bit_cast<float>(uint(right[i])); volatile float quotient=x32/y32; expected=std::bit_cast<uint>(std::floor(quotient)); }
       if (op==29) expected=std::bit_cast<uint>(std::sqrt(std::bit_cast<float>(uint(left[i]))));
       if (op==28) expected=std::bit_cast<ulong>(std::sqrt(x));
       if (op==27) expected=std::bit_cast<ulong>(std::fma(x,y,std::bit_cast<double>((left[i]>>31)|(left[i]<<33))));
@@ -199,8 +212,9 @@ kernel void arithmetic(device const ulong *a[[buffer(0)]],
                    op==26 ? f64_fma(left[i],right[i],f64_mul(left[i],right[i])^0x8000000000000000UL) :
                    op==27 ? f64_fma(left[i],right[i],(left[i]>>31)|(left[i]<<33)) :
                    op==28 ? f64_sqrt(left[i]) :
-                   op==29 ? ulong(f64_to_float32(f64_sqrt(f64_from_float32(uint(left[i]))))) : test_integer(left[i],op);
-      bool narrow=op==9||op==24||op==29;
+                   op==29 ? ulong(f64_to_float32(f64_sqrt(f64_from_float32(uint(left[i]))))) :
+                   op==30 ? ulong(f32_floor_div(uint(left[i]),uint(right[i]))) : test_integer(left[i],op);
+      bool narrow=op==9||op==24||op==29||op==30;
       bool nan = op>=13 && op<21 ? false : narrow ? (expected&0x7fffffffUL)>0x7f800000UL : f64_nan(expected);
       bool actualNan = narrow ? (host&0x7fffffffUL)>0x7f800000UL && (gpu[i]&0x7fffffffUL)>0x7f800000UL : f64_nan(host) && f64_nan(gpu[i]);
       if ((nan ? !actualNan : host != expected || gpu[i] != expected)) {
