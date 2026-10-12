@@ -70,5 +70,3 @@ def test_native_metal_float32_modulo_bits_nulls_children_and_cost() raises:
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),
     )
-
-

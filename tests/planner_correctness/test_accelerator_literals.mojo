@@ -49,6 +49,7 @@ def test_literal_numeric_and_decimal_casts_without_device() raises:
             folded.collect(engine="cpu").equals(query.collect(engine="cpu"))
         )
 
+
 def test_literal_cast_rejections_preserve_unobserved_errors() raises:
     var frame = DataFrame([Series("x", Column[Int32]([1, 2]))])
     var invalid = frame.lazy().select(

@@ -168,5 +168,3 @@ def test_native_metal_proven_integer_full_int8_domain_compositions_and_resident_
     )
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
-
-

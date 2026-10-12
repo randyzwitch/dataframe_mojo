@@ -284,5 +284,3 @@ def test_native_metal_scalar_broadcast_resident_traffic_budgets_and_recovery() r
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),
     )
-
-

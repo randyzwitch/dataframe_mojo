@@ -84,5 +84,3 @@ def test_native_metal_float32_floor_division_bits_nulls_children_and_cost() rais
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),
     )
-
-

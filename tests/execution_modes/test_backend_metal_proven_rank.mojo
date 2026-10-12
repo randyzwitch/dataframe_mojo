@@ -4,7 +4,10 @@ from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr
 from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.rows import lower_rows
-from tests.execution_modes.test_backend_metal_proven_arithmetic import frame, check
+from tests.execution_modes.test_backend_metal_proven_arithmetic import (
+    frame,
+    check,
+)
 
 
 def test_proven_rank_preflight_preserves_opt_in_and_unsafe_children() raises:
@@ -97,5 +100,3 @@ def test_native_metal_proven_rank_gpu_resident_consumers_head_and_rejections() r
         )
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
-
-

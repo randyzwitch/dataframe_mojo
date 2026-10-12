@@ -415,4 +415,3 @@ def test_native_metal_decimal128_cost_memory_budget_and_literal_pipeline_cache()
     var folded = fold_literal_text_parsing(second)
     assert_equal(runtime.estimate_auto(folded).accelerator[13], Float64(0))
     check(second)
-

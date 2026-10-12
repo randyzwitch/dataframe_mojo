@@ -277,5 +277,3 @@ def test_rank_capability_and_checked_input_preflight() raises:
     var unknown = frame.lazy().select(col("x").rank("invalid"))
     with assert_raises(contains="rank method must be"):
         _ = lower_rows(unknown, _capabilities())
-
-

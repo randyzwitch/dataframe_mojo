@@ -8,7 +8,10 @@ from dataframe.metal import MetalRuntime, _capabilities
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal_float64_emulation import same
-from tests.execution_modes.test_backend_metal_wide_plans import wide_frame, numeric_frame
+from tests.execution_modes.test_backend_metal_wide_plans import (
+    wide_frame,
+    numeric_frame,
+)
 
 
 def aliases(count: Int) -> List[Expr]:
@@ -156,5 +159,3 @@ def test_native_metal_column_slot_gpu_resident_joins_reductions_and_dictionaries
     assert_true(measured[1].height() > 0)
     var last = measured[1].height() - 1
     assert_true(measured[1].column("executor").string()._get(last) == "metal")
-
-

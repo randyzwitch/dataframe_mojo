@@ -760,5 +760,3 @@ def test_native_metal_float64_sqrt_bits_filters_children_and_cost() raises:
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),
     )
-
-

@@ -13,6 +13,7 @@ from dataframe.accelerator.sets import lower_set_operations
 
 from tests.execution_modes.test_backend_metal import require_metal
 
+
 def frame() raises -> DataFrame:
     return DataFrame(
         [
@@ -44,12 +45,14 @@ def frame() raises -> DataFrame:
         ]
     )
 
+
 def check_siblings(query: LazyFrame) raises:
     assert_true(
         query.collect(accelerator=MetalRuntime()).equals(
             query.collect(engine="cpu")
         )
     )
+
 
 def sibling_expressions() -> List[Expr]:
     return [
@@ -60,6 +63,7 @@ def sibling_expressions() -> List[Expr]:
         col("x").max().alias("largest"),
         col("x").null_count().alias("nulls"),
     ]
+
 
 def test_native_metal_distinct_siblings_null_order_empty_and_composition() raises:
     _ = require_metal()
@@ -95,6 +99,7 @@ def test_native_metal_distinct_siblings_null_order_empty_and_composition() raise
         .agg(sibling_expressions())
         .filter(col("rows") > 1)
     )
+
 
 def test_native_metal_distinct_siblings_sum_and_checked_child_restrictions() raises:
     _ = require_metal()
@@ -141,6 +146,7 @@ def test_native_metal_distinct_siblings_sum_and_checked_child_restrictions() rai
         )
     )
 
+
 def test_native_metal_distinct_siblings_join_profile_budget_and_collision() raises:
     _ = require_metal()
     var input = frame().with_columns(
@@ -160,6 +166,7 @@ def test_native_metal_distinct_siblings_join_profile_budget_and_collision() rais
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))
     check_siblings(query)
+
 
 def test_native_metal_distinct_siblings_multikey_hash_slices_and_null_text() raises:
     _ = require_metal()

@@ -232,5 +232,3 @@ def test_native_metal_wide_metal_join_fields_keys_empty_and_budget() raises:
     var last = measured[1].height() - 1
     assert_true(measured[1].column("executor").string()._get(last) == "metal")
     assert_true(measured[1].column("download_bytes").int64()._get(last) > 0)
-
-

@@ -599,6 +599,8 @@ def test_shared_partition_metadata_preserves_cpu_empty_execution() raises:
     assert_true(dag.joins == 24, String(dag.joins))
     for counter in counters:
         assert_true(counter[] == 0)
+
+
 def test_native_metal_deep_shared_partition_metadata_stays_resident() raises:
     _ = require_metal()
     var frame = fixture()
@@ -606,4 +608,3 @@ def test_native_metal_deep_shared_partition_metadata_stays_resident() raises:
     for level in range(8):
         expression = expression.min().over("g" if level % 2 == 0 else "h")
     check(frame.lazy().select(expression.alias("deep")))
-
