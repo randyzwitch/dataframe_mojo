@@ -17,8 +17,21 @@ jobs:
         with:
           cache: true
 
-      - name: Run tests
-        run: pixi run test
+      - name: Install independent format consumers
+        run: |
+          pixi install --locked -e oracle
+          pixi run --locked -e oracle python3 -c 'import geopandas, pyproj, pyarrow, shapely'
+
+      - uses: ./.github/actions/setup-parquet
+
+      - name: Verify native Parquet exported ABI
+        run: pixi run check-parquet-abi
+
+      - name: Run maintained contract suite
+        run: pixi run test --output build/contract-tests
+
+      - name: Validate actual contract outputs with independent format consumers
+        run: pixi run -e oracle test-interchange-oracles
 
       - name: Check public docstrings
         run: pixi run docs-check

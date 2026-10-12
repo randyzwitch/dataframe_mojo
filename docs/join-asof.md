@@ -64,13 +64,16 @@ the input row counts, with linear auxiliary storage.
 
 ## Validation and measurement
 
-`pixi run -e oracle oracle-asof` compares eager Arrow interchange and lazy
-Parquet plans against Polars. It covers all supported numeric key dtypes,
-Date/Datetime/Duration units and a time zone, all strategies, exact-match
-settings, grouped/null group keys, tolerances, duplicates, null ordered keys,
-integer extremes and nonfinite floats. Build `libdfparquet` before running the
-lazy oracle. `tests/test_asof.mojo` additionally verifies sortedness errors,
-schema/name checks and optimization boundaries.
+[`test_asof.mojo`](../tests/public_contracts/test_asof.mojo) compares public joins
+with independently enumerated nearest-match pairs, including strategies, ties,
+exact-match settings, grouped/null keys, tolerances and numeric/temporal types.
+[`test_asof_errors.mojo`](../tests/public_contracts/test_asof_errors.mojo) checks
+invalid types, names, tolerances and sortedness. The planner's
+[`test_asof_boundaries.mojo`](../tests/planner_correctness/test_asof_boundaries.mojo)
+holds execution fixed while checking filter/slice boundaries and lazy errors.
+Run `pixi run test --contracts table.join planner.relational`. The
+[coverage guide](test-coverage-plan.md) describes the reference and dimension
+requirements for extending these tests.
 
 Run the issue's 10M-left/1M-right development measurement with:
 

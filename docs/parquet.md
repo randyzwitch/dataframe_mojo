@@ -37,8 +37,11 @@ before using the new writer.
 
 ## Validation
 
-`tests/test_write_parquet.mojo` covers all supported numeric widths, temporal
+[`test_parquet.mojo`](../tests/interchange/test_parquet.mojo) covers numeric widths, temporal
 units, nested data, nulls, chunked/sliced input, all three codecs, row-group
 sizes, empty typed frames, invalid options, I/O errors and release counts.
-`scripts/check_parquet_write.py` reads files produced by the Mojo oracle with PyArrow and checks
-schemas, values, codecs and temporal metadata independently of our reader.
+After `pixi run test --areas interchange`, run
+`pixi run -e oracle test-interchange-oracles`. Its PyArrow consumer reads actual
+public writer artifacts and checks schemas, values, codecs and temporal metadata
+independently of our reader. Build `libdfparquet` first as described in
+[the testing guide](testing.md).

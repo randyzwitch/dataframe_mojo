@@ -60,9 +60,10 @@ A nonempty `.prj` is retained as its original WKT string in the geometry's
 GeoArrow CRS metadata. There is no conversion to PROJJSON, coordinate
 transformation or CRS guess. Missing or blank `.prj` means unknown CRS.
 
-Run `pixi run -e oracle oracle-shapefile` for fixtures checked against
-GeoPandas/GDAL and Shapely, including a GeoPandas-produced shapefile. Pyogrio
-currently drops measured coordinates when creating GeoPandas geometries, so
-M/ZM values are additionally checked against independent Shapely WKT geometries.
-The oracle verifies attributes, dimensions, CRS, optional sidecars, encoding,
-deleted records and malformed input. Contract tests run on every CI platform.
+Run `pixi run test --contracts io.spatial` for independently constructed SHP,
+SHX and DBF records with exact expected WKB and typed attributes. The maintained
+spatial contracts check shape families and dimensions, optional measures and
+no-data sentinels, deleted records, encodings, polygon-hole containment, CRS,
+sidecars and malformed record boundaries. See [geospatial validation](geospatial.md#validation)
+for independent consumers of actual GeoParquet outputs; those checks do not claim
+an external Shapefile consumer roundtrip.
