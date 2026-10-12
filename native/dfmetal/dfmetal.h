@@ -143,6 +143,11 @@ enum DFMOp {
   // Cumulative header: input slot, reverse flag, method (sum/min/max/count).
   // SORT_KEY descriptors name partitions; the header literal is decimal precision.
   DFM_CUMULATIVE_KEY = 214,
+  // Decimal128 SUM/MEAN preserve CPU worker partitions and check every
+  // precision-bounded partial and merge. Packed metadata carries min_count,
+  // precision, scale, and the configured worker count.
+  DFM_DECIMAL128_SUM = 215,
+  DFM_DECIMAL128_MEAN = 216,
 };
 
 typedef struct DFMInput {

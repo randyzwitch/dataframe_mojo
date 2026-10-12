@@ -93,6 +93,10 @@ int64_t reductionType(int64_t type, int64_t op) {
     return type == DFM_INT32 || type == DFM_INT64 ? DFM_FLOAT64_STORAGE : -1;
   if (op == DFM_WIDE_SUM)
     return type == DFM_INT32 || type == DFM_INT64 ? DFM_DECIMAL128 : -1;
+  if (op == DFM_DECIMAL128_SUM)
+    return type == DFM_DECIMAL128 ? DFM_DECIMAL128 : -1;
+  if (op == DFM_DECIMAL128_MEAN)
+    return type == DFM_DECIMAL128 ? DFM_FLOAT64_STORAGE : -1;
   if (type == DFM_DECIMAL128) {
     if (op == DFM_COUNT || op == DFM_LEN || op == DFM_NULL_COUNT) return DFM_INT64;
     if (op == DFM_MIN || op == DFM_MAX || op == DFM_FIRST || op == DFM_LAST) return DFM_DECIMAL128;
@@ -111,6 +115,34 @@ int64_t reductionType(int64_t type, int64_t op) {
     return type;
   return -1;
 }
+bool decimal128Reduction(int64_t op) {
+  return op == DFM_DECIMAL128_SUM || op == DFM_DECIMAL128_MEAN;
+}
+uint64_t decimalMinCount(int64_t metadata) {
+  return uint64_t(metadata) & 0xffffffffULL;
+}
+uint64_t decimalPrecision(int64_t metadata) {
+  return (uint64_t(metadata) >> 32) & 63ULL;
+}
+uint64_t decimalScale(int64_t metadata) {
+  return (uint64_t(metadata) >> 38) & 63ULL;
+}
+uint64_t decimalWorkers(int64_t metadata) {
+  return (uint64_t(metadata) >> 44) & 0xffffULL;
+}
+bool validDecimalMetadata(int64_t metadata) {
+  auto precision = decimalPrecision(metadata), scale = decimalScale(metadata);
+  return metadata >= 0 && (uint64_t(metadata) >> 60) == 0 && precision >= 1 &&
+         precision <= 38 && scale <= precision && decimalWorkers(metadata) >= 1;
+}
+bool sumReduction(int64_t op) {
+  return op == DFM_SUM || op == DFM_WIDE_SUM ||
+         op == DFM_WIDE_INTEGER_SUM || op == DFM_DECIMAL128_SUM;
+}
+int64_t reductionMinimum(int64_t op, int64_t metadata) {
+  return op == DFM_DECIMAL128_SUM ? int64_t(decimalMinCount(metadata))
+                                  : metadata;
+}
 bool typed(const DFMRequest &r) { return r.dtype == 0; }
 int64_t partialWidth(const DFMRequest &r) {
   if (!r.reductions) return 16;
@@ -118,7 +150,8 @@ int64_t partialWidth(const DFMRequest &r) {
     auto &o = r.outputs[i];
     if (o.dtype == DFM_DECIMAL128 || o.reduction == DFM_WIDE_INTEGER_SUM ||
         o.reduction == DFM_WIDE_INTEGER_MEAN ||
-        o.reduction == DFM_WIDE_DECIMAL_MEAN) return 32;
+        o.reduction == DFM_WIDE_DECIMAL_MEAN ||
+        o.reduction == DFM_DECIMAL128_MEAN) return 32;
   }
   return 16;
 }
@@ -478,6 +511,9 @@ Shape validate(const DFMRequest &r, bool storage = false,
           if (c[3] == DFM_WIDE_DECIMAL_MEAN &&
               r.literals[v.start + j] > uint64_t(t == DFM_INT32 ? 9 : 18))
             fail("Invalid Metal decimal mean scale");
+          if (decimal128Reduction(c[3]) &&
+              !validDecimalMetadata(int64_t(r.literals[v.start + j])))
+            fail("Invalid Metal Decimal128 reduction metadata");
           if ((c[3] == DFM_ANY || c[3] == DFM_ALL) &&
               r.literals[v.start + j] > 1)
             fail("Invalid Metal Boolean reduction metadata");
@@ -714,6 +750,9 @@ Shape validate(const DFMRequest &r, bool storage = false,
           (v.min_count < 0 ||
            v.min_count > (slotType(r, v.slot) == DFM_INT32 ? 9 : 18)))
         fail("Invalid Metal decimal mean scale");
+      if (decimal128Reduction(v.reduction) &&
+          !validDecimalMetadata(v.min_count))
+        fail("Invalid Metal Decimal128 reduction metadata");
       if (v.reduction != DFM_SUM && v.reduction != DFM_COUNT &&
           v.reduction != DFM_LEN && !typed(r))
         fail("Metal reduction requires typed storage");
@@ -1102,6 +1141,37 @@ bool wide_compare(ulong2 a,ulong2 b,long op) {
  if(op==21)return !less;return equal||less;
 }
 ulong2 wide_word(long value){return ulong2(ulong(value),value<0?~0UL:0UL);}
+uint decimal_minimum(long metadata){return uint(ulong(metadata)&0xffffffffUL);}
+uint decimal_precision(long metadata){return uint((ulong(metadata)>>32)&63UL);}
+uint decimal_scale(long metadata){return uint((ulong(metadata)>>38)&63UL);}
+uint decimal_configured_workers(long metadata){return uint((ulong(metadata)>>44)&0xffffUL);}
+uint decimal_worker_count(long metadata,uint rows,uint groups){
+ return max(1U,min(min(decimal_configured_workers(metadata),rows/65536U),
+                   uint(ulong(rows)/max(1UL,4UL*ulong(groups)))));
+}
+uint decimal_worker_step(uint rows,uint workers){
+ return ((rows+workers-1U)/workers+8191U)/8192U*8192U;
+}
+ulong2 decimal_limit(uint precision){
+ ulong low=0UL,high=0UL;
+ for(uint digit=0;digit<precision;++digit){
+  ulong product=low*10UL,next=product+9UL;
+  high=high*10UL+mulhi(low,10UL)+ulong(next<product);low=next;
+ }
+ return ulong2(low,high);
+}
+bool decimal_add_checked(thread long &low,thread long &high,ulong2 word,uint precision){
+ ulong before=ulong(low),upper=ulong(high),next=before+word.x;
+ ulong nextUpper=upper+word.y+ulong(next<before);
+ bool overflow=((upper^word.y)&0x8000000000000000UL)==0UL&&
+               ((upper^nextUpper)&0x8000000000000000UL)!=0UL;
+ bool negative=long(nextUpper)<0;ulong magnitude=negative?0UL-next:next;
+ ulong magnitudeUpper=negative?~nextUpper+ulong(magnitude==0UL):nextUpper;
+ ulong2 limit=decimal_limit(precision);
+ if(overflow||magnitudeUpper>limit.y||
+    (magnitudeUpper==limit.y&&magnitude>limit.x))return false;
+ low=long(next);high=long(nextUpper);return true;
+}
 bool extrema_better(ulong a,ulong b,long type,bool maximum) {
  if(type==11){ulong ax=a&0x7fffffffffffffffUL,ay=b&0x7fffffffffffffffUL;
  bool nx=ax>0x7ff0000000000000UL,ny=ay>0x7ff0000000000000UL;
@@ -1231,6 +1301,24 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
         "long sum=long(total);state_finish(sum,count,o,end-begin);"
         "bool valid=state_valid(o,count);y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);return;}\n"
         : "") + R"MSL(
+ if(o.kind==215||o.kind==216){
+  if(lane)return;uint workers=decimal_worker_count(o.minimum,meta.y,meta.x);
+  uint step=decimal_worker_step(meta.y,workers),at=begin;long total=0,upper=0,count=0;
+  for(uint worker=0;worker<workers;++worker){
+   uint stop=min(meta.y,(worker+1U)*step);long partial=0,partialUpper=0,partialCount=0;
+   while(at<end){uint row=uint(x[)MSL" + index + R"MSL(+at]);if(row>=stop)break;++at;
+    ulong from=ulong(o.slot)*meta.z+row;if(!v[from])continue;
+    if(!decimal_add_checked(partial,partialUpper,ulong2(x[from],x[from+meta.z]),decimal_precision(o.minimum))){
+     atomic_fetch_min_explicit(error,0xC0000000U,memory_order_relaxed);return;}++partialCount;
+   }
+   if(!decimal_add_checked(total,upper,ulong2(ulong(partial),ulong(partialUpper)),decimal_precision(o.minimum))){
+    atomic_fetch_min_explicit(error,0xC0000000U,memory_order_relaxed);return;}
+   count+=partialCount;
+  }
+  bool valid=o.kind==215?count>=long(decimal_minimum(o.minimum)):count>0;
+  y[to]=valid?(o.kind==216?f64_decimal128_mean(ulong(total),ulong(upper),ulong(count),decimal_scale(o.minimum)):ulong(total)):0UL;
+  w[to]=uchar(valid);if(o.kind==215){y[to+meta.z]=valid?ulong(upper):0UL;w[to+meta.z]=uchar(valid);}return;
+ }
  threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  bool first=group.y==0;
  for(uint at=begin+lane;at<end;at+=256){uint row=uint(x[)MSL" +
@@ -1401,7 +1489,7 @@ void wide_merge(thread long &low,thread long &high,long other,long upper){
 void wide_add(thread long &low,thread long &high,ulong word){
  wide_merge(low,high,long(word),long(word)<0?-1L:0L);
 }
-bool wide_accum(Out o){return USE_WIDE&&(o.kind==208||o.kind==210||o.kind==211||o.kind==212);}
+bool wide_accum(Out o){return USE_WIDE&&(o.kind==208||o.kind==210||o.kind==211||o.kind==212||o.kind==215||o.kind==216);}
 void wide_accumulate(thread long &low,thread long &high,ulong word,Out o){
  wide_merge(low,high,long(word),o.type==10?0L:(long(word)<0?-1L:0L));
 }
@@ -1463,15 +1551,35 @@ void state_finish(thread long &value,thread long &count,Out o,long rows){
 void state_finish_wide(thread long &value,thread long &high,thread long &count,Out o,long rows){
  if(o.kind==211){if(count)value=long(f64_div(f64_from_wide(ulong(value),ulong(high),o.type==10),f64_from_signed(count)));high=0;}
  else if(o.kind==212){if(count)value=long(f64_decimal_mean(ulong(value),ulong(high),ulong(count),uint(o.minimum)));high=0;}
+ else if(o.kind==216){if(count)value=long(f64_decimal128_mean(ulong(value),ulong(high),ulong(count),decimal_scale(o.minimum)));high=0;}
  else state_finish(value,count,o,rows);
 }
-bool state_valid(Out o,long count){return o.kind==10||o.kind==208||o.kind==210?count>=o.minimum:count>0;}
+bool state_valid(Out o,long count){return o.kind==10||o.kind==208||o.kind==210?count>=o.minimum:o.kind==215?count>=long(decimal_minimum(o.minimum)):count>0;}
 kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device Partial *partials[[buffer(2)]],device const Out *out[[buffer(3)]],
  constant uint4 &meta[[buffer(4)]],constant ulong &groups[[buffer(5)]],device atomic_uint *error[[buffer(6)]],
  uint2 group[[threadgroup_position_in_grid]],uint lane[[thread_index_in_threadgroup]]) {
  threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  Out o=out[group.y];
+ if(o.kind==215||o.kind==216){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  uint workers=decimal_worker_count(o.minimum,meta.x,1U);
+  uint step=decimal_worker_step(meta.x,workers);
+  for(uint worker=0;worker<workers;++worker){
+   uint begin=min(meta.x,worker*step),end=min(meta.x,(worker+1U)*step);
+   long partial=0,partialHigh=0,partialCount=0;
+   for(uint row=begin;row<end;++row){
+    if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+    ulong idx=o.slot*meta.z+row;if(!v[idx])continue;
+    if(!decimal_add_checked(partial,partialHigh,ulong2(x[idx],x[idx+meta.z]),decimal_precision(o.minimum))){
+     atomic_fetch_min_explicit(error,0xC0000000U,memory_order_relaxed);return;}++partialCount;
+   }
+   if(!decimal_add_checked(sum,high,ulong2(ulong(partial),ulong(partialHigh)),decimal_precision(o.minimum))){
+    atomic_fetch_min_explicit(error,0xC0000000U,memory_order_relaxed);return;}count+=partialCount;
+  }
+  partials[group.y*groups]=make_partial(sum,high,count);return;
+ }
  for(ulong row=group.x*256+lane;row<meta.x;row+=groups*256){ulong idx=o.slot*meta.z+row;
  if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
  Out current=o;if(DIRECT_FILTERED_REDUCTION&&o.kind==90)current.kind=11;
@@ -2151,8 +2259,9 @@ ResidentCopy residentCopy(const Resident &table, int64_t column,
   auto source = table.scalar ? (table.scalar_stride / 8) * c.slot : c.slot * table.cap;
   return {uint64_t(source),
           uint64_t(table.scalar ? table.scalar_stride * c.slot + (table.scalar_stride == 32 ? 16 : 8) : c.slot * table.cap),
-          uint64_t(target), uint64_t(table.rows), table.scalar, c.minimum,
-          c.reduction == DFM_SUM || c.reduction == DFM_WIDE_SUM || c.reduction == DFM_WIDE_INTEGER_SUM, 0,
+          uint64_t(target), uint64_t(table.rows), table.scalar,
+          reductionMinimum(c.reduction, c.minimum),
+          sumReduction(c.reduction), 0,
           uint64_t(wide ? source + (table.scalar ? 1 : table.cap) : 0),
           uint64_t(wide ? target + target_cap : 0)};
 }
@@ -2626,6 +2735,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
            "within the native Int64/UInt64 range");
     if (fault == 0xD0000000U)
       fail("Integer or decimal overflow in Metal cumulative sum");
+    if (fault == 0xC0000000U)
+      fail("value exceeds decimal precision in Metal Decimal128 reduction");
     if (fault == 0xF0000000U)
       fail("Integer overflow in Metal grouped sum");
     if (fault & 0x40000000u)
@@ -2693,8 +2804,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     stats.download_bytes = 8;
     if (r.reductions && rows)
       for (int64_t i = 0; i < r.output_count; ++i)
-        if (r.outputs[i].reduction == DFM_SUM ||
-            r.outputs[i].reduction == DFM_WIDE_INTEGER_SUM)
+        if (sumReduction(r.outputs[i].reduction))
           stats.download_bytes += partialWidth(r);
     stats.result_copy_ns = 0;
     t->stats = stats;
@@ -2708,8 +2818,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
       if (!rows)
         continue;
       auto a = loadPartial(result, i, partialWidth(r));
-      bool valid =
-          (o.reduction == DFM_SUM || o.reduction == DFM_WIDE_SUM || o.reduction == DFM_WIDE_INTEGER_SUM) ? a.count >= o.min_count : a.count > 0;
+      bool valid = sumReduction(o.reduction)
+                       ? a.count >= reductionMinimum(o.reduction, o.min_count)
+                       : a.count > 0;
       if (!valid)
         a.total = a.high = 0;
       memcpy(o.values, &a.total, width(o.dtype));
@@ -3052,7 +3163,9 @@ int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
           continue;
         if (t.scalar) {
           auto a = loadPartial(t.values, c.slot, t.scalar_stride);
-          bool valid = (c.reduction == DFM_SUM || c.reduction == DFM_WIDE_SUM || c.reduction == DFM_WIDE_INTEGER_SUM) ? a.count >= c.minimum : a.count > 0;
+          bool valid = sumReduction(c.reduction)
+                           ? a.count >= reductionMinimum(c.reduction, c.minimum)
+                           : a.count > 0;
           if (!valid)
             a.total = a.high = 0;
           memcpy(o.values, &a.total, width(o.dtype));

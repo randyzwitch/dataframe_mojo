@@ -50,6 +50,7 @@ struct RowCapabilities(Copyable):
     var scalar_regions: Bool
     var temporal_fields: Bool
     var decimal128: Bool
+    var decimal128_reductions: Bool
     var decimal_mean: Bool
     var decimal_float_cast: Bool
     var ranks: Bool
@@ -90,6 +91,7 @@ struct RowCapabilities(Copyable):
         ranks: Bool = False,
         cumulative_windows: Bool = False,
         decimal128: Bool = False,
+        decimal128_reductions: Bool = False,
         decimal_mean: Bool = False,
         decimal_float_cast: Bool = False,
         max_nodes: Int = 64,
@@ -125,6 +127,7 @@ struct RowCapabilities(Copyable):
         self.ranks = ranks
         self.cumulative_windows = cumulative_windows
         self.decimal128 = decimal128
+        self.decimal128_reductions = decimal128_reductions
         self.decimal_mean = decimal_mean
         self.decimal_float_cast = decimal_float_cast
         self.reuse_column_slots = reuse_column_slots
@@ -198,6 +201,7 @@ struct RowCapabilities(Copyable):
             and op != MAX
             and op != FIRST
             and op != LAST
+            and not (self.decimal128_reductions and (op == SUM or op == MEAN))
         ):
             self.reject(
                 "accumulator",

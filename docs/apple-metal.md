@@ -223,7 +223,15 @@ precision 38 and the original scale, including through joins and scalar
 broadcasts. The Int32.MAX row bound keeps every possible partial below 2**94,
 so no value-dependent range proof or CPU row evaluation is needed. Empty,
 all-null, and `min_count` results match the CPU. Reductions of Decimal128 inputs
-support counts, minimum, maximum, first, and last. Sums and means of Decimal128 inputs still require CPU execution.
+support counts, minimum, maximum, first, last, sum, and mean. Sums preserve the
+input precision and scale; means return Float64 using the same exact
+scaled-integer quotient and remainder sequence as the CPU. Global, grouped,
+null, empty, `min_count`, resident, and composed results retain CPU behavior.
+Every input prefix and ordered worker-state merge is checked against the
+declared precision, so cancellation after an invalid intermediate value still
+raises. Rebuild the optional native runtime for these opcodes. Estimates use
+`decimal128-reductions-v1` on CPU and `metal-decimal128-reductions-v1` on Metal,
+so prior calibrations do not apply.
 
 Decimal32/64/128 casts to Float64 convert the signed integer payload to
 binary64 first, then divide by the separately converted integer `10**scale`,
@@ -365,8 +373,8 @@ As in the CPU mergeable floating state, reduction reassociation is allowed and
 bitwise reproducibility across execution schedules is not promised. Integer
 means retain an exact integer total before Float64 conversion and division.
 Int64/UInt64 inputs use the exact two-word accumulator without a value-dependent
-range proof. Sums and means of Decimal128 inputs still require CPU
-execution. Forced accelerator execution rejects statically unsupported
+range proof. Decimal128 sums and means use their precision-checked two-word
+accumulator. Forced accelerator execution rejects statically unsupported
 operations before submission; checked final sums can raise overflow during
 execution.
 Int64/UInt64-to-Float32 casts emulate the CPU contract of rounding through
