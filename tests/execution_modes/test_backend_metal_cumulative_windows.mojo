@@ -1,5 +1,6 @@
 """Ordered cumulative state and nested OVER scopes through resident Metal."""
-from std.testing import TestSuite, assert_true, assert_raises
+from tests.execution_modes.test_backend_metal import require_metal
+from std.testing import assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import (
     DataFrame,
@@ -13,11 +14,11 @@ from dataframe import (
     when,
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime, metal_installed
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.windows import lower_partition_aggregates
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.capabilities import RowCapabilities
-from test_metal_float64_emulation import same
+from tests.execution_modes.test_backend_metal_float64_emulation import same
 
 
 def check(frame: DataFrame, expression: Expr) raises:
@@ -63,9 +64,8 @@ def test_nested_window_lowering_preserves_cpu_scopes_without_device() raises:
         )
 
 
-def test_cumulative_numeric_widths_null_partitions_and_reverse() raises:
-    if not metal_installed():
-        return
+def test_native_metal_cumulative_numeric_widths_null_partitions_and_reverse() raises:
+    _ = require_metal()
     comptime for D in NUMERIC_DTYPES:
         var values = List[Scalar[D]]()
         var keys = List[Int32]()
@@ -88,9 +88,8 @@ def test_cumulative_numeric_widths_null_partitions_and_reverse() raises:
                 check(frame, cumulative(col("x"), method, reverse).over("k"))
 
 
-def test_cumulative_floating_association_nan_zeros_and_subnormals() raises:
-    if not metal_installed():
-        return
+def test_native_metal_cumulative_floating_association_nan_zeros_and_subnormals() raises:
+    _ = require_metal()
     var words: List[UInt64] = [
         0x4340000000000000,
         0x3FF0000000000000,
@@ -137,9 +136,8 @@ def test_cumulative_floating_association_nan_zeros_and_subnormals() raises:
                 check(frame, cumulative(col(name), method, reverse).over("k"))
 
 
-def test_cumulative_decimal_boolean_text_and_logical_storage() raises:
-    if not metal_installed():
-        return
+def test_native_metal_cumulative_decimal_boolean_text_and_logical_storage() raises:
+    _ = require_metal()
     var frame = DataFrame(
         [
             Series("k", Column[Int32]([0, 1, 0, 1, 0, 1])),
@@ -186,9 +184,8 @@ def test_cumulative_decimal_boolean_text_and_logical_storage() raises:
                 check(frame, cumulative(col(name), method, reverse).over("k"))
 
 
-def test_cumulative_nested_scopes_resident_consumers_empty_and_budget() raises:
-    if not metal_installed():
-        return
+def test_native_metal_cumulative_nested_scopes_resident_consumers_empty_and_budget() raises:
+    _ = require_metal()
     var frame = DataFrame(
         [
             Series("k", Column[Int32]([0, 1, 0, 1, 0, 1])),
@@ -237,6 +234,12 @@ def test_cumulative_nested_scopes_resident_consumers_empty_and_budget() raises:
         frame.lazy().select(col("x").cum_count())
     )
     assert_true("metal-cumulative-v1" in estimate.family)
+    assert_true(";cumulative-v1" in estimate.family)
+    var automatic = frame.lazy().select(col("x").cum_count())
+    same(
+        automatic.collect(engine="auto", accelerator=MetalRuntime()),
+        automatic.collect(engine="cpu"),
+    )
     check(frame.head(0), col("x").cum_sum().over("k"))
     var all_null = DataFrame(
         [
@@ -251,9 +254,8 @@ def test_cumulative_nested_scopes_resident_consumers_empty_and_budget() raises:
     same(query.collect(accelerator=MetalRuntime()), query.collect(engine="cpu"))
 
 
-def test_cumulative_checked_prefixes_remain_observable_under_head_and_when() raises:
-    if not metal_installed():
-        return
+def test_native_metal_cumulative_checked_prefixes_remain_observable_under_head_and_when() raises:
+    _ = require_metal()
     var frame = DataFrame(
         [
             Series("k", Column[Int32]([0, 0, 0])),
@@ -351,9 +353,8 @@ def test_cumulative_checked_prefixes_remain_observable_under_head_and_when() rai
     )
 
 
-def test_cumulative_large_global_partition_preserves_serial_float_order() raises:
-    if not metal_installed():
-        return
+def test_native_metal_cumulative_large_global_partition_preserves_serial_float_order() raises:
+    _ = require_metal()
     var values = List[Float64](length=1048576, fill=0)
     for i in range(len(values)):
         values[i] = Float64(9007199254740992) if i % 3 == 0 else (
@@ -366,5 +367,3 @@ def test_cumulative_large_global_partition_preserves_serial_float_order() raises
     same(query.collect(accelerator=MetalRuntime()), query.collect(engine="cpu"))
 
 
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -3,7 +3,7 @@ from ..dtype import DataType
 from ..expr import CAST, LEN
 from ..lazy import LazyFrame
 from .capabilities import RowCapabilities
-from .rows import lower_rows, ROW_RANK_KEY
+from .rows import lower_rows, ROW_RANK_KEY, ROW_CUMULATIVE_KEY
 from .cost import COST_FEATURE_COUNT, cost_feature_names
 
 
@@ -51,6 +51,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             decimal128=True,
             decimal_float_cast=True,
             ranks=True,
+            cumulative_windows=True,
         ),
     )
     var features = List[Float64](length=COST_FEATURE_COUNT, fill=0)
@@ -65,10 +66,15 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             family = current
         elif family != current:
             family = "mixed"
+    var ranked = False
+    var cumulative = False
     for step in plan.steps:
-        if plan.code[step.start * 4] == ROW_RANK_KEY:
-            family += ";rank-v1"
-            break
+        ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
+        cumulative |= plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+    if ranked:
+        family += ";rank-v1"
+    if cumulative:
+        family += ";cumulative-v1"
     var wide_decimal = False
     for dtype in plan.node_dtypes:
         wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128
