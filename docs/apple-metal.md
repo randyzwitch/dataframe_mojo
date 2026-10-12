@@ -52,6 +52,16 @@ backends retain their existing 64-entry defaults. The extended bounds require
 rebuilding the optional native Metal runtime; ABI layouts and opcode meanings
 are unchanged. Memory budgets and semantic preflight checks still apply.
 
+Direct column projections and aliases reuse an existing resident value slot.
+They preserve separate output names and column order without a copying device
+step. Filters, sorts, and slices gather each shared value and validity bitmap
+once. Computed expressions still allocate slots, and aliases still count
+toward the independent 128-output-column limit. Automatic placement uses a
+separate `metal-column-slots-v1` cost family for plans that reuse columns, so
+older calibration cannot select them for GPU execution. A complete supported
+cost estimate is still required; wider explicit plans can remain on CPU
+automatically when the shared analytical estimator rejects their shape.
+
 Sources must be contiguous in-memory Float32, any signed or unsigned integer
 width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64/128 columns.
 Float64 columns use IEEE words throughout resident execution. Add, subtract,
@@ -170,8 +180,8 @@ DAG is not a single command-buffer submission.
 Checked integer arithmetic, checked casts to integer/Boolean targets, and checked Int32/UInt32/Int64/UInt64 sums in
 join inputs require CPU execution because those inputs are not terminal
 observable boundaries. Pure expressions and bounded Int8/Int16/UInt8/UInt16
-sums can feed a join. Each join supports at most 64 combined input columns,
-64 output columns, and Int32.MAX rows per input and output.
+sums can feed a join. Each join supports at most 128 combined input columns,
+128 output columns, and Int32.MAX rows per input and output.
 
 A final head immediately above a join or above pure projections of its rows
 bounds the join output allocation, even when its full match count is larger

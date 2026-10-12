@@ -342,6 +342,7 @@ def _capabilities() -> RowCapabilities:
         temporal_fields=True,
         ranks=True,
         decimal128=True,
+        reuse_column_slots=True,
         max_nodes=128,
         max_slots=128,
         max_steps=128,
@@ -1406,6 +1407,8 @@ struct MetalRuntime(AcceleratorBackend):
         device[13] = Float64(metadata[4] == 0)
         device[14] = 0
         var family = work[1].copy()
+        if plan.reused_columns:
+            family += ";metal-column-slots-v1"
         for step in plan.steps:
             if plan.code[step.start * 4] == ROW_RANK_KEY:
                 family += ";metal-rank-v1"

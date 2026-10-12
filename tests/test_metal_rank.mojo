@@ -270,7 +270,8 @@ def test_rank_capability_and_checked_input_preflight() raises:
     with assert_raises(contains="rank requires backend support"):
         _ = lower_rows(query, RowCapabilities())
     var plan = lower_rows(query, _capabilities())
-    assert_true(len(plan.steps) == 3)
+    assert_true(len(plan.steps) == 2)
+    assert_true(plan.outputs[0].slot == plan.steps[1].slot)
     var invalid = frame.lazy().select((col("x") + lit(Int32(1))).rank())
     with assert_raises(contains="checked rank inputs"):
         _ = lower_rows(invalid, _capabilities())
