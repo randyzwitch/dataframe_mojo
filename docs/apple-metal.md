@@ -232,8 +232,18 @@ values. CPU unary kernels also retain narrow decimal storage and handle Int128
 explicitly. Nulls and conditional masks preserve which rows can raise errors.
 Operations without a static range proof require terminal projections without a
 head. Safe arithmetic can feed resident filters, joins, aggregates, and windows.
-Estimates include `metal-decimal-arithmetic-v1`. Multiplication and division
-remain unsupported.
+Estimates include `metal-decimal-arithmetic-v1`.
+
+Decimal multiplication and division also return precision 38 at the larger
+input scale. Products check the CPU's Int128 multiplication bounds before
+half-even scale reduction. Quotients preserve the CPU's sequence of checked
+precision, wrapping intermediate arithmetic, signed division, floor modulo,
+and final half-even rounding; division by zero produces nulls. Both operations
+retain the checked arithmetic placement rules and conditional row masks.
+Multiplication with different scales requires a static rescaling proof because
+the CPU's dense and nullable paths have different rescaling checks. Safe
+operations can feed resident consumers. Estimates include
+`metal-decimal-multiplicative-v1`; previous calibrations do not apply.
 
 Decimal32/64 sums accumulate exactly in two words and return Decimal128 with
 precision 38 and the original scale, including through joins and scalar
@@ -552,6 +562,7 @@ python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py
 python3 native/dfmetal/test_decimal_comparisons.py
 python3 native/dfmetal/test_decimal_arithmetic.py
+python3 native/dfmetal/test_decimal_multiplicative.py
 pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
 pixi run mojo run -I . tests/test_metal_completeness.mojo

@@ -639,7 +639,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
         if (!typed(r) || c[3] < 0 || metadata >> 18 || resultType != DFM_DECIMAL128 ||
             !maximum(operand) || !maximum(rightType) ||
             (metadata & 63) > maximum(operand) || ((metadata >> 6) & 63) > maximum(rightType) ||
-            (op != DFM_ADD && op != DFM_SUB))
+            (op != DFM_ADD && op != DFM_SUB && op != DFM_MUL && op != DFM_DIV))
           fail("Invalid Metal decimal arithmetic descriptor");
       }
       if (c[0] == DFM_DECIMAL_COMPARE) {
@@ -1924,13 +1924,17 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           if (op == DFM_DECIMAL_UNARY)
             text += "decimal_unary(" + word(dtype,a) + "," + std::to_string(width(dtype)*8) + "," +
                 (c[3] == DFM_ABS ? "true" : "false") + ");";
+          else if ((metadata >> 12) == DFM_MUL || (metadata >> 12) == DFM_DIV)
+            text += std::string((metadata >> 12) == DFM_MUL ? "decimal_multiply(" : "decimal_divide_rows(") +
+                word(nodeType(r,s.start+c[1]),a) + "," + word(nodeType(r,s.start+c[2]),b) + "," +
+                std::to_string(metadata & 63) + "," + std::to_string((metadata >> 6) & 63) + ");";
           else
             text += "decimal_add_subtract(" + word(nodeType(r,s.start+c[1]),a) + "," +
                 word(nodeType(r,s.start+c[2]),b) + "," +
                 std::to_string(metadata & 63) + "," + std::to_string((metadata >> 6) & 63) + "," +
                 ((metadata >> 12) == DFM_SUB ? "true" : "false") + ");";
           text += z + "=" + (dtype == DFM_DECIMAL128 ? "computed.value" : typename_ + "(computed.value.x)") +
-              ";" + valid + "=computed.error==0;if(!" + valid + "){uint fault=computed.error==1?0x08000000u:computed.error==2?0x04000000u:0x02000000u;"
+              ";" + valid + "=computed.error==0;if(!" + valid + "&&computed.error!=4){uint fault=computed.error==1?0x08000000u:computed.error==2?0x04000000u:0x02000000u;"
               "atomic_fetch_min_explicit(error,fault+" + std::to_string(s.start+j+1) + "u,memory_order_relaxed);}}";
         } else if (op == DFM_DECIMAL_COMPARE) {
           auto word = [&](int64_t type, const std::string &value) {

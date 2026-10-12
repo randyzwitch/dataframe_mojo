@@ -16,6 +16,7 @@ from dataframe.expr import (
     ADD,
     SUB,
     MUL,
+    DIV,
     NEG,
     ABS,
     col,
@@ -121,6 +122,8 @@ def _conditional_leaf(
                 or node.op == SUB
                 or node.op == NEG
                 or node.op == ABS
+                or node.op == MUL
+                or node.op == DIV
             )
             and not proven[i]
         ):

@@ -5,7 +5,7 @@ are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
 from .metadata import prune_projections
-from .integer_ranges import proven_integer_nodes
+from .integer_ranges import proven_integer_nodes, _decimal_scale_safe
 from std.memory import bitcast
 from std.math import pow, abs
 from dataframe.parallel import configured_workers
@@ -212,6 +212,11 @@ def _program(
         if not (
             op == COL
             or (
+                op == DIV
+                and capabilities.decimal_multiplicative
+                and bound.dtypes[i].is_decimal()
+            )
+            or (
                 op == FLOORDIV
                 and capabilities.float_division
                 and bound.dtypes[i] == DataType.FLOAT32
@@ -323,10 +328,11 @@ def _program(
                 )
             )
         )
-        var decimal_arithmetic = (
+        var decimal_arithmetic = left_type.is_decimal() and (
             capabilities.decimal_arithmetic
-            and left_type.is_decimal()
             and (op == ADD or op == SUB or op == NEG or op == ABS)
+            or capabilities.decimal_multiplicative
+            and (op == MUL or op == DIV)
         )
         if (
             temporal
@@ -873,6 +879,7 @@ def lower_rows(
                 capabilities.proven_integer_operations
                 or capabilities.decimal_comparisons
                 or capabilities.decimal_arithmetic
+                or capabilities.decimal_multiplicative
             ):
                 proven = proven_integer_nodes(bound)
             for part_index in range(len(bound.expr._nodes)):
@@ -920,13 +927,17 @@ def lower_rows(
             for part_index in range(len(bound.expr._nodes)):
                 ref part = bound.expr._nodes[part_index]
                 if (
-                    capabilities.decimal_arithmetic
-                    and bound.dtypes[part_index].is_decimal()
+                    bound.dtypes[part_index].is_decimal()
                     and (
-                        part.op == ADD
-                        or part.op == SUB
-                        or part.op == NEG
-                        or part.op == ABS
+                        capabilities.decimal_arithmetic
+                        and (
+                            part.op == ADD
+                            or part.op == SUB
+                            or part.op == NEG
+                            or part.op == ABS
+                        )
+                        or capabilities.decimal_multiplicative
+                        and (part.op == MUL or part.op == DIV)
                     )
                     and not proven[part_index]
                     and (
@@ -940,6 +951,25 @@ def lower_rows(
                         "plan",
                         "checked decimal arithmetic requires terminal projections without head",
                     )
+                if (
+                    capabilities.decimal_multiplicative
+                    and part.op == MUL
+                    and bound.dtypes[part_index].is_decimal()
+                ):
+                    var left = bound.dtypes[part.left]
+                    var right = bound.dtypes[part.right]
+                    var scale = max(left.scale(), right.scale())
+                    # CPU's nullable/masked multiplication checks unused
+                    # rescaling that its dense fast path skips. Require a
+                    # proof so results cannot depend on those paths.
+                    if not (
+                        _decimal_scale_safe(left, scale)
+                        and _decimal_scale_safe(right, scale)
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "decimal multiplication with different scales requires a static rescaling proof",
+                        )
                 if (
                     is_comparison(part.op)
                     and part.left >= 0

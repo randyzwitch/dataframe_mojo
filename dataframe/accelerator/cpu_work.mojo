@@ -59,6 +59,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             decimal_casts=True,
             decimal_comparisons=True,
             decimal_arithmetic=True,
+            decimal_multiplicative=True,
             ranks=True,
             cumulative_windows=True,
         ),
