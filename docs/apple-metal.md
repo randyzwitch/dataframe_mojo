@@ -129,8 +129,10 @@ first descending), matching the CPU rank contract. Numeric, Boolean, String,
 categorical, temporal, and Decimal32/64/128 inputs use the same stable sort
 workspace. Dense ranks scan tie boundaries without downloading row data.
 Filters, projections, grouped results, joins, slices, and final head can surround
-rank operations. Checked rank inputs and rank inside grouped aggregation remain
-unsupported. Rank plans carry a separate `metal-rank-v1` calibration family;
+rank operations. Integer arithmetic and casts can feed rank when static ranges
+prove every checked input node safe. Unproved checked inputs and rank inside
+grouped aggregation remain unsupported. Rank plans carry a separate
+`metal-rank-v1` calibration family;
 automatic placement stays on CPU without matching validated evidence.
 
 Supported scalar reductions also run within `over()` partitions: Metal groups a
