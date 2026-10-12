@@ -98,6 +98,18 @@ def fold_literal_text_parsing(query: LazyFrame) raises -> LazyFrame:
                                     Optional[DataType](dtype)
                                 ]
                             found = True
+                    if dtype.is_decimal() and dtype.decimal_width() == 128:
+                        ref values = column._data[Column[Int128]]
+                        if values.is_valid(0):
+                            var raw = values.value(0)
+                            replacement = lit(raw.cast[DType.int64]())
+                            replacement._nodes[0].text2 = String(
+                                (raw >> 64).cast[DType.int64]()
+                            )
+                            replacement._nodes[0].dtypes = [
+                                Optional[DataType](dtype)
+                            ]
+                        found = True
                     if not found:
                         raise Error("unsupported parsed literal dtype")
                     expression._nodes[n] = replacement._nodes[0].copy()

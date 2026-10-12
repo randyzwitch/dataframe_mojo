@@ -22,12 +22,16 @@ enum DFMType {
   // IEEE-754 binary64 words. Arithmetic and conversions use integer-only
   // software primitives; the name retains compatibility with opaque storage.
   DFM_FLOAT64_STORAGE = 11,
+  // Signed 128-bit decimal payload, stored as low/high 64-bit columns.
+  DFM_DECIMAL128 = 12,
 };
 
 // Fixed native opcodes. The Mojo wrapper translates the shared expression IR
 // rather than relying on its numeric constants remaining unchanged.
 enum DFMOp {
   DFM_COLUMN = 0,
+  // Decimal128 literals use literals[node] for the low word and code[3]
+  // to name an Int64 literal payload containing the high word.
   DFM_LITERAL_INT = 1,
   DFM_LITERAL_FLOAT = 2,
   DFM_LITERAL_BOOL = 3,
@@ -116,6 +120,8 @@ enum DFMOp {
   // Rank header: input slot, descending flag, method (average/min/max/dense/ordinal).
   // Optional following SORT_KEY descriptors name partition columns.
   DFM_RANK_KEY = 207,
+  // Exact Decimal32/64 sum with Decimal128 output.
+  DFM_WIDE_SUM = 208,
 };
 
 typedef struct DFMInput {

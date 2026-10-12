@@ -158,8 +158,11 @@ def test_literal_cast_rejections_preserve_unobserved_errors() raises:
     with assert_raises(contains="unsupported [literal text parsing]"):
         _ = fold_literal_text_parsing(invalid)
     var wide = frame.lazy().select(lit("123.45").cast(DataType.decimal(20, 2)))
-    with assert_raises(contains="unsupported parsed literal dtype"):
-        _ = fold_literal_text_parsing(wide)
+    assert_true(
+        fold_literal_text_parsing(wide)
+        .collect(engine="cpu")
+        .equals(wide.collect(engine="cpu"))
+    )
     var dynamic = DataFrame(
         [Series("s", StringColumn(List[String](["1", "2"])))]
     )

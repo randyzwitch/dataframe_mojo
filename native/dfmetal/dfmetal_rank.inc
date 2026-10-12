@@ -11,6 +11,7 @@ std::string rankSource(const DFMRequest &r, const Layout &layout, int64_t i) {
     auto base = std::to_string(layout.physical[slot]) + "UL*meta.z";
     auto type = slotType(r, slot);
     std::string words = "ulong aa=x[ai],bb=x[bi];";
+    if (type == DFM_DECIMAL128) words += "if(x[ai+meta.z]!=x[bi+meta.z])return false;";
     if (type == DFM_FLOAT64_STORAGE)
       words += "aa=!f64_abs(aa)?0UL:f64_nan(aa)?0x7ff8000000000000UL:aa;"
                "bb=!f64_abs(bb)?0UL:f64_nan(bb)?0x7ff8000000000000UL:bb;";

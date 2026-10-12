@@ -324,6 +324,8 @@ struct Node(Copyable):
     var left: Int
     var right: Int
     var text: String
+    # Internal Decimal128 LIT_INT: integer holds the low word and text2
+    # holds the signed high word, preserving it in expression signatures.
     var integer: Int64
     var floating: Float64
     var min_count: Int
