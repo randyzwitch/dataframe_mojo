@@ -101,6 +101,34 @@ inline ulong2 decimal_half_even(ulong2 value, uint scale) {
   return negative ? decimal_negate(divided.value) : divided.value;
 }
 struct DecimalCast { ulong2 value; bool valid; };
+inline DecimalCast decimal_scale_checked(ulong2 value, uint scale) {
+  if (!scale) return {value, true};
+  ulong2 factor = decimal_wide_pow10(scale);
+  ulong2 maximum = ulong2(~0UL, 0x7fffffffffffffffUL);
+  ulong2 permitted = decimal_wide_divide(maximum, factor).value;
+  ulong2 magnitude = decimal_magnitude(value);
+  if (decimal_wide_ge(magnitude, permitted) &&
+      (magnitude.x != permitted.x || magnitude.y != permitted.y))
+    return {ulong2(0), false};
+  for (uint i = 0; i < scale; ++i)
+    value = ulong2(value.x * 10UL, value.y * 10UL + mulhi(value.x, 10UL));
+  return {value, true};
+}
+struct DecimalComparison { bool value; bool valid; };
+inline DecimalComparison decimal_compare(ulong2 left, ulong2 right,
+                                          uint leftScale, uint rightScale,
+                                          uint op) {
+  uint common = leftScale > rightScale ? leftScale : rightScale;
+  DecimalCast a = decimal_scale_checked(left, common - leftScale);
+  DecimalCast b = decimal_scale_checked(right, common - rightScale);
+  if (!a.valid || !b.valid) return {false, false};
+  bool equal = a.value.x == b.value.x && a.value.y == b.value.y;
+  bool sa = (a.value.y >> 63) != 0, sb = (b.value.y >> 63) != 0;
+  bool less = sa != sb ? sa :
+      (a.value.y < b.value.y || (a.value.y == b.value.y && a.value.x < b.value.x));
+  return {op == 9 ? equal : op == 23 ? !equal : op == 20 ? less :
+          op == 22 ? less || equal : op == 8 ? !less && !equal : !less, true};
+}
 inline DecimalCast decimal_cast(ulong2 value, uint fromScale, uint toScale,
                                 uint precision, uint bits, bool isUnsigned,
                                 bool isBoolean) {

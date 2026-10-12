@@ -152,6 +152,9 @@ enum DFMOp {
   // scale (6), target decimal precision (6), strict, source/target decimal flags.
   // Decimal -> Float32 uses the CPU binary64 divisor in literals[node].
   DFM_DECIMAL_CAST = 217,
+  // Binary decimal comparison: code[3] packs left scale (6 bits), right scale
+  // (6), and the original comparison opcode. Rescaling checks signed Int128.
+  DFM_DECIMAL_COMPARE = 218,
 };
 
 typedef struct DFMInput {

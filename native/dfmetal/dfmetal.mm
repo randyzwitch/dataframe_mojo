@@ -40,7 +40,7 @@ void error(char **p, const std::exception &e) {
     *p = strdup(e.what());
 }
 bool binaryOp(int64_t op) {
-  return op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_DIV || op == DFM_GT ||
+  return op == DFM_DECIMAL_COMPARE || op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_DIV || op == DFM_GT ||
          op == DFM_EQ ||
          ((op >= DFM_LT && op <= DFM_NE) ||
           (op >= DFM_FLOORDIV && op <= DFM_CLIP_HIGH)) ||
@@ -624,12 +624,24 @@ Shape validate(const DFMRequest &r, bool storage = false,
             fail("Invalid Metal decimal Float32 cast divisor");
         }
       }
+      if (c[0] == DFM_DECIMAL_COMPARE) {
+        auto metadata = uint64_t(c[3]), op = metadata >> 12;
+        auto maximum = [](int64_t type) -> uint64_t {
+          return type == DFM_INT32 ? 9 : type == DFM_INT64 ? 18 : type == DFM_DECIMAL128 ? 38 : 0;
+        };
+        auto rightType = nodeType(r, v.start+c[2]);
+        if (!typed(r) || c[3] < 0 || metadata >> 18 || resultType != DFM_BOOL ||
+            !maximum(operand) || !maximum(rightType) ||
+            (metadata & 63) > maximum(operand) || ((metadata >> 6) & 63) > maximum(rightType) ||
+            (op != DFM_GT && op != DFM_EQ && op != DFM_LT && op != DFM_GE && op != DFM_LE && op != DFM_NE))
+          fail("Invalid Metal decimal comparison descriptor");
+      }
       if ((operand == DFM_DECIMAL128 || resultType == DFM_DECIMAL128) &&
           c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_NULL && c[0] != DFM_LITERAL_INT &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE && c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL &&
           c[0] != DFM_FILL_NULL && c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
-          c[0] != DFM_DECIMAL_FLOAT_CAST && c[0] != DFM_DECIMAL_CAST)
+          c[0] != DFM_DECIMAL_FLOAT_CAST && c[0] != DFM_DECIMAL_CAST && c[0] != DFM_DECIMAL_COMPARE)
         fail("Metal Decimal128 row arithmetic requires CPU execution");
       if (c[0] >= DFM_DT_YEAR && c[0] <= DFM_DT_TRUNCATE) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
@@ -1883,6 +1895,17 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                   castExpression(r.node_types[s.start + c[1]], dtype, a, z,
                                  valid, c[3] != 0, s.start + j + 1) +
                   "}";
+        } else if (op == DFM_DECIMAL_COMPARE) {
+          auto word = [&](int64_t type, const std::string &value) {
+            return type == DFM_DECIMAL128 ? value : "wide_word(long(" + value + "))";
+          };
+          auto metadata = uint64_t(c[3]);
+          text += valid + "=" + av + "&&" + bv + ";if(" + valid + "){DecimalComparison compared=decimal_compare(" +
+              word(nodeType(r,s.start+c[1]), a) + "," + word(nodeType(r,s.start+c[2]), b) + "," +
+              std::to_string(metadata & 63) + "," + std::to_string((metadata >> 6) & 63) + "," +
+              std::to_string(metadata >> 12) + ");" + z + "=uchar(compared.value);" + valid +
+              "=compared.valid;if(!" + valid + ")atomic_fetch_min_explicit(error," +
+              std::to_string(0x08000000UL + s.start+j+1) + "u,memory_order_relaxed);}";
         } else if (op == DFM_DECIMAL_CAST) {
           auto from = nodeType(r, s.start + c[1]);
           auto word = from == DFM_DECIMAL128 ? a :
@@ -2812,6 +2835,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
            "underflow requires CPU execution");
     if (fault & 0x10000000U)
       fail("Integer power requires a nonnegative exponent");
+    if (fault & 0x08000000U)
+      fail("decimal multiplication overflow in Metal comparison");
     fail("Integer overflow in Metal row expression");
   }
   start = Clock::now();

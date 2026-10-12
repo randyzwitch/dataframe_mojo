@@ -72,6 +72,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .execution_report import ExecutionReport
 from .expr import (
     COL,
+    is_comparison,
     DIV,
     DT_YEAR,
     DT_TIME,
@@ -354,6 +355,7 @@ def _capabilities() -> RowCapabilities:
         decimal_mean=True,
         decimal_float_cast=True,
         decimal_casts=True,
+        decimal_comparisons=True,
         reuse_column_slots=True,
         proven_integer_operations=True,
         max_nodes=128,
@@ -675,6 +677,25 @@ struct _Descriptors(Movable):
             self.inputs.extend(_input_series(column))
         for step in plan.steps:
             for i in range(step.start, step.start + step.nodes):
+                if (
+                    plan.code[4 * i] == GT
+                    or plan.code[4 * i] == LT
+                    or plan.code[4 * i] == GE
+                    or plan.code[4 * i] == LE
+                    or plan.code[4 * i] == EQ
+                    or plan.code[4 * i] == NE
+                ):
+                    var left = Int(plan.code[4 * i + 1])
+                    var right = Int(plan.code[4 * i + 2])
+                    var left_type = plan.node_dtypes[step.start + left]
+                    var right_type = plan.node_dtypes[step.start + right]
+                    if left_type.is_decimal() and right_type.is_decimal():
+                        self.code[4 * i + 3] = (
+                            Int64(left_type.scale())
+                            | Int64(right_type.scale()) << 6
+                            | self.code[4 * i] << 12
+                        )
+                        self.code[4 * i] = 218
                 if plan.code[4 * i] == CAST:
                     var operand = Int(plan.code[4 * i + 1])
                     if operand >= 0:
@@ -1641,6 +1662,17 @@ struct MetalRuntime(AcceleratorBackend):
                         decimal_casts = True
         if decimal_casts:
             family += ";metal-decimal-casts-v1"
+        var decimal_comparisons = False
+        for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if is_comparison(Int(plan.code[4 * i])):
+                    var operand = Int(plan.code[4 * i + 1])
+                    if operand >= 0:
+                        decimal_comparisons |= plan.node_dtypes[
+                            step.start + operand
+                        ].is_decimal()
+        if decimal_comparisons:
+            family += ";metal-decimal-comparisons-v1"
         var emulated = False
         for i in range(len(plan.node_dtypes)):
             if plan.node_dtypes[i] == DataType.FLOAT64:
