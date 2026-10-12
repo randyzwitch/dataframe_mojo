@@ -1064,6 +1064,7 @@ def production_policy() -> SuitePolicy:
                 "tests/planner_correctness/test_branch_rewrites.mojo",
                 "tests/planner_correctness/test_join_aggregate_projection.mojo",
                 "tests/planner_correctness/test_join_key_pushdown.mojo",
+                "tests/planner_correctness/test_join_side_swap.mojo",
                 "tests/planner_correctness/test_join_strategies.mojo",
                 "tests/planner_correctness/test_name_identity.mojo",
                 "tests/planner_correctness/test_nested_boundaries.mojo",
