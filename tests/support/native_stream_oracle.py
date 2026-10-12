@@ -136,6 +136,9 @@ with tempfile.TemporaryDirectory() as directory:
         use_dictionary=False,
     )
     print("PyArrow version", pa.__version__, flush=True)
+    lib.dfq_arrow_version.restype = c.c_char_p
+    print("Native Arrow version", lib.dfq_arrow_version(), flush=True)
+    assert pq.read_table(path).equals(table), "Independent PyArrow file producer must preserve all values"
     print("Independent PyArrow file head", pq.read_table(path).slice(0, 3).to_pydict(), flush=True)
     for columns, groups in [
         ((), None),
@@ -148,6 +151,7 @@ with tempfile.TemporaryDirectory() as directory:
             while (batch := next_batch(stream)) is not None:
                 batches.append(batch)
                 print("Imported batch", len(batches), "head", batch.slice(0, 3).to_pydict(), "first retained batch", batches[0].slice(0, 3).to_pydict(), flush=True)
+                print("Native batch buffers", [(field.name, str(column.type), [(buffer.address, buffer.size) if buffer is not None else None for buffer in column.buffers()]) for field, column in zip(batch.schema, batch.columns)], flush=True)
             assert next_batch(stream) is None  # repeated EOF
             selected = list(range(3)) if groups is None else groups
             assert len(batches) == max(1, len(selected))
