@@ -238,12 +238,17 @@ Checked sums in child regions and checked arithmetic followed by head retain
 their existing rejection boundaries. Selectors, windows and unsupported
 aggregate leaves remain unsupported.
 
-A single `n_unique()` aggregate in a select or grouped aggregation runs as
-resident deduplication followed by row counting. Null contributes one distinct
-category, matching CPU semantics; empty global input returns zero. Numeric and
-dictionary-backed text values, later aggregate expressions and prior joins
-are supported. Multiple distinct counts or other aggregate siblings in the
-same operation still require additional lowering and remain unsupported.
+`n_unique()` aggregates in a select or grouped aggregation run as resident
+deduplication followed by row counting. Null contributes one distinct category,
+matching CPU semantics. Multiple distinct counts and other supported aggregate
+siblings share a resident input and combine their results on the GPU. Grouped
+branches match null keys and preserve first-occurrence order when requested;
+global branches combine their single rows. Numeric, String/categorical, and
+logical keys retain the existing key semantics. Composed aggregate expressions,
+filters, joins, and empty inputs are supported. Checked sums, strict casts, and
+checked arithmetic retain their normal child-region restrictions. Only existing
+window observation boundaries permit checked window producers; splitting
+ordinary aggregates does not create such a boundary.
 
 Minimum and maximum preserve the input dtype, ignore nulls, and return null
 for empty or all-null inputs. NaNs order above numeric values, so maximum
