@@ -11,6 +11,13 @@ from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.dtype import DataType
 from dataframe.expr import (
     Expr,
+    RANK,
+    OVER,
+    col,
+    subtree,
+    split_names,
+    is_window,
+    is_reduction,
     DIV,
     FLOORDIV,
     MOD,
@@ -90,6 +97,7 @@ comptime ROW_GROUP_KEY = 1003
 comptime ROW_GROUP_OUTPUT = 1004
 comptime ROW_GROUP_HEADER_LAST = 1005
 comptime ROW_SLICE = 1006
+comptime ROW_RANK_KEY = 1007
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -133,6 +141,25 @@ struct RowPlan(Movable):
     var root: Int
     var limit: Int
     var reductions: Bool
+
+
+def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
+    var reachable = List[Bool](length=root + 1, fill=False)
+    reachable[root] = True
+    for reverse in range(root + 1):
+        var index = root - reverse
+        if not reachable[index]:
+            continue
+        if index == target:
+            return True
+        ref node = expression._nodes[index]
+        if node.left >= 0:
+            reachable[node.left] = True
+        if node.right >= 0:
+            reachable[node.right] = True
+        if node.extra >= 0:
+            reachable[node.extra] = True
+    return False
 
 
 def _empty(name: String, dtype: DataType) raises -> Series:
@@ -752,6 +779,191 @@ def lower_rows(
                         "plan",
                         "strict casts require terminal projections without head",
                     )
+            var rank_schema = schema.copy()
+            var rank_slots = slots.copy()
+            var ranked = bound.expr.copy()
+            var original_rank_scopes = bound.expr.copy()
+            var rank_scopes = List[Bool](length=len(ranked._nodes), fill=False)
+            var has_rank = False
+            for r in range(len(ranked._nodes)):
+                if ranked._nodes[r].op != RANK:
+                    continue
+                if not capabilities.ranks:
+                    capabilities.reject("plan", "rank requires backend support")
+                if node.kind == AGG:
+                    capabilities.reject(
+                        "plan",
+                        "rank inside grouped aggregation requires CPU execution",
+                    )
+                var rank_node = ranked._nodes[r].copy()
+                var replacement = r
+                var partitions = List[String]()
+                var scope = -1
+                for parent in range(r + 1, len(ranked._nodes)):
+                    ref candidate = original_rank_scopes._nodes[parent]
+                    if candidate.op == OVER and _contains_node(
+                        original_rank_scopes, candidate.left, r
+                    ):
+                        if scope >= 0:
+                            capabilities.reject(
+                                "plan",
+                                "nested over scopes require CPU execution",
+                            )
+                        scope = parent
+                if scope >= 0:
+                    partitions = split_names(
+                        original_rank_scopes._nodes[scope].text2
+                    )
+                    rank_scopes[scope] = True
+                    if original_rank_scopes._nodes[scope].left == r:
+                        replacement = scope
+                var methods = List[String](
+                    ["average", "min", "max", "dense", "ordinal"]
+                )
+                var method = -1
+                for m in range(len(methods)):
+                    if rank_node.text == methods[m]:
+                        method = m
+                if method < 0:
+                    raise Error("unknown rank method: " + rank_node.text)
+                var child = bind(subtree(ranked, rank_node.left), rank_schema)
+                for c in range(len(child.expr._nodes)):
+                    var operation = child.expr._nodes[c].op
+                    if (
+                        child.dtypes[c].is_integer()
+                        and (
+                            operation == ADD
+                            or operation == SUB
+                            or operation == MUL
+                            or operation == NEG
+                            or operation == ABS
+                            or operation == FLOORDIV
+                            or operation == POW
+                        )
+                        or operation == CAST
+                        and child.expr._nodes[c].integer
+                        and not child.dtypes[c].is_float()
+                    ):
+                        capabilities.reject(
+                            "plan", "checked rank inputs require CPU execution"
+                        )
+                if (
+                    next_slot + 2 > ROW_MAX_SLOTS
+                    or len(steps) + 2 > ROW_MAX_STEPS
+                ):
+                    capabilities.reject(
+                        "plan", "rank exceeds resident slot or step limits"
+                    )
+                var input_slot = next_slot
+                var input_start = len(literals)
+                _program(
+                    child,
+                    len(child.expr._nodes),
+                    rank_slots,
+                    dtype,
+                    code,
+                    literals,
+                    node_dtypes,
+                    capabilities,
+                )
+                slot_dtypes.append(child.dtypes[len(child.dtypes) - 1])
+                steps.append(
+                    RowStep(
+                        input_start,
+                        len(child.expr._nodes),
+                        input_slot,
+                        False,
+                        0,
+                        0,
+                        False,
+                        False,
+                    )
+                )
+                next_slot += 1
+                var rank_start = len(literals)
+                code.extend(
+                    [
+                        Int64(ROW_RANK_KEY),
+                        Int64(input_slot),
+                        Int64(rank_node.min_count == 1),
+                        Int64(method),
+                    ]
+                )
+                literals.append(0)
+                node_dtypes.append(child.dtypes[len(child.dtypes) - 1])
+                for name in partitions:
+                    var key = -1
+                    for c in range(len(schema)):
+                        if schema[c].name() == name:
+                            key = c
+                    if key < 0:
+                        raise Error("Unknown partition column: " + name)
+                    capabilities.require_key(schema[key].dtype())
+                    code.extend(
+                        [
+                            Int64(ROW_SORT_KEY),
+                            Int64(slots[key]),
+                            Int64(0),
+                            Int64(1),
+                        ]
+                    )
+                    literals.append(0)
+                    node_dtypes.append(schema[key].dtype())
+                var result_type = (
+                    DataType.FLOAT64 if method == 0 else DataType.INT64
+                )
+                slot_dtypes.append(result_type)
+                steps.append(
+                    RowStep(
+                        rank_start,
+                        1 + len(partitions),
+                        next_slot,
+                        False,
+                        0,
+                        0,
+                        True,
+                        False,
+                    )
+                )
+                var name = "__metal_rank_" + String(next_slot)
+                var collision = True
+                while collision:
+                    collision = False
+                    for column in rank_schema:
+                        if column.name() == name:
+                            collision = True
+                    if collision:
+                        name += "_"
+                rank_schema.append(_empty(name, result_type))
+                rank_slots.append(next_slot)
+                next_slot += 1
+                ranked._nodes[replacement] = col(name)._nodes[0].copy()
+                if replacement != r:
+                    ranked._nodes[r] = col(name)._nodes[0].copy()
+                has_rank = True
+            if has_rank:
+                for scope in range(len(ranked._nodes)):
+                    if (
+                        not rank_scopes[scope]
+                        or ranked._nodes[scope].op != OVER
+                    ):
+                        continue
+                    var child = ranked._nodes[scope].left
+                    var fragment = subtree(ranked, child)
+                    for part in fragment._nodes:
+                        if (
+                            is_window(part.op)
+                            or is_reduction(part.op)
+                            or part.op == OVER
+                        ):
+                            capabilities.reject(
+                                "plan",
+                                "rank scopes containing other windows or reductions require CPU execution",
+                            )
+                    ranked._nodes[scope] = ranked._nodes[child].copy()
+                bound = bind(
+                    subtree(ranked, len(ranked._nodes) - 1), rank_schema
+                )
             var count = len(bound.expr._nodes)
             var result_dtype = bound.dtypes[count - 1]
             var reduction = -1
@@ -846,7 +1058,7 @@ def lower_rows(
             _program(
                 bound,
                 count,
-                slots,
+                rank_slots,
                 dtype,
                 code,
                 literals,

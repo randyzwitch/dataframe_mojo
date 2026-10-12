@@ -102,6 +102,18 @@ values in either direction; equal keys retain their input order. Sorting can
 appear between projections and filters without materializing CPU columns.
 The GPU sorts row indices with a parallel merge sort and gathers the live
 columns. Preflight includes both index buffers and both value matrices.
+Average, min, max, dense, and ordinal rank also run on the GPU, globally or
+within one or more `over()` partition keys. Ranks retain original row order;
+ordinal ties follow input order. Null values remain null, null partition keys
+form a group, signed zeros tie, and NaNs form one tie class (last ascending,
+first descending), matching the CPU rank contract. Numeric, Boolean, String,
+categorical, temporal, and Decimal32/64 inputs use the same stable sort
+workspace. Dense ranks scan tie boundaries without downloading row data.
+Filters, projections, grouped results, joins, slices, and final head can surround
+rank operations. Checked rank inputs and rank inside grouped aggregation remain
+unsupported. Rank plans carry a separate `metal-rank-v1` calibration family;
+automatic placement stays on CPU without matching validated evidence.
+
 Checked integer arithmetic currently
 requires terminal projections without head, matching the shared planner's
 observable-overflow boundary.
