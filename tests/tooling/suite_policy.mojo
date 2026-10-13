@@ -1287,6 +1287,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_projections.mojo::test_native_metal_scalar_projections_empty_sources_types_and_literal_text",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_projections.mojo::test_native_metal_scalar_projection_consumers_limits_joins_and_collisions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_projections.mojo::test_native_metal_scalar_projection_profiles_budgets_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_quantiles.mojo::test_native_metal_quantiles_numeric_widths_nulls_groups_and_partitions",
             "metal",
         )
@@ -1885,6 +1903,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_empty_inputs.mojo",
                 "tests/execution_modes/test_backend_metal_duration_totals.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
+                "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",
                 "tests/execution_modes/test_backend_metal_higher_moments.mojo",
                 "tests/execution_modes/test_backend_metal_pair_moments.mojo",

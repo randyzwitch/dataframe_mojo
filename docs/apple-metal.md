@@ -69,6 +69,14 @@ row consumers also execute natively, retaining row
 counts without a synthetic host column. Their calibration families include
 `empty-inputs-v1` and `metal-empty-inputs-v1`.
 
+Scalar-only selections such as `select(lit(7))` produce one row even from an
+empty or zero-column source. Native counts establish the scalar shape, then
+resident expressions evaluate and project the literals. Typed nulls, text,
+fixed logical values, later filters, reductions, joins, and limits retain CPU
+behavior. Private counter aliases avoid user names and preserve the input
+producer checks. These plans use the resident scalar DAG; its automatic
+placement estimates remain unavailable.
+
 Skewness and kurtosis execute global, grouped, and partitioned central-moment
 reductions in emulated Float64, including bias correction and Fisher/Pearson
 conventions. Empty and insufficient samples retain CPU nulls; constant and
