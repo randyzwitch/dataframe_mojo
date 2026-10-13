@@ -353,6 +353,7 @@ def _capabilities() -> RowCapabilities:
         decimal128_reductions=True,
         decimal_mean=True,
         decimal_float_cast=True,
+        decimal_casts=True,
         reuse_column_slots=True,
         proven_integer_operations=True,
         max_nodes=128,
@@ -686,6 +687,33 @@ struct _Descriptors(Movable):
                             self.code[4 * i + 2] = -1
                             self.code[4 * i + 3] = Int64(source.scale())
                             self.literals[i] = Float64(pow10(source.scale()))
+                        elif (
+                            source.is_decimal()
+                            or plan.node_dtypes[i].is_decimal()
+                        ):
+                            var target = plan.node_dtypes[i]
+                            self.code[4 * i] = 217
+                            self.code[4 * i + 2] = -1
+                            self.code[4 * i + 3] = (
+                                Int64(
+                                    source.scale() if source.is_decimal() else 0
+                                )
+                                | Int64(
+                                    target.scale() if target.is_decimal() else 0
+                                )
+                                << 6
+                                | Int64(
+                                    target.precision() if target.is_decimal() else 0
+                                )
+                                << 12
+                                | self.code[4 * i + 3] << 18
+                                | Int64(source.is_decimal()) << 19
+                                | Int64(target.is_decimal()) << 20
+                            )
+                            if target == DataType.FLOAT32:
+                                self.literals[i] = Float64(
+                                    pow10(source.scale())
+                                )
             self.steps.extend(
                 [
                     Int64(step.start),
@@ -1601,6 +1629,18 @@ struct MetalRuntime(AcceleratorBackend):
                         ].is_decimal()
         if decimal_float_cast:
             family += ";metal-decimal-float-casts-v1"
+        var decimal_casts = False
+        for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if plan.code[4 * i] == CAST:
+                    var operand = Int(plan.code[4 * i + 1])
+                    if operand >= 0 and (
+                        plan.node_dtypes[i].is_decimal()
+                        or plan.node_dtypes[step.start + operand].is_decimal()
+                    ):
+                        decimal_casts = True
+        if decimal_casts:
+            family += ";metal-decimal-casts-v1"
         var emulated = False
         for i in range(len(plan.node_dtypes)):
             if plan.node_dtypes[i] == DataType.FLOAT64:

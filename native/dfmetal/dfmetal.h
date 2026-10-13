@@ -148,6 +148,10 @@ enum DFMOp {
   // precision, scale, and the configured worker count.
   DFM_DECIMAL128_SUM = 215,
   DFM_DECIMAL128_MEAN = 216,
+  // Unary integer/decimal cast. code[3] packs source scale (6 bits), target
+  // scale (6), target decimal precision (6), strict, source/target decimal flags.
+  // Decimal -> Float32 uses the CPU binary64 divisor in literals[node].
+  DFM_DECIMAL_CAST = 217,
 };
 
 typedef struct DFMInput {

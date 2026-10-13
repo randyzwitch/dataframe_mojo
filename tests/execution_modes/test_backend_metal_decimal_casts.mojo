@@ -97,6 +97,7 @@ def test_decimal_cast_capability_scale_descriptors_and_rejections() raises:
         assert_equal(casts, 3)
     var caps = _capabilities()
     caps.decimal_float_cast = False
+    caps.decimal_casts = False
     with assert_raises(contains="logical"):
         _ = lower_rows(
             fixture(3, 2).lazy().select(col("large").cast(DataType.FLOAT64)),
@@ -110,7 +111,7 @@ def test_decimal_cast_capability_scale_descriptors_and_rejections() raises:
     with assert_raises(contains="logical"):
         _ = lower_rows(
             fixture(3, 2).lazy().select(col("large").cast(DataType.FLOAT32)),
-            _capabilities(),
+            caps,
         )
     var runtime = MetalRuntime(device_id=999999)
     var query = fixture(3, 38).lazy().select_exprs(cast_columns())

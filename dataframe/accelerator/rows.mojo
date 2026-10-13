@@ -302,6 +302,26 @@ def _program(
             and (capabilities.float64 or capabilities.float64_emulated)
             and capabilities.casts
         )
+        var decimal_cast = (
+            op == CAST
+            and capabilities.casts
+            and capabilities.decimal_casts
+            and (
+                (
+                    left_type.is_decimal()
+                    and (
+                        bound.dtypes[i].is_decimal()
+                        or bound.dtypes[i].is_integer()
+                        or bound.dtypes[i] == DataType.BOOL
+                        or bound.dtypes[i] == DataType.FLOAT32
+                    )
+                )
+                or (
+                    bound.dtypes[i].is_decimal()
+                    and (left_type.is_integer() or left_type == DataType.BOOL)
+                )
+            )
+        )
         if (
             temporal
             and left_type.is_datetime()
@@ -381,6 +401,7 @@ def _program(
                 and op != EQ
                 and op != NE
                 and not decimal_float_cast
+                and not decimal_cast
             ):
                 capabilities.reject(
                     "logical",
@@ -397,6 +418,7 @@ def _program(
         if (
             logical
             and not decimal_float_cast
+            and not decimal_cast
             and (
                 op == SQRT
                 or op == ABS

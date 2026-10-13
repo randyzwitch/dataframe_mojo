@@ -47,7 +47,7 @@ bool binaryOp(int64_t op) {
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+  return (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
          op == DFM_CEIL || op == DFM_ROUND || op == DFM_SQRT ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
@@ -599,12 +599,37 @@ Shape validate(const DFMRequest &r, bool storage = false,
             r.code[4*c[3]] != DFM_LITERAL_INT || nodeType(r,c[3]) != DFM_INT64)
           fail("Invalid Metal Decimal128 literal high-word payload");
       }
+      if (c[0] == DFM_DECIMAL_CAST) {
+        auto metadata = uint64_t(c[3]);
+        auto fromScale = metadata & 63, toScale = (metadata >> 6) & 63;
+        auto precision = (metadata >> 12) & 63;
+        bool sourceDecimal = metadata & (1UL << 19), targetDecimal = metadata & (1UL << 20);
+        auto maximum = [](int64_t type) -> uint64_t {
+          return type == DFM_INT32 ? 9 : type == DFM_INT64 ? 18 : type == DFM_DECIMAL128 ? 38 : 0;
+        };
+        if (!typed(r) || c[2] != -1 || c[3] < 0 || metadata >> 21 ||
+            (!sourceDecimal && !targetDecimal) ||
+            (sourceDecimal ? !maximum(operand) || fromScale > maximum(operand)
+                           : fromScale != 0 || operand == DFM_FLOAT32 || operand == DFM_FLOAT64_STORAGE || operand == DFM_DECIMAL128) ||
+            (targetDecimal ? !precision || precision > maximum(resultType) || toScale > precision
+                           : precision != 0 || toScale != 0 || resultType == DFM_FLOAT64_STORAGE || resultType == DFM_DECIMAL128))
+          fail("Invalid Metal decimal cast descriptor");
+        if (resultType == DFM_FLOAT32) {
+          unsigned __int128 unit = 1;
+          for (uint64_t i = 0; i < fromScale; ++i) unit *= 10;
+          double divisor = double(unit);
+          uint64_t bits;
+          std::memcpy(&bits, &divisor, sizeof(bits));
+          if (r.literals[v.start+j] != bits)
+            fail("Invalid Metal decimal Float32 cast divisor");
+        }
+      }
       if ((operand == DFM_DECIMAL128 || resultType == DFM_DECIMAL128) &&
           c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_NULL && c[0] != DFM_LITERAL_INT &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE && c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL &&
           c[0] != DFM_FILL_NULL && c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
-          c[0] != DFM_DECIMAL_FLOAT_CAST)
+          c[0] != DFM_DECIMAL_FLOAT_CAST && c[0] != DFM_DECIMAL_CAST)
         fail("Metal Decimal128 row arithmetic requires CPU execution");
       if (c[0] >= DFM_DT_YEAR && c[0] <= DFM_DT_TRUNCATE) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
@@ -1858,6 +1883,31 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                   castExpression(r.node_types[s.start + c[1]], dtype, a, z,
                                  valid, c[3] != 0, s.start + j + 1) +
                   "}";
+        } else if (op == DFM_DECIMAL_CAST) {
+          auto from = nodeType(r, s.start + c[1]);
+          auto word = from == DFM_DECIMAL128 ? a :
+              "ulong2(ulong(" + a + ")," + (unsignedType(from) || from == DFM_BOOL
+                 ? std::string("0UL") : "ulong(long(" + a + ")<0?-1L:0L)") + ")";
+          auto metadata = uint64_t(c[3]);
+          text += valid + "=" + av + ";if(" + valid + "){";
+          if (dtype == DFM_FLOAT32) {
+            text += "ulong2 raw=" + word + ";" + z +
+                "=as_type<float>(f64_to_float32(f64_div(f64_from_wide(raw.x,raw.y,false),lit[" +
+                std::to_string(s.start+j) + "])));";
+          } else {
+            text += "DecimalCast casted=decimal_cast(" + word + "," +
+                std::to_string(metadata & 63) + "," +
+                std::to_string((metadata >> 6) & 63) + "," +
+                std::to_string((metadata >> 12) & 63) + "," +
+                std::to_string(width(dtype)*8) + "," + (unsignedType(dtype) ? "true" : "false") +
+                "," + (dtype == DFM_BOOL ? "true" : "false") + ");" +
+                valid + "=casted.valid;if(" + valid + ")" + z + "=" +
+                (dtype == DFM_DECIMAL128 ? "casted.value" : std::string(metalType(dtype)) + "(casted.value.x)") + ";";
+            if (metadata & (1UL << 18))
+              text += "else atomic_fetch_min_explicit(error," +
+                      std::to_string(0x40000000UL + s.start+j+1) + "u,memory_order_relaxed);";
+          }
+          text += "}";
         } else if (op == DFM_INT_IS_IN) {
           auto operand = nodeType(r, s.start + c[1]);
           text += valid + "=" + av + ";if(" + valid + "){bool hit=false;";
@@ -2395,8 +2445,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     memcpy(&floating, r.literals + i, 8);
     auto op = r.code[4 * i];
     auto dtype = nodeType(r, i);
-    if (op == DFM_ROUND && r.code[4*i+3] != 0 &&
-        (dtype == DFM_FLOAT32 || dtype == DFM_FLOAT64_STORAGE)) {
+    if ((op == DFM_ROUND && r.code[4*i+3] != 0 &&
+         (dtype == DFM_FLOAT32 || dtype == DFM_FLOAT64_STORAGE)) ||
+        (op == DFM_DECIMAL_CAST && dtype == DFM_FLOAT32)) {
       memcpy(static_cast<char *>(literal.contents) + i * 8, r.literals + i, 8);
       continue;
     }
