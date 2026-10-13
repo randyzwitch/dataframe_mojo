@@ -212,11 +212,47 @@ def _hash_column(
                     ),
                 )
         return
+    # Arrow views, read through pointers taken once: a string up to eight
+    # bytes is one load from inside its 16-byte view, as the offsets loop
+    # above loads it; a longer one is hashed where its view says it is.
+    # Per row, `_get` passed the whole column to a call (a third more
+    # hashing time on view keys).
+    ref storage = strings._view_storage.value()
+    var views = (
+        storage._views[]
+        .unsafe_ptr()
+        .unsafe_offset(strings._offset)
+        .unsafe_mut_cast[False]()
+        .unsafe_origin_cast[ImmutAnyOrigin]()
+    )
+    var buffers = storage._buffers[].unsafe_ptr()
+    var nulls = len(strings._bits[]) != 0
     for i in range(start, end):
-        if not strings._valid(i):
+        if nulls and not strings._valid(i):
             write(i, _NULL_KEY)
-        else:
-            write(i, _hash_bytes(strings._get(i).as_bytes()))
+            continue
+        var view = views.unsafe_offset(i)
+        var length = Int(view[].length)
+        var inline = view.unsafe_bitcast[UInt8]().unsafe_offset(4)
+        if length <= 8:
+            var word = bitcast[DType.uint64, 1](inline.unsafe_load[width=8]())
+            write(i, _short_hash(word, length))
+            continue
+        var at = inline
+        if length > 12:
+            at = (
+                buffers[unsafe_offset=Int(view[].buffer_index)][]
+                .unsafe_ptr()
+                .unsafe_offset(Int(view[].offset))
+                .unsafe_mut_cast[False]()
+                .unsafe_origin_cast[ImmutAnyOrigin]()
+            )
+        write(
+            i,
+            _hash_bytes(
+                Span[UInt8, ImmutAnyOrigin](unsafe_ptr=at, length=length)
+            ),
+        )
 
 
 struct _HashJob(Job):
