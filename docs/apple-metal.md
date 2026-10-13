@@ -692,14 +692,33 @@ buffers or returning an error; execution never retries the query on CPU after a
 GPU fault. Output owners and source owners remain alive across that boundary.
 
 Binary64 emulation and native Float32 kernels have different costs. Plans
-containing Float64 values, floating sum/mean, rounding, square root, floor division or remainder, or
+containing Float64 values, floating sum/mean, rounding, square root, exponential/logarithm, floor division or remainder, or
 Int64/UInt64-to-Float32 conversions carry the separate `metal-emulated-float64-v1` calibration family.
 Native-only calibration cannot select those plans. Without matching, validated
 end-to-end evidence, automatic placement stays on CPU. Future calibration may
 select emulation only when its conservative GPU estimate beats the CPU bound;
 forced accelerator execution remains available independently of that decision.
 
-Floating power and transcendentals are not yet supported by this subset.
+Natural `exp` and `log` execute on Metal for Float32, Float64, and primitive
+integer inputs. Integer inputs return Float64; Float32 inputs retain Float32.
+The shared integer-only binary64 helpers reduce `exp` around multiples of log(2)
+and use a Taylor series, and normalize `log` around one with an atanh series.
+They preserve subnormal inputs and outputs, quiet NaNs, and match zero/infinity
+and domain classifications. These are numerical approximations: validation
+allows 16 ULP against independent host libm rather than promising identical
+vendor-libm bits. The GPU differential fixture covers all normal exponents,
+boundaries around overflow/underflow and one, exceptional values, and random
+encodings. Conditional expressions, resident consumers, and chunked inputs use
+the same kernels. Estimates include separate exponential/logarithm node counts
+in `transcendentals-v1:e<count>:l<count>` and corresponding `metal-` families.
+Decimal inputs require an explicit Float64 cast, as with square root. CPU
+expression kernels use system libm for logarithms to preserve positive infinity
+and the existing numeric tolerance (the toolchain approximation misses it for
+`log(10)`). Exponential NaNs and boundary lanes also use libm to avoid premature
+overflow and retain gradual underflow; ordinary finite exponentials keep their
+vector kernel.
+
+Floating power is not yet supported by this subset.
 
 ## CPU parity work remaining
 
@@ -710,7 +729,7 @@ that unlisted query combinations are already equivalent.
 
 | Area | Remaining CPU operations or behavior |
 | --- | --- |
-| Numeric expressions | Floating power, `exp`, and `log`. |
+| Numeric expressions | Floating power. |
 | Reductions | Mode, implode, and value counts. |
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
 | Temporal expressions | Row-valued parsing/formatting and timezone operations. |

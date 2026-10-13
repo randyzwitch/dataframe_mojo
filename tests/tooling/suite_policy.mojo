@@ -1341,6 +1341,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_transcendentals.mojo::test_native_metal_transcendentals_float_widths_subnormals_extremes_nulls_and_empty_rows",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_transcendentals.mojo::test_native_metal_transcendentals_resident_consumers_windows_chunks_and_scalar_literals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_transcendentals.mojo::test_native_metal_transcendentals_profiles_family_exact_budget_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_fixed_offsets.mojo::test_native_metal_fixed_offsets_all_temporal_units_nulls_negative_epochs_and_empty_rows",
             "metal",
         )
@@ -1981,6 +1999,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_chunked_inputs.mojo",
                 "tests/execution_modes/test_backend_metal_calendar_truncation.mojo",
                 "tests/execution_modes/test_backend_metal_calendar_offsets.mojo",
+                "tests/execution_modes/test_backend_metal_transcendentals.mojo",
                 "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",

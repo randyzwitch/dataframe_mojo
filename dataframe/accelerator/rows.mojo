@@ -45,6 +45,8 @@ from dataframe.expr import (
     KEEP_NULLS,
     ABS,
     SQRT,
+    EXP,
+    LOG,
     FLOOR,
     CEIL,
     ROUND,
@@ -250,6 +252,11 @@ def _program(
                 and bound.dtypes[i] == DataType.FLOAT32
             )
             or (
+                (op == EXP or op == LOG)
+                and capabilities.float_transcendentals
+                and bound.dtypes[i].is_float()
+            )
+            or (
                 op == SQRT
                 and capabilities.float_sqrt
                 and bound.dtypes[i].is_float()
@@ -404,6 +411,8 @@ def _program(
                         or op == FLOORDIV
                         or op == MOD
                         or op == SQRT
+                        or (op == EXP or op == LOG)
+                        and capabilities.float_transcendentals
                         or op == CAST
                         or op == FLOOR
                         or op == CEIL
@@ -470,6 +479,8 @@ def _program(
             and not decimal_arithmetic
             and (
                 op == SQRT
+                or op == EXP
+                or op == LOG
                 or op == ABS
                 or op == FLOORDIV
                 or op == MOD

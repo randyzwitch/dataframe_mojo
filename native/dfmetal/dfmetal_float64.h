@@ -450,4 +450,47 @@ inline ulong f64_decimal_round(ulong value, ulong scale, bool negative_decimals)
   if (f64_less(scaled,0)) rounded ^= 0x8000000000000000UL;
   return negative_decimals ? f64_mul(rounded,scale) : f64_div(rounded,scale);
 }
+// Range reduction keeps exp's Taylor argument within half a log(2).
+// The 24-term tail is below binary64 rounding error. Scaling the normalized
+// significand once preserves gradual underflow without a rounded power-of-two
+// intermediate. These transcendental approximations are not bitwise libm APIs.
+inline ulong f64_exp(ulong a) {
+  if (f64_nan(a)) return f64_quiet(a);
+  if (f64_inf(a)) return a >> 63 ? 0UL : a;
+  if (f64_less(0x4086300000000000UL,a)) return 0x7ff0000000000000UL; // 710
+  if (f64_less(a,0xc087700000000000UL)) return 0UL; // -750
+  ulong rounded=f64_round(f64_mul(a,0x3ff71547652b82feUL));
+  long k=long(f64_to_integer(rounded,64,false).word);
+  ulong count=f64_from_signed(k);
+  ulong r=f64_fma(count^0x8000000000000000UL,0x3fe62e42fefa39efUL,a);
+  r=f64_fma(count^0x8000000000000000UL,0x3c7abc9e3b39803fUL,r);
+  ulong sum=0x3ff0000000000000UL,term=sum;
+  for (uint n=1;n<=24;++n) {
+    term=f64_div(f64_mul(term,r),f64_from_unsigned(n));
+    sum=f64_add(sum,term);
+  }
+  F64Parts value=f64_parts(sum);
+  return f64_pack(0,value.exponent+int(k),value.significand<<3);
+}
+// Normalize even subnormal inputs, then use log(m)=2*atanh((m-1)/(m+1))
+// with |(m-1)/(m+1)| <= 0.172. Split log(2) and fused reconstruction retain
+// small results around one and avoid a large rounded exponent product.
+inline ulong f64_log(ulong a) {
+  if (f64_nan(a)) return f64_quiet(a);
+  if (!f64_abs(a)) return 0xfff0000000000000UL;
+  if (a>>63) return f64_invalid();
+  if (f64_inf(a)) return a;
+  F64Parts value=f64_parts(a);
+  ulong m=0x3ff0000000000000UL|(value.significand&0x000fffffffffffffUL);
+  if (f64_less(0x3ff6a09e667f3bcdUL,m)) {m-=0x0010000000000000UL;++value.exponent;}
+  ulong y=f64_div(f64_sub(m,0x3ff0000000000000UL),f64_add(m,0x3ff0000000000000UL));
+  ulong square=f64_mul(y,y),term=y,sum=y;
+  for (uint n=3;n<=49;n+=2) {
+    term=f64_mul(term,square);
+    sum=f64_add(sum,f64_div(term,f64_from_unsigned(n)));
+  }
+  ulong count=f64_from_signed(value.exponent);
+  ulong result=f64_fma(count,0x3c7abc9e3b39803fUL,f64_mul(sum,0x4000000000000000UL));
+  return f64_fma(count,0x3fe62e42fefa39efUL,result);
+}
 )metal";
