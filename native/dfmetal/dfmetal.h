@@ -180,6 +180,13 @@ enum DFMOp {
   DFM_DECIMAL_ARITHMETIC = 219,
   // Unary decimal NEG/ABS: code[3] is the original unary opcode.
   DFM_DECIMAL_UNARY = 220,
+  // Quantile metadata contains the complete binary64 q bits in [0, 1].
+  // Float64 input/output; nulls excluded and NaNs ordered above numbers.
+  DFM_QUANTILE_LINEAR = 221,
+  DFM_QUANTILE_LOWER = 222,
+  DFM_QUANTILE_HIGHER = 223,
+  DFM_QUANTILE_NEAREST = 224,
+  DFM_QUANTILE_MIDPOINT = 225,
 };
 
 typedef struct DFMInput {

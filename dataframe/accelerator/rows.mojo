@@ -85,6 +85,8 @@ from dataframe.expr import (
     VAR,
     SKEW,
     KURTOSIS,
+    MEDIAN,
+    QUANTILE,
     COV,
     CORR,
     STD,
@@ -124,6 +126,13 @@ comptime ROW_SLICE = 1006
 comptime ROW_CUMULATIVE_KEY = 1009
 comptime ROW_RANK_KEY = 1007
 comptime ROW_GROUP_HEADER_WINDOW = 1008
+# Backend-neutral quantile reductions preserve the complete binary64 q in
+# min_count; the reduction identifies the interpolation method.
+comptime ROW_QUANTILE_LINEAR = 1010
+comptime ROW_QUANTILE_LOWER = 1011
+comptime ROW_QUANTILE_HIGHER = 1012
+comptime ROW_QUANTILE_NEAREST = 1013
+comptime ROW_QUANTILE_MIDPOINT = 1014
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -1423,6 +1432,8 @@ def lower_rows(
                 or last.op == CORR
                 or last.op == SKEW
                 or last.op == KURTOSIS
+                or last.op == MEDIAN
+                or last.op == QUANTILE
                 or last.op == VAR
                 or last.op == STD
                 or last.op == LEN
@@ -1573,6 +1584,26 @@ def lower_rows(
                         min(Int(last.integer), Int(Int32.MAX))
                         | min(configured_workers(), 65535) << 47
                     )
+                    var converted = subtree(bound.expr, last.left).cast(
+                        DataType.FLOAT64
+                    )
+                    bound = bind(converted, rank_schema)
+                    count = len(bound.expr._nodes)
+                if reduction == MEDIAN or reduction == QUANTILE:
+                    min_count = Int(
+                        bitcast[DType.int64](
+                            last.floating if last.floating != 0 else Float64(0)
+                        )
+                    )
+                    reduction = ROW_QUANTILE_LINEAR
+                    if last.text == "lower":
+                        reduction = ROW_QUANTILE_LOWER
+                    elif last.text == "higher":
+                        reduction = ROW_QUANTILE_HIGHER
+                    elif last.text == "nearest":
+                        reduction = ROW_QUANTILE_NEAREST
+                    elif last.text == "midpoint":
+                        reduction = ROW_QUANTILE_MIDPOINT
                     var converted = subtree(bound.expr, last.left).cast(
                         DataType.FLOAT64
                     )

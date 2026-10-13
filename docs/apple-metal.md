@@ -332,6 +332,22 @@ the CPU's dense and nullable paths have different rescaling checks. Safe
 operations can feed resident consumers. Estimates include
 `metal-decimal-multiplicative-v1`; previous calibrations do not apply.
 
+Median and quantile reductions return Float64 for numeric inputs, including
+full-width UInt64 and Decimal32/64/128 with their numeric scales. CPU sample
+conversion also preserves these values instead of the internal UInt64 ordering
+keys or raw decimal payloads. Global,
+grouped, and partitioned reductions support `linear`, `lower`, `higher`,
+`nearest`, and `midpoint` interpolation. Nulls are excluded; NaNs count as valid
+samples and sort above every number. Empty or all-null samples produce null.
+The original Float64 probability is retained without narrowing, and linear and
+midpoint arithmetic preserve the CPU operation sequence, including infinities.
+
+Selection scans one byte of the sortable binary64 encoding at a time. Eight
+passes find each required order statistic without allocating a sorted copy;
+one GPU lane performs each reduction. Values and selected ranks remain on the
+GPU. Estimates use separate `quantiles-v1` and `metal-quantiles-v1` calibration
+families. Rebuild the optional runtime for the appended quantile opcodes.
+
 Decimal32/64 sums accumulate exactly in two words and return Decimal128 with
 precision 38 and the original scale, including through joins and scalar
 broadcasts. The Int32.MAX row bound keeps every possible partial below 2**94,
@@ -646,7 +662,7 @@ that unlisted query combinations are already equivalent.
 | Area | Remaining CPU operations or behavior |
 | --- | --- |
 | Numeric expressions | Floating power, `exp`, and `log`. |
-| Reductions | Median, quantile, mode, implode, and value counts. |
+| Reductions | Mode, implode, and value counts. |
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
 | Temporal expressions | Calendar month/year truncation, offsets, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
