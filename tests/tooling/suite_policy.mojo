@@ -103,14 +103,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/public_contracts/test_order_windows.mojo::test_coordinate_interpolation_accepts_chunked_equal_length_columns",
-            "Coordinate interpolation does not handle chunked columns with equal logical lengths.",
-            "Column values and validity must have equal lengths",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_temporal.mojo::test_temporal_subtraction_equal_minimum_ticks_cancel_exactly",
             "Subtracting equal minimum Int64 temporal ticks raises overflow even though the exact difference is zero.",
             "temporal value overflows Int64",
@@ -1341,6 +1333,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_coordinate_interpolation.mojo::test_native_metal_coordinate_interpolation_numeric_decimals_partitions_and_chunked_sources",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_coordinate_interpolation.mojo::test_native_metal_coordinate_interpolation_independent_distances_duplicate_axes_and_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_coordinate_interpolation.mojo::test_native_metal_coordinate_interpolation_profile_exact_budget_cost_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_interpolation.mojo::test_native_metal_interpolation_numeric_widths_decimals_null_partitions_slices_and_chunks",
             "metal",
         )
@@ -2019,6 +2029,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_calendar_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_transcendentals.mojo",
                 "tests/execution_modes/test_backend_metal_interpolation.mojo",
+                "tests/execution_modes/test_backend_metal_coordinate_interpolation.mojo",
                 "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",

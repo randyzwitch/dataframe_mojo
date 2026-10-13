@@ -439,21 +439,22 @@ def _decimal_cum_sum(
 
 def _as_float(input: Series) raises -> Series:
     """Convert a primitive numeric column to Float64, preserving validity."""
-    if input._data.isa[Column[Float64]]():
-        return input.copy()
-    var valid = validity(input)
-    if input.dtype().is_decimal():
-        var wide = input._decimal128()
+    var contiguous = input.rechunk()
+    if contiguous._data.isa[Column[Float64]]():
+        return contiguous.copy()
+    var valid = validity(contiguous)
+    if contiguous.dtype().is_decimal():
+        var wide = contiguous._decimal128()
         ref column = wide._data[Column[Int128]]
         var values = List[Float64](capacity=len(column))
-        var divisor = pow10(input.dtype().scale()).cast[DType.float64]()
+        var divisor = pow10(contiguous.dtype().scale()).cast[DType.float64]()
         for i in range(len(column)):
             values.append(column._get(i).cast[DType.float64]() / divisor)
         return Series("", Column[Float64](values^, valid))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
-        if input._data.isa[Column[Scalar[D]]]():
-            ref column = input._data[Column[Scalar[D]]]
+        if contiguous._data.isa[Column[Scalar[D]]]():
+            ref column = contiguous._data[Column[Scalar[D]]]
             var values = List[Float64](capacity=len(column))
             for i in range(len(column)):
                 values.append(column._get(i).cast[DType.float64]())
