@@ -5,15 +5,30 @@ short, long, empty, Unicode and null strings, null integers, -0.0/0.0 and NaN
 floats and null Booleans; layouts cover contiguous, offset and unequally
 chunked columns and strings carrying Parquet dictionary codes beside plain
 ones. Worker counts cover tables that clear and keep their rows (three or
-more) and tables that grow (two)."""
-from std.testing import assert_true
+more) and tables that grow (two). Decimal sums and means (decimal32, 64
+and 128 inputs) keep exact 128-bit totals on both routes and raise past
+their precision."""
+from std.testing import assert_equal, assert_raises, assert_true
 
-from dataframe import DataFrame, Expr, col, concat, lit
+from dataframe import (
+    Column,
+    DataFrame,
+    DataType,
+    Expr,
+    Series,
+    col,
+    concat,
+    lit,
+)
 from tests.support.aggregate_table_reference import (
     aggregate_frame,
+    assert_close,
     assert_groups,
     coded_strings,
     group_models,
+    group_of,
+    key_text,
+    model_key_text,
 )
 from tests.support.coverage_generators import chunk_layout, offset_layout
 from tests.support.group_strategy_reference import (
@@ -145,4 +160,164 @@ def test_tables_that_fill_many_times_merge_every_group_once() raises:
         group_models(rows, groups),
         False,
     )
+    _ = workers^
+
+
+def decimal_value(row: Int) -> Int64:
+    return Int64((row * 104729) % 200_001 - 100_000)
+
+
+def decimal_frame(rows: Int, groups: Int) raises -> DataFrame:
+    """Keys s and i of each row's group, then the same unscaled values as
+    decimal32 (7, 2), decimal64 (15, 2) and decimal128 (30, 4) columns,
+    each null on its own rows, and r, the row's index."""
+    var keys = aggregate_frame(rows, groups)
+    var d32 = List[Int32]()
+    var v32 = List[Bool]()
+    var d64 = List[Int64]()
+    var v64 = List[Bool]()
+    var d128 = List[Int128]()
+    var v128 = List[Bool]()
+    for row in range(rows):
+        var value = decimal_value(row)
+        d32.append(Int32(value))
+        v32.append(row % 11 != 4)
+        d64.append(value)
+        v64.append(row % 13 != 6)
+        d128.append(Int128(value) * 1_000_000_000_000_000)
+        v128.append(row % 7 != 2)
+    return DataFrame(
+        [
+            keys.column("s"),
+            keys.column("i"),
+            Series("d32", Column[Int32](d32^, v32^)).with_dtype(
+                DataType.decimal(7, 2, 32)
+            ),
+            Series("d64", Column[Int64](d64^, v64^)).with_dtype(
+                DataType.decimal(15, 2, 64)
+            ),
+            Series("d128", Column[Int128](d128^, v128^)).with_dtype(
+                DataType.decimal(30, 4)
+            ),
+            keys.column("r"),
+        ]
+    )
+
+
+def unscaled(column: Series, row: Int) raises -> Int128:
+    var flat = column.rechunk() if column.is_chunked() else column.copy()
+    return flat._data[Column[Int128]]._get(row)
+
+
+def assert_decimal_groups(
+    actual: DataFrame, rows: Int, groups: Int, start: Int
+) raises:
+    """Each group's decimal sums (exact, unscaled) and means against Int128
+    scalar totals over rows `start` on, in any order."""
+    var totals = List[List[Int128]](
+        length=groups, fill=[Int128(0), Int128(0), Int128(0)]
+    )
+    var counts = List[List[Int]](length=groups, fill=[0, 0, 0])
+    var seen_rows = List[Int](length=groups, fill=0)
+    for row in range(start, rows):
+        var g = group_of(row, groups)
+        var value = Int128(decimal_value(row))
+        seen_rows[g] += 1
+        if row % 11 != 4:
+            totals[g][0] += value
+            counts[g][0] += 1
+        if row % 13 != 6:
+            totals[g][1] += value
+            counts[g][1] += 1
+        if row % 7 != 2:
+            totals[g][2] += value * 1_000_000_000_000_000
+            counts[g][2] += 1
+    var lookup = Dict[String, Int]()
+    var present = 0
+    for g in range(groups):
+        if seen_rows[g] > 0:
+            lookup[model_key_text(g)] = g
+            present += 1
+    assert_equal(actual.height(), present)
+    var names: List[String] = ["d32", "d64", "d128"]
+    var scales: List[Int] = [2, 2, 4]
+    for r in range(actual.height()):
+        var text = key_text(actual.item(r, "s"), actual.item(r, "i"))
+        assert_true(text in lookup, "unexpected group " + text)
+        var g = lookup[text]
+        for c in range(3):
+            var total = actual.column(names[c] + "_sum")
+            if counts[g][c] == 0:
+                assert_true(total.get(r).is_null())
+                continue
+            assert_equal(unscaled(total, r), totals[g][c])
+            var mean = actual.item(r, names[c] + "_mean").float64()
+            var expected = (
+                Float64(totals[g][c])
+                / Float64(counts[g][c])
+                / (10.0 ** Float64(scales[c]))
+            )
+            assert_close(mean, expected, names[c] + " mean of " + text)
+
+
+def decimal_reductions() -> List[Expr]:
+    var out = List[Expr]()
+    for name in ["d32", "d64", "d128"]:
+        out.append(col(name).sum(min_count=1).alias(name + "_sum"))
+        out.append(col(name).mean().alias(name + "_mean"))
+    return out^
+
+
+def test_decimal_sums_and_means_match_int128_totals_on_both_routes() raises:
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var trace = ScopedEnvironment("DATAFRAME_TRACE_PATHS", "1")
+    var rows = 60_000
+    var groups = 5_000
+    var frame = decimal_frame(rows, groups)
+    var observed = StrategyTrace()
+    var eager = frame.group_by(["s", "i"]).agg(decimal_reductions())
+    assert_true(
+        "dataframe-path: group_by.aggregate_table\n" in observed.text(),
+        "decimal sums did not reach the aggregate table",
+    )
+    _ = observed^
+    assert_decimal_groups(eager, rows, groups, 0)
+    observed = StrategyTrace()
+    var piped = (
+        frame.lazy()
+        .filter(col("r") >= lit(Int64(77)))
+        .group_by(["s", "i"])
+        .agg(decimal_reductions())
+        .collect()
+    )
+    assert_true(
+        "dataframe-path: pipeline.group_table\n" in observed.text(),
+        "decimal sums did not reach the aggregate table sink",
+    )
+    _ = observed^
+    assert_decimal_groups(piped, rows, groups, 77)
+    _ = trace^
+    _ = workers^
+
+
+def test_decimal_sum_past_its_precision_raises() raises:
+    # decimal(38, 0) values near 10^37: a group's total passes 38 digits,
+    # within one worker's partial sum or when partitions merge.
+    var workers = ScopedEnvironment("DATAFRAME_THREADS", "8")
+    var rows = 40_000
+    var keys = List[Int64]()
+    var values = List[Int128]()
+    for row in range(rows):
+        keys.append(Int64(row % 9_000))
+        values.append(Int128(10) ** 37 * 6)
+    var frame = DataFrame(
+        [
+            Series("k", Column[Int64](keys^)),
+            Series("v", Column[Int128](values^)).with_dtype(
+                DataType.decimal(38, 0)
+            ),
+        ]
+    )
+    with assert_raises():
+        _ = frame.group_by(["k"]).agg([col("v").sum().alias("total")])
     _ = workers^
