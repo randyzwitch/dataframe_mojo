@@ -170,6 +170,18 @@ explicit Float64 cast, matching the CPU's current unsupported operation.
 Rolling plans use `metal-rolling-v1`. Work grows with the number of rows times
 the trailing window length; these kernels prioritize matching CPU evaluation.
 
+Variance (`var`) and standard deviation (`std`) run as scalar, grouped,
+or `over()` reductions for primitive numeric inputs. They convert each value
+to Float64, skip nulls, and use integer-only Welford updates and Chan merges.
+The result is null when the valid count does not exceed `ddof`; nonfinite inputs
+follow the CPU state updates. UInt64 conversion retains its unsigned value.
+Decimal moments require an explicit Float64 cast, avoiding the CPU's existing
+decimal moment storage defect. These plans carry `metal-moments-v1`.
+Metal uses deterministic contiguous partition merges. CPU results can differ
+slightly between streaming, hash, and materializing routes, and Metal can
+likewise differ by floating-point rounding.
+Partitioned `over()` states follow the materializing CPU worker boundaries.
+
 Supported scalar reductions also run within `over()` partitions: Metal groups a
 shared resident prefix and broadcasts each result back in original row order.
 Null partition keys form one group; multiple keys, dictionary codes, fixed logical
@@ -572,8 +584,7 @@ end-to-end evidence, automatic placement stays on CPU. Future calibration may
 select emulation only when its conservative GPU estimate beats the CPU bound;
 forced accelerator execution remains available independently of that decision.
 
-Floating power, transcendentals, and variance/std are not yet
-supported by this subset.
+Floating power and transcendentals are not yet supported by this subset.
 
 ## Validation
 
@@ -582,6 +593,7 @@ python3 native/dfmetal/test_native.py
 python3 native/dfmetal/test_join.py
 python3 native/dfmetal/test_resident.py
 python3 native/dfmetal/test_float64.py
+python3 native/dfmetal/test_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py
 python3 native/dfmetal/test_decimal_comparisons.py

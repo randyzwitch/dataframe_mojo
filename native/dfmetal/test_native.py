@@ -943,6 +943,36 @@ def check_rolling_preflight_without_device():
             lib.dfm_free(err)
 
 
+def check_moment_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    slots = (I * 1)(11)
+    outputs = (Output * 1)(Output(None, None, 11, 0, 87, 1 << 47))
+    request = Request(2, 513, 0, 1, 1, 0, 0, 0, 0, 1, -1, 1, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    for operation in (86,87):
+        outputs[0].reduction = operation
+        for workers in (1,2,8,65535):
+            for ddof in (0,1,513,(1 << 31)-1):
+                outputs[0].min_count = (workers << 47) | ddof
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                assert memory.result == 9
+        for metadata in (0,1,1 << 31,(1 << 47) | (1 << 31)):
+            outputs[0].min_count = metadata
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"moment metadata" in C.string_at(err)
+            lib.dfm_free(err)
+        outputs[0].min_count = 1 << 47
+        slots[0] = inputs[0].dtype = 3
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"accumulator" in C.string_at(err)
+        lib.dfm_free(err)
+        slots[0] = inputs[0].dtype = 11
+
+
+check_moment_preflight_without_device()
 check_rolling_preflight_without_device()
 check_shift_fill_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
