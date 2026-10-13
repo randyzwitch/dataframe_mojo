@@ -41,13 +41,18 @@ path = "dataframe"
 
 [package.host-dependencies]
 mojo = ">=1.2.0.dev2026092105,<1.3"
+max-core = "==26.7.0.dev2026100905"
 
 [package.run-dependencies]
 mojo = ">=1.2.0.dev2026092105,<1.3"
+max-core = "==26.7.0.dev2026100905"
 
 [dependencies]
 # What CI runs, matching the package's host and run dependencies above.
 mojo = ">=1.2.0.dev2026092105,<1.3"
+# Mojo's GPU APIs live in max-core. Package/doc compilation resolves these
+# imports even for CPU execution, so every environment needs the matching SDK.
+max-core = "==26.7.0.dev2026100905"
 
 [tasks]
 build-dfmetal = "bash native/dfmetal/build.sh"
@@ -105,9 +110,6 @@ gpu = { features = ["gpu"] }
 
 [feature.gpu]
 platforms = ["osx-arm64"]
-
-[feature.gpu.dependencies]
-max-core = "==26.7.0.dev2026100905"
 
 [feature.gpu.tasks]
 test-mojo-gpu-floating = "python3 tests/tooling/mojo_gpu_floating.py"

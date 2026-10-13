@@ -7,8 +7,11 @@ Its row kernels compile from Mojo, and its orchestration uses Mojo's
 `DeviceContext` for allocations, transfers, launches and synchronization.
 The existing `MetalRuntime` calls this code directly when built with
 `-D DATAFRAME_MOJO_GPU=1`; this path does not load `libdfmetal` or cross the
-dataframe's native C ABI. The optional `gpu` environment supplies the pinned
-MAX accelerator library that now contains Mojo's GPU APIs.
+dataframe's native C ABI. The pinned `max-core` dependency supplies Mojo's GPU
+APIs. It is required in all build and consumer environments because Mojo's
+package and documentation compilers resolve GPU imports even when the selected
+execution path uses the CPU. It does not install the Python MAX SDK or initialize
+a device for CPU queries. The `gpu` environment provides the migration test tasks.
 
 ```sh
 pixi run -e gpu test-mojo-gpu
@@ -31,8 +34,8 @@ migration is not evidence of a Mojo limitation.
 ## Existing runtime
 
 The optional native Metal runtime executes the shared bound row plan on Apple
-Silicon. The normal dataframe package needs no MAX package or GPU SDK. Building
-the runtime needs macOS 15 or later and Xcode's Metal compiler tools:
+Silicon. Building the existing native runtime needs macOS 15 or later and Xcode's
+Metal compiler tools:
 
 ```sh
 pixi run build-dfmetal
