@@ -1275,6 +1275,19 @@ def production_policy() -> SuitePolicy:
 
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_selectors.mojo::test_native_metal_selectors_projection_replacement_filters_strings_and_estimates",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_selectors.mojo::test_native_metal_selectors_aggregates_partition_windows_join_and_consumer_scopes",
+            "metal",
+        )
+    )
+
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_rolling_moments.mojo::test_native_metal_rolling_moments_numeric_widths_bounds_nulls_and_anchors",
             "metal",
         )
@@ -1825,6 +1838,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_string_concat.mojo",
                 "tests/execution_modes/test_backend_metal_rolling.mojo",
                 "tests/execution_modes/test_backend_metal_rolling_moments.mojo",
+                "tests/execution_modes/test_backend_metal_selectors.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
                 "tests/execution_modes/test_backend_metal_pair_moments.mojo",
                 "tests/execution_modes/test_backend_metal_shift_fill.mojo",
