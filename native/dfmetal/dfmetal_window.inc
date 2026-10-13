@@ -48,6 +48,44 @@ std::string shiftFillSource(const DFMRequest &r, const Layout &layout, int64_t i
   return text + "}}}\n";
 }
 
+// Each partition owner follows the CPU's monotone sliding bounds. Every
+// input is added/removed once, and output rows retain source order.
+std::string rollingMomentsSource(const DFMRequest &r, const Layout &layout, int64_t i) {
+  auto &step = r.steps[i];
+  auto h = r.code + 4 * step.start;
+  auto name = std::to_string(i);
+  auto input = std::to_string(layout.physical[h[1]]) + "UL*meta.z";
+  auto output = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
+  std::string text = partitionSource(r, layout, i);
+  text += "kernel void cumulative_assign" + name + R"MSL(
+(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],
+ device const uint *order[[buffer(2)]],constant uint4 &meta[[buffer(3)]],
+ device atomic_uint *error[[buffer(4)]],device const ulong *lit[[buffer(5)]],
+ uint position[[thread_position_in_grid]]){
+ if(position>=meta.x)return;uint first=order[position];
+)MSL";
+  text += "if(position&&window_partition" + name + "(order[position-1],first,x,v,meta))return;"
+          "uint lo=position+1,hi=meta.x;while(lo<hi){uint mid=(lo+hi)/2;"
+          "if(window_partition" + name + "(order[mid],first,x,v,meta))lo=mid+1;else hi=mid;}"
+          "uint end=lo;ulong origin=0UL;"
+          "for(uint j=position;j<end;++j){ulong at=" + input + "+order[j];"
+          "if(v[at]&&f64_abs(x[at])<0x7ff0000000000000UL){origin=x[at];break;}}"
+          "ulong parameter=lit[" + std::to_string(step.start) + "];"
+          "uint window=uint(parameter);ulong ddof=parameter>>32;"
+          "lo=position;hi=position;RollingVarianceState state={0UL,0UL,0UL,0UL};"
+          "for(uint j=position;j<end;++j){uint start=j-position+1>window?j-window+1:position;"
+          "if(start<lo||start>=hi){lo=start;hi=start;state={0UL,0UL,0UL,0UL};}"
+          "while(lo<start){ulong at=" + input + "+order[lo++];"
+          "if(v[at])state=rolling_variance_remove(state,x[at],origin);}"
+          "while(hi<=j){ulong at=" + input + "+order[hi++];"
+          "if(v[at])state=rolling_variance_add(state,x[at],origin);}"
+          "ulong out=" + output + "+order[j];x[out]=T(0);v[out]=0;"
+          "ulong total=state.count+state.bad;if(total>ddof&&total>=" +
+          std::to_string(h[2]) + "UL){x[out]=T(rolling_variance_finish(state,ddof," +
+          std::string(h[3] == 12 ? "true" : "false") + "));v[out]=1;}}}";
+  return text + "\n";
+}
+
 // Recompute each trailing window in source order, matching CPU association.
 std::string rollingSource(const DFMRequest &r, const Layout &layout, int64_t i) {
   auto &step = r.steps[i];
@@ -120,6 +158,7 @@ std::string rollingSource(const DFMRequest &r, const Layout &layout, int64_t i) 
 std::string cumulativeSource(const DFMRequest &r, const Layout &layout, int64_t i) {
   auto &step = r.steps[i];
   auto h = r.code + 4 * step.start;
+  if (h[3] >= 11) return rollingMomentsSource(r, layout, i);
   if (h[3] >= 7) return rollingSource(r, layout, i);
   if (h[3] >= 4) return shiftFillSource(r, layout, i);
   auto name = std::to_string(i);

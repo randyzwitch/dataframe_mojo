@@ -65,6 +65,7 @@ struct RowCapabilities(Copyable):
     var paired_moments: Bool
     var moments: Bool
     var rolling_windows: Bool
+    var rolling_moments: Bool
     var shift_fill_windows: Bool
     var cumulative_windows: Bool
     var reuse_column_slots: Bool
@@ -105,6 +106,7 @@ struct RowCapabilities(Copyable):
         paired_moments: Bool = False,
         moments: Bool = False,
         rolling_windows: Bool = False,
+        rolling_moments: Bool = False,
         shift_fill_windows: Bool = False,
         decimal128: Bool = False,
         decimal128_reductions: Bool = False,
@@ -149,6 +151,7 @@ struct RowCapabilities(Copyable):
         self.paired_moments = paired_moments
         self.moments = moments
         self.rolling_windows = rolling_windows
+        self.rolling_moments = rolling_moments
         self.shift_fill_windows = shift_fill_windows
         self.decimal128 = decimal128
         self.decimal128_reductions = decimal128_reductions
