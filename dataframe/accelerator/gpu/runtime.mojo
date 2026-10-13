@@ -58,8 +58,9 @@ from dataframe.expr import (
 from dataframe.lazy import LazyFrame
 from dataframe.execution_report import ExecutionReport
 from dataframe.accelerator.capabilities import RowCapabilities
-from dataframe.accelerator.rows import RowPlan, lower_rows
+from dataframe.accelerator.rows import RowPlan, lower_rows, ROW_SLICE
 from .rows import row_program
+from .movement import filter_scan, filter_offsets, filter_gather
 
 
 def _kind(dtype: DataType) raises -> Int64:
@@ -103,6 +104,7 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
         extended_integers=True,
         mixed_types=True,
         row_extras=True,
+        slices=True,
         fixed_logical=True,
         chunked_inputs=True,
         empty_inputs=True,
@@ -121,6 +123,7 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
     for dtype in plan.slot_dtypes:
         _ = _kind(dtype)
     var supported: List[Int] = [
+        ROW_SLICE,
         COL,
         LIT_INT,
         LIT_FLOAT,
@@ -165,8 +168,8 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
         WHEN,
     ]
     for step in plan.steps:
-        if step.filter or step.order or step.grouped:
-            raise Error("Mojo GPU row movement is not implemented yet")
+        if step.order or step.grouped:
+            raise Error("Mojo GPU ordering and groups are not implemented yet")
         for node in range(step.start, step.start + step.nodes):
             var op = Int(plan.code[4 * node])
             if op not in supported:
@@ -328,11 +331,24 @@ def execute(
     var rows = plan.source.height()
     var count = rows if plan.limit < 0 else min(rows, plan.limit)
     var cells = _checked_mul(rows, plan.slots)
+    var current_rows = rows
+    var movement = False
+    for step in plan.steps:
+        movement = movement or step.filter
     # GPU words, byte validity and per-value errors; one host staging matrix
     # is reused for readback after the stream consumes its upload.
     var matrix_bytes = _checked_mul(cells, 13)
     var program_bytes = _checked_mul(len(plan.code) + 2 * len(plan.literals), 8)
     var shared = _checked_add(matrix_bytes, program_bytes) if rows else 0
+    if rows and movement:
+        # A second matrix prevents overlapping reads/writes during compaction.
+        # Scans use row positions, two block arrays and a two-word count/error
+        # readback. Gather metadata is bounded by the full plan's gather list.
+        shared = _checked_add(shared, matrix_bytes)
+        shared = _checked_add(shared, _checked_mul(rows, 4))
+        shared = _checked_add(shared, _checked_mul((rows + 255) // 256, 8))
+        shared = _checked_add(shared, 16)
+        shared = _checked_add(shared, _checked_mul(len(plan.gathers), 16))
     var result_bytes = _checked_add(matrix_bytes, program_bytes) if rows else 0
     for output in plan.outputs:
         result_bytes = _checked_add(
@@ -393,6 +409,8 @@ def execute(
             ctx.enqueue_copy(device_literals, literals.unsafe_ptr())
             ctx.enqueue_copy(device_types, types.unsafe_ptr())
             for step in plan.steps:
+                if current_rows == 0:
+                    break
                 ctx.enqueue_function[row_program](
                     device_words.unsafe_ptr(),
                     device_valid.unsafe_ptr(),
@@ -403,11 +421,93 @@ def execute(
                     UInt32(step.start),
                     UInt32(step.nodes),
                     UInt32(step.slot),
+                    UInt32(current_rows),
                     UInt32(rows),
-                    grid_dim=(rows + 255) // 256,
+                    grid_dim=(current_rows + 255) // 256,
                     block_dim=256,
                 )
                 submissions += 1
+                if step.filter:
+                    var blocks = (current_rows + 255) // 256
+                    var positions = ctx.enqueue_create_buffer[DType.uint32](
+                        current_rows
+                    )
+                    var offsets = ctx.enqueue_create_buffer[DType.uint32](
+                        blocks * 2
+                    )
+                    var metadata = ctx.enqueue_create_buffer[DType.uint32](2)
+                    var gathered_words = ctx.enqueue_create_buffer[
+                        DType.uint64
+                    ](cells)
+                    var gathered_valid = ctx.enqueue_create_buffer[DType.uint8](
+                        cells
+                    )
+                    var gathered_errors = ctx.enqueue_create_buffer[
+                        DType.uint32
+                    ](cells)
+                    ctx.enqueue_function[filter_scan](
+                        device_words.unsafe_ptr(),
+                        device_valid.unsafe_ptr(),
+                        device_errors.unsafe_ptr(),
+                        positions.unsafe_ptr(),
+                        offsets.unsafe_ptr(),
+                        UInt32(step.slot),
+                        UInt32(current_rows),
+                        UInt32(rows),
+                        grid_dim=blocks,
+                        block_dim=256,
+                    )
+                    ctx.enqueue_function[filter_offsets](
+                        offsets.unsafe_ptr(),
+                        metadata.unsafe_ptr(),
+                        UInt32(blocks),
+                        grid_dim=1,
+                        block_dim=1,
+                    )
+                    submissions += 2
+                    var shape = List[UInt32](length=2, fill=0)
+                    ctx.enqueue_copy(shape.unsafe_ptr(), metadata)
+                    ctx.synchronize()
+                    waits += 1
+                    if shape[1]:
+                        raise Error(
+                            "Mojo GPU filter predicate failed checked arithmetic or cast"
+                        )
+                    if shape[0] and step.gather_count:
+                        var gathers = List[Int64](capacity=step.gather_count)
+                        for column in range(step.gather_count):
+                            gathers.append(
+                                plan.gathers[step.gather_start + column]
+                            )
+                        var device_gathers = ctx.enqueue_create_buffer[
+                            DType.int64
+                        ](len(gathers))
+                        ctx.enqueue_copy(device_gathers, gathers.unsafe_ptr())
+                        ctx.enqueue_function[filter_gather](
+                            device_words.unsafe_ptr(),
+                            device_valid.unsafe_ptr(),
+                            device_errors.unsafe_ptr(),
+                            gathered_words.unsafe_ptr(),
+                            gathered_valid.unsafe_ptr(),
+                            gathered_errors.unsafe_ptr(),
+                            positions.unsafe_ptr(),
+                            offsets.unsafe_ptr(),
+                            device_gathers.unsafe_ptr(),
+                            UInt32(step.gather_count),
+                            UInt32(step.slot),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            grid_dim=blocks,
+                            block_dim=256,
+                        )
+                        submissions += 1
+                        # Complete gathers before replacing their source owners.
+                        ctx.synchronize()
+                        waits += 1
+                    device_words = gathered_words^
+                    device_valid = gathered_valid^
+                    device_errors = gathered_errors^
+                    current_rows = Int(shape[0])
             ctx.enqueue_copy(words.unsafe_ptr(), device_words)
             ctx.enqueue_copy(validity.unsafe_ptr(), device_valid)
             ctx.enqueue_copy(errors.unsafe_ptr(), device_errors)
@@ -420,6 +520,7 @@ def execute(
             ctx.enqueue_copy(validity.unsafe_ptr(), device_valid)
             ctx.synchronize()
             waits += 1
+    count = current_rows if plan.limit < 0 else min(current_rows, plan.limit)
     for output in plan.outputs:
         for row in range(count):
             if errors[output.slot * rows + row]:

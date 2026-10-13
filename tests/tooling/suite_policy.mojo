@@ -102,6 +102,18 @@ def production_policy() -> SuitePolicy:
             "mojo_gpu",
         )
     )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_filters_slices_preserve_order_nulls_chunks_and_bits",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_compaction_observes_checked_work_on_surviving_rows",
+            "mojo_gpu",
+        )
+    )
     # exit_code zero means an ordinary exception; nonzero means an isolated process.
     policy.failures.append(
         ExpectedFailure(

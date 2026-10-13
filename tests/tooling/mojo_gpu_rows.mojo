@@ -7,6 +7,8 @@ from tests.execution_modes.test_mojo_gpu_rows import (
     test_mojo_gpu_boolean_kleene_nulls_empty_rows_and_zero_columns,
     test_mojo_gpu_floating_arithmetic_predicates_rounding_and_subnormals,
     test_mojo_gpu_transcendentals_power_and_numeric_casts,
+    test_mojo_gpu_filters_slices_preserve_order_nulls_chunks_and_bits,
+    test_mojo_gpu_compaction_observes_checked_work_on_surviving_rows,
 )
 
 
@@ -18,6 +20,8 @@ def main() raises:
     test_mojo_gpu_boolean_kleene_nulls_empty_rows_and_zero_columns()
     test_mojo_gpu_floating_arithmetic_predicates_rounding_and_subnormals()
     test_mojo_gpu_transcendentals_power_and_numeric_casts()
+    test_mojo_gpu_filters_slices_preserve_order_nulls_chunks_and_bits()
+    test_mojo_gpu_compaction_observes_checked_work_on_surviving_rows()
     print(
         "PASS direct Mojo dataframe GPU rows: widths, nulls, ownership, errors and bit encodings"
     )

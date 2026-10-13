@@ -469,3 +469,145 @@ def test_mojo_gpu_transcendentals_power_and_numeric_casts() raises:
         safe.collect(accelerator=runtime, engine="accel"),
         safe.collect(engine="cpu"),
     )
+
+
+def test_mojo_gpu_filters_slices_preserve_order_nulls_chunks_and_bits() raises:
+    from tests.execution_modes.test_backend_metal_float64_emulation import same
+
+    var ids = List[Int64]()
+    var words: List[UInt64] = [
+        0,
+        0x8000000000000000,
+        1,
+        0x7FF0000000000000,
+        0x7FF8000000000042,
+        0xFFF0000000000001,
+    ]
+    var floats = List[Float64]()
+    var valid = List[Bool]()
+    var keep = List[Bool]()
+    var keep_valid = List[Bool]()
+    for row in range(1_033):
+        ids.append(Int64(row))
+        floats.append(bitcast[DType.float64](words[row % len(words)]))
+        valid.append(row % 7 != 2)
+        keep.append(row % 3 != 1)
+        keep_valid.append(row % 11 != 4)
+    var input = DataFrame(
+        [
+            Series("id", Column[Int64](ids^)),
+            Series("f", Column[Float64](floats^, valid^)),
+            Series("keep", Column[Bool](keep^, keep_valid^)),
+        ]
+    ).slice(3, 1_027)
+    var columns = List[Series]()
+    for column in input._columns:
+        columns.append(
+            Series._from_chunks(
+                [
+                    column.slice(0, 257),
+                    column.slice(257, 0),
+                    column.slice(257, 770),
+                ]
+            )
+        )
+    var chunked = DataFrame(columns^)
+    for frame in [input.copy(), chunked.copy()]:
+        var query = (
+            frame.lazy()
+            .filter(col("keep"))
+            .filter(col("id") >= 128)
+            .select_exprs(
+                [col("id").alias("left"), col("id").alias("right"), col("f")]
+            )
+        )
+        var actual = query.collect(accelerator=MetalRuntime(), engine="accel")
+        same(actual, query.collect(engine="cpu"))
+        var expected_row = 128
+        for row in range(actual.height()):
+            while expected_row % 3 == 1 or expected_row % 11 == 4:
+                expected_row += 1
+            assert_equal(actual.item(row, "left").int64(), Int64(expected_row))
+            assert_equal(actual.item(row, "right").int64(), Int64(expected_row))
+            assert_equal(actual.item(row, "f").is_null(), expected_row % 7 == 2)
+            if expected_row % 7 != 2:
+                assert_equal(
+                    bitcast[DType.uint64](
+                        actual.column("f").float64()._get(row)
+                    ),
+                    words[expected_row % len(words)],
+                )
+            expected_row += 1
+        for offset in [-2_000, -257, -1, 0, 1, 255, 2_000]:
+            for length in [0, 1, 193, Int.MAX]:
+                var sliced = (
+                    frame.lazy()
+                    .filter(col("keep"))
+                    .slice(offset, length)
+                    .with_columns((col("f") + 0.5).alias("value"))
+                )
+                same(
+                    sliced.collect(accelerator=MetalRuntime(), engine="accel"),
+                    sliced.collect(engine="cpu"),
+                )
+        var head = query.head(17)
+        same(
+            head.collect(accelerator=MetalRuntime(), engine="accel"),
+            head.collect(engine="cpu"),
+        )
+        for selected in [False, True]:
+            var constant = frame.lazy().filter(lit(selected))
+            same(
+                constant.collect(accelerator=MetalRuntime(), engine="accel"),
+                constant.collect(engine="cpu"),
+            )
+        var empty = frame.head(0).lazy().filter(col("keep"))
+        same(
+            empty.collect(accelerator=MetalRuntime(), engine="accel"),
+            empty.collect(engine="cpu"),
+        )
+        var no_columns = (
+            frame.lazy().filter(col("keep")).drop(["id", "f", "keep"])
+        )
+        var no_values = no_columns.collect(
+            accelerator=MetalRuntime(), engine="accel"
+        )
+        assert_equal(no_values.width(), 0)
+        assert_equal(
+            no_values.height(),
+            frame.lazy().filter(col("keep")).collect(engine="cpu").height(),
+        )
+
+
+def test_mojo_gpu_compaction_observes_checked_work_on_surviving_rows() raises:
+    var frame = DataFrame(
+        [
+            Series("x", Column[Int64]([Int64.MAX, 3])),
+            Series("keep", Column[Bool]([False, True])),
+        ]
+    )
+    var safe = (
+        frame.lazy().filter(col("keep")).select((col("x") + 1).alias("v"))
+    )
+    var result = safe.collect(accelerator=MetalRuntime(), engine="accel")
+    assert_equal(result.height(), 1)
+    assert_equal(result.item(0, "v").int64(), Int64(4))
+    with assert_raises():
+        _ = (
+            frame.lazy()
+            .filter(~col("keep"))
+            .select(col("x") + 1)
+            .collect(accelerator=MetalRuntime(), engine="accel")
+        )
+    _ = safe.collect(accelerator=MetalRuntime(), engine="accel")
+    var profile = safe.profile(accelerator=MetalRuntime(), engine="accel")
+    assert_true(profile[1].item(0, "kernel_launches").int64() >= 5)
+    var peak = Int(profile[1].item(0, "peak_requested_bytes").int64())
+    with assert_raises(contains="budget"):
+        _ = safe.collect(
+            accelerator=MetalRuntime(memory_limit_bytes=peak - 1),
+            engine="accel",
+        )
+    _ = safe.collect(
+        accelerator=MetalRuntime(memory_limit_bytes=peak), engine="accel"
+    )

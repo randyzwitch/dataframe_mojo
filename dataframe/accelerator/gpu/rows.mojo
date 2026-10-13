@@ -51,6 +51,7 @@ from dataframe.expr import (
 )
 from std.memory import Pointer, unsafe_stack_allocation
 from . import floating
+from dataframe.accelerator.rows import ROW_SLICE
 
 
 @always_inline
@@ -128,6 +129,7 @@ def row_program(
     nodes: UInt32,
     target: UInt32,
     rows: UInt32,
+    stride: UInt32,
 ):
     var row = global_idx.x
     if row >= Int(rows):
@@ -146,10 +148,21 @@ def row_program(
         var present = True
         var error = UInt32(0)
         if op == COL:
-            var at = c * Int(rows) + row
+            var at = c * Int(stride) + row
             value = words[unsafe_offset=at]
             present = validity[unsafe_offset=at] != 0
             error = errors[unsafe_offset=at]
+        elif op == ROW_SLICE:
+            var offset = literals[unsafe_offset=a].cast[DType.int64]()
+            var length = literals[unsafe_offset=b].cast[DType.int64]()
+            var begin = min(
+                Int64(rows),
+                max(Int64(0), Int64(rows) + offset) if offset < 0 else offset,
+            )
+            var span = Int64(rows) - begin
+            if length >= 0:
+                span = min(span, length)
+            value = UInt64(Int64(row) >= begin and Int64(row) - begin < span)
         elif op == LIT_INT or op == LIT_FLOAT or op == LIT_BOOL:
             value = literals[unsafe_offset=absolute]
         elif op == LIT_NULL:
@@ -394,7 +407,7 @@ def row_program(
         valid[unsafe_offset=node] = UInt8(present)
         failed[unsafe_offset=node] = error
     var root = Int(nodes) - 1
-    var destination = Int(target) * Int(rows) + row
+    var destination = Int(target) * Int(stride) + row
     words[unsafe_offset=destination] = values[unsafe_offset=root]
     validity[unsafe_offset=destination] = valid[unsafe_offset=root]
     errors[unsafe_offset=destination] = failed[unsafe_offset=root]

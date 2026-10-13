@@ -19,14 +19,16 @@ pixi run -e gpu test-mojo-gpu-floating
 ```
 
 The migration covers integer/Boolean row expressions, checked arithmetic,
-conditional error observation, numeric casts, nullable/chunked storage, and
-Float32/Float64 arithmetic, comparisons, rounding, square roots, modulo,
+conditional error observation, numeric casts, nullable/chunked storage, stable
+filtering, slicing, and Float32/Float64 arithmetic, comparisons, rounding,
+square roots, modulo,
 exponentials, logarithms and power. Floating primitives use integer Mojo code,
 including fused arithmetic and gradual underflow; they do not require native
 Float64 GPU instructions. The second task compares GPU results with independent
-host IEEE arithmetic over boundary and randomized inputs. Unsupported regions
-reject before device allocation.
-Automatic placement awaits calibration for the Mojo implementation. The
+host IEEE arithmetic over boundary and randomized inputs. Filtering uses Mojo
+block prefix sums and gathers; slices share that compaction path, including
+negative offsets. Values, null masks and deferred errors move together.
+Unsupported regions reject before device allocation. Automatic placement awaits calibration for the Mojo implementation. The
 remaining operations below continue to use the existing implementation until
 their Mojo replacements are verified; retaining that implementation during
 migration is not evidence of a Mojo limitation.
