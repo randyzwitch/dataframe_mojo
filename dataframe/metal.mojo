@@ -376,6 +376,7 @@ def _capabilities() -> RowCapabilities:
         rolling_moments=True,
         empty_outputs=True,
         empty_inputs=True,
+        chunked_inputs=True,
         shift_fill_windows=True,
         decimal128=True,
         decimal128_reductions=True,
@@ -584,6 +585,8 @@ def _input[T: DType](column: Column[Scalar[T]], dtype: Int64) -> List[Int64]:
 
 
 def _input_series(column: Series) raises -> List[Int64]:
+    if column.is_chunked():
+        raise Error("Metal chunked inputs require owned chunk descriptors")
     if column.dtype().is_decimal() and column.dtype().decimal_width() == 128:
         return _input(column.numeric[DType.int128](), Int64(12))
     if column.dtype() == DataType.BOOL:
@@ -645,6 +648,7 @@ def _decimal128_reduction_metadata(
 
 
 struct _Descriptors(Movable):
+    var input_chunks: List[List[Int64]]
     var inputs: List[Int64]
     var code: List[Int64]
     var literals: List[Float64]
@@ -656,6 +660,7 @@ struct _Descriptors(Movable):
     var typed: Bool
 
     def __init__(out self, plan: RowPlan) raises:
+        self.input_chunks = List[List[Int64]]()
         self.inputs = List[Int64]()
         self.code = plan.code.copy()
         self.literals = plan.literals.copy()
@@ -721,7 +726,29 @@ struct _Descriptors(Movable):
                     )
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
-            self.inputs.extend(_input_series(column))
+            if column.is_chunked():
+                var words = List[Int64]()
+                for part in column.chunks():
+                    words.extend(_input_series(part))
+                    words.append(Int64(len(part)))
+                self.input_chunks.append(words^)
+                self.inputs.extend(
+                    [
+                        Int64(
+                            Int(
+                                self.input_chunks[
+                                    len(self.input_chunks) - 1
+                                ].unsafe_ptr()
+                            )
+                        ),
+                        Int64(0),
+                        _type(column.dtype()),
+                        Int64(column.n_chunks()),
+                        Int64(2),
+                    ]
+                )
+            else:
+                self.inputs.extend(_input_series(column))
         for step in plan.steps:
             for i in range(step.start, step.start + step.nodes):
                 if (
@@ -1401,7 +1428,14 @@ def _execute_join_dag(
                 task.query, _capabilities(), terminal_boundary=task.terminal
             )
             plan.root = task.root
-            if len(task.query._nodes) == 1 and task.source < 0:
+            var chunked_source = False
+            for column in plan.source._columns:
+                chunked_source |= column.is_chunked()
+            if (
+                len(task.query._nodes) == 1
+                and task.source < 0
+                and not chunked_source
+            ):
                 # Keep original CPU scans until their first consumer. This
                 # avoids a standalone upload/submit/wait for an identity scan.
                 values.append(_ResidentValue(plan.source.copy()))
@@ -1642,6 +1676,13 @@ struct MetalRuntime(AcceleratorBackend):
         device[13] = Float64(metadata[4] == 0)
         device[14] = 0
         var family = work[1].copy()
+        var chunked = False
+        var chunks = 0
+        for column in plan.source._columns:
+            chunked |= column.is_chunked()
+            chunks += column.n_chunks()
+        if chunked:
+            family += ";metal-chunked-inputs-v1:" + String(chunks)
         if not plan.source.width():
             family += ";metal-empty-inputs-v1"
         if not len(plan.outputs):

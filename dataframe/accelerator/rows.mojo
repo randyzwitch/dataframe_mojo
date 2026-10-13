@@ -775,7 +775,7 @@ def lower_rows(
     for i in range(len(schema)):
         var type = schema[i].dtype()
         capabilities.require_dtype(type)
-        if schema[i].is_chunked():
+        if schema[i].is_chunked() and not capabilities.chunked_inputs:
             capabilities.reject(
                 "plan", "chunked input; rechunk before accelerator execution"
             )

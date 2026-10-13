@@ -200,6 +200,15 @@ typedef struct DFMInput {
   int64_t has_validity;
 } DFMInput;
 
+// An input with has_validity=2 points values at this metadata array and uses
+// bit_offset as its chunk count. Its validity pointer is null. Each child has
+// the parent dtype, flags 0/1, its own bitmap offset, and a nonnegative row
+// count. Child counts sum to the request rows. No host rechunk is required.
+typedef struct DFMInputChunk {
+  DFMInput input;
+  int64_t rows;
+} DFMInputChunk;
+
 typedef struct DFMStep {
   int64_t start;
   int64_t nodes;

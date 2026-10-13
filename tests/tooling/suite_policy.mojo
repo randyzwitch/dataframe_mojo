@@ -1287,6 +1287,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_chunked_inputs.mojo::test_native_metal_chunked_inputs_physical_types_offsets_nulls_and_slices",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_chunked_inputs.mojo::test_native_metal_chunked_inputs_row_consumers_groups_and_resident_joins",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_chunked_inputs.mojo::test_native_metal_chunked_inputs_profiles_exact_budget_and_float_reductions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_fixed_offsets.mojo::test_native_metal_fixed_offsets_all_temporal_units_nulls_negative_epochs_and_empty_rows",
             "metal",
         )
@@ -1921,6 +1939,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_empty_inputs.mojo",
                 "tests/execution_modes/test_backend_metal_duration_totals.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
+                "tests/execution_modes/test_backend_metal_chunked_inputs.mojo",
                 "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",

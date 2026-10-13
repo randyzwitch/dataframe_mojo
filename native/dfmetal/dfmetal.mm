@@ -23,6 +23,7 @@
 #ifndef DFM_BUILD_ID
 #define DFM_BUILD_ID "development"
 #endif
+static_assert(sizeof(DFMInputChunk) == 48);
 static_assert(sizeof(DFMInput) == 40 && sizeof(DFMStep) == 48);
 static_assert(sizeof(DFMOutput) == 48 && sizeof(DFMRequest) == 176);
 static_assert(sizeof(DFMMemory) == 64 && sizeof(DFMStats) == 136);
@@ -75,6 +76,31 @@ int64_t width(int64_t t) {
     return 1;
   fail("Metal unsupported dtype");
   return 0;
+}
+int64_t inputBitmapBytes(const DFMInput &input, int64_t rows) {
+  return rows ? (rows + input.bit_offset + 7) / 8 : 0;
+}
+template<class F> void inputParts(const DFMInput &input, int64_t rows, F each) {
+  auto flat = [&](const DFMInput &part, int64_t count, int64_t begin) {
+    if (part.bit_offset < 0 || part.bit_offset > 7 ||
+        (part.has_validity != 0 && part.has_validity != 1))
+      fail("Invalid input bitmap descriptor");
+    each(part, count, begin);
+  };
+  if (input.has_validity != 2) { flat(input, rows, 0); return; }
+  if (input.bit_offset < 0 || input.bit_offset > INT32_MAX || input.validity ||
+      (input.bit_offset && !input.values))
+    fail("Invalid Metal chunk metadata array");
+  auto chunks = static_cast<const DFMInputChunk *>(input.values);
+  int64_t begin = 0;
+  for (int64_t i = 0; i < input.bit_offset; ++i) {
+    const auto &chunk = chunks[i];
+    if (chunk.rows < 0 || chunk.rows > rows - begin || chunk.input.dtype != input.dtype)
+      fail("Invalid Metal chunk row count or dtype");
+    flat(chunk.input, chunk.rows, begin);
+    begin += chunk.rows;
+  }
+  if (begin != rows) fail("Metal chunk rows do not match request rows");
 }
 bool unsignedType(int64_t t) {
   return t == DFM_UINT8 || t == DFM_UINT16 || t == DFM_UINT32 ||
@@ -427,22 +453,17 @@ Shape validate(const DFMRequest &r, bool storage = false,
     if (typed(r) ? v.dtype != r.slot_types[i]
                  : (v.dtype != DFM_BOOL && v.dtype != r.dtype))
       fail("Mixed Metal input dtypes");
-    if (v.bit_offset < 0 || v.bit_offset > 7 ||
-        (v.has_validity != 0 && v.has_validity != 1))
-      fail("Invalid input bitmap descriptor");
     bool native = resident && resident[i].table;
-    if (storage && !native && r.rows &&
-        (!v.values || (v.has_validity && !v.validity)))
-      fail("Missing Metal input data");
-    int64_t bytes = (r.rows + v.bit_offset + 7) / 8;
-    if (native)
-      continue;
-    if (v.dtype == DFM_BOOL)
-      s.bitmap = add(s.bitmap, bytes);
-    else if (typed(r))
-      s.bitmap = add(aligned(s.bitmap), mul(r.rows, width(v.dtype)));
-    if (v.has_validity)
-      s.bitmap = add(s.bitmap, bytes);
+    if (native && v.has_validity == 2) fail("Resident Metal inputs require flat descriptors");
+    inputParts(v, r.rows, [&](const DFMInput &part, int64_t rows, int64_t begin) {
+      if (storage && !native && rows && (!part.values || (part.has_validity && !part.validity)))
+        fail("Missing Metal input data");
+      if (native) return;
+      int64_t bytes = inputBitmapBytes(part, rows);
+      if (part.dtype == DFM_BOOL) s.bitmap = add(s.bitmap, bytes);
+      else if (typed(r)) s.bitmap = add(aligned(s.bitmap), mul(rows, width(part.dtype)));
+      if (part.has_validity) s.bitmap = add(s.bitmap, bytes);
+    });
   }
   std::array<bool, DFM_MAX_SLOTS> defined{};
   for (int64_t i = 0; i < r.input_count; ++i)
@@ -907,11 +928,12 @@ Shape validate(const DFMRequest &r, bool storage = false,
     auto bound = s;
     bound.bitmap = 0;
     for (int64_t i = 0; i < r.input_count; ++i) {
-      auto &v = r.inputs[i];
-      auto bytes = (r.rows + v.bit_offset + 7) / 8;
-      if (v.dtype == DFM_BOOL) bound.bitmap = add(bound.bitmap, bytes);
-      else if (typed(r)) bound.bitmap = add(aligned(bound.bitmap), mul(r.rows, width(v.dtype)));
-      if (v.has_validity) bound.bitmap = add(bound.bitmap, bytes);
+      inputParts(r.inputs[i], r.rows, [&](const DFMInput &v, int64_t rows, int64_t begin) {
+        auto bytes = inputBitmapBytes(v, rows);
+        if (v.dtype == DFM_BOOL) bound.bitmap = add(bound.bitmap, bytes);
+        else if (typed(r)) bound.bitmap = add(aligned(bound.bitmap), mul(rows, width(v.dtype)));
+        if (v.has_validity) bound.bitmap = add(bound.bitmap, bytes);
+      });
     }
     if (estimate(r, bound, nullptr, false, false).peak_bytes > r.memory_budget_bytes)
       s.radixSort = s.hashGroups = false;
@@ -956,13 +978,11 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
   for (int64_t i = 0; i < r.input_count; ++i) {
     if (resident && resident[i].table)
       continue;
-    const auto &input = r.inputs[i];
-    auto bitmapBytes = (r.rows + input.bit_offset + 7) / 8;
-    m.upload_bytes = add(m.upload_bytes, input.dtype == DFM_BOOL
-                                             ? bitmapBytes
-                                             : mul(r.rows, width(input.dtype)));
-    if (input.has_validity)
-      m.upload_bytes = add(m.upload_bytes, bitmapBytes);
+    inputParts(r.inputs[i], r.rows, [&](const DFMInput &input, int64_t rows, int64_t begin) {
+      auto bitmapBytes = inputBitmapBytes(input, rows);
+      m.upload_bytes = add(m.upload_bytes, input.dtype == DFM_BOOL ? bitmapBytes : mul(rows, width(input.dtype)));
+      if (input.has_validity) m.upload_bytes = add(m.upload_bytes, bitmapBytes);
+    });
   }
   m.upload_bytes = add(m.upload_bytes, mul(r.literal_count, storageWidth(r)));
   for (int64_t i = 0; i < r.output_count; ++i) {
@@ -979,7 +999,12 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
   }
   m.peak_bytes = add(m.shared_bytes, m.result_bytes);
   auto layout = Layout(r);
-  m.launches = r.input_count + layout.ends.size() +
+  int64_t fragments = 0;
+  for (int64_t i = 0; i < r.input_count; ++i) {
+    if (resident && resident[i].table) ++fragments;
+    else inputParts(r.inputs[i], r.rows, [&](const DFMInput &, int64_t, int64_t) { ++fragments; });
+  }
+  m.launches = fragments + layout.ends.size() +
       (r.output_count ? (r.reductions ? 2 : (!retain || final)) : 0);
   for (int64_t i = 0; i < r.step_count; ++i)
     if (r.steps[i].filter && !directFilteredReduction(r)) {
@@ -1630,10 +1655,11 @@ float float_integral(float x,int op){
                           : "ulong(value)") +
           ";}\n";
   text += R"MSL(
+struct Unpack { ulong x,y,z,w,begin,rows; };
 kernel void unpack(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],
- device const uchar *bits[[buffer(2)]],constant ulong4 &p[[buffer(3)]],
+ device const uchar *bits[[buffer(2)]],constant Unpack &p[[buffer(3)]],
  constant uint4 &meta[[buffer(4)]],uint row[[thread_position_in_grid]]) {
- if(row>=meta.x)return;ulong at=p.x*meta.z+row;ulong bit=row+p.y;
+ if(row>=p.rows)return;ulong at=p.x*meta.z+p.begin+row;ulong bit=row+p.y;
  if(p.z!=0)x[at]=T((bits[p.z-1+bit/8]>>(bit%8))&1);
  v[at]=p.w==ulong(-1)?1:uchar((bits[p.w+bit/8]>>(bit%8))&1);
 }
@@ -1923,9 +1949,9 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
       text += "kernel void unpack" + std::to_string(i) +
               "(device ulong *x[[buffer(0)]],device uchar "
               "*v[[buffer(1)]],device const uchar *bits[[buffer(2)]],constant "
-              "ulong4 &p[[buffer(3)]],constant uint4 &meta[[buffer(4)]],uint "
-              "row[[thread_position_in_grid]]) {if(row>=meta.x)return;ulong "
-              "at=p.x*meta.z+row,bit=row+p.y;";
+              "Unpack &p[[buffer(3)]],constant uint4 &meta[[buffer(4)]],uint "
+              "row[[thread_position_in_grid]]) {if(row>=p.rows)return;ulong "
+              "at=p.x*meta.z+p.begin+row,bit=row+p.y;";
       if (t == DFM_BOOL)
         text += "x[at]=ulong((bits[p.z-1+bit/8]>>(bit%8))&1);";
       else if (t == DFM_DECIMAL128)
@@ -2680,46 +2706,33 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
   metadata[1] = r.rows;
   metadata[2] = shape.cap;
   *static_cast<uint32_t *>(arithmeticError.contents) = UINT32_MAX;
-  std::vector<std::array<uint64_t, 4>> unpack;
+  std::vector<std::vector<std::array<uint64_t, 6>>> unpack(r.input_count);
   int64_t offset = 0;
   for (int64_t i = 0; i < r.input_count; ++i) {
-    auto &input = r.inputs[i];
-    if (refs && refs[i].table) {
-      unpack.push_back({});
-      continue;
-    }
-    int64_t size = (r.rows + input.bit_offset + 7) / 8;
-    std::array<uint64_t, 4> params{
-        static_cast<uint64_t>(layout.physical[i]),
-        static_cast<uint64_t>(input.bit_offset),
-        static_cast<uint64_t>(input.dtype == DFM_BOOL), UINT64_MAX};
-    // Bitmap offsets are absolute; buffer bindings stay naturally aligned.
-    if (input.dtype == DFM_BOOL)
-      params[2] = offset + 1;
-    if (input.dtype == DFM_BOOL) {
-      if (size)
-        memcpy(static_cast<char *>(bitmap.contents) + offset, input.values,
-               size);
-      offset += size;
-    } else if (typed(r)) {
-      offset = aligned(offset);
-      params[2] = offset;
-      if (r.rows)
-        memcpy(static_cast<char *>(bitmap.contents) + offset, input.values,
-               r.rows * width(input.dtype));
-      offset += r.rows * width(input.dtype);
-    } else if (r.rows)
-      memcpy(static_cast<char *>(x.contents) +
-                 layout.physical[i] * shape.cap * storageWidth(r),
-             input.values, r.rows * storageWidth(r));
-    if (input.has_validity) {
-      params[3] = offset;
-      if (size)
-        memcpy(static_cast<char *>(bitmap.contents) + offset, input.validity,
-               size);
-      offset += size;
-    }
-    unpack.push_back(params);
+    if (refs && refs[i].table) continue;
+    inputParts(r.inputs[i], r.rows, [&](const DFMInput &input, int64_t rows, int64_t begin) {
+      int64_t size = inputBitmapBytes(input, rows);
+      std::array<uint64_t, 6> params{uint64_t(layout.physical[i]), uint64_t(input.bit_offset),
+        uint64_t(input.dtype == DFM_BOOL), UINT64_MAX, uint64_t(begin), uint64_t(rows)};
+      if (input.dtype == DFM_BOOL) {
+        params[2] = offset + 1;
+        if (size) memcpy(static_cast<char *>(bitmap.contents) + offset, input.values, size);
+        offset += size;
+      } else if (typed(r)) {
+        offset = aligned(offset); params[2] = offset;
+        if (rows) memcpy(static_cast<char *>(bitmap.contents) + offset, input.values, rows * width(input.dtype));
+        offset += rows * width(input.dtype);
+      } else if (rows) {
+        memcpy(static_cast<char *>(x.contents) + (layout.physical[i] * shape.cap + begin) * storageWidth(r),
+               input.values, rows * storageWidth(r));
+      }
+      if (input.has_validity) {
+        params[3] = offset;
+        if (size) memcpy(static_cast<char *>(bitmap.contents) + offset, input.validity, size);
+        offset += size;
+      }
+      unpack[i].push_back(params);
+    });
   }
   for (int64_t i = 0; i < r.literal_count; ++i) {
     int64_t integer;
@@ -2832,15 +2845,11 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
       dispatch("resident_copy", shape.cap);
       continue;
     }
-    buffer(0, x);
-    buffer(1, v);
-    buffer(2, bitmap);
-    bytes(3, unpack[i].data(), 32);
-    buffer(4, meta);
-    dispatch(typed(r) ? "unpack" + std::to_string(i) : "unpack", shape.cap);
-    auto &input = r.inputs[i];
-    offset += ((r.rows + input.bit_offset + 7) / 8) *
-              ((input.dtype == DFM_BOOL) + input.has_validity);
+    for (auto &part : unpack[i]) {
+      buffer(0, x); buffer(1, v); buffer(2, bitmap);
+      bytes(3, part.data(), sizeof(part)); buffer(4, meta);
+      dispatch(typed(r) ? "unpack" + std::to_string(i) : "unpack", std::max<int64_t>(1, part[5]));
+    }
   }
   for (auto i : layout.ends) {
     auto &step = r.steps[i];
