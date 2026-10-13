@@ -1073,6 +1073,11 @@ struct LazyFrame(Copyable):
     # table that subplan narrowed, so the join order still sees how
     # selective it is (`_spine_rows`, `_selectivity`).
     var _origin_rows: Dict[Int, Int]
+    # Each node's empty result (its output names and types) while an
+    # optimizer pass reads them without rewiring the plan, as Polars' IR
+    # and DuckDB's logical operators keep their schemas; cleared by every
+    # rewrite (`_reorder`), None outside those passes.
+    var _schema_memo: Optional[ArcPointer[Dict[Int, DataFrame]]]
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -1080,6 +1085,7 @@ struct LazyFrame(Copyable):
         self._nodes = [_plan_node(SCAN_FRAME, offset=0)]
         self._report = None
         self._origin_rows = Dict[Int, Int]()
+        self._schema_memo = None
 
     def __init__(
         out self,
@@ -1092,6 +1098,7 @@ struct LazyFrame(Copyable):
         self._schemas = schemas^
         self._report = None
         self._origin_rows = Dict[Int, Int]()
+        self._schema_memo = None
 
     def _record(
         self,
@@ -3220,6 +3227,14 @@ struct LazyFrame(Copyable):
             var streamed = self._stream_execute(index, batch_size)
             if streamed:
                 return streamed.take()
+        if empty and self._schema_memo:
+            var memo = self._schema_memo.value()
+            var known = memo[].get(index)
+            if known:
+                return known.take()
+            var schema = self._execute_node(index, True, streaming, batch_size)
+            memo[][index] = schema.copy()
+            return schema^
         if not self._report or empty:
             return self._execute_node(index, empty, streaming, batch_size)
         # Record what the node did: its inputs record themselves as they
@@ -3394,7 +3409,8 @@ struct LazyFrame(Copyable):
                 return input.join(right, how=node.text, suffix=node.names2[0])
             # Consumers that ignore row order let the join skip restoring
             # left-major order after probing.
-            var free = self._order_free_above(
+            # A schema has no row order to keep.
+            var free = empty or self._order_free_above(
                 index, self._live_parents(len(self._nodes) - 1), True
             )
             return input._join_impl(
@@ -4806,19 +4822,60 @@ struct LazyFrame(Copyable):
                 return False
         return True
 
+    def _remember_schemas(mut self):
+        """Keep each node's schema once derived, until the next rewrite."""
+        self._schema_memo = Optional(ArcPointer(Dict[Int, DataFrame]()))
+
+    def _forget_schemas(mut self):
+        if self._schema_memo:
+            self._schema_memo.value()[].clear()
+
+    def _forget_schemas_from(mut self, first: Int):
+        """Forget the schemas of nodes numbered `first` and after."""
+        if not self._schema_memo:
+            return
+        ref memo = self._schema_memo.value()[]
+        var stale = List[Int]()
+        for index in memo.keys():
+            if index >= first:
+                stale.append(index)
+        for index in stale:
+            try:
+                _ = memo.pop(index)
+            except:
+                pass
+
     def _push_predicates(mut self) raises:
         """Swap each filter below operators that cannot change its result."""
+        self._remember_schemas()
+        try:
+            self._push_predicates_now()
+        except e:
+            self._schema_memo = None
+            raise e^
+        self._schema_memo = None
+
+    def _push_predicates_now(mut self) raises:
+        # Filters are visited in children-before-parents order and moved
+        # in place: a filter keeps its input's columns, so no other node's
+        # schema changes and only the moved filters' are forgotten. The
+        # plan is renumbered once at the end.
+        var root = len(self._nodes) - 1
+        var moved = False
         var changed = True
         while changed:
             changed = False
-            for i in range(len(self._nodes)):
+            for i in self._topological(root):
                 if self._nodes[i].kind != FILTER:
                     continue
                 var child = self._nodes[i].left
                 var side = self._passes(i, child)
                 if side >= 0:
-                    self._swap_down(i, child, side == 1)
+                    if i == root:
+                        root = child
+                    self._swap_in_place(i, child, side == 1)
                     changed = True
+                    moved = True
                     break
                 # Over another row-local filter that is stuck where this one
                 # could go further (a filter on an AND split into parts,
@@ -4847,9 +4904,14 @@ struct LazyFrame(Copyable):
                     and self._passes(child, under) < 0
                     and self._passes(i, under) >= 0
                 ):
-                    self._swap_down(i, child, False)
+                    if i == root:
+                        root = child
+                    self._swap_in_place(i, child, False)
                     changed = True
+                    moved = True
                     break
+        if moved:
+            self._reorder(root)
 
     def _passes(self, filter: Int, child: Int) raises -> Int:
         """Whether the filter at `filter` can move below the node at
@@ -4926,6 +4988,14 @@ struct LazyFrame(Copyable):
 
     def _swap_down(mut self, filter: Int, child: Int, right_side: Bool):
         """Move filter from above child to directly above child's input."""
+        self._swap_in_place(filter, child, right_side)
+        self._reorder()
+
+    def _swap_in_place(mut self, filter: Int, child: Int, right_side: Bool):
+        """`_swap_down` without renumbering the plan: the nodes keep their
+        indices, so it is out of children-before-parents order until the
+        next `_reorder`. Only the moved filter's and its old child's
+        schemas are forgotten (a filter keeps its input's columns)."""
         var parents = self._parents()
         var parent = parents[filter]
         var target = (
@@ -4941,10 +5011,35 @@ struct LazyFrame(Copyable):
                 self._nodes[parent].left = child
             else:
                 self._nodes[parent].right = child
-        self._reorder()
+        if self._schema_memo:
+            ref memo = self._schema_memo.value()[]
+            for moved in [filter, child]:
+                try:
+                    _ = memo.pop(moved)
+                except:
+                    pass
 
     def _reorder(mut self, root: Int = -1):
         """Restore children-before-parents order after rewiring."""
+        self._forget_schemas()
+        var order = self._topological(root)
+        var position = List[Int](length=len(self._nodes), fill=-1)
+        for k in range(len(order)):
+            position[order[k]] = k
+        var nodes = List[PlanNode]()
+        for k in range(len(order)):
+            var node = self._nodes[order[k]].copy()
+            if node.left >= 0:
+                node.left = position[node.left]
+            if node.right >= 0:
+                node.right = position[node.right]
+            nodes.append(node^)
+        self._nodes = nodes^
+
+    def _topological(self, root: Int = -1) -> List[Int]:
+        """The nodes reachable from `root` (by default the last node no
+        other reads), children before parents: the order `_reorder`
+        numbers them in."""
         var selected = root
         if selected < 0:
             var parents = self._parents()
@@ -4967,18 +5062,7 @@ struct LazyFrame(Copyable):
                 if not visited[top]:
                     visited[top] = True
                     order.append(top)
-        var position = List[Int](length=len(self._nodes), fill=-1)
-        for k in range(len(order)):
-            position[order[k]] = k
-        var nodes = List[PlanNode]()
-        for k in range(len(order)):
-            var node = self._nodes[order[k]].copy()
-            if node.left >= 0:
-                node.left = position[node.left]
-            if node.right >= 0:
-                node.right = position[node.right]
-            nodes.append(node^)
-        self._nodes = nodes^
+        return order^
 
     def _push_slices(mut self):
         """Move leading slices below row-local projections; a leading slice
@@ -5049,6 +5133,7 @@ struct LazyFrame(Copyable):
         )
         var all_needed = List[Bool](length=len(self._nodes), fill=False)
         all_needed[len(self._nodes) - 1] = True
+        self._remember_schemas()
         # (join index, right side?, columns) for join inputs to narrow.
         var narrow_joins = List[Int]()
         var narrow_sides = List[Bool]()
@@ -5078,6 +5163,13 @@ struct LazyFrame(Copyable):
                                 break
                     if len(keep) > 0 and len(keep) < len(columns):
                         self._nodes[i].names = keep^
+                        # Only this scan's schema changes among the nodes
+                        # still to visit: they come before it, and none
+                        # reads it (children precede their parents).
+                        try:
+                            _ = self._schema_memo.value()[].pop(i)
+                        except:
+                            pass
                 continue
             # What this node reads from its input(s).
             var reads = List[String]()
@@ -5123,6 +5215,7 @@ struct LazyFrame(Copyable):
                 else:
                     needed[child] = reads.copy()
         self._narrow_join_inputs(narrow_joins, narrow_sides, narrow_columns)
+        self._schema_memo = None
 
     def _join_input_columns(
         self, index: Int, wanted: List[String]
@@ -5210,6 +5303,10 @@ struct LazyFrame(Copyable):
             for name in columns[k]:
                 exprs.append(col(name))
             self._nodes.append(_plan_node(SELECT, child, exprs=exprs))
+            # The join and the nodes above it (all numbered after it) may
+            # now produce fewer columns; the joins still to narrow come
+            # before it.
+            self._forget_schemas_from(join)
             if right_sides[k]:
                 self._nodes[join].right = len(self._nodes) - 1
             else:
