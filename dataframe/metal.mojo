@@ -63,6 +63,7 @@ from .accelerator.rows import (
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
     ROW_DURATION_KEY,
+    ROW_DURATION_CALENDAR,
     ROW_DURATION_BOUNDS,
     ROW_CALENDAR_OFFSET,
     ROW_CALENDAR_TRUNCATE,
@@ -387,6 +388,7 @@ def _capabilities() -> RowCapabilities:
         interpolation_windows=True,
         coordinate_interpolation=True,
         duration_rolling=True,
+        calendar_duration_rolling=True,
         empty_outputs=True,
         empty_inputs=True,
         chunked_inputs=True,
@@ -437,6 +439,8 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if op == ROW_DURATION_CALENDAR:
+        return 228
     if op == ROW_DURATION_KEY or op == ROW_DURATION_BOUNDS:
         return 226 if op == ROW_DURATION_KEY else 227
     if op == EXP or op == LOG:

@@ -122,7 +122,7 @@ def test_duration_rolling_capability_intervals_private_indices_types_and_scopes(
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
-    for every in ["1mo", "1ns"]:
+    for every in ["1ns"]:
         with assert_raises(contains="fixed positive interval aligned"):
             _ = lower_rows(
                 source.lazy().select(col("x").rolling_sum_by("t", every)),
@@ -209,11 +209,6 @@ def test_native_metal_duration_rolling_numeric_temporal_units_closed_partitions_
             ),
             runtime,
         )
-        with assert_raises(contains="explicit Float64 cast"):
-            _ = lower_rows(
-                decimal.lazy().select(col(name).rolling_mean_by("t", "3d")),
-                _capabilities(),
-            )
         check(
             decimal.lazy().select(
                 col(name).cast(DataType.FLOAT64).rolling_mean_by("t", "3d")

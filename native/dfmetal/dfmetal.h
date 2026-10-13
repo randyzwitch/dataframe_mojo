@@ -204,11 +204,15 @@ enum DFMOp {
   DFM_QUANTILE_NEAREST = 224,
   DFM_QUANTILE_MIDPOINT = 225,
   // Duration window: value slot, Int64 time-index slot, method
-  // (sum/mean/min/max/variance/std). Literal contains positive period ticks.
-  // A BOUNDS node follows, then zero or more SORT_KEY partition descriptors.
+  // (sum/mean/min/max/variance/std). Literal contains nonnegative fixed ticks;
+  // zero requires the optional positive CALENDAR header after BOUNDS.
+  // Zero or more SORT_KEY partition descriptors follow the headers.
   DFM_DURATION_KEY = 226,
   // Operands carry min_samples, closed-side bits (left=1/right=2), and ddof.
+  // For Decimal128 SUM the last operand is the result precision (1..38).
   DFM_DURATION_BOUNDS = 227,
+  // Optional third duration header: positive months, unit (Date/ms/us/ns), 0.
+  DFM_DURATION_CALENDAR = 228,
 };
 
 typedef struct DFMInput {
