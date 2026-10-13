@@ -259,6 +259,11 @@ def _program(
                 and bound.dtypes[i].is_float()
             )
             or (
+                op == POW
+                and capabilities.float_power
+                and bound.dtypes[i].is_float()
+            )
+            or (
                 op == SQRT
                 and capabilities.float_sqrt
                 and bound.dtypes[i].is_float()
