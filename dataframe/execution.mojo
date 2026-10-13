@@ -71,6 +71,7 @@ from .expr import (
     INTERPOLATE_BY,
     is_rolling_by,
     is_dt_op,
+    DT_OFFSET_BY,
     SEP,
     split_names,
     subtree,
@@ -323,7 +324,13 @@ def _eval[
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
     if is_dt_op(node.op):
-        return dt_op(node, left, bound.dtypes[node.left])
+        return dt_op(
+            node,
+            left,
+            bound.dtypes[node.left],
+            fit_mask(mask, len(left)) if node.op
+            == DT_OFFSET_BY else List[Bool](),
+        )
     if node.op == CAST:
         # Categoricals are carried as strings inside an expression and
         # encoded once the whole result is assembled (see evaluate).

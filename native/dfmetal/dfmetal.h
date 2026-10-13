@@ -104,6 +104,9 @@ enum DFMOp {
   // Whole duration units: positive factor in code[2], code[3] is 1 for
   // signed division toward zero, 0 for Int64 storage multiplication.
   DFM_DT_TOTAL = 143,
+  // Checked fixed temporal offset in storage ticks, in code[2]. code[3]
+  // retains the logical temporal unit (0 Date, 1..3 datetime, 4 Time).
+  DFM_DT_OFFSET_BY = 142,
   DFM_MIN = 80,
   DFM_MEAN = 82,
   // Float64 Welford/Chan reductions. min_count metadata: low 31 bits ddof,

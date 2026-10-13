@@ -49,7 +49,7 @@ bool binaryOp(int64_t op) {
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return op == DFM_DT_TOTAL || op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+  return op == DFM_DT_OFFSET_BY || op == DFM_DT_TOTAL || op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
          op == DFM_CEIL || op == DFM_ROUND || op == DFM_SQRT ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
@@ -710,6 +710,10 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_DECIMAL_FLOAT_CAST && c[0] != DFM_DECIMAL_CAST && c[0] != DFM_DECIMAL_COMPARE &&
           c[0] != DFM_DECIMAL_ARITHMETIC && c[0] != DFM_DECIMAL_UNARY)
         fail("Metal Decimal128 row arithmetic requires CPU execution");
+      if (c[0] == DFM_DT_OFFSET_BY) {
+        if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 || c[3] < 0 || c[3] > 4)
+          fail("Invalid Metal temporal offset descriptor");
+      }
       if (c[0] == DFM_DT_TOTAL) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
             c[2] <= 0 || c[2] > 86400000000000LL || c[3] < 0 || c[3] > 1)
@@ -2260,6 +2264,14 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
               expression = (op == DFM_CLIP_LOW ? "f64_less(" + a + "," + b : "f64_less(" + b + "," + a) + ")?" + b + ":" + a;
             else fail("Unsupported emulated Float64 expression");
             text += z + "=" + typename_ + "(" + expression + ");";
+          } else if (op == DFM_DT_OFFSET_BY) {
+            const auto offset = std::to_string(uint64_t(c[2])) + "UL";
+            text += "long shifted=as_type<long>(as_type<ulong>(" + a + ")+" + offset + ");"
+                    "if(((" + a + "^shifted)&(as_type<long>(" + offset + ")^shifted))<0L)"
+                    "atomic_fetch_min_explicit(error," + std::to_string(s.start+j+1) + "U,memory_order_relaxed);";
+            if (c[3] == 4 && c[2] != 0)
+              text += "shifted%=86400000000000L;if(shifted<0L)shifted+=86400000000000L;";
+            text += z + "=shifted;";
           } else if (op == DFM_DT_TOTAL) {
             // Division never negates Int64.MIN. Finer units retain the CPU
             // total kernel's fixed-width storage multiplication semantics.

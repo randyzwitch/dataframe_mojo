@@ -2,6 +2,7 @@
 from ..dtype import DataType
 from ..expr import (
     DT_TOTAL,
+    DT_OFFSET_BY,
     CAST,
     LEN,
     MEAN,
@@ -68,6 +69,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             extrema=True,
             fixed_logical=True,
             duration_totals=True,
+            temporal_offsets=True,
             decimal128=True,
             decimal128_reductions=True,
             decimal_float_cast=True,
@@ -112,6 +114,11 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
     if paired:
         family += ";paired-moments-v1"
+    var offsets = False
+    for i in range(0, len(plan.code), 4):
+        offsets |= plan.code[i] == DT_OFFSET_BY
+    if offsets:
+        family += ";fixed-offsets-v1"
     var totals = False
     for i in range(0, len(plan.code), 4):
         totals |= plan.code[i] == DT_TOTAL

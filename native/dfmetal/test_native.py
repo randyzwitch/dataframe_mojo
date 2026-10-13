@@ -1141,6 +1141,33 @@ def check_empty_inputs_preflight_without_device():
 
 
 check_empty_inputs_preflight_without_device()
+def check_fixed_offsets_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 3, 0, 0))
+    code = (I * 8)(0, -1, -1, 0, 142, 0, 1, 0)
+    literals = (I * 2)(0, 0)
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    nodes, slots = (I * 2)(3, 3), (I * 2)(3, 3)
+    outputs = (Output * 1)(Output(None, None, 3, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for unit in range(5):
+        code[7] = unit
+        for offset in (-(2**63), -1, 0, 1, 2**63-1):
+            code[6] = offset
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for unit in (-1, 5):
+        code[7] = unit
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"temporal offset descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_fixed_offsets_preflight_without_device()
+
+
 def check_quantiles_preflight_without_device():
     inputs = (Input * 1)(Input(None, None, 11, 0, 0))
     slots = (I * 1)(11)
@@ -3887,6 +3914,28 @@ def test_duration_totals_native():
 
 
 test_duration_totals_native()
+
+
+def test_fixed_offsets_native():
+    lo, hi, day = -(2**63), 2**63-1, 86400000000000
+    for unit in range(5):
+        for offset in (-1, 0, 1):
+            values = [lo, lo+1, -day-1, -1, 0, 1, day-1, day, hi-1, hi]
+            valid = [lo <= value+offset <= hi for value in values]
+            nodes = [col, (142, 0, offset, unit)]
+            actual, bits, _ = execute(values, 3, nodes, [0, 0], valid=valid, offset=5, typed=True)
+            expected = [(value+offset) % day if unit == 4 and offset else value+offset for value in values]
+            assert bits == valid
+            assert all(not ok or a == e for a, e, ok in zip(actual, expected, valid))
+            actual, bits, _ = execute([], 3, nodes, [0, 0], typed=True)
+            assert actual == bits == []
+        execute([hi], 3, [col, (142, 0, 1, unit)], [0, 0], typed=True, expect_error="overflow")
+        execute([lo], 3, [col, (142, 0, -1, unit)], [0, 0], typed=True, expect_error="overflow")
+    print("PASS checked fixed temporal offsets, Time wrapping, endpoints, nulls and empty rows")
+
+
+test_fixed_offsets_native()
+
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"
