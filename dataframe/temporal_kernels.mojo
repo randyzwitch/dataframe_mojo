@@ -222,7 +222,8 @@ def _total(value: Int64, dtype: DataType, unit: String) -> Int64:
     if nanos_per_unit >= nanos_per_tick:
         var ticks = nanos_per_unit // nanos_per_tick
         # Truncate toward zero, like a duration's whole-unit count.
-        return value // ticks if value >= 0 else -((-value) // ticks)
+        var quotient = value // ticks
+        return quotient + 1 if value < 0 and value % ticks != 0 else quotient
     return value * (nanos_per_tick // nanos_per_unit)
 
 

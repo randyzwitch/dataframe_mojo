@@ -1141,6 +1141,31 @@ def check_empty_inputs_preflight_without_device():
 
 
 check_empty_inputs_preflight_without_device()
+def check_duration_totals_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 3, 0, 0))
+    code = (I * 8)(0, -1, -1, 0, 143, 0, 1, 1)
+    literals = (I * 2)(0, 0)
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    nodes, slots = (I * 2)(3, 3), (I * 2)(3, 3)
+    outputs = (Output * 1)(Output(None, None, 3, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for mode in (0, 1):
+        code[7] = mode
+        for factor in (1, 1000, 1000000, 86400000000000):
+            code[6] = factor
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for factor, mode in ((0, 1), (-1, 1), (86400000000001, 1), (1, -1), (1, 2)):
+        code[6], code[7] = factor, mode
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"duration total descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_duration_totals_preflight_without_device()
 check_empty_outputs_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
@@ -3816,6 +3841,22 @@ def test_empty_inputs_native():
 
 
 test_empty_inputs_native()
+def test_duration_totals_native():
+    values = [-(1 << 63), -(1 << 63) + 1, -1000000001, -1001, -1, 0,
+              1, 1001, 1000000001, (1 << 63)-1]
+    for factor in (1, 1000, 1000000, 86400000000000):
+        for mode in (0, 1):
+            for validity in ([True] * len(values), [i % 3 != 1 for i in range(len(values))]):
+                output, bits, _ = execute(values, 3, [col, (143, 0, factor, mode)], [0, 0],
+                                          valid=validity, offset=5, typed=True)
+                reference = [((-1 if x < 0 else 1)*(abs(x)//factor)) if mode
+                             else ((x*factor+(1 << 63)) % (1 << 64))-(1 << 63) for x in values]
+                assert bits == validity
+                assert [x for x, valid in zip(output, bits) if valid] == [x for x, valid in zip(reference, validity) if valid]
+    print("PASS signed duration totals, full-width storage, nulls and slice bitmaps")
+
+
+test_duration_totals_native()
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"

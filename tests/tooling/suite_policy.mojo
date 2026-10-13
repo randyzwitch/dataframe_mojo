@@ -135,14 +135,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/public_contracts/test_temporal.mojo::test_duration_minimum_tick_totals_keep_the_negative_sign",
-            "Whole seconds of the minimum Int64 nanosecond duration do not retain the correct negative, truncated count.",
-            "minimum duration whole seconds must truncate toward zero without sign overflow",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_inspection.mojo::test_empty_selector_expansion_preserves_input_height",
             "An empty selector expansion collapses input height to one.",
             "empty selector expansion must preserve input height",
@@ -1283,6 +1275,24 @@ def production_policy() -> SuitePolicy:
 
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_totals.mojo::test_native_metal_duration_totals_all_storage_units_full_domain_and_nulls",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_totals.mojo::test_native_metal_duration_totals_conditions_filters_groups_windows_and_joins",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_totals.mojo::test_native_metal_duration_totals_profiles_cost_budget_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_empty_inputs.mojo::test_native_metal_empty_inputs_rows_slices_filters_and_literal_broadcasts",
             "metal",
         )
@@ -1879,6 +1889,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_selectors.mojo",
                 "tests/execution_modes/test_backend_metal_empty_results.mojo",
                 "tests/execution_modes/test_backend_metal_empty_inputs.mojo",
+                "tests/execution_modes/test_backend_metal_duration_totals.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
                 "tests/execution_modes/test_backend_metal_higher_moments.mojo",
                 "tests/execution_modes/test_backend_metal_pair_moments.mojo",

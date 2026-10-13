@@ -77,6 +77,7 @@ from .expr import (
     is_comparison,
     DIV,
     DT_YEAR,
+    DT_TOTAL,
     DT_TIME,
     DT_TRUNCATE,
     FLOORDIV,
@@ -356,6 +357,7 @@ def _capabilities() -> RowCapabilities:
         slices=True,
         scalar_regions=True,
         temporal_fields=True,
+        duration_totals=True,
         ranks=True,
         cumulative_windows=True,
         paired_moments=True,
@@ -515,6 +517,8 @@ def _op(op: Int) raises -> Int64:
         return 98
     if op == KURTOSIS:
         return 99
+    if op == DT_TOTAL:
+        return 143
     if op == VAR:
         return 87
     if op == STD:
@@ -1637,6 +1641,11 @@ struct MetalRuntime(AcceleratorBackend):
                 paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
         if paired:
             family += ";metal-paired-moments-v1"
+        var totals = False
+        for i in range(0, len(plan.code), 4):
+            totals |= plan.code[i] == DT_TOTAL
+        if totals:
+            family += ";metal-duration-totals-v1"
         var higher = False
         for output in plan.outputs:
             higher |= output.reduction == SKEW or output.reduction == KURTOSIS
