@@ -1072,15 +1072,20 @@ def lower_rows(
                     ):
                         # CPU pushdown can remove checked work. An operation
                         # without a static no-error proof still needs an
-                        # observable terminal boundary, with no final head.
+                        # observable terminal boundary, with no final head,
+                        # unless the backend carries per-value errors through
+                        # row selection and checks each observing consumer.
                         if not (
                             capabilities.proven_integer_operations
                             and proven[part_index]
                         ) and (
                             not terminal_boundary
-                            or k != 0
-                            or node.kind == FILTER
-                            or limit >= 0
+                            or (
+                                not capabilities.deferred_integer_errors
+                                and (
+                                    k != 0 or node.kind == FILTER or limit >= 0
+                                )
+                            )
                         ):
                             capabilities.reject(
                                 "plan",

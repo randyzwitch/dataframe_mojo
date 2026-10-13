@@ -114,6 +114,60 @@ def production_policy() -> SuitePolicy:
             "mojo_gpu",
         )
     )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_reductions.mojo::test_mojo_gpu_integer_reductions_layouts_empty_nulls_and_exact_results",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_reductions.mojo::test_mojo_gpu_wide_reduction_cancellation_overflow_and_mean",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_reductions.mojo::test_mojo_gpu_float_boolean_extrema_and_filtered_reductions",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordering.mojo::test_mojo_gpu_ordering_integer_layouts_nulls_mixed_keys_and_stability",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordering.mojo::test_mojo_gpu_ordering_float_encodings_nan_zero_subnormal_and_nulls",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordering.mojo::test_mojo_gpu_ordering_compositions_key_errors_budget_and_recovery",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_statistics.mojo::test_mojo_gpu_statistics_numeric_layouts_empty_masks_and_mixed_outputs",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_statistics.mojo::test_mojo_gpu_statistics_nonfinite_constant_and_scalar_anchors",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_statistics.mojo::test_mojo_gpu_statistics_filtered_sliced_and_pair_intersection",
+            "mojo_gpu",
+        )
+    )
     # exit_code zero means an ordinary exception; nonzero means an isolated process.
     policy.failures.append(
         ExpectedFailure(

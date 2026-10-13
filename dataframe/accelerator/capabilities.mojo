@@ -90,6 +90,8 @@ struct RowCapabilities(Copyable):
     var shift_fill_windows: Bool
     var cumulative_windows: Bool
     var reuse_column_slots: Bool
+    # Carry per-value checked errors through selections and observe consumers.
+    var deferred_integer_errors: Bool
     var proven_integer_operations: Bool
     var max_nodes: Int
     var max_slots: Int
@@ -160,6 +162,7 @@ struct RowCapabilities(Copyable):
         max_join_columns: Int = 64,
         reuse_column_slots: Bool = False,
         proven_integer_operations: Bool = False,
+        deferred_integer_errors: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -218,6 +221,7 @@ struct RowCapabilities(Copyable):
         self.decimal_multiplicative = decimal_multiplicative
         self.reuse_column_slots = reuse_column_slots
         self.proven_integer_operations = proven_integer_operations
+        self.deferred_integer_errors = deferred_integer_errors
         self.max_nodes = max_nodes
         self.max_slots = max_slots
         self.max_steps = max_steps

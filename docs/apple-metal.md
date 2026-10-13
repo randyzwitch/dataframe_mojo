@@ -28,6 +28,15 @@ Float64 GPU instructions. The second task compares GPU results with independent
 host IEEE arithmetic over boundary and randomized inputs. Filtering uses Mojo
 block prefix sums and gathers; slices share that compaction path, including
 negative offsets. Values, null masks and deferred errors move together.
+
+Direct Mojo reductions cover exact integer sums and means, counts, extrema,
+first/last, extremum positions and Kleene Boolean reductions. Integer sums use
+paired UInt64 words and check overflow only at the typed result boundary.
+Statistical kernels provide variance, standard deviation, skewness, kurtosis,
+covariance and correlation. Stable ordering supports mixed fixed-width keys,
+per-key direction and null placement, preserving source order on ties and the
+original floating-point encodings. These operations share the same Mojo-owned
+buffers, deferred errors and request-budget accounting.
 Unsupported regions reject before device allocation. Automatic placement awaits calibration for the Mojo implementation. The
 remaining operations below continue to use the existing implementation until
 their Mojo replacements are verified; retaining that implementation during
