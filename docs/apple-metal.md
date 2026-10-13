@@ -213,6 +213,17 @@ so no value-dependent range proof or CPU row evaluation is needed. Empty,
 all-null, and `min_count` results match the CPU. Reductions of Decimal128 inputs
 support counts, minimum, maximum, first, and last. Sums and means of Decimal128 inputs still require CPU execution.
 
+Decimal32/64/128 casts to Float64 convert the signed integer payload to
+binary64 first, then divide by the separately converted integer `10**scale`,
+matching the CPU two-rounding sequence. Both conversions and row division run
+on the GPU using integer-only primitives; scale is bound once as a runtime
+literal. Nulls remain null, and strict/non-strict modes produce the same result
+because every valid decimal fits Float64. These casts can appear in filters,
+join branches, aggregate consumers, windows, or before a head. Decimal32/64
+SUM results can consequently be cast from their Decimal128 result to Float64.
+Estimates include `metal-decimal-float-casts-v1`; prior calibrations do not apply.
+Other logical arithmetic and cast combinations retain their existing limits.
+
 Decimal32/64 means return Float64. The GPU divides the exact two-word total
 by the valid count and then by the decimal scale, retaining both integer
 remainders before conversion. The separate Float64 conversions, divisions and

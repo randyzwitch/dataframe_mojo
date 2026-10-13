@@ -22,6 +22,7 @@ from .accelerator.cost import (
 from .accelerator.cpu_work import cpu_features
 from ._build_identity import CPU_BUILD_ID
 from .parallel import configured_workers
+from .decimal import pow10
 from .json_value import JsonValue
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.sets import has_set_operations, lower_set_operations
@@ -343,6 +344,7 @@ def _capabilities() -> RowCapabilities:
         ranks=True,
         decimal128=True,
         decimal_mean=True,
+        decimal_float_cast=True,
         reuse_column_slots=True,
         proven_integer_operations=True,
         max_nodes=128,
@@ -632,6 +634,19 @@ struct _Descriptors(Movable):
         for column in plan.source._columns:
             self.inputs.extend(_input_series(column))
         for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if plan.code[4 * i] == CAST:
+                    var operand = Int(plan.code[4 * i + 1])
+                    if operand >= 0:
+                        var source = plan.node_dtypes[step.start + operand]
+                        if (
+                            source.is_decimal()
+                            and plan.node_dtypes[i] == DataType.FLOAT64
+                        ):
+                            self.code[4 * i] = 213
+                            self.code[4 * i + 2] = -1
+                            self.code[4 * i + 3] = Int64(source.scale())
+                            self.literals[i] = Float64(pow10(source.scale()))
             self.steps.extend(
                 [
                     Int64(step.start),
@@ -1490,6 +1505,20 @@ struct MetalRuntime(AcceleratorBackend):
             )
         if wide_decimal:
             family += ";metal-decimal128-v1"
+        var decimal_float_cast = False
+        for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if (
+                    plan.code[4 * i] == CAST
+                    and plan.node_dtypes[i] == DataType.FLOAT64
+                ):
+                    var operand = Int(plan.code[4 * i + 1])
+                    if operand >= 0:
+                        decimal_float_cast |= plan.node_dtypes[
+                            step.start + operand
+                        ].is_decimal()
+        if decimal_float_cast:
+            family += ";metal-decimal-float-casts-v1"
         var emulated = False
         for i in range(len(plan.node_dtypes)):
             if plan.node_dtypes[i] == DataType.FLOAT64:

@@ -137,6 +137,9 @@ enum DFMOp {
   // Exact Decimal32/64 mean with CPU quotient/remainder rounding. Metadata
   // carries the source scale in min_count (or the GROUP_OUTPUT literal).
   DFM_WIDE_DECIMAL_MEAN = 212,
+  // Unary decimal-to-Float64 conversion. code[3] is scale, code[2] is -1;
+  // literals[node] is the CPU binary64 conversion of the integer 10**scale.
+  DFM_DECIMAL_FLOAT_CAST = 213,
 };
 
 typedef struct DFMInput {
