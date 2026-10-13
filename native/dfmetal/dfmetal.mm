@@ -1,5 +1,6 @@
 #include "dfmetal.h"
 #include "dfmetal_float64.h"
+#include "dfmetal_decimal.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
@@ -88,6 +89,8 @@ int64_t reductionType(int64_t type, int64_t op) {
   if (op == DFM_WIDE_INTEGER_SUM || op == DFM_WIDE_INTEGER_MEAN)
     return type == DFM_INT64 || type == DFM_UINT64
                ? (op == DFM_WIDE_INTEGER_SUM ? type : DFM_FLOAT64_STORAGE) : -1;
+  if (op == DFM_WIDE_DECIMAL_MEAN)
+    return type == DFM_INT32 || type == DFM_INT64 ? DFM_FLOAT64_STORAGE : -1;
   if (op == DFM_WIDE_SUM)
     return type == DFM_INT32 || type == DFM_INT64 ? DFM_DECIMAL128 : -1;
   if (type == DFM_DECIMAL128) {
@@ -114,7 +117,8 @@ int64_t partialWidth(const DFMRequest &r) {
   for (int64_t i = 0; i < r.output_count; ++i) {
     auto &o = r.outputs[i];
     if (o.dtype == DFM_DECIMAL128 || o.reduction == DFM_WIDE_INTEGER_SUM ||
-        o.reduction == DFM_WIDE_INTEGER_MEAN) return 32;
+        o.reduction == DFM_WIDE_INTEGER_MEAN ||
+        o.reduction == DFM_WIDE_DECIMAL_MEAN) return 32;
   }
   return 16;
 }
@@ -440,6 +444,9 @@ Shape validate(const DFMRequest &r, bool storage = false,
           auto t = slotType(r, c[1]), out = slotType(r, c[2]);
           if (out != reductionType(t, c[3]))
             fail("Unsupported Metal grouped reduction precision");
+          if (c[3] == DFM_WIDE_DECIMAL_MEAN &&
+              r.literals[v.start + j] > uint64_t(t == DFM_INT32 ? 9 : 18))
+            fail("Invalid Metal decimal mean scale");
           if ((c[3] == DFM_ANY || c[3] == DFM_ALL) &&
               r.literals[v.start + j] > 1)
             fail("Invalid Metal Boolean reduction metadata");
@@ -658,6 +665,10 @@ Shape validate(const DFMRequest &r, bool storage = false,
         fail("Metal reduction requires unsupported accumulator precision");
       if (v.dtype != expected)
         fail("Invalid Metal reduction dtype");
+      if (v.reduction == DFM_WIDE_DECIMAL_MEAN &&
+          (v.min_count < 0 ||
+           v.min_count > (slotType(r, v.slot) == DFM_INT32 ? 9 : 18)))
+        fail("Invalid Metal decimal mean scale");
       if (v.reduction != DFM_SUM && v.reduction != DFM_COUNT &&
           v.reduction != DFM_LEN && !typed(r))
         fail("Metal reduction requires typed storage");
@@ -1210,7 +1221,8 @@ std::string source(const DFMRequest &r) {
   for (int64_t i = 0; i < r.code_words; i += 4)
     wide |= r.code[i] == DFM_GROUP_OUTPUT &&
             (r.code[i + 3] == DFM_WIDE_INTEGER_SUM ||
-             r.code[i + 3] == DFM_WIDE_INTEGER_MEAN);
+             r.code[i + 3] == DFM_WIDE_INTEGER_MEAN ||
+             r.code[i + 3] == DFM_WIDE_DECIMAL_MEAN);
   text += "constant bool USE_WIDE=" + std::string(wide ? "true" : "false") + ";\n";
   text += "struct Out { long slot; long kind; long minimum; long type; "
           "};\n";
@@ -1224,6 +1236,7 @@ std::string source(const DFMRequest &r) {
             "long partial_high(Partial p){return 0;}\n";
   text += residentSource();
   text += dfm_float64_source;
+  text += dfm_decimal_source;
   text += "constant bool DIRECT_FILTERED_REDUCTION=" +
           std::string(direct ? "true" : "false") + ";\n" +
           "constant ulong FILTERED_SLOT=" + std::to_string(filterSlot) + "UL;\n";
@@ -1342,7 +1355,7 @@ void wide_merge(thread long &low,thread long &high,long other,long upper){
 void wide_add(thread long &low,thread long &high,ulong word){
  wide_merge(low,high,long(word),long(word)<0?-1L:0L);
 }
-bool wide_accum(Out o){return USE_WIDE&&(o.kind==208||o.kind==210||o.kind==211);}
+bool wide_accum(Out o){return USE_WIDE&&(o.kind==208||o.kind==210||o.kind==211||o.kind==212);}
 void wide_accumulate(thread long &low,thread long &high,ulong word,Out o){
  wide_merge(low,high,long(word),o.type==10?0L:(long(word)<0?-1L:0L));
 }
@@ -1403,6 +1416,7 @@ void state_finish(thread long &value,thread long &count,Out o,long rows){
 }
 void state_finish_wide(thread long &value,thread long &high,thread long &count,Out o,long rows){
  if(o.kind==211){if(count)value=long(f64_div(f64_from_wide(ulong(value),ulong(high),o.type==10),f64_from_signed(count)));high=0;}
+ else if(o.kind==212){if(count)value=long(f64_decimal_mean(ulong(value),ulong(high),ulong(count),uint(o.minimum)));high=0;}
  else state_finish(value,count,o,rows);
 }
 bool state_valid(Out o,long count){return o.kind==10||o.kind==208||o.kind==210?count>=o.minimum:count>0;}

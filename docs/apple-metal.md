@@ -211,7 +211,14 @@ precision 38 and the original scale, including through joins and scalar
 broadcasts. The Int32.MAX row bound keeps every possible partial below 2**94,
 so no value-dependent range proof or CPU row evaluation is needed. Empty,
 all-null, and `min_count` results match the CPU. Reductions of Decimal128 inputs
-support counts, minimum, maximum, first, and last. Sums of Decimal128 inputs and decimal means still require CPU execution.
+support counts, minimum, maximum, first, and last. Sums and means of Decimal128 inputs still require CPU execution.
+
+Decimal32/64 means return Float64. The GPU divides the exact two-word total
+by the valid count and then by the decimal scale, retaining both integer
+remainders before conversion. The separate Float64 conversions, divisions and
+additions match the CPU rounding sequence. Global, grouped and resident scalar
+means preserve empty and all-null results. Rebuild the optional native runtime
+for this opcode; its cost family is `metal-decimal-means-v1`.
 
 Int64 and UInt64 sums and means accumulate exactly in two words on the GPU.
 The Int32.MAX row bound keeps every partial below 2**95, including unsigned
@@ -331,7 +338,7 @@ As in the CPU mergeable floating state, reduction reassociation is allowed and
 bitwise reproducibility across execution schedules is not promised. Integer
 means retain an exact integer total before Float64 conversion and division.
 Int64/UInt64 inputs use the exact two-word accumulator without a value-dependent
-range proof. Sums of Decimal128 inputs and decimal means still require CPU
+range proof. Sums and means of Decimal128 inputs still require CPU
 execution. Forced accelerator execution rejects statically unsupported
 operations before submission; checked final sums can raise overflow during
 execution.
@@ -472,6 +479,7 @@ python3 native/dfmetal/test_native.py
 python3 native/dfmetal/test_join.py
 python3 native/dfmetal/test_resident.py
 python3 native/dfmetal/test_float64.py
+python3 native/dfmetal/test_decimal.py
 pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
 pixi run mojo run -I . tests/test_metal_completeness.mojo
@@ -482,6 +490,7 @@ pixi run mojo run -I . tests/test_metal_float64_storage.mojo
 pixi run mojo run -I . tests/test_metal_float64_emulation.mojo
 pixi run mojo run -I . tests/test_metal_bounded_sums.mojo
 pixi run mojo run -I . tests/test_metal_decimal128.mojo
+pixi run mojo run -I . tests/test_metal_decimal_means.mojo
 pixi run mojo run -I . tests/test_metal_constants.mojo
 pixi run mojo run -I . tests/test_metal_aggregate_compositions.mojo
 pixi run mojo run -I . tests/test_metal_distinct_counts.mojo

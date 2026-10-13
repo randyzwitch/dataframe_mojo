@@ -359,6 +359,23 @@ def check_group_preflight_without_device():
     literals[2] = 0
 
 
+    # Decimal means carry an integer scale in the grouped literal payload.
+    # Validate this path even on CI machines without a Metal device.
+    code[11], nt[2], st[4], outputs[0].dtype = 212, 11, 11, 11
+    for dtype, maximum in ((2, 9), (3, 18)):
+        inputs[0].dtype = st[0] = nt[1] = dtype
+        for scale in (0, maximum):
+            literals[2] = scale
+            err = P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for scale in (-1, maximum + 1):
+            literals[2] = scale
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal mean scale" in C.string_at(err)
+            lib.dfm_free(err)
+
+
 check_group_preflight_without_device()
 
 
@@ -737,7 +754,7 @@ def execute(
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
     out_type = (
-        11 if reduction == 211 else dtype if reduction == 210 else
+        11 if reduction in (211, 212) else dtype if reduction == 210 else
         (dtype if dtype in (1, 2, 9, 10) else 3) if reduction == 10 else 3
     ) if reduction >= 0 else (4 if output_bool else dtype)
     out_scalar = C.c_uint64 if out_type == 11 else SCALARS[out_type]
@@ -3191,6 +3208,51 @@ def test_exact_wide_integer_reductions():
 
 test_exact_wide_integer_reductions()
 
+
+
+def test_exact_decimal_means():
+    import struct
+    def expected(values, scale):
+        if not values:
+            return 0
+        total, count = sum(values), len(values)
+        per_row, left = divmod(abs(total), count)
+        whole, digits = divmod(per_row, 10**scale)
+        value = float(whole) + (float(digits) + float(left) / float(count)) / float(10**scale)
+        if total < 0:
+            value = -value
+        return struct.unpack("Q", struct.pack("d", value))[0]
+    for dtype, width, max_scale in ((2, 31, 9), (3, 63, 18)):
+        high = (1 << width) - 1
+        for scale in range(max_scale + 1):
+            for values in ([high, high-1, -high, 7], [-high, -high+1, -3],
+                           [high, high, high], [-(1 << width)], []):
+                output, bits, _ = execute(values, dtype, [col], [0], reduction=212,
+                                         minimum=scale, typed=True)
+                assert bits == [bool(values)] and output == [expected(values, scale)], (dtype, scale, values, output)
+        for n in (257, 4097, 65537):
+            values = [high - i % 31 if i % 3 else -high for i in range(n)]
+            valid = [i % 11 != 3 for i in range(n)]
+            chosen = [v for v, ok in zip(values, valid) if ok]
+            for scale in (0, max_scale):
+                output, bits, _ = execute(values, dtype, [col], [0], valid=valid,
+                                         offset=5, reduction=212, minimum=scale, typed=True)
+                assert bits == [True] and output == [expected(chosen, scale)]
+        output, bits, _ = execute([high, -high], dtype, [col], [0], valid=[False, False],
+                                 reduction=212, minimum=max_scale, typed=True)
+        assert output == [0] and bits == [False]
+        for scale in (-1, max_scale + 1):
+            execute([high], dtype, [col], [0], reduction=212, minimum=scale,
+                    typed=True, expect_error="Invalid Metal output" if scale < 0 else "decimal mean scale")
+        execute([high], dtype, [col], [0], reduction=212, minimum=max_scale,
+                typed=True, budget=0, expect_error="budget")
+    for dtype in (1, 4, 5, 6, 7, 8, 9, 10):
+        execute([1], dtype, [col], [0], reduction=212, typed=True,
+                expect_error="unsupported accumulator precision")
+    print("PASS exact Decimal32/64 mean native regressions")
+
+
+test_exact_decimal_means()
 
 lib.dfm_context_release(ctx)
 print(
