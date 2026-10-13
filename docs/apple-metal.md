@@ -52,6 +52,15 @@ backends retain their existing 64-entry defaults. The extended bounds require
 rebuilding the optional native Metal runtime; ABI layouts and opcode meanings
 are unchanged. Memory budgets and semantic preflight checks still apply.
 
+Selectors (`all`, named column lists, exclusions, dtype matching, and positional
+`nth`) expand against the input schema before dictionary, aggregate, or window
+normalization. Operations and name prefixes/suffixes apply independently to each
+matched column, in the CPU selector's order. Select, with-columns, grouped and
+global aggregates, supported windows, and filters with exactly one match retain
+their normal precision and observation checks. Expansion reads no source rows.
+An empty selector in with-columns is a no-op; empty select results still require
+zero-column resident support and reject before device initialization.
+
 Direct column projections and aliases reuse an existing resident value slot.
 They preserve separate output names and column order without a copying device
 step. Filters, sorts, and slices gather each shared value and validity bitmap
@@ -224,7 +233,7 @@ restrictions. Nested aggregate, rank, cumulative, shift, fill, and rolling windo
 inner scopes before feeding outer scopes, retaining original row order and the
 same observation boundaries at each level. Cumulative prefixes remain checked
 inside unused conditional branches and before head. Unproved checked inputs to
-rank/cumulative/shift/fill/rolling kernels, selectors, other window kernels, and unsupported
+rank/cumulative/shift/fill/rolling kernels, other window kernels, and unsupported
 underlying reductions still require CPU execution.
 Automatic placement keeps these plans on CPU until their complete DAG has a
 supported estimate and matching calibration.
@@ -417,8 +426,7 @@ broadcast through conditional expressions. File-backed inputs still reject befor
 reads. Automatic placement keeps these multi-region plans on CPU until it can
 estimate the complete DAG.
 Checked sums in child regions and checked arithmetic followed by head retain
-their existing rejection boundaries. Selectors, windows and unsupported
-aggregate leaves remain unsupported.
+their existing rejection boundaries. Unsupported windows and aggregate leaves retain their rejection boundaries.
 
 `n_unique()` aggregates in a select or grouped aggregation run as resident
 deduplication followed by row counting. Null contributes one distinct category,
@@ -627,7 +635,7 @@ that unlisted query combinations are already equivalent.
 | Temporal expressions | Calendar month/year truncation, offsets, duration totals, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins, file-backed scans, and chunked in-memory inputs without explicit rechunking. |
-| Composition | Selector expansion and remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
+| Composition | Zero-column selector results and remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
 
 Native validation and the backend contract suite cover each implemented feature.
 They must be extended as these gaps close; passing the current suite alone does
