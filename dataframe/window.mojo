@@ -948,6 +948,11 @@ def rolling_by_op(
 
     if input.is_chunked() or index.is_chunked():
         return rolling_by_op(node, input.rechunk(), index.rechunk(), ids)
+    if input.dtype().is_decimal():
+        if node.op == ROLLING_SUM_BY:
+            return _rolling_decimal_sum_by(node, input, index, ids)
+        if node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
+            return rolling_by_op(node, _as_float(input), index, ids)
     if node.op == ROLLING_SUM_BY and input.dtype() == DataType.UINT64:
         var groups = partitions(len(input), ids)
         var bounds = rolling_bounds(
@@ -1043,6 +1048,51 @@ def rolling_by_op(
     if is_int:
         return Series("", Column[Int64](ints^, mask))
     return Series("", Column[Float64](floats^, mask))
+
+
+def _rolling_decimal_sum_by(
+    node: Node, input: Series, index: Series, ids: List[Int]
+) raises -> Series:
+    from .time_windows import rolling_bounds, negate_period
+
+    var groups = partitions(len(input), ids)
+    var bounds = rolling_bounds(
+        index, groups, node.text, negate_period(node.text), node.text2
+    )
+    var wide = input._decimal128()
+    ref column = wide._data[Column[Int128]]
+    var target = input.dtype().sum_type()
+    var limit = precision_limit(target.precision())
+    var output = List[Int128](length=len(input), fill=0)
+    var valid = List[Bool](length=len(input), fill=False)
+    for rows in groups:
+        for row in rows:
+            var begin = bounds[0][row]
+            var stop = bounds[1][row]
+            var count = 0
+            for position in range(begin, stop):
+                count += Int(column._valid(rows[position]))
+            if count < Int(node.floating):
+                continue
+            var total = Int128(0)
+            for position in range(begin, stop):
+                var at = rows[position]
+                if not column._valid(at):
+                    continue
+                var value = check_limit(column._get(at), limit, target)
+                # Check before addition so even precision-38 prefixes cannot
+                # wrap Int128 and hide a precision error behind cancellation.
+                if (value > 0 and total >= limit - value) or (
+                    value < 0 and total <= -limit - value
+                ):
+                    raise Error(
+                        "value exceeds decimal precision "
+                        + String(target.precision())
+                    )
+                total += value
+            output[row] = total
+            valid[row] = True
+    return Series("", Column[Int128](output^, valid^)).with_dtype(target)
 
 
 def _rolling_u64_sum(

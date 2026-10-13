@@ -1085,7 +1085,7 @@ def check_duration_rolling_preflight_without_device():
             inputs[0].dtype=nodes[0]=slots[0]=dtype
             output=11 if method in (1,4,5) else 3 if method==0 and dtype in (5,6,7,8) else dtype
             slots[2]=outputs[0].dtype=output
-            supported=dtype!=4 and (method in (2,3) or method==0 and dtype!=12 or method in (1,4,5) and dtype==11)
+            supported=dtype!=4 and (method in (0,2,3) or method in (1,4,5) and dtype==11)
             err=P()
             status=lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
             if supported:check(status,err)
@@ -1093,8 +1093,20 @@ def check_duration_rolling_preflight_without_device():
                 assert status
                 assert b"duration window result type" in C.string_at(err)
                 lib.dfm_free(err)
-    inputs[0].dtype=nodes[0]=slots[0]=slots[2]=outputs[0].dtype=3
+    inputs[0].dtype=nodes[0]=slots[0]=slots[2]=outputs[0].dtype=12
     code[3]=0
+    for precision in range(1,39):
+        code[7]=precision
+        err=P()
+        check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+    for precision in (0,39,(1<<63)-1):
+        code[7]=precision
+        err=P()
+        assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
+        assert b"duration window result type" in C.string_at(err)
+        lib.dfm_free(err)
+    inputs[0].dtype=nodes[0]=slots[0]=slots[2]=outputs[0].dtype=3
+    code[3],code[7]=0,1
     for period in (1,3,(1<<63)-1):
         literals[0]=period
         for minimum in (0,1,(1<<63)-1):

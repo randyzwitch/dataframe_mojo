@@ -1333,6 +1333,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_decimals.mojo::test_native_metal_duration_decimals_all_widths_scales_signs_layouts_partitions_and_boundaries",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_decimals.mojo::test_native_metal_duration_decimal_observed_prefix_errors_null_payloads_and_physical_extremes",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_decimals.mojo::test_native_metal_duration_decimal_consumers_profiles_precision_families_and_exact_budgets",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_duration_rolling.mojo::test_native_metal_duration_rolling_numeric_temporal_units_closed_partitions_slices_and_chunks",
             "metal",
         )
@@ -1721,6 +1739,7 @@ def production_policy() -> SuitePolicy:
                 "tests/public_contracts/test_extended_windows.mojo",
                 "tests/public_contracts/test_order_windows.mojo",
                 "tests/public_contracts/test_window_precision.mojo",
+                "tests/public_contracts/test_duration_decimal_windows.mojo",
                 "tests/public_contracts/test_window_types.mojo",
             ],
         )
@@ -2068,6 +2087,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_coordinate_interpolation.mojo",
                 "tests/execution_modes/test_backend_metal_floating_power.mojo",
                 "tests/execution_modes/test_backend_metal_duration_rolling.mojo",
+                "tests/execution_modes/test_backend_metal_duration_decimals.mojo",
                 "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",

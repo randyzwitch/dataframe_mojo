@@ -500,7 +500,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           fail("Invalid Metal duration window bounds");
         auto input = slotType(r,h[1]), output = slotType(r,v.slot);
         if (nodeType(r,v.start) != input || input == DFM_BOOL ||
-            (h[3] == 0 && (input == DFM_DECIMAL128 || output != sumType(input))) ||
+            (h[3] == 0 && (output != (input == DFM_DECIMAL128 ? DFM_DECIMAL128 : sumType(input)) || (input == DFM_DECIMAL128 && (bounds[3] < 1 || bounds[3] > 38)))) ||
             ((h[3] == 1 || h[3] >= 4) && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
             ((h[3] == 2 || h[3] == 3) && input != output))
           fail("Invalid Metal duration window result type");
@@ -3194,6 +3194,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if (fault == 0xB0000000U) fail("Metal time window index contains nulls");
     if (fault == 0xB0000001U) fail("Metal time window index is not sorted within its group");
     if (fault == 0xB0000002U) fail("Int64 offset overflow in Metal time window bounds");
+    if (fault == 0xB0000003U) fail("value exceeds decimal precision in Metal duration sum");
     if (fault == 0xE0000000U)
       fail("Metal unsupported [accumulator]: cannot prove exact wide accumulation "
            "within the native Int64/UInt64 range");

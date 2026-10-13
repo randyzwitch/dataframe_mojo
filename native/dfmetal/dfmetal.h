@@ -208,6 +208,7 @@ enum DFMOp {
   // A BOUNDS node follows, then zero or more SORT_KEY partition descriptors.
   DFM_DURATION_KEY = 226,
   // Operands carry min_samples, closed-side bits (left=1/right=2), and ddof.
+  // For Decimal128 SUM the last operand is the result precision (1..38).
   DFM_DURATION_BOUNDS = 227,
 };
 

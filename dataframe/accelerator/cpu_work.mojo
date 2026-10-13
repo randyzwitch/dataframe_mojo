@@ -70,9 +70,11 @@ def duration_family(plan: RowPlan, prefix: String) -> String:
             + String(plan.code[start + 6])
             + ":n"
             + String(plan.code[start + 5])
-            + ":d"
-            + String(plan.code[start + 7])
         )
+        family += (
+            ":dp" if plan.code[start + 3] == 0
+            and plan.slot_dtypes[step.slot].is_decimal() else ":d"
+        ) + String(plan.code[start + 7])
     return family^
 
 

@@ -1383,13 +1383,20 @@ def lower_rows(
                 var child = bind(subtree(ranked, rank_node.left), rank_schema)
                 if (
                     duration
-                    and method != 2
-                    and method != 3
+                    and method == 0
                     and child.dtypes[len(child.dtypes) - 1].is_decimal()
+                    and child.dtypes[len(child.dtypes) - 1].decimal_width()
+                    != 128
                 ):
-                    capabilities.reject(
-                        "logical",
-                        "duration rolling decimal arithmetic requires an explicit Float64 cast",
+                    var source_type = child.dtypes[len(child.dtypes) - 1]
+                    # Every physical Int32/Int64 value fits precision 38 at
+                    # the same scale, so this widening cannot discard a row.
+                    child = bind(
+                        child.expr.cast(
+                            DataType.decimal(38, source_type.scale()),
+                            strict=False,
+                        ),
+                        rank_schema,
                     )
                 if (
                     rolling_moments
@@ -1616,7 +1623,10 @@ def lower_rows(
                             Int64(ROW_DURATION_BOUNDS),
                             max(Int64(0), Int64(rank_node.floating)),
                             closed,
-                            Int64(rank_node.min_count),
+                            Int64(result_type.precision()) if method == 0
+                            and result_type.is_decimal() else Int64(
+                                rank_node.min_count
+                            ),
                         ]
                     )
                     literals.append(0)

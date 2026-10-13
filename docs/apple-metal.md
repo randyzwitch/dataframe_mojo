@@ -266,13 +266,20 @@ use wide intermediates and check the declared output width, including the full
 UInt64 domain. Float32 sums accumulate in binary64 before rounding; mean,
 variance, and standard deviation return Float64. Extrema retain input words and
 choose the last NaN in a window; moments share the finite-outlier recovery above.
-Decimal extrema retain their dtype; decimal arithmetic requires an explicit
-Float64 cast. Null/unsorted indices and checked lower-bound underflow raise
+Decimal32/64 sums widen to Decimal128 precision 38 at the original scale;
+Decimal128 sums retain their declared precision. Each observed window checks
+its original-order prefixes against that precision before adding, so signed
+Int128 overflow cannot hide a precision error. Windows below `min_samples` do
+not observe those prefix errors; a zero-count sum at a zero minimum is valid
+zero. Decimal mean, variance, and standard deviation convert each value to
+Float64 with its scale before calculation, matching the fixed-row window
+policy. This also corrects the former CPU duration scale/storage errors.
+Decimal extrema retain their dtype. Null/unsorted indices and checked lower-bound underflow raise
 before any caller output is committed, even when value rows are null. Plans use
 `duration-rolling-v1` and `metal-duration-rolling-v1` calibration families with
-their method and bound parameters. Calendar intervals, timezone-aware indices,
-wider duration literals, and implicit decimal arithmetic remain outside this
-duration subset.
+their method and bound parameters, including declared decimal sum precision
+(`:dp<precision>`). Calendar intervals, timezone-aware indices, and wider
+duration literals remain outside this duration subset.
 
 Variance (`var`) and standard deviation (`std`) run as scalar, grouped,
 or `over()` reductions for primitive numeric inputs. They convert each value
@@ -789,7 +796,7 @@ that unlisted query combinations are already equivalent.
 | Area | Remaining CPU operations or behavior |
 | --- | --- |
 | Reductions | Mode, implode, and value counts. |
-| Ordered windows | Calendar/timezone-aware rolling durations, wider duration literals, implicit decimal arithmetic in duration windows, cut, and qcut. |
+| Ordered windows | Calendar/timezone-aware rolling durations, wider duration literals, cut, and qcut. |
 | Temporal expressions | Row-valued parsing/formatting and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins and file-backed scans. |
@@ -826,6 +833,7 @@ python3 native/dfmetal/test_interpolation.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_coordinate_interpolation.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_power.py
 python3 native/dfmetal/test_duration_rolling.py build/dfmetal/libdfmetal.dylib
+python3 native/dfmetal/test_duration_decimals.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py

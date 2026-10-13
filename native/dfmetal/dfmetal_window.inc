@@ -215,7 +215,8 @@ std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i)
   auto output=std::to_string(layout.physical[step.slot])+"UL*meta.z";
   auto inputType=slotType(r,h[1]),outputType=slotType(r,step.slot);
   bool moments=h[3]>=4,arithmetic=h[3]<=1;
-  bool integer=h[3]==0&&inputType!=DFM_FLOAT32&&inputType!=DFM_FLOAT64_STORAGE;
+  bool decimal=h[3]==0&&inputType==DFM_DECIMAL128;
+  bool integer=h[3]==0&&inputType!=DFM_FLOAT32&&inputType!=DFM_FLOAT64_STORAGE&&!decimal;
   bool wide=inputType==DFM_DECIMAL128;
   bool floating=inputType==DFM_FLOAT32||inputType==DFM_FLOAT64_STORAGE;
   std::string text=partitionSource(r,layout,i);
@@ -257,9 +258,19 @@ std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i)
           "x[out]=T(rolling_variance_finish(state,"+std::to_string(bounds[3])+"UL,"+std::string(h[3]==5?"true":"false")+"));v[out]=1;}";
     return text+"}}\n";
   }
+  if(decimal)
+    text+="uint samples=0;for(uint p=start;p<stop;++p) samples+=uint(v["+input+"+order[p]]!=0);"
+          "if(ulong(samples)<"+std::to_string(bounds[1])+"UL)continue;"
+          "ulong2 limit=decimal_wide_pow10("+std::to_string(bounds[3])+"U);";
   text+="ulong state=0UL,upper=0UL;uint count=0;for(uint p=start;p<stop;++p){ulong at="+input+"+order[p];"
         "if(!v[at])continue;ulong word=x[at];";
-  if(integer)
+  if(decimal)
+    text+="ulong2 value=ulong2(word,x[at+meta.z]),previous=ulong2(state,upper);"
+          "ulong2 next=decimal_wide_add(previous,value);"
+          "bool overflow=((previous.y^value.y)&0x8000000000000000UL)==0UL&&((previous.y^next.y)&0x8000000000000000UL)!=0UL;"
+          "if(overflow||decimal_wide_ge(decimal_magnitude(value),limit)||decimal_wide_ge(decimal_magnitude(next),limit)){"
+          "atomic_fetch_min_explicit(error,0xB0000003U,memory_order_relaxed);return;}state=next.x;upper=next.y;";
+  else if(integer)
     text+="ulong other="+std::string(unsignedType(inputType)?"0UL":"long(word)<0?~0UL:0UL")+";ulong next=state+word;upper+=other+ulong(next<state);state=next;";
   else if(arithmetic)
     text+="state=f64_add(state,"+std::string(inputType==DFM_FLOAT32?"f64_from_float32(uint(word))":"word")+");";
