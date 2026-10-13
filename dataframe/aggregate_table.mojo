@@ -52,6 +52,7 @@ from std.memory import Pointer, bitcast
 from std.sys import size_of
 
 from .aggregate import Reducer, float_key
+from .decimal import check_limit, precision_limit
 from .bool_column import BoolColumn
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
@@ -141,6 +142,9 @@ comptime _K_MOMENTS = 7  # count, mean, m2 (Welford, as `VarState`)
 # Int64 total, count: an integer input of at most 32 bits over fewer than
 # 2^31 rows cannot overflow it (DuckDB's `sum_no_overflow`).
 comptime _K_NARROW_SUM = 8
+# A decimal sum or mean: 128-bit total, count; the total is held to the
+# result's precision on every add, as the `Reducer`'s decimal sums are.
+comptime _K_DECIMAL_SUM = 9
 
 
 @fieldwise_init
@@ -152,9 +156,15 @@ struct _Slot(Copyable, Movable):
     var kind: Int
     var offset: Int
     var floating: Bool
+    # The state's type (a decimal sum's result type, for its precision).
+    var dtype: DataType
 
     def words(self) -> Int:
-        if self.kind == _K_INT_SUM or self.kind == _K_MOMENTS:
+        if (
+            self.kind == _K_INT_SUM
+            or self.kind == _K_MOMENTS
+            or self.kind == _K_DECIMAL_SUM
+        ):
             return 3
         if (
             self.kind == _K_FLOAT_SUM
@@ -187,6 +197,11 @@ def _slot_kind(spec: ReducerSpec, input: Series) -> Int:
     state is not a few fixed words here."""
     if spec.op == LEN:
         return _K_LEN
+    if (spec.op == SUM or spec.op == MEAN) and input.dtype().is_decimal():
+        var state = spec.make(0).dtype
+        if state.is_decimal() and _decimal_part(input):
+            return _K_DECIMAL_SUM
+        return -1
     var part = _numeric_part(input)
     if not part:
         return -1
@@ -324,6 +339,51 @@ def _update_slot[
                     at[unsafe_offset=w + 1] |= 1
 
 
+def _decimal_part(column: Series) -> Bool:
+    """Whether a decimal column's storage is 32-, 64- or 128-bit integers."""
+    var part = column.chunks()[
+        0
+    ].copy() if column.is_chunked() else column.copy()
+    return (
+        part._data.isa[Column[Int32]]()
+        or part._data.isa[Column[Int64]]()
+        or part._data.isa[Column[Int128]]()
+    )
+
+
+def _update_decimal[
+    D: DType
+](
+    slot: _Slot,
+    column: Column[Scalar[D]],
+    start: Int,
+    count: Int,
+    rows: Pointer[Int, _],
+    base: Int,
+) raises:
+    """A batch's decimal values (unscaled, at their storage width) into
+    their groups' 128-bit totals and counts, each total held to the
+    state's precision."""
+    var values = column._ptr()
+    var nulls = column.null_count() > 0
+    var limit = precision_limit(slot.dtype.precision())
+    for k in range(count):
+        var i = start + k
+        if nulls and not column._valid(i):
+            continue
+        var at = _words_at(rows[unsafe_offset=k] + base)
+        var total = bitcast[DType.int128](
+            (UInt128(at[unsafe_offset=1]) << 64) | UInt128(at[unsafe_offset=0])
+        )
+        total = check_limit(
+            total + Int128(values[unsafe_offset=i]), limit, slot.dtype
+        )
+        var word = bitcast[DType.uint128](total)
+        at[unsafe_offset=0] = UInt64(word)
+        at[unsafe_offset=1] = UInt64(word >> 64)
+        at[unsafe_offset=2] += 1
+
+
 def _update_states(
     slots: List[_Slot],
     inputs: List[Series],
@@ -343,6 +403,20 @@ def _update_states(
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
             continue
         ref part = inputs[s]
+        if slot.kind == _K_DECIMAL_SUM:
+            if part._data.isa[Column[Int64]]():
+                _update_decimal[DType.int64](
+                    slot, part._data[Column[Int64]], start, count, rows, base
+                )
+            elif part._data.isa[Column[Int32]]():
+                _update_decimal[DType.int32](
+                    slot, part._data[Column[Int32]], start, count, rows, base
+                )
+            else:
+                _update_decimal[DType.int128](
+                    slot, part._data[Column[Int128]], start, count, rows, base
+                )
+            continue
         var done = False
         comptime for t in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[t]
@@ -360,7 +434,7 @@ def _update_states(
             raise Error("aggregate table: unsupported reduction input")
 
 
-def _combine(slots: List[_Slot], into: Int, other: Int):
+def _combine(slots: List[_Slot], into: Int, other: Int) raises:
     """Group row `other`'s states folded into group row `into` (both the
     addresses of their first state word's row)."""
     var a = _words_at(into)
@@ -373,6 +447,25 @@ def _combine(slots: List[_Slot], into: Int, other: Int):
         elif kind == _K_NARROW_SUM:
             a[unsafe_offset=w] += b[unsafe_offset=w]
             a[unsafe_offset=w + 1] += b[unsafe_offset=w + 1]
+        elif kind == _K_DECIMAL_SUM:
+            var x = bitcast[DType.int128](
+                (UInt128(a[unsafe_offset=w + 1]) << 64)
+                | UInt128(a[unsafe_offset=w])
+            )
+            var y = bitcast[DType.int128](
+                (UInt128(b[unsafe_offset=w + 1]) << 64)
+                | UInt128(b[unsafe_offset=w])
+            )
+            var total = bitcast[DType.uint128](
+                check_limit(
+                    x + y,
+                    precision_limit(slots[s].dtype.precision()),
+                    slots[s].dtype,
+                )
+            )
+            a[unsafe_offset=w] = UInt64(total)
+            a[unsafe_offset=w + 1] = UInt64(total >> 64)
+            a[unsafe_offset=w + 2] += b[unsafe_offset=w + 2]
         elif kind == _K_INT_SUM:
             var x = (UInt128(a[unsafe_offset=w + 1]) << 64) | UInt128(
                 a[unsafe_offset=w]
@@ -455,6 +548,12 @@ def _unload(slot: _Slot, groups: _Groups, spec: ReducerSpec) raises -> Reducer:
             reducer.int_sums[g].count = bitcast[DType.int64](
                 at[unsafe_offset=w + 2]
             )
+        elif kind == _K_DECIMAL_SUM:
+            reducer.decimals[g] = bitcast[DType.int128](
+                (UInt128(at[unsafe_offset=w + 1]) << 64)
+                | UInt128(at[unsafe_offset=w])
+            )
+            reducer.counts[g] = bitcast[DType.int64](at[unsafe_offset=w + 2])
         elif kind == _K_NARROW_SUM:
             reducer.int_sums[g].total = bitcast[DType.int64](
                 at[unsafe_offset=w]
@@ -1050,9 +1149,11 @@ def aggregate_layout(
         if kind < 0:
             raise Error("aggregate table: a state that is not inline")
         var floating = False
-        if kind != _K_LEN:
+        if kind != _K_LEN and kind != _K_DECIMAL_SUM:
             floating = _numeric_part(inputs[s]).value().dtype().is_float()
-        slots.append(_Slot(kind, state_words, floating))
+        slots.append(
+            _Slot(kind, state_words, floating, templates[s].make(0).dtype)
+        )
         state_words += slots[s].words()
     var key_templates = List[Series](capacity=len(keys))
     for key in keys:
