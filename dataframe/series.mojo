@@ -377,19 +377,23 @@ struct Series(Copyable, Deinitable, Movable, Sized, Writable):
 
     def _merge_storage(self, parts: List[Self]) raises -> Self:
         var result = parts[0].copy()
-        # Utf8View chunks concatenate descriptors and Arc byte blocks. Calling
-        # the legacy reserve path would materialize their payloads first.
-        if (
-            result._data.isa[StringColumn]()
-            and result._data[StringColumn]._is_view_storage()
-        ):
+        # Utf8View chunks concatenate descriptors and Arc byte blocks; any
+        # view chunk makes the whole column views (an offsets chunk becomes
+        # descriptors over its own bytes), the canonical layout.
+        var any_views = False
+        if result._data.isa[StringColumn]():
+            for part in parts:
+                any_views = (
+                    any_views or part._data[StringColumn]._is_view_storage()
+                )
+        if any_views:
             var storages = List[StringViewStorage](capacity=len(parts))
             var offsets = List[Int](capacity=len(parts))
             var lengths = List[Int](capacity=len(parts))
             for part in parts:
-                ref column = part._data[StringColumn]
+                var column = part._data[StringColumn]._as_views()
                 if not column._is_view_storage():
-                    # The mixed path below uses the explicit large_utf8 adapter.
+                    # Bytes past a view's offsets: the offsets route.
                     result._reserve_rows(len(self), self._text_bytes())
                     for i in range(1, len(parts)):
                         result._append_series(parts[i])

@@ -724,26 +724,49 @@ struct StringColumn(Copyable, Sized):
         if len(self._bits[]) != 0:
             self._bits[].reserve((rows + 7) // 8)
 
+    def _as_views(self) raises -> Self:
+        """This column as Arrow views onto its own bytes (descriptors only;
+        the bytes are shared, not copied), the one in-memory string layout
+        every kernel reads fast, as Polars keeps BinaryView. A column whose
+        bytes pass a view's 32-bit offsets stays as it is."""
+        if self._is_view_storage() or len(self._bytes[]) > Int(Int32.MAX):
+            return self.copy()
+        var rows = List[Int](capacity=self._length)
+        for r in range(self._length):
+            rows.append(r)
+        return self._gather_views(rows, 0, self._length, False)
+
     def _append_column(mut self, other: Self):
         """Append rows in bulk, retaining native view payload blocks when possible."""
         # Codes cover the rows before the append only.
         self._codes = None
-        if self._is_view_storage():
-            if other._is_view_storage():
-                var combined = self._view_storage.value()._concat(
-                    self._offset,
-                    self._length,
-                    other._view_storage.value(),
-                    other._offset,
-                    other._length,
+        if self._is_view_storage() or other._is_view_storage():
+            # Views are the canonical layout: a mixed pair becomes views
+            # (descriptors over the offsets side's own bytes), never the
+            # other way round, which copied every byte of the views side.
+            var left = self.copy()
+            var right = other.copy()
+            try:
+                if not left._is_view_storage():
+                    left = left._as_views()
+                if not right._is_view_storage():
+                    right = right._as_views()
+            except:
+                # Rows a view cannot hold: the offsets route below.
+                pass
+            if left._is_view_storage() and right._is_view_storage():
+                var combined = left._view_storage.value()._concat(
+                    left._offset,
+                    left._length,
+                    right._view_storage.value(),
+                    right._offset,
+                    right._length,
                 )
                 self = Self(combined^)
                 return
-            self = self.to_large_utf8()
-        if other._is_view_storage():
-            # Existing large_utf8 append remains the safe adapter for a mixed
-            # pair. Native-to-native follows the descriptor-only path above.
-            var conventional_other = other.to_large_utf8()
+            # A side too large for views: the offsets route.
+            self = left.to_large_utf8()
+            var conventional_other = right.to_large_utf8()
             self._append_column(conventional_other)
             return
         if not self._owned():

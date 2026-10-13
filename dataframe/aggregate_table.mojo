@@ -80,6 +80,7 @@ from .partition import (
 from .series import Series
 from .hashing import RowKeys
 from .trace import trace_path
+from .string_bytes import _Bytes
 from .string_column import StringColumn
 from .string_view import (
     STRING_VIEW_INLINE_BYTES,
@@ -641,7 +642,32 @@ def _string_words(
     var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
     var has_nulls = strings.null_count() > 0
     var views = strings._is_view_storage()
-    var size = 0 if views else len(strings._bytes[])
+    if views:
+        # A view is already these words: its first word, then its inline
+        # bytes or (past twelve bytes) where its bytes are.
+        var rows = _Bytes(strings)
+        var words = Pointer[UInt64, ImmutAnyOrigin](
+            unsafe_from_address=rows.views
+        )
+        for k in range(count):
+            var i = start + k
+            if has_nulls and not strings._valid(i):
+                first[unsafe_offset=k] = 0
+                second[unsafe_offset=k] = 0
+                nulls[unsafe_offset=k] |= bit
+                continue
+            var head = rows.head(i)
+            var length = Int(head & 0xFFFFFFFF)
+            first[unsafe_offset=k] = head
+            if length <= 12:
+                var keep = 8 * max(length - 4, 0)
+                second[unsafe_offset=k] = words[unsafe_offset=2 * i + 1] & (
+                    (UInt64(1) << UInt64(keep)) - 1 if keep < 64 else UInt64.MAX
+                )
+            else:
+                second[unsafe_offset=k] = UInt64(Int(rows.get(i).unsafe_ptr()))
+        return
+    var size = len(strings._bytes[])
     for k in range(count):
         var i = start + k
         if has_nulls and not strings._valid(i):

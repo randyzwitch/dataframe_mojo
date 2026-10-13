@@ -966,15 +966,14 @@ def _import_storage(array: ArrowArray, schema: ArrowSchema) raises -> Series:
         var offsets = List[Int64](capacity=length + 1)
         for i in range(length + 1):
             offsets.append(Int64(text_offset(offset + i) - first))
-        var result = Series(
-            name,
-            StringColumn(
-                bytes=text^, offsets=offsets^, bits=bits^, length=length
-            ),
+        # Text is held as views over the copied bytes, the layout every
+        # string kernel reads; binary keeps its offsets.
+        var strings = StringColumn(
+            bytes=text^, offsets=offsets^, bits=bits^, length=length
         )
         if format == "Z" or format == "z":
-            return result.with_dtype(DataType.BINARY)
-        return result^
+            return Series(name, strings^).with_dtype(DataType.BINARY)
+        return Series(name, strings._as_views())
     if format == "tdD":
         return Series(
             name, _int64_column(_as_int64[Int32](array, length, offset), bits^)

@@ -40,6 +40,7 @@ from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
 from .parallel import Job, Pool, configured_workers
 from .series import Series
+from .string_bytes import _Bytes
 from .string_column import StringColumn
 
 # Tier codes as stored: a key with nulls or NaN orders tiers first.
@@ -189,10 +190,11 @@ struct _PrefixJob(Job):
 
     def run(mut self) raises:
         var ref_ptr = self.reference.unsafe_ptr()
+        var rows = _Bytes(self.column)
         for i in range(self.first, self.last):
             if self.nulls and not self.column._valid(i):
                 continue
-            var bytes = self.column._row_bytes(i)
+            var bytes = rows.get(i)
             var length = len(bytes)
             self.longest = max(self.longest, length)
             var limit = min(self.prefix, length)
@@ -288,13 +290,12 @@ struct _OrderJob(Job):
                 high = max(high, o)
         else:
             ref typed = self.column._data[StringColumn]
+            var rows = _Bytes(typed)
             for i in range(self.first, self.last):
                 if self.nulls and not typed._valid(i):
                     tier[unsafe_offset=i] = _ROW_NULL
                     continue
-                var o = _string_order(
-                    typed._row_bytes(i), self.prefix, self.width
-                )
+                var o = _string_order(rows.get(i), self.prefix, self.width)
                 order[unsafe_offset=i] = o
                 tier[unsafe_offset=i] = _ROW_VALUE
                 low = min(low, o)

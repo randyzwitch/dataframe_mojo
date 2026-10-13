@@ -140,6 +140,15 @@ struct _PredicateJob[op: Int](Job):
             unsafe_from_address=self.output
         )[].unsafe_ptr()
         var literal = self.literals.get(0)
+        # The literal's first view word (length and up to four bytes): a
+        # view whose first word differs is unequal without reading its
+        # bytes, as DuckDB's string_t compare does.
+        var literal_head = UInt64(len(literal))
+        for b in range(min(len(literal), 4)):
+            literal_head |= UInt64(
+                literal.unsafe_ptr()[unsafe_offset=b]
+            ) << UInt64(32 + 8 * b)
+        var by_head = self.rows.is_views()
         var row = self.first
         while row < self.last:
             var end = min(row + 8, self.last)
@@ -147,6 +156,13 @@ struct _PredicateJob[op: Int](Job):
             for i in range(row, end):
                 if self.nulls and not self.rows.column._valid(i):
                     continue
+                comptime if Self.op == EQ or Self.op == NE:
+                    # Unequal first words settle the row before its bytes
+                    # (a long view's are behind its buffer) are read.
+                    if by_head and self.rows.head(i) != literal_head:
+                        comptime if Self.op == NE:
+                            byte |= UInt8(1) << UInt8(i - row)
+                        continue
                 var value = self.rows.get(i)
                 var hit: Bool
                 comptime if Self.op == IS_IN:

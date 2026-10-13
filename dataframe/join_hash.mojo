@@ -19,6 +19,7 @@ from .huge_pages import huge_list, huge_uninit
 from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, _mix
 from .series import Series
+from .string_bytes import _Bytes
 from .string_column import StringColumn
 from .string_view import StringView
 from .trace import trace_path
@@ -658,8 +659,8 @@ def _int64_probe_slot(index: _HashBucket, hash: UInt64, key: UInt64) -> Int:
 def _string_probe_slot(
     index: _HashBucket,
     hash: UInt64,
-    probe: StringColumn,
-    build: StringColumn,
+    probe: _Bytes,
+    build: _Bytes,
     row: Int,
 ) -> Int:
     # The caller proves probe validity; null build rows never enter the index.
@@ -667,7 +668,7 @@ def _string_probe_slot(
     var at = Int(hash & UInt64(index.mask()))
     while index.slots[at].row >= 0:
         ref slot = index.slots[at]
-        if hash == slot.key and probe._get(row) == build._get(Int(slot.row)):
+        if hash == slot.key and probe.equal(row, build, Int(slot.row)):
             return at
         at = (at + 1) & index.mask()
     return -1
@@ -928,7 +929,8 @@ struct _HashProbeJob(Job):
             and self.left_keys[0]._data.isa[StringColumn]()
         ):
             ref probe = self.left_keys[0]._data[StringColumn]
-            ref build = self.right_keys[0]._data[StringColumn]
+            var probe_bytes = _Bytes(probe)
+            var build_bytes = _Bytes(self.right_keys[0]._data[StringColumn])
             var all_valid = len(probe._bits[]) == 0
             for i in range(self.start, self.end):
                 var matched = False
@@ -937,7 +939,11 @@ struct _HashProbeJob(Job):
                     var bucket = Int(hash >> 56) >> self.fold
                     matched = (
                         _string_probe_slot(
-                            self.buckets[][bucket], hash, probe, build, i
+                            self.buckets[][bucket],
+                            hash,
+                            probe_bytes,
+                            build_bytes,
+                            i,
                         )
                         >= 0
                     )
@@ -1022,7 +1028,11 @@ struct _HashProbeJob(Job):
         ):
             ref left = self.left_keys[0]._data[StringColumn]
             ref right = self.right_keys[0]._data[StringColumn]
-            var all_valid = len(left._bits[]) == 0 and len(right._bits[]) == 0
+            # Null build rows never enter the index: only the probe's
+            # validity is read.
+            var all_valid = len(left._bits[]) == 0
+            var left_bytes = _Bytes(left)
+            var right_bytes = _Bytes(right)
             var generic_start = self.start
             # Emit only right positions while every input row has one output.
             # Missing inner matches or duplicate right keys end this prefix.
@@ -1050,9 +1060,8 @@ struct _HashProbeJob(Job):
                         ref slot = index.slots[position]
                         var j = Int(slot.row)
                         if hash == slot.key and (
-                            left._equal_at_valid(
-                                right, row, j
-                            ) if all_valid else left._equal_at(right, row, j)
+                            (all_valid or left._valid(row))
+                            and left_bytes.equal(row, right_bytes, j)
                         ):
                             matched_row = j
                             duplicate = slot.next_position >= 0
@@ -1085,9 +1094,8 @@ struct _HashProbeJob(Job):
                     ref slot = index.slots[position]
                     var j = Int(slot.row)
                     if hash == slot.key and (
-                        left._equal_at_valid(
-                            right, i, j
-                        ) if all_valid else left._equal_at(right, i, j)
+                        (all_valid or left._valid(i))
+                        and left_bytes.equal(i, right_bytes, j)
                     ):
                         self.left_rows.append(i)
                         self.right_rows.append(j)
