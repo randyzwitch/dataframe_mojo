@@ -840,6 +840,43 @@ def check_decimal_comparison_preflight_without_device():
 
 
 check_decimal_comparison_preflight_without_device()
+def check_decimal_arithmetic_preflight_without_device():
+    inputs = (Input * 2)(Input(None, None, 2, 5, 1), Input(None, None, 12, 0, 0))
+    code = (I * 12)(0, -1, -1, 0, 0, -1, -1, 1, 219, 0, 1, 1 | 38 << 6 | 5 << 12)
+    literals = (I * 3)(0, 0, 0)
+    nodes, slots = (I * 3)(2, 12, 12), (I * 3)(2, 12, 12)
+    steps = (Step * 1)(Step(0, 3, 2, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 12, 2, -1, 0))
+    request = Request(2, 513, 0, 3, 2, 12, 3, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for op in (5, 6):
+        code[11] = 1 | 38 << 6 | op << 12
+        memory, err = Memory(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        assert memory.result == 513 * 16 + 65
+    for invalid in (-1, 10 | 5 << 12, 39 << 6 | 5 << 12, 7 << 12, 5 << 12 | 1 << 18):
+        code[11] = invalid
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal arithmetic descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+    for dtype in (2, 3, 12):
+        nodes[0] = slots[0] = inputs[0].dtype = dtype
+        nodes[2] = slots[2] = outputs[0].dtype = dtype
+        code[8], code[10] = 220, -1
+        for op in (50, 51):
+            code[11] = op
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        code[11] = 52
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal unary descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_decimal_arithmetic_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")

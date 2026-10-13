@@ -5,6 +5,7 @@ from dataframe.binding import BoundExpr
 from dataframe.dtype import DataType
 from dataframe.decimal import pow10, divide_half_even
 from dataframe.expr import (
+    COL,
     LIT_INT,
     ADD,
     SUB,
@@ -222,7 +223,57 @@ def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
             proved = _decimal_cast_safe(
                 bound.dtypes[node.left], bound.dtypes[i], a
             )
-        ranges.append(result^)
+        if bound.dtypes[i].is_decimal():
+            result = _type_range(bound.dtypes[i].physical())
+            if node.op != COL:
+                result = IntegerRange(0, 0, False)
+            if (node.op == NEG or node.op == ABS) and a.known:
+                var limits = _type_range(bound.dtypes[i].physical())
+                if bound.dtypes[i].decimal_width() == 128:
+                    limits = IntegerRange(Int128.MIN, Int128.MAX, True)
+                if limits.known and a.low > limits.low:
+                    var low = -a.high
+                    var high = -a.low
+                    if node.op == ABS:
+                        low = Int128(0) if a.low <= 0 and a.high >= 0 else min(
+                            abs(a.low), abs(a.high)
+                        )
+                        high = max(abs(a.low), abs(a.high))
+                    result = IntegerRange(low, high, True)
+                    proved = True
+            if (node.op == ADD or node.op == SUB) and a.known and b.known:
+                var scale = bound.dtypes[i].scale()
+                var left_factor = pow10(scale - bound.dtypes[node.left].scale())
+                var right_factor = pow10(
+                    scale - bound.dtypes[node.right].scale()
+                )
+                if (
+                    max(abs(a.low), abs(a.high)) <= Int128.MAX // left_factor
+                    and max(abs(b.low), abs(b.high))
+                    <= Int128.MAX // right_factor
+                ):
+                    var low = a.low * left_factor
+                    var high = a.high * left_factor
+                    var other_low = b.low * right_factor
+                    var other_high = b.high * right_factor
+                    if node.op == SUB:
+                        var previous_low = other_low
+                        other_low = -other_high
+                        other_high = -previous_low
+                    var maximum = pow10(38) - 1
+                    if (
+                        low >= -maximum
+                        and high <= maximum
+                        and other_low >= -maximum
+                        and other_high <= maximum
+                    ):
+                        if (other_low >= 0 or low >= -maximum - other_low) and (
+                            other_high <= 0 or high <= maximum - other_high
+                        ):
+                            result = IntegerRange(
+                                low + other_low, high + other_high, True
+                            )
+                            proved = True
         if is_comparison(node.op) and node.left >= 0 and node.right >= 0:
             var left_type = bound.dtypes[node.left]
             var right_type = bound.dtypes[node.right]
@@ -231,5 +282,6 @@ def proven_integer_nodes(bound: BoundExpr) -> List[Bool]:
                 proved = _decimal_scale_safe(
                     left_type, scale
                 ) and _decimal_scale_safe(right_type, scale)
+        ranges.append(result^)
         safe.append(proved)
     return safe^

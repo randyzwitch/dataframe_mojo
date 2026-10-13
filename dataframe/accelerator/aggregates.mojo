@@ -16,6 +16,8 @@ from dataframe.expr import (
     ADD,
     SUB,
     MUL,
+    NEG,
+    ABS,
     col,
     is_reduction,
     is_comparison,
@@ -112,6 +114,19 @@ def _conditional_leaf(
     var proven = proven_integer_nodes(bound)
     for i in range(len(bound.expr._nodes)):
         ref node = bound.expr._nodes[i]
+        if (
+            bound.dtypes[i].is_decimal()
+            and (
+                node.op == ADD
+                or node.op == SUB
+                or node.op == NEG
+                or node.op == ABS
+            )
+            and not proven[i]
+        ):
+            raise Error(
+                "Metal unsupported [plan]: conditional checked decimal arithmetic requires CPU execution"
+            )
         if (
             is_comparison(node.op)
             and node.left >= 0

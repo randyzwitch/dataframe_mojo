@@ -55,6 +55,7 @@ struct RowCapabilities(Copyable):
     var decimal_float_cast: Bool
     var decimal_casts: Bool
     var decimal_comparisons: Bool
+    var decimal_arithmetic: Bool
     var ranks: Bool
     var cumulative_windows: Bool
     var reuse_column_slots: Bool
@@ -98,6 +99,7 @@ struct RowCapabilities(Copyable):
         decimal_float_cast: Bool = False,
         decimal_casts: Bool = False,
         decimal_comparisons: Bool = False,
+        decimal_arithmetic: Bool = False,
         max_nodes: Int = 64,
         max_slots: Int = 64,
         max_steps: Int = 64,
@@ -136,6 +138,7 @@ struct RowCapabilities(Copyable):
         self.decimal_float_cast = decimal_float_cast
         self.decimal_casts = decimal_casts
         self.decimal_comparisons = decimal_comparisons
+        self.decimal_arithmetic = decimal_arithmetic
         self.reuse_column_slots = reuse_column_slots
         self.proven_integer_operations = proven_integer_operations
         self.max_nodes = max_nodes
