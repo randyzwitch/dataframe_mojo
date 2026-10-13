@@ -67,6 +67,14 @@ payloads. Zero-column plans use `metal-empty-outputs-v1` so automatic placement
 requires matching calibration for this result shape. Zero-column sources and
 subsequent consumers still require resident input support.
 
+Skewness and kurtosis execute global, grouped, and partitioned central-moment
+reductions in emulated Float64, including bias correction and Fisher/Pearson
+conventions. Empty and insufficient samples retain CPU nulls; constant and
+nonfinite samples retain CPU NaNs. Worker states merge in CPU partition order.
+`higher-moments-v1` and `metal-higher-moments-v1` require separate calibration.
+As with variance, numerical comparisons allow Float64 reduction rounding;
+decimal inputs use an explicit Float64 cast.
+
 Direct column projections and aliases reuse an existing resident value slot.
 They preserve separate output names and column order without a copying device
 step. Filters, sorts, and slices gather each shared value and validity bitmap
@@ -636,7 +644,7 @@ that unlisted query combinations are already equivalent.
 | Area | Remaining CPU operations or behavior |
 | --- | --- |
 | Numeric expressions | Floating power, `exp`, and `log`. |
-| Reductions | Median, quantile, skew, kurtosis, mode, implode, and value counts. |
+| Reductions | Median, quantile, mode, implode, and value counts. |
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
 | Temporal expressions | Calendar month/year truncation, offsets, duration totals, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
@@ -656,6 +664,7 @@ python3 native/dfmetal/test_join.py
 python3 native/dfmetal/test_resident.py
 python3 native/dfmetal/test_float64.py
 python3 native/dfmetal/test_moments.py
+python3 native/dfmetal/test_higher_moments.py
 python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py

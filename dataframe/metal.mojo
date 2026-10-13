@@ -122,6 +122,8 @@ from .expr import (
     SUM,
     MEAN,
     VAR,
+    SKEW,
+    KURTOSIS,
     COV,
     CORR,
     STD,
@@ -358,6 +360,7 @@ def _capabilities() -> RowCapabilities:
         cumulative_windows=True,
         paired_moments=True,
         moments=True,
+        higher_moments=True,
         rolling_windows=True,
         rolling_moments=True,
         empty_outputs=True,
@@ -507,6 +510,10 @@ def _op(op: Int) raises -> Int64:
         return 161
     if op == CORR:
         return 160
+    if op == SKEW:
+        return 98
+    if op == KURTOSIS:
+        return 99
     if op == VAR:
         return 87
     if op == STD:
@@ -1627,6 +1634,16 @@ struct MetalRuntime(AcceleratorBackend):
                 paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
         if paired:
             family += ";metal-paired-moments-v1"
+        var higher = False
+        for output in plan.outputs:
+            higher |= output.reduction == SKEW or output.reduction == KURTOSIS
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                higher |= (
+                    plan.code[i + 3] == SKEW or plan.code[i + 3] == KURTOSIS
+                )
+        if higher:
+            family += ";metal-higher-moments-v1"
         var moments = False
         for output in plan.outputs:
             moments |= output.reduction == VAR or output.reduction == STD

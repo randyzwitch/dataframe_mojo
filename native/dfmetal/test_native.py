@@ -1010,6 +1010,33 @@ def check_moment_preflight_without_device():
         slots[0] = inputs[0].dtype = 11
 
 
+def check_higher_moment_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    slots = (I * 1)(11)
+    outputs = (Output * 1)(Output(None, None, 11, 0, 98, 1 << 47))
+    request = Request(2, 513, 0, 1, 1, 0, 0, 0, 0, 1, -1, 1, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    for operation, maximum in ((98, 1), (99, 3)):
+        outputs[0].reduction = operation
+        for workers in (1, 2, 8, 65535):
+            for flags in range(maximum + 1):
+                outputs[0].min_count = (workers << 47) | flags
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for metadata in (0, 1, (1 << 47) | (maximum + 1), (1 << 47) | (1 << 31)):
+            outputs[0].min_count = metadata
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"moment metadata" in C.string_at(err)
+            lib.dfm_free(err)
+        outputs[0].min_count = 1 << 47
+        slots[0] = inputs[0].dtype = 3
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        lib.dfm_free(err)
+        slots[0] = inputs[0].dtype = 11
+
+
 def check_pair_moment_preflight_without_device():
     inputs = (Input * 2)(Input(None, None, 11, 0, 0), Input(None, None, 11, 0, 0))
     slots = (I * 3)(11, 11, 11)
@@ -1061,6 +1088,7 @@ def check_pair_moment_preflight_without_device():
             lib.dfm_free(err)
 
 
+check_higher_moment_preflight_without_device()
 check_pair_moment_preflight_without_device()
 
 check_moment_preflight_without_device()
