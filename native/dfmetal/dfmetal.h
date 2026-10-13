@@ -103,6 +103,10 @@ enum DFMOp {
   DFM_DT_TRUNCATE = 141,
   DFM_MIN = 80,
   DFM_MEAN = 82,
+  // Float64 Welford/Chan reductions. min_count metadata: low 31 bits ddof,
+  // next 16 bits reserved (zero), high 16 bits configured worker limit.
+  DFM_STD = 86,
+  DFM_VAR = 87,
   DFM_MAX = 81,
   DFM_FIRST = 83,
   DFM_LAST = 84,

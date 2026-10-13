@@ -119,6 +119,8 @@ from .expr import (
     IS_NOT_NULL,
     SUM,
     MEAN,
+    VAR,
+    STD,
     MIN,
     MAX,
     COUNT,
@@ -350,6 +352,7 @@ def _capabilities() -> RowCapabilities:
         temporal_fields=True,
         ranks=True,
         cumulative_windows=True,
+        moments=True,
         rolling_windows=True,
         shift_fill_windows=True,
         decimal128=True,
@@ -493,6 +496,10 @@ def _op(op: Int) raises -> Int64:
         return 81
     if op == SUM:
         return 10
+    if op == VAR:
+        return 87
+    if op == STD:
+        return 86
     if op == MEAN:
         return 82
     if op == COUNT:
@@ -1597,6 +1604,14 @@ struct MetalRuntime(AcceleratorBackend):
         var family = work[1].copy()
         if plan.reused_columns:
             family += ";metal-column-slots-v1"
+        var moments = False
+        for output in plan.outputs:
+            moments |= output.reduction == VAR or output.reduction == STD
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                moments |= plan.code[i + 3] == VAR or plan.code[i + 3] == STD
+        if moments:
+            family += ";metal-moments-v1"
         var ranked = False
         var cumulative = False
         var rolling = False
