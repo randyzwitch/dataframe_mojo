@@ -231,14 +231,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/public_contracts/test_selection_types.mojo::test_decimal_bare_filter_literals_adopt_numeric_column_type",
-            "Bare integer filter literals do not adopt decimal operand dtype during evaluation for any decimal storage width.",
-            "decimal bare filter literals must adopt operand dtype",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_uint64_quantiles_do_not_expose_internal_ordering_bias",
             "Advertised public reduction does not satisfy its documented numeric contract.",
             "UInt64 percentile must not expose signed ordering bias",
@@ -554,22 +546,6 @@ def production_policy() -> SuitePolicy:
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_value_counts_retains_typed_values",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
             "aggregate.mojo:1501:37: get: wrong variant type",
-            mojo_variant_abort_exit_code(),
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_grouped_types.mojo::test_grouped_decimal_count_skips_null_rows_without_storage_confusion",
-            "Verified grouped decimal COUNT reads the wrong storage variant and terminates the process.",
-            "execution.mojo:968:28: get: wrong variant type",
-            mojo_variant_abort_exit_code(),
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_set_reshape_types.mojo::test_pivot_count_nullable_decimal128_uses_parent_validity",
-            "Nullable Decimal128 pivot COUNT reaches execution COUNT with wrong physical variant; independent expected nonnull counts are 4 and 3.",
-            "execution.mojo:968:28: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -1105,6 +1081,19 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo::test_native_metal_exact_wide_integer_limits_partials_means_and_nulls",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo::test_native_metal_exact_wide_integer_resident_inputs_consumers_and_budget",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -1477,6 +1466,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_rank.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo",
                 "tests/execution_modes/test_backend_metal_wide_plans.mojo",
+                "tests/execution_modes/test_backend_metal_wide_integer_reductions.mojo",
                 "tests/execution_modes/test_backends.mojo",
             ],
         )

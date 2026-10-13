@@ -85,6 +85,9 @@ int64_t sumType(int64_t t) {
   return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
+  if (op == DFM_WIDE_INTEGER_SUM || op == DFM_WIDE_INTEGER_MEAN)
+    return type == DFM_INT64 || type == DFM_UINT64
+               ? (op == DFM_WIDE_INTEGER_SUM ? type : DFM_FLOAT64_STORAGE) : -1;
   if (op == DFM_WIDE_SUM)
     return type == DFM_INT32 || type == DFM_INT64 ? DFM_DECIMAL128 : -1;
   if (type == DFM_DECIMAL128) {
@@ -110,7 +113,8 @@ int64_t partialWidth(const DFMRequest &r) {
   if (!r.reductions) return 16;
   for (int64_t i = 0; i < r.output_count; ++i) {
     auto &o = r.outputs[i];
-    if (o.dtype == DFM_DECIMAL128) return 32;
+    if (o.dtype == DFM_DECIMAL128 || o.reduction == DFM_WIDE_INTEGER_SUM ||
+        o.reduction == DFM_WIDE_INTEGER_MEAN) return 32;
   }
   return 16;
 }
@@ -1176,12 +1180,13 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
         index + R"MSL(+at]);ulong idx=ulong(o.slot)*meta.z+row;
  if(first)state_add(sum,count,ulong(row),true,long(row),o);
  else {if(v[idx]&&!sum_bound(x[idx],o,end-begin)){atomic_fetch_min_explicit(error,0xE0000000U,memory_order_relaxed);continue;}
- if(USE_WIDE&&o.kind==208){if(v[idx]){wide_add(sum,high,x[idx]);++count;}}
+ if(wide_accum(o)){if(v[idx]){wide_accumulate(sum,high,x[idx],o);++count;}}
  else if(wide_pick(o))state_add_wide(sum,high,count,ulong2(x[idx],x[idx+meta.z]),v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);
  else state_add(sum,count,x[idx],v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);}}
  sums[lane]=sum;counts[lane]=count;highs[lane]=high;threadgroup_barrier(mem_flags::mem_threadgroup);
- for(uint stride=128;stride;stride/=2){if(lane<stride){long a=sums[lane],b=counts[lane],h=highs[lane];if(USE_WIDE&&o.kind==208){wide_merge(a,h,sums[lane+stride],highs[lane+stride]);b+=counts[lane+stride];}else if(wide_pick(o))state_merge_wide(a,h,b,sums[lane+stride],highs[lane+stride],counts[lane+stride],o);else state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;highs[lane]=h;}threadgroup_barrier(mem_flags::mem_threadgroup);}
- if(lane==0){sum=sums[0];high=highs[0];count=counts[0];state_finish(sum,count,o,end-begin);bool valid=state_valid(o,count);
+ for(uint stride=128;stride;stride/=2){if(lane<stride){long a=sums[lane],b=counts[lane],h=highs[lane];if(wide_accum(o)){wide_merge(a,h,sums[lane+stride],highs[lane+stride]);b+=counts[lane+stride];}else if(wide_pick(o))state_merge_wide(a,h,b,sums[lane+stride],highs[lane+stride],counts[lane+stride],o);else state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;highs[lane]=h;}threadgroup_barrier(mem_flags::mem_threadgroup);}
+ if(lane==0){sum=sums[0];high=highs[0];count=counts[0];state_finish_wide(sum,high,count,o,end-begin);bool valid=state_valid(o,count);
+ if(o.kind==210&&valid&&(o.type==10?high!=0:high!=(sum<0?-1L:0L)))atomic_fetch_min_explicit(error,0xF0000000U,memory_order_relaxed);
  if(o.kind==10&&valid&&((o.type==2&&(sum<(-2147483647L-1L)||sum>2147483647L))||(o.type==9&&(sum<0||ulong(sum)>4294967295UL))))atomic_fetch_min_explicit(error,0xF0000000U,memory_order_relaxed);
  y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);if(wide_result(o)){y[to+meta.z]=valid?ulong(high):0UL;w[to+meta.z]=uchar(valid);}}}
 )MSL";
@@ -1202,6 +1207,10 @@ std::string source(const DFMRequest &r) {
   bool wide = partialWidth(r) == 32;
   if (typed(r))
     for (int64_t i = 0; i < r.slots; ++i) wide |= r.slot_types[i] == DFM_DECIMAL128;
+  for (int64_t i = 0; i < r.code_words; i += 4)
+    wide |= r.code[i] == DFM_GROUP_OUTPUT &&
+            (r.code[i + 3] == DFM_WIDE_INTEGER_SUM ||
+             r.code[i + 3] == DFM_WIDE_INTEGER_MEAN);
   text += "constant bool USE_WIDE=" + std::string(wide ? "true" : "false") + ";\n";
   text += "struct Out { long slot; long kind; long minimum; long type; "
           "};\n";
@@ -1324,7 +1333,7 @@ bool sum_bound(ulong word,Out o,ulong rows){
  ulong magnitude=negative?0UL-word:word;
  return mulhi(magnitude,rows)==0UL&&magnitude*rows<=maximum;
 }
-// Decimal32/64 input and Int32.MAX rows bound every sum partial below 2**94.
+// At most Int32.MAX rows of 64-bit inputs bound every sum partial below 2**95.
 // Two-word modulo addition is therefore exact in signed128 and precision38.
 void wide_merge(thread long &low,thread long &high,long other,long upper){
  ulong before=ulong(low),after=before+ulong(other);
@@ -1332,6 +1341,10 @@ void wide_merge(thread long &low,thread long &high,long other,long upper){
 }
 void wide_add(thread long &low,thread long &high,ulong word){
  wide_merge(low,high,long(word),long(word)<0?-1L:0L);
+}
+bool wide_accum(Out o){return USE_WIDE&&(o.kind==208||o.kind==210||o.kind==211);}
+void wide_accumulate(thread long &low,thread long &high,ulong word,Out o){
+ wide_merge(low,high,long(word),o.type==10?0L:(long(word)<0?-1L:0L));
 }
 bool wide_pick(Out o){return USE_WIDE&&o.type==12&&(o.kind==80||o.kind==81||o.kind==83||o.kind==84);}
 bool wide_result(Out o){return USE_WIDE&&(o.kind==208||(wide_pick(o)&&o.kind!=95&&o.kind!=96));}
@@ -1388,7 +1401,11 @@ void state_finish(thread long &value,thread long &count,Out o,long rows){
   count=o.minimum||!unknown||(o.kind==91?yes:no);value=o.kind==91?yes:!no;
  }
 }
-bool state_valid(Out o,long count){return o.kind==10||o.kind==208?count>=o.minimum:count>0;}
+void state_finish_wide(thread long &value,thread long &high,thread long &count,Out o,long rows){
+ if(o.kind==211){if(count)value=long(f64_div(f64_from_wide(ulong(value),ulong(high),o.type==10),f64_from_signed(count)));high=0;}
+ else state_finish(value,count,o,rows);
+}
+bool state_valid(Out o,long count){return o.kind==10||o.kind==208||o.kind==210?count>=o.minimum:count>0;}
 kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device Partial *partials[[buffer(2)]],device const Out *out[[buffer(3)]],
  constant uint4 &meta[[buffer(4)]],constant ulong &groups[[buffer(5)]],device atomic_uint *error[[buffer(6)]],
@@ -1400,12 +1417,12 @@ kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[bu
  Out current=o;if(DIRECT_FILTERED_REDUCTION&&o.kind==90)current.kind=11;
  ulong word=read_word(x[idx]);
  if(v[idx]&&!sum_bound(word,current,meta.x)){atomic_fetch_min_explicit(error,0xE0000000U,memory_order_relaxed);continue;}
- if(USE_WIDE&&o.kind==208){if(v[idx]){wide_add(sum,high,word);++count;}}
+ if(wide_accum(o)){if(v[idx]){wide_accumulate(sum,high,word,o);++count;}}
  else if(wide_pick(o))state_add_wide(sum,high,count,ulong2(word,x[idx+meta.z]),v[idx]!=0,long(row),o);
  else state_add(sum,count,word,DIRECT_FILTERED_REDUCTION&&o.kind==90?true:v[idx]!=0,long(row),current);}
  sums[lane]=sum;counts[lane]=count;highs[lane]=high;threadgroup_barrier(mem_flags::mem_threadgroup);
  for(uint stride=128;stride;stride/=2){if(lane<stride){
- long a=sums[lane],b=counts[lane],h=highs[lane];if(USE_WIDE&&o.kind==208){wide_merge(a,h,sums[lane+stride],highs[lane+stride]);b+=counts[lane+stride];}else if(wide_pick(o))state_merge_wide(a,h,b,sums[lane+stride],highs[lane+stride],counts[lane+stride],o);else state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;highs[lane]=h;}
+ long a=sums[lane],b=counts[lane],h=highs[lane];if(wide_accum(o)){wide_merge(a,h,sums[lane+stride],highs[lane+stride]);b+=counts[lane+stride];}else if(wide_pick(o))state_merge_wide(a,h,b,sums[lane+stride],highs[lane+stride],counts[lane+stride],o);else state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;highs[lane]=h;}
  threadgroup_barrier(mem_flags::mem_threadgroup);}
  if(lane==0)partials[group.y*groups+group.x]=make_partial(sums[0],highs[0],counts[0]);
 }
@@ -1414,9 +1431,9 @@ kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *
  uint column[[thread_position_in_grid]]) {
  long sum=0,count=0,high=0;Out o=out[column];
  for(ulong i=0;i<groups;++i){Partial p=partials[column*groups+i];
- if(USE_WIDE&&o.kind==208){wide_merge(sum,high,p.total,partial_high(p));count+=p.count;}else if(wide_pick(o))state_merge_wide(sum,high,count,p.total,partial_high(p),p.count,o);else state_merge(sum,count,p.total,p.count,o);}
+ if(wide_accum(o)){wide_merge(sum,high,p.total,partial_high(p));count+=p.count;}else if(wide_pick(o))state_merge_wide(sum,high,count,p.total,partial_high(p),p.count,o);else state_merge(sum,count,p.total,p.count,o);}
  if(DIRECT_FILTERED_REDUCTION&&o.kind==90){sum=count;count=1;}
- else state_finish(sum,count,o,meta.x);
+ else state_finish_wide(sum,high,count,o,meta.x);
  result[column]=make_partial(sum,high,count);
 }
 kernel void order_init(device uint *index[[buffer(0)]],constant uint4 &meta[[buffer(1)]],uint row[[thread_position_in_grid]]){
@@ -2067,7 +2084,7 @@ ResidentCopy residentCopy(const Resident &table, int64_t column,
   return {uint64_t(source),
           uint64_t(table.scalar ? table.scalar_stride * c.slot + (table.scalar_stride == 32 ? 16 : 8) : c.slot * table.cap),
           uint64_t(target), uint64_t(table.rows), table.scalar, c.minimum,
-          c.reduction == DFM_SUM || c.reduction == DFM_WIDE_SUM, 0,
+          c.reduction == DFM_SUM || c.reduction == DFM_WIDE_SUM || c.reduction == DFM_WIDE_INTEGER_SUM, 0,
           uint64_t(wide ? source + (table.scalar ? 1 : table.cap) : 0),
           uint64_t(wide ? target + target_cap : 0)};
 }
@@ -2554,6 +2571,11 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
   if (r.reductions && rows) {
     for (int64_t i = 0; i < r.output_count; ++i) {
       auto value = loadPartial(result, i, partialWidth(r));
+      if (r.outputs[i].reduction == DFM_WIDE_INTEGER_SUM &&
+          value.count >= r.outputs[i].min_count &&
+          (r.outputs[i].dtype == DFM_UINT64 ? value.high != 0
+              : value.high != (value.total < 0 ? -1 : 0)))
+        fail("Integer overflow in Metal sum");
       if (r.outputs[i].reduction == DFM_SUM &&
           value.count >= r.outputs[i].min_count &&
           ((r.outputs[i].dtype == DFM_INT32 &&
@@ -2595,7 +2617,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     stats.download_bytes = 8;
     if (r.reductions && rows)
       for (int64_t i = 0; i < r.output_count; ++i)
-        if (r.outputs[i].reduction == DFM_SUM)
+        if (r.outputs[i].reduction == DFM_SUM ||
+            r.outputs[i].reduction == DFM_WIDE_INTEGER_SUM)
           stats.download_bytes += partialWidth(r);
     stats.result_copy_ns = 0;
     t->stats = stats;
@@ -2610,7 +2633,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         continue;
       auto a = loadPartial(result, i, partialWidth(r));
       bool valid =
-          (o.reduction == DFM_SUM || o.reduction == DFM_WIDE_SUM) ? a.count >= o.min_count : a.count > 0;
+          (o.reduction == DFM_SUM || o.reduction == DFM_WIDE_SUM || o.reduction == DFM_WIDE_INTEGER_SUM) ? a.count >= o.min_count : a.count > 0;
       if (!valid)
         a.total = a.high = 0;
       memcpy(o.values, &a.total, width(o.dtype));
@@ -2953,7 +2976,7 @@ int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
           continue;
         if (t.scalar) {
           auto a = loadPartial(t.values, c.slot, t.scalar_stride);
-          bool valid = (c.reduction == DFM_SUM || c.reduction == DFM_WIDE_SUM) ? a.count >= c.minimum : a.count > 0;
+          bool valid = (c.reduction == DFM_SUM || c.reduction == DFM_WIDE_SUM || c.reduction == DFM_WIDE_INTEGER_SUM) ? a.count >= c.minimum : a.count > 0;
           if (!valid)
             a.total = a.high = 0;
           memcpy(o.values, &a.total, width(o.dtype));

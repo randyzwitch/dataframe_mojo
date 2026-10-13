@@ -601,8 +601,8 @@ def test_native_metal_integer_mean_preserves_exact_accumulation_before_float64_d
     var unproved = DataFrame(
         [Series("i", Column[Int64]([Int64.MIN, Int64.MAX]))]
     )
-    with assert_raises(contains="accumulator"):
-        _ = unproved.lazy().select(col("i").mean()).collect(accelerator=runtime)
+    var exact = unproved.lazy().select(col("i").mean())
+    same(exact.collect(accelerator=runtime), exact.collect(engine="cpu"))
 
 
 def test_native_metal_float64_remainder_extremes_filters_children_and_cost() raises:

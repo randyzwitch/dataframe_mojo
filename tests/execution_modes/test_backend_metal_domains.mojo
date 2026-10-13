@@ -411,17 +411,17 @@ def wide_sum_cases(runtime: MetalRuntime, native: Bool) raises:
         var cancel = DataFrame(
             [Series("x", Column[Int64]([Int64.MAX, -Int64.MAX]))]
         )
-        with assert_raises(contains="exact wide accumulation"):
-            _ = (
-                cancel.lazy()
-                .select(col("x").sum())
-                .collect(accelerator=runtime)
-            )
+        check_domain(
+            cancel.lazy().select(col("x").sum()),
+            DataFrame([Series("x", Column[Int64]([0]))]),
+            runtime,
+            native,
+        )
         var bad32 = DataFrame([Series("x", Column[Int32]([Int32.MAX, 1]))])
         with assert_raises(contains="overflow"):
             _ = bad32.lazy().select(col("x").sum()).collect(accelerator=runtime)
         var unsafe = DataFrame([Series("x", Column[UInt64]([UInt64.MAX, 1]))])
-        with assert_raises(contains="exact wide accumulation"):
+        with assert_raises(contains="Integer overflow"):
             _ = (
                 unsafe.lazy()
                 .select(col("x").sum())
