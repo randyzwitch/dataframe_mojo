@@ -124,9 +124,12 @@ std::string rollingMomentsSource(const DFMRequest &r, const Layout &layout, int6
           "uint window=uint(parameter);ulong ddof=parameter>>32;"
           "lo=position;hi=position;RollingVarianceState state={0UL,0UL,0UL,0UL};"
           "for(uint j=position;j<end;++j){uint start=j-position+1>window?j-window+1:position;"
-          "if(start<lo||start>=hi){lo=start;hi=start;state={0UL,0UL,0UL,0UL};}"
+          "bool rebuild=start<lo||start>=hi;if(rebuild){lo=start;hi=start;state={0UL,0UL,0UL,0UL};}"
           "while(lo<start){ulong at=" + input + "+order[lo++];"
-          "if(v[at])state=rolling_variance_remove(state,x[at],origin);}"
+          "if(v[at]){ulong previous=state.m2;state=rolling_variance_remove(state,x[at],origin);"
+          "rebuild=rebuild||(f64_abs(x[at])<0x7ff0000000000000UL&&(!state.count||f64_abs(previous)>=0x7ff0000000000000UL||f64_less(state.m2,f64_mul(previous,0x3fe0000000000000UL))));}}"
+          "if(rebuild){lo=start;hi=start;state={0UL,0UL,0UL,0UL};"
+          "for(uint p=start;p<=j;++p){ulong at=" + input + "+order[p];if(v[at]&&f64_abs(x[at])<0x7ff0000000000000UL){origin=x[at];break;}}}"
           "while(hi<=j){ulong at=" + input + "+order[hi++];"
           "if(v[at])state=rolling_variance_add(state,x[at],origin);}"
           "ulong out=" + output + "+order[j];x[out]=T(0);v[out]=0;"
@@ -202,12 +205,93 @@ std::string rollingSource(const DFMRequest &r, const Layout &layout, int64_t i) 
   return text + "}\n";
 }
 
+// Duration bounds use the original row order within stable partitions. Each
+// owner validates its whole index before evaluating a single window.
+std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i) {
+  auto &step=r.steps[i];auto h=r.code+4*step.start;auto bounds=h+4;
+  auto name=std::to_string(i);
+  auto input=std::to_string(layout.physical[h[1]])+"UL*meta.z";
+  auto axis=std::to_string(layout.physical[h[2]])+"UL*meta.z";
+  auto output=std::to_string(layout.physical[step.slot])+"UL*meta.z";
+  auto inputType=slotType(r,h[1]),outputType=slotType(r,step.slot);
+  bool moments=h[3]>=4,arithmetic=h[3]<=1;
+  bool integer=h[3]==0&&inputType!=DFM_FLOAT32&&inputType!=DFM_FLOAT64_STORAGE;
+  bool wide=inputType==DFM_DECIMAL128;
+  bool floating=inputType==DFM_FLOAT32||inputType==DFM_FLOAT64_STORAGE;
+  std::string text=partitionSource(r,layout,i);
+  text+="kernel void cumulative_assign"+name+R"MSL(
+(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],
+ device const uint *order[[buffer(2)]],constant uint4 &meta[[buffer(3)]],
+ device atomic_uint *error[[buffer(4)]],device const ulong *lit[[buffer(5)]],
+ uint position[[thread_position_in_grid]]){
+ if(position>=meta.x)return;uint first=order[position];
+)MSL";
+  text+="if(position&&window_partition"+name+"(order[position-1],first,x,v,meta))return;"
+        "uint lo=position+1,hi=meta.x;while(lo<hi){uint mid=(lo+hi)/2;"
+        "if(window_partition"+name+"(order[mid],first,x,v,meta))lo=mid+1;else hi=mid;}uint end=lo;"
+        "long period=as_type<long>(lit["+std::to_string(step.start)+"]);"
+        "for(uint j=position;j<end;++j){ulong at="+axis+"+order[j];"
+        "if(!v[at]){atomic_fetch_min_explicit(error,0xB0000000U,memory_order_relaxed);return;}"
+        "if(j>position&&as_type<long>(x[at])<as_type<long>(x["+axis+"+order[j-1]])){"
+        "atomic_fetch_min_explicit(error,0xB0000001U,memory_order_relaxed);return;}}";
+  if(moments)
+    text+="ulong origin=0UL;for(uint j=position;j<end;++j){ulong at="+input+"+order[j];"
+          "if(v[at]&&f64_abs(x[at])<0x7ff0000000000000UL){origin=x[at];break;}}"
+          "RollingVarianceState state={0UL,0UL,0UL,0UL};uint previousLower=position,previousUpper=position;";
+  text+="for(uint j=position;j<end;++j){uint own=order[j];long time=as_type<long>(x["+axis+"+own]);"
+        "if(time<(-9223372036854775807L-1L)+period){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}"
+        "long startTime=time-period;lo=position;hi=end;while(lo<hi){uint mid=(lo+hi)/2;long t=as_type<long>(x["+axis+"+order[mid]]);"
+        "if(t<startTime"+std::string(bounds[2]&1?"":"||t==startTime")+")lo=mid+1;else hi=mid;}uint start=lo;"
+        "lo=position;hi=end;while(lo<hi){uint mid=(lo+hi)/2;long t=as_type<long>(x["+axis+"+order[mid]]);"
+        "if(t<time"+std::string(bounds[2]&2?"||t==time":"")+")lo=mid+1;else hi=mid;}uint stop=max(start,lo);"
+        "ulong out="+output+"+own;x[out]=T(0);v[out]=0;";
+  if(wide)text+="x[out+meta.z]=T(0);v[out+meta.z]=0;";
+  if(moments){
+    text+="bool rebuild=start<previousLower||stop<previousUpper||start>=previousUpper;if(rebuild){previousLower=start;previousUpper=start;state={0UL,0UL,0UL,0UL};}"
+          "while(previousLower<start){ulong at="+input+"+order[previousLower++];if(v[at]){ulong previous=state.m2;state=rolling_variance_remove(state,x[at],origin);"
+          "rebuild=rebuild||(f64_abs(x[at])<0x7ff0000000000000UL&&(!state.count||f64_abs(previous)>=0x7ff0000000000000UL||f64_less(state.m2,f64_mul(previous,0x3fe0000000000000UL))));}}"
+          "if(rebuild){previousLower=start;previousUpper=start;state={0UL,0UL,0UL,0UL};"
+          "for(uint p=start;p<stop;++p){ulong at="+input+"+order[p];if(v[at]&&f64_abs(x[at])<0x7ff0000000000000UL){origin=x[at];break;}}}"
+          "while(previousUpper<stop){ulong at="+input+"+order[previousUpper++];if(v[at])state=rolling_variance_add(state,x[at],origin);}"
+          "ulong total=state.count+state.bad;if(total>="+std::to_string(bounds[1])+"UL&&total>"+std::to_string(bounds[3])+"UL){"
+          "x[out]=T(rolling_variance_finish(state,"+std::to_string(bounds[3])+"UL,"+std::string(h[3]==5?"true":"false")+"));v[out]=1;}";
+    return text+"}}\n";
+  }
+  text+="ulong state=0UL,upper=0UL;uint count=0;for(uint p=start;p<stop;++p){ulong at="+input+"+order[p];"
+        "if(!v[at])continue;ulong word=x[at];";
+  if(integer)
+    text+="ulong other="+std::string(unsignedType(inputType)?"0UL":"long(word)<0?~0UL:0UL")+";ulong next=state+word;upper+=other+ulong(next<state);state=next;";
+  else if(arithmetic)
+    text+="state=f64_add(state,"+std::string(inputType==DFM_FLOAT32?"f64_from_float32(uint(word))":"word")+");";
+  else if(wide)
+    text+="ulong other=x[at+meta.z];if(!count||"+std::string(h[3]==3?"wide_less(ulong2(state,upper),ulong2(word,other))":"wide_less(ulong2(word,other),ulong2(state,upper))")+"){state=word;upper=other;}";
+  else {
+    std::string better="extrema_better(word,state,"+std::to_string(inputType)+","+std::string(h[3]==3?"true":"false")+")";
+    if(floating)
+      better="f64_nan(f64_word(word,"+std::to_string(inputType)+"))||(!f64_nan(f64_word(state,"+std::to_string(inputType)+"))&&"+better+")";
+    text+="if(!count||"+better+")state=word;";
+  }
+  text+="++count;}if(ulong(count)<"+std::to_string(bounds[1])+"UL"+std::string(h[3]==0?"":"||!count")+")continue;";
+  if(integer){
+    text+="bool overflow="+std::string(unsignedType(outputType)?"upper!=0UL":"upper!=(long(state)<0?~0UL:0UL)")+";";
+    if(outputType==DFM_INT32)text+="overflow=overflow||long(state)<(-2147483647L-1L)||long(state)>2147483647L;";
+    if(outputType==DFM_UINT32)text+="overflow=overflow||state>4294967295UL;";
+    text+="if(overflow){atomic_fetch_min_explicit(error,0xD0000000U,memory_order_relaxed);return;}";
+  }
+  if(h[3]==1)text+="state=f64_div(state,f64_from_unsigned(ulong(count)));";
+  if(h[3]==0&&inputType==DFM_FLOAT32)text+="state=ulong(f64_to_float32(state));";
+  text+="x[out]=T(state);v[out]=1;";
+  if(wide)text+="x[out+meta.z]=T(upper);v[out+meta.z]=1;";
+  return text+"}}\n";
+}
+
 // Stable partition ordering groups the rows without changing the table. A
 // partition owner walks its rows sequentially, preserving CPU floating-point
 // association and validating every integer/decimal prefix before head/filter.
 std::string cumulativeSource(const DFMRequest &r, const Layout &layout, int64_t i) {
   auto &step = r.steps[i];
   auto h = r.code + 4 * step.start;
+  if (h[0] == DFM_DURATION_KEY) return durationSource(r,layout,i);
   if (h[3] >= 13) return interpolationSource(r, layout, i);
   if (h[3] >= 11) return rollingMomentsSource(r, layout, i);
   if (h[3] >= 7) return rollingSource(r, layout, i);
