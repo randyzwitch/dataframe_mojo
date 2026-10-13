@@ -35,8 +35,13 @@ paired UInt64 words and check overflow only at the typed result boundary.
 Statistical kernels provide variance, standard deviation, skewness, kurtosis,
 covariance and correlation. Stable ordering supports mixed fixed-width keys,
 per-key direction and null placement, preserving source order on ties and the
-original floating-point encodings. These operations share the same Mojo-owned
-buffers, deferred errors and request-budget accounting.
+original floating-point encodings. Grouped aggregation supports those reductions
+and key-only distinct groups, with stable representatives and nullable mixed
+keys. Rank methods, partitioned cumulative operations, shift/fill windows,
+medians and all five quantile interpolation methods also run in Mojo. These
+operations share the same Mojo-owned buffers, deferred errors and request-budget
+accounting. Rolling/interpolation windows, joins and remaining logical operations
+are still being integrated.
 Unsupported regions reject before device allocation. Automatic placement awaits calibration for the Mojo implementation. The
 remaining operations below continue to use the existing implementation until
 their Mojo replacements are verified; retaining that implementation during

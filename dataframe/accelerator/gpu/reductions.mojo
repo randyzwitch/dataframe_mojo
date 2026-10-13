@@ -27,6 +27,10 @@ from dataframe.expr import (
     COV,
     CORR,
 )
+from dataframe.accelerator.rows import (
+    ROW_QUANTILE_LINEAR,
+    ROW_QUANTILE_MIDPOINT,
+)
 from .rows import integer_fits, unsigned_type
 from . import floating as f
 
@@ -262,7 +266,9 @@ def reduce_partials(
     var slot = Int(descriptors[unsafe_offset=column * DESCRIPTOR_WORDS])
     var dtype = descriptors[unsafe_offset=column * DESCRIPTOR_WORDS + 1]
     var op = descriptors[unsafe_offset=column * DESCRIPTOR_WORDS + 3]
-    if _statistical(op):
+    if _statistical(op) or (
+        op >= ROW_QUANTILE_LINEAR and op <= ROW_QUANTILE_MIDPOINT
+    ):
         return
     var state = State()
     for row in range(group, Int(rows), Int(groups)):
@@ -296,7 +302,9 @@ def reduce_finish(
     var target = descriptors[unsafe_offset=base + 2]
     var op = descriptors[unsafe_offset=base + 3]
     var minimum = descriptors[unsafe_offset=base + 4]
-    if _statistical(op):
+    if _statistical(op) or (
+        op >= ROW_QUANTILE_LINEAR and op <= ROW_QUANTILE_MIDPOINT
+    ):
         return
     var state = State()
     for group in range(Int(groups)):

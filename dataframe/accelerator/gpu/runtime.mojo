@@ -82,11 +82,25 @@ from dataframe.accelerator.rows import (
     lower_rows,
     ROW_SLICE,
     ROW_SORT_KEY,
+    ROW_RANK_KEY,
+    ROW_CUMULATIVE_KEY,
+    ROW_GROUP_HEADER,
+    ROW_GROUP_HEADER_LAST,
+    ROW_GROUP_KEY,
+    ROW_GROUP_OUTPUT,
+    ROW_QUANTILE_LINEAR,
+    ROW_QUANTILE_LOWER,
+    ROW_QUANTILE_HIGHER,
+    ROW_QUANTILE_NEAREST,
+    ROW_QUANTILE_MIDPOINT,
 )
 from .rows import row_program
 from .movement import filter_scan, filter_offsets, filter_gather
-from . import statistics
+from . import statistics, quantiles
+from .grouping import group_mark, group_offsets, group_starts, group_reduce
 from .ordering import order_init, order_merge, order_key_errors, order_gather
+from .ranking import rank_order_merge, rank_prepare, rank_offsets, rank_assign
+from .windows import window_assign, window_check_errors
 from .reductions import (
     State,
     STATE_WORDS,
@@ -139,7 +153,12 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
         moments=True,
         higher_moments=True,
         paired_moments=True,
+        quantiles=True,
         order=True,
+        ranks=True,
+        cumulative_windows=True,
+        shift_fill_windows=True,
+        grouped=True,
         int64_arithmetic=True,
         deferred_integer_errors=True,
         extended_integers=True,
@@ -159,40 +178,46 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
         raise Error(
             "Mojo GPU row count exceeds the supported device index range"
         )
-    if plan.reductions:
-        var supported_reductions: List[Int] = [
-            SUM,
-            MEAN,
-            MIN,
-            MAX,
-            COUNT,
-            LEN,
-            NULL_COUNT,
-            FIRST,
-            LAST,
-            ANY,
-            ALL,
-            ARG_MIN,
-            ARG_MAX,
-            VAR,
-            STD,
-            SKEW,
-            KURTOSIS,
-            COV,
-            CORR,
-        ]
-        for output in plan.outputs:
-            _ = _kind(output.dtype)
-            if output.reduction not in supported_reductions:
-                raise Error(
-                    "Mojo GPU reduction is not implemented: "
-                    + String(output.reduction)
-                )
+    var supported_reductions: List[Int] = [
+        SUM,
+        MEAN,
+        MIN,
+        MAX,
+        COUNT,
+        LEN,
+        NULL_COUNT,
+        FIRST,
+        LAST,
+        ANY,
+        ALL,
+        ARG_MIN,
+        ARG_MAX,
+        VAR,
+        STD,
+        SKEW,
+        KURTOSIS,
+        COV,
+        CORR,
+        ROW_QUANTILE_LINEAR,
+        ROW_QUANTILE_LOWER,
+        ROW_QUANTILE_HIGHER,
+        ROW_QUANTILE_NEAREST,
+        ROW_QUANTILE_MIDPOINT,
+    ]
+    for output in plan.outputs:
+        _ = _kind(output.dtype)
+        if plan.reductions and output.reduction not in supported_reductions:
+            raise Error(
+                "Mojo GPU reduction is not implemented: "
+                + String(output.reduction)
+            )
     for dtype in plan.slot_dtypes:
         _ = _kind(dtype)
     var supported: List[Int] = [
         ROW_SLICE,
         ROW_SORT_KEY,
+        ROW_RANK_KEY,
+        ROW_CUMULATIVE_KEY,
         COL,
         LIT_INT,
         LIT_FLOAT,
@@ -238,7 +263,37 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
     ]
     for step in plan.steps:
         if step.grouped:
-            raise Error("Mojo GPU groups are not implemented yet")
+            var header = Int(plan.code[4 * step.start])
+            if header != ROW_GROUP_HEADER and header != ROW_GROUP_HEADER_LAST:
+                raise Error("Mojo GPU grouped windows are not implemented yet")
+            var keys = Int(plan.code[4 * step.start + 1])
+            if keys < 1 or keys >= step.nodes:
+                raise Error("Mojo GPU grouping requires fixed-width keys")
+            for offset in range(1, step.nodes):
+                var node = step.start + offset
+                var op = Int(plan.code[4 * node])
+                if offset <= keys:
+                    if op != ROW_GROUP_KEY:
+                        raise Error("Mojo GPU invalid group key descriptor")
+                elif (
+                    op != ROW_GROUP_OUTPUT
+                    or Int(plan.code[4 * node + 3]) not in supported_reductions
+                ):
+                    raise Error("Mojo GPU grouped reduction is not implemented")
+            continue
+        if step.order:
+            var header = Int(plan.code[4 * step.start])
+            var method = Int(plan.code[4 * step.start + 3])
+            if header == ROW_RANK_KEY:
+                if method < 0 or method > 4 or step.gather_count:
+                    raise Error(
+                        "Mojo GPU invalid rank method or gather metadata"
+                    )
+            elif header == ROW_CUMULATIVE_KEY:
+                if method < 0 or method > 6 or step.gather_count:
+                    raise Error("Mojo GPU window method is not implemented")
+            elif header != ROW_SORT_KEY:
+                raise Error("Mojo GPU ordering descriptor is not implemented")
         for node in range(step.start, step.start + step.nodes):
             var op = Int(plan.code[4 * node])
             if op not in supported:
@@ -405,9 +460,17 @@ def execute(
     var current_rows = rows
     var movement = False
     var ordering = False
+    var grouping = False
+    var ranking = False
+    var windows = False
     for step in plan.steps:
-        ordering = ordering or step.order
-        movement = movement or step.filter or step.order
+        ordering = ordering or step.order or step.grouped
+        grouping = grouping or step.grouped
+        if step.order and not step.grouped:
+            var header = Int(plan.code[4 * step.start])
+            ranking = ranking or header == ROW_RANK_KEY
+            windows = windows or header == ROW_CUMULATIVE_KEY
+        movement = movement or step.filter or step.order or step.grouped
     # GPU words, byte validity and per-value errors; one host staging matrix
     # is reused for readback after the stream consumes its upload.
     var matrix_bytes = _checked_mul(cells, 13)
@@ -422,7 +485,17 @@ def execute(
         shared = _checked_add(shared, _checked_mul((rows + 255) // 256, 8))
         shared = _checked_add(shared, 16)
         shared = _checked_add(shared, _checked_mul(len(plan.gathers), 16))
+        if ranking:
+            # The idle sort-index owner supplies dense prefixes. Only the
+            # additional per-block dense counts need separate device storage.
+            shared = _checked_add(shared, _checked_mul((rows + 255) // 256, 4))
+        if grouping:
+            # Group starts and block-local positions accompany both sort indices.
+            shared = _checked_add(shared, _checked_mul(rows, 8))
+            shared = _checked_add(shared, _checked_mul(plan.slots, 8))
     var result_bytes = _checked_add(matrix_bytes, program_bytes) if rows else 0
+    if rows and grouping:
+        result_bytes = _checked_add(result_bytes, _checked_mul(plan.slots, 8))
     if plan.reductions:
         var outputs = len(plan.outputs)
         # Descriptors and scalar results have both host and device storage.
@@ -458,9 +531,13 @@ def execute(
     var errors = List[UInt32](length=cells, fill=0)
     var reduction_code = List[Int64]()
     var has_statistics = False
+    var has_quantiles = False
     if plan.reductions:
         for output in plan.outputs:
             has_statistics = has_statistics or statistics.supported(
+                Int64(output.reduction)
+            )
+            has_quantiles = has_quantiles or quantiles.supported(
                 Int64(output.reduction)
             )
             reduction_code.extend(
@@ -495,6 +572,10 @@ def execute(
             value = UInt64(bitcast[DType.uint32](Float32(plan.literals[node])))
         literals.append(value)
         types.append(_kind(dtype))
+    var slot_types = List[Int64]()
+    if grouping:
+        for dtype in plan.slot_dtypes:
+            slot_types.append(_kind(dtype))
     for slot in range(plan.source.width()):
         _stage(plan.source._columns[slot], rows, slot, 0, words, validity)
     var submissions = 0
@@ -522,6 +603,311 @@ def execute(
             for step in plan.steps:
                 if current_rows == 0:
                     break
+                if step.grouped:
+                    var blocks = (current_rows + 255) // 256
+                    var keys = Int(code[4 * step.start + 1])
+                    var index = ctx.enqueue_create_buffer[DType.uint32](
+                        current_rows
+                    )
+                    var next_index = ctx.enqueue_create_buffer[DType.uint32](
+                        current_rows
+                    )
+                    var positions = ctx.enqueue_create_buffer[DType.uint32](
+                        current_rows
+                    )
+                    var starts = ctx.enqueue_create_buffer[DType.uint32](
+                        current_rows
+                    )
+                    var offsets = ctx.enqueue_create_buffer[DType.uint32](
+                        blocks * 2
+                    )
+                    var metadata = ctx.enqueue_create_buffer[DType.uint32](2)
+                    var device_slot_types = ctx.enqueue_create_buffer[
+                        DType.int64
+                    ](len(slot_types))
+                    ctx.enqueue_copy(device_slot_types, slot_types.unsafe_ptr())
+                    ctx.enqueue_function[order_init](
+                        index.unsafe_ptr(),
+                        UInt32(current_rows),
+                        grid_dim=blocks,
+                        block_dim=256,
+                    )
+                    submissions += 1
+                    var run_width = 1
+                    while run_width < current_rows:
+                        ctx.enqueue_function[order_merge](
+                            device_words.unsafe_ptr(),
+                            device_valid.unsafe_ptr(),
+                            index.unsafe_ptr(),
+                            next_index.unsafe_ptr(),
+                            device_code.unsafe_ptr(),
+                            device_types.unsafe_ptr(),
+                            UInt32(step.start + 1),
+                            UInt32(keys),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            UInt32(run_width),
+                            grid_dim=blocks,
+                            block_dim=256,
+                        )
+                        var previous = index^
+                        index = next_index^
+                        next_index = previous^
+                        run_width *= 2
+                        submissions += 1
+                    ctx.enqueue_function[group_mark](
+                        device_words.unsafe_ptr(),
+                        device_valid.unsafe_ptr(),
+                        device_errors.unsafe_ptr(),
+                        index.unsafe_ptr(),
+                        positions.unsafe_ptr(),
+                        offsets.unsafe_ptr(),
+                        device_code.unsafe_ptr(),
+                        device_types.unsafe_ptr(),
+                        UInt32(step.start),
+                        UInt32(keys),
+                        UInt32(current_rows),
+                        UInt32(rows),
+                        grid_dim=blocks,
+                        block_dim=256,
+                    )
+                    ctx.enqueue_function[group_offsets](
+                        offsets.unsafe_ptr(),
+                        metadata.unsafe_ptr(),
+                        UInt32(blocks),
+                        grid_dim=1,
+                        block_dim=1,
+                    )
+                    submissions += 2
+                    var shape = List[UInt32](length=2, fill=0)
+                    ctx.enqueue_copy(shape.unsafe_ptr(), metadata)
+                    ctx.synchronize()
+                    waits += 1
+                    if shape[1]:
+                        raise Error(
+                            "Mojo GPU group key failed checked arithmetic or cast"
+                        )
+                    var gathered_words = ctx.enqueue_create_buffer[
+                        DType.uint64
+                    ](cells)
+                    var gathered_valid = ctx.enqueue_create_buffer[DType.uint8](
+                        cells
+                    )
+                    var gathered_errors = ctx.enqueue_create_buffer[
+                        DType.uint32
+                    ](cells)
+                    if shape[0]:
+                        ctx.enqueue_function[group_starts](
+                            device_words.unsafe_ptr(),
+                            device_valid.unsafe_ptr(),
+                            index.unsafe_ptr(),
+                            positions.unsafe_ptr(),
+                            offsets.unsafe_ptr(),
+                            starts.unsafe_ptr(),
+                            device_code.unsafe_ptr(),
+                            device_types.unsafe_ptr(),
+                            UInt32(step.start),
+                            UInt32(keys),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            grid_dim=blocks,
+                            block_dim=256,
+                        )
+                        ctx.enqueue_function[group_reduce](
+                            device_words.unsafe_ptr(),
+                            device_valid.unsafe_ptr(),
+                            device_errors.unsafe_ptr(),
+                            gathered_words.unsafe_ptr(),
+                            gathered_valid.unsafe_ptr(),
+                            gathered_errors.unsafe_ptr(),
+                            index.unsafe_ptr(),
+                            starts.unsafe_ptr(),
+                            device_code.unsafe_ptr(),
+                            device_literals.unsafe_ptr(),
+                            device_slot_types.unsafe_ptr(),
+                            UInt32(step.start),
+                            UInt32(step.nodes),
+                            shape[0],
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            grid_dim=(Int(shape[0]) * step.nodes + 255) // 256,
+                            block_dim=256,
+                        )
+                        submissions += 2
+                        # Starts, sort indices, and descriptor owners outlive all queued reads.
+                        ctx.synchronize()
+                        waits += 1
+                    current_rows = Int(shape[0])
+                    device_words = gathered_words^
+                    device_valid = gathered_valid^
+                    device_errors = gathered_errors^
+                    continue
+                var header = Int(code[4 * step.start])
+                if step.order and (
+                    header == ROW_RANK_KEY or header == ROW_CUMULATIVE_KEY
+                ):
+                    var blocks = (current_rows + 255) // 256
+                    var index = ctx.enqueue_create_buffer[DType.uint32](
+                        current_rows
+                    )
+                    var next_index = ctx.enqueue_create_buffer[DType.uint32](
+                        current_rows
+                    )
+                    var failures = ctx.enqueue_create_buffer[DType.uint32](
+                        blocks
+                    )
+                    var host_failures = List[UInt32](length=blocks, fill=0)
+                    ctx.enqueue_function[order_key_errors](
+                        device_errors.unsafe_ptr(),
+                        device_code.unsafe_ptr(),
+                        failures.unsafe_ptr(),
+                        UInt32(step.start),
+                        UInt32(step.nodes),
+                        UInt32(current_rows),
+                        UInt32(rows),
+                        grid_dim=blocks,
+                        block_dim=256,
+                    )
+                    ctx.enqueue_function[order_init](
+                        index.unsafe_ptr(),
+                        UInt32(current_rows),
+                        grid_dim=blocks,
+                        block_dim=256,
+                    )
+                    submissions += 2
+                    var run_width = 1
+                    while run_width < current_rows:
+                        if header == ROW_RANK_KEY:
+                            ctx.enqueue_function[rank_order_merge](
+                                device_words.unsafe_ptr(),
+                                device_valid.unsafe_ptr(),
+                                index.unsafe_ptr(),
+                                next_index.unsafe_ptr(),
+                                device_code.unsafe_ptr(),
+                                device_types.unsafe_ptr(),
+                                UInt32(step.start),
+                                UInt32(step.nodes),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                UInt32(run_width),
+                                grid_dim=blocks,
+                                block_dim=256,
+                            )
+                        else:
+                            ctx.enqueue_function[order_merge](
+                                device_words.unsafe_ptr(),
+                                device_valid.unsafe_ptr(),
+                                index.unsafe_ptr(),
+                                next_index.unsafe_ptr(),
+                                device_code.unsafe_ptr(),
+                                device_types.unsafe_ptr(),
+                                UInt32(step.start + 1),
+                                UInt32(step.nodes - 1),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                UInt32(run_width),
+                                grid_dim=blocks,
+                                block_dim=256,
+                            )
+                        var previous = index^
+                        index = next_index^
+                        next_index = previous^
+                        run_width *= 2
+                        submissions += 1
+                    ctx.enqueue_copy(host_failures.unsafe_ptr(), failures)
+                    ctx.synchronize()
+                    waits += 1
+                    for failure in host_failures:
+                        if failure:
+                            raise Error(
+                                "Mojo GPU window key failed checked arithmetic or cast"
+                            )
+                    if header == ROW_RANK_KEY:
+                        var dense_blocks = ctx.enqueue_create_buffer[
+                            DType.uint32
+                        ](blocks)
+                        if code[4 * step.start + 3] == 3:
+                            ctx.enqueue_function[rank_prepare](
+                                device_words.unsafe_ptr(),
+                                device_valid.unsafe_ptr(),
+                                index.unsafe_ptr(),
+                                next_index.unsafe_ptr(),
+                                dense_blocks.unsafe_ptr(),
+                                device_code.unsafe_ptr(),
+                                device_types.unsafe_ptr(),
+                                UInt32(step.start),
+                                UInt32(step.nodes),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                grid_dim=blocks,
+                                block_dim=256,
+                            )
+                            ctx.enqueue_function[rank_offsets](
+                                dense_blocks.unsafe_ptr(),
+                                UInt32(blocks),
+                                grid_dim=1,
+                                block_dim=1,
+                            )
+                            submissions += 2
+                        ctx.enqueue_function[rank_assign](
+                            device_words.unsafe_ptr(),
+                            device_valid.unsafe_ptr(),
+                            device_errors.unsafe_ptr(),
+                            index.unsafe_ptr(),
+                            next_index.unsafe_ptr(),
+                            dense_blocks.unsafe_ptr(),
+                            device_code.unsafe_ptr(),
+                            device_types.unsafe_ptr(),
+                            UInt32(step.start),
+                            UInt32(step.nodes),
+                            UInt32(step.slot),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            grid_dim=blocks,
+                            block_dim=256,
+                        )
+                        submissions += 1
+                        # Permutation, dense prefixes and block owners outlive
+                        # their last queued reads before the next plan step.
+                        ctx.synchronize()
+                        waits += 1
+                    else:
+                        ctx.enqueue_function[window_assign](
+                            device_words.unsafe_ptr(),
+                            device_valid.unsafe_ptr(),
+                            device_errors.unsafe_ptr(),
+                            index.unsafe_ptr(),
+                            device_code.unsafe_ptr(),
+                            device_types.unsafe_ptr(),
+                            device_literals.unsafe_ptr(),
+                            UInt32(step.start),
+                            UInt32(step.nodes),
+                            UInt32(step.slot),
+                            UInt32(_kind(plan.slot_dtypes[step.slot])),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            grid_dim=blocks,
+                            block_dim=256,
+                        )
+                        ctx.enqueue_function[window_check_errors](
+                            device_errors.unsafe_ptr(),
+                            failures.unsafe_ptr(),
+                            UInt32(step.slot),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            grid_dim=blocks,
+                            block_dim=256,
+                        )
+                        submissions += 2
+                        ctx.enqueue_copy(host_failures.unsafe_ptr(), failures)
+                        ctx.synchronize()
+                        waits += 1
+                        for failure in host_failures:
+                            if failure:
+                                raise Error(
+                                    "Mojo GPU cumulative window overflow or input expression failure"
+                                )
+                    continue
                 if step.order:
                     var blocks = (current_rows + 255) // 256
                     var index = ctx.enqueue_create_buffer[DType.uint32](
@@ -790,6 +1176,33 @@ def execute(
                     block_dim=128,
                 )
                 submissions += 2
+            if has_quantiles:
+                ctx.enqueue_function[quantiles.reduce_partials](
+                    device_words.unsafe_ptr(),
+                    device_valid.unsafe_ptr(),
+                    device_errors.unsafe_ptr(),
+                    descriptors.unsafe_ptr(),
+                    partials.unsafe_ptr(),
+                    UInt32(outputs),
+                    UInt32(groups),
+                    UInt32(current_rows),
+                    UInt32(rows),
+                    grid_dim=(outputs * groups + 127) // 128,
+                    block_dim=128,
+                )
+                ctx.enqueue_function[quantiles.reduce_finish](
+                    partials.unsafe_ptr(),
+                    descriptors.unsafe_ptr(),
+                    results.unsafe_ptr(),
+                    result_validity.unsafe_ptr(),
+                    result_errors.unsafe_ptr(),
+                    UInt32(outputs),
+                    UInt32(groups),
+                    UInt32(current_rows),
+                    grid_dim=(outputs + 127) // 128,
+                    block_dim=128,
+                )
+                submissions += 2
             ctx.enqueue_copy(reduced_words.unsafe_ptr(), results)
             ctx.enqueue_copy(reduced_validity.unsafe_ptr(), result_validity)
             ctx.enqueue_copy(reduced_errors.unsafe_ptr(), result_errors)
@@ -813,6 +1226,10 @@ def execute(
             )
             if statistics.supported(reduction_code[base + 3]):
                 empty = statistics.empty_result(
+                    reduction_code[base + 3], reduction_code[base + 4]
+                )
+            if quantiles.supported(reduction_code[base + 3]):
+                empty = quantiles.empty_result(
                     reduction_code[base + 3], reduction_code[base + 4]
                 )
             reduced_words[i] = empty[0]
@@ -866,7 +1283,8 @@ def execute(
         "metal",
         rows,
         count,
-        algorithm="mojo_gpu_reductions" if plan.reductions else "mojo_gpu_ordered_rows" if ordering else "mojo_gpu_row_program",
+        algorithm="mojo_gpu_grouped_rows" if grouping else "mojo_gpu_reductions" if plan.reductions else "mojo_gpu_windows" if ranking
+        or windows else "mojo_gpu_ordered_rows" if ordering else "mojo_gpu_row_program",
         wall_ns=Int(perf_counter_ns()) - started,
     )
     var fields = report.frame()._columns.copy()
