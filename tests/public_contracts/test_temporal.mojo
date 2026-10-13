@@ -1603,4 +1603,6 @@ def test_temporal_offsets_skip_unobserved_overflow_in_conditional_branches() rai
             .otherwise(lit(Int64(0)).cast(dtype))
             .alias("v")
         )
-        assert_equal(frame.select(inactive).item(0, "v").int64(), Int64(0))
+        var actual = frame.select(inactive)
+        assert_equal(actual.column("v").dtype(), dtype)
+        assert_equal(actual.column("v").int64()._get(0), Int64(0))
