@@ -1,5 +1,6 @@
 """Batch kernels: operation/dtype dispatch occurs outside element loops."""
 from std.math import sqrt, exp, log, floor, ceil, pow, isinf, isnan
+from std.ffi import external_call
 from std.sys import size_of
 from .float_ops import arithmetic, compare
 from .nested_column import ListColumn, StructColumn
@@ -989,6 +990,23 @@ def _unary_float[
     return Series("", Column[Scalar[D]](values^, valid))
 
 
+@always_inline
+def _exp_edge[
+    D: DType
+](value: Scalar[D]) -> Scalar[D] where D.is_floating_point():
+    # The toolchain approximation clamps NaNs to infinity and overflows
+    # prematurely near the upper boundary. System libm also retains gradual
+    # underflow. Ordinary finite lanes keep the existing vector kernel.
+    comptime if D == DType.float32:
+        return external_call["expf", Float32](value.cast[DType.float32]()).cast[
+            D
+        ]()
+    else:
+        return external_call["exp", Float64](value.cast[DType.float64]()).cast[
+            D
+        ]()
+
+
 def _unary_block[
     op: Int, width: Int, D: DType
 ](
@@ -1008,8 +1026,19 @@ def _unary_block[
         result = sqrt(x)
     elif op == EXP:
         result = exp(x)
+        comptime for lane in range(width):
+            var value = x[lane]
+            if valid[start + lane] and (
+                isnan(value)
+                or abs(value) > Scalar[D](80 if D == DType.float32 else 700)
+            ):
+                result[lane] = _exp_edge[D](value)
     elif op == LOG:
         result = log(x)
+        comptime for lane in range(width):
+            # The toolchain log approximation returns NaN for +infinity.
+            if isinf(x[lane]) and x[lane] > 0:
+                result[lane] = x[lane]
     elif op == FLOOR:
         result = floor(x)
     elif op == CEIL:
@@ -1059,7 +1088,10 @@ def _unary_int[
         elif op == SQRT:
             floats[i] = sqrt(x.cast[DType.float64]())
         elif op == EXP:
-            floats[i] = exp(x.cast[DType.float64]())
+            var value = x.cast[DType.float64]()
+            floats[i] = _exp_edge[DType.float64](value) if abs(
+                value
+            ) > 700 else exp(value)
         elif op == LOG:
             floats[i] = log(x.cast[DType.float64]())
         else:

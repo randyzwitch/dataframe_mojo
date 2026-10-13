@@ -515,7 +515,40 @@ def check_sqrt_preflight_without_device():
     lib.dfm_free(err)
 
 
+def check_transcendental_preflight_without_device():
+    for operation in (53,54):
+        # Descriptor validation must not depend on a Metal device being exposed.
+        inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+        code = (I * 8)(0, -1, -1, 0, 53, 0, -1, -1)
+        literals = (I * 2)()
+        steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+        outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+        nt, st = (I * 2)(11, 11), (I * 2)(11, 11)
+        request = Request(2, 0, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                          ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                          ptr(outputs), ptr(nt), ptr(st))
+        code[4] = operation
+        memory, err = Memory(), P()
+        for dtype in (11, 3, 10):
+            inputs[0].dtype = nt[0] = st[0] = dtype
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        inputs[0].dtype = nt[0] = st[0] = 4
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Invalid Metal transcendental dtype" in C.string_at(err)
+        lib.dfm_free(err)
+        inputs[0].dtype = nt[0] = st[0] = 1
+        outputs[0].dtype = nt[1] = st[1] = 1
+        err = P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        outputs[0].dtype = nt[1] = st[1] = 3
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Invalid Metal transcendental dtype" in C.string_at(err)
+        lib.dfm_free(err)
+
+
 check_sqrt_preflight_without_device()
+check_transcendental_preflight_without_device()
 
 def check_float32_floor_division_preflight_without_device():
     inputs = (Input * 1)(Input(None, None, 1, 0, 0))

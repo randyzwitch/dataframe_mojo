@@ -5,6 +5,7 @@ errors are then exercised as valid cells and as hidden null payloads. Integer
 expectations use exact Int128 references, never floating-point range checks.
 """
 from std.math import abs, isnan, isinf
+from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, Expr, col, lit
 from tests.support.numeric_model import (
@@ -1300,3 +1301,90 @@ def test_float32_modulo_infinite_divisor_matches_selected_python_policy() raises
 
 def test_float64_modulo_infinite_divisor_matches_selected_python_policy() raises:
     _infinite_divisor_modulo[DType.float64]()
+
+
+def _transcendental_exceptional_values[D: DType]() raises:
+    var nan = Float64(0) / Float64(0)
+    var inf = Float64(1) / Float64(0)
+    var upper = Float64(88.72283172607422) if D == DType.float32 else Float64(
+        709.782712893384
+    )
+    var lower = Float64(-103.97207641601562) if D == DType.float32 else Float64(
+        -745.1332191019411
+    )
+    var values: List[Float64] = [
+        nan,
+        inf,
+        -inf,
+        -0.0,
+        0,
+        1,
+        -1,
+        upper,
+        lower,
+        1,
+        nan,
+    ]
+    var input = List[Scalar[D]]()
+    for value in values:
+        input.append(value.cast[D]())
+    var frame = DataFrame(
+        [
+            Series(
+                "x",
+                Column[Scalar[D]](
+                    input^,
+                    [
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        False,
+                    ],
+                ),
+            )
+        ]
+    )
+    for streaming in [False, True]:
+        var actual = (
+            frame.lazy()
+            .select_exprs(
+                [col("x").exp().alias("e"), col("x").log().alias("l")]
+            )
+            .collect(engine="cpu", streaming=streaming)
+        )
+        var e = actual.column("e").numeric[D]()
+        var l = actual.column("l").numeric[D]()
+        assert_true(isnan(e._get(0)))
+        assert_true(isnan(l._get(0)))
+        assert_true(isinf(e._get(1)) and e._get(1) > 0)
+        assert_true(isinf(l._get(1)) and l._get(1) > 0)
+        assert_equal(e._get(2), Scalar[D](0))
+        assert_true(isnan(l._get(2)))
+        assert_equal(e._get(3), Scalar[D](1))
+        assert_equal(e._get(4), Scalar[D](1))
+        assert_true(isinf(l._get(3)) and l._get(3) < 0)
+        assert_true(isinf(l._get(4)) and l._get(4) < 0)
+        assert_equal(l._get(5), Scalar[D](0))
+        assert_true(isnan(l._get(6)))
+        assert_true(not isinf(e._get(7)) and not isnan(e._get(7)))
+        assert_true(
+            e._get(7)
+            > Scalar[D](3.4027e38 if D == DType.float32 else 1.7976e308)
+        )
+        comptime if D == DType.float32:
+            assert_equal(bitcast[DType.uint32](e._get(8)), UInt32(1))
+        else:
+            assert_equal(bitcast[DType.uint64](e._get(8)), UInt64(1))
+        assert_true(not e.is_valid(10) and not l.is_valid(10))
+
+
+def test_transcendental_nan_infinity_and_boundary_classifications() raises:
+    _transcendental_exceptional_values[DType.float32]()
+    _transcendental_exceptional_values[DType.float64]()

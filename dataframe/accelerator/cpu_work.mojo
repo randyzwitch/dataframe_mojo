@@ -2,6 +2,8 @@
 from ..dtype import DataType
 from ..expr import (
     DT_TOTAL,
+    EXP,
+    LOG,
     DT_OFFSET_BY,
     CAST,
     LEN,
@@ -62,6 +64,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             float_division=True,
             float_rounding=True,
             float_modulo=True,
+            float_transcendentals=True,
             float_sqrt=True,
             wide_integer=True,
             int64_arithmetic=True,
@@ -126,6 +129,18 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
     if paired:
         family += ";paired-moments-v1"
+    var exponentials = 0
+    var logarithms = 0
+    for i in range(0, len(plan.code), 4):
+        exponentials += Int(plan.code[i] == EXP)
+        logarithms += Int(plan.code[i] == LOG)
+    if exponentials or logarithms:
+        family += (
+            ";transcendentals-v1:e"
+            + String(exponentials)
+            + ":l"
+            + String(logarithms)
+        )
     var calendar_offset = False
     for i in range(0, len(plan.code), 4):
         calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET

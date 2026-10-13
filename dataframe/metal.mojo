@@ -98,6 +98,8 @@ from .expr import (
     KEEP_NULLS,
     ABS,
     SQRT,
+    EXP,
+    LOG,
     FLOOR,
     CEIL,
     ROUND,
@@ -351,6 +353,7 @@ def _capabilities() -> RowCapabilities:
         float_division=True,
         float_rounding=True,
         float_modulo=True,
+        float_transcendentals=True,
         float_sqrt=True,
         wide_integer=False,
         bounded_integer_sum=True,
@@ -428,6 +431,8 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if op == EXP or op == LOG:
+        return 53 if op == EXP else 54
     if op == ROW_CALENDAR_OFFSET:
         return 145
     if op == ROW_CALENDAR_TRUNCATE:
@@ -1705,6 +1710,18 @@ struct MetalRuntime(AcceleratorBackend):
                 paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
         if paired:
             family += ";metal-paired-moments-v1"
+        var exponentials = 0
+        var logarithms = 0
+        for i in range(0, len(plan.code), 4):
+            exponentials += Int(plan.code[i] == EXP)
+            logarithms += Int(plan.code[i] == LOG)
+        if exponentials or logarithms:
+            family += (
+                ";metal-transcendentals-v1:e"
+                + String(exponentials)
+                + ":l"
+                + String(logarithms)
+            )
         var calendar_offset = False
         for i in range(0, len(plan.code), 4):
             calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET
@@ -1916,6 +1933,8 @@ struct MetalRuntime(AcceleratorBackend):
             if plan.node_dtypes[i].is_float() and (
                 plan.code[i * 4] == ROUND
                 or plan.code[i * 4] == DIV
+                or plan.code[i * 4] == EXP
+                or plan.code[i * 4] == LOG
                 or plan.code[i * 4] == SQRT
                 or plan.code[i * 4] == FLOORDIV
                 or plan.code[i * 4] == MOD
