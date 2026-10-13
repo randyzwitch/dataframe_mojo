@@ -1877,6 +1877,7 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/execution_modes/test_lifecycle.mojo",
                 "tests/execution_modes/test_worker_scheduling.mojo",
+                "tests/execution_modes/test_crew_startup.mojo",
                 "tests/storage_ownership/test_release.mojo",
             ],
         )
