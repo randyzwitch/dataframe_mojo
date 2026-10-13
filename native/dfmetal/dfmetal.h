@@ -175,6 +175,9 @@ enum DFMOp {
   // Methods 13/14: linear Float64 interpolation / nearest word gather.
   // Operand 2 is zero; the literal is unused. Original non-null values anchor
   // each interior gap; nearest ties choose the following anchor.
+  // Method 15: coordinate interpolation over Float64 value/axis slots.
+  // Operand 2 names the defined axis slot; null coordinates cannot anchor or
+  // receive interpolated values. Equal neighboring coordinates leave gaps null.
   DFM_CUMULATIVE_KEY = 214,
   // Decimal128 SUM/MEAN preserve CPU worker partitions and check every
   // precision-bounded partial and merge. Packed metadata carries min_count,

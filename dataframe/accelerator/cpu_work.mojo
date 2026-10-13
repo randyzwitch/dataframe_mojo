@@ -93,6 +93,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             rolling_windows=True,
             rolling_moments=True,
             interpolation_windows=True,
+            coordinate_interpolation=True,
             empty_outputs=True,
             empty_inputs=True,
             chunked_inputs=True,
@@ -197,6 +198,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
     var rolling = False
     var rolling_moments = False
     var interpolation = False
+    var coordinate_interpolation = False
     var shift_fill = False
     for step in plan.steps:
         ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
@@ -213,6 +215,10 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
         interpolation |= (
             plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
             and plan.code[step.start * 4 + 3] >= 13
+        )
+        coordinate_interpolation |= (
+            plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+            and plan.code[step.start * 4 + 3] == 15
         )
         rolling_moments |= (
             plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
@@ -236,6 +242,8 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
         family += ";rolling-moments-v1"
     if interpolation:
         family += ";interpolation-v1"
+    if coordinate_interpolation:
+        family += ";coordinate-interpolation-v1"
     var wide_decimal = False
     for dtype in plan.node_dtypes:
         wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128

@@ -27,6 +27,7 @@ from dataframe.expr import (
     ROLLING_VAR,
     ROLLING_STD,
     INTERPOLATE,
+    INTERPOLATE_BY,
     FORWARD_FILL,
     BACKWARD_FILL,
     OVER,
@@ -1216,7 +1217,8 @@ def lower_rows(
                     or window_op == ROLLING_MIN
                     or window_op == ROLLING_MAX
                 )
-                var interpolation = window_op == INTERPOLATE
+                var coordinate = window_op == INTERPOLATE_BY
+                var interpolation = window_op == INTERPOLATE or coordinate
                 if (
                     window_op != RANK
                     and not cumulative
@@ -1225,7 +1227,16 @@ def lower_rows(
                     and not interpolation
                 ):
                     continue
-                if interpolation and not capabilities.interpolation_windows:
+                if coordinate and not capabilities.coordinate_interpolation:
+                    capabilities.reject(
+                        "plan",
+                        "coordinate interpolation requires backend support",
+                    )
+                if (
+                    interpolation
+                    and not coordinate
+                    and not capabilities.interpolation_windows
+                ):
                     capabilities.reject(
                         "plan", "interpolation windows require backend support"
                     )
@@ -1307,7 +1318,10 @@ def lower_rows(
                     if rank_node.text == methods[m]:
                         method = m
                 if interpolation:
-                    method = 13 if rank_node.text == "linear" else 14
+                    method = (
+                        15 if coordinate else 13 if rank_node.text
+                        == "linear" else 14
+                    )
                 elif rolling:
                     method = (
                         7 if window_op
@@ -1333,7 +1347,7 @@ def lower_rows(
                 var child = bind(subtree(ranked, rank_node.left), rank_schema)
                 if (
                     rolling_moments
-                    or (interpolation and method == 13)
+                    or (interpolation and method != 14)
                     or (
                         rolling
                         and window_op == ROLLING_MEAN
@@ -1369,8 +1383,8 @@ def lower_rows(
                         )
                 if (
                     1 + len(partitions) > capabilities.max_nodes
-                    or next_slot + 2 > capabilities.max_slots
-                    or len(steps) + 2 > capabilities.max_steps
+                    or next_slot + 2 + Int(coordinate) > capabilities.max_slots
+                    or len(steps) + 2 + Int(coordinate) > capabilities.max_steps
                 ):
                     capabilities.reject(
                         "plan", "rank exceeds resident slot or step limits"
@@ -1401,6 +1415,64 @@ def lower_rows(
                     )
                 )
                 next_slot += 1
+                var axis_slot = -1
+                if coordinate:
+                    var axis = bind(
+                        subtree(ranked, rank_node.right).cast(DataType.FLOAT64),
+                        rank_schema,
+                    )
+                    var axis_proven = List[Bool](
+                        length=len(axis.expr._nodes), fill=False
+                    )
+                    if capabilities.proven_integer_operations:
+                        axis_proven = proven_integer_nodes(axis)
+                    for c in range(len(axis.expr._nodes)):
+                        var operation = axis.expr._nodes[c].op
+                        if not axis_proven[c] and (
+                            axis.dtypes[c].is_integer()
+                            and (
+                                operation == ADD
+                                or operation == SUB
+                                or operation == MUL
+                                or operation == NEG
+                                or operation == ABS
+                                or operation == FLOORDIV
+                                or operation == POW
+                            )
+                            or operation == CAST
+                            and axis.expr._nodes[c].integer
+                            and not axis.dtypes[c].is_float()
+                        ):
+                            capabilities.reject(
+                                "plan",
+                                "checked interpolation axes require CPU execution",
+                            )
+                    axis_slot = next_slot
+                    var axis_start = len(literals)
+                    _program(
+                        axis,
+                        len(axis.expr._nodes),
+                        rank_slots,
+                        dtype,
+                        code,
+                        literals,
+                        node_dtypes,
+                        capabilities,
+                    )
+                    slot_dtypes.append(DataType.FLOAT64)
+                    steps.append(
+                        RowStep(
+                            axis_start,
+                            len(axis.expr._nodes),
+                            axis_slot,
+                            False,
+                            0,
+                            0,
+                            False,
+                            False,
+                        )
+                    )
+                    next_slot += 1
                 var rank_start = len(literals)
                 # Match the CPU Float64-to-Int conversion for min_samples.
                 # A rounded positive value may wrap negative at Int64.MAX;
@@ -1414,7 +1486,7 @@ def lower_rows(
                             or interpolation else ROW_RANK_KEY
                         ),
                         Int64(input_slot),
-                        (
+                        Int64(axis_slot) if coordinate else (
                             rank_node.integer if rank_node.floating
                             < 0 else max(Int64(0), Int64(rank_node.floating))
                         ) if rolling else Int64(

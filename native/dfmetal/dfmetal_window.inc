@@ -57,6 +57,8 @@ std::string interpolationSource(const DFMRequest &r, const Layout &layout, int64
   auto input = std::to_string(layout.physical[h[1]]) + "UL*meta.z";
   auto output = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
   bool wide = slotType(r, h[1]) == DFM_DECIMAL128;
+  bool coordinate = h[3] == 15;
+  auto axis = coordinate ? std::to_string(layout.physical[h[2]]) + "UL*meta.z" : "";
   std::string text = partitionSource(r, layout, i);
   text += "kernel void cumulative_assign" + name + R"MSL(
 (device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],
@@ -74,16 +76,24 @@ std::string interpolationSource(const DFMRequest &r, const Layout &layout, int64
   if (wide) text += "x[out+meta.z]=v[at]?x[at+meta.z]:T(0);v[out+meta.z]=v[at];";
   text += "}uint previous=position;bool seen=false;"
           "for(uint j=position;j<end;++j){ulong at=" + input + "+order[j];"
-          "if(v[at]){previous=j;seen=true;continue;}if(!seen)continue;"
-          "uint following=j+1;while(following<end&&!v[" + input + "+order[following]])++following;"
+          "if(v[at]){" + std::string(coordinate ? "if(v[" + axis + "+order[j]])" : "") +
+          "{previous=j;seen=true;}continue;}if(!seen)continue;"
+          "uint following=j+1;while(following<end&&(!v[" + input + "+order[following]]" +
+          (coordinate ? "||!v[" + axis + "+order[following]]" : "") + "))++following;"
           "if(following==end)break;ulong before=" + input + "+order[previous],after=" + input + "+order[following];"
           "for(uint p=j;p<following;++p){ulong out=" + output + "+order[p];";
   if (h[3] == 14) {
     text += "ulong source=p-previous<following-p?before:after;x[out]=x[source];";
     if (wide) text += "x[out+meta.z]=x[source+meta.z];v[out+meta.z]=1;";
   } else {
-    text += "ulong fraction=f64_div(f64_from_unsigned(ulong(p-previous)),f64_from_unsigned(ulong(following-previous)));"
-            "x[out]=T(f64_fma(f64_sub(x[after],x[before]),fraction,x[before]));";
+    if (coordinate) {
+      text += "ulong point=" + axis + "+order[p],left=" + axis + "+order[previous],right=" + axis + "+order[following];"
+              "if(v[" + input + "+order[p]]||!v[point])continue;"
+              "ulong span=f64_sub(x[right],x[left]);if(!f64_abs(span))continue;"
+              "ulong fraction=f64_div(f64_sub(x[point],x[left]),span);";
+    } else
+      text += "ulong fraction=f64_div(f64_from_unsigned(ulong(p-previous)),f64_from_unsigned(ulong(following-previous)));";
+    text += "x[out]=T(f64_fma(f64_sub(x[after],x[before]),fraction,x[before]));";
   }
   return text + "v[out]=1;}j=following-1;}}\n";
 }

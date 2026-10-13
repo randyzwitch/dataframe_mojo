@@ -209,8 +209,19 @@ nearest preserves the input dtype and payload words, with ties choosing the
 following neighbor. NaNs and infinities remain valid anchors. A partition owner
 walks each gap once, without host downloads or per-gap scratch storage. These
 plans use separate `interpolation-v1` and `metal-interpolation-v1` cost families;
-linear interpolation also uses emulated binary64 arithmetic. Interpolation by
-another expression remains unsupported.
+linear interpolation also uses emulated binary64 arithmetic.
+
+`interpolate_by(axis)` converts values and coordinates independently to Float64
+and interpolates using coordinate distances within each original-order partition.
+Only original values with non-null coordinates anchor a gap. Null coordinates
+cannot receive interpolation, existing values retain their validity even with a
+null coordinate, and equal neighboring coordinates leave gaps null. Coordinates
+may be unsorted, duplicated, NaN, or infinite; arithmetic follows the CPU rules.
+The axis expression stays resident across preceding filters and later consumers.
+Coordinate plans add separate `coordinate-interpolation-v1` and
+`metal-coordinate-interpolation-v1` cost families. The CPU numeric window helper
+also materializes chunked columns before accessing their contiguous storage,
+fixing the existing chunked coordinate interpolation regression.
 
 Fixed-size `rolling_sum`, `rolling_mean`, `rolling_min`, and `rolling_max`
 run globally or within `over()` partitions. Each trailing window includes the
@@ -742,7 +753,7 @@ that unlisted query combinations are already equivalent.
 | --- | --- |
 | Numeric expressions | Floating power. |
 | Reductions | Mode, implode, and value counts. |
-| Ordered windows | Duration-based rolling sum/mean/min/max/var/std, `interpolate_by`, cut, and qcut. |
+| Ordered windows | Duration-based rolling sum/mean/min/max/var/std, cut, and qcut. |
 | Temporal expressions | Row-valued parsing/formatting and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins and file-backed scans. |
@@ -776,6 +787,7 @@ python3 native/dfmetal/test_float64.py
 python3 native/dfmetal/test_moments.py
 python3 native/dfmetal/test_higher_moments.py
 python3 native/dfmetal/test_interpolation.py build/dfmetal/libdfmetal.dylib
+python3 native/dfmetal/test_coordinate_interpolation.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py

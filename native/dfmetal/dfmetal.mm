@@ -268,6 +268,8 @@ struct Layout {
         auto &step = r.steps[first];
         if (step.filter == 4 || step.filter == 5) {
           keep(step.slot);
+          if (step.filter == 5 && r.code[4 * step.start + 3] == 15)
+            keep(r.code[4 * step.start + 2]);
           for (int64_t j = 0; j < step.nodes; ++j)
             keep(r.code[4 * (step.start + j) + 1]);
         } else if (step.filter == 2) {
@@ -343,6 +345,8 @@ struct Layout {
         }
       } else if (step.filter == 2 || step.filter == 4 || step.filter == 5) {
         if (step.filter == 4 || step.filter == 5) live[step.slot] = false;
+        if (step.filter == 5 && r.code[4 * step.start + 3] == 15)
+          live[r.code[4 * step.start + 2]] = true;
         for (int64_t j = 0; j < step.nodes; ++j)
           live[r.code[4 * (step.start + j) + 1]] = true;
       } else {
@@ -480,14 +484,15 @@ Shape validate(const DFMRequest &r, bool storage = false,
     if (v.filter == 5) {
       auto h = r.code + 4 * v.start;
       if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_CUMULATIVE_KEY ||
-          h[1] < 0 || h[1] >= r.slots || h[2] < 0 || (h[3] < 7 && h[2] > 1) || h[3] < 0 || h[3] > 14 ||
-          (h[3] >= 13 && h[2] != 0) ||
+          h[1] < 0 || h[1] >= r.slots || h[2] < 0 || (h[3] < 7 && h[2] > 1) || h[3] < 0 || h[3] > 15 ||
+          ((h[3] == 13 || h[3] == 14) && h[2] != 0) ||
+          (h[3] == 15 && (h[2] >= r.slots || !defined[h[2]] || slotType(r, h[2]) != DFM_FLOAT64_STORAGE)) ||
           (h[3] >= 4 && h[3] <= 6 && h[2] != (h[3] == 6)))
         fail("Invalid Metal cumulative descriptor");
       auto input = slotType(r, h[1]), output = slotType(r, v.slot);
       if ((h[3] >= 4 && h[3] <= 6 && output != input) || (h[3] == 3 && output != DFM_INT64) ||
           ((h[3] == 1 || h[3] == 2 || h[3] == 9 || h[3] == 10) && output != input) ||
-          ((h[3] == 11 || h[3] == 12 || h[3] == 13) && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
+          ((h[3] == 11 || h[3] == 12 || h[3] == 13 || h[3] == 15) && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
           (h[3] == 14 && output != input) ||
           (h[3] == 8 && (output != DFM_FLOAT64_STORAGE || input == DFM_DECIMAL128 || input == DFM_BOOL)) ||
           (h[3] == 7 && (input == DFM_BOOL || input == DFM_DECIMAL128 || output == DFM_DECIMAL128)) ||
