@@ -387,7 +387,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
     fail("Metal ABI version mismatch");
   if (r.rows < 0 || r.rows > INT32_MAX || r.slots < 1 || r.slots > DFM_MAX_SLOTS ||
       r.input_count < 1 || r.input_count > r.slots || r.step_count < 0 ||
-      r.step_count > DFM_MAX_STEPS || r.output_count < 1 || r.output_count > DFM_MAX_SLOTS ||
+      r.step_count > DFM_MAX_STEPS || r.output_count < 0 || r.output_count > DFM_MAX_SLOTS ||
       r.literal_count < 0 || r.literal_count > 4096 ||
       r.code_words != mul(r.literal_count, 4) || r.gather_count < 0 ||
       r.gather_count > 4096 || r.limit < -1 || r.memory_budget_bytes < -1 ||
@@ -408,7 +408,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
     fail("Metal common storage must be numeric");
   if (r.dtype == DFM_FLOAT64_STORAGE)
     fail("Metal opaque Float64 requires typed storage");
-  if (!r.inputs || !r.outputs || (r.step_count && !r.steps) ||
+  if (!r.inputs || (r.output_count && !r.outputs) || (r.step_count && !r.steps) ||
       (r.literal_count && (!r.code || !r.literals)) ||
       (r.gather_count && !r.gathers))
     fail("Missing Metal request descriptors");
@@ -962,7 +962,7 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
   m.peak_bytes = add(m.shared_bytes, m.result_bytes);
   auto layout = Layout(r);
   m.launches = r.input_count + layout.ends.size() +
-      (r.reductions ? 2 : (!retain || final));
+      (r.output_count ? (r.reductions ? 2 : (!retain || final)) : 0);
   for (int64_t i = 0; i < r.step_count; ++i)
     if (r.steps[i].filter && !directFilteredReduction(r)) {
       if (r.steps[i].filter == 1)
@@ -2709,6 +2709,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
   };
   auto dispatch = [&](const std::string &name, int64_t count,
                       int64_t columns = 1, bool full = false) {
+    if (!columns) return;
     [encoder setComputePipelineState:p->kernels.at(name)];
     if (full)
       [encoder dispatchThreadgroups:MTLSizeMake((count + 255) / 256, columns, 1)
@@ -2967,7 +2968,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     buffer(2, out);
     buffer(3, meta);
     bytes(4, &groups, 8);
-    dispatch("finish_reduce", r.output_count);
+    if (r.output_count) dispatch("finish_reduce", r.output_count);
   } else if (!query || final) {
     uint64_t params[4] = {
         static_cast<uint64_t>(shape.packed),
@@ -3417,7 +3418,7 @@ int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
     *err = nullptr;
   @autoreleasepool {
     try {
-      if (!p || !outputs || !stats)
+      if (!p || (count && !outputs) || !stats)
         fail("Missing Metal resident export table, outputs or stats");
       auto &t = *static_cast<Resident *>(p);
       std::lock_guard<std::mutex> lock(t.query.context.mutex);

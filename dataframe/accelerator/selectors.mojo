@@ -1,6 +1,15 @@
 """Resolve CPU selectors against metadata before accelerator normalization."""
-from dataframe.expr import SELECTOR
-from dataframe.lazy import LazyFrame, SELECT, WITH_COLUMNS, AGG, FILTER
+from dataframe.expr import SELECTOR, Expr, col
+from dataframe.lazy import (
+    LazyFrame,
+    PlanNode,
+    SELECT,
+    WITH_COLUMNS,
+    AGG,
+    FILTER,
+    DROP,
+    _plan_node,
+)
 from dataframe.selectors import expand_all
 from .aggregates import _in_memory_sources
 from .metadata import schema_frame
@@ -43,16 +52,26 @@ def lower_selectors(query: LazyFrame) raises -> LazyFrame:
     """
     _in_memory_sources(query)
     var result = query.copy()
+    result._nodes = List[PlanNode]()
+    var roots = List[Int]()
     var live = _live_nodes(query)
-    for index in range(len(result._nodes)):
+    for index in range(len(query._nodes)):
+        var operation = query._nodes[index].copy()
+        if operation.left >= 0:
+            operation.left = roots[operation.left]
+        if operation.right >= 0:
+            operation.right = roots[operation.right]
         if not live[index]:
+            result._nodes.append(operation^)
+            roots.append(len(result._nodes) - 1)
             continue
-        var operation = result._nodes[index].copy()
         var selected = False
         for expression in operation.exprs:
             for node in expression._nodes:
                 selected |= node.op == SELECTOR
         if not selected:
+            result._nodes.append(operation^)
+            roots.append(len(result._nodes) - 1)
             continue
         if (
             operation.kind != SELECT
@@ -66,9 +85,27 @@ def lower_selectors(query: LazyFrame) raises -> LazyFrame:
         if operation.kind == FILTER and len(expanded) != 1:
             raise Error("A filter selector must match exactly one column")
         if operation.kind == SELECT and not len(expanded):
-            raise Error(
-                "Metal unsupported [selector]: empty selections require zero-column resident results"
+            # CPU select_exprs distinguishes a nonempty expression list whose
+            # selectors match nothing (one row) from explicit select([]), which
+            # preserves the input height. Count every input then drop the
+            # counters to retain the scalar shape and all producer references.
+            if not schema.width():
+                raise Error(
+                    "Metal unsupported [selector]: zero-column sources require resident input support"
+                )
+            var names = List[String]()
+            for column in schema._columns:
+                var name = "__metal_empty_selection_" + String(len(names))
+                names.append(name)
+                expanded.append(col(column.name()).count().alias(name))
+            operation.exprs = expanded^
+            result._nodes.append(operation^)
+            result._nodes.append(
+                _plan_node(DROP, len(result._nodes) - 1, names=names)
             )
+            roots.append(len(result._nodes) - 1)
+            continue
         operation.exprs = expanded^
-        result._nodes[index] = operation^
+        result._nodes.append(operation^)
+        roots.append(len(result._nodes) - 1)
     return result^

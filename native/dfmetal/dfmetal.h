@@ -214,6 +214,7 @@ typedef struct DFMRequest {
   int64_t literal_count;
   int64_t step_count;
   int64_t gather_count;
+  // Zero columns retain row cardinality; outputs may be null in that case.
   int64_t output_count;
   int64_t limit; // -1 or final head length.
   int64_t reductions;

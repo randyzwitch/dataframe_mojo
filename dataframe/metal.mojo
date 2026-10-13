@@ -360,6 +360,7 @@ def _capabilities() -> RowCapabilities:
         moments=True,
         rolling_windows=True,
         rolling_moments=True,
+        empty_outputs=True,
         shift_fill_windows=True,
         decimal128=True,
         decimal128_reductions=True,
@@ -992,7 +993,7 @@ def _execute(
     var columns = List[Series]()
     for column in storage:
         columns.append(column.slice(0, Int(stats[8])))
-    var result = DataFrame(columns^)
+    var result = DataFrame(columns^, height=Int(stats[8]))
     var report = _native_report(
         context,
         device,
@@ -1614,6 +1615,8 @@ struct MetalRuntime(AcceleratorBackend):
         device[13] = Float64(metadata[4] == 0)
         device[14] = 0
         var family = work[1].copy()
+        if not len(plan.outputs):
+            family += ";metal-empty-outputs-v1"
         if plan.reused_columns:
             family += ";metal-column-slots-v1"
         var paired = False
