@@ -2408,6 +2408,9 @@ struct LazyFrame(Copyable):
             and _pipeline_steps(operations, indexes)
             and not _counts_distinct(expressions)
             and (len(joins) == 0 or len(keys) == 0 or not ordered)
+            # Ungrouped states merge in worker order, not morsel order.
+            # Positional reductions therefore retain ordered streaming.
+            and (len(keys) > 0 or not _order_sensitive(expressions))
         )
         # A grouped sink either inserts rows into per-worker group tables
         # (few groups among 4,096 sampled key rows, fixed-width keys) or
