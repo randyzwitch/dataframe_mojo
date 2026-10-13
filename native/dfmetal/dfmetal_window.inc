@@ -1,9 +1,60 @@
+// Shift and fill gather words without performing numeric conversions.
+std::string shiftFillSource(const DFMRequest &r, const Layout &layout, int64_t i) {
+  auto &step = r.steps[i];
+  auto h = r.code + 4 * step.start;
+  auto name = std::to_string(i);
+  auto input = std::to_string(layout.physical[h[1]]) + "UL*meta.z";
+  auto output = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
+  bool wide = slotType(r, h[1]) == DFM_DECIMAL128;
+  std::string text = partitionSource(r, layout, i);
+  text += "kernel void cumulative_assign" + name + R"MSL(
+(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],
+ device const uint *order[[buffer(2)]],constant uint4 &meta[[buffer(3)]],
+ device atomic_uint *error[[buffer(4)]],device const ulong *lit[[buffer(5)]],
+ uint position[[thread_position_in_grid]]){
+ if(position>=meta.x)return;uint first=order[position];
+)MSL";
+  text += "long parameter=as_type<long>(lit[" + std::to_string(step.start) + "]);";
+  if (h[3] == 4) {
+    // Find this row's partition, then gather its shifted source in parallel.
+    text += "uint lo=0,hi=position;while(lo<hi){uint mid=(lo+hi)/2;"
+            "if(window_partition" + name + "(order[mid],first,x,v,meta))hi=mid;else lo=mid+1;}"
+            "uint begin=lo;lo=position+1;hi=meta.x;while(lo<hi){uint mid=(lo+hi)/2;"
+            "if(window_partition" + name + "(order[mid],first,x,v,meta))lo=mid+1;else hi=mid;}"
+            "uint end=lo,from=0;bool present=false;"
+            "if(parameter>=0){ulong offset=ulong(parameter);if(offset<=ulong(position-begin)){from=position-uint(offset);present=true;}}"
+            "else{ulong offset=0UL-ulong(parameter);if(offset<ulong(end-position)){from=position+uint(offset);present=true;}}"
+            "ulong out=" + output + "+first;x[out]=T(0);v[out]=0;";
+    if (wide) text += "x[out+meta.z]=T(0);v[out+meta.z]=0;";
+    text += "if(present){uint source=order[from];ulong at=" + input + "+source;"
+            "x[out]=x[at];v[out]=v[at];";
+    if (wide) text += "x[out+meta.z]=x[at+meta.z];v[out+meta.z]=v[at+meta.z];";
+    return text + "}}\n";
+  }
+  // One owner per partition tracks the nearest original non-null row.
+  text += "if(position&&window_partition" + name + "(order[position-1],first,x,v,meta))return;"
+          "uint lo=position+1,hi=meta.x;while(lo<hi){uint mid=(lo+hi)/2;"
+          "if(window_partition" + name + "(order[mid],first,x,v,meta))lo=mid+1;else hi=mid;}"
+          "uint end=lo,last=0,distance=0;bool seen=false;"
+          "for(uint offset=0;offset<end-position;++offset){uint row=order[" +
+          std::string(h[3] == 6 ? "end-1-offset" : "position+offset") + "];"
+          "ulong at=" + input + "+row,out=" + output + "+row;bool valid=v[at]!=0;"
+          "if(valid){last=row;seen=true;distance=0;}else ++distance;"
+          "bool present=valid||(seen&&(parameter<0||ulong(distance)<=ulong(parameter)));"
+          "x[out]=T(0);v[out]=0;";
+  if (wide) text += "x[out+meta.z]=T(0);v[out+meta.z]=0;";
+  text += "if(present){ulong source=" + input + "+last;x[out]=x[source];v[out]=v[source];";
+  if (wide) text += "x[out+meta.z]=x[source+meta.z];v[out+meta.z]=v[source+meta.z];";
+  return text + "}}}\n";
+}
+
 // Stable partition ordering groups the rows without changing the table. A
 // partition owner walks its rows sequentially, preserving CPU floating-point
 // association and validating every integer/decimal prefix before head/filter.
 std::string cumulativeSource(const DFMRequest &r, const Layout &layout, int64_t i) {
   auto &step = r.steps[i];
   auto h = r.code + 4 * step.start;
+  if (h[3] >= 4) return shiftFillSource(r, layout, i);
   auto name = std::to_string(i);
   auto inputType = slotType(r, h[1]), outputType = slotType(r, step.slot);
   auto input = std::to_string(layout.physical[h[1]]) + "UL*meta.z";

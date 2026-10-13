@@ -11,6 +11,9 @@ from dataframe.expr import (
     CUM_MIN,
     CUM_MAX,
     CUM_COUNT,
+    SHIFT,
+    FORWARD_FILL,
+    BACKWARD_FILL,
     SELECTOR,
     col,
     is_reduction,
@@ -45,6 +48,9 @@ def _staged_over(expression: Expr, index: Int) -> Bool:
             or node.op == CUM_MIN
             or node.op == CUM_MAX
             or node.op == CUM_COUNT
+            or node.op == SHIFT
+            or node.op == FORWARD_FILL
+            or node.op == BACKWARD_FILL
         ):
             return True
     return False
