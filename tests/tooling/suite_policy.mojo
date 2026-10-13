@@ -823,6 +823,7 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/execution_modes/test_order_batches.mojo",
                 "tests/kernel_equivalence/test_parallel_order_selection.mojo",
+                "tests/kernel_equivalence/test_window_partition_table.mojo",
                 "tests/public_contracts/test_extended_windows.mojo",
                 "tests/public_contracts/test_order_windows.mojo",
                 "tests/public_contracts/test_window_precision.mojo",
