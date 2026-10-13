@@ -332,8 +332,10 @@ the CPU's dense and nullable paths have different rescaling checks. Safe
 operations can feed resident consumers. Estimates include
 `metal-decimal-multiplicative-v1`; previous calibrations do not apply.
 
-Median and quantile reductions return Float64 for primitive numeric inputs,
-including full-width UInt64, with explicit Float64 casts for decimals. Global,
+Median and quantile reductions return Float64 for numeric inputs, including
+full-width UInt64 and Decimal32/64/128 with their numeric scales. CPU sample
+conversion also preserves these values instead of the internal UInt64 ordering
+keys or raw decimal payloads. Global,
 grouped, and partitioned reductions support `linear`, `lower`, `higher`,
 `nearest`, and `midpoint` interpolation. Nulls are excluded; NaNs count as valid
 samples and sort above every number. Empty or all-null samples produce null.

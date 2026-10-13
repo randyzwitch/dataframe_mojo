@@ -25,10 +25,27 @@ def expressions(q: Float64) -> List[Expr]:
 
 
 def check(query: LazyFrame, runtime: MetalRuntime) raises:
-    near(
-        query.collect(accelerator=runtime),
-        query.collect(engine="cpu", streaming=False),
-    )
+    var actual = query.collect(accelerator=runtime)
+    var expected = query.collect(engine="cpu", streaming=False)
+    try:
+        near(actual, expected)
+    except error:
+        print("QUANTILE MISMATCH", query.explain())
+        for name in actual.columns():
+            if actual.column(name).dtype() != DataType.FLOAT64:
+                continue
+            var a = actual.column(name).float64()
+            var b = expected.column(name).float64()
+            for row in range(actual.height()):
+                print(
+                    name,
+                    row,
+                    a.is_valid(row),
+                    a._get(row),
+                    b.is_valid(row),
+                    b._get(row),
+                )
+        raise Error(String(error))
 
 
 def test_quantile_capabilities_private_casts_full_probability_metadata_and_binding() raises:
@@ -63,11 +80,10 @@ def test_quantile_capabilities_private_casts_full_probability_metadata_and_bindi
         assert_true(
             "unsupported" not in MetalRuntime(device_id=999999).describe(query)
         )
-    with assert_raises(contains="explicit Float64 cast"):
-        _ = lower_rows(
-            decimal_fixture(3, 2).lazy().select(col("wide").median()),
-            _capabilities(),
-        )
+    _ = lower_rows(
+        decimal_fixture(3, 2).lazy().select(col("wide").median()),
+        _capabilities(),
+    )
     var invalid_probabilities: List[Float64] = [
         -0.1,
         1.1,
@@ -177,6 +193,13 @@ def test_native_metal_quantiles_nonfinite_unsigned_extremes_decimal_casts_and_co
             .with_columns(col("wide").cast(DataType.FLOAT64).alias("x"))
         )
         check(frame.select_exprs(expressions(0.37)), runtime)
+        for name in List[String](["wide", "large", "small"]):
+            var direct = (
+                decimal_fixture(width, 2)
+                .lazy()
+                .with_columns(col(name).alias("x"))
+            )
+            check(direct.select_exprs(expressions(0.37)), runtime)
     var frame = DataFrame(
         [
             Series("x", Column[Int32]([9, 1, 7, 3, 5])),

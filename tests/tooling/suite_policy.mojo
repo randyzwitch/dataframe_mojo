@@ -215,14 +215,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/public_contracts/test_reduction_types.mojo::test_uint64_quantiles_do_not_expose_internal_ordering_bias",
-            "Advertised public reduction does not satisfy its documented numeric contract.",
-            "UInt64 percentile must not expose signed ordering bias",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_skew_accepts_advertised_numeric_input",
             "Advertised public reduction does not satisfy its documented numeric contract.",
             "expected a numeric column",
@@ -457,7 +449,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_variance_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1221:39: get: wrong variant type",
+            "aggregate.mojo:1231:39: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -465,23 +457,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_standard_deviation_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1221:39: get: wrong variant type",
-            mojo_variant_abort_exit_code(),
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_reduction_types.mojo::test_decimal_median_retains_numeric_scale",
-            "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1221:39: get: wrong variant type",
-            mojo_variant_abort_exit_code(),
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_reduction_types.mojo::test_decimal_quantile_retains_numeric_scale",
-            "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1221:39: get: wrong variant type",
+            "aggregate.mojo:1231:39: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -489,7 +465,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_arg_min_accepts_advertised_ordered_input",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1449:37: get: wrong variant type",
+            "aggregate.mojo:1459:37: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -497,7 +473,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_arg_max_accepts_advertised_ordered_input",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1449:37: get: wrong variant type",
+            "aggregate.mojo:1459:37: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -505,7 +481,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_mode_retains_typed_values",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1501:37: get: wrong variant type",
+            "aggregate.mojo:1511:37: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -513,7 +489,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_value_counts_retains_typed_values",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1501:37: get: wrong variant type",
+            "aggregate.mojo:1511:37: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )

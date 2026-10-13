@@ -29,7 +29,7 @@ __FLOAT64__
 __QUANTILES__
 #undef device
 #undef thread
-struct Input { ulong x[64];uchar v[64];ulong q,index;uint begin,end,kind; };
+struct Input { ulong x[1024];uchar v[1024];ulong q,index;uint begin,end,kind; };
 void emulated(const Input &r,ulong *out){bool valid=false;
  out[0]=quantile_reduce(r.x,r.v,0UL,r.index,r.begin,r.end,r.q,r.kind,valid);out[1]=valid;}
 int main(){@autoreleasepool{
@@ -39,11 +39,11 @@ int main(){@autoreleasepool{
   0xfff0000000000000UL,0x7ff8000000000042UL,0xfff0000000000042UL};
  std::vector<double> probabilities={0.0,0.5,1.0,0.25,0.75,0.12345678901234567,
   std::numeric_limits<double>::denorm_min(),std::numeric_limits<double>::min(),std::nextafter(0.5,0.0),std::nextafter(0.5,1.0),std::nextafter(1.0,0.0)};
- for(uint i=0;i<5000;++i){Input r={};r.begin=random()%5;r.end=r.begin+random()%(33-r.begin);
-  r.index=i%2?32UL:~0UL;r.kind=221+i%5;
+ for(uint i=0;i<5000;++i){Input r={};r.begin=random()%5;r.end=r.begin+random()%((i<2500?33U:513U)-r.begin);
+  r.index=i%2?512UL:~0UL;r.kind=221+i%5;
   double q=i%3?probabilities[i%probabilities.size()]:double(random()>>11)*0x1p-53;r.q=std::bit_cast<ulong>(q);
-  for(uint j=0;j<32;++j){r.x[j]=i<1000?boundary[(i+j)%boundary.size()]:i%3?random():std::bit_cast<ulong>(double(int(random()%101)-50));
-    r.v[j]=random()%5!=0;r.x[32+j]=31-j;}
+  for(uint j=0;j<512;++j){r.x[j]=i<1000?boundary[(i+j)%boundary.size()]:i%3?random():std::bit_cast<ulong>(double(int(random()%101)-50));
+    r.v[j]=random()%5!=0;r.x[512+j]=511-j;}
   input.push_back(r);}
  id<MTLDevice> device=MTLCreateSystemDefaultDevice();if(!device){puts("SKIP quantiles: no Metal device");return 0;}
  NSString *shader=@R"shader(
@@ -52,7 +52,7 @@ using namespace metal;
 #pragma clang fp contract(off)
 __FLOAT64__
 __QUANTILES__
-struct Input { ulong x[64];uchar v[64];ulong q,index;uint begin,end,kind; };
+struct Input { ulong x[1024];uchar v[1024];ulong q,index;uint begin,end,kind; };
 kernel void quantiles(device const Input *inputs[[buffer(0)]],device ulong *outputs[[buffer(1)]],uint i[[thread_position_in_grid]]){
  device const Input &r=inputs[i];bool valid=false;
  outputs[2*i]=quantile_reduce(r.x,r.v,0UL,r.index,r.begin,r.end,r.q,r.kind,valid);outputs[2*i+1]=ulong(valid);

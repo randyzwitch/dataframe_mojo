@@ -244,15 +244,8 @@ struct RowCapabilities(Copyable):
         if op == MEDIAN or op == QUANTILE:
             if not self.quantiles:
                 self.reject("reduction", "quantiles require backend support")
-            if dtype.is_decimal():
-                self.reject(
-                    "logical",
-                    "decimal quantiles require an explicit Float64 cast",
-                )
-            if not dtype.is_numeric():
-                self.reject(
-                    "dtype", "quantiles require primitive numeric input"
-                )
+            if not dtype.is_numeric() and not dtype.is_decimal():
+                self.reject("dtype", "quantiles require numeric input")
             if not self.float64 and not self.float64_emulated:
                 self.reject("precision", "quantiles require Float64 arithmetic")
             self.require_dtype(dtype)
