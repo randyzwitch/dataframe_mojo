@@ -1,6 +1,6 @@
 """Common CPU work features for the shared bound numeric row subset."""
 from ..dtype import DataType
-from ..expr import CAST, LEN, MEAN, SUM, VAR, STD
+from ..expr import CAST, LEN, MEAN, SUM, VAR, STD, COV, CORR
 from ..lazy import LazyFrame
 from .capabilities import RowCapabilities
 from .rows import (
@@ -62,6 +62,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             decimal_multiplicative=True,
             ranks=True,
             cumulative_windows=True,
+            paired_moments=True,
             moments=True,
             rolling_windows=True,
             shift_fill_windows=True,
@@ -79,6 +80,14 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             family = current
         elif family != current:
             family = "mixed"
+    var paired = False
+    for output in plan.outputs:
+        paired |= output.reduction == COV or output.reduction == CORR
+    for i in range(0, len(plan.code), 4):
+        if plan.code[i] == ROW_GROUP_OUTPUT:
+            paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
+    if paired:
+        family += ";paired-moments-v1"
     var moments = False
     for output in plan.outputs:
         moments |= output.reduction == VAR or output.reduction == STD

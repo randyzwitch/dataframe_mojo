@@ -182,6 +182,19 @@ slightly between streaming, hash, and materializing routes, and Metal can
 likewise differ by floating-point rounding.
 Partitioned `over()` states follow the materializing CPU worker boundaries.
 
+Paired covariance (`cov`) and correlation (`corr`, Pearson or Spearman) also
+run globally, by group, and within `over()` partitions. Only rows where both
+operands are valid enter the state. Covariance is null with no pairs and zero
+when the pair count does not exceed `ddof`; correlation is valid NaN below two
+pairs or for a constant operand. Inputs convert independently to Float64,
+including full UInt64 values. Spearman ranks only paired valid rows after that
+conversion, uses average ranks for ties, and returns NaN for a paired NaN.
+The ranks, paired states, and broadcasts remain on the GPU. Decimal inputs
+require explicit Float64 casts. Checked expressions feeding staged ranks need
+the existing static no-error proofs. Pair plans carry
+`metal-paired-moments-v1`; their contiguous merges can differ from CPU routes
+by floating-point rounding, as for variance.
+
 Supported scalar reductions also run within `over()` partitions: Metal groups a
 shared resident prefix and broadcasts each result back in original row order.
 Null partition keys form one group; multiple keys, dictionary codes, fixed logical

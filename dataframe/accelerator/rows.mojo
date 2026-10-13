@@ -81,6 +81,8 @@ from dataframe.expr import (
     COUNT,
     MEAN,
     VAR,
+    COV,
+    CORR,
     STD,
     LEN,
     FIRST,
@@ -1357,6 +1359,8 @@ def lower_rows(
                 or last.op == SUM
                 or last.op == COUNT
                 or last.op == MEAN
+                or last.op == COV
+                or last.op == CORR
                 or last.op == VAR
                 or last.op == STD
                 or last.op == LEN
@@ -1407,7 +1411,11 @@ def lower_rows(
                     or reduction == ALL else last.min_count
                 )
                 count -= 1
-                if last.left != count - 1:
+                if (
+                    last.left != count - 1
+                    and reduction != COV
+                    and reduction != CORR
+                ):
                     capabilities.reject(
                         "plan",
                         "reduction must consume the complete row expression",
@@ -1424,6 +1432,72 @@ def lower_rows(
                             " numeric input dtype"
                         ),
                     )
+                if reduction == COV or reduction == CORR:
+                    capabilities.require_reduction(
+                        bound.dtypes[last.right], reduction, frame.height()
+                    )
+                    if bound.shapes[last.right] != ROWS:
+                        capabilities.reject(
+                            "plan",
+                            "paired reductions require two row expressions",
+                        )
+                    if reduction == CORR and last.text != "pearson":
+                        capabilities.reject(
+                            "plan", "Spearman correlation requires rank staging"
+                        )
+                    if next_slot + 1 >= capabilities.max_slots:
+                        capabilities.reject(
+                            "plan", "paired reduction requires two value slots"
+                        )
+                    var left_slot = next_slot
+                    # Keep the original left-to-right error observation order.
+                    for side in List[Int]([last.left, last.right]):
+                        var converted = subtree(bound.expr, side).cast(
+                            DataType.FLOAT64
+                        )
+                        var child = bind(converted, rank_schema)
+                        var child_count = len(child.expr._nodes)
+                        var child_start = len(literals)
+                        _program(
+                            child,
+                            child_count,
+                            rank_slots,
+                            dtype,
+                            code,
+                            literals,
+                            node_dtypes,
+                            capabilities,
+                        )
+                        slot_dtypes.append(DataType.FLOAT64)
+                        steps.append(
+                            RowStep(
+                                child_start,
+                                child_count,
+                                next_slot,
+                                False,
+                                0,
+                                0,
+                                False,
+                                False,
+                            )
+                        )
+                        next_slot += 1
+                    min_count = (
+                        min(Int(last.integer), Int(Int32.MAX))
+                        | (left_slot + 1) << 31
+                        | min(configured_workers(), 65535) << 47
+                    )
+                    aggregate_outputs.append(
+                        RowOutput(
+                            expr._name,
+                            result_dtype,
+                            left_slot,
+                            reduction,
+                            min_count,
+                        )
+                    )
+                    has_aggregate = True
+                    continue
                 if reduction == VAR or reduction == STD:
                     # Counts fit Int32; every larger ddof yields null. The
                     # middle sixteen bits are reserved for paired moments.

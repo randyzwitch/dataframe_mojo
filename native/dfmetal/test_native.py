@@ -972,6 +972,59 @@ def check_moment_preflight_without_device():
         slots[0] = inputs[0].dtype = 11
 
 
+def check_pair_moment_preflight_without_device():
+    inputs = (Input * 2)(Input(None, None, 11, 0, 0), Input(None, None, 11, 0, 0))
+    slots = (I * 3)(11, 11, 11)
+    outputs = (Output * 1)(Output(None, None, 11, 0, 160, (1 << 47) | (1 << 31)))
+    request = Request(2, 513, 0, 3, 2, 0, 0, 0, 0, 1, -1, 1, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    for operation in (160, 161):
+        outputs[0].reduction = operation
+        for workers in (1, 2, 8, 65535):
+            for right in (0, 1):
+                for ddof in (0, 1, (1 << 31)-1):
+                    outputs[0].min_count = (workers << 47) | (right << 31) | ddof
+                    memory, err = Memory(), P()
+                    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                    assert memory.result == 9
+        for right in (2, 3, 65535):
+            outputs[0].min_count = (1 << 47) | (right << 31)
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"paired moment right input" in C.string_at(err)
+            lib.dfm_free(err)
+        outputs[0].min_count = (1 << 47) | (1 << 31)
+        inputs[1].dtype = slots[1] = 3
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"paired moment right input" in C.string_at(err)
+        lib.dfm_free(err)
+        inputs[1].dtype = slots[1] = 11
+    # Group output literals carry the same logical right operand slot.
+    code = (I * 12)(201, 1, 3, 4, 202, 0, 0, 0, 203, 0, 5, 160)
+    literals = (I * 3)(0, 0, (1 << 47) | (1 << 31))
+    nt, st = (I * 3)(3, 11, 11), (I * 6)(11, 11, 3, 3, 3, 11)
+    steps = (Step * 1)(Step(0, 3, 2, 3, 0, 0))
+    outputs[0].slot, outputs[0].reduction, outputs[0].min_count = 5, -1, 0
+    request = Request(2, 513, 0, 6, 2, 12, 3, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nt), ptr(st))
+    for operation in (160, 161):
+        code[11] = operation
+        for right in (0, 1):
+            literals[2] = (8 << 47) | (right << 31) | 1
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for right in (2, 5, 6, 65535):
+            literals[2] = (8 << 47) | (right << 31)
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"paired moment right input" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+check_pair_moment_preflight_without_device()
+
 check_moment_preflight_without_device()
 check_rolling_preflight_without_device()
 check_shift_fill_preflight_without_device()
