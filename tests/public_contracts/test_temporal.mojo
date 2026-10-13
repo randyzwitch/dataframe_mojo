@@ -1606,3 +1606,31 @@ def test_temporal_offsets_skip_unobserved_overflow_in_conditional_branches() rai
         var actual = frame.select(inactive)
         assert_equal(actual.column("v").dtype(), dtype)
         assert_equal(actual.column("v").int64()._get(0), Int64(0))
+
+
+def test_calendar_truncation_skips_unobserved_datetime_underflow() raises:
+    for dtype in List[DataType](
+        [
+            DataType.datetime("ms"),
+            DataType.datetime("us"),
+            DataType.datetime("ns"),
+        ]
+    ):
+        var frame = DataFrame(
+            [Series("t", Column[Int64]([Int64.MIN, 0])).with_dtype(dtype)]
+        )
+        var expression = (
+            when(col("t") > lit(Int64.MIN).cast(dtype))
+            .then(col("t").dt().truncate("1mo"))
+            .otherwise(lit(Int64(0)).cast(dtype))
+            .alias("v")
+        )
+        for streaming in [False, True]:
+            var actual = (
+                frame.lazy()
+                .select(expression)
+                .collect(engine="cpu", streaming=streaming)
+            )
+            assert_equal(actual.column("v").dtype(), dtype)
+            assert_equal(actual.column("v").int64()._get(0), Int64(0))
+            assert_equal(actual.column("v").int64()._get(1), Int64(0))

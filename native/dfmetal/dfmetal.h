@@ -101,6 +101,8 @@ enum DFMOp {
   // Fixed interval truncation: code[2] is the positive step in storage
   // ticks. Whole-week steps align to Monday; other steps to the epoch.
   DFM_DT_TRUNCATE = 141,
+  // Positive calendar months in code[2]; Date/Datetime unit 0..3 in code[3].
+  DFM_DT_CALENDAR_TRUNCATE = 144,
   // Whole duration units: positive factor in code[2], code[3] is 1 for
   // signed division toward zero, 0 for Int64 storage multiplication.
   DFM_DT_TOTAL = 143,

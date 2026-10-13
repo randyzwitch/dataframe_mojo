@@ -134,6 +134,7 @@ comptime ROW_QUANTILE_LOWER = 1011
 comptime ROW_QUANTILE_HIGHER = 1012
 comptime ROW_QUANTILE_NEAREST = 1013
 comptime ROW_QUANTILE_MIDPOINT = 1014
+comptime ROW_CALENDAR_TRUNCATE = 1015
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -271,6 +272,7 @@ def _program(
                 and op >= DT_YEAR
                 and op <= DT_TRUNCATE
             )
+            or (op == DT_TRUNCATE and capabilities.calendar_truncation)
             or (op == DT_TOTAL and capabilities.duration_totals)
             or (op == DT_OFFSET_BY and capabilities.temporal_offsets)
             or (op == INT_IS_IN and capabilities.extended_integers)
@@ -616,26 +618,37 @@ def _program(
                     "offset requires a fixed interval aligned to the storage unit",
                 )
             right = interval[1] // per_tick
+        var lowered_op = op
         if op == DT_TRUNCATE:
             var interval = parse_every(node.text)
             var per_tick = NANOS_PER_DAY if left_type.is_date() else (
                 Int64(1000000000) // left_type.per_second()
             )
             if (
-                interval[0] != 0
-                or interval[1] <= 0
-                or interval[1] % per_tick != 0
+                interval[0] > 0
+                and interval[1] == 0
+                and capabilities.calendar_truncation
             ):
-                capabilities.reject(
-                    "temporal",
-                    (
-                        "truncate requires a positive fixed interval aligned to"
-                        " the storage unit"
-                    ),
-                )
-            right = interval[1] // per_tick
+                if left_type.is_time():
+                    capabilities.reject(
+                        "temporal",
+                        "Time cannot be truncated by calendar months",
+                    )
+                lowered_op = ROW_CALENDAR_TRUNCATE
+                right = interval[0]
+            else:
+                if (
+                    interval[0] != 0
+                    or interval[1] <= 0
+                    or interval[1] % per_tick != 0
+                ):
+                    capabilities.reject(
+                        "temporal",
+                        "truncate requires a positive fixed interval aligned to the storage unit or supported calendar months",
+                    )
+                right = interval[1] // per_tick
         node_dtypes.append(bound.dtypes[i])
-        code.append(Int64(op))
+        code.append(Int64(lowered_op))
         code.append(Int64(node.left))
         code.append(right)
         code.append(Int64(source))
@@ -945,6 +958,23 @@ def lower_rows(
                     )
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
+            if capabilities.calendar_truncation:
+                for part in bound.expr._nodes:
+                    if (
+                        part.op == DT_TRUNCATE
+                        and bound.dtypes[part.left].is_datetime()
+                    ):
+                        var interval = parse_every(part.text)
+                        if interval[0] != 0 and (
+                            not terminal_boundary
+                            or k != 0
+                            or node.kind == FILTER
+                            or limit >= 0
+                        ):
+                            capabilities.reject(
+                                "plan",
+                                "checked calendar truncation requires terminal projections without head",
+                            )
             var proven = List[Bool](length=len(bound.expr._nodes), fill=False)
             if (
                 capabilities.proven_integer_operations

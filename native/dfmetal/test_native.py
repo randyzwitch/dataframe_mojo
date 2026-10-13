@@ -3936,6 +3936,61 @@ def test_fixed_offsets_native():
 
 test_fixed_offsets_native()
 
+def test_calendar_truncation_native():
+    lo, hi = -(1 << 63), (1 << 63)-1
+    def wrap(value):
+        return (value-lo) % (1 << 64)+lo
+    def start(year):
+        previous = year-1
+        return 365*previous+previous//4-previous//100+previous//400-719162
+    def reference(value, unit, months):
+        per_second = (0,1000,1000000,1000000000)[unit]
+        days = value if not unit else value//(86400*per_second)
+        # Invert the independent year ordinal by bisection, then walk months.
+        left, right = -30000000000000000, 30000000000000000
+        while left+1 < right:
+            middle=(left+right)//2
+            if start(middle) <= days:
+                left=middle
+            else:
+                right=middle
+        year, remainder, month = left, days-start(left), 1
+        lengths=[31,29 if year%4 == 0 and (year%100 != 0 or year%400 == 0) else 28,31,30,31,30,31,31,30,31,30,31]
+        while remainder >= lengths[month-1]:
+            remainder-=lengths[month-1]
+            month+=1
+        index=(year*12+month-1)//months*months
+        year, month0=divmod(index,12)
+        lengths=[31,29 if year%4 == 0 and (year%100 != 0 or year%400 == 0) else 28,31,30,31,30,31,31,30,31,30,31]
+        days=wrap(start(year)+sum(lengths[:month0]))
+        if not unit:
+            return days
+        seconds=days*86400
+        result=seconds*per_second
+        return result if lo <= seconds <= hi and lo <= result <= hi else None
+    rng=random.Random(0xCA1E)
+    cases=0
+    for unit in range(4):
+        values=[lo,lo+1,hi-1,hi,-1,0,1,-719528,11016,18321]+[rng.randrange(lo,hi+1) for _ in range(128)]
+        for months in (1,2,3,12,15,1200,999999999999999999):
+            expected=[reference(value,unit,months) for value in values]
+            valid=[value is not None and i%11 != 3 for i,value in enumerate(expected)]
+            output,bits,_=execute(values,3,[col,(144,0,months,unit)],[0,0],valid=valid,offset=5,typed=True)
+            assert bits == valid
+            assert all(not ok or a == b for a,b,ok in zip(output,expected,valid)), (unit,months,output,expected)
+            cases+=len(values)
+            bad=next((value for value,answer in zip(values,expected) if answer is None),None)
+            if bad is not None:
+                execute([bad],3,[col,(144,0,months,unit)],[0,0],typed=True,expect_error="overflow")
+            execute([],3,[col,(144,0,months,unit)],[0,0],typed=True)
+    for months,unit in ((0,0),(-1,0),(1,-1),(1,4)):
+        execute([0],3,[col,(144,0,months,unit)],[0,0],typed=True,expect_error="calendar truncation descriptor")
+    print("PASS calendar truncation: independent ordinal/bisection reference",cases,"rows, overflow, nulls and empty inputs")
+
+
+test_calendar_truncation_native()
+
+
 class InputChunk(C.Structure):
     _fields_ = [("input", Input), ("rows", I)]
 

@@ -50,7 +50,7 @@ bool binaryOp(int64_t op) {
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return op == DFM_DT_OFFSET_BY || op == DFM_DT_TOTAL || op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+  return op == DFM_DT_CALENDAR_TRUNCATE || op == DFM_DT_OFFSET_BY || op == DFM_DT_TOTAL || op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
          op == DFM_CEIL || op == DFM_ROUND || op == DFM_SQRT ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
@@ -731,6 +731,10 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_DECIMAL_FLOAT_CAST && c[0] != DFM_DECIMAL_CAST && c[0] != DFM_DECIMAL_COMPARE &&
           c[0] != DFM_DECIMAL_ARITHMETIC && c[0] != DFM_DECIMAL_UNARY)
         fail("Metal Decimal128 row arithmetic requires CPU execution");
+      if (c[0] == DFM_DT_CALENDAR_TRUNCATE) {
+        if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 || c[2] <= 0 || c[3] < 0 || c[3] > 3)
+          fail("Invalid Metal calendar truncation descriptor");
+      }
       if (c[0] == DFM_DT_OFFSET_BY) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 || c[3] < 0 || c[3] > 4)
           fail("Invalid Metal temporal offset descriptor");
@@ -2304,6 +2308,26 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
             text += z + "=" + (c[3]
                 ? "as_type<ulong>(as_type<long>(" + a + ")/" + std::to_string(c[2]) + "L)"
                 : "as_type<ulong>(" + a + ")*" + std::to_string(c[2]) + "UL") + ";";
+          } else if (op == DFM_DT_CALENDAR_TRUNCATE) {
+            const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
+            const auto dayTicks = std::to_string(perSecond * 86400) + "L";
+            const auto months = std::to_string(c[2]) + "L";
+            text += c[3] == 0 ? "long days=" + a + ";" :
+                "long days=" + a + "/" + dayTicks + ";if(" + a + "%" + dayTicks + "<0)--days;";
+            text += "long era=days/146097L,rem=days%146097L;if(rem<0){--era;rem+=146097L;}"
+                    "rem+=719468L;era+=rem/146097L;long doe=rem%146097L;"
+                    "long yoe=(doe-doe/1460L+doe/36524L-doe/146096L)/365L;"
+                    "long doy=doe-(365L*yoe+yoe/4L-yoe/100L);long mp=(5L*doy+2L)/153L;"
+                    "long month=mp<10L?mp+3L:mp-9L,year=yoe+era*400L+(month<=2L?1L:0L);"
+                    "long index=year*12L+month-1L,q=index/" + months + ";if(index%" + months + "<0)--q;index=q*" + months + ";"
+                    "year=index/12L;month=index%12L;if(month<0){--year;month+=12L;}++month;"
+                    "long y=year-(month<=2L?1L:0L);era=y/400L;if(y%400L<0)--era;yoe=y-era*400L;"
+                    "mp=(month+9L)%12L;doe=yoe*365L+yoe/4L-yoe/100L+(153L*mp+2L)/5L;"
+                    "days=as_type<long>(as_type<ulong>(era)*146097UL+ulong(doe)-719468UL);";
+            if (c[3] == 0) text += z + "=days;";
+            else text += "long seconds=0;bool ok=d3::checked_mul(days,86400L,seconds)&&d3::checked_mul(seconds," +
+                std::to_string(perSecond) + "L," + z + ");if(!ok)atomic_fetch_min_explicit(error," +
+                std::to_string(s.start+j+1) + "u,memory_order_relaxed);";
           } else if (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) {
             const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
             const int64_t dayTicks = c[3] == 0 ? 1 : perSecond * 86400;

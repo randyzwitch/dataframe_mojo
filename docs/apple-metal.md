@@ -358,7 +358,17 @@ checks Int64 overflow before Time wraps within a day; nulls and conditional
 branches retain CPU observation behavior. The CPU offset kernel now honors
 conditional masks so inactive overflowing branches are skipped. Nonzero offsets require terminal
 projections without a head, following the checked arithmetic boundary rules.
-Calendar months/years and time zone offsets remain unsupported. Estimates use
+Calendar month/year `dt.truncate` intervals also run on Metal for Date and naive
+Datetime values. Buckets align to proleptic year zero, including negative years,
+leap years, century boundaries, and multi-month intervals. Date results preserve
+the CPU's Int64 wrapping storage behavior at the full-domain endpoints; Datetime
+conversion checks signed storage overflow. Conditional masks suppress errors in
+unobserved branches on both CPU and Metal. Calendar Datetime truncation requires
+terminal projections without head or later filters. Calendar Date buckets may
+feed resident consumers. Estimates use `calendar-truncation-v1` and
+`metal-calendar-truncation-v1` families.
+
+Calendar month/year offsets and time zone offsets remain unsupported. Estimates use
 `fixed-offsets-v1` and `metal-fixed-offsets-v1` calibration families.
 
 Median and quantile reductions return Float64 for numeric inputs, including
@@ -693,7 +703,7 @@ that unlisted query combinations are already equivalent.
 | Numeric expressions | Floating power, `exp`, and `log`. |
 | Reductions | Mode, implode, and value counts. |
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
-| Temporal expressions | Calendar month/year truncation, offsets, row-valued parsing/formatting, and timezone operations. |
+| Temporal expressions | Calendar month/year offsets, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins and file-backed scans. |
 | Composition | Remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
