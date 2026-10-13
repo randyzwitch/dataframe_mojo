@@ -227,9 +227,11 @@ def _total(value: Int64, dtype: DataType, unit: String) -> Int64:
     return value * (nanos_per_tick // nanos_per_unit)
 
 
-def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
+def dt_op(
+    node: Node, input: Series, dtype: DataType, mask: List[Bool] = List[Bool]()
+) raises -> Series:
     if input.is_chunked():
-        return dt_op(node, input.rechunk(), dtype)
+        return dt_op(node, input.rechunk(), dtype, mask)
     var op = node.op
     if op == DT_STRPTIME:
         return _strptime(
@@ -253,7 +255,7 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
         return Series("", StringColumn(texts, valid))
     var values = List[Int64](length=n, fill=0)
     for i in range(n):
-        valid[i] = column._valid(i)
+        valid[i] = column._valid(i) and (not len(mask) or mask[i])
         if not valid[i]:
             continue
         var v = column._get(i)

@@ -340,6 +340,15 @@ the CPU's dense and nullable paths have different rescaling checks. Safe
 operations can feed resident consumers. Estimates include
 `metal-decimal-multiplicative-v1`; previous calibrations do not apply.
 
+Fixed `dt.offset_by` intervals execute on Date, naive Datetime (all storage
+units), and Time columns. Intervals must align to the storage unit. Addition
+checks Int64 overflow before Time wraps within a day; nulls and conditional
+branches retain CPU observation behavior. The CPU offset kernel now honors
+conditional masks so inactive overflowing branches are skipped. Nonzero offsets require terminal
+projections without a head, following the checked arithmetic boundary rules.
+Calendar months/years and time zone offsets remain unsupported. Estimates use
+`fixed-offsets-v1` and `metal-fixed-offsets-v1` calibration families.
+
 Median and quantile reductions return Float64 for numeric inputs, including
 full-width UInt64 and Decimal32/64/128 with their numeric scales. CPU sample
 conversion also preserves these values instead of the internal UInt64 ordering

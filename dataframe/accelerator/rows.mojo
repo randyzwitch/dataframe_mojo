@@ -102,6 +102,7 @@ from dataframe.expr import (
     DT_TOTAL,
     DT_TIME,
     DT_TRUNCATE,
+    DT_OFFSET_BY,
 )
 from dataframe.frame import DataFrame
 from dataframe.temporal import parse_every, NANOS_PER_DAY
@@ -271,6 +272,7 @@ def _program(
                 and op <= DT_TRUNCATE
             )
             or (op == DT_TOTAL and capabilities.duration_totals)
+            or (op == DT_OFFSET_BY and capabilities.temporal_offsets)
             or (op == INT_IS_IN and capabilities.extended_integers)
             or (
                 capabilities.row_extras
@@ -325,7 +327,11 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
-        var temporal = (op >= DT_YEAR and op <= DT_TRUNCATE) or op == DT_TOTAL
+        var temporal = (
+            (op >= DT_YEAR and op <= DT_TRUNCATE)
+            or op == DT_TOTAL
+            or op == DT_OFFSET_BY
+        )
         var decimal_float_cast = (
             op == CAST
             and left_type.is_decimal()
@@ -598,6 +604,18 @@ def _program(
                 // nanos_per_tick if source else nanos_per_tick
                 // nanos_per_unit
             )
+        if op == DT_OFFSET_BY:
+            var interval = parse_every(node.text)
+            var per_tick = (
+                NANOS_PER_DAY if left_type.is_date() else Int64(1000000000)
+                // left_type.per_second()
+            )
+            if interval[0] != 0 or interval[1] % per_tick != 0:
+                capabilities.reject(
+                    "temporal",
+                    "offset requires a fixed interval aligned to the storage unit",
+                )
+            right = interval[1] // per_tick
         if op == DT_TRUNCATE:
             var interval = parse_every(node.text)
             var per_tick = NANOS_PER_DAY if left_type.is_date() else (
@@ -936,6 +954,23 @@ def lower_rows(
             ):
                 proven = proven_integer_nodes(bound)
             for part_index in range(len(bound.expr._nodes)):
+                if (
+                    bound.expr._nodes[part_index].op == DT_OFFSET_BY
+                    and capabilities.temporal_offsets
+                ):
+                    var interval = parse_every(
+                        bound.expr._nodes[part_index].text
+                    )
+                    if interval[1] != 0 and (
+                        not terminal_boundary
+                        or k != 0
+                        or node.kind == FILTER
+                        or limit >= 0
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "checked temporal offsets require terminal projections without head",
+                        )
                 if bound.dtypes[part_index].is_integer():
                     ref part = bound.expr._nodes[part_index]
                     if (

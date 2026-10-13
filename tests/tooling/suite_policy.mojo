@@ -1287,6 +1287,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_fixed_offsets.mojo::test_native_metal_fixed_offsets_all_temporal_units_nulls_negative_epochs_and_empty_rows",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_fixed_offsets.mojo::test_native_metal_fixed_offset_checked_endpoints_and_conditional_masks",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_fixed_offsets.mojo::test_native_metal_fixed_offset_profiles_cost_budget_and_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_scalar_projections.mojo::test_native_metal_scalar_projections_empty_sources_types_and_literal_text",
             "metal",
         )
@@ -1903,6 +1921,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_empty_inputs.mojo",
                 "tests/execution_modes/test_backend_metal_duration_totals.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
+                "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",
                 "tests/execution_modes/test_backend_metal_higher_moments.mojo",

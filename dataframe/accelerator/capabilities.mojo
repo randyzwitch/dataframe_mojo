@@ -57,6 +57,7 @@ struct RowCapabilities(Copyable):
     var slices: Bool
     var scalar_regions: Bool
     var temporal_fields: Bool
+    var temporal_offsets: Bool
     var duration_totals: Bool
     var decimal128: Bool
     var decimal128_reductions: Bool
@@ -110,6 +111,7 @@ struct RowCapabilities(Copyable):
         slices: Bool = False,
         scalar_regions: Bool = False,
         temporal_fields: Bool = False,
+        temporal_offsets: Bool = False,
         duration_totals: Bool = False,
         ranks: Bool = False,
         cumulative_windows: Bool = False,
@@ -160,6 +162,7 @@ struct RowCapabilities(Copyable):
         self.slices = slices
         self.scalar_regions = scalar_regions
         self.temporal_fields = temporal_fields
+        self.temporal_offsets = temporal_offsets
         self.duration_totals = duration_totals
         self.ranks = ranks
         self.cumulative_windows = cumulative_windows
