@@ -8,6 +8,7 @@ join's documented left-major, right-input match order.
 """
 from std.bit import count_trailing_zeros
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
+from std.ffi import external_call
 from std.sys import size_of
 
 from .aggregate import float_key
@@ -19,6 +20,7 @@ from .parallel import Job, partitions, run_jobs, worker_count
 from .partition import Partitioner, _mix
 from .series import Series
 from .string_column import StringColumn
+from .string_view import StringView
 from .trace import trace_path
 
 
@@ -73,6 +75,333 @@ def _row_equal(left: List[Series], right: List[Series], i: Int, j: Int) -> Bool:
         if not _key_equal(left[k], right[k], i, j):
             return False
     return True
+
+
+# Probe rows whose candidates are matched together, as DuckDB's RowMatcher
+# matches a vector of candidates (STANDARD_VECTOR_SIZE is 2048).
+comptime _MATCH_BATCH = 1024
+
+
+struct _Candidates(Movable):
+    """Build slots whose stored hash equals a probe row's, for a batch of
+    probe rows in row order: the probe row, the build row, and the bucket
+    and duplicate chain that list the build row's equal keys.
+
+    The keys are then compared a column at a time over the candidates that
+    are still equal (`sel`), as DuckDB's RowMatcher does: each column's type
+    is resolved once per batch instead of once per key per candidate, which
+    `_row_equal` did (two thirds of a 65K-row join on four string keys and
+    an integer)."""
+
+    var left: List[Int]
+    var right: List[Int]
+    var bucket: List[Int]
+    var chain: List[Int]
+    var sel: List[Int]
+    var equal: List[Bool]
+
+    def __init__(out self):
+        self.left = List[Int](capacity=_MATCH_BATCH)
+        self.right = List[Int](capacity=_MATCH_BATCH)
+        self.bucket = List[Int](capacity=_MATCH_BATCH)
+        self.chain = List[Int](capacity=_MATCH_BATCH)
+        self.sel = List[Int](capacity=_MATCH_BATCH)
+        self.equal = List[Bool](capacity=_MATCH_BATCH)
+
+    def clear(mut self):
+        self.left.clear()
+        self.right.clear()
+        self.bucket.clear()
+        self.chain.clear()
+
+    def add(mut self, left: Int, right: Int, bucket: Int, chain: Int):
+        self.left.append(left)
+        self.right.append(right)
+        self.bucket.append(bucket)
+        self.chain.append(chain)
+
+    def match(mut self, left_keys: List[Series], right_keys: List[Series]):
+        """Mark each candidate whose keys all equal its probe row's."""
+        var n = len(self.left)
+        self.sel.clear()
+        for c in range(n):
+            self.sel.append(c)
+        var alive = n
+        for k in range(len(left_keys)):
+            if alive == 0:
+                break
+            alive = _match_key(
+                left_keys[k],
+                right_keys[k],
+                self.left.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin](),
+                self.right.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin](),
+                self.sel.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin](),
+                alive,
+            )
+        self.equal.clear()
+        self.equal.resize(n, False)
+        for s in range(alive):
+            self.equal[self.sel[s]] = True
+
+
+@always_inline
+def _match_values[
+    T: Copyable & Deinitable & Equatable
+](
+    a: Pointer[T, MutAnyOrigin],
+    b: Pointer[T, MutAnyOrigin],
+    left: Pointer[Int, MutAnyOrigin],
+    right: Pointer[Int, MutAnyOrigin],
+    sel: Pointer[Int, MutAnyOrigin],
+    count: Int,
+) -> Int:
+    """Keep in `sel` the candidates whose values are equal; validity is
+    checked after (`_keep_valid`)."""
+    var kept = 0
+    for s in range(count):
+        var c = sel[unsafe_offset=s]
+        var same = (
+            a[unsafe_offset=left[unsafe_offset=c]]
+            == b[unsafe_offset=right[unsafe_offset=c]]
+        )
+        sel[unsafe_offset=kept] = c
+        kept += Int(same)
+    return kept
+
+
+def _keep_valid[
+    T: Copyable & Deinitable
+](
+    a: Column[T],
+    b: Column[T],
+    left_rows: Pointer[Int, MutAnyOrigin],
+    right_rows: Pointer[Int, MutAnyOrigin],
+    sel: Pointer[Int, MutAnyOrigin],
+    count: Int,
+) -> Int:
+    """Keep in `sel` the candidates valid on both sides: a null key never
+    matches. Columns without a bitmap keep every candidate."""
+    if len(a._bits[]) == 0 and len(b._bits[]) == 0:
+        return count
+    var kept = 0
+    for s in range(count):
+        var c = sel[unsafe_offset=s]
+        var same = a._valid(left_rows[unsafe_offset=c]) and b._valid(
+            right_rows[unsafe_offset=c]
+        )
+        sel[unsafe_offset=kept] = c
+        kept += Int(same)
+    return kept
+
+
+def _match_key(
+    left: Series,
+    right: Series,
+    left_rows: Pointer[Int, MutAnyOrigin],
+    right_rows: Pointer[Int, MutAnyOrigin],
+    sel: Pointer[Int, MutAnyOrigin],
+    count: Int,
+) -> Int:
+    """Narrow `sel` to the candidates whose key column is equal on both
+    sides, with `_key_equal`'s meaning: nulls never equal, floats by
+    `float_key`."""
+    comptime for k in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[k]
+        if left._data.isa[Column[Scalar[D]]]():
+            ref a = left._data[Column[Scalar[D]]]
+            ref b = right._data[Column[Scalar[D]]]
+            var kept = 0
+            comptime if D.is_floating_point():
+                var x = a._ptr()
+                var y = b._ptr()
+                for s in range(count):
+                    var c = sel[unsafe_offset=s]
+                    var same = float_key(
+                        Float64(x[unsafe_offset=left_rows[unsafe_offset=c]])
+                    ) == float_key(
+                        Float64(y[unsafe_offset=right_rows[unsafe_offset=c]])
+                    )
+                    sel[unsafe_offset=kept] = c
+                    kept += Int(same)
+            else:
+                kept = _match_values(
+                    a._ptr(), b._ptr(), left_rows, right_rows, sel, count
+                )
+            return _keep_valid(a, b, left_rows, right_rows, sel, kept)
+    if left._data.isa[Column[Int128]]():
+        ref a = left._data[Column[Int128]]
+        ref b = right._data[Column[Int128]]
+        var kept = _match_values(
+            a._ptr(), b._ptr(), left_rows, right_rows, sel, count
+        )
+        return _keep_valid(a, b, left_rows, right_rows, sel, kept)
+    if left._data.isa[BoolColumn]():
+        ref a = left._data[BoolColumn]
+        ref b = right._data[BoolColumn]
+        var kept = 0
+        for s in range(count):
+            var c = sel[unsafe_offset=s]
+            var i = left_rows[unsafe_offset=c]
+            var j = right_rows[unsafe_offset=c]
+            var same = a._valid(i) and b._valid(j) and a._get(i) == b._get(j)
+            sel[unsafe_offset=kept] = c
+            kept += Int(same)
+        return kept
+    return _match_strings(
+        left._data[StringColumn],
+        right._data[StringColumn],
+        left_rows,
+        right_rows,
+        sel,
+        count,
+    )
+
+
+def _match_strings(
+    a: StringColumn,
+    b: StringColumn,
+    left_rows: Pointer[Int, MutAnyOrigin],
+    right_rows: Pointer[Int, MutAnyOrigin],
+    sel: Pointer[Int, MutAnyOrigin],
+    count: Int,
+) -> Int:
+    var nulls = len(a._bits[]) > 0 or len(b._bits[]) > 0
+    var kept = 0
+    if a._is_view_storage() and b._is_view_storage():
+        # Arrow views: length and four-byte prefix in the first word,
+        # the next eight bytes (up to twelve) or the bytes' location in
+        # the second. Unequal first words settle most unequal pairs
+        # without reading the bytes, as DuckDB's string_t compare does.
+        var x = (
+            a._view_storage.value()
+            ._views[]
+            .unsafe_ptr()
+            .unsafe_offset(a._offset)
+            .unsafe_bitcast[UInt64]()
+        )
+        var y = (
+            b._view_storage.value()
+            ._views[]
+            .unsafe_ptr()
+            .unsafe_offset(b._offset)
+            .unsafe_bitcast[UInt64]()
+        )
+        var long_a = _StringBytes(a)
+        var long_b = _StringBytes(b)
+        for s in range(count):
+            var c = sel[unsafe_offset=s]
+            var i = left_rows[unsafe_offset=c]
+            var j = right_rows[unsafe_offset=c]
+            var head = x[unsafe_offset=2 * i]
+            var length = Int(head & 0xFFFFFFFF)
+            # Bytes past the string's end in an inline view are masked
+            # off: Arrow does not promise they are zero.
+            var shown = min(length, 4)
+            var head_mask = UInt64(0xFFFFFFFF) | (
+                ((UInt64(1) << UInt64(8 * shown)) - 1) << 32
+            )
+            var same = ((head ^ y[unsafe_offset=2 * j]) & head_mask) == 0
+            if same and length > 4:
+                if length <= 12:
+                    var tail_mask = (
+                        (UInt64(1) << UInt64(8 * (length - 4))) - 1
+                    ) if length < 12 else UInt64.MAX
+                    same = (
+                        (
+                            x[unsafe_offset=2 * i + 1]
+                            ^ y[unsafe_offset=2 * j + 1]
+                        )
+                        & tail_mask
+                    ) == 0
+                else:
+                    # Equal lengths and prefixes: the bytes after the
+                    # prefix.
+                    var u = long_a.at(i)
+                    var v = long_b.at(j)
+                    same = (
+                        external_call["memcmp", Int32](
+                            u[0] + 4, v[0] + 4, length - 4
+                        )
+                        == 0
+                    )
+            if nulls:
+                same = same and a._valid(i) and b._valid(j)
+            sel[unsafe_offset=kept] = c
+            kept += Int(same)
+        return kept
+    # Either storage: the bytes and length read through pointers taken
+    # once, lengths compared first, then the bytes.
+    var x = _StringBytes(a)
+    var y = _StringBytes(b)
+    for s in range(count):
+        var c = sel[unsafe_offset=s]
+        var i = left_rows[unsafe_offset=c]
+        var j = right_rows[unsafe_offset=c]
+        var u = x.at(i)
+        var v = y.at(j)
+        var same = u[1] == v[1]
+        if same and u[1] > 0:
+            same = external_call["memcmp", Int32](u[0], v[0], u[1]) == 0
+        if nulls:
+            same = same and a._valid(i) and b._valid(j)
+        sel[unsafe_offset=kept] = c
+        kept += Int(same)
+    return kept
+
+
+struct _StringBytes:
+    """Where a string column's rows start and how long they are, from
+    pointers taken once: offsets and a byte buffer, or Arrow views (inline
+    bytes, or a buffer and an offset)."""
+
+    var views: Int
+    var offsets: Int
+    var base: Int
+    var buffers: Int
+
+    def __init__(out self, column: StringColumn):
+        if column._is_view_storage():
+            ref storage = column._view_storage.value()
+            self.views = Int(
+                storage._views[].unsafe_ptr().unsafe_offset(column._offset)
+            )
+            self.buffers = Int(storage._buffers[].unsafe_ptr())
+            self.offsets = 0
+            self.base = 0
+        else:
+            self.views = 0
+            self.buffers = 0
+            self.offsets = Int(
+                column._offsets[].unsafe_ptr().unsafe_offset(column._offset)
+            )
+            self.base = Int(column._base())
+
+    @always_inline
+    def at(self, i: Int) -> Tuple[Int, Int]:
+        """Row i's first byte's address and its length."""
+        if self.views == 0:
+            var offsets = Pointer[Int64, MutAnyOrigin](
+                unsafe_from_address=self.offsets
+            )
+            var start = Int(offsets[unsafe_offset=i])
+            return (
+                self.base + start,
+                Int(offsets[unsafe_offset=i + 1]) - start,
+            )
+        var view = Pointer[StringView, MutAnyOrigin](
+            unsafe_from_address=self.views
+        ).unsafe_offset(i)
+        var length = Int(view[].length)
+        if length <= 12:
+            return (Int(view) + 4, length)
+        var buffers = Pointer[ArcPointer[List[UInt8]], MutAnyOrigin](
+            unsafe_from_address=self.buffers
+        )
+        return (
+            Int(buffers[unsafe_offset=Int(view[].buffer_index)][].unsafe_ptr())
+            + Int(view[].offset),
+            length,
+        )
 
 
 @always_inline
@@ -568,24 +897,6 @@ struct _HashProbeJob(Job):
             capacity=0 if membership >= 0 else end - start
         )
 
-    def _matches(self, i: Int) -> Bool:
-        """Whether probe row i has at least one exact match in the index.
-        A null key never matches: `_key_equal` requires both sides valid.
-        Single integer keys never reach this; they have no stored hashes."""
-        var hash = self.left_hashes[][i]
-        var bucket = Int(hash >> 56) >> self.fold
-        ref index = self.buckets[][bucket]
-        var cursor = _TagCursor(index, hash)
-        var position = cursor.next()
-        while position >= 0:
-            ref slot = index.slots[position]
-            if hash == slot.key and _row_equal(
-                self.left_keys, self.right_keys, i, Int(slot.row)
-            ):
-                return True
-            position = cursor.next()
-        return False
-
     def run_membership(mut self) raises:
         """Semi (membership == 1) or anti (0): each left row at most once,
         in row order; duplicate right keys do not repeat it."""
@@ -633,9 +944,31 @@ struct _HashProbeJob(Job):
                 if matched == keep:
                     self.left_rows.append(i)
             return
-        for i in range(self.start, self.end):
-            if self._matches(i) == keep:
-                self.left_rows.append(i)
+        var candidates = _Candidates()
+        var row = self.start
+        while row < self.end:
+            var stop = min(self.end, row + _MATCH_BATCH)
+            self._candidates(row, stop, candidates)
+            var n = len(candidates.left)
+            if keep:
+                for c in range(n):
+                    var i = candidates.left[c]
+                    if candidates.equal[c] and (
+                        len(self.left_rows) == 0
+                        or self.left_rows[len(self.left_rows) - 1] != i
+                    ):
+                        self.left_rows.append(i)
+                row = stop
+                continue
+            var c = 0
+            for i in range(row, stop):
+                var matched = False
+                while c < n and candidates.left[c] == i:
+                    matched = matched or candidates.equal[c]
+                    c += 1
+                if not matched:
+                    self.left_rows.append(i)
+            row = stop
 
     def run(mut self) raises:
         if self.membership >= 0:
@@ -776,34 +1109,68 @@ struct _HashProbeJob(Job):
         # values; the general comparison below measured faster (TPC-DS q93
         # 17.9 -> 8.4 ms, q40 22.8 -> 17.4) once Parquet columns lost their
         # all-valid bitmaps and reached it.
-        for i in range(self.start, self.end):
+        var candidates = _Candidates()
+        var row = self.start
+        while row < self.end:
+            var stop = min(self.end, row + _MATCH_BATCH)
+            self._candidates(row, stop, candidates)
+            # Distinct build keys hold distinct slots, so at most one
+            # candidate of a probe row is equal; its duplicate chain
+            # follows it, as before.
+            var n = len(candidates.left)
+            if not self.include_unmatched:
+                # Candidates are in probe-row order: walk them, not the
+                # rows, most of which find none in a selective join.
+                for c in range(n):
+                    if candidates.equal[c]:
+                        self._emit(candidates, c)
+                row = stop
+                continue
+            var c = 0
+            for i in range(row, stop):
+                var matched = False
+                while c < n and candidates.left[c] == i:
+                    if candidates.equal[c]:
+                        self._emit(candidates, c)
+                        matched = True
+                    c += 1
+                if not matched:
+                    self.left_rows.append(i)
+                    self.right_rows.append(-1)
+            row = stop
+
+    @always_inline
+    def _emit(mut self, candidates: _Candidates, c: Int):
+        """A matched candidate's pair, then its build row's duplicates."""
+        var i = candidates.left[c]
+        self.left_rows.append(i)
+        self.right_rows.append(candidates.right[c])
+        _append_duplicate_rows(
+            self.buckets[][candidates.bucket[c]],
+            candidates.chain[c],
+            i,
+            self.left_rows,
+            self.right_rows,
+        )
+
+    def _candidates(self, start: Int, stop: Int, mut candidates: _Candidates):
+        """The build slots of probe rows [start, stop) whose stored hash
+        equals the row's, matched on the keys."""
+        candidates.clear()
+        for i in range(start, stop):
             var hash = self.left_hashes[][i]
             var bucket = Int(hash >> 56) >> self.fold
             ref index = self.buckets[][bucket]
             var cursor = _TagCursor(index, hash)
-            var matched = False
             var position = cursor.next()
             while position >= 0:
                 ref slot = index.slots[position]
-                var j = Int(slot.row)
-                if hash == slot.key and _row_equal(
-                    self.left_keys, self.right_keys, i, j
-                ):
-                    self.left_rows.append(i)
-                    self.right_rows.append(j)
-                    _append_duplicate_rows(
-                        index,
-                        Int(slot.next_position),
-                        i,
-                        self.left_rows,
-                        self.right_rows,
+                if hash == slot.key:
+                    candidates.add(
+                        i, Int(slot.row), bucket, Int(slot.next_position)
                     )
-                    matched = True
-                    break
                 position = cursor.next()
-            if not matched and self.include_unmatched:
-                self.left_rows.append(i)
-                self.right_rows.append(-1)
+        candidates.match(self.left_keys, self.right_keys)
 
 
 @fieldwise_init
