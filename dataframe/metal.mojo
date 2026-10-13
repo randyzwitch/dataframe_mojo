@@ -381,6 +381,7 @@ def _capabilities() -> RowCapabilities:
         higher_moments=True,
         rolling_windows=True,
         rolling_moments=True,
+        interpolation_windows=True,
         empty_outputs=True,
         empty_inputs=True,
         chunked_inputs=True,
@@ -1778,6 +1779,7 @@ struct MetalRuntime(AcceleratorBackend):
         var cumulative = False
         var rolling = False
         var rolling_moments = False
+        var interpolation = False
         var shift_fill = False
         for step in plan.steps:
             ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
@@ -1791,13 +1793,19 @@ struct MetalRuntime(AcceleratorBackend):
                 and plan.code[step.start * 4 + 3] <= 6
             )
         for step in plan.steps:
+            interpolation |= (
+                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                and plan.code[step.start * 4 + 3] >= 13
+            )
             rolling_moments |= (
                 plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
                 and plan.code[step.start * 4 + 3] >= 11
+                and plan.code[step.start * 4 + 3] <= 12
             )
             rolling |= (
                 plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
                 and plan.code[step.start * 4 + 3] >= 7
+                and plan.code[step.start * 4 + 3] <= 12
             )
         if ranked:
             family += ";metal-rank-v1"
@@ -1809,6 +1817,8 @@ struct MetalRuntime(AcceleratorBackend):
             family += ";metal-rolling-v1"
         if rolling_moments:
             family += ";metal-rolling-moments-v1"
+        if interpolation:
+            family += ";metal-interpolation-v1"
         var decimal_mean = False
         for output in plan.outputs:
             decimal_mean |= output.reduction == MEAN and (

@@ -172,6 +172,9 @@ enum DFMOp {
   // Methods 11/12: rolling variance/std over Float64. Operand 2 is
   // min_samples; literal low/high UInt32 words carry window size/ddof.
   // Mojo lowering saturates both fields to UInt32.MAX (the row-count limit).
+  // Methods 13/14: linear Float64 interpolation / nearest word gather.
+  // Operand 2 is zero; the literal is unused. Original non-null values anchor
+  // each interior gap; nearest ties choose the following anchor.
   DFM_CUMULATIVE_KEY = 214,
   // Decimal128 SUM/MEAN preserve CPU worker partitions and check every
   // precision-bounded partial and merge. Packed metadata carries min_count,

@@ -480,13 +480,15 @@ Shape validate(const DFMRequest &r, bool storage = false,
     if (v.filter == 5) {
       auto h = r.code + 4 * v.start;
       if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_CUMULATIVE_KEY ||
-          h[1] < 0 || h[1] >= r.slots || h[2] < 0 || (h[3] < 7 && h[2] > 1) || h[3] < 0 || h[3] > 12 ||
+          h[1] < 0 || h[1] >= r.slots || h[2] < 0 || (h[3] < 7 && h[2] > 1) || h[3] < 0 || h[3] > 14 ||
+          (h[3] >= 13 && h[2] != 0) ||
           (h[3] >= 4 && h[3] <= 6 && h[2] != (h[3] == 6)))
         fail("Invalid Metal cumulative descriptor");
       auto input = slotType(r, h[1]), output = slotType(r, v.slot);
       if ((h[3] >= 4 && h[3] <= 6 && output != input) || (h[3] == 3 && output != DFM_INT64) ||
           ((h[3] == 1 || h[3] == 2 || h[3] == 9 || h[3] == 10) && output != input) ||
-          (h[3] >= 11 && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
+          ((h[3] == 11 || h[3] == 12 || h[3] == 13) && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
+          (h[3] == 14 && output != input) ||
           (h[3] == 8 && (output != DFM_FLOAT64_STORAGE || input == DFM_DECIMAL128 || input == DFM_BOOL)) ||
           (h[3] == 7 && (input == DFM_BOOL || input == DFM_DECIMAL128 || output == DFM_DECIMAL128)) ||
           ((h[3] == 0 || h[3] == 7) && (input == DFM_BOOL ||
@@ -500,7 +502,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           (r.literals[v.start] < 1 || r.literals[v.start] > 38 ||
            r.literals[v.start] != int64_t(r.literals[v.start])))
         fail("Invalid Metal cumulative decimal precision");
-      if (h[3] >= 7) {
+      if (h[3] >= 7 && h[3] <= 12) {
         int64_t window;
         memcpy(&window, r.literals + v.start, 8);
         if ((h[3] >= 11 ? uint32_t(window) == 0 : window < 1))
