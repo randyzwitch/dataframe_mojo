@@ -1846,6 +1846,7 @@ def production_policy() -> SuitePolicy:
             "storage.release",
             [
                 "tests/storage_ownership/test_aggregate_key_lifetime.mojo",
+                "tests/storage_ownership/test_aggregate_key_views.mojo",
                 "tests/storage_ownership/test_release.mojo",
             ],
         )
@@ -1893,6 +1894,7 @@ def production_policy() -> SuitePolicy:
                 "tests/kernel_equivalence/test_order_keys.mojo",
                 "tests/kernel_equivalence/test_parallel_order_selection.mojo",
                 "tests/kernel_equivalence/test_set_routes.mojo",
+                "tests/kernel_equivalence/test_string_view_hashing.mojo",
                 "tests/kernel_equivalence/test_top_rows.mojo",
             ],
         )
