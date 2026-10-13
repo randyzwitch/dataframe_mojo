@@ -156,6 +156,20 @@ words, retaining floating-point NaN payloads, signed zeros, dictionary identity,
 logical metadata, and both Decimal128 words. Their parameters remain runtime
 values and their cost family is `metal-shift-fill-v1`.
 
+Fixed-size `rolling_sum`, `rolling_mean`, `rolling_min`, and `rolling_max`
+run globally or within `over()` partitions. Each trailing window includes the
+current row and skips null inputs; `min_samples` defaults to the window size.
+An empty or all-null window remains null even with a zero minimum. Integer sums
+accumulate in 128 bits and check valid final outputs against the CPU result type;
+UInt64 sum/mean inputs retain the CPU Int64 widening check. Floating sums and
+means recompute each window in original row order with binary64 emulation,
+rounding Float32 sum outputs afterward. Decimal means convert each input to
+Float64 before accumulation. Extrema preserve original payload words, including
+NaN ties, dictionary values, and Decimal128. Decimal rolling sum requires an
+explicit Float64 cast, matching the CPU's current unsupported operation.
+Rolling plans use `metal-rolling-v1`. Work grows with the number of rows times
+the trailing window length; these kernels prioritize matching CPU evaluation.
+
 Supported scalar reductions also run within `over()` partitions: Metal groups a
 shared resident prefix and broadcasts each result back in original row order.
 Null partition keys form one group; multiple keys, dictionary codes, fixed logical
@@ -168,11 +182,11 @@ These aggregate-window producers are full observation boundaries, matching the
 CPU's eager preparation of window states even inside a conditional or before
 head. Checked sums and checked expressions inside these producers retain their
 normal overflow checks. Ordinary checked join inputs keep their existing
-restrictions. Nested aggregate, rank, cumulative, shift, and fill windows materialize their
+restrictions. Nested aggregate, rank, cumulative, shift, fill, and rolling windows materialize their
 inner scopes before feeding outer scopes, retaining original row order and the
 same observation boundaries at each level. Cumulative prefixes remain checked
 inside unused conditional branches and before head. Unproved checked inputs to
-rank/cumulative/shift/fill kernels, selectors, other window kernels, and unsupported
+rank/cumulative/shift/fill/rolling kernels, selectors, other window kernels, and unsupported
 underlying reductions still require CPU execution.
 Automatic placement keeps these plans on CPU until their complete DAG has a
 supported estimate and matching calibration.

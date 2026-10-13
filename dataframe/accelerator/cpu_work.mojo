@@ -62,6 +62,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             decimal_multiplicative=True,
             ranks=True,
             cumulative_windows=True,
+            rolling_windows=True,
             shift_fill_windows=True,
         ),
     )
@@ -79,6 +80,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             family = "mixed"
     var ranked = False
     var cumulative = False
+    var rolling = False
     var shift_fill = False
     for step in plan.steps:
         ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
@@ -89,6 +91,12 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
         shift_fill |= (
             plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
             and plan.code[step.start * 4 + 3] >= 4
+            and plan.code[step.start * 4 + 3] <= 6
+        )
+    for step in plan.steps:
+        rolling |= (
+            plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+            and plan.code[step.start * 4 + 3] >= 7
         )
     if ranked:
         family += ";rank-v1"
@@ -96,6 +104,8 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
         family += ";cumulative-v1"
     if shift_fill:
         family += ";shift-fill-v1"
+    if rolling:
+        family += ";rolling-v1"
     var wide_decimal = False
     for dtype in plan.node_dtypes:
         wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128

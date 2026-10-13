@@ -20,6 +20,10 @@ from dataframe.expr import (
     CUM_MAX,
     CUM_COUNT,
     SHIFT,
+    ROLLING_SUM,
+    ROLLING_MEAN,
+    ROLLING_MIN,
+    ROLLING_MAX,
     FORWARD_FILL,
     BACKWARD_FILL,
     OVER,
@@ -1056,8 +1060,32 @@ def lower_rows(
                     or window_op == FORWARD_FILL
                     or window_op == BACKWARD_FILL
                 )
-                if window_op != RANK and not cumulative and not shift_fill:
+                var rolling = (
+                    window_op == ROLLING_SUM
+                    or window_op == ROLLING_MEAN
+                    or window_op == ROLLING_MIN
+                    or window_op == ROLLING_MAX
+                )
+                if (
+                    window_op != RANK
+                    and not cumulative
+                    and not shift_fill
+                    and not rolling
+                ):
                     continue
+                if rolling and not capabilities.rolling_windows:
+                    capabilities.reject(
+                        "plan", "rolling windows require backend support"
+                    )
+                if (
+                    rolling
+                    and window_op == ROLLING_SUM
+                    and bound.dtypes[ranked._nodes[r].left].is_decimal()
+                ):
+                    capabilities.reject(
+                        "logical",
+                        "rolling_sum over a decimal column requires an explicit Float64 cast",
+                    )
                 if shift_fill and not capabilities.shift_fill_windows:
                     capabilities.reject(
                         "plan", "shift and fill windows require backend support"
@@ -1066,7 +1094,12 @@ def lower_rows(
                     capabilities.reject(
                         "plan", "cumulative windows require backend support"
                     )
-                if not cumulative and not shift_fill and not capabilities.ranks:
+                if (
+                    not cumulative
+                    and not shift_fill
+                    and not rolling
+                    and not capabilities.ranks
+                ):
                     capabilities.reject("plan", "rank requires backend support")
                 if node.kind == AGG:
                     capabilities.reject(
@@ -1105,7 +1138,14 @@ def lower_rows(
                 for m in range(len(methods)):
                     if rank_node.text == methods[m]:
                         method = m
-                if shift_fill:
+                if rolling:
+                    method = (
+                        7 if window_op
+                        == ROLLING_SUM else 8 if window_op
+                        == ROLLING_MEAN else 9 if window_op
+                        == ROLLING_MIN else 10
+                    )
+                elif shift_fill:
                     method = (
                         4 if window_op
                         == SHIFT else 5 if window_op
@@ -1119,6 +1159,13 @@ def lower_rows(
                 if method < 0:
                     raise Error("unknown rank method: " + rank_node.text)
                 var child = bind(subtree(ranked, rank_node.left), rank_schema)
+                if (
+                    rolling
+                    and window_op == ROLLING_MEAN
+                    and child.dtypes[len(child.dtypes) - 1].is_decimal()
+                ):
+                    var converted = child.expr.cast(DataType.FLOAT64)
+                    child = bind(converted, rank_schema)
                 var child_proven = List[Bool](
                     length=len(child.expr._nodes), fill=False
                 )
@@ -1179,28 +1226,38 @@ def lower_rows(
                 )
                 next_slot += 1
                 var rank_start = len(literals)
+                # Match the CPU Float64-to-Int conversion for min_samples.
+                # A rounded positive value may wrap negative at Int64.MAX;
+                # such a threshold accepts every nonempty window.
                 code.extend(
                     [
                         Int64(
                             ROW_CUMULATIVE_KEY if cumulative
-                            or shift_fill else ROW_RANK_KEY
+                            or shift_fill
+                            or rolling else ROW_RANK_KEY
                         ),
                         Int64(input_slot),
-                        Int64(method == 6) if shift_fill else Int64(
+                        (
+                            rank_node.integer if rank_node.floating
+                            < 0 else max(Int64(0), Int64(rank_node.floating))
+                        ) if rolling else Int64(
+                            method == 6
+                        ) if shift_fill else Int64(
                             rank_node.min_count == 1
                         ),
                         Int64(method),
                     ]
                 )
-                var result_type = bound.dtypes[
-                    r
-                ] if cumulative or shift_fill else (
-                    DataType.FLOAT64 if method == 0 else DataType.INT64
+                var result_type = (
+                    bound.dtypes[r] if cumulative
+                    or shift_fill
+                    or rolling else (
+                        DataType.FLOAT64 if method == 0 else DataType.INT64
+                    )
                 )
                 literals.append(
-                    bitcast[DType.float64](
-                        rank_node.integer
-                    ) if shift_fill else bitcast[DType.float64](
+                    bitcast[DType.float64](rank_node.integer) if shift_fill
+                    or rolling else bitcast[DType.float64](
                         Int64(result_type.precision())
                     ) if cumulative
                     and result_type.is_decimal() else 0
