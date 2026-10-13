@@ -87,7 +87,7 @@ int64_t sumType(int64_t t) {
   return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
-  if (op == DFM_VAR || op == DFM_STD)
+  if (op == DFM_VAR || op == DFM_STD || op == DFM_COV || op == DFM_CORR)
     return type == DFM_FLOAT64_STORAGE ? DFM_FLOAT64_STORAGE : -1;
   if (op == DFM_WIDE_INTEGER_SUM || op == DFM_WIDE_INTEGER_MEAN)
     return type == DFM_INT64 || type == DFM_UINT64
@@ -118,9 +118,11 @@ int64_t reductionType(int64_t type, int64_t op) {
     return type;
   return -1;
 }
-bool momentReduction(int64_t op) { return op == DFM_VAR || op == DFM_STD; }
-bool validMomentMetadata(int64_t metadata) {
-  return metadata >= 0 && ((uint64_t(metadata) >> 31) & 0xffffULL) == 0 &&
+bool pairMomentReduction(int64_t op) { return op == DFM_COV || op == DFM_CORR; }
+int64_t momentRight(int64_t metadata) { return (uint64_t(metadata) >> 31) & 0xffffULL; }
+bool momentReduction(int64_t op) { return op == DFM_VAR || op == DFM_STD || pairMomentReduction(op); }
+bool validMomentMetadata(int64_t metadata, int64_t op) {
+  return metadata >= 0 && (pairMomentReduction(op) || momentRight(metadata) == 0) &&
          ((uint64_t(metadata) >> 47) & 0xffffULL) >= 1;
 }
 bool decimal128Reduction(int64_t op) {
@@ -248,8 +250,10 @@ struct Layout {
           for (int64_t j = 1; j < step.nodes; ++j) {
             auto c = r.code + 4 * (step.start + j);
             keep(c[1]);
-            if (c[0] == DFM_GROUP_OUTPUT)
+            if (c[0] == DFM_GROUP_OUTPUT) {
               keep(c[2]);
+              if (pairMomentReduction(c[3])) keep(momentRight(int64_t(r.literals[step.start + j])));
+            }
           }
         }
         ++first;
@@ -273,13 +277,17 @@ struct Layout {
         keep(r.steps[end].slot);
       first = end + 1;
     }
-    for (int64_t i = 0; i < r.output_count; ++i)
+    for (int64_t i = 0; i < r.output_count; ++i) {
       keep(r.outputs[i].slot);
+      if (pairMomentReduction(r.outputs[i].reduction)) keep(momentRight(r.outputs[i].min_count));
+    }
     // A column can need physical storage before a boundary without needing a
     // gather after it. Walk uses backward to distinguish those lifetimes.
     std::array<bool, DFM_MAX_SLOTS> live{};
-    for (int64_t i = 0; i < r.output_count; ++i)
+    for (int64_t i = 0; i < r.output_count; ++i) {
       live[r.outputs[i].slot] = true;
+      if (pairMomentReduction(r.outputs[i].reduction)) live[momentRight(r.outputs[i].min_count)] = true;
+    }
     for (int64_t i = r.step_count; i-- > 0;) {
       auto &step = r.steps[i];
       if (step.filter == 1 || step.filter == 2)
@@ -296,8 +304,12 @@ struct Layout {
           if (node[0] == DFM_GROUP_OUTPUT)
             live[node[2]] = false;
         }
-        for (int64_t j = 1; j < step.nodes; ++j)
-          live[r.code[4 * (step.start + j) + 1]] = true;
+        for (int64_t j = 1; j < step.nodes; ++j) {
+          auto node = r.code + 4 * (step.start + j);
+          live[node[1]] = true;
+          if (node[0] == DFM_GROUP_OUTPUT && pairMomentReduction(node[3]))
+            live[momentRight(int64_t(r.literals[step.start + j]))] = true;
+        }
       } else if (step.filter == 2 || step.filter == 4 || step.filter == 5) {
         if (step.filter == 4 || step.filter == 5) live[step.slot] = false;
         for (int64_t j = 0; j < step.nodes; ++j)
@@ -315,6 +327,10 @@ struct Layout {
     }
   }
 };
+int64_t physicalMomentMetadata(int64_t metadata, const Layout &layout) {
+  auto right = layout.physical[momentRight(metadata)];
+  return (uint64_t(metadata) & ~(0xffffULL << 31)) | (uint64_t(right) << 31);
+}
 #include "dfmetal_rank.inc"
 #include "dfmetal_window.inc"
 struct Shape {
@@ -530,8 +546,13 @@ Shape validate(const DFMRequest &r, bool storage = false,
           if (decimal128Reduction(c[3]) &&
               !validDecimalMetadata(int64_t(r.literals[v.start + j])))
             fail("Invalid Metal Decimal128 reduction metadata");
-          if (momentReduction(c[3]) && !validMomentMetadata(int64_t(r.literals[v.start + j])))
+          if (momentReduction(c[3]) && !validMomentMetadata(int64_t(r.literals[v.start + j]), c[3]))
             fail("Invalid Metal moment metadata");
+          if (pairMomentReduction(c[3])) {
+            auto right = momentRight(int64_t(r.literals[v.start + j]));
+            if (right >= r.slots || !defined[right] || slotType(r, right) != DFM_FLOAT64_STORAGE)
+              fail("Invalid Metal paired moment right input");
+          }
           if ((c[3] == DFM_ANY || c[3] == DFM_ALL) &&
               r.literals[v.start + j] > 1)
             fail("Invalid Metal Boolean reduction metadata");
@@ -830,8 +851,13 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if (decimal128Reduction(v.reduction) &&
           !validDecimalMetadata(v.min_count))
         fail("Invalid Metal Decimal128 reduction metadata");
-      if (momentReduction(v.reduction) && !validMomentMetadata(v.min_count))
+      if (momentReduction(v.reduction) && !validMomentMetadata(v.min_count, v.reduction))
         fail("Invalid Metal moment metadata");
+      if (pairMomentReduction(v.reduction)) {
+        auto right = momentRight(v.min_count);
+        if (right >= r.slots || !defined[right] || slotType(r, right) != DFM_FLOAT64_STORAGE)
+          fail("Invalid Metal paired moment right input");
+      }
       if (v.reduction != DFM_SUM && v.reduction != DFM_COUNT &&
           v.reduction != DFM_LEN && !typed(r))
         fail("Metal reduction requires typed storage");
@@ -1389,6 +1415,21 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
         "long sum=long(total);state_finish(sum,count,o,end-begin);"
         "bool valid=state_valid(o,count);y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);return;}\n"
         : "") + R"MSL(
+ if(PAIRED_MOMENT_REDUCTIONS&&(o.kind==160||o.kind==161)){
+  if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
+        std::string(windowFloating ? "true" : "false") + R"MSL();
+  uint step=moment_step(meta.y,workers,)MSL" + std::string(windowFloating ? "8192U" : "64U") + R"MSL();
+  uint at=begin;CovarianceState state={0,0,0,0,0,0};
+  for(uint worker=0;worker<workers;++worker){CovarianceState current={0,0,0,0,0,0};
+   uint stop=min(meta.y,(worker+1U)*step);
+   while(at<end){uint row=uint(x[)MSL" + index + R"MSL(+at]);if(row>=stop)break;++at;
+    ulong left=ulong(o.slot)*meta.z+row,right=moment_right(o.minimum)*meta.z+row;
+    if(v[left]&&v[right])current=covariance_add(current,x[left],x[right]);}
+   state=covariance_merge(state,current);
+  }
+  bool valid=o.kind==160||state.count>0;
+  y[to]=valid?covariance_finish(state,moment_ddof(o.minimum),o.kind==160):0UL;w[to]=uchar(valid);return;
+ }
  if(MOMENT_REDUCTIONS&&(o.kind==86||o.kind==87)){
   if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
         std::string(windowFloating ? "true" : "false") + R"MSL();
@@ -1454,11 +1495,17 @@ std::string source(const DFMRequest &r) {
   // Keep the moment state machine out of unrelated reduction pipelines.
   // Out.kind is a runtime parameter, so the shader otherwise retains this
   // expensive binary64 branch even when the request cannot use it.
-  bool moments = false;
-  for (int64_t i = 0; i < r.output_count; ++i)
-    moments |= momentReduction(r.outputs[i].reduction);
-  for (int64_t i = 0; i < r.code_words; i += 4)
-    moments |= r.code[i] == DFM_GROUP_OUTPUT && momentReduction(r.code[i + 3]);
+  bool moments = false, paired = false;
+  for (int64_t i = 0; i < r.output_count; ++i) {
+    moments |= r.outputs[i].reduction == DFM_VAR || r.outputs[i].reduction == DFM_STD;
+    paired |= pairMomentReduction(r.outputs[i].reduction);
+  }
+  for (int64_t i = 0; i < r.code_words; i += 4) {
+    moments |= r.code[i] == DFM_GROUP_OUTPUT && (r.code[i+3] == DFM_VAR || r.code[i+3] == DFM_STD);
+    paired |= r.code[i] == DFM_GROUP_OUTPUT && pairMomentReduction(r.code[i + 3]);
+  }
+  text += "constant bool PAIRED_MOMENT_REDUCTIONS=" +
+          std::string(paired ? "true" : "false") + ";\n";
   text += "constant bool MOMENT_REDUCTIONS=" +
           std::string(moments ? "true" : "false") + ";\n";
   bool wide = partialWidth(r) == 32;
@@ -1486,6 +1533,7 @@ std::string source(const DFMRequest &r) {
   text += dfm_moments_source;
   text += R"MSL(
 ulong moment_ddof(long metadata){return ulong(metadata)&0x7fffffffUL;}
+ulong moment_right(long metadata){return(ulong(metadata)>>31)&65535UL;}
 uint moment_workers(long metadata,uint rows,uint groups,bool window){
  ulong configured=ulong(metadata)>>47;
  ulong workers=max(1UL,min(configured,ulong(rows)/(window?65536UL:16384UL)));
@@ -1686,6 +1734,22 @@ kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[bu
  uint2 group[[threadgroup_position_in_grid]],uint lane[[thread_index_in_threadgroup]]) {
  threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  Out o=out[group.y];
+ if(PAIRED_MOMENT_REDUCTIONS&&(o.kind==160||o.kind==161)){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  uint workers=uint(max(1UL,min(ulong(o.minimum)>>47,ulong(meta.x)/65536UL)));
+  uint step=moment_step(meta.x,workers,8192U);CovarianceState state={0,0,0,0,0,0};
+  for(uint worker=0;worker<workers;++worker){CovarianceState current={0,0,0,0,0,0};
+   uint begin=min(meta.x,worker*step),end=min(meta.x,(worker+1U)*step);
+   for(uint row=begin;row<end;++row){
+    if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+    ulong left=o.slot*meta.z+row,right=moment_right(o.minimum)*meta.z+row;
+    if(v[left]&&v[right])current=covariance_add(current,x[left],x[right]);}
+   state=covariance_merge(state,current);
+  }
+  bool valid=o.kind==160||state.count>0;
+  partials[group.y*groups]=make_partial(valid?long(covariance_finish(state,moment_ddof(o.minimum),o.kind==160)):0L,0L,long(valid));return;
+ }
  if(MOMENT_REDUCTIONS&&(o.kind==86||o.kind==87)){
   if(lane)return;
   if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
@@ -2589,6 +2653,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
       continue;
     }
     if (op == DFM_GROUP_OUTPUT) {
+      if (pairMomentReduction(r.code[4*i+3])) integer = physicalMomentMetadata(integer, layout);
       memcpy(static_cast<char *>(literal.contents) + i * 8, &integer, 8);
       continue;
     }
@@ -2619,10 +2684,13 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     }
   }
   auto *descriptors = static_cast<GPUOut *>(out.contents);
-  for (int64_t i = 0; i < r.output_count; ++i)
+  for (int64_t i = 0; i < r.output_count; ++i) {
+    auto minimum = r.outputs[i].min_count;
+    if (pairMomentReduction(r.outputs[i].reduction)) minimum = physicalMomentMetadata(minimum, layout);
     descriptors[i] = {layout.physical[r.outputs[i].slot],
-                      r.outputs[i].reduction, r.outputs[i].min_count,
+                      r.outputs[i].reduction, minimum,
                       slotType(r, r.outputs[i].slot)};
+  }
   stats.staging_copy_ns = ns(start);
   Drain drain{[c.queue commandBuffer]};
   if (!drain.command)

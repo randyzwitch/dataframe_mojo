@@ -1398,6 +1398,31 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_pair_moments.mojo::test_native_metal_pair_moments_mixed_widths_independent_pairs_and_layouts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_pair_moments.mojo::test_native_metal_pair_moments_ieee_null_pairs_unsigned_and_wide_physical_slots",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_pair_moments.mojo::test_native_metal_pair_moments_large_workers_centered_accuracy_and_spearman_ties",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_pair_moments.mojo::test_native_metal_pair_moments_nested_consumers_checked_inputs_budget_cost_and_reuse",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -1781,6 +1806,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_string_concat.mojo",
                 "tests/execution_modes/test_backend_metal_rolling.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
+                "tests/execution_modes/test_backend_metal_pair_moments.mojo",
                 "tests/execution_modes/test_backend_metal_shift_fill.mojo",
                 "tests/execution_modes/test_backend_metal_cumulative_windows.mojo",
                 "tests/execution_modes/test_backends.mojo",

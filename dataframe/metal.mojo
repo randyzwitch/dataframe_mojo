@@ -34,6 +34,7 @@ from .accelerator.distinct_counts import (
     has_distinct_counts,
     lower_distinct_counts,
 )
+from .accelerator.paired_moments import has_spearman, lower_spearman
 from .accelerator.windows import (
     has_partition_aggregates,
     lower_partition_aggregates,
@@ -120,6 +121,8 @@ from .expr import (
     SUM,
     MEAN,
     VAR,
+    COV,
+    CORR,
     STD,
     MIN,
     MAX,
@@ -352,6 +355,7 @@ def _capabilities() -> RowCapabilities:
         temporal_fields=True,
         ranks=True,
         cumulative_windows=True,
+        paired_moments=True,
         moments=True,
         rolling_windows=True,
         shift_fill_windows=True,
@@ -496,6 +500,10 @@ def _op(op: Int) raises -> Int64:
         return 81
     if op == SUM:
         return 10
+    if op == COV:
+        return 161
+    if op == CORR:
+        return 160
     if op == VAR:
         return 87
     if op == STD:
@@ -1604,6 +1612,14 @@ struct MetalRuntime(AcceleratorBackend):
         var family = work[1].copy()
         if plan.reused_columns:
             family += ";metal-column-slots-v1"
+        var paired = False
+        for output in plan.outputs:
+            paired |= output.reduction == COV or output.reduction == CORR
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
+        if paired:
+            family += ";metal-paired-moments-v1"
         var moments = False
         for output in plan.outputs:
             moments |= output.reduction == VAR or output.reduction == STD
@@ -1919,6 +1935,20 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_spearman(query):
+            var executed = self._run(lower_spearman(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
         if has_aggregate_compositions(query):
             var executed = self._run(
                 lower_aggregate_compositions(query, exact_float32=True),
@@ -2076,6 +2106,10 @@ struct MetalRuntime(AcceleratorBackend):
             if has_partition_aggregates(query):
                 return "Metal resident partition aggregates; " + self.describe(
                     lower_partition_aggregates(query)
+                )
+            if has_spearman(query):
+                return "Metal resident Spearman ranks; " + self.describe(
+                    lower_spearman(query)
                 )
             if has_aggregate_compositions(query):
                 return "Metal resident aggregate expressions; " + self.describe(

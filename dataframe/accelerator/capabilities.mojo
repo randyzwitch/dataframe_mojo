@@ -5,6 +5,8 @@ from dataframe.expr import (
     COUNT,
     MEAN,
     VAR,
+    COV,
+    CORR,
     STD,
     LEN,
     MIN,
@@ -60,6 +62,7 @@ struct RowCapabilities(Copyable):
     var decimal_multiplicative: Bool
     var decimal_arithmetic: Bool
     var ranks: Bool
+    var paired_moments: Bool
     var moments: Bool
     var rolling_windows: Bool
     var shift_fill_windows: Bool
@@ -99,6 +102,7 @@ struct RowCapabilities(Copyable):
         temporal_fields: Bool = False,
         ranks: Bool = False,
         cumulative_windows: Bool = False,
+        paired_moments: Bool = False,
         moments: Bool = False,
         rolling_windows: Bool = False,
         shift_fill_windows: Bool = False,
@@ -142,6 +146,7 @@ struct RowCapabilities(Copyable):
         self.temporal_fields = temporal_fields
         self.ranks = ranks
         self.cumulative_windows = cumulative_windows
+        self.paired_moments = paired_moments
         self.moments = moments
         self.rolling_windows = rolling_windows
         self.shift_fill_windows = shift_fill_windows
@@ -214,8 +219,13 @@ struct RowCapabilities(Copyable):
             )
 
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
-        if op == VAR or op == STD:
-            if not self.moments:
+        if op == VAR or op == STD or op == COV or op == CORR:
+            if (op == COV or op == CORR) and not self.paired_moments:
+                self.reject(
+                    "reduction",
+                    "covariance and correlation require backend support",
+                )
+            if (op == VAR or op == STD) and not self.moments:
                 self.reject(
                     "reduction",
                     "variance and standard deviation require backend support",
