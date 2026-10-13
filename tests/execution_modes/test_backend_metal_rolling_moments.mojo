@@ -333,7 +333,9 @@ def test_native_metal_rolling_moments_large_offsets_partition_workers_and_nested
         _ = (
             small.lazy()
             .select(
-                (col("x").cast(DataType.INT64) + lit(1)).rolling_var(3, 1, 0)
+                (col("x").cast(DataType.INT64) + lit(Int64(1))).rolling_var(
+                    3, 1, 0
+                )
             )
             .collect(accelerator=runtime)
         )
