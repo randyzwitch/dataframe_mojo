@@ -777,13 +777,47 @@ struct _Crew(Movable):
     var stopping: Atomic[Int64]
     var postings: Int
     var threads: Int
+    # Threads are created by the first `run_jobs` that posts work (0 not
+    # yet, 1 being created, 2 created), so an operation with nothing to run
+    # in parallel creates none. Their ids sit at `ids`, room for `wanted`.
+    var spawned: Atomic[Int64]
+    var ids: Int
+    var wanted: Int
 
-    def __init__(out self, postings: Int):
+    def __init__(out self, postings: Int, ids: Int, wanted: Int):
         self.mutex = Array[UInt8, _SYNC_BYTES](fill=0)
         self.cond = Array[UInt8, _SYNC_BYTES](fill=0)
         self.stopping = Atomic[Int64](0)
         self.postings = postings
         self.threads = 0
+        self.spawned = Atomic[Int64](0)
+        self.ids = ids
+        self.wanted = wanted
+
+    def spawn(mut self, address: Int):
+        """Start the threads, once: the caller that wins the flag creates
+        one thread, which creates the rest and then works, so the caller
+        goes on to its jobs after a single thread creation rather than
+        all of them (creating seven took 205 us before any could help).
+        Another caller goes on, as its posting is served by whichever
+        threads are up and by itself."""
+        var none = Int64(0)
+        if not self.spawned.compare_exchange(none, Int64(1)):
+            return
+        if self.wanted <= 0:
+            self.spawned.store(2)
+            return
+        var entry: _Entry = _crew_spawner
+        var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
+        # Counted before it starts: the first thread counts those it
+        # creates, after this write.
+        self.threads = 1
+        var rc = external_call["pthread_create", Int32](
+            self.ids, 0, entry_address, address
+        )
+        if rc != 0:
+            self.threads = 0
+            self.spawned.store(2)
 
     def _mutex(self) -> Int:
         return Int(self.mutex.unsafe_ptr())
@@ -852,6 +886,25 @@ struct _Crew(Movable):
         return unjoined
 
 
+def _crew_spawner(address: Int) abi("C") -> Int:
+    """The crew's first thread: creates the others (their ids after its
+    own), marks the crew started, then works as any crew thread does."""
+    ref crew = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)[]
+    var entry: _Entry = _crew_worker
+    var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
+    for t in range(1, crew.wanted):
+        if crew.stopping.load() != 0:
+            break
+        var rc = external_call["pthread_create", Int32](
+            crew.ids + 8 * t, 0, entry_address, address
+        )
+        if rc != 0:
+            break
+        crew.threads += 1
+    crew.spawned.store(2)
+    return _crew_worker(address)
+
+
 def _crew_worker(address: Int) abi("C") -> Int:
     ref crew = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)[]
     while True:
@@ -908,11 +961,9 @@ struct Crew(Movable):
     joins every thread."""
 
     var address: Int
-    var ids: List[UInt64]
 
     def __init__(out self):
         self.address = 0
-        self.ids = List[UInt64]()
 
     @staticmethod
     def start() -> Crew:
@@ -922,28 +973,19 @@ struct Crew(Movable):
             return crew^
         var address = external_call["malloc", Int](size_of[_Crew]())
         var postings = external_call["calloc", Int](_POSTINGS, 16)
-        if address == 0 or postings == 0:
+        var ids = external_call["calloc", Int](max(helpers, 1), 8)
+        if address == 0 or postings == 0 or ids == 0:
             return crew^
         var pointer = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)
-        pointer.unsafe_write(_Crew(postings))
+        pointer.unsafe_write(_Crew(postings, ids, helpers))
         ref state = pointer[]
         _ = external_call["pthread_mutex_init", Int32](state._mutex(), 0)
         _ = external_call["pthread_cond_init", Int32](state._cond(), 0)
-        var entry: _Entry = _crew_worker
-        var entry_address = Pointer(to=entry).unsafe_bitcast[Int]()[]
-        var ids = List[UInt64](length=helpers, fill=0)
-        var started = 0
-        for t in range(helpers):
-            var rc = external_call["pthread_create", Int32](
-                Int(ids.unsafe_ptr()) + 8 * t, 0, entry_address, address
-            )
-            if rc != 0:
-                break
-            started += 1
-        state.threads = started
-        ids.resize(started, 0)
+        # No thread yet: the first `run_jobs` with work for helpers creates
+        # them (`_Crew.spawn`). A query that runs nothing in parallel pays
+        # no thread creation (a 21-row filter took 290 us, 266 of them
+        # starting and joining seven threads).
         crew.address = address
-        crew.ids = ids^
         var none = Int64(0)
         if not _current_crew().compare_exchange(none, Int64(address)):
             # Another operation started one first: stop ours.
@@ -963,12 +1005,16 @@ struct Crew(Movable):
         state.stopping.store(1)
         _ = external_call["pthread_cond_broadcast", Int32](state._cond())
         _ = external_call["pthread_mutex_unlock", Int32](state._mutex())
-        for t in range(len(self.ids)):
-            _ = external_call["pthread_join", Int32](self.ids[t], 0)
+        # The first thread may still be creating the others.
+        while state.spawned.load() == 1:
+            _ = external_call["sched_yield", Int32]()
+        var ids = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=state.ids)
+        for t in range(state.threads):
+            _ = external_call["pthread_join", Int32](ids[unsafe_offset=t], 0)
+        _ = external_call["free", NoneType](state.ids)
         _ = external_call["free", NoneType](state.postings)
         _ = external_call["free", NoneType](self.address)
         self.address = 0
-        self.ids = List[UInt64]()
 
 
 def _run_on_crew[
@@ -984,6 +1030,8 @@ def _run_on_crew[
     if helpers == 0:
         return False
     ref crew = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)[]
+    if crew.spawned.load() != 2:
+        crew.spawn(address)
     var claims = _Claims(
         Int(slots.unsafe_ptr()), size_of[_Slot[J]](), len(slots), entry
     )
