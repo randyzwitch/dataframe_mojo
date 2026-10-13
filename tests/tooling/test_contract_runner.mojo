@@ -24,6 +24,8 @@ from tests.tooling.contract_runner import (
     selected_modules,
     validate_policy,
     generate_driver,
+    generate_fatal_driver,
+    shell_quote,
 )
 
 
@@ -232,7 +234,7 @@ def _run_fixture(
 def test_compile_and_execution_failures_do_not_hide_later_areas() raises:
     assert_equal(String(DEFAULT_PACKAGING), "areas")
     for scenario in ["none", "compile", "execute"]:
-        var metadata = _run_fixture(_root(), scenario, False)
+        var metadata = _run_fixture(_root(), scenario, False, "areas")
         assert_equal(metadata.get("packaging").string(), "areas")
         var events = metadata.get("events").items()
         assert_equal(len(events), 3 if scenario == "compile" else 4)
@@ -264,7 +266,7 @@ def test_explicit_combined_packaging_keeps_selection_and_reports_shared_process_
 
 def test_isolated_failures_require_exact_exit_and_diagnostic_and_reject_xpass() raises:
     for scenario in ["process", "wrong-exit", "wrong-message", "repair"]:
-        var metadata = _run_fixture(_root(), scenario, True)
+        var metadata = _run_fixture(_root(), scenario, True, "areas")
         assert_equal(
             metadata.get("expected_failures").text,
             "1" if scenario == "process" else "0",
@@ -275,6 +277,228 @@ def test_isolated_failures_require_exact_exit_and_diagnostic_and_reject_xpass() 
             len(metadata.get("failed").items()),
             0 if scenario == "process" else 1,
         )
+
+
+def _fatal_entries() -> List[String]:
+    return [
+        "tests/public_contracts/test_crash.mojo::test_fatal",
+        "tests/storage_ownership/test_crash.mojo::test_fatal",
+    ]
+
+
+def _fatal_pair_compiler(root: String, scenario: String) raises -> String:
+    # The compiler fixture models processes, not Mojo dispatch semantics. The
+    # generated Mojo dispatcher is compiled and exercised separately below.
+    var path = root + "/fixture-compiler"
+    var entries = _fatal_entries()
+    var script = String(
+        '#!/bin/sh\nset -eu\nif [ "$1" = --version ]; then printf \'fixture compiler\\n\'; exit 0; fi\nsource=\noutput=\nwhile [ $# -gt 0 ]; do\n  case "$1" in\n    -o) output=$2; shift 2 ;;\n    *.mojo) source=$1; shift ;;\n    *) shift ;;\n  esac\ndone\nprintf \'%s\\n\' "$source" >> '
+    )
+    script += shell_quote(root + "/builds.log")
+    script += '\ncase "$source" in\n  */fatal/driver.mojo)\n'
+    if scenario == "compile":
+        script += "    exit 3\n"
+    script += '    cat > "$output" <<\'FATAL_CHILD\'\n#!/bin/sh\nset -eu\nprintf \'%s|%s\\n\' "$$" "${DATAFRAME_FATAL_CASE-}" >> '
+    script += shell_quote(root + "/children.log")
+    script += '\ncase "${DATAFRAME_FATAL_CASE-}" in\n  '
+    script += shell_quote(entries[0]) + ")\n    printf '%s\\n' "
+    script += shell_quote(
+        "storage fatal diagnostic" if scenario
+        == "wrong-message" else "public fatal diagnostic"
+    )
+    script += "\n    exit " + String(
+        133 if scenario == "wrong-exit" else 0 if scenario == "repair" else 132
+    )
+    script += "\n    ;;\n  " + shell_quote(entries[1])
+    script += ")\n    printf '%s\\n' 'storage fatal diagnostic'\n    exit 133\n    ;;\n  *) exit 1 ;;\nesac\nFATAL_CHILD\n    ;;\n  *) printf '#!/bin/sh\\nexit 0\\n' > \"$output\" ;;\nesac\nchmod +x \"$output\"\n"
+    write_text(path, script)
+    run_command(["chmod", "+x", path])
+    return path^
+
+
+def test_fatal_bundle_compiles_once_and_validates_each_fresh_process() raises:
+    for scenario in [
+        "process",
+        "wrong-exit",
+        "wrong-message",
+        "repair",
+        "compile",
+    ]:
+        var root = _root()
+        var policy = _policy()
+        var entries = _fatal_entries()
+        for i in range(len(entries)):
+            var module = (
+                "tests/"
+                + String("public_contracts" if i == 0 else "storage_ownership")
+                + "/test_crash.mojo"
+            )
+            write_text(
+                root + "/" + module, "def test_fatal() raises:\n    pass\n"
+            )
+            policy.groups[i].modules.append(module^)
+            policy.failures.append(
+                ExpectedFailure(
+                    entries[i].copy(),
+                    "verified fixture",
+                    String("public" if i == 0 else "storage")
+                    + " fatal diagnostic",
+                    132 + i,
+                )
+            )
+        var failed = False
+        try:
+            _ = execute_suite(
+                RunnerOptions(
+                    root.copy(),
+                    ["public", "storage"],
+                    List[String](),
+                    "combined",
+                    root + "/output",
+                    _fatal_pair_compiler(root, scenario),
+                ),
+                policy,
+            )
+        except error:
+            if String(error).find("Contract suite failure; provenance:") < 0:
+                raise error
+            failed = True
+        assert_equal(failed, scenario != "process")
+        var listing = capture(
+            ["find", root + "/output", "-name", "run.metadata"]
+        )
+        assert_equal(listing[0], 0)
+        var metadata = JsonValue(read_text(String(listing[1].strip())))
+        var builds = read_text(root + "/builds.log").strip().split("\n")
+        assert_equal(
+            len(builds), 2, "One ordinary build and one shared fatal build"
+        )
+        assert_true(String(builds[1]).endswith("/fatal/driver.mojo"))
+        assert_equal(len(metadata.get("process_cases").items()), 2)
+        var events = metadata.get("events").items()
+        assert_equal(len(events), 3 if scenario == "compile" else 5)
+        assert_equal(events[2].get("label").string(), "fatal-bundle")
+        assert_equal(events[2].get("phase").string(), "compile")
+        assert_equal(
+            len(metadata.get("failed").items()),
+            0 if scenario == "process" else 1,
+        )
+        assert_equal(
+            metadata.get("expected_failures").text,
+            "2" if scenario
+            == "process" else "0" if scenario
+            == "compile" else "1",
+        )
+        if scenario == "compile":
+            assert_equal(
+                metadata.get("failed").items()[0].string(),
+                "fatal-bundle:compile",
+            )
+            assert_equal(capture(["test", "-e", root + "/children.log"])[0], 1)
+            continue
+        if scenario != "process":
+            assert_equal(
+                metadata.get("failed").items()[0].string(),
+                entries[0] + ":execute",
+            )
+        var children = read_text(root + "/children.log").strip().split("\n")
+        assert_equal(len(children), 2)
+        var first = String(children[0]).split("|")
+        var second = String(children[1]).split("|")
+        assert_true(
+            String(first[0]) != String(second[0]),
+            "Each case needs a fresh process",
+        )
+        assert_equal(String(first[1]), entries[0])
+        assert_equal(String(second[1]), entries[1])
+        for i in range(2):
+            assert_equal(events[3 + i].get("label").string(), entries[i])
+            assert_equal(events[3 + i].get("phase").string(), "execute")
+            assert_true(
+                events[3 + i]
+                .get("log")
+                .string()
+                .endswith("/isolated-" + String(i) + "/execute.log")
+            )
+
+
+def test_generated_fatal_dispatch_selects_full_ids_and_isolates_fixture_state() raises:
+    var root = _root()
+    var entries = _fatal_entries()
+    var folder = root + "/dispatch"
+    var areas: List[String] = ["public", "storage"]
+    for i in range(2):
+        var module = (
+            "tests/"
+            + String("public_contracts" if i == 0 else "storage_ownership")
+            + "/test_crash.mojo"
+        )
+        var fixture = folder + "/case-" + String(i) + "/" + areas[i]
+        var source = String(
+            'from std.testing import assert_equal, assert_false\nfrom std.os import getenv\nfrom std.os.path import exists\nfrom std.ffi import external_call\n\ndef test_fatal() raises:\n    assert_equal(getenv("DATAFRAME_THREADS"), "1")\n    var fixture = getenv("COVERAGE_TEST_TMP")\n    assert_equal(fixture, '
+        )
+        source += (
+            '"'
+            + fixture
+            + '")\n    assert_false(exists(fixture + "/sentinel"))\n    with open(fixture + "/sentinel", "w") as file:\n        file.write("owned by this case")\n    print("CASE_'
+            + String(i)
+            + '")\n    print("PID", external_call["getpid", Int32]())\n'
+        )
+        write_text(root + "/" + module, source)
+    run_command(["mkdir", "-p", folder])
+    write_text(
+        folder + "/driver.mojo", generate_fatal_driver(areas, entries, folder)
+    )
+    run_command(
+        [
+            "mojo",
+            "build",
+            "-I",
+            root.copy(),
+            folder + "/driver.mojo",
+            "-o",
+            folder + "/suite",
+        ]
+    )
+    var pids = List[String]()
+    for i in range(2):
+        var result = capture(
+            [
+                "env",
+                "DATAFRAME_THREADS=9",
+                "COVERAGE_TEST_TMP=/invalid/parent/fixture",
+                "DATAFRAME_FATAL_CASE=" + entries[i],
+                folder + "/suite",
+            ]
+        )
+        assert_equal(result[0], 0, result[1])
+        assert_true(result[1].find("CASE_" + String(i)) >= 0)
+        assert_true(result[1].find("CASE_" + String(1 - i)) < 0)
+        var pid_line = String(result[1].split("PID ")[1]).split("\n")
+        pids.append(String(pid_line[0].strip()))
+    assert_true(pids[0] != pids[1])
+    # Both files must survive independently despite having the same basename.
+    for i in range(2):
+        assert_equal(
+            read_text(
+                folder + "/case-" + String(i) + "/" + areas[i] + "/sentinel"
+            ),
+            "owned by this case",
+        )
+    var unknown = capture(
+        ["env", "DATAFRAME_FATAL_CASE=test_fatal", folder + "/suite"]
+    )
+    var missing = capture(
+        ["env", "-u", "DATAFRAME_FATAL_CASE", folder + "/suite"]
+    )
+    for result in [unknown, missing]:
+        assert_equal(
+            result[0],
+            1,
+            "Invalid selectors are ordinary errors, not native crashes",
+        )
+        assert_true(result[1].find("Unknown fatal case selector:") >= 0)
+        assert_true(result[1].find("CASE_") < 0)
 
 
 def test_generated_expected_failure_wrappers_match_only_the_named_diagnostic() raises:
@@ -396,6 +620,12 @@ def main() raises:
     ]()
     suite.test[
         test_isolated_failures_require_exact_exit_and_diagnostic_and_reject_xpass
+    ]()
+    suite.test[
+        test_fatal_bundle_compiles_once_and_validates_each_fresh_process
+    ]()
+    suite.test[
+        test_generated_fatal_dispatch_selects_full_ids_and_isolates_fixture_state
     ]()
     suite.test[
         test_generated_expected_failure_wrappers_match_only_the_named_diagnostic
