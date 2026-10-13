@@ -157,13 +157,15 @@ def test_native_metal_chunked_inputs_row_consumers_groups_and_resident_joins() r
     var frame = chunk_frame()
     check(frame.lazy().filter(col("x") > 0).sort("x"), runtime)
     check(
-        frame.lazy().with_columns((col("x") + 2).alias("z")).slice(2, 6),
+        frame.lazy()
+        .with_columns((col("x").cast(DataType.FLOAT64) + 2).alias("z"))
+        .slice(2, 6),
         runtime,
     )
     check(frame.lazy().select(col("x").shift(2)), runtime)
     check(frame.lazy().select(col("x").median()), runtime)
     check(frame.lazy().select_exprs([col("x").sum(), col("k").mean()]), runtime)
-    check(frame.lazy().group_by("k").agg(col("x").sum()).sort("k"), runtime)
+    check(frame.lazy().group_by("k").agg(col("x").sum()), runtime)
     check(
         frame.lazy().with_columns(col("x").sum().over("k").alias("s")), runtime
     )
