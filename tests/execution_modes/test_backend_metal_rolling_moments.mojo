@@ -272,7 +272,7 @@ def test_native_metal_rolling_moments_nonfinite_recovery_unsigned_and_decimal_in
                 ),
                 runtime,
             )
-    var chunks = frame.slice(0, 5).vstack(frame.slice(5, 7))
+    var chunks = frame.slice(0, 5).vstack(frame.slice(5, 7)).rechunk()
     check(chunks.lazy().select_exprs(expressions(3, 1, 0)), runtime)
 
 
