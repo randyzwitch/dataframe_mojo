@@ -26,9 +26,12 @@ def days_from_civil(year: Int64, month: Int64, day: Int64) -> Int64:
 
 def civil_from_days(days: Int64) -> Tuple[Int64, Int64, Int64]:
     """(year, month, day) for days since 1970-01-01."""
-    var z = days + 719468
-    var era = floor_div(z, 146097)
-    var doe = z - era * 146097
+    # Decompose before aligning epochs: days + 719468 can exceed Int64,
+    # and multiplying a negative floor quotient back can underflow too.
+    var era = floor_div(days, 146097)
+    var shifted_remainder = floor_mod(days, 146097) + 719468
+    era += floor_div(shifted_remainder, 146097)
+    var doe = floor_mod(shifted_remainder, 146097)
     var yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
     var doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
     var mp = (5 * doy + 2) // 153

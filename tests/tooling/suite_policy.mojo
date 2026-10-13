@@ -60,14 +60,6 @@ def mojo_variant_abort_exit_code() -> Int:
 def production_policy() -> SuitePolicy:
     var policy = empty_policy()
     policy.capabilities = ["metal"]
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_fields",
-            "Native Date calendar extraction wraps the Int64 epoch shift, matching the separately recorded CPU defect. An independent Int128 Gregorian model requires positive year25252734927766554; actual Metal CI returns -25252734927766555. Later calendar fields remain unvalidated until this defect is fixed.",
-            "native Date Gregorian year must remain positive across epoch shift; got -25252734927766555",
-            0,
-        )
-    )
     # exit_code zero means an ordinary exception; nonzero means an isolated process.
     policy.failures.append(
         ExpectedFailure(
@@ -471,22 +463,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/public_contracts/test_temporal_extremes.mojo::test_maximum_date_weekday_does_not_wrap_the_epoch_alignment_shift",
-            "Date Int64.MAX is an exact multiple of7 days; epochThursday requires weekday4. Int64 epoch shift wraps and returns2. Independent Int128 Gregorian model and literal arithmetic verify the expected value.",
-            "maximum Date weekday must be Thursday(4); got 2",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_temporal_extremes.mojo::test_extreme_date_calendar_fields_do_not_wrap_the_epoch_conversion",
-            "Int64.MAX−719467 Date crosses the civil epoch shift and produces a negative year instead of independently modeled positive25252734927766554. First failing year isolated; later fields await repair.",
-            "extreme Date calendar year must remain positive; got -25252734927766555",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_variance_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
             "aggregate.mojo:1221:39: get: wrong variant type",
@@ -626,6 +602,12 @@ def production_policy() -> SuitePolicy:
     policy.requirements.append(
         CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_temporal_all_units_and_extreme_ticks_match_independent_calendar",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_temporal.mojo::test_native_metal_date_fields_match_independent_full_storage_domain",
             "metal",
         )
     )

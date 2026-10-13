@@ -653,6 +653,12 @@ that unlisted query combinations are already equivalent.
 | Plans and sources | As-of joins, file-backed scans, and chunked in-memory inputs without explicit rechunking. |
 | Composition | Remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
 
+Date year, month, day, weekday, and ordinal fields preserve proleptic Gregorian
+meaning across the complete Int64 day domain. CPU and Metal reduce days into
+400-year cycle quotients and remainders before applying epoch alignment,
+avoiding signed overflow. Boundary and deterministic full-width values are
+checked against an independent Int128 calendar model.
+
 Native validation and the backend contract suite cover each implemented feature.
 They must be extended as these gaps close; passing the current suite alone does
 not establish CPU parity. Fixed-size rolling variance/std now have an independent

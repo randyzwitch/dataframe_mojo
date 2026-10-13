@@ -2248,9 +2248,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
             } else if (op == DFM_DT_DATE)
               text += z + "=days;";
             else if (op == DFM_DT_WEEKDAY) {
-              // Explicit unsigned wrapping matches the CPU calendar's Int64
-              // addition even at the extremes of stored date values.
-              text += "long wd=as_type<long>(as_type<ulong>(days)+3UL)%7L;if(wd<0)wd+=7L;" + z + "=wd+1L;";
+              // Align the reduced remainder instead of overflowing days + 3.
+              text += "long wd=days%7L;if(wd<0)wd+=7L;wd=(wd+3L)%7L;" + z + "=wd+1L;";
             } else if ((op >= DFM_DT_HOUR && op <= DFM_DT_NANOSECOND) || op == DFM_DT_TIME) {
               text += "long within=" + a + "%" + perDay + ";if(within<0)within+=" + perDay + ";long seconds=within/" + second + ";";
               if (op == DFM_DT_HOUR) text += z + "=seconds/3600L;";
@@ -2261,8 +2260,10 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
             } else if (op == DFM_DT_ORDINAL_DAY && c[3] == 4) {
               text += z + "=days+1L;";
             } else {
-              text += "long shifted=as_type<long>(as_type<ulong>(days)+719468UL);long era=shifted/146097L;if(shifted%146097L<0)--era;"
-                      "long doe=as_type<long>(as_type<ulong>(shifted)-as_type<ulong>(era)*146097UL);"
+              // Floor quotient and remainder stay in range at both Int64
+              // endpoints; the civil epoch shift then touches only a remainder.
+              text += "long era=days/146097L;long rem=days%146097L;if(rem<0){--era;rem+=146097L;}"
+                      "rem+=719468L;era+=rem/146097L;long doe=rem%146097L;"
                       "long yoe=(doe-doe/1460L+doe/36524L-doe/146096L)/365L;"
                       "long doy=doe-(365L*yoe+yoe/4L-yoe/100L);long mp=(5L*doy+2L)/153L;"
                       "long day=doy-(153L*mp+2L)/5L+1L;long month=mp<10L?mp+3L:mp-9L;long year=yoe+era*400L+(month<=2L?1L:0L);";
