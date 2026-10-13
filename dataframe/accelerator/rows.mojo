@@ -150,6 +150,7 @@ comptime ROW_CALENDAR_TRUNCATE = 1015
 comptime ROW_CALENDAR_OFFSET = 1016
 comptime ROW_DURATION_KEY = 1017
 comptime ROW_DURATION_BOUNDS = 1018
+comptime ROW_DURATION_CALENDAR = 1019
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -1473,6 +1474,8 @@ def lower_rows(
                 next_slot += 1
                 var axis_slot = -1
                 var period_ticks = Int64(0)
+                var period_months = Int64(0)
+                var period_unit = Int64(0)
                 var closed = Int64(0)
                 if coordinate or duration:
                     var axis_expr = subtree(ranked, rank_node.right)
@@ -1499,16 +1502,26 @@ def lower_rows(
                             )
                             // axis_type.per_second()
                         )
-                        if (
-                            interval[0] != 0
-                            or interval[1] <= 0
-                            or interval[1] % per_tick != 0
-                        ):
+                        if interval[1] % per_tick != 0:
                             capabilities.reject(
                                 "temporal",
                                 "duration rolling requires a fixed positive interval aligned to the storage unit",
                             )
                         period_ticks = interval[1] // per_tick
+                        period_months = interval[0]
+                        period_unit = Int64(
+                            0 if axis_type.is_date() else 1 if axis_type.unit()
+                            == "ms" else 2 if axis_type.unit()
+                            == "us" else 3
+                        )
+                        if (
+                            period_months
+                            and not capabilities.calendar_duration_rolling
+                        ):
+                            capabilities.reject(
+                                "temporal",
+                                "calendar duration rolling requires backend support",
+                            )
                     var axis_proven = List[Bool](
                         length=len(axis.expr._nodes), fill=False
                     )
@@ -1561,6 +1574,16 @@ def lower_rows(
                         )
                     )
                     next_slot += 1
+                if (
+                    1
+                    + Int(duration)
+                    + Int(period_months != 0)
+                    + len(partitions)
+                    > capabilities.max_nodes
+                ):
+                    capabilities.reject(
+                        "plan", "window metadata exceeds backend node limits"
+                    )
                 var rank_start = len(literals)
                 # Match the CPU Float64-to-Int conversion for min_samples.
                 # A rounded positive value may wrap negative at Int64.MAX;
@@ -1631,6 +1654,17 @@ def lower_rows(
                     )
                     literals.append(0)
                     node_dtypes.append(slot_dtypes[axis_slot])
+                    if period_months:
+                        code.extend(
+                            [
+                                Int64(ROW_DURATION_CALENDAR),
+                                period_months,
+                                period_unit,
+                                0,
+                            ]
+                        )
+                        literals.append(0)
+                        node_dtypes.append(DataType.INT64)
                 for name in partitions:
                     var key = -1
                     for c in range(len(schema)):
@@ -1653,7 +1687,10 @@ def lower_rows(
                 steps.append(
                     RowStep(
                         rank_start,
-                        1 + Int(duration) + len(partitions),
+                        1
+                        + Int(duration)
+                        + Int(period_months != 0)
+                        + len(partitions),
                         next_slot,
                         False,
                         0,

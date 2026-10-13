@@ -240,8 +240,14 @@ std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i)
           "if(v[at]&&f64_abs(x[at])<0x7ff0000000000000UL){origin=x[at];break;}}"
           "RollingVarianceState state={0UL,0UL,0UL,0UL};uint previousLower=position,previousUpper=position;";
   text+="for(uint j=position;j<end;++j){uint own=order[j];long time=as_type<long>(x["+axis+"+own]);"
-        "if(time<(-9223372036854775807L-1L)+period){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}"
-        "long startTime=time-period;lo=position;hi=end;while(lo<hi){uint mid=(lo+hi)/2;long t=as_type<long>(x["+axis+"+order[mid]]);"
+        "long startTime=0;";
+  if(durationHeaders(r,step)==3){
+    auto calendar=h+8;
+    text+=calendarOffsetSource("time","startTime",-calendar[1],calendar[2],"-period",0xB0000002U);
+  }else{
+    text+="if(time<(-9223372036854775807L-1L)+period){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}startTime=time-period;";
+  }
+  text+="lo=position;hi=end;while(lo<hi){uint mid=lo+(hi-lo)/2;long t=as_type<long>(x["+axis+"+order[mid]]);"
         "if(t<startTime"+std::string(bounds[2]&1?"":"||t==startTime")+")lo=mid+1;else hi=mid;}uint start=lo;"
         "lo=position;hi=end;while(lo<hi){uint mid=(lo+hi)/2;long t=as_type<long>(x["+axis+"+order[mid]]);"
         "if(t<time"+std::string(bounds[2]&2?"||t==time":"")+")lo=mid+1;else hi=mid;}uint stop=max(start,lo);"

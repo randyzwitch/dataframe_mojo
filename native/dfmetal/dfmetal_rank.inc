@@ -18,7 +18,7 @@ std::string partitionSource(const DFMRequest &r, const Layout &layout, int64_t i
   };
   std::string text = "bool window_partition" + name +
       "(uint a,uint b,device const T *x,device const uchar *v,constant uint4 &meta){";
-  for (int64_t j = r.code[4 * step.start] == DFM_DURATION_KEY ? 2 : 1; j < step.nodes; ++j)
+  for (int64_t j = durationHeaders(r,step); j < step.nodes; ++j)
     text += equal(r.code[4 * (step.start + j) + 1]);
   text += "return true;}\n";
   return text;

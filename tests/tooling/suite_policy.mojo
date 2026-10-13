@@ -1333,6 +1333,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_calendar_rolling.mojo::test_native_metal_calendar_duration_leap_clamps_closed_sides_numeric_decimal_layouts_and_partitions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_calendar_rolling.mojo::test_native_metal_calendar_duration_date_extremes_datetime_overflow_and_index_validation",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_calendar_rolling.mojo::test_native_metal_calendar_duration_resident_axes_consumers_profiles_and_exact_budgets",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_duration_decimals.mojo::test_native_metal_duration_decimals_all_widths_scales_signs_layouts_partitions_and_boundaries",
             "metal",
         )
@@ -2088,6 +2106,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_floating_power.mojo",
                 "tests/execution_modes/test_backend_metal_duration_rolling.mojo",
                 "tests/execution_modes/test_backend_metal_duration_decimals.mojo",
+                "tests/execution_modes/test_backend_metal_calendar_rolling.mojo",
                 "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",

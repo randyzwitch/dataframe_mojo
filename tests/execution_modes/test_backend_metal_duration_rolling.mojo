@@ -122,7 +122,7 @@ def test_duration_rolling_capability_intervals_private_indices_types_and_scopes(
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
-    for every in ["1mo", "1ns"]:
+    for every in ["1ns"]:
         with assert_raises(contains="fixed positive interval aligned"):
             _ = lower_rows(
                 source.lazy().select(col("x").rolling_sum_by("t", every)),
