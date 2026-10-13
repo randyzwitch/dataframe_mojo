@@ -58,6 +58,8 @@ from .accelerator.rows import (
     ROW_SORT_KEY,
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
+    ROW_QUANTILE_LINEAR,
+    ROW_QUANTILE_MIDPOINT,
 )
 from .accelerator.joins import (
     JoinDag,
@@ -362,6 +364,7 @@ def _capabilities() -> RowCapabilities:
         cumulative_windows=True,
         paired_moments=True,
         moments=True,
+        quantiles=True,
         higher_moments=True,
         rolling_windows=True,
         rolling_moments=True,
@@ -596,6 +599,8 @@ def _input_series(column: Series) raises -> List[Int64]:
 
 
 def _reduction_op(op: Int, source_dtype: DataType) raises -> Int64:
+    if ROW_QUANTILE_LINEAR <= op <= ROW_QUANTILE_MIDPOINT:
+        return Int64(221 + op - ROW_QUANTILE_LINEAR)
     if source_dtype.is_decimal() and source_dtype.decimal_width() == 128:
         if op == SUM:
             return 215
@@ -1646,6 +1651,20 @@ struct MetalRuntime(AcceleratorBackend):
             totals |= plan.code[i] == DT_TOTAL
         if totals:
             family += ";metal-duration-totals-v1"
+        var quantiles = False
+        for output in plan.outputs:
+            quantiles |= (
+                ROW_QUANTILE_LINEAR <= output.reduction <= ROW_QUANTILE_MIDPOINT
+            )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                quantiles |= (
+                    ROW_QUANTILE_LINEAR
+                    <= Int(plan.code[i + 3])
+                    <= ROW_QUANTILE_MIDPOINT
+                )
+        if quantiles:
+            family += ";metal-quantiles-v1"
         var higher = False
         for output in plan.outputs:
             higher |= output.reduction == SKEW or output.reduction == KURTOSIS

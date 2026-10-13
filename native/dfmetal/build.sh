@@ -19,7 +19,7 @@ import sys
 
 root = Path(sys.argv[1])
 identity = hashlib.sha256()
-for name in ["build.sh", "dfmetal.h", "dfmetal.mm", "dfmetal.sym", "dfmetal_join.inc", "dfmetal_order.inc", "dfmetal_rank.inc", "dfmetal_window.inc", "dfmetal_float64.h", "dfmetal_decimal.h", "dfmetal_moments.h"]:
+for name in ["build.sh", "dfmetal.h", "dfmetal.mm", "dfmetal.sym", "dfmetal_join.inc", "dfmetal_order.inc", "dfmetal_rank.inc", "dfmetal_window.inc", "dfmetal_float64.h", "dfmetal_decimal.h", "dfmetal_moments.h", "dfmetal_quantiles.h"]:
     identity.update(name.encode())
     identity.update((root / name).read_bytes())
 for command in [["xcrun", "clang++", "--version"],

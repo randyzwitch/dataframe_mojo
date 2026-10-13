@@ -20,6 +20,8 @@ from .rows import (
     ROW_GROUP_OUTPUT,
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
+    ROW_QUANTILE_LINEAR,
+    ROW_QUANTILE_MIDPOINT,
 )
 from .cost import COST_FEATURE_COUNT, cost_feature_names
 
@@ -77,6 +79,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             cumulative_windows=True,
             paired_moments=True,
             moments=True,
+            quantiles=True,
             higher_moments=True,
             rolling_windows=True,
             rolling_moments=True,
@@ -114,6 +117,20 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
         totals |= plan.code[i] == DT_TOTAL
     if totals:
         family += ";duration-totals-v1"
+    var quantiles = False
+    for output in plan.outputs:
+        quantiles |= (
+            ROW_QUANTILE_LINEAR <= output.reduction <= ROW_QUANTILE_MIDPOINT
+        )
+    for i in range(0, len(plan.code), 4):
+        if plan.code[i] == ROW_GROUP_OUTPUT:
+            quantiles |= (
+                ROW_QUANTILE_LINEAR
+                <= Int(plan.code[i + 3])
+                <= ROW_QUANTILE_MIDPOINT
+            )
+    if quantiles:
+        family += ";quantiles-v1"
     var higher = False
     for output in plan.outputs:
         higher |= output.reduction == SKEW or output.reduction == KURTOSIS

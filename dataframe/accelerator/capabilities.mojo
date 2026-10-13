@@ -7,6 +7,8 @@ from dataframe.expr import (
     VAR,
     SKEW,
     KURTOSIS,
+    MEDIAN,
+    QUANTILE,
     COV,
     CORR,
     STD,
@@ -67,6 +69,7 @@ struct RowCapabilities(Copyable):
     var ranks: Bool
     var paired_moments: Bool
     var moments: Bool
+    var quantiles: Bool
     var higher_moments: Bool
     var rolling_windows: Bool
     var rolling_moments: Bool
@@ -112,6 +115,7 @@ struct RowCapabilities(Copyable):
         cumulative_windows: Bool = False,
         paired_moments: Bool = False,
         moments: Bool = False,
+        quantiles: Bool = False,
         higher_moments: Bool = False,
         rolling_windows: Bool = False,
         rolling_moments: Bool = False,
@@ -161,6 +165,7 @@ struct RowCapabilities(Copyable):
         self.cumulative_windows = cumulative_windows
         self.paired_moments = paired_moments
         self.moments = moments
+        self.quantiles = quantiles
         self.higher_moments = higher_moments
         self.rolling_windows = rolling_windows
         self.rolling_moments = rolling_moments
@@ -236,6 +241,22 @@ struct RowCapabilities(Copyable):
             )
 
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
+        if op == MEDIAN or op == QUANTILE:
+            if not self.quantiles:
+                self.reject("reduction", "quantiles require backend support")
+            if dtype.is_decimal():
+                self.reject(
+                    "logical",
+                    "decimal quantiles require an explicit Float64 cast",
+                )
+            if not dtype.is_numeric():
+                self.reject(
+                    "dtype", "quantiles require primitive numeric input"
+                )
+            if not self.float64 and not self.float64_emulated:
+                self.reject("precision", "quantiles require Float64 arithmetic")
+            self.require_dtype(dtype)
+            return
         if (
             op == VAR
             or op == STD

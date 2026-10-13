@@ -2,6 +2,7 @@
 #include "dfmetal_float64.h"
 #include "dfmetal_decimal.h"
 #include "dfmetal_moments.h"
+#include "dfmetal_quantiles.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
@@ -86,7 +87,10 @@ int64_t sumType(int64_t t) {
   if (t == DFM_FLOAT32 || t == DFM_FLOAT64_STORAGE) return t;
   return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
+bool quantileReduction(int64_t op) { return op >= DFM_QUANTILE_LINEAR && op <= DFM_QUANTILE_MIDPOINT; }
+bool validQuantileMetadata(uint64_t bits) { return bits <= 0x3ff0000000000000ULL; }
 int64_t reductionType(int64_t type, int64_t op) {
+  if (quantileReduction(op)) return type == DFM_FLOAT64_STORAGE ? DFM_FLOAT64_STORAGE : -1;
   if (op == DFM_VAR || op == DFM_STD || op == DFM_COV || op == DFM_CORR || op == DFM_SKEW || op == DFM_KURTOSIS)
     return type == DFM_FLOAT64_STORAGE ? DFM_FLOAT64_STORAGE : -1;
   if (op == DFM_WIDE_INTEGER_SUM || op == DFM_WIDE_INTEGER_MEAN)
@@ -549,6 +553,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
           if (decimal128Reduction(c[3]) &&
               !validDecimalMetadata(int64_t(r.literals[v.start + j])))
             fail("Invalid Metal Decimal128 reduction metadata");
+          if (quantileReduction(c[3]) && !validQuantileMetadata(r.literals[v.start + j]))
+            fail("Invalid Metal quantile metadata");
           if (momentReduction(c[3]) && !validMomentMetadata(int64_t(r.literals[v.start + j]), c[3]))
             fail("Invalid Metal moment metadata");
           if (pairMomentReduction(c[3])) {
@@ -859,6 +865,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if (decimal128Reduction(v.reduction) &&
           !validDecimalMetadata(v.min_count))
         fail("Invalid Metal Decimal128 reduction metadata");
+      if (quantileReduction(v.reduction) && !validQuantileMetadata(uint64_t(v.min_count)))
+        fail("Invalid Metal quantile metadata");
       if (momentReduction(v.reduction) && !validMomentMetadata(v.min_count, v.reduction))
         fail("Invalid Metal moment metadata");
       if (pairMomentReduction(v.reduction)) {
@@ -1438,6 +1446,11 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
   bool valid=o.kind==160||state.count>0;
   y[to]=valid?covariance_finish(state,moment_ddof(o.minimum),o.kind==160):0UL;w[to]=uchar(valid);return;
  }
+ if(QUANTILE_REDUCTIONS&&o.kind>=221&&o.kind<=225){
+  if(lane)return;bool valid=false;
+  ulong value=quantile_reduce(x,v,ulong(o.slot)*meta.z,)MSL" + index + R"MSL(,begin,end,ulong(o.minimum),o.kind,valid);
+  y[to]=valid?value:0UL;w[to]=uchar(valid);return;
+ }
  if(HIGHER_MOMENT_REDUCTIONS&&(o.kind==98||o.kind==99)){
   if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
         std::string(windowFloating ? "true" : "false") + R"MSL();
@@ -1517,17 +1530,20 @@ std::string source(const DFMRequest &r) {
   // Keep the moment state machine out of unrelated reduction pipelines.
   // Out.kind is a runtime parameter, so the shader otherwise retains this
   // expensive binary64 branch even when the request cannot use it.
-  bool moments = false, paired = false, higher = false;
+  bool moments = false, paired = false, higher = false, quantiles = false;
   for (int64_t i = 0; i < r.output_count; ++i) {
     moments |= r.outputs[i].reduction == DFM_VAR || r.outputs[i].reduction == DFM_STD;
     paired |= pairMomentReduction(r.outputs[i].reduction);
     higher |= higherMomentReduction(r.outputs[i].reduction);
+    quantiles |= quantileReduction(r.outputs[i].reduction);
   }
   for (int64_t i = 0; i < r.code_words; i += 4) {
     moments |= r.code[i] == DFM_GROUP_OUTPUT && (r.code[i+3] == DFM_VAR || r.code[i+3] == DFM_STD);
     paired |= r.code[i] == DFM_GROUP_OUTPUT && pairMomentReduction(r.code[i + 3]);
     higher |= r.code[i] == DFM_GROUP_OUTPUT && higherMomentReduction(r.code[i + 3]);
+    quantiles |= r.code[i] == DFM_GROUP_OUTPUT && quantileReduction(r.code[i + 3]);
   }
+  text += "constant bool QUANTILE_REDUCTIONS=" + std::string(quantiles ? "true" : "false") + ";\n";
   text += "constant bool PAIRED_MOMENT_REDUCTIONS=" +
           std::string(paired ? "true" : "false") + ";\n";
   text += "constant bool HIGHER_MOMENT_REDUCTIONS=" +
@@ -1557,6 +1573,7 @@ std::string source(const DFMRequest &r) {
   text += dfm_float64_source;
   text += dfm_decimal_source;
   text += dfm_moments_source;
+  text += dfm_quantiles_source;
   text += R"MSL(
 ulong moment_ddof(long metadata){return ulong(metadata)&0x7fffffffUL;}
 ulong moment_right(long metadata){return(ulong(metadata)>>31)&65535UL;}
@@ -1775,6 +1792,12 @@ kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[bu
   }
   bool valid=o.kind==160||state.count>0;
   partials[group.y*groups]=make_partial(valid?long(covariance_finish(state,moment_ddof(o.minimum),o.kind==160)):0L,0L,long(valid));return;
+ }
+ if(QUANTILE_REDUCTIONS&&o.kind>=221&&o.kind<=225){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  bool valid=false;ulong value=quantile_reduce(x,v,ulong(o.slot)*meta.z,~0UL,0U,meta.x,ulong(o.minimum),o.kind,valid);
+  partials[group.y*groups]=make_partial(valid?long(value):0L,0L,long(valid));return;
  }
  if(HIGHER_MOMENT_REDUCTIONS&&(o.kind==98||o.kind==99)){
   if(lane)return;

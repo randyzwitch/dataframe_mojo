@@ -1311,6 +1311,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_quantiles.mojo::test_native_metal_quantiles_numeric_widths_nulls_groups_and_partitions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_quantiles.mojo::test_native_metal_quantiles_nonfinite_unsigned_extremes_decimal_casts_and_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_quantiles.mojo::test_native_metal_quantiles_profiles_cost_budget_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_higher_moments.mojo::test_native_metal_higher_moments_numeric_widths_flags_nulls_groups_and_partitions",
             "metal",
         )
@@ -1891,6 +1909,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_empty_inputs.mojo",
                 "tests/execution_modes/test_backend_metal_duration_totals.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
+                "tests/execution_modes/test_backend_metal_quantiles.mojo",
                 "tests/execution_modes/test_backend_metal_higher_moments.mojo",
                 "tests/execution_modes/test_backend_metal_pair_moments.mojo",
                 "tests/execution_modes/test_backend_metal_shift_fill.mojo",

@@ -1141,6 +1141,36 @@ def check_empty_inputs_preflight_without_device():
 
 
 check_empty_inputs_preflight_without_device()
+def check_quantiles_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    slots = (I * 1)(11)
+    outputs = (Output * 1)(Output(None, None, 11, 0, 221, 0))
+    request = Request(2, 513, 0, 1, 1, 0, 0, 0, 0, 1, -1, 1, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    for operation in range(221, 226):
+        outputs[0].reduction = operation
+        for bits in (0, 1, 0x3fbf9add3746f65e, 0x3fe0000000000000, 0x3ff0000000000000):
+            outputs[0].min_count = bits
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for bits in (0x3ff0000000000001, 0x7ff0000000000000, 0x7ff8000000000000):
+            outputs[0].min_count = bits
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"quantile metadata" in C.string_at(err)
+            lib.dfm_free(err)
+        outputs[0].min_count = 0
+        for dtype in (1, 3, 10):
+            slots[0] = inputs[0].dtype = dtype
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            lib.dfm_free(err)
+        slots[0] = inputs[0].dtype = 11
+
+
+check_quantiles_preflight_without_device()
+
+
 def check_duration_totals_preflight_without_device():
     inputs = (Input * 1)(Input(None, None, 3, 0, 0))
     code = (I * 8)(0, -1, -1, 0, 143, 0, 1, 1)
