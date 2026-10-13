@@ -1105,11 +1105,11 @@ def checked_boundary_preflight() raises:
             .head(0)
             .collect(accelerator=unavailable)
         )
-    var float_source = DataFrame([Series("f", Column[Float32]([1.5]))])
-    with assert_raises(contains="Float64 intermediate"):
+    var float_source = DataFrame([Series("f", Column[Float64]([1.5]))])
+    with assert_raises(contains="Float64 requires CPU"):
         _ = (
             float_source.lazy()
-            .select(col("f").round(2))
+            .select(col("f").pow(lit(Float64(2))))
             .collect(accelerator=unavailable)
         )
 

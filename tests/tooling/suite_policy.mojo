@@ -1614,6 +1614,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "reduce.grouped",
             [
+                "tests/kernel_equivalence/test_aggregate_table.mojo",
                 "tests/public_contracts/test_distribution_shapes.mojo",
                 "tests/public_contracts/test_expression_boundaries.mojo",
                 "tests/public_contracts/test_grouped_types.mojo",
@@ -1639,6 +1640,7 @@ def production_policy() -> SuitePolicy:
             "table.join",
             [
                 "tests/kernel_equivalence/test_join_routes.mojo",
+                "tests/kernel_equivalence/test_pipeline_join_selection.mojo",
                 "tests/planner_correctness/test_asof_sources.mojo",
                 "tests/public_contracts/test_asof.mojo",
                 "tests/public_contracts/test_asof_errors.mojo",
@@ -1720,6 +1722,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "storage.release",
             [
+                "tests/storage_ownership/test_aggregate_key_lifetime.mojo",
                 "tests/storage_ownership/test_release.mojo",
             ],
         )
@@ -1729,6 +1732,7 @@ def production_policy() -> SuitePolicy:
             "kernel.reduce",
             [
                 "tests/execution_modes/test_lifecycle.mojo",
+                "tests/kernel_equivalence/test_aggregate_table.mojo",
                 "tests/kernel_equivalence/test_grouped_routes.mojo",
                 "tests/kernel_equivalence/test_quantile_routes.mojo",
                 "tests/kernel_equivalence/test_reduction_routes.mojo",
@@ -1797,10 +1801,12 @@ def production_policy() -> SuitePolicy:
                 "tests/planner_correctness/test_branch_rewrites.mojo",
                 "tests/planner_correctness/test_join_aggregate_projection.mojo",
                 "tests/planner_correctness/test_join_key_pushdown.mojo",
+                "tests/planner_correctness/test_join_side_swap.mojo",
                 "tests/planner_correctness/test_join_strategies.mojo",
                 "tests/planner_correctness/test_name_identity.mojo",
                 "tests/planner_correctness/test_nested_boundaries.mojo",
                 "tests/planner_correctness/test_relational.mojo",
+                "tests/planner_correctness/test_shared_aggregated_inputs.mojo",
                 "tests/planner_correctness/test_source_reuse.mojo",
             ],
         )
@@ -1829,6 +1835,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.modes",
             [
+                "tests/execution_modes/test_aggregate_table_modes.mojo",
                 "tests/execution_modes/test_batches.mojo",
                 "tests/execution_modes/test_group_strategy.mojo",
                 "tests/execution_modes/test_lifecycle.mojo",
