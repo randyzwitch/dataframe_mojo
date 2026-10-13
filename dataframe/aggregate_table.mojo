@@ -1628,7 +1628,7 @@ def _merge_row(
     mut final: _Groups,
     addressed: List[Bool],
     slots: List[_Slot],
-) -> Bool:
+) raises -> Bool:
     """Row `at` into the finish's table: a new group (True), or its states
     folded into its group's, which keeps the earlier first row."""
     var row = _words_at(at)
