@@ -818,6 +818,50 @@ def test_temporal_binding_intervals_and_null_payload_errors() raises:
     )
 
 
+def test_intervals_are_checked_against_the_first_valid_value_and_apply_to_every_row() raises:
+    # Binding rejects interval syntax. The checks that depend on the
+    # column (a positive truncation, no unit finer than its ticks) are
+    # errors once some value is valid, wherever it is, and not on a column
+    # with none.
+    var all_null = DataFrame(
+        [tagged("t", DataType.datetime("us"), [5, 6], [False, False])]
+    )
+    var truncated = all_null.select(col("t").dt().truncate("0d"))
+    assert_true(truncated.item(1, "t").is_null())
+    var shifted = all_null.select(col("t").dt().offset_by("1ns"))
+    assert_true(shifted.item(1, "t").is_null())
+    var late = DataFrame(
+        [tagged("t", DataType.datetime("us"), [5, 6], [False, True])]
+    )
+    with assert_raises():
+        _ = late.select(col("t").dt().truncate("0d"))
+    with assert_raises():
+        _ = late.select(col("t").dt().offset_by("1ns"))
+    # One parsed interval, every row: 2,000 microsecond ticks either side
+    # of the epoch, against floor arithmetic.
+    var values = List[Int64]()
+    var valid = List[Bool]()
+    for row in range(2_000):
+        values.append(Int64(row - 1_000) * 3_700_000_017)
+        valid.append(row % 11 != 4)
+    var frame = DataFrame([tagged("t", DataType.datetime("us"), values, valid)])
+    var out = frame.select_exprs(
+        [
+            col("t").dt().truncate("15m").alias("floor"),
+            col("t").dt().offset_by("1h30m").alias("shift"),
+        ]
+    )
+    var step = Int64(15 * 60 * 1_000_000)
+    var floors = List[Int64]()
+    var shifts = List[Int64]()
+    for row in range(2_000):
+        # `//` rounds down, as truncation does before the epoch.
+        floors.append((values[row] // step) * step)
+        shifts.append(values[row] + 5_400_000_000)
+    assert_ticks(out, "floor", DataType.datetime("us"), floors, valid)
+    assert_ticks(out, "shift", DataType.datetime("us"), shifts, valid)
+
+
 def assert_time_aggregate_row(
     actual: DataFrame,
     row: Int,
