@@ -1,6 +1,18 @@
 """Common CPU work features for the shared bound numeric row subset."""
 from ..dtype import DataType
-from ..expr import CAST, LEN, MEAN, SUM, VAR, STD, COV, CORR, SKEW, KURTOSIS
+from ..expr import (
+    DT_TOTAL,
+    CAST,
+    LEN,
+    MEAN,
+    SUM,
+    VAR,
+    STD,
+    COV,
+    CORR,
+    SKEW,
+    KURTOSIS,
+)
 from ..lazy import LazyFrame
 from .capabilities import RowCapabilities
 from .rows import (
@@ -53,6 +65,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             casts=True,
             extrema=True,
             fixed_logical=True,
+            duration_totals=True,
             decimal128=True,
             decimal128_reductions=True,
             decimal_float_cast=True,
@@ -96,6 +109,11 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
     if paired:
         family += ";paired-moments-v1"
+    var totals = False
+    for i in range(0, len(plan.code), 4):
+        totals |= plan.code[i] == DT_TOTAL
+    if totals:
+        family += ";duration-totals-v1"
     var higher = False
     for output in plan.outputs:
         higher |= output.reduction == SKEW or output.reduction == KURTOSIS

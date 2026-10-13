@@ -101,6 +101,9 @@ enum DFMOp {
   // Fixed interval truncation: code[2] is the positive step in storage
   // ticks. Whole-week steps align to Monday; other steps to the epoch.
   DFM_DT_TRUNCATE = 141,
+  // Whole duration units: positive factor in code[2], code[3] is 1 for
+  // signed division toward zero, 0 for Int64 storage multiplication.
+  DFM_DT_TOTAL = 143,
   DFM_MIN = 80,
   DFM_MEAN = 82,
   // Float64 Welford/Chan reductions. min_count metadata: low 31 bits ddof,

@@ -97,6 +97,7 @@ from dataframe.expr import (
     ARG_MIN,
     ARG_MAX,
     DT_YEAR,
+    DT_TOTAL,
     DT_TIME,
     DT_TRUNCATE,
 )
@@ -260,6 +261,7 @@ def _program(
                 and op >= DT_YEAR
                 and op <= DT_TRUNCATE
             )
+            or (op == DT_TOTAL and capabilities.duration_totals)
             or (op == INT_IS_IN and capabilities.extended_integers)
             or (
                 capabilities.row_extras
@@ -314,7 +316,7 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
-        var temporal = op >= DT_YEAR and op <= DT_TRUNCATE
+        var temporal = (op >= DT_YEAR and op <= DT_TRUNCATE) or op == DT_TOTAL
         var decimal_float_cast = (
             op == CAST
             and left_type.is_decimal()
@@ -566,6 +568,27 @@ def _program(
                 )
             )
         var right = Int64(node.right)
+        if op == DT_TOTAL:
+            var nanos_per_tick = Int64(1000000000) // left_type.per_second()
+            var nanos_per_unit = Int64(1)
+            if node.text == "days":
+                nanos_per_unit = NANOS_PER_DAY
+            elif node.text == "hours":
+                nanos_per_unit = 3600000000000
+            elif node.text == "minutes":
+                nanos_per_unit = 60000000000
+            elif node.text == "seconds":
+                nanos_per_unit = 1000000000
+            elif node.text == "milliseconds":
+                nanos_per_unit = 1000000
+            elif node.text == "microseconds":
+                nanos_per_unit = 1000
+            source = 1 if nanos_per_unit >= nanos_per_tick else 0
+            right = (
+                nanos_per_unit
+                // nanos_per_tick if source else nanos_per_tick
+                // nanos_per_unit
+            )
         if op == DT_TRUNCATE:
             var interval = parse_every(node.text)
             var per_tick = NANOS_PER_DAY if left_type.is_date() else (

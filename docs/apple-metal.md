@@ -648,10 +648,17 @@ that unlisted query combinations are already equivalent.
 | Numeric expressions | Floating power, `exp`, and `log`. |
 | Reductions | Median, quantile, mode, implode, and value counts. |
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
-| Temporal expressions | Calendar month/year truncation, offsets, duration totals, row-valued parsing/formatting, and timezone operations. |
+| Temporal expressions | Calendar month/year truncation, offsets, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins, file-backed scans, and chunked in-memory inputs without explicit rechunking. |
 | Composition | Remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
+
+Duration totals execute from ms/us/ns storage into days, hours, minutes,
+seconds, milliseconds, microseconds, or nanoseconds. Coarser units truncate
+toward zero without negating Int64.MIN; finer units retain the CPU kernel's
+Int64 storage multiplication. Nulls and native row/group/window/join consumers
+retain those semantics. `duration-totals-v1` and `metal-duration-totals-v1`
+require separate calibration.
 
 Date year, month, day, weekday, and ordinal fields preserve proleptic Gregorian
 meaning across the complete Int64 day domain. CPU and Metal reduce days into

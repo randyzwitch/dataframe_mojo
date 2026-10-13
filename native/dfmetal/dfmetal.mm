@@ -48,7 +48,7 @@ bool binaryOp(int64_t op) {
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+  return op == DFM_DT_TOTAL || op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
          op == DFM_CEIL || op == DFM_ROUND || op == DFM_SQRT ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
@@ -704,6 +704,11 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_DECIMAL_FLOAT_CAST && c[0] != DFM_DECIMAL_CAST && c[0] != DFM_DECIMAL_COMPARE &&
           c[0] != DFM_DECIMAL_ARITHMETIC && c[0] != DFM_DECIMAL_UNARY)
         fail("Metal Decimal128 row arithmetic requires CPU execution");
+      if (c[0] == DFM_DT_TOTAL) {
+        if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
+            c[2] <= 0 || c[2] > 86400000000000LL || c[3] < 0 || c[3] > 1)
+          fail("Invalid Metal duration total descriptor");
+      }
       if (c[0] >= DFM_DT_YEAR && c[0] <= DFM_DT_TRUNCATE) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
             (c[0] == DFM_DT_TRUNCATE ? c[2] <= 0 : c[2] != -1) || c[3] < 0 || c[3] > 4 ||
@@ -2232,6 +2237,12 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
               expression = (op == DFM_CLIP_LOW ? "f64_less(" + a + "," + b : "f64_less(" + b + "," + a) + ")?" + b + ":" + a;
             else fail("Unsupported emulated Float64 expression");
             text += z + "=" + typename_ + "(" + expression + ");";
+          } else if (op == DFM_DT_TOTAL) {
+            // Division never negates Int64.MIN. Finer units retain the CPU
+            // total kernel's fixed-width storage multiplication semantics.
+            text += z + "=" + (c[3]
+                ? "as_type<ulong>(as_type<long>(" + a + ")/" + std::to_string(c[2]) + "L)"
+                : "as_type<ulong>(" + a + ")*" + std::to_string(c[2]) + "UL") + ";";
           } else if (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) {
             const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
             const int64_t dayTicks = c[3] == 0 ? 1 : perSecond * 86400;
