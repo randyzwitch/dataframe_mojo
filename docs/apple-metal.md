@@ -626,7 +626,7 @@ that unlisted query combinations are already equivalent.
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
 | Temporal expressions | Calendar month/year truncation, offsets, duration totals, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
-| Plans and sources | As-of joins and file-backed scans. |
+| Plans and sources | As-of joins, file-backed scans, and chunked in-memory inputs without explicit rechunking. |
 | Composition | Selector expansion and remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
 
 Native validation and the backend contract suite cover each implemented feature.
