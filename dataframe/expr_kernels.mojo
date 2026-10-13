@@ -149,7 +149,16 @@ def _float_scalar[op: Int, D: DType](x: Scalar[D], y: Scalar[D]) -> Scalar[D]:
             return Scalar[D](0) / Scalar[D](0)
         return x % y
     elif op == POW:
-        return pow(x, y)
+        # The toolchain approximation violates NaN/infinity rules and loses
+        # accuracy even for 10**0.5. Use the platform floating implementation.
+        comptime if D == DType.float32:
+            return external_call["powf", Float32](
+                x.cast[DType.float32](), y.cast[DType.float32]()
+            ).cast[D]()
+        else:
+            return external_call["pow", Float64](
+                x.cast[DType.float64](), y.cast[DType.float64]()
+            ).cast[D]()
     elif op == CLIP_LOW:
         if x != x or y != y:
             return x

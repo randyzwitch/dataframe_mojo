@@ -1333,6 +1333,42 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_rolling.mojo::test_native_metal_duration_rolling_numeric_temporal_units_closed_partitions_slices_and_chunks",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_rolling.mojo::test_native_metal_duration_rolling_checked_indices_unsigned_sums_and_finite_outlier_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_duration_rolling.mojo::test_native_metal_duration_rolling_consumers_profile_family_budget_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_floating_power.mojo::test_native_metal_floating_power_independent_ieee_anchors_widths_nulls_chunks_and_empty",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_floating_power.mojo::test_native_metal_floating_power_resident_filters_reductions_windows_and_conditional_scopes",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_floating_power.mojo::test_native_metal_floating_power_profile_family_exact_budget_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_coordinate_interpolation.mojo::test_native_metal_coordinate_interpolation_numeric_decimals_partitions_and_chunked_sources",
             "metal",
         )
@@ -2032,6 +2068,8 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_transcendentals.mojo",
                 "tests/execution_modes/test_backend_metal_interpolation.mojo",
                 "tests/execution_modes/test_backend_metal_coordinate_interpolation.mojo",
+                "tests/execution_modes/test_backend_metal_floating_power.mojo",
+                "tests/execution_modes/test_backend_metal_duration_rolling.mojo",
                 "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",

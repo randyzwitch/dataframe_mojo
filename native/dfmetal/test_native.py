@@ -567,9 +567,7 @@ def check_float32_floor_division_preflight_without_device():
     for opcode in (27,):
         code[4] = opcode
         err = P()
-        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
-        assert b"Metal floating operator requires CPU execution" in C.string_at(err)
-        lib.dfm_free(err)
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
 
 
 check_float32_floor_division_preflight_without_device()
@@ -1070,6 +1068,61 @@ def check_coordinate_interpolation_preflight_without_device():
     lib.dfm_free(err)
 
 
+def check_duration_rolling_preflight_without_device():
+    inputs=(Input*2)(Input(None,None,3,7,1),Input(None,None,3,5,1))
+    code=(I*8)(226,0,1,0,227,0,2,1)
+    literals=(I*2)(3,0)
+    nodes,slots=(I*2)(3,3),(I*3)(3,3,3)
+    steps=(Step*1)(Step(0,2,2,5,0,0))
+    outputs=(Output*1)(Output(None,None,3,2,-1,0))
+    request=Request(2,513,0,3,2,8,2,1,0,1,-1,0,0,-1,
+                    ptr(inputs),ptr(code),ptr(literals),ptr(steps),None,
+                    ptr(outputs),ptr(nodes),ptr(slots))
+    memory=Memory()
+    for method in range(6):
+        code[3]=method
+        for dtype in range(1,13):
+            inputs[0].dtype=nodes[0]=slots[0]=dtype
+            output=11 if method in (1,4,5) else 3 if method==0 and dtype in (5,6,7,8) else dtype
+            slots[2]=outputs[0].dtype=output
+            supported=dtype!=4 and (method in (2,3) or method==0 and dtype!=12 or method in (1,4,5) and dtype==11)
+            err=P()
+            status=lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
+            if supported:check(status,err)
+            else:
+                assert status
+                assert b"duration window result type" in C.string_at(err)
+                lib.dfm_free(err)
+    inputs[0].dtype=nodes[0]=slots[0]=slots[2]=outputs[0].dtype=3
+    code[3]=0
+    for period in (1,3,(1<<63)-1):
+        literals[0]=period
+        for minimum in (0,1,(1<<63)-1):
+            code[5]=minimum
+            err=P()
+            check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+    code[5]=0
+    def invalid(message):
+        err=P()
+        assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
+        assert message in C.string_at(err),C.string_at(err)
+        lib.dfm_free(err)
+    for period in (0,-1,-(1<<63)):
+        literals[0]=period
+        invalid(b"duration window bounds")
+    literals[0]=1
+    for axis in (-1,2,3,(1<<63)-1):
+        code[2]=axis
+        invalid(b"duration window descriptor")
+    code[2]=1
+    for field,value in ((4,200),(5,-1),(6,-1),(6,4),(7,-1)):
+        previous=code[field];code[field]=value
+        invalid(b"duration window bounds")
+        code[field]=previous
+    inputs[1].dtype=slots[1]=1
+    invalid(b"duration window descriptor")
+
+
 def check_moment_preflight_without_device():
     inputs = (Input * 1)(Input(None, None, 11, 0, 0))
     slots = (I * 1)(11)
@@ -1185,6 +1238,7 @@ check_rolling_preflight_without_device()
 check_rolling_moments_preflight_without_device()
 check_interpolation_preflight_without_device()
 check_coordinate_interpolation_preflight_without_device()
+check_duration_rolling_preflight_without_device()
 check_shift_fill_preflight_without_device()
 def empty_request(rows, reduction=0):
     values = (C.c_float * max(1, rows))(*([1.0] * max(1, rows)))

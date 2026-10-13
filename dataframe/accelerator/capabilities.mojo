@@ -41,6 +41,7 @@ struct RowCapabilities(Copyable):
     var float_division: Bool
     var float_modulo: Bool
     var float_transcendentals: Bool
+    var float_power: Bool
     var float_sqrt: Bool
     var float_rounding: Bool
     var wide_integer: Bool
@@ -79,6 +80,7 @@ struct RowCapabilities(Copyable):
     var rolling_moments: Bool
     var interpolation_windows: Bool
     var coordinate_interpolation: Bool
+    var duration_rolling: Bool
     var empty_outputs: Bool
     var chunked_inputs: Bool
     var empty_inputs: Bool
@@ -101,6 +103,7 @@ struct RowCapabilities(Copyable):
         float_division: Bool = False,
         float_modulo: Bool = False,
         float_transcendentals: Bool = False,
+        float_power: Bool = False,
         float_sqrt: Bool = False,
         float_rounding: Bool = False,
         wide_integer: Bool = True,
@@ -132,6 +135,7 @@ struct RowCapabilities(Copyable):
         rolling_moments: Bool = False,
         interpolation_windows: Bool = False,
         coordinate_interpolation: Bool = False,
+        duration_rolling: Bool = False,
         empty_outputs: Bool = False,
         chunked_inputs: Bool = False,
         empty_inputs: Bool = False,
@@ -158,6 +162,7 @@ struct RowCapabilities(Copyable):
         self.float_division = float_division
         self.float_modulo = float_modulo
         self.float_transcendentals = float_transcendentals
+        self.float_power = float_power
         self.float_sqrt = float_sqrt
         self.float_rounding = float_rounding
         self.wide_integer = wide_integer
@@ -189,6 +194,7 @@ struct RowCapabilities(Copyable):
         self.rolling_moments = rolling_moments
         self.interpolation_windows = interpolation_windows
         self.coordinate_interpolation = coordinate_interpolation
+        self.duration_rolling = duration_rolling
         self.empty_outputs = empty_outputs
         self.chunked_inputs = chunked_inputs
         self.empty_inputs = empty_inputs

@@ -203,6 +203,12 @@ enum DFMOp {
   DFM_QUANTILE_HIGHER = 223,
   DFM_QUANTILE_NEAREST = 224,
   DFM_QUANTILE_MIDPOINT = 225,
+  // Duration window: value slot, Int64 time-index slot, method
+  // (sum/mean/min/max/variance/std). Literal contains positive period ticks.
+  // A BOUNDS node follows, then zero or more SORT_KEY partition descriptors.
+  DFM_DURATION_KEY = 226,
+  // Operands carry min_samples, closed-side bits (left=1/right=2), and ddof.
+  DFM_DURATION_BOUNDS = 227,
 };
 
 typedef struct DFMInput {

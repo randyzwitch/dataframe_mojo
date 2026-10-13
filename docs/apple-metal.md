@@ -246,9 +246,33 @@ it leaves the window. A result is null unless the non-null count meets
 `min_samples` and exceeds `ddof`. Primitive inputs, including the full UInt64
 range, and Decimal32/64/128 inputs convert privately to Float64 first, matching
 the CPU window path. These operations support nested `over()` scopes and later
-resident consumers. Each partition walks its source rows once, with integer-only
-binary64 arithmetic, and uses the separate `metal-rolling-moments-v1` cost
-family. Duration-based rolling windows remain unsupported.
+resident consumers. Ordinary updates advance each partition once. If removing
+a finite outlier sharply reduces the accumulated variance, CPU and Metal rebase
+to a current-window anchor and rebuild that window, retaining small residual
+variances after the outlier leaves. The rebuild can add a window-length scan;
+the changed work uses the separate `metal-rolling-moments-v2` cost family.
+
+Duration-based `rolling_sum_by`, `rolling_mean_by`, `rolling_min_by`,
+`rolling_max_by`, `rolling_var_by`, and `rolling_std_by` run over Date and
+timezone-free Datetime indices for fixed, positive intervals aligned to storage
+ticks. Each index must be non-null and nondecreasing within its original-order
+`over()` partition. All four `closed` modes apply to the time interval, including
+future rows tied at the current timestamp when the right boundary is closed.
+Bounds and values remain resident, and results scatter to original row positions.
+
+Only non-null values count toward `min_samples`. A zero-count sum is valid zero
+when the minimum is zero; other zero-count outputs remain null. Integer sums
+use wide intermediates and check the declared output width, including the full
+UInt64 domain. Float32 sums accumulate in binary64 before rounding; mean,
+variance, and standard deviation return Float64. Extrema retain input words and
+choose the last NaN in a window; moments share the finite-outlier recovery above.
+Decimal extrema retain their dtype; decimal arithmetic requires an explicit
+Float64 cast. Null/unsorted indices and checked lower-bound underflow raise
+before any caller output is committed, even when value rows are null. Plans use
+`duration-rolling-v1` and `metal-duration-rolling-v1` calibration families with
+their method and bound parameters. Calendar intervals, timezone-aware indices,
+wider duration literals, and implicit decimal arithmetic remain outside this
+duration subset.
 
 Variance (`var`) and standard deviation (`std`) run as scalar, grouped,
 or `over()` reductions for primitive numeric inputs. They convert each value
@@ -740,7 +764,20 @@ and the existing numeric tolerance (the toolchain approximation misses it for
 overflow and retain gradual underflow; ordinary finite exponentials keep their
 vector kernel.
 
-Floating power is not yet supported by this subset.
+Floating `pow` executes for Float32 and Float64 inputs and retains their width.
+It handles zero, signed zero, infinity, NaN, negative bases, and integral exponent
+parity before arithmetic. Exact power-of-two integer exponents retain their
+normal and subnormal boundaries. Other powers carry a second binary64 residual
+through logarithm, multiplication, and exponential range reduction; this avoids
+large-exponent error amplification and premature overflow/underflow from a
+rounded logarithm product. Independent GPU validation includes 160-digit Decimal
+references at dense overflow/underflow boundaries, plus libm and random cases,
+with a 16 ULP bound. Vendor libm can differ at the last subnormal bit. CPU floating
+powers use system libm to correct the toolchain's exceptional-value and ordinary
+accuracy errors. Plans add `floating-power-v1:p<count>` and the corresponding
+`metal-` cost family, and Float32 powers also identify binary64 emulation. Checked
+integer power retains its existing behavior. Decimal power is outside this
+floating subset; callers can explicitly cast numeric inputs to Float64.
 
 ## CPU parity work remaining
 
@@ -751,9 +788,8 @@ that unlisted query combinations are already equivalent.
 
 | Area | Remaining CPU operations or behavior |
 | --- | --- |
-| Numeric expressions | Floating power. |
 | Reductions | Mode, implode, and value counts. |
-| Ordered windows | Duration-based rolling sum/mean/min/max/var/std, cut, and qcut. |
+| Ordered windows | Calendar/timezone-aware rolling durations, wider duration literals, implicit decimal arithmetic in duration windows, cut, and qcut. |
 | Temporal expressions | Row-valued parsing/formatting and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins and file-backed scans. |
@@ -788,6 +824,8 @@ python3 native/dfmetal/test_moments.py
 python3 native/dfmetal/test_higher_moments.py
 python3 native/dfmetal/test_interpolation.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_coordinate_interpolation.py build/dfmetal/libdfmetal.dylib
+python3 native/dfmetal/test_power.py
+python3 native/dfmetal/test_duration_rolling.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py

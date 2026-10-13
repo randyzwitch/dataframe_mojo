@@ -1,9 +1,11 @@
 """Common CPU work features for the shared bound numeric row subset."""
+from std.memory import bitcast
 from ..dtype import DataType
 from ..expr import (
     DT_TOTAL,
     EXP,
     LOG,
+    POW,
     DT_OFFSET_BY,
     CAST,
     LEN,
@@ -19,10 +21,12 @@ from ..expr import (
 from ..lazy import LazyFrame
 from .capabilities import RowCapabilities
 from .rows import (
+    RowPlan,
     lower_rows,
     ROW_GROUP_OUTPUT,
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
+    ROW_DURATION_KEY,
     ROW_CALENDAR_OFFSET,
     ROW_CALENDAR_TRUNCATE,
     ROW_QUANTILE_LINEAR,
@@ -49,6 +53,29 @@ def _width(dtype: DataType) -> Int:
     return 8
 
 
+def duration_family(plan: RowPlan, prefix: String) -> String:
+    var family = String()
+    for step in plan.steps:
+        var start = step.start * 4
+        if plan.code[start] != ROW_DURATION_KEY:
+            continue
+        family += (
+            ";"
+            + prefix
+            + "duration-rolling-v1:m"
+            + String(plan.code[start + 3])
+            + ":p"
+            + String(bitcast[DType.int64](plan.literals[step.start]))
+            + ":c"
+            + String(plan.code[start + 6])
+            + ":n"
+            + String(plan.code[start + 5])
+            + ":d"
+            + String(plan.code[start + 7])
+        )
+    return family^
+
+
 def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
     """Bound worst-case work without inspecting selectivity or null values.
 
@@ -65,6 +92,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             float_rounding=True,
             float_modulo=True,
             float_transcendentals=True,
+            float_power=True,
             float_sqrt=True,
             wide_integer=True,
             int64_arithmetic=True,
@@ -94,6 +122,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             rolling_moments=True,
             interpolation_windows=True,
             coordinate_interpolation=True,
+            duration_rolling=True,
             empty_outputs=True,
             empty_inputs=True,
             chunked_inputs=True,
@@ -143,6 +172,13 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             + ":l"
             + String(logarithms)
         )
+    var powers = 0
+    for i in range(0, len(plan.code), 4):
+        powers += Int(
+            plan.code[i] == POW and plan.node_dtypes[i // 4].is_float()
+        )
+    if powers:
+        family += ";floating-power-v1:p" + String(powers)
     var calendar_offset = False
     for i in range(0, len(plan.code), 4):
         calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET
@@ -239,11 +275,12 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
     if rolling:
         family += ";rolling-v1"
     if rolling_moments:
-        family += ";rolling-moments-v1"
+        family += ";rolling-moments-v2"
     if interpolation:
         family += ";interpolation-v1"
     if coordinate_interpolation:
         family += ";coordinate-interpolation-v1"
+    family += duration_family(plan, "")
     var wide_decimal = False
     for dtype in plan.node_dtypes:
         wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128

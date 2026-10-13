@@ -19,7 +19,7 @@ from .accelerator.cost import (
     CalibrationKey,
     select_auto as select_cost,
 )
-from .accelerator.cpu_work import cpu_features
+from .accelerator.cpu_work import cpu_features, duration_family
 from ._build_identity import CPU_BUILD_ID
 from .parallel import configured_workers
 from .decimal import pow10
@@ -62,6 +62,8 @@ from .accelerator.rows import (
     ROW_SORT_KEY,
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
+    ROW_DURATION_KEY,
+    ROW_DURATION_BOUNDS,
     ROW_CALENDAR_OFFSET,
     ROW_CALENDAR_TRUNCATE,
     ROW_QUANTILE_LINEAR,
@@ -354,6 +356,7 @@ def _capabilities() -> RowCapabilities:
         float_rounding=True,
         float_modulo=True,
         float_transcendentals=True,
+        float_power=True,
         float_sqrt=True,
         wide_integer=False,
         bounded_integer_sum=True,
@@ -383,6 +386,7 @@ def _capabilities() -> RowCapabilities:
         rolling_moments=True,
         interpolation_windows=True,
         coordinate_interpolation=True,
+        duration_rolling=True,
         empty_outputs=True,
         empty_inputs=True,
         chunked_inputs=True,
@@ -433,6 +437,8 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if op == ROW_DURATION_KEY or op == ROW_DURATION_BOUNDS:
+        return 226 if op == ROW_DURATION_KEY else 227
     if op == EXP or op == LOG:
         return 53 if op == EXP else 54
     if op == ROW_CALENDAR_OFFSET:
@@ -858,8 +864,9 @@ struct _Descriptors(Movable):
                     Int64(step.start),
                     Int64(step.nodes),
                     Int64(step.slot),
-                    Int64(5) if plan.code[step.start * 4]
-                    == ROW_CUMULATIVE_KEY else Int64(4) if plan.code[
+                    Int64(5) if plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                    or plan.code[step.start * 4]
+                    == ROW_DURATION_KEY else Int64(4) if plan.code[
                         step.start * 4
                     ]
                     == ROW_RANK_KEY else Int64(3) if step.grouped else (
@@ -1724,6 +1731,13 @@ struct MetalRuntime(AcceleratorBackend):
                 + ":l"
                 + String(logarithms)
             )
+        var powers = 0
+        for i in range(0, len(plan.code), 4):
+            powers += Int(
+                plan.code[i] == POW and plan.node_dtypes[i // 4].is_float()
+            )
+        if powers:
+            family += ";metal-floating-power-v1:p" + String(powers)
         var calendar_offset = False
         for i in range(0, len(plan.code), 4):
             calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET
@@ -1822,11 +1836,12 @@ struct MetalRuntime(AcceleratorBackend):
         if rolling:
             family += ";metal-rolling-v1"
         if rolling_moments:
-            family += ";metal-rolling-moments-v1"
+            family += ";metal-rolling-moments-v2"
         if interpolation:
             family += ";metal-interpolation-v1"
         if coordinate_interpolation:
             family += ";metal-coordinate-interpolation-v1"
+        family += duration_family(plan, "metal-")
         var decimal_mean = False
         for output in plan.outputs:
             decimal_mean |= output.reduction == MEAN and (
@@ -1953,9 +1968,14 @@ struct MetalRuntime(AcceleratorBackend):
                 or plan.code[i * 4] == DIV
                 or plan.code[i * 4] == EXP
                 or plan.code[i * 4] == LOG
+                or plan.code[i * 4] == POW
                 or plan.code[i * 4] == SQRT
                 or plan.code[i * 4] == FLOORDIV
                 or plan.code[i * 4] == MOD
+                or (
+                    plan.code[i * 4] == ROW_DURATION_KEY
+                    and plan.code[i * 4 + 3] == 0
+                )
             ):
                 emulated = True
         for output in plan.outputs:

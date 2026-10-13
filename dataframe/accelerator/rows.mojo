@@ -28,6 +28,13 @@ from dataframe.expr import (
     ROLLING_STD,
     INTERPOLATE,
     INTERPOLATE_BY,
+    ROLLING_SUM_BY,
+    ROLLING_MEAN_BY,
+    ROLLING_MIN_BY,
+    ROLLING_MAX_BY,
+    ROLLING_VAR_BY,
+    ROLLING_STD_BY,
+    is_rolling_by,
     FORWARD_FILL,
     BACKWARD_FILL,
     OVER,
@@ -110,6 +117,7 @@ from dataframe.expr import (
 )
 from dataframe.frame import DataFrame
 from dataframe.temporal import parse_every, NANOS_PER_DAY
+from dataframe.time_windows import positive_period, closed_sides
 from dataframe.lazy import (
     LazyFrame,
     SCAN_FRAME,
@@ -140,6 +148,8 @@ comptime ROW_QUANTILE_NEAREST = 1013
 comptime ROW_QUANTILE_MIDPOINT = 1014
 comptime ROW_CALENDAR_TRUNCATE = 1015
 comptime ROW_CALENDAR_OFFSET = 1016
+comptime ROW_DURATION_KEY = 1017
+comptime ROW_DURATION_BOUNDS = 1018
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -256,6 +266,11 @@ def _program(
             or (
                 (op == EXP or op == LOG)
                 and capabilities.float_transcendentals
+                and bound.dtypes[i].is_float()
+            )
+            or (
+                op == POW
+                and capabilities.float_power
                 and bound.dtypes[i].is_float()
             )
             or (
@@ -415,6 +430,8 @@ def _program(
                         or op == SQRT
                         or (op == EXP or op == LOG)
                         and capabilities.float_transcendentals
+                        or op == POW
+                        and capabilities.float_power
                         or op == CAST
                         or op == FLOOR
                         or op == CEIL
@@ -581,6 +598,8 @@ def _program(
                 and capabilities.float_division
                 or op == MOD
                 and capabilities.float_modulo
+                or op == POW
+                and capabilities.float_power
             )
         ):
             capabilities.reject(
@@ -1219,14 +1238,21 @@ def lower_rows(
                 )
                 var coordinate = window_op == INTERPOLATE_BY
                 var interpolation = window_op == INTERPOLATE or coordinate
+                var duration = is_rolling_by(window_op)
                 if (
                     window_op != RANK
                     and not cumulative
                     and not shift_fill
                     and not rolling
                     and not interpolation
+                    and not duration
                 ):
                     continue
+                if duration and not capabilities.duration_rolling:
+                    capabilities.reject(
+                        "plan",
+                        "duration rolling windows require backend support",
+                    )
                 if coordinate and not capabilities.coordinate_interpolation:
                     capabilities.reject(
                         "plan",
@@ -1277,6 +1303,7 @@ def lower_rows(
                     and not shift_fill
                     and not rolling
                     and not interpolation
+                    and not duration
                     and not capabilities.ranks
                 ):
                     capabilities.reject("plan", "rank requires backend support")
@@ -1317,7 +1344,16 @@ def lower_rows(
                 for m in range(len(methods)):
                     if rank_node.text == methods[m]:
                         method = m
-                if interpolation:
+                if duration:
+                    method = (
+                        0 if window_op
+                        == ROLLING_SUM_BY else 1 if window_op
+                        == ROLLING_MEAN_BY else 2 if window_op
+                        == ROLLING_MIN_BY else 3 if window_op
+                        == ROLLING_MAX_BY else 4 if window_op
+                        == ROLLING_VAR_BY else 5
+                    )
+                elif interpolation:
                     method = (
                         15 if coordinate else 13 if rank_node.text
                         == "linear" else 14
@@ -1346,7 +1382,18 @@ def lower_rows(
                     raise Error("unknown rank method: " + rank_node.text)
                 var child = bind(subtree(ranked, rank_node.left), rank_schema)
                 if (
+                    duration
+                    and method != 2
+                    and method != 3
+                    and child.dtypes[len(child.dtypes) - 1].is_decimal()
+                ):
+                    capabilities.reject(
+                        "logical",
+                        "duration rolling decimal arithmetic requires an explicit Float64 cast",
+                    )
+                if (
                     rolling_moments
+                    or (duration and (method == 1 or method >= 4))
                     or (interpolation and method != 14)
                     or (
                         rolling
@@ -1382,9 +1429,11 @@ def lower_rows(
                             "plan", "checked rank inputs require CPU execution"
                         )
                 if (
-                    1 + len(partitions) > capabilities.max_nodes
-                    or next_slot + 2 + Int(coordinate) > capabilities.max_slots
-                    or len(steps) + 2 + Int(coordinate) > capabilities.max_steps
+                    1 + Int(duration) + len(partitions) > capabilities.max_nodes
+                    or next_slot + 2 + Int(coordinate or duration)
+                    > capabilities.max_slots
+                    or len(steps) + 2 + Int(coordinate or duration)
+                    > capabilities.max_steps
                 ):
                     capabilities.reject(
                         "plan", "rank exceeds resident slot or step limits"
@@ -1416,11 +1465,43 @@ def lower_rows(
                 )
                 next_slot += 1
                 var axis_slot = -1
-                if coordinate:
-                    var axis = bind(
-                        subtree(ranked, rank_node.right).cast(DataType.FLOAT64),
-                        rank_schema,
-                    )
+                var period_ticks = Int64(0)
+                var closed = Int64(0)
+                if coordinate or duration:
+                    var axis_expr = subtree(ranked, rank_node.right)
+                    if coordinate:
+                        axis_expr = axis_expr.cast(DataType.FLOAT64)
+                    var axis = bind(axis_expr, rank_schema)
+                    var axis_type = axis.dtypes[len(axis.dtypes) - 1]
+                    if duration:
+                        if (
+                            axis_type.is_datetime()
+                            and axis_type.time_zone() != ""
+                        ):
+                            capabilities.reject(
+                                "temporal",
+                                "duration rolling requires a timezone-free index",
+                            )
+                        positive_period(rank_node.text)
+                        var sides = closed_sides(rank_node.text2)
+                        closed = Int64(sides[0]) | (Int64(sides[1]) << 1)
+                        var interval = parse_every(rank_node.text)
+                        var per_tick = (
+                            NANOS_PER_DAY if axis_type.is_date() else Int64(
+                                1000000000
+                            )
+                            // axis_type.per_second()
+                        )
+                        if (
+                            interval[0] != 0
+                            or interval[1] <= 0
+                            or interval[1] % per_tick != 0
+                        ):
+                            capabilities.reject(
+                                "temporal",
+                                "duration rolling requires a fixed positive interval aligned to the storage unit",
+                            )
+                        period_ticks = interval[1] // per_tick
                     var axis_proven = List[Bool](
                         length=len(axis.expr._nodes), fill=False
                     )
@@ -1445,7 +1526,7 @@ def lower_rows(
                         ):
                             capabilities.reject(
                                 "plan",
-                                "checked interpolation axes require CPU execution",
+                                "checked duration indices require CPU execution" if duration else "checked interpolation axes require CPU execution",
                             )
                     axis_slot = next_slot
                     var axis_start = len(literals)
@@ -1459,7 +1540,7 @@ def lower_rows(
                         node_dtypes,
                         capabilities,
                     )
-                    slot_dtypes.append(DataType.FLOAT64)
+                    slot_dtypes.append(axis_type)
                     steps.append(
                         RowStep(
                             axis_start,
@@ -1480,13 +1561,14 @@ def lower_rows(
                 code.extend(
                     [
                         Int64(
-                            ROW_CUMULATIVE_KEY if cumulative
+                            ROW_DURATION_KEY if duration else ROW_CUMULATIVE_KEY if cumulative
                             or shift_fill
                             or rolling
                             or interpolation else ROW_RANK_KEY
                         ),
                         Int64(input_slot),
-                        Int64(axis_slot) if coordinate else (
+                        Int64(axis_slot) if coordinate
+                        or duration else (
                             rank_node.integer if rank_node.floating
                             < 0 else max(Int64(0), Int64(rank_node.floating))
                         ) if rolling else Int64(
@@ -1501,7 +1583,8 @@ def lower_rows(
                     bound.dtypes[r] if cumulative
                     or shift_fill
                     or rolling
-                    or interpolation else (
+                    or interpolation
+                    or duration else (
                         DataType.FLOAT64 if method == 0 else DataType.INT64
                     )
                 )
@@ -1509,12 +1592,16 @@ def lower_rows(
                     # Row counts fit UInt32 in the native ABI. Saturating
                     # larger bounds preserves every observable window/result.
                     bitcast[DType.float64](
+                        period_ticks
+                    ) if duration else bitcast[DType.float64](
                         min(rank_node.integer, Int64(UInt32.MAX))
                         | (
                             min(Int64(rank_node.min_count), Int64(UInt32.MAX))
                             << 32
                         )
-                    ) if rolling_moments else bitcast[DType.float64](
+                    ) if rolling_moments else bitcast[
+                        DType.float64
+                    ](
                         rank_node.integer
                     ) if shift_fill
                     or rolling else bitcast[DType.float64](
@@ -1523,6 +1610,17 @@ def lower_rows(
                     and result_type.is_decimal() else 0
                 )
                 node_dtypes.append(child.dtypes[len(child.dtypes) - 1])
+                if duration:
+                    code.extend(
+                        [
+                            Int64(ROW_DURATION_BOUNDS),
+                            max(Int64(0), Int64(rank_node.floating)),
+                            closed,
+                            Int64(rank_node.min_count),
+                        ]
+                    )
+                    literals.append(0)
+                    node_dtypes.append(slot_dtypes[axis_slot])
                 for name in partitions:
                     var key = -1
                     for c in range(len(schema)):
@@ -1545,7 +1643,7 @@ def lower_rows(
                 steps.append(
                     RowStep(
                         rank_start,
-                        1 + len(partitions),
+                        1 + Int(duration) + len(partitions),
                         next_slot,
                         False,
                         0,

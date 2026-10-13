@@ -493,4 +493,91 @@ inline ulong f64_log(ulong a) {
   ulong result=f64_fma(count,0x3c7abc9e3b39803fUL,f64_mul(sum,0x4000000000000000UL));
   return f64_fma(count,0x3fe62e42fefa39efUL,result);
 }
+// Floating power keeps an extra binary64 residual through log, the exponent
+// product and exp range reduction. This avoids large-exponent amplification
+// and incorrect overflow/underflow classifications from a rounded log product.
+// Original domain/exception rules and exact power-of-two integer exponents
+// are handled before the compensated arithmetic.
+struct F64Double {ulong hi,lo;};
+inline F64Double f64_double_sum(ulong a,ulong b) {
+  ulong s=f64_add(a,b),v=f64_sub(s,a);
+  F64Double result={s,f64_add(f64_sub(a,f64_sub(s,v)),f64_sub(b,v))};return result;
+}
+inline F64Double f64_double_add(F64Double a,F64Double b) {
+  F64Double s=f64_double_sum(a.hi,b.hi);
+  return f64_double_sum(s.hi,f64_add(s.lo,f64_add(a.lo,b.lo)));
+}
+inline F64Double f64_double_neg(F64Double a) {
+  F64Double result={a.hi^0x8000000000000000UL,a.lo^0x8000000000000000UL};return result;
+}
+inline F64Double f64_double_mul(F64Double a,F64Double b) {
+  ulong product=f64_mul(a.hi,b.hi);
+  ulong error=f64_fma(a.hi,b.hi,product^0x8000000000000000UL);
+  error=f64_add(error,f64_add(f64_mul(a.hi,b.lo),f64_mul(a.lo,b.hi)));
+  error=f64_add(error,f64_mul(a.lo,b.lo));
+  return f64_double_sum(product,error);
+}
+inline F64Double f64_double_div(F64Double a,F64Double b) {
+  ulong q=f64_div(a.hi,b.hi);F64Double first={q,0UL};
+  F64Double residual=f64_double_add(a,f64_double_neg(f64_double_mul(b,first)));
+  return f64_double_sum(q,f64_div(f64_add(residual.hi,residual.lo),b.hi));
+}
+inline F64Double f64_power_log(ulong a) {
+  F64Parts p=f64_parts(a);ulong m=0x3ff0000000000000UL|(p.significand&0x000fffffffffffffUL);
+  if(f64_less(0x3ff6a09e667f3bcdUL,m)){m-=0x0010000000000000UL;++p.exponent;}
+  F64Double numerator=f64_double_sum(m,0xbff0000000000000UL),denominator=f64_double_sum(m,0x3ff0000000000000UL);
+  F64Double y=f64_double_div(numerator,denominator),square=f64_double_mul(y,y),term=y,sum=y;
+  for(uint n=3;n<=49;n+=2){term=f64_double_mul(term,square);F64Double count={f64_from_unsigned(n),0UL};sum=f64_double_add(sum,f64_double_div(term,count));}
+  F64Double two={0x4000000000000000UL,0UL},count={f64_from_signed(p.exponent),0UL},ln2={0x3fe62e42fefa39efUL,0x3c7abc9e3b39803fUL};
+  return f64_double_add(f64_double_mul(sum,two),f64_double_mul(count,ln2));
+}
+inline ulong f64_power_exp(F64Double a) {
+  long k=long(f64_to_integer(f64_round(f64_mul(a.hi,0x3ff71547652b82feUL)),64,false).word);
+  F64Double count={f64_from_signed(k),0UL},ln2={0x3fe62e42fefa39efUL,0x3c7abc9e3b39803fUL};
+  F64Double r=f64_double_add(a,f64_double_neg(f64_double_mul(count,ln2)));
+  F64Double term={0x3ff0000000000000UL,0UL},sum=term;
+  for(uint n=1;n<=24;++n){F64Double divisor={f64_from_unsigned(n),0UL};term=f64_double_div(f64_double_mul(term,r),divisor);sum=f64_double_add(sum,term);}
+  F64Parts p=f64_parts(sum.hi);ulong significand=p.significand<<3;
+  if(f64_abs(sum.lo))significand=f64_less(sum.lo,0UL)?significand-1:significand+1;
+  return f64_pack(0UL,p.exponent+int(k),significand);
+}
+inline ulong f64_power(ulong a, ulong b) {
+  const ulong one=0x3ff0000000000000UL,inf=0x7ff0000000000000UL;
+  ulong x=f64_abs(a),y=f64_abs(b);
+  if (!y||a==one) return one;
+  if (f64_nan(a)) return f64_quiet(a);
+  if (f64_nan(b)) return f64_quiet(b);
+  if (y==inf) {
+    if (x==one) return one;
+    bool large=f64_less(one,x);
+    return large!=(bool(b>>63))?inf:0UL;
+  }
+  F64Parts exponent=f64_parts(y);
+  bool integral=exponent.exponent>=0;
+  bool odd=false;
+  if (integral&&exponent.exponent<=52) {
+    uint shift=uint(52-exponent.exponent);
+    integral=(exponent.significand&((1UL<<shift)-1UL))==0;
+    odd=integral&&((exponent.significand>>shift)&1UL);
+  }
+  ulong sign=(a>>63)&&odd?0x8000000000000000UL:0UL;
+  if (!x) return sign|(b>>63?inf:0UL);
+  if (x==inf) return sign|(b>>63?0UL:inf);
+  if ((a>>63)&&!integral) return f64_invalid();
+  if (b==one) return a;
+  if (b==(one|0x8000000000000000UL)) return f64_div(one,a);
+  if (b==0x3fe0000000000000UL) return f64_sqrt(x);
+  F64Parts base=f64_parts(x);
+  if (integral&&base.significand==0x0010000000000000UL) {
+    ulong power=f64_mul(f64_from_signed(base.exponent),b);
+    if (!f64_less(power,0x4090000000000000UL)) return sign|inf; // >=1024
+    if (!f64_less(0xc090cc0000000000UL,power)) return sign; // <=-1075
+    return f64_pack(sign,int(long(f64_to_integer(power,64,false).word)),0x0080000000000000UL);
+  }
+  if(b==0x4000000000000000UL)return f64_mul(a,a);
+  ulong approximate=f64_mul(b,f64_log(x));
+  if(f64_less(0x408f400000000000UL,f64_abs(approximate)))return sign|(approximate>>63?0UL:inf);
+  F64Double exponentValue={b,0UL};
+  return sign|f64_power_exp(f64_double_mul(exponentValue,f64_power_log(x)));
+}
 )metal";

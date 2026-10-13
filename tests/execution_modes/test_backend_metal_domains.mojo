@@ -1106,12 +1106,12 @@ def checked_boundary_preflight() raises:
             .collect(accelerator=unavailable)
         )
     var float_source = DataFrame([Series("f", Column[Float64]([1.5]))])
-    with assert_raises(contains="Float64 requires CPU"):
-        _ = (
-            float_source.lazy()
-            .select(col("f").pow(lit(Float64(2))))
-            .collect(accelerator=unavailable)
+    assert_true(
+        "unsupported"
+        not in unavailable.describe(
+            float_source.lazy().select(col("f").pow(lit(Float64(2))))
         )
+    )
 
 
 def test_native_metal_checked_operation_boundaries_reject_before_device_initialization() raises:

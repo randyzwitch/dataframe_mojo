@@ -268,10 +268,11 @@ struct Layout {
         auto &step = r.steps[first];
         if (step.filter == 4 || step.filter == 5) {
           keep(step.slot);
-          if (step.filter == 5 && r.code[4 * step.start + 3] == 15)
+          bool duration = r.code[4 * step.start] == DFM_DURATION_KEY;
+          if (step.filter == 5 && (duration || r.code[4 * step.start + 3] == 15))
             keep(r.code[4 * step.start + 2]);
           for (int64_t j = 0; j < step.nodes; ++j)
-            keep(r.code[4 * (step.start + j) + 1]);
+            if (!duration || j != 1) keep(r.code[4 * (step.start + j) + 1]);
         } else if (step.filter == 2) {
           for (int64_t j = 0; j < step.nodes; ++j)
             keep(r.code[4 * (step.start + j) + 1]);
@@ -345,10 +346,11 @@ struct Layout {
         }
       } else if (step.filter == 2 || step.filter == 4 || step.filter == 5) {
         if (step.filter == 4 || step.filter == 5) live[step.slot] = false;
-        if (step.filter == 5 && r.code[4 * step.start + 3] == 15)
+        bool duration = r.code[4 * step.start] == DFM_DURATION_KEY;
+        if (step.filter == 5 && (duration || r.code[4 * step.start + 3] == 15))
           live[r.code[4 * step.start + 2]] = true;
         for (int64_t j = 0; j < step.nodes; ++j)
-          live[r.code[4 * (step.start + j) + 1]] = true;
+          if (!duration || j != 1) live[r.code[4 * (step.start + j) + 1]] = true;
       } else {
         live[step.slot] = false;
         // Retain inputs even for a dead result: evaluating a checked expression
@@ -483,6 +485,36 @@ Shape validate(const DFMRequest &r, bool storage = false,
       fail("Invalid Metal expression step");
     if (v.filter == 5) {
       auto h = r.code + 4 * v.start;
+      if (h[0] == DFM_DURATION_KEY) {
+        if (!typed(r) || v.gather_count || defined[v.slot] || v.nodes < 2 ||
+            h[1] < 0 || h[1] >= r.slots || !defined[h[1]] ||
+            h[2] < 0 || h[2] >= r.slots || !defined[h[2]] ||
+            slotType(r,h[2]) != DFM_INT64 || h[3] < 0 || h[3] > 5)
+          fail("Invalid Metal duration window descriptor");
+        auto bounds = h + 4;
+        int64_t period;
+        memcpy(&period,r.literals + v.start,8);
+        if (period <= 0 || bounds[0] != DFM_DURATION_BOUNDS || bounds[1] < 0 ||
+            bounds[2] < 0 || bounds[2] > 3 || bounds[3] < 0 ||
+            nodeType(r,v.start+1) != DFM_INT64)
+          fail("Invalid Metal duration window bounds");
+        auto input = slotType(r,h[1]), output = slotType(r,v.slot);
+        if (nodeType(r,v.start) != input || input == DFM_BOOL ||
+            (h[3] == 0 && (input == DFM_DECIMAL128 || output != sumType(input))) ||
+            ((h[3] == 1 || h[3] >= 4) && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
+            ((h[3] == 2 || h[3] == 3) && input != output))
+          fail("Invalid Metal duration window result type");
+        for (int64_t j=2;j<v.nodes;++j) {
+          auto key = h + 4*j;
+          if (key[0] != DFM_SORT_KEY || key[1] < 0 || key[1] >= r.slots ||
+              !defined[key[1]] || key[2] != 0 || key[3] != 1 ||
+              nodeType(r,v.start+j) != slotType(r,key[1]))
+            fail("Invalid Metal duration window partition key");
+        }
+        defined[v.slot] = true;
+        s.order = true;
+        continue;
+      }
       if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_CUMULATIVE_KEY ||
           h[1] < 0 || h[1] >= r.slots || h[2] < 0 || (h[3] < 7 && h[2] > 1) || h[3] < 0 || h[3] > 15 ||
           ((h[3] == 13 || h[3] == 14) && h[2] != 0) ||
@@ -768,7 +800,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL && c[0] != DFM_FILL_NULL &&
           c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
           c[0] != DFM_ADD && c[0] != DFM_SUB && c[0] != DFM_MUL &&
-          c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_MOD && c[0] != DFM_CAST && c[0] != DFM_DECIMAL_FLOAT_CAST &&
+          c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_MOD && c[0] != DFM_POW && c[0] != DFM_CAST && c[0] != DFM_DECIMAL_FLOAT_CAST &&
           c[0] != DFM_FLOOR && c[0] != DFM_CEIL && c[0] != DFM_ROUND && c[0] != DFM_SQRT && c[0] != DFM_EXP && c[0] != DFM_LOG &&
           c[0] != DFM_NEG && c[0] != DFM_ABS &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE &&
@@ -792,9 +824,6 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if ((c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
           operand != DFM_FLOAT32 && operand != DFM_FLOAT64_STORAGE)
         fail("Metal floating classification requires Float32");
-      if (c[0] == DFM_POW &&
-          operand == DFM_FLOAT32)
-        fail("Metal floating operator requires CPU execution");
       if (c[0] == DFM_ROUND && c[3] != 0 &&
           (operand == DFM_FLOAT32 || operand == DFM_FLOAT64_STORAGE) && !typed(r))
         fail("Metal floating decimal rounding requires typed descriptors");
@@ -1988,9 +2017,9 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
               "(uint a,uint b,device const T *x,device const uchar *v,constant "
               "uint4 &meta){";
       auto keyCount =
-          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes - (step.filter == 5);
+          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes - (step.filter == 5 ? (r.code[4 * step.start] == DFM_DURATION_KEY ? 2 : 1) : 0);
       for (int64_t j = 0; j < keyCount; ++j) {
-        auto key = r.code + 4 * (step.start + (step.filter == 5 ? j + 1 : step.filter == 4
+        auto key = r.code + 4 * (step.start + (step.filter == 5 ? j + (r.code[4 * step.start] == DFM_DURATION_KEY ? 2 : 1) : step.filter == 4
             ? (j + 1 < keyCount ? j + 1 : 0) : j + (step.filter == 3)));
         auto slot = std::to_string(layout.physical[key[1]]) + "UL*meta.z";
         text += "{ulong ai=" + slot + "+a,bi=" + slot +
@@ -2271,6 +2300,10 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           } else if (op == DFM_DIV) {
             text += z + "=f64_div(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) +
                     "),f64_word(" + encode(operandType,b) + "," + std::to_string(operandType) + "));";
+          } else if (op == DFM_POW && (operandType == DFM_FLOAT32 || operandType == DFM_FLOAT64_STORAGE)) {
+            auto expression = "f64_power(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) +
+                "),f64_word(" + encode(operandType,b) + "," + std::to_string(operandType) + "))";
+            text += z + "=" + (dtype == DFM_FLOAT32 ? "as_type<float>(f64_to_float32(" + expression + "))" : expression) + ";";
           } else if (op == DFM_EXP || op == DFM_LOG) {
             auto expression = std::string(op == DFM_EXP ? "f64_exp" : "f64_log") + "(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) + "))";
             text += z + "=" + (dtype == DFM_FLOAT32 ? "as_type<float>(f64_to_float32(" + expression + "))" : expression) + ";";
@@ -2808,7 +2841,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if ((op == DFM_ROUND && r.code[4*i+3] != 0 &&
          (dtype == DFM_FLOAT32 || dtype == DFM_FLOAT64_STORAGE)) ||
         (op == DFM_DECIMAL_CAST && dtype == DFM_FLOAT32) ||
-        op == DFM_CUMULATIVE_KEY) {
+        op == DFM_CUMULATIVE_KEY || op == DFM_DURATION_KEY) {
       memcpy(static_cast<char *>(literal.contents) + i * 8, r.literals + i, 8);
       continue;
     }
@@ -3158,6 +3191,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         int64_t((drain.command.GPUEndTime - drain.command.GPUStartTime) * 1e9);
   uint32_t fault = *static_cast<uint32_t *>(arithmeticError.contents);
   if (fault != UINT32_MAX) {
+    if (fault == 0xB0000000U) fail("Metal time window index contains nulls");
+    if (fault == 0xB0000001U) fail("Metal time window index is not sorted within its group");
+    if (fault == 0xB0000002U) fail("Int64 offset overflow in Metal time window bounds");
     if (fault == 0xE0000000U)
       fail("Metal unsupported [accumulator]: cannot prove exact wide accumulation "
            "within the native Int64/UInt64 range");
