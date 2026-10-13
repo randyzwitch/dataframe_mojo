@@ -122,14 +122,10 @@ def decode(values: Series) raises -> Series:
 
 
 def decode_contiguous(values: Series) raises -> Series:
-    """A categorical column's values as a String column with its bytes laid
-    out row after row, which string kernels read faster than views."""
-    var codes = values.rechunk() if values.is_chunked() else values.copy()
-    return _decode_copying(
-        values.name(),
-        codes._data[Column[UInt32]],
-        values.dtype().dictionary(),
-    )
+    """A categorical column's values as a String column: views into its
+    dictionary's bytes (`decode`), the one in-memory string layout, which
+    every string kernel reads through pointers taken once."""
+    return decode(values)
 
 
 def _decode_copying(

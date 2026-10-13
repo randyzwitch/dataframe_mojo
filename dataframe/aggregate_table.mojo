@@ -80,6 +80,7 @@ from .partition import (
 from .series import Series
 from .hashing import RowKeys
 from .trace import trace_path
+from .string_bytes import _Bytes
 from .string_column import StringColumn
 from .string_view import (
     STRING_VIEW_INLINE_BYTES,
@@ -641,7 +642,32 @@ def _string_words(
     var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
     var has_nulls = strings.null_count() > 0
     var views = strings._is_view_storage()
-    var size = 0 if views else len(strings._bytes[])
+    if views:
+        # A view is already these words: its first word, then its inline
+        # bytes or (past twelve bytes) where its bytes are.
+        var rows = _Bytes(strings)
+        var words = Pointer[UInt64, ImmutAnyOrigin](
+            unsafe_from_address=rows.views
+        )
+        for k in range(count):
+            var i = start + k
+            if has_nulls and not strings._valid(i):
+                first[unsafe_offset=k] = 0
+                second[unsafe_offset=k] = 0
+                nulls[unsafe_offset=k] |= bit
+                continue
+            var head = rows.head(i)
+            var length = Int(head & 0xFFFFFFFF)
+            first[unsafe_offset=k] = head
+            if length <= 12:
+                var keep = 8 * max(length - 4, 0)
+                second[unsafe_offset=k] = words[unsafe_offset=2 * i + 1] & (
+                    (UInt64(1) << UInt64(keep)) - 1 if keep < 64 else UInt64.MAX
+                )
+            else:
+                second[unsafe_offset=k] = UInt64(Int(rows.get(i).unsafe_ptr()))
+        return
+    var size = len(strings._bytes[])
     for k in range(count):
         var i = start + k
         if has_nulls and not strings._valid(i):
@@ -661,14 +687,16 @@ def _string_words(
         if not views and strings._start(i) + 16 <= size:
             # Sixteen readable bytes from the string's start: its words by
             # two loads, masked to its length.
-            var low = start_ptr.bitcast[UInt64]().unsafe_load[alignment=1]()
+            var low = start_ptr.unsafe_bitcast[UInt64]().unsafe_load[
+                alignment=1
+            ]()
             head |= (low & 0xFFFFFFFF) << 32
             first[unsafe_offset=k] = head
             if length <= 12:
                 var high = (low >> 32) | (
                     UInt64(
                         start_ptr.unsafe_offset(8)
-                        .bitcast[UInt32]()
+                        .unsafe_bitcast[UInt32]()
                         .unsafe_load[alignment=1]()
                     )
                     << 32
@@ -1986,7 +2014,7 @@ def _string_keys(
             continue
         buffer_bytes += length
         var found = held.find(Int(tail), length)
-        var b = -1
+        var b: Int
         var offset = found[1]
         if found[0] >= 0 and offset <= _STRING_VIEW_BUFFER_LIMIT - length:
             b = local[found[0]]

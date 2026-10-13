@@ -2182,6 +2182,7 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/storage_ownership/test_isolation.mojo",
                 "tests/storage_ownership/test_typed_storage.mojo",
+                "tests/storage_ownership/test_string_views_canonical.mojo",
                 "tests/storage_ownership/test_views.mojo",
             ],
         )

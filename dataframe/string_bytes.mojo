@@ -8,8 +8,10 @@ reads offsets and bytes (or view storage) directly, and `_same_bytes` and
 """
 from std.bit import byte_swap
 
+from std.memory import ArcPointer, Pointer
+
 from .string_column import StringColumn
-from .string_view import StringViewStorage
+from .string_view import StringView, StringViewStorage
 
 
 @always_inline
@@ -39,33 +41,61 @@ def _same_bytes(
 
 
 struct _Bytes(Copyable, Movable):
-    """Row bytes of one string chunk, read from its buffers directly: the
-    column's own accessor re-checks its storage kind and copies the view
-    storage handle, whose reference count every worker shares, per row."""
+    """Row bytes of one string chunk, read through pointers taken once, for
+    either storage: offsets and bytes, or Arrow views (16-byte descriptors:
+    length and a four-byte prefix, then eight more inline bytes up to
+    twelve or a buffer and an offset), the layout of DuckDB's `string_t`.
+    The column's own accessor re-checks its storage kind and copies the
+    view storage handle, whose reference count every worker shares, per
+    row; that made every kernel slower on views than on offsets."""
 
     var column: StringColumn
-    var storage: List[StringViewStorage]
+    var views: Int
+    var buffers: Int
     var offsets: Int
     var data: Int
 
     def __init__(out self, column: StringColumn):
         self.column = column.copy()
-        self.storage = List[StringViewStorage]()
+        self.views = 0
+        self.buffers = 0
         self.offsets = 0
         self.data = 0
         if column._is_view_storage():
-            self.storage.append(column._view_storage_unchecked())
+            ref storage = column._view_storage_unchecked()
+            self.views = Int(
+                storage._views[].unsafe_ptr().unsafe_offset(column._offset)
+            )
+            self.buffers = Int(storage._buffers[].unsafe_ptr())
         else:
             self.offsets = Int(column.unsafe_offsets()) + 8 * column._offset
             self.data = Int(column.unsafe_bytes())
 
     @always_inline
+    def is_views(self) -> Bool:
+        return self.views != 0
+
+    @always_inline
     def get(self, i: Int) -> Span[UInt8, ImmutAnyOrigin]:
-        if len(self.storage) > 0:
-            return (
-                self.storage[0]
-                ._get_unchecked(self.column._offset + i)
-                .as_bytes()
+        if self.views != 0:
+            var view = Pointer[StringView, ImmutAnyOrigin](
+                unsafe_from_address=self.views
+            ).unsafe_offset(i)
+            var length = Int(view[].length)
+            var at: Int
+            if length <= 12:
+                at = Int(view) + 4
+            else:
+                at = Int(
+                    Pointer[ArcPointer[List[UInt8]], ImmutAnyOrigin](
+                        unsafe_from_address=self.buffers
+                    )[unsafe_offset=Int(view[].buffer_index)][].unsafe_ptr()
+                ) + Int(view[].offset)
+            return Span[UInt8, ImmutAnyOrigin](
+                unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                    unsafe_from_address=at
+                ),
+                length=length,
             )
         var offsets = Pointer[Int64, ImmutAnyOrigin](
             unsafe_from_address=self.offsets
@@ -78,6 +108,40 @@ struct _Bytes(Copyable, Movable):
             ),
             length=end - start,
         )
+
+    @always_inline
+    def head(self, i: Int) -> UInt64:
+        """Row i's length and first four bytes, as a view's first word (zero
+        past the end of a shorter value): equal strings have equal heads,
+        so unequal heads settle most unequal pairs without their bytes."""
+        if self.views != 0:
+            var word = Pointer[UInt64, ImmutAnyOrigin](
+                unsafe_from_address=self.views
+            )[unsafe_offset=2 * i]
+            var length = Int(word & 0xFFFFFFFF)
+            if length >= 4:
+                return word
+            # Bytes past a short value are not promised to be zero.
+            var keep = (UInt64(1) << UInt64(8 * length)) - 1
+            return (word & 0xFFFFFFFF) | (((word >> 32) & keep) << 32)
+        var bytes = self.get(i)
+        var head = UInt64(len(bytes))
+        for b in range(min(len(bytes), 4)):
+            head |= UInt64(bytes.unsafe_ptr()[unsafe_offset=b]) << UInt64(
+                32 + 8 * b
+            )
+        return head
+
+    @always_inline
+    def equal(self, i: Int, other: _Bytes, j: Int) -> Bool:
+        """Whether row i equals `other`'s row j (validity aside): heads
+        first, then the bytes."""
+        if self.views != 0 and other.views != 0:
+            if self.head(i) != other.head(j):
+                return False
+            if len(self.get(i)) <= 4:
+                return True
+        return _same_bytes(self.get(i), other.get(j))
 
 
 @always_inline
