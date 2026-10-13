@@ -1301,6 +1301,24 @@ def production_policy() -> SuitePolicy:
 
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_higher_moments.mojo::test_native_metal_higher_moments_numeric_widths_flags_nulls_groups_and_partitions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_higher_moments.mojo::test_native_metal_higher_moments_nonfinite_constants_full_unsigned_and_decimal_casts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_higher_moments.mojo::test_native_metal_higher_moments_workers_compositions_cost_budget_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_rolling_moments.mojo::test_native_metal_rolling_moments_numeric_widths_bounds_nulls_and_anchors",
             "metal",
         )
@@ -1854,6 +1872,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_selectors.mojo",
                 "tests/execution_modes/test_backend_metal_empty_results.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
+                "tests/execution_modes/test_backend_metal_higher_moments.mojo",
                 "tests/execution_modes/test_backend_metal_pair_moments.mojo",
                 "tests/execution_modes/test_backend_metal_shift_fill.mojo",
                 "tests/execution_modes/test_backend_metal_cumulative_windows.mojo",

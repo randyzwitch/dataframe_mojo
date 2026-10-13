@@ -107,6 +107,8 @@ enum DFMOp {
   // next 16 bits reserved (zero), high 16 bits configured worker limit.
   DFM_STD = 86,
   DFM_VAR = 87,
+  DFM_SKEW = 98,
+  DFM_KURTOSIS = 99,
   // Paired Float64 reductions. Moment metadata uses ddof bits 0..30,
   // the logical right operand slot in bits 31..46, and workers in 47..62.
   DFM_CORR = 160,

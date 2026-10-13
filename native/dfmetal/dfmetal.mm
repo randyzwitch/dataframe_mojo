@@ -87,7 +87,7 @@ int64_t sumType(int64_t t) {
   return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
-  if (op == DFM_VAR || op == DFM_STD || op == DFM_COV || op == DFM_CORR)
+  if (op == DFM_VAR || op == DFM_STD || op == DFM_COV || op == DFM_CORR || op == DFM_SKEW || op == DFM_KURTOSIS)
     return type == DFM_FLOAT64_STORAGE ? DFM_FLOAT64_STORAGE : -1;
   if (op == DFM_WIDE_INTEGER_SUM || op == DFM_WIDE_INTEGER_MEAN)
     return type == DFM_INT64 || type == DFM_UINT64
@@ -120,9 +120,10 @@ int64_t reductionType(int64_t type, int64_t op) {
 }
 bool pairMomentReduction(int64_t op) { return op == DFM_COV || op == DFM_CORR; }
 int64_t momentRight(int64_t metadata) { return (uint64_t(metadata) >> 31) & 0xffffULL; }
-bool momentReduction(int64_t op) { return op == DFM_VAR || op == DFM_STD || pairMomentReduction(op); }
+bool higherMomentReduction(int64_t op) { return op == DFM_SKEW || op == DFM_KURTOSIS; }
+bool momentReduction(int64_t op) { return op == DFM_VAR || op == DFM_STD || higherMomentReduction(op) || pairMomentReduction(op); }
 bool validMomentMetadata(int64_t metadata, int64_t op) {
-  return metadata >= 0 && (pairMomentReduction(op) || momentRight(metadata) == 0) &&
+  return metadata >= 0 && (!higherMomentReduction(op) || (uint64_t(metadata) & 0x7fffffffULL) <= (op == DFM_SKEW ? 1 : 3)) && (pairMomentReduction(op) || momentRight(metadata) == 0) &&
          ((uint64_t(metadata) >> 47) & 0xffffULL) >= 1;
 }
 bool decimal128Reduction(int64_t op) {
@@ -1432,6 +1433,20 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
   bool valid=o.kind==160||state.count>0;
   y[to]=valid?covariance_finish(state,moment_ddof(o.minimum),o.kind==160):0UL;w[to]=uchar(valid);return;
  }
+ if(HIGHER_MOMENT_REDUCTIONS&&(o.kind==98||o.kind==99)){
+  if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
+        std::string(windowFloating ? "true" : "false") + R"MSL();
+  uint step=moment_step(meta.y,workers,)MSL" + std::string(windowFloating ? "8192U" : "64U") + R"MSL();
+  uint at=begin;CentralMomentState state={0,0,0,0,0};
+  for(uint worker=0;worker<workers;++worker){CentralMomentState current={0,0,0,0,0};
+   uint stop=min(meta.y,(worker+1U)*step);
+   while(at<end){uint row=uint(x[)MSL" + index + R"MSL(+at]);if(row>=stop)break;++at;
+    ulong from=ulong(o.slot)*meta.z+row;if(v[from])current=central_add(current,x[from]);}
+   state=central_merge(state,current);
+  }
+  bool valid=central_valid(state.count,o.kind==99,moment_ddof(o.minimum));
+  y[to]=valid?central_finish(state,o.kind==99,moment_ddof(o.minimum)):0UL;w[to]=uchar(valid);return;
+ }
  if(MOMENT_REDUCTIONS&&(o.kind==86||o.kind==87)){
   if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
         std::string(windowFloating ? "true" : "false") + R"MSL();
@@ -1497,17 +1512,21 @@ std::string source(const DFMRequest &r) {
   // Keep the moment state machine out of unrelated reduction pipelines.
   // Out.kind is a runtime parameter, so the shader otherwise retains this
   // expensive binary64 branch even when the request cannot use it.
-  bool moments = false, paired = false;
+  bool moments = false, paired = false, higher = false;
   for (int64_t i = 0; i < r.output_count; ++i) {
     moments |= r.outputs[i].reduction == DFM_VAR || r.outputs[i].reduction == DFM_STD;
     paired |= pairMomentReduction(r.outputs[i].reduction);
+    higher |= higherMomentReduction(r.outputs[i].reduction);
   }
   for (int64_t i = 0; i < r.code_words; i += 4) {
     moments |= r.code[i] == DFM_GROUP_OUTPUT && (r.code[i+3] == DFM_VAR || r.code[i+3] == DFM_STD);
     paired |= r.code[i] == DFM_GROUP_OUTPUT && pairMomentReduction(r.code[i + 3]);
+    higher |= r.code[i] == DFM_GROUP_OUTPUT && higherMomentReduction(r.code[i + 3]);
   }
   text += "constant bool PAIRED_MOMENT_REDUCTIONS=" +
           std::string(paired ? "true" : "false") + ";\n";
+  text += "constant bool HIGHER_MOMENT_REDUCTIONS=" +
+          std::string(higher ? "true" : "false") + ";\n";
   text += "constant bool MOMENT_REDUCTIONS=" +
           std::string(moments ? "true" : "false") + ";\n";
   bool wide = partialWidth(r) == 32;
@@ -1751,6 +1770,21 @@ kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[bu
   }
   bool valid=o.kind==160||state.count>0;
   partials[group.y*groups]=make_partial(valid?long(covariance_finish(state,moment_ddof(o.minimum),o.kind==160)):0L,0L,long(valid));return;
+ }
+ if(HIGHER_MOMENT_REDUCTIONS&&(o.kind==98||o.kind==99)){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  uint workers=uint(max(1UL,min(ulong(o.minimum)>>47,ulong(meta.x)/65536UL)));
+  uint step=moment_step(meta.x,workers,8192U);CentralMomentState state={0,0,0,0,0};
+  for(uint worker=0;worker<workers;++worker){CentralMomentState current={0,0,0,0,0};
+   uint begin=min(meta.x,worker*step),end=min(meta.x,(worker+1U)*step);
+   for(uint row=begin;row<end;++row){
+    if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+    ulong idx=o.slot*meta.z+row;if(v[idx])current=central_add(current,x[idx]);}
+   state=central_merge(state,current);
+  }
+  bool valid=central_valid(state.count,o.kind==99,moment_ddof(o.minimum));
+  partials[group.y*groups]=make_partial(valid?long(central_finish(state,o.kind==99,moment_ddof(o.minimum))):0L,0L,long(valid));return;
  }
  if(MOMENT_REDUCTIONS&&(o.kind==86||o.kind==87)){
   if(lane)return;

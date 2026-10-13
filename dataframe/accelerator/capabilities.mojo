@@ -5,6 +5,8 @@ from dataframe.expr import (
     COUNT,
     MEAN,
     VAR,
+    SKEW,
+    KURTOSIS,
     COV,
     CORR,
     STD,
@@ -64,6 +66,7 @@ struct RowCapabilities(Copyable):
     var ranks: Bool
     var paired_moments: Bool
     var moments: Bool
+    var higher_moments: Bool
     var rolling_windows: Bool
     var rolling_moments: Bool
     var empty_outputs: Bool
@@ -106,6 +109,7 @@ struct RowCapabilities(Copyable):
         cumulative_windows: Bool = False,
         paired_moments: Bool = False,
         moments: Bool = False,
+        higher_moments: Bool = False,
         rolling_windows: Bool = False,
         rolling_moments: Bool = False,
         empty_outputs: Bool = False,
@@ -152,6 +156,7 @@ struct RowCapabilities(Copyable):
         self.cumulative_windows = cumulative_windows
         self.paired_moments = paired_moments
         self.moments = moments
+        self.higher_moments = higher_moments
         self.rolling_windows = rolling_windows
         self.rolling_moments = rolling_moments
         self.empty_outputs = empty_outputs
@@ -225,7 +230,18 @@ struct RowCapabilities(Copyable):
             )
 
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
-        if op == VAR or op == STD or op == COV or op == CORR:
+        if (
+            op == VAR
+            or op == STD
+            or op == COV
+            or op == CORR
+            or op == SKEW
+            or op == KURTOSIS
+        ):
+            if (op == SKEW or op == KURTOSIS) and not self.higher_moments:
+                self.reject(
+                    "reduction", "skewness and kurtosis require backend support"
+                )
             if (op == COV or op == CORR) and not self.paired_moments:
                 self.reject(
                     "reduction",

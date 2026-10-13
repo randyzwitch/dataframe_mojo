@@ -83,6 +83,8 @@ from dataframe.expr import (
     COUNT,
     MEAN,
     VAR,
+    SKEW,
+    KURTOSIS,
     COV,
     CORR,
     STD,
@@ -1392,6 +1394,8 @@ def lower_rows(
                 or last.op == MEAN
                 or last.op == COV
                 or last.op == CORR
+                or last.op == SKEW
+                or last.op == KURTOSIS
                 or last.op == VAR
                 or last.op == STD
                 or last.op == LEN
@@ -1529,9 +1533,15 @@ def lower_rows(
                     )
                     has_aggregate = True
                     continue
-                if reduction == VAR or reduction == STD:
+                if (
+                    reduction == VAR
+                    or reduction == STD
+                    or reduction == SKEW
+                    or reduction == KURTOSIS
+                ):
                     # Counts fit Int32; every larger ddof yields null. The
                     # middle sixteen bits are reserved for paired moments.
+                    # Higher moments use the low bits for bias/Fisher flags.
                     min_count = (
                         min(Int(last.integer), Int(Int32.MAX))
                         | min(configured_workers(), 65535) << 47
