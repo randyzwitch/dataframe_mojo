@@ -1505,17 +1505,18 @@ def _one_chunk(column: Series) -> Series:
     return column.copy()
 
 
-def _next_row(parts: _Partitioned, p: Int, block: Int, row: Int) -> Int:
-    """The address of a worker's next row of partition p, at `row` of
-    `block` or later, or 0 when it has none."""
+def _next_first(parts: _Partitioned, p: Int, block: Int, row: Int) -> Int:
+    """The first row of a worker's next row of partition p, at `row` of
+    `block` or later, or Int.MAX when it has none."""
     var b = block
     var r = row
     while b < len(parts.blocks[p]):
         if r < parts.rows_in(p, b):
-            return parts.blocks[p][b] + 8 * r * parts.stride
+            var at = parts.blocks[p][b] + 8 * r * parts.stride
+            return Int(_words_at(at)[unsafe_offset=2])
         b += 1
         r = 0
-    return 0
+    return Int.MAX
 
 
 @always_inline
@@ -1624,11 +1625,14 @@ struct _FinishJob(Job):
         var sinks = len(jobs)
         var block = List[Int](length=sinks, fill=0)
         var row_in = List[Int](length=sinks, fill=0)
+        # Each worker's next row's first row, Int.MAX when it has none.
+        var head = List[Int](length=sinks, fill=Int.MAX)
         var in_order = True
         for p in range(self.lo, self.hi):
             for j in range(sinks):
                 block[j] = 0
                 row_in[j] = 0
+                head[j] = _next_first(jobs[j].parts, p, 0, 0)
             var last = -1
             while True:
                 # The worker whose next row comes first, and the first
@@ -1637,10 +1641,7 @@ struct _FinishJob(Job):
                 var best_first = Int.MAX
                 var after = Int.MAX
                 for j in range(sinks):
-                    var at = _next_row(jobs[j].parts, p, block[j], row_in[j])
-                    if at == 0:
-                        continue
-                    var first = Int(_words_at(at)[unsafe_offset=2])
+                    var first = head[j]
                     if first < best_first:
                         after = best_first
                         best_first = first
@@ -1671,6 +1672,7 @@ struct _FinishJob(Job):
                         break
                     block[best] += 1
                     row_in[best] = 0
+                head[best] = _next_first(parts, p, block[best], row_in[best])
         _ = entries^
         if not in_order:
             # A worker's rows were not in first-row order: sort the groups.
