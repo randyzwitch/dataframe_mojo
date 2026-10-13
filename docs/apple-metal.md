@@ -58,8 +58,14 @@ normalization. Operations and name prefixes/suffixes apply independently to each
 matched column, in the CPU selector's order. Select, with-columns, grouped and
 global aggregates, supported windows, and filters with exactly one match retain
 their normal precision and observation checks. Expansion reads no source rows.
-An empty selector in with-columns is a no-op; empty select results still require
-zero-column resident support and reject before device initialization.
+An empty selector in with-columns is a no-op. A select whose selectors match no
+columns returns one row with zero columns, matching the CPU scalar selection
+shape. Explicit `select([])` and dropping every column preserve the input row
+count, including after filters, groups, joins, and limits. Native result and
+dictionary materialization retain that row count without allocating column
+payloads. Zero-column plans use `metal-empty-outputs-v1` so automatic placement
+requires matching calibration for this result shape. Zero-column sources and
+subsequent consumers still require resident input support.
 
 Direct column projections and aliases reuse an existing resident value slot.
 They preserve separate output names and column order without a copying device
@@ -635,7 +641,7 @@ that unlisted query combinations are already equivalent.
 | Temporal expressions | Calendar month/year truncation, offsets, duration totals, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins, file-backed scans, and chunked in-memory inputs without explicit rechunking. |
-| Composition | Zero-column selector results and remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
+| Composition | Zero-column sources and subsequent consumers, plus remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
 
 Native validation and the backend contract suite cover each implemented feature.
 They must be extended as these gaps close; passing the current suite alone does

@@ -876,7 +876,9 @@ def lower_rows(
         var projected = List[Series]()
         var projected_slots = List[Int]()
         var aggregate_outputs = List[RowOutput]()
-        var has_rows = False
+        # An explicit empty projection keeps its input row shape. A selector
+        # that expands to nothing is normalized separately to a scalar row.
+        var has_rows = node.kind == SELECT and len(node.exprs) == 0
         var has_aggregate = False
         var projection_names = List[String]()
         for expr in node.exprs:
@@ -1793,7 +1795,7 @@ def lower_rows(
             + String(capabilities.max_slots)
             + " output columns",
         )
-    if len(outputs) == 0:
+    if len(outputs) == 0 and not capabilities.empty_outputs:
         capabilities.reject(
             "plan", "resident region requires at least one output column"
         )

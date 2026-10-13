@@ -544,4 +544,4 @@ def restore_frame(
         columns.append(
             dictionary.restore(frame._columns[i], schema._columns[i].dtype())
         )
-    return DataFrame(columns^)
+    return DataFrame(columns^, height=frame.height())
