@@ -1,6 +1,6 @@
 """Column aliases share resident values without changing visible schemas."""
-from std.testing import assert_true, assert_raises
 from tests.execution_modes.test_backend_metal import require_metal
+from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit, Expr
 from dataframe.lazy import LazyFrame
 from dataframe.string_column import StringColumn
@@ -27,17 +27,17 @@ def check(query: LazyFrame) raises:
 
 def test_column_slot_preflight_reuses_values_and_bounds_outputs() raises:
     var source = DataFrame([Series("x", Column[Int32]([3, 1, 2]))])
-    var query = source.lazy().select_exprs(aliases(128))
+    var query = source.lazy().select_exprs(aliases(256))
     var plan = lower_rows(query, _capabilities())
     assert_true(plan.source.width() == 1 and plan.slots == 1)
-    assert_true(len(plan.steps) == 0 and len(plan.outputs) == 128)
+    assert_true(len(plan.steps) == 0 and len(plan.outputs) == 256)
     assert_true(len(plan.code) == 0 and len(plan.literals) == 0)
     assert_true(plan.reused_columns)
     for output in plan.outputs:
         assert_true(output.slot == 0)
-    with assert_raises(contains="128 output columns"):
+    with assert_raises(contains="256 output columns"):
         _ = lower_rows(
-            source.lazy().select_exprs(aliases(129)), _capabilities()
+            source.lazy().select_exprs(aliases(257)), _capabilities()
         )
     var two = source.lazy().select_exprs(aliases(2))
     var default_plan = lower_rows(two, RowCapabilities())
@@ -46,15 +46,15 @@ def test_column_slot_preflight_reuses_values_and_bounds_outputs() raises:
     var reused = lower_rows(two, _capabilities())
     assert_true(reused.slots == 1 and len(reused.steps) == 0)
     var identity = List[Expr]()
-    for name in wide_frame(128, 1).columns():
+    for name in wide_frame(256, 1).columns():
         identity.append(col(name))
     var wide = lower_rows(
-        wide_frame(128, 1).lazy().select_exprs(identity), _capabilities()
+        wide_frame(256, 1).lazy().select_exprs(identity), _capabilities()
     )
-    assert_true(wide.slots == 128 and len(wide.steps) == 0)
+    assert_true(wide.slots == 256 and len(wide.steps) == 0)
     var boundary = (
         source.lazy()
-        .select_exprs(aliases(128))
+        .select_exprs(aliases(256))
         .filter(col("v0") > 0)
         .sort("v1")
     )
@@ -65,35 +65,37 @@ def test_column_slot_preflight_reuses_values_and_bounds_outputs() raises:
     assert_true(len(gathered.gathers) == 2)
     assert_true(gathered.gathers[0] == 0 and gathered.gathers[1] == 0)
     # Computations still allocate values and enforce the independent slot cap.
-    var computed = List[Expr]()
-    for i in range(128):
-        computed.append((col("x") + lit(Int32(0))).alias("v" + String(i)))
-    with assert_raises(contains="128 value slots"):
-        _ = lower_rows(source.lazy().select_exprs(computed), _capabilities())
+    with assert_raises(contains="256 value slots"):
+        _ = lower_rows(
+            wide_frame(256, 1)
+            .lazy()
+            .with_columns((col("c0") + lit(Int64(0))).alias("computed")),
+            _capabilities(),
+        )
 
 
 def test_native_metal_column_slot_gpu_aliases_filters_order_slices_and_replacement() raises:
     _ = require_metal()
-    var raw = wide_frame(128)
+    var raw = wide_frame(256)
     var identity = List[Expr]()
     for name in raw.columns():
         identity.append(col(name))
     check(raw.lazy().select_exprs(identity))
     check(raw.slice(3, 13).lazy().select_exprs(identity))
     var raw_aliases = List[Expr]()
-    for i in range(128):
+    for i in range(256):
         raw_aliases.append(col("c0").alias("v" + String(i)))
     check(raw.lazy().select_exprs(raw_aliases))
     var source = numeric_frame().select(["x"])
-    var query = source.lazy().select_exprs(aliases(128))
+    var query = source.lazy().select_exprs(aliases(256))
     check(query)
     check(query.head(0))
     check(query.filter(col("v127") < 3))
     check(query.sort("v126", descending=True))
     check(query.slice(1, 4))
     check(query.filter(col("v127") < 3).sort("v1").slice(1, 2))
-    check(source.slice(0, 0).lazy().select_exprs(aliases(128)))
-    check(source.slice(1, 5).lazy().select_exprs(aliases(128)))
+    check(source.slice(0, 0).lazy().select_exprs(aliases(256)))
+    check(source.slice(1, 5).lazy().select_exprs(aliases(256)))
     var changed = (
         source.lazy()
         .with_columns(col("x").alias("copy"))
