@@ -77,6 +77,7 @@ from .partition import (
     _mix,
 )
 from .series import Series
+from .trace import trace_path
 from .string_column import StringColumn
 from .string_view import (
     STRING_VIEW_INLINE_BYTES,
@@ -1504,6 +1505,53 @@ def _one_chunk(column: Series) -> Series:
     return column.copy()
 
 
+def _next_row(parts: _Partitioned, p: Int, block: Int, row: Int) -> Int:
+    """The address of a worker's next row of partition p, at `row` of
+    `block` or later, or 0 when it has none."""
+    var b = block
+    var r = row
+    while b < len(parts.blocks[p]):
+        if r < parts.rows_in(p, b):
+            return parts.blocks[p][b] + 8 * r * parts.stride
+        b += 1
+        r = 0
+    return 0
+
+
+@always_inline
+def _merge_row(
+    at: Int,
+    table: Pointer[UInt64, MutAnyOrigin],
+    mask: Int,
+    mut final: _Groups,
+    addressed: List[Bool],
+    slots: List[_Slot],
+) -> Bool:
+    """Row `at` into the finish's table: a new group (True), or its states
+    folded into its group's, which keeps the earlier first row."""
+    var row = _words_at(at)
+    var hash = row[]
+    var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
+    var slot = Int(hash) & mask
+    var states_bytes = 8 * final.states_at
+    while True:
+        var entry = table[unsafe_offset=slot]
+        if entry == 0:
+            var f = final.copy_row(at)
+            table[unsafe_offset=slot] = _entry(hash, f + 1)
+            return True
+        if (entry & ~_ID_MASK) == salt:
+            var f = Int(entry & _ID_MASK) - 1
+            var mine = final.at(f)
+            if _words_at(mine)[] == hash and _same_rows(mine, at, addressed):
+                _combine(slots, mine + states_bytes, at + states_bytes)
+                var first = row[unsafe_offset=2]
+                if first < _words_at(mine)[unsafe_offset=2]:
+                    _words_at(mine)[unsafe_offset=2] = first
+                return False
+        slot = (slot + _stride(hash)) & mask
+
+
 struct _FinishJob(Job):
     """Phase 2: a run of partitions' rows from every worker merged in a
     fresh table sized for them, states folded into each group's row."""
@@ -1557,7 +1605,7 @@ struct _FinishJob(Job):
             capacity *= 2
         var mask = capacity - 1
         var entries = huge_list(capacity, UInt64(0))
-        var table = entries.unsafe_ptr()
+        var table = entries.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
         ref addressed = jobs[0].addressed
         var final = _Groups(
             len(addressed),
@@ -1566,65 +1614,88 @@ struct _FinishJob(Job):
             self.total,
         )
         var stride = final.stride
-        var states_bytes = 8 * final.states_at
-        for j in range(len(jobs)):
-            for p in range(self.lo, self.hi):
-                ref blocks = jobs[j].parts.blocks[p]
-                for b in range(len(blocks)):
-                    var base = blocks[b]
-                    for r in range(jobs[j].parts.rows_in(p, b)):
-                        var at = base + 8 * r * stride
-                        var row = _words_at(at)
-                        var hash = row[]
-                        var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
-                        var slot = Int(hash) & mask
-                        while True:
-                            var entry = table[unsafe_offset=slot]
-                            if entry == 0:
-                                var f = final.copy_row(at)
-                                table[unsafe_offset=slot] = _entry(hash, f + 1)
-                                break
-                            if (entry & ~_ID_MASK) == salt:
-                                var f = Int(entry & _ID_MASK) - 1
-                                var mine = final.at(f)
-                                if _words_at(mine)[] == hash and _same_rows(
-                                    mine, at, addressed
-                                ):
-                                    _combine(
-                                        self.slots,
-                                        mine + states_bytes,
-                                        at + states_bytes,
-                                    )
-                                    var first = row[unsafe_offset=2]
-                                    if first < _words_at(mine)[unsafe_offset=2]:
-                                        _words_at(mine)[unsafe_offset=2] = first
-                                    break
-                            slot = (slot + _stride(hash)) & mask
+        # Groups come out by partition, then by first row, so the output
+        # order depends on the rows alone, not on which worker took which
+        # morsel. A worker takes morsels in order and makes a group's row
+        # at its first sight in a fill cycle, so each worker's rows of a
+        # partition are in first-row order: merging them makes every group
+        # at its earliest row, in that order, with no sort and no second
+        # copy of the groups (both were a tenth of near-unique group-bys).
+        var sinks = len(jobs)
+        var block = List[Int](length=sinks, fill=0)
+        var row_in = List[Int](length=sinks, fill=0)
+        var in_order = True
+        for p in range(self.lo, self.hi):
+            for j in range(sinks):
+                block[j] = 0
+                row_in[j] = 0
+            var last = -1
+            while True:
+                # The worker whose next row comes first, and the first
+                # row next after it among the others.
+                var best = -1
+                var best_first = Int.MAX
+                var after = Int.MAX
+                for j in range(sinks):
+                    var at = _next_row(jobs[j].parts, p, block[j], row_in[j])
+                    if at == 0:
+                        continue
+                    var first = Int(_words_at(at)[unsafe_offset=2])
+                    if first < best_first:
+                        after = best_first
+                        best_first = first
+                        best = j
+                    elif first < after:
+                        after = first
+                if best < 0:
+                    break
+                ref parts = jobs[best].parts
+                # Its rows up to the others' next, block by block.
+                while block[best] < len(parts.blocks[p]):
+                    var rows = parts.rows_in(p, block[best])
+                    var base = parts.blocks[p][block[best]]
+                    var stop = False
+                    while row_in[best] < rows:
+                        var at = base + 8 * row_in[best] * stride
+                        var first = Int(_words_at(at)[unsafe_offset=2])
+                        if first > after:
+                            stop = True
+                            break
+                        if _merge_row(
+                            at, table, mask, final, addressed, self.slots
+                        ):
+                            in_order = in_order and first > last
+                            last = first
+                        row_in[best] += 1
+                    if stop:
+                        break
+                    block[best] += 1
+                    row_in[best] = 0
         _ = entries^
-        # Groups by partition, then by first row, so the output order
-        # depends on the rows alone, not on which worker took which morsel
-        # (nor on how many rows each worker's partitions held).
-        # Each group as one 128-bit key: partition and first row above,
-        # the group below (first rows stay under 2^56).
-        var shift = UInt64(48 - self.bits)
-        var part_mask = UInt64((1 << self.bits) - 1)
-        var keyed = List[UInt128](capacity=final.count())
-        for g in range(final.count()):
-            var part = (_words_at(final.at(g))[] >> shift) & part_mask
-            var place = (UInt128(part) << 56) | UInt128(final.first(g))
-            keyed.append((place << 64) | UInt128(g))
-        sort(keyed)
-        var ordered = _Groups(
-            final.width(),
-            final.addressed.copy(),
-            final.stride - final.states_at,
-            final.count(),
-        )
-        for key in keyed:
-            _ = ordered.copy_row(
-                final.at(Int(UInt64(key & 0xFFFFFFFFFFFFFFFF)))
+        if not in_order:
+            # A worker's rows were not in first-row order: sort the groups.
+            trace_path("aggregate_table.sorted_groups")
+            # Each as one 128-bit key: partition and first row above, the
+            # group below (first rows stay under 2^56).
+            var shift = UInt64(48 - self.bits)
+            var part_mask = UInt64((1 << self.bits) - 1)
+            var keyed = List[UInt128](capacity=final.count())
+            for g in range(final.count()):
+                var part = (_words_at(final.at(g))[] >> shift) & part_mask
+                var place = (UInt128(part) << 56) | UInt128(final.first(g))
+                keyed.append((place << 64) | UInt128(g))
+            sort(keyed)
+            var ordered = _Groups(
+                final.width(),
+                final.addressed.copy(),
+                final.stride - final.states_at,
+                final.count(),
             )
-        final = ordered^
+            for key in keyed:
+                _ = ordered.copy_row(
+                    final.at(Int(UInt64(key & 0xFFFFFFFFFFFFFFFF)))
+                )
+            final = ordered^
         for s in range(len(self.templates)):
             self.states.append(_unload(self.slots[s], final, self.templates[s]))
         # Keys scanned out of the stored words (DuckDB's gather from its
