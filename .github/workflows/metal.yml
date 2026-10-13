@@ -51,6 +51,7 @@ jobs:
           python3 native/dfmetal/test_native.py
           python3 native/dfmetal/test_join.py
           python3 native/dfmetal/test_resident.py
+          python3 native/dfmetal/test_rolling_moments.py
       - name: Run Mojo provider contracts with explicit hardware capability
         run: |
           mkdir -p build/contract-tests

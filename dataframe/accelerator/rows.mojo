@@ -24,6 +24,8 @@ from dataframe.expr import (
     ROLLING_MEAN,
     ROLLING_MIN,
     ROLLING_MAX,
+    ROLLING_VAR,
+    ROLLING_STD,
     FORWARD_FILL,
     BACKWARD_FILL,
     OVER,
@@ -1064,8 +1066,12 @@ def lower_rows(
                     or window_op == FORWARD_FILL
                     or window_op == BACKWARD_FILL
                 )
+                var rolling_moments = (
+                    window_op == ROLLING_VAR or window_op == ROLLING_STD
+                )
                 var rolling = (
-                    window_op == ROLLING_SUM
+                    rolling_moments
+                    or window_op == ROLLING_SUM
                     or window_op == ROLLING_MEAN
                     or window_op == ROLLING_MIN
                     or window_op == ROLLING_MAX
@@ -1077,6 +1083,17 @@ def lower_rows(
                     and not rolling
                 ):
                     continue
+                if rolling_moments and not capabilities.rolling_moments:
+                    capabilities.reject(
+                        "plan",
+                        "rolling variance and standard deviation require backend support",
+                    )
+                if rolling_moments and not (
+                    capabilities.float64 or capabilities.float64_emulated
+                ):
+                    capabilities.reject(
+                        "plan", "rolling moments require Float64 arithmetic"
+                    )
                 if rolling and not capabilities.rolling_windows:
                     capabilities.reject(
                         "plan", "rolling windows require backend support"
@@ -1147,7 +1164,9 @@ def lower_rows(
                         7 if window_op
                         == ROLLING_SUM else 8 if window_op
                         == ROLLING_MEAN else 9 if window_op
-                        == ROLLING_MIN else 10
+                        == ROLLING_MIN else 10 if window_op
+                        == ROLLING_MAX else 11 if window_op
+                        == ROLLING_VAR else 12
                     )
                 elif shift_fill:
                     method = (
@@ -1163,7 +1182,7 @@ def lower_rows(
                 if method < 0:
                     raise Error("unknown rank method: " + rank_node.text)
                 var child = bind(subtree(ranked, rank_node.left), rank_schema)
-                if (
+                if rolling_moments or (
                     rolling
                     and window_op == ROLLING_MEAN
                     and child.dtypes[len(child.dtypes) - 1].is_decimal()
@@ -1260,7 +1279,17 @@ def lower_rows(
                     )
                 )
                 literals.append(
-                    bitcast[DType.float64](rank_node.integer) if shift_fill
+                    # Row counts fit UInt32 in the native ABI. Saturating
+                    # larger bounds preserves every observable window/result.
+                    bitcast[DType.float64](
+                        min(rank_node.integer, Int64(UInt32.MAX))
+                        | (
+                            min(Int64(rank_node.min_count), Int64(UInt32.MAX))
+                            << 32
+                        )
+                    ) if rolling_moments else bitcast[DType.float64](
+                        rank_node.integer
+                    ) if shift_fill
                     or rolling else bitcast[DType.float64](
                         Int64(result_type.precision())
                     ) if cumulative
