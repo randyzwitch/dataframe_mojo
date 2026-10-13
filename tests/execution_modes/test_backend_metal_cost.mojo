@@ -81,7 +81,7 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
         assert_equal(
             cold.accelerator[at], dense_facts.accelerator[at] + bitmap_bytes
         )
-    assert_equal(cold.family, "float32")
+    assert_equal(cold.family, "float32;metal-float32-arithmetic-v1")
     assert_equal(cold.placement, "accel")
     assert_equal(estimate_feature(cold, "fixed", False), Float64(1))
     assert_equal(estimate_feature(cold, "rows", False), Float64(3))

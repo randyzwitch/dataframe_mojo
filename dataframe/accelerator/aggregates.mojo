@@ -101,14 +101,18 @@ def _in_memory_sources(query: LazyFrame) raises:
             pending.append(node.right)
 
 
-def _conditional_leaf(expression: Expr, schema: DataFrame) raises:
+def _conditional_leaf(
+    expression: Expr, schema: DataFrame, exact_float32: Bool
+) raises:
     # A lifted scalar is evaluated before its row consumer. Keep data-dependent
     # precision failures out of conditionally unobserved scalar branches.
     var bound = bind(expression, schema._columns)
     for i in range(len(bound.expr._nodes)):
         ref node = bound.expr._nodes[i]
-        if bound.dtypes[i] == DataType.FLOAT32 and (
-            node.op == ADD or node.op == SUB or node.op == MUL
+        if (
+            not exact_float32
+            and bound.dtypes[i] == DataType.FLOAT32
+            and (node.op == ADD or node.op == SUB or node.op == MUL)
         ):
             raise Error(
                 "Metal unsupported [precision]: conditional scalar Float32"
@@ -116,7 +120,9 @@ def _conditional_leaf(expression: Expr, schema: DataFrame) raises:
             )
 
 
-def lower_aggregate_compositions(query: LazyFrame) raises -> LazyFrame:
+def lower_aggregate_compositions(
+    query: LazyFrame, *, exact_float32: Bool = False
+) raises -> LazyFrame:
     """Compute aggregate leaves on GPU, then project their resident results.
 
     Binding and schema execution inspect no source rows. Checked aggregate
@@ -190,7 +196,7 @@ def lower_aggregate_compositions(query: LazyFrame) raises -> LazyFrame:
                     names[name] = True
                     var leaf = subtree(bound.expr, n).alias(name)
                     if conditional:
-                        _conditional_leaf(leaf, schema)
+                        _conditional_leaf(leaf, schema, exact_float32)
                     leaves.append(leaf^)
                     leaf_names.append(name)
                     rewritten.append(_node(COL, text=name))

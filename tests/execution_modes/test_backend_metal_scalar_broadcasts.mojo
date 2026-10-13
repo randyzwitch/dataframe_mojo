@@ -82,7 +82,7 @@ def test_scalar_broadcast_planning_shares_prefix_and_preserves_schema() raises:
     )
 
 
-def test_scalar_broadcast_rejects_file_reads_and_conditional_precision_faults() raises:
+def test_scalar_broadcast_rejects_file_reads_and_checked_integer_children() raises:
     var runtime = MetalRuntime(device_id=999999)
     var missing = scan_csv(
         "/nonexistent/metal-scalar-broadcast-must-not-read.csv"
@@ -97,8 +97,7 @@ def test_scalar_broadcast_rejects_file_reads_and_conditional_precision_faults() 
         when(lit(False)).then((col("x") * col("x")).sum()).otherwise(col("x"))
     )
     same(conditional.collect(engine="cpu"), narrow)
-    with assert_raises(contains="conditional scalar Float32 arithmetic"):
-        _ = conditional.collect(accelerator=runtime)
+    assert_true("unsupported" not in runtime.describe(conditional))
     var wide = DataFrame([Series("x", Column[Int64]([Int64.MAX, Int64.MAX]))])
     var mean = wide.lazy().select(
         when(lit(False))

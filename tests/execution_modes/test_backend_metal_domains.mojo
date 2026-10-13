@@ -739,12 +739,12 @@ def masked_cases(runtime: MetalRuntime, native: Bool) raises:
                 .select(col("u").cast("int8"))
                 .collect(accelerator=runtime)
             )
-        with assert_raises(contains="subnormal"):
-            _ = (
-                source.lazy()
-                .select(col("f") * lit(Float32(1e-20)))
-                .collect(accelerator=runtime)
+        var underflow = source.lazy().select(col("f") * lit(Float32(1e-20)))
+        assert_true(
+            underflow.collect(accelerator=runtime).equals(
+                underflow.collect(engine="cpu")
             )
+        )
         var boundary = DataFrame(
             [
                 Series(
@@ -753,12 +753,12 @@ def masked_cases(runtime: MetalRuntime, native: Bool) raises:
                 )
             ]
         )
-        with assert_raises(contains="double-rounding boundary"):
-            _ = (
-                boundary.lazy()
-                .select(col("u").cast("float32"))
-                .collect(accelerator=runtime)
+        var rounded_cast = boundary.lazy().select(col("u").cast("float32"))
+        assert_true(
+            rounded_cast.collect(accelerator=runtime).equals(
+                rounded_cast.collect(engine="cpu")
             )
+        )
         check_domain(
             plan,
             DataFrame(

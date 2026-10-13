@@ -836,6 +836,18 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float32_arithmetic.mojo::test_native_metal_float32_arithmetic_words_nulls_consumers_and_cost",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_float32_arithmetic.mojo::test_native_metal_float32_arithmetic_conditional_scalar_and_rounding_boundaries",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_float64_emulation.mojo::test_native_metal_float64_arithmetic_rounding_subnormals_and_nulls",
             "metal",
         )
@@ -1603,6 +1615,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_distinct_siblings.mojo",
                 "tests/execution_modes/test_backend_metal_float32_division.mojo",
                 "tests/execution_modes/test_backend_metal_float32_modulo.mojo",
+                "tests/execution_modes/test_backend_metal_float32_arithmetic.mojo",
                 "tests/execution_modes/test_backend_metal_float64_emulation.mojo",
                 "tests/execution_modes/test_backend_metal_literal_casts.mojo",
                 "tests/execution_modes/test_backend_metal_partition_aggregates.mojo",
