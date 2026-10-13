@@ -62,6 +62,7 @@ from .accelerator.rows import (
     ROW_SORT_KEY,
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
+    ROW_CALENDAR_TRUNCATE,
     ROW_QUANTILE_LINEAR,
     ROW_QUANTILE_MIDPOINT,
 )
@@ -365,6 +366,7 @@ def _capabilities() -> RowCapabilities:
         scalar_regions=True,
         temporal_fields=True,
         duration_totals=True,
+        calendar_truncation=True,
         temporal_offsets=True,
         ranks=True,
         cumulative_windows=True,
@@ -424,6 +426,8 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if op == ROW_CALENDAR_TRUNCATE:
+        return 144
     if op >= DT_YEAR and op <= DT_TRUNCATE:
         return Int64(130 + op - DT_YEAR)
     if op == INT_IS_IN:
@@ -1697,6 +1701,11 @@ struct MetalRuntime(AcceleratorBackend):
                 paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
         if paired:
             family += ";metal-paired-moments-v1"
+        var calendar = False
+        for i in range(0, len(plan.code), 4):
+            calendar |= plan.code[i] == ROW_CALENDAR_TRUNCATE
+        if calendar:
+            family += ";metal-calendar-truncation-v1"
         var offsets = False
         for i in range(0, len(plan.code), 4):
             offsets |= plan.code[i] == DT_OFFSET_BY

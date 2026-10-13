@@ -504,12 +504,12 @@ def temporal_preflight_cases() raises:
         ]
     )
     assert_true("unsupported" not in unavailable.describe(scalar_query))
-    with assert_raises(contains="positive fixed interval"):
-        _ = (
-            dates.lazy()
-            .select(col("t").dt().truncate("1mo"))
-            .collect(accelerator=unavailable)
+    assert_true(
+        "unsupported"
+        not in unavailable.describe(
+            dates.lazy().select(col("t").dt().truncate("1mo"))
         )
+    )
     var decimals = DataFrame(
         [
             Series("d", Column[Int128]([100])).with_dtype(
