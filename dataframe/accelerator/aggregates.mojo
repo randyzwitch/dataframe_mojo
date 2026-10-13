@@ -114,14 +114,6 @@ def _conditional_leaf(expression: Expr, schema: DataFrame) raises:
                 "Metal unsupported [precision]: conditional scalar Float32"
                 " arithmetic requires CPU execution"
             )
-        if node.op == MEAN and (
-            bound.dtypes[node.left] == DataType.INT64
-            or bound.dtypes[node.left] == DataType.UINT64
-        ):
-            raise Error(
-                "Metal unsupported [precision]: conditional scalar wide integer"
-                " mean requires CPU execution"
-            )
 
 
 def lower_aggregate_compositions(query: LazyFrame) raises -> LazyFrame:

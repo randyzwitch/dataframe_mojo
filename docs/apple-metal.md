@@ -263,11 +263,12 @@ feeds the scalar reduction and row branch, and a GPU cross join broadcasts the
 scalar result. Empty inputs stay empty in row-valued consumers; all-null means
 broadcast null. Temporary columns do not appear in the output.
 
-Conditional scalar Float32 arithmetic and Int64/UInt64 means retain their
-existing preflight rejection. Float32 arithmetic can still expose a precision
-failure during eager scalar evaluation.
-Nonthrowing Float64 leaves and direct Float32 column reductions can broadcast
-through conditional expressions. File-backed inputs still reject before source
+Conditional Int64/UInt64 means use exact wide accumulation and can broadcast
+through either branch, including when that branch is unselected. Empty and
+all-null means remain null. Conditional scalar Float32 arithmetic retains its
+preflight rejection because eager evaluation can expose a precision failure.
+Nonthrowing Float64 leaves and direct Float32 column reductions can also
+broadcast through conditional expressions. File-backed inputs still reject before source
 reads. Automatic placement keeps these multi-region plans on CPU until it can
 estimate the complete DAG.
 Checked sums in child regions and checked arithmetic followed by head retain

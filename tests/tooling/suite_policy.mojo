@@ -1094,6 +1094,19 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo::test_native_metal_conditional_integer_means_limits_nulls_empty_and_partitions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_scalar_broadcasts.mojo::test_native_metal_conditional_integer_means_resident_joins_filters_and_budget",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
