@@ -121,110 +121,225 @@ def _days(value: Int64, dtype: DataType) -> Int64:
     return floor_div(value, ticks_per_day(dtype))
 
 
+@fieldwise_init
+struct Truncation(Copyable):
+    """`truncate(every)` for one column, its interval parsed once (as
+    Polars parses a `Duration` once per expression): calendar months, or a
+    fixed step in the column's ticks from an origin. Parsing per value was
+    half of ClickBench q42, a minute truncation of 560K timestamps."""
+
+    var dtype: DataType
+    var months: Int64
+    var step: Int64
+    var origin: Int64
+
+    def __init__(out self, dtype: DataType, every: String) raises:
+        var interval = parse_every(every)
+        var months = interval[0]
+        var nanos = interval[1]
+        if (months != 0) == (nanos != 0) or months < 0 or nanos < 0:
+            raise Error(
+                "truncate needs one positive interval in months/years or in"
+                " fixed units, found " + every
+            )
+        self.dtype = dtype
+        self.months = months
+        self.step = 0
+        self.origin = 0
+        if months > 0:
+            if dtype.is_time():
+                raise Error("time values cannot be truncated by months")
+            return
+        var per_tick = (
+            Int64(1000000000)
+            // dtype.per_second() if not dtype.is_date() else NANOS_PER_DAY
+        )
+        if nanos % per_tick != 0:
+            raise Error("interval " + every + " is finer than " + dtype.name())
+        self.step = nanos // per_tick
+        # Whole weeks align to Monday (1970-01-05); other steps to the
+        # epoch.
+        if nanos % (7 * NANOS_PER_DAY) == 0:
+            self.origin = 4 * (NANOS_PER_DAY // per_tick)
+
+    @staticmethod
+    def unused(dtype: DataType) -> Self:
+        """A placeholder for a column that truncates nothing."""
+        return Self(dtype=dtype, months=0, step=1, origin=0)
+
+    @always_inline
+    def apply(self, value: Int64) raises -> Int64:
+        if self.months > 0:
+            var p = split(value, self.dtype)
+            var index = (
+                floor_div(p.year * 12 + p.month - 1, self.months) * self.months
+            )
+            return join(
+                Parts(
+                    floor_div(index, 12),
+                    floor_mod(index, 12) + 1,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                ),
+                self.dtype,
+            )
+        return (
+            floor_div(value - self.origin, self.step) * self.step + self.origin
+        )
+
+
 def _truncate(value: Int64, dtype: DataType, every: String) raises -> Int64:
-    var interval = parse_every(every)
-    var months = interval[0]
-    var nanos = interval[1]
-    if (months != 0) == (nanos != 0) or months < 0 or nanos < 0:
-        raise Error(
-            "truncate needs one positive interval in months/years or in"
-            " fixed units, found " + every
-        )
-    if months > 0:
-        if dtype.is_time():
-            raise Error("time values cannot be truncated by months")
-        var p = split(value, dtype)
-        var index = floor_div(p.year * 12 + p.month - 1, months) * months
-        return join(
-            Parts(
-                floor_div(index, 12), floor_mod(index, 12) + 1, 1, 0, 0, 0, 0
-            ),
-            dtype,
-        )
-    var per_tick = (
-        Int64(1000000000)
-        // dtype.per_second() if not dtype.is_date() else NANOS_PER_DAY
-    )
-    if nanos % per_tick != 0:
-        raise Error("interval " + every + " is finer than " + dtype.name())
-    var step = nanos // per_tick
-    # Whole weeks align to Monday (1970-01-05); other steps to the epoch.
-    var origin = Int64(0)
-    if nanos % (7 * NANOS_PER_DAY) == 0:
-        origin = 4 * (NANOS_PER_DAY // per_tick)
-    return floor_div(value - origin, step) * step + origin
+    return Truncation(dtype, every).apply(value)
+
+
+@fieldwise_init
+struct ZonedOffset(Copyable):
+    """An offset_by for a zone-aware datetime, its interval parsed once:
+    months and days move the local wall-clock time, then fixed units move
+    the UTC instant (as Polars)."""
+
+    var dtype: DataType
+    var months: Int64
+    var days: Int64
+    var ticks: Int64
+
+    def __init__(out self, dtype: DataType, by: String) raises:
+        var interval = parse_interval(by)
+        self.dtype = dtype
+        self.months = interval[0]
+        self.days = interval[1]
+        self.ticks = 0
+        if interval[2] != 0:
+            var per_tick = Int64(1000000000) // dtype.per_second()
+            if interval[2] % per_tick != 0:
+                raise Error("offset " + by + " is finer than " + dtype.name())
+            self.ticks = interval[2] // per_tick
+
+    @staticmethod
+    def unused(dtype: DataType) -> Self:
+        """A placeholder for a column that offsets nothing."""
+        return Self(dtype=dtype, months=0, days=0, ticks=0)
+
+    def apply(self, value: Int64, zone: TimeZone) raises -> Int64:
+        var result = value
+        # Months, then days, each localized from the step before, as Polars
+        # does.
+        if self.months != 0:
+            var local = to_local(result, self.dtype, zone)
+            local = join(
+                add_months(split(local, self.dtype), self.months), self.dtype
+            )
+            result = relocalize(local, result, self.dtype, zone)
+        if self.days != 0:
+            var local = checked_add(
+                to_local(result, self.dtype, zone),
+                checked_mul(self.days, ticks_per_day(self.dtype)),
+            )
+            result = relocalize(local, result, self.dtype, zone)
+        if self.ticks != 0:
+            result = checked_add(result, self.ticks)
+        return result
 
 
 def _offset_in(
     value: Int64, dtype: DataType, by: String, zone: TimeZone
 ) raises -> Int64:
-    """offset_by for a zone-aware datetime: months and days move the local
-    wall-clock time, then fixed units move the UTC instant (as Polars)."""
-    var interval = parse_interval(by)
-    var result = value
-    # Months, then days, each localized from the step before, as Polars
-    # does.
-    if interval[0] != 0:
-        var local = to_local(result, dtype, zone)
-        local = join(add_months(split(local, dtype), interval[0]), dtype)
-        result = relocalize(local, result, dtype, zone)
-    if interval[1] != 0:
-        var local = checked_add(
-            to_local(result, dtype, zone),
-            checked_mul(interval[1], ticks_per_day(dtype)),
-        )
-        result = relocalize(local, result, dtype, zone)
-    if interval[2] != 0:
-        var per_tick = Int64(1000000000) // dtype.per_second()
-        if interval[2] % per_tick != 0:
-            raise Error("offset " + by + " is finer than " + dtype.name())
-        result = checked_add(result, interval[2] // per_tick)
-    return result
+    return ZonedOffset(dtype, by).apply(value, zone)
+
+
+@fieldwise_init
+struct Offset(Copyable):
+    """An offset_by for a naive value, its interval parsed once: calendar
+    months, then fixed units in the column's ticks."""
+
+    var dtype: DataType
+    var months: Int64
+    var ticks: Int64
+
+    def __init__(out self, dtype: DataType, by: String) raises:
+        var interval = parse_every(by)
+        self.dtype = dtype
+        self.months = interval[0]
+        self.ticks = 0
+        if self.months != 0 and dtype.is_time():
+            raise Error("time values cannot be offset by months")
+        if interval[1] != 0:
+            var per_tick = (
+                Int64(1000000000)
+                // dtype.per_second() if not dtype.is_date() else NANOS_PER_DAY
+            )
+            if interval[1] % per_tick != 0:
+                raise Error("offset " + by + " is finer than " + dtype.name())
+            self.ticks = interval[1] // per_tick
+
+    @staticmethod
+    def unused(dtype: DataType) -> Self:
+        """A placeholder for a column that offsets nothing."""
+        return Self(dtype=dtype, months=0, ticks=0)
+
+    def apply(self, value: Int64) raises -> Int64:
+        var result = value
+        if self.months != 0:
+            result = join(
+                add_months(split(value, self.dtype), self.months), self.dtype
+            )
+        if self.ticks != 0:
+            result = checked_add(result, self.ticks)
+            if self.dtype.is_time():
+                result = floor_mod(result, NANOS_PER_DAY)
+        return result
 
 
 def _offset(value: Int64, dtype: DataType, by: String) raises -> Int64:
-    var interval = parse_every(by)
-    var result = value
-    if interval[0] != 0:
-        if dtype.is_time():
-            raise Error("time values cannot be offset by months")
-        result = join(add_months(split(value, dtype), interval[0]), dtype)
-    if interval[1] != 0:
-        var per_tick = (
-            Int64(1000000000)
-            // dtype.per_second() if not dtype.is_date() else NANOS_PER_DAY
-        )
-        if interval[1] % per_tick != 0:
-            raise Error("offset " + by + " is finer than " + dtype.name())
-        result = checked_add(result, interval[1] // per_tick)
-        if dtype.is_time():
-            result = floor_mod(result, NANOS_PER_DAY)
-    return result
+    return Offset(dtype, by).apply(value)
+
+
+struct TotalUnits(Copyable):
+    """A duration's whole count of one unit, the unit's name read once."""
+
+    var divide: Int64
+    var multiply: Int64
+
+    def __init__(out self, dtype: DataType, unit: String):
+        var nanos_per_tick = Int64(1000000000) // dtype.per_second()
+        var nanos_per_unit: Int64
+        if unit == "days":
+            nanos_per_unit = NANOS_PER_DAY
+        elif unit == "hours":
+            nanos_per_unit = 3600000000000
+        elif unit == "minutes":
+            nanos_per_unit = 60000000000
+        elif unit == "seconds":
+            nanos_per_unit = 1000000000
+        elif unit == "milliseconds":
+            nanos_per_unit = 1000000
+        elif unit == "microseconds":
+            nanos_per_unit = 1000
+        else:
+            nanos_per_unit = 1
+        self.divide = 0
+        self.multiply = 0
+        if nanos_per_unit >= nanos_per_tick:
+            self.divide = nanos_per_unit // nanos_per_tick
+        else:
+            self.multiply = nanos_per_tick // nanos_per_unit
+
+    def apply(self, value: Int64) -> Int64:
+        if self.divide > 0:
+            var ticks = self.divide
+            # Truncate toward zero, like a duration's whole-unit count.
+            var quotient = value // ticks
+            return (
+                quotient + 1 if value < 0 and value % ticks != 0 else quotient
+            )
+        return value * self.multiply
 
 
 def _total(value: Int64, dtype: DataType, unit: String) -> Int64:
-    var nanos_per_tick = Int64(1000000000) // dtype.per_second()
-    var nanos_per_unit: Int64
-    if unit == "days":
-        nanos_per_unit = NANOS_PER_DAY
-    elif unit == "hours":
-        nanos_per_unit = 3600000000000
-    elif unit == "minutes":
-        nanos_per_unit = 60000000000
-    elif unit == "seconds":
-        nanos_per_unit = 1000000000
-    elif unit == "milliseconds":
-        nanos_per_unit = 1000000
-    elif unit == "microseconds":
-        nanos_per_unit = 1000
-    else:
-        nanos_per_unit = 1
-    if nanos_per_unit >= nanos_per_tick:
-        var ticks = nanos_per_unit // nanos_per_tick
-        # Truncate toward zero, like a duration's whole-unit count.
-        var quotient = value // ticks
-        return quotient + 1 if value < 0 and value % ticks != 0 else quotient
-    return value * (nanos_per_tick // nanos_per_unit)
+    return TotalUnits(dtype, unit).apply(value)
 
 
 def dt_op(
@@ -254,6 +369,30 @@ def dt_op(
                 texts[i] = format_in(column._get(i), dtype, node.text, zone)
         return Series("", StringColumn(texts, valid))
     var values = List[Int64](length=n, fill=0)
+    # Intervals parsed once, when some observed value is valid: an all-null
+    # or fully masked column raises no interval error, as before. The
+    # loop below is single-threaded over every row (10M in ClickBench
+    # q18), so it checks nothing more per row.
+    var parse = False
+    if op == DT_TRUNCATE or op == DT_OFFSET_BY:
+        for i in range(n):
+            if column._valid(i) and (not len(mask) or mask[i]):
+                parse = True
+                break
+    var truncation = Truncation(
+        dtype, node.text
+    ) if parse and op == DT_TRUNCATE else Truncation.unused(dtype)
+    var offset_by = (
+        Offset(dtype, node.text) if parse
+        and op == DT_OFFSET_BY
+        and not aware else Offset.unused(dtype)
+    )
+    var zoned_offset = (
+        ZonedOffset(dtype, node.text) if parse
+        and op == DT_OFFSET_BY
+        and aware else ZonedOffset.unused(dtype)
+    )
+    var total = TotalUnits(dtype, node.text if op == DT_TOTAL else "")
     for i in range(n):
         valid[i] = column._valid(i) and (not len(mask) or mask[i])
         if not valid[i]:
@@ -264,24 +403,24 @@ def dt_op(
             var per_second = dtype.per_second()
             var offset = zone.offset_at(floor_div(v, per_second))
             values[i] = relocalize(
-                _truncate(v + offset * per_second, dtype, node.text),
+                truncation.apply(v + offset * per_second),
                 v,
                 dtype,
                 zone,
             )
             continue
         if aware and op == DT_OFFSET_BY:
-            values[i] = _offset_in(v, dtype, node.text, zone)
+            values[i] = zoned_offset.apply(v, zone)
             continue
         if aware:
             # Every other operation reads local fields.
             v = to_local(v, dtype, zone)
         if op == DT_TRUNCATE:
-            values[i] = _truncate(v, dtype, node.text)
+            values[i] = truncation.apply(v)
         elif op == DT_OFFSET_BY:
-            values[i] = _offset(v, dtype, node.text)
+            values[i] = offset_by.apply(v)
         elif op == DT_TOTAL:
-            values[i] = _total(v, dtype, node.text)
+            values[i] = total.apply(v)
         elif op == DT_DATE:
             values[i] = _days(v, dtype)
         elif op == DT_TIME:
