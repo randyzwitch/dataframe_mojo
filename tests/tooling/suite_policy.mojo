@@ -1581,6 +1581,7 @@ def production_policy() -> SuitePolicy:
             [
                 "tests/execution_modes/test_order_batches.mojo",
                 "tests/kernel_equivalence/test_parallel_order_selection.mojo",
+                "tests/kernel_equivalence/test_window_partition_table.mojo",
                 "tests/public_contracts/test_extended_windows.mojo",
                 "tests/public_contracts/test_order_windows.mojo",
                 "tests/public_contracts/test_window_precision.mojo",
@@ -1786,6 +1787,7 @@ def production_policy() -> SuitePolicy:
                 "tests/kernel_equivalence/test_bucket_keys.mojo",
                 "tests/kernel_equivalence/test_group_cardinality.mojo",
                 "tests/kernel_equivalence/test_hash_join_routes.mojo",
+                "tests/kernel_equivalence/test_join_key_matching.mojo",
                 "tests/kernel_equivalence/test_join_parallel_boundaries.mojo",
                 "tests/kernel_equivalence/test_native_string_rank.mojo",
                 "tests/kernel_equivalence/test_order_keys.mojo",

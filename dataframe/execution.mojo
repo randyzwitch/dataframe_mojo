@@ -2222,6 +2222,11 @@ def _dense_partitions(keys: List[Series]) raises -> Optional[RowKeys]:
     )
 
 
+# Imported here, not with the others: a recorded process-failure diagnostic
+# in tests/tooling/suite_policy.mojo names a line number above.
+from .aggregate_table import key_supported, table_row_keys
+
+
 def _over[
     width: Int
 ](
@@ -2257,7 +2262,17 @@ def _over[
     if dense:
         partitions = dense.take()
     elif workers <= 1:
-        partitions = encode_rows(keys, nulls_equal=True)
+        # On one thread, the aggregate table's hashing numbers partitions
+        # without a row-encoded copy of string keys (TPC-DS q47's four
+        # string partition keys: three quarters of its window step went to
+        # encoding them).
+        var supported = True
+        for key in keys:
+            supported = supported and key_supported(key)
+        if supported:
+            partitions = table_row_keys(keys)
+        else:
+            partitions = encode_rows(keys, nulls_equal=True)
     elif low_cardinality(keys):
         partitions = encode_rows_parallel(keys, True, workers)
     else:
