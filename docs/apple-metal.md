@@ -95,8 +95,20 @@ older calibration cannot select them for GPU execution. A complete supported
 cost estimate is still required; wider explicit plans can remain on CPU
 automatically when the shared analytical estimator rejects their shape.
 
-Sources must be contiguous in-memory Float32, any signed or unsigned integer
+Sources may be contiguous or chunked in-memory Float32, any signed or unsigned integer
 width (8, 16, 32, or 64 bits), packed Bool, temporal, or Decimal32/64/128 columns.
+Chunked sources upload their original fragments directly into resident storage;
+columns may have different fragment boundaries and independent Boolean/validity
+bitmap offsets. The wrapper owns child descriptors through the native call and
+retains source arrays without a host rechunk. Native estimates include each
+fragment's payload, bitmap window, alignment, and unpack launch, including empty
+fragments. Resident joins upload chunked identity inputs before reusing them.
+Calibration families include `chunked-inputs-v1:<fragment-count>` and
+`metal-chunked-inputs-v1:<fragment-count>` so evidence from flat inputs or different
+fragment counts cannot select these plans automatically. Floating reductions
+retain the CPU contract allowing reassociation; cancellation-heavy sums can differ
+between CPU eager, CPU streaming, and GPU routes.
+
 Float64 columns use IEEE words throughout resident execution. Add, subtract,
 multiply, divide, floor division, remainder, square root, comparisons, numeric/Boolean casts,
 absolute value, negation,
@@ -683,7 +695,7 @@ that unlisted query combinations are already equivalent.
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
 | Temporal expressions | Calendar month/year truncation, offsets, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
-| Plans and sources | As-of joins, file-backed scans, and chunked in-memory inputs without explicit rechunking. |
+| Plans and sources | As-of joins and file-backed scans. |
 | Composition | Remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
 
 Duration totals execute from ms/us/ns storage into days, hours, minutes,

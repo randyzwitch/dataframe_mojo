@@ -3936,6 +3936,107 @@ def test_fixed_offsets_native():
 
 test_fixed_offsets_native()
 
+class InputChunk(C.Structure):
+    _fields_ = [("input", Input), ("rows", I)]
+
+
+def test_chunked_inputs_native():
+    assert C.sizeof(InputChunk) == 48
+    # Independent child bitmap windows, numeric pointers, and empty fragments.
+    for dtype in range(1, 13):
+        scalar = C.c_uint64 if dtype in (11, 12) else SCALARS[dtype]
+        for typed in (False, True):
+            if not typed and dtype >= 11:
+                continue
+            for sizes in ([0], [0, 3, 0, 5, 2, 0], [1, 255, 1, 256]):
+                owners, parts, expected, validity = [], [], [], []
+                for c, n in enumerate(sizes):
+                    offset = (c * 3 + 1) % 8
+                    values = [int((i+c) % 2) if dtype == 4 else (i+c) % 97 for i in range(n)]
+                    valid = [(i+c) % 4 != 2 for i in range(n)]
+                    if dtype == 12:
+                        # Exercise both words, including negative high words.
+                        words = [word for i, value in enumerate(values) for word in (value, (1 << 64)-1 if i % 2 else 7)]
+                        data = (scalar * max(1, 2*n))(*words)
+                        expected.extend(words)
+                    else:
+                        data = packed(values, offset) if dtype == 4 else (scalar * max(1,n))(*values)
+                        expected.extend(values)
+                    bits = packed(valid, offset)
+                    owners.extend([data, bits])
+                    parts.append(InputChunk(Input(ptr(data) if n else None, ptr(bits) if n else None, dtype, offset, 1), n))
+                    validity.extend(valid)
+                chunks = (InputChunk * len(parts))(*parts)
+                inputs = (Input * 1)(Input(ptr(chunks), None, dtype, len(parts), 2))
+                n = sum(sizes)
+                result = (scalar * max(1,n*(2 if dtype == 12 else 1)))()
+                bits = (C.c_uint8 * max(1,(n+7)//8))()
+                outputs = (Output * 1)(Output(ptr(result),ptr(bits),dtype,0,-1,0))
+                slots = (I * (2 if dtype == 12 else 1))(*([dtype] * (2 if dtype == 12 else 1)))
+                request = Request(2,n,0 if typed else (1 if dtype == 4 else dtype),1,1,0,0,0,0,1,-1,0,1,-1,
+                                  ptr(inputs),None,None,None,None,ptr(outputs),None,ptr(slots) if typed else None)
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+                fragment_bitmap = sum((size+part.input.offset+7)//8 if size else 0 for size,part in zip(sizes,parts))
+                value_bytes = fragment_bitmap if dtype == 4 else n*C.sizeof(scalar)*(2 if dtype == 12 else 1)
+                assert memory.upload == value_bytes+fragment_bitmap
+                assert memory.launches == len(parts)+1
+                request.budget = memory.peak
+                stats,err = Stats(),P()
+                check(lib.dfm_execute(ctx,C.byref(request),C.byref(stats),C.byref(err)),err)
+                assert stats.rows == n and unpack(bits,n) == validity
+                assert stats.memory.peak == memory.peak and stats.memory.launches == memory.launches
+                actual = unpack(result,n) if dtype == 4 else list(result)[:len(expected)]
+                for i,ok in enumerate(validity):
+                    if ok:
+                        if dtype == 12:
+                            assert actual[2*i:2*i+2] == expected[2*i:2*i+2]
+                        else:
+                            assert actual[i] == expected[i], (dtype,typed,sizes,i,actual[i],expected[i])
+                request.budget = memory.peak-1
+                err=P()
+                assert lib.dfm_execute(ctx,C.byref(request),C.byref(stats),C.byref(err))
+                assert b"budget" in C.string_at(err)
+                lib.dfm_free(err)
+                # Estimates must not dereference child payload pointers.
+                for part in chunks:
+                    part.input.values=part.input.validity=None
+                request.budget=-1
+                err=P()
+                check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+                if n:
+                    err=P()
+                    assert lib.dfm_execute(ctx,C.byref(request),C.byref(stats),C.byref(err))
+                    assert b"Missing Metal input data" in C.string_at(err)
+                    lib.dfm_free(err)
+                def invalid(message):
+                    error=P()
+                    assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(error))
+                    assert message in C.string_at(error), C.string_at(error)
+                    lib.dfm_free(error)
+                chunks[0].input.has_validity=2
+                invalid(b"bitmap descriptor")
+                chunks[0].input.has_validity=1
+                chunks[0].input.offset=8
+                invalid(b"bitmap descriptor")
+                chunks[0].input.offset=0
+                chunks[0].rows=-1
+                invalid(b"chunk row count")
+                chunks[0].rows=sizes[0]
+                chunks[0].input.dtype=999
+                invalid(b"chunk row count or dtype")
+                chunks[0].input.dtype=dtype
+                request.rows=n+1
+                invalid(b"chunk rows do not match")
+                request.rows=n
+                inputs[0].validity=1
+                invalid(b"chunk metadata array")
+                inputs[0].validity=None
+    print("PASS chunk fragments: all physical types, sliced bitmaps, empty chunks, exact estimates, budgets and invalid metadata")
+
+
+test_chunked_inputs_native()
+
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"

@@ -87,6 +87,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             rolling_moments=True,
             empty_outputs=True,
             empty_inputs=True,
+            chunked_inputs=True,
             shift_fill_windows=True,
         ),
     )
@@ -102,6 +103,13 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             family = current
         elif family != current:
             family = "mixed"
+    var chunked = False
+    var chunks = 0
+    for column in plan.source._columns:
+        chunked |= column.is_chunked()
+        chunks += column.n_chunks()
+    if chunked:
+        family += ";chunked-inputs-v1:" + String(chunks)
     if not plan.source.width():
         family += ";empty-inputs-v1"
     if not len(plan.outputs):

@@ -75,6 +75,7 @@ struct RowCapabilities(Copyable):
     var rolling_windows: Bool
     var rolling_moments: Bool
     var empty_outputs: Bool
+    var chunked_inputs: Bool
     var empty_inputs: Bool
     var shift_fill_windows: Bool
     var cumulative_windows: Bool
@@ -122,6 +123,7 @@ struct RowCapabilities(Copyable):
         rolling_windows: Bool = False,
         rolling_moments: Bool = False,
         empty_outputs: Bool = False,
+        chunked_inputs: Bool = False,
         empty_inputs: Bool = False,
         shift_fill_windows: Bool = False,
         decimal128: Bool = False,
@@ -173,6 +175,7 @@ struct RowCapabilities(Copyable):
         self.rolling_windows = rolling_windows
         self.rolling_moments = rolling_moments
         self.empty_outputs = empty_outputs
+        self.chunked_inputs = chunked_inputs
         self.empty_inputs = empty_inputs
         self.shift_fill_windows = shift_fill_windows
         self.decimal128 = decimal128
