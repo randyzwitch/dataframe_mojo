@@ -114,6 +114,8 @@ from dataframe.expr import (
     DT_TIME,
     DT_TRUNCATE,
     DT_OFFSET_BY,
+    DT_REPLACE_TZ,
+    DT_CONVERT_TZ,
 )
 from dataframe.frame import DataFrame
 from dataframe.temporal import parse_every, parse_interval, NANOS_PER_DAY
@@ -302,6 +304,10 @@ def _program(
             )
             or (op == DT_TRUNCATE and capabilities.calendar_truncation)
             or (op == DT_TOTAL and capabilities.duration_totals)
+            or (
+                capabilities.utc_temporal_conversions
+                and (op == DT_REPLACE_TZ or op == DT_CONVERT_TZ)
+            )
             or (op == DT_OFFSET_BY and capabilities.temporal_offsets)
             or (op == INT_IS_IN and capabilities.extended_integers)
             or (
@@ -357,6 +363,18 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
+        if op == DT_CONVERT_TZ and bound.dtypes[i].time_zone() != "UTC":
+            capabilities.reject(
+                "temporal", "Mojo time zone conversion supports a UTC target"
+            )
+        if op == DT_REPLACE_TZ and (
+            left_type.time_zone() not in List[String](["", "UTC"])
+            or bound.dtypes[i].time_zone() not in List[String](["", "UTC"])
+        ):
+            capabilities.reject(
+                "temporal",
+                "Mojo time zone replacement requires naive or UTC values",
+            )
         var temporal = (
             (op >= DT_YEAR and op <= DT_TRUNCATE)
             or op == DT_TOTAL
@@ -400,6 +418,10 @@ def _program(
             temporal
             and left_type.is_datetime()
             and left_type.time_zone().byte_length()
+            and not (
+                capabilities.utc_temporal_conversions
+                and left_type.time_zone() == "UTC"
+            )
         ):
             capabilities.reject(
                 "temporal", "time zone field extraction requires CPU execution"
@@ -620,7 +642,15 @@ def _program(
                     == 1000 else (2 if left_type.per_second() == 1000000 else 3)
                 )
             )
+        if op == DT_CONVERT_TZ or op == DT_REPLACE_TZ:
+            source = (
+                1 if left_type.per_second()
+                == 1000 else 2 if left_type.per_second()
+                == 1000000 else 3
+            )
         var right = Int64(node.right)
+        if op == DT_CONVERT_TZ or op == DT_REPLACE_TZ:
+            right = Int64(bound.dtypes[i].time_zone() == "UTC")
         if op == DT_TOTAL:
             var nanos_per_tick = Int64(1000000000) // left_type.per_second()
             var nanos_per_unit = Int64(1)
@@ -646,6 +676,20 @@ def _program(
         var calendar_ticks = Int64(0)
         if op == DT_OFFSET_BY:
             var interval = parse_every(node.text)
+            if (
+                capabilities.utc_temporal_conversions
+                and left_type.is_datetime()
+                and left_type.time_zone() == "UTC"
+            ):
+                var zoned = parse_interval(node.text)
+                if zoned[1] < -131072 or zoned[1] > 131071:
+                    capabilities.reject(
+                        "temporal",
+                        "UTC calendar-day offset exceeds descriptor range",
+                    )
+                # Bit 8 selects UTC's checked day/relocalization phase;
+                # parse_every bounds days to signed 18 bits in bits 9..26.
+                source |= 256 | ((Int(zoned[1]) & 0x3FFFF) << 9)
             var per_tick = (
                 NANOS_PER_DAY if left_type.is_date() else Int64(1000000000)
                 // left_type.per_second()
@@ -668,6 +712,12 @@ def _program(
                 right = interval[0]
         if op == DT_TRUNCATE:
             var interval = parse_every(node.text)
+            if (
+                capabilities.utc_temporal_conversions
+                and left_type.is_datetime()
+                and left_type.time_zone() == "UTC"
+            ):
+                source |= 256
             var per_tick = NANOS_PER_DAY if left_type.is_date() else (
                 Int64(1000000000) // left_type.per_second()
             )
@@ -1034,6 +1084,25 @@ def lower_rows(
             ):
                 proven = proven_integer_nodes(bound)
             for part_index in range(len(bound.expr._nodes)):
+                if capabilities.utc_temporal_conversions:
+                    ref utc_part = bound.expr._nodes[part_index]
+                    var checked_utc = (
+                        utc_part.op == DT_REPLACE_TZ and utc_part.text == "UTC"
+                    ) or (
+                        utc_part.op == DT_TRUNCATE
+                        and bound.dtypes[utc_part.left].is_datetime()
+                        and bound.dtypes[utc_part.left].time_zone() == "UTC"
+                    )
+                    if checked_utc and (
+                        not terminal_boundary
+                        or k != 0
+                        or node.kind == FILTER
+                        or limit >= 0
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "checked UTC operations require terminal projections without head",
+                        )
                 if (
                     bound.expr._nodes[part_index].op == DT_OFFSET_BY
                     and capabilities.temporal_offsets

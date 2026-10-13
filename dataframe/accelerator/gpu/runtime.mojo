@@ -73,6 +73,22 @@ from dataframe.expr import (
     IS_NULL,
     IS_NOT_NULL,
     WHEN,
+    DT_YEAR,
+    DT_MONTH,
+    DT_DAY,
+    DT_HOUR,
+    DT_MINUTE,
+    DT_SECOND,
+    DT_NANOSECOND,
+    DT_WEEKDAY,
+    DT_ORDINAL_DAY,
+    DT_DATE,
+    DT_TIME,
+    DT_TRUNCATE,
+    DT_OFFSET_BY,
+    DT_TOTAL,
+    DT_REPLACE_TZ,
+    DT_CONVERT_TZ,
 )
 from dataframe.lazy import LazyFrame
 from dataframe.execution_report import ExecutionReport
@@ -84,10 +100,16 @@ from dataframe.accelerator.rows import (
     ROW_SORT_KEY,
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
+    ROW_DURATION_KEY,
+    ROW_DURATION_BOUNDS,
+    ROW_DURATION_CALENDAR,
+    ROW_DURATION_UTC,
     ROW_GROUP_HEADER,
     ROW_GROUP_HEADER_LAST,
     ROW_GROUP_KEY,
     ROW_GROUP_OUTPUT,
+    ROW_CALENDAR_OFFSET,
+    ROW_CALENDAR_TRUNCATE,
     ROW_QUANTILE_LINEAR,
     ROW_QUANTILE_LOWER,
     ROW_QUANTILE_HIGHER,
@@ -100,7 +122,14 @@ from . import statistics, quantiles
 from .grouping import group_mark, group_offsets, group_starts, group_reduce
 from .ordering import order_init, order_merge, order_key_errors, order_gather
 from .ranking import rank_order_merge, rank_prepare, rank_offsets, rank_assign
-from .windows import window_assign, window_check_errors
+from .windows import (
+    window_assign,
+    window_check_errors,
+    window_input_errors,
+    duration_assign,
+    duration_check_errors,
+    duration_headers,
+)
 from .reductions import (
     State,
     STATE_WORDS,
@@ -133,8 +162,8 @@ def _kind(dtype: DataType) raises -> Int64:
     raise Error("Mojo GPU storage is not implemented for " + dtype.name())
 
 
-def _preflight(query: LazyFrame) raises -> RowPlan:
-    var capabilities = RowCapabilities(
+def capabilities() -> RowCapabilities:
+    return RowCapabilities(
         "Mojo GPU",
         float64=False,
         float64_storage=True,
@@ -158,6 +187,14 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
         ranks=True,
         cumulative_windows=True,
         shift_fill_windows=True,
+        rolling_windows=True,
+        rolling_moments=True,
+        interpolation_windows=True,
+        coordinate_interpolation=True,
+        duration_rolling=True,
+        calendar_duration_rolling=True,
+        utc_duration_rolling=True,
+        fixed_zone_duration_rolling=True,
         grouped=True,
         int64_arithmetic=True,
         deferred_integer_errors=True,
@@ -166,6 +203,12 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
         row_extras=True,
         slices=True,
         fixed_logical=True,
+        temporal_fields=True,
+        utc_temporal_conversions=True,
+        duration_totals=True,
+        temporal_offsets=True,
+        calendar_offsets=True,
+        calendar_truncation=True,
         chunked_inputs=True,
         empty_inputs=True,
         empty_outputs=True,
@@ -173,7 +216,14 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
         max_slots=256,
         max_steps=128,
     )
-    var plan = lower_rows(query, capabilities)
+
+
+def _preflight(
+    query: LazyFrame, *, terminal_boundary: Bool = True
+) raises -> RowPlan:
+    var plan = lower_rows(
+        query, capabilities(), terminal_boundary=terminal_boundary
+    )
     if plan.source.height() > Int(Int32.MAX):
         raise Error(
             "Mojo GPU row count exceeds the supported device index range"
@@ -214,10 +264,32 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
     for dtype in plan.slot_dtypes:
         _ = _kind(dtype)
     var supported: List[Int] = [
+        ROW_CALENDAR_OFFSET,
+        ROW_CALENDAR_TRUNCATE,
+        DT_YEAR,
+        DT_MONTH,
+        DT_DAY,
+        DT_HOUR,
+        DT_MINUTE,
+        DT_SECOND,
+        DT_NANOSECOND,
+        DT_WEEKDAY,
+        DT_ORDINAL_DAY,
+        DT_DATE,
+        DT_TIME,
+        DT_TRUNCATE,
+        DT_OFFSET_BY,
+        DT_TOTAL,
+        DT_REPLACE_TZ,
+        DT_CONVERT_TZ,
         ROW_SLICE,
         ROW_SORT_KEY,
         ROW_RANK_KEY,
         ROW_CUMULATIVE_KEY,
+        ROW_DURATION_KEY,
+        ROW_DURATION_BOUNDS,
+        ROW_DURATION_CALENDAR,
+        ROW_DURATION_UTC,
         COL,
         LIT_INT,
         LIT_FLOAT,
@@ -290,8 +362,22 @@ def _preflight(query: LazyFrame) raises -> RowPlan:
                         "Mojo GPU invalid rank method or gather metadata"
                     )
             elif header == ROW_CUMULATIVE_KEY:
-                if method < 0 or method > 6 or step.gather_count:
+                if method < 0 or method > 15 or step.gather_count:
                     raise Error("Mojo GPU window method is not implemented")
+            elif header == ROW_DURATION_KEY:
+                if (
+                    method < 0
+                    or method > 5
+                    or step.gather_count
+                    or step.nodes < 2
+                ):
+                    raise Error(
+                        "Mojo GPU duration window descriptor is not implemented"
+                    )
+                if plan.code[4 * (step.start + 1)] != ROW_DURATION_BOUNDS:
+                    raise Error(
+                        "Mojo GPU duration window bounds metadata is invalid"
+                    )
             elif header != ROW_SORT_KEY:
                 raise Error("Mojo GPU ordering descriptor is not implemented")
         for node in range(step.start, step.start + step.nodes):
@@ -449,9 +535,11 @@ def execute(
     device_id: Int,
     budget: Int,
     profiling: Bool,
+    *,
+    terminal_boundary: Bool = True,
 ) raises -> Tuple[DataFrame, DataFrame]:
     var started = Int(perf_counter_ns())
-    var plan = _preflight(query)
+    var plan = _preflight(query, terminal_boundary=terminal_boundary)
     var rows = plan.source.height()
     var count = rows if plan.limit < 0 else min(rows, plan.limit)
     if plan.reductions:
@@ -463,13 +551,19 @@ def execute(
     var grouping = False
     var ranking = False
     var windows = False
+    var duration_windows = False
     for step in plan.steps:
         ordering = ordering or step.order or step.grouped
         grouping = grouping or step.grouped
         if step.order and not step.grouped:
             var header = Int(plan.code[4 * step.start])
             ranking = ranking or header == ROW_RANK_KEY
-            windows = windows or header == ROW_CUMULATIVE_KEY
+            windows = (
+                windows
+                or header == ROW_CUMULATIVE_KEY
+                or header == ROW_DURATION_KEY
+            )
+            duration_windows = duration_windows or header == ROW_DURATION_KEY
         movement = movement or step.filter or step.order or step.grouped
     # GPU words, byte validity and per-value errors; one host staging matrix
     # is reused for readback after the stream consumes its upload.
@@ -485,6 +579,10 @@ def execute(
         shared = _checked_add(shared, _checked_mul((rows + 255) // 256, 8))
         shared = _checked_add(shared, 16)
         shared = _checked_add(shared, _checked_mul(len(plan.gathers), 16))
+        if duration_windows:
+            # Duration errors preserve four distinct fault categories on both
+            # host and device, replacing the ordinary one-word block summary.
+            shared = _checked_add(shared, _checked_mul((rows + 255) // 256, 24))
         if ranking:
             # The idle sort-index owner supplies dense prefixes. Only the
             # additional per-block dense counts need separate device storage.
@@ -744,7 +842,9 @@ def execute(
                     continue
                 var header = Int(code[4 * step.start])
                 if step.order and (
-                    header == ROW_RANK_KEY or header == ROW_CUMULATIVE_KEY
+                    header == ROW_RANK_KEY
+                    or header == ROW_CUMULATIVE_KEY
+                    or header == ROW_DURATION_KEY
                 ):
                     var blocks = (current_rows + 255) // 256
                     var index = ctx.enqueue_create_buffer[DType.uint32](
@@ -753,11 +853,24 @@ def execute(
                     var next_index = ctx.enqueue_create_buffer[DType.uint32](
                         current_rows
                     )
+                    var is_duration = header == ROW_DURATION_KEY
+                    var headers = Int(
+                        duration_headers(
+                            code.unsafe_ptr()
+                            .unsafe_mut_cast[False]()
+                            .unsafe_origin_cast[ImmutAnyOrigin](),
+                            UInt32(step.start),
+                            UInt32(step.nodes),
+                        )
+                    ) if is_duration else 1
+                    var failure_count = blocks * (4 if is_duration else 1)
                     var failures = ctx.enqueue_create_buffer[DType.uint32](
-                        blocks
+                        failure_count
                     )
-                    var host_failures = List[UInt32](length=blocks, fill=0)
-                    ctx.enqueue_function[order_key_errors](
+                    var host_failures = List[UInt32](
+                        length=failure_count, fill=0
+                    )
+                    ctx.enqueue_function[window_input_errors](
                         device_errors.unsafe_ptr(),
                         device_code.unsafe_ptr(),
                         failures.unsafe_ptr(),
@@ -801,8 +914,8 @@ def execute(
                                 next_index.unsafe_ptr(),
                                 device_code.unsafe_ptr(),
                                 device_types.unsafe_ptr(),
-                                UInt32(step.start + 1),
-                                UInt32(step.nodes - 1),
+                                UInt32(step.start + headers),
+                                UInt32(step.nodes - headers),
                                 UInt32(current_rows),
                                 UInt32(rows),
                                 UInt32(run_width),
@@ -872,41 +985,88 @@ def execute(
                         ctx.synchronize()
                         waits += 1
                     else:
-                        ctx.enqueue_function[window_assign](
-                            device_words.unsafe_ptr(),
-                            device_valid.unsafe_ptr(),
-                            device_errors.unsafe_ptr(),
-                            index.unsafe_ptr(),
-                            device_code.unsafe_ptr(),
-                            device_types.unsafe_ptr(),
-                            device_literals.unsafe_ptr(),
-                            UInt32(step.start),
-                            UInt32(step.nodes),
-                            UInt32(step.slot),
-                            UInt32(_kind(plan.slot_dtypes[step.slot])),
-                            UInt32(current_rows),
-                            UInt32(rows),
-                            grid_dim=blocks,
-                            block_dim=256,
-                        )
-                        ctx.enqueue_function[window_check_errors](
-                            device_errors.unsafe_ptr(),
-                            failures.unsafe_ptr(),
-                            UInt32(step.slot),
-                            UInt32(current_rows),
-                            UInt32(rows),
-                            grid_dim=blocks,
-                            block_dim=256,
-                        )
+                        if is_duration:
+                            ctx.enqueue_function[duration_assign](
+                                device_words.unsafe_ptr(),
+                                device_valid.unsafe_ptr(),
+                                device_errors.unsafe_ptr(),
+                                index.unsafe_ptr(),
+                                device_code.unsafe_ptr(),
+                                device_types.unsafe_ptr(),
+                                device_literals.unsafe_ptr(),
+                                UInt32(step.start),
+                                UInt32(step.nodes),
+                                UInt32(step.slot),
+                                UInt32(_kind(plan.slot_dtypes[step.slot])),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                grid_dim=blocks,
+                                block_dim=256,
+                            )
+                            ctx.enqueue_function[duration_check_errors](
+                                device_errors.unsafe_ptr(),
+                                failures.unsafe_ptr(),
+                                UInt32(step.slot),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                grid_dim=blocks,
+                                block_dim=256,
+                            )
+                        else:
+                            ctx.enqueue_function[window_assign](
+                                device_words.unsafe_ptr(),
+                                device_valid.unsafe_ptr(),
+                                device_errors.unsafe_ptr(),
+                                index.unsafe_ptr(),
+                                device_code.unsafe_ptr(),
+                                device_types.unsafe_ptr(),
+                                device_literals.unsafe_ptr(),
+                                UInt32(step.start),
+                                UInt32(step.nodes),
+                                UInt32(step.slot),
+                                UInt32(_kind(plan.slot_dtypes[step.slot])),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                grid_dim=blocks,
+                                block_dim=256,
+                            )
+                            ctx.enqueue_function[window_check_errors](
+                                device_errors.unsafe_ptr(),
+                                failures.unsafe_ptr(),
+                                UInt32(step.slot),
+                                UInt32(current_rows),
+                                UInt32(rows),
+                                grid_dim=blocks,
+                                block_dim=256,
+                            )
                         submissions += 2
                         ctx.enqueue_copy(host_failures.unsafe_ptr(), failures)
                         ctx.synchronize()
                         waits += 1
-                        for failure in host_failures:
-                            if failure:
-                                raise Error(
-                                    "Mojo GPU cumulative window overflow or input expression failure"
-                                )
+                        if is_duration:
+                            for block in range(blocks):
+                                if host_failures[4 * block]:
+                                    raise Error(
+                                        "Mojo GPU time window index contains null"
+                                    )
+                                if host_failures[4 * block + 1]:
+                                    raise Error(
+                                        "Mojo GPU time window index is not sorted within its group"
+                                    )
+                                if host_failures[4 * block + 2]:
+                                    raise Error(
+                                        "Mojo GPU time window bounds overflow"
+                                    )
+                                if host_failures[4 * block + 3]:
+                                    raise Error(
+                                        "Mojo GPU duration window arithmetic overflow"
+                                    )
+                        else:
+                            for failure in host_failures:
+                                if failure:
+                                    raise Error(
+                                        "Mojo GPU cumulative or rolling window overflow or input expression failure"
+                                    )
                     continue
                 if step.order:
                     var blocks = (current_rows + 255) // 256

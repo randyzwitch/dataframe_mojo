@@ -53,6 +53,28 @@ from tests.execution_modes.test_mojo_gpu_quantiles import (
     test_mojo_gpu_quantiles_grouped_filtered_sliced_and_checked_errors,
 )
 
+from tests.execution_modes.test_mojo_gpu_joins import (
+    test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides,
+    test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads,
+    test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget,
+    test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight,
+    test_mojo_gpu_join_empty_projection_preserves_cardinality_and_zero_column_contract,
+)
+
+from tests.execution_modes.test_mojo_gpu_temporal import (
+    test_mojo_gpu_temporal_fields_extreme_storage_nullable_layouts_and_metadata,
+    test_mojo_gpu_temporal_calendar_offsets_truncation_and_time_wrap,
+    test_mojo_gpu_duration_totals_negative_truncation_wrapping_and_rows,
+    test_mojo_gpu_utc_temporal_fields_conversions_calendar_and_checked_edges,
+)
+
+from tests.execution_modes.test_mojo_gpu_rolling import (
+    test_mojo_gpu_rolling_numeric_layouts_thresholds_and_interpolation,
+    test_mojo_gpu_rolling_duration_bounds_calendar_zones_and_unsigned_storage,
+    test_mojo_gpu_rolling_floating_recovery_zero_nan_and_variance_association,
+    test_mojo_gpu_rolling_errors_compositions_exact_budget_and_recovery,
+)
+
 
 def main() raises:
     print(
@@ -160,5 +182,51 @@ def main() raises:
     )
     test_mojo_gpu_quantiles_grouped_filtered_sliced_and_checked_errors()
     print(
-        "PASS direct Mojo dataframe GPU: rows, filtering, reductions, ordering, statistics, groups, ranks, windows and quantiles"
+        "RUN test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides"
     )
+    test_mojo_gpu_join_styles_typed_composite_keys_coalescing_and_empty_sides()
+    print("RUN test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads")
+    test_mojo_gpu_join_nan_zero_subnormal_keys_and_exact_payloads()
+    print("RUN test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget")
+    test_mojo_gpu_join_bounded_cross_fanout_and_exact_memory_budget()
+    print(
+        "RUN test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight"
+    )
+    test_mojo_gpu_join_regions_consumers_retained_budget_and_preflight()
+    print(
+        "RUN test_mojo_gpu_join_empty_projection_preserves_cardinality_and_zero_column_contract"
+    )
+    test_mojo_gpu_join_empty_projection_preserves_cardinality_and_zero_column_contract()
+    print(
+        "RUN test_mojo_gpu_temporal_fields_extreme_storage_nullable_layouts_and_metadata"
+    )
+    test_mojo_gpu_temporal_fields_extreme_storage_nullable_layouts_and_metadata()
+    print(
+        "RUN test_mojo_gpu_temporal_calendar_offsets_truncation_and_time_wrap"
+    )
+    test_mojo_gpu_temporal_calendar_offsets_truncation_and_time_wrap()
+    print(
+        "RUN test_mojo_gpu_duration_totals_negative_truncation_wrapping_and_rows"
+    )
+    test_mojo_gpu_duration_totals_negative_truncation_wrapping_and_rows()
+    print(
+        "RUN test_mojo_gpu_utc_temporal_fields_conversions_calendar_and_checked_edges"
+    )
+    test_mojo_gpu_utc_temporal_fields_conversions_calendar_and_checked_edges()
+    print(
+        "RUN test_mojo_gpu_rolling_numeric_layouts_thresholds_and_interpolation"
+    )
+    test_mojo_gpu_rolling_numeric_layouts_thresholds_and_interpolation()
+    print(
+        "RUN test_mojo_gpu_rolling_duration_bounds_calendar_zones_and_unsigned_storage"
+    )
+    test_mojo_gpu_rolling_duration_bounds_calendar_zones_and_unsigned_storage()
+    print(
+        "RUN test_mojo_gpu_rolling_floating_recovery_zero_nan_and_variance_association"
+    )
+    test_mojo_gpu_rolling_floating_recovery_zero_nan_and_variance_association()
+    print(
+        "RUN test_mojo_gpu_rolling_errors_compositions_exact_budget_and_recovery"
+    )
+    test_mojo_gpu_rolling_errors_compositions_exact_budget_and_recovery()
+    print("PASS direct Mojo dataframe GPU: 43 integrated query tests")

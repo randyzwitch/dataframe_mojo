@@ -2121,8 +2121,13 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
         comptime if get_defined_bool["DATAFRAME_MOJO_GPU"]():
-            from .accelerator.gpu.runtime import execute
+            from .accelerator.gpu.runtime import execute, capabilities
+            from .accelerator.gpu.dag_runtime import execute as execute_dag
 
+            if has_join(query) or has_scalar_consumers(query):
+                return execute_dag(
+                    query, self._device, self._budget, profiling, capabilities()
+                )
             return execute(query, self._device, self._budget, profiling)
         var start = Int(perf_counter_ns())
         if has_selectors(query):
@@ -2349,8 +2354,11 @@ struct MetalRuntime(AcceleratorBackend):
 
     def describe(self, query: LazyFrame) -> String:
         comptime if get_defined_bool["DATAFRAME_MOJO_GPU"]():
-            from .accelerator.gpu.runtime import describe
+            from .accelerator.gpu.runtime import describe, capabilities
+            from .accelerator.gpu.dag_runtime import describe as describe_dag
 
+            if has_join(query) or has_scalar_consumers(query):
+                return describe_dag(query, capabilities())
             return describe(query)
         try:
             if has_selectors(query):

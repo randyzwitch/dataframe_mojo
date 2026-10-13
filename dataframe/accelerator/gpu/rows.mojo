@@ -50,7 +50,7 @@ from dataframe.expr import (
     WHEN,
 )
 from std.memory import Pointer, unsafe_stack_allocation
-from . import floating
+from . import floating, temporal
 from dataframe.accelerator.rows import ROW_SLICE
 
 
@@ -258,6 +258,19 @@ def row_program(
                 value = UInt64(floating.absolute(input) < floating.INF)
             else:
                 value = UInt64(floating.is_inf(input))
+        elif temporal.supported(op):
+            present = valid[unsafe_offset=a] != 0
+            error = failed[unsafe_offset=a]
+            if present:
+                var result = temporal.evaluate(
+                    values[unsafe_offset=a],
+                    op,
+                    Int64(b),
+                    Int64(c),
+                    literals[unsafe_offset=absolute],
+                )
+                value = result[0]
+                error |= result[1]
         elif op == NEG or op == ABS or op == NOT:
             value = values[unsafe_offset=a]
             present = valid[unsafe_offset=a] != 0

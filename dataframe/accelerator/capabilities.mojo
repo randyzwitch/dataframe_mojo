@@ -59,6 +59,7 @@ struct RowCapabilities(Copyable):
     var slices: Bool
     var scalar_regions: Bool
     var temporal_fields: Bool
+    var utc_temporal_conversions: Bool
     var calendar_offsets: Bool
     var calendar_truncation: Bool
     var temporal_offsets: Bool
@@ -126,6 +127,7 @@ struct RowCapabilities(Copyable):
         slices: Bool = False,
         scalar_regions: Bool = False,
         temporal_fields: Bool = False,
+        utc_temporal_conversions: Bool = False,
         calendar_offsets: Bool = False,
         calendar_truncation: Bool = False,
         temporal_offsets: Bool = False,
@@ -189,6 +191,7 @@ struct RowCapabilities(Copyable):
         self.slices = slices
         self.scalar_regions = scalar_regions
         self.temporal_fields = temporal_fields
+        self.utc_temporal_conversions = utc_temporal_conversions
         self.calendar_offsets = calendar_offsets
         self.calendar_truncation = calendar_truncation
         self.temporal_offsets = temporal_offsets

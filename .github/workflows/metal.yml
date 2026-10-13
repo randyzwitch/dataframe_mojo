@@ -7,6 +7,7 @@ on:
       - 'native/dfmetal/**'
       - 'dataframe/**'
       - 'tests/execution_modes/test_backend*.mojo'
+      - 'tests/execution_modes/test_mojo_gpu*.mojo'
       - 'tests/support/**'
       - 'tests/tooling/**'
       - 'tests/runner.mojo'
@@ -20,6 +21,7 @@ on:
       - 'native/dfmetal/**'
       - 'dataframe/**'
       - 'tests/execution_modes/test_backend*.mojo'
+      - 'tests/execution_modes/test_mojo_gpu*.mojo'
       - 'tests/support/**'
       - 'tests/tooling/**'
       - 'tests/runner.mojo'
@@ -59,8 +61,10 @@ jobs:
           capability="$(build/contract-tests/metal-available)"
           if [[ "$capability" == available ]]; then
             pixi run test --areas execution --contracts execution.backends --capabilities metal
+            pixi run --locked -e gpu test-mojo-gpu
+            pixi run --locked -e gpu test-mojo-gpu-floating
           elif [[ "$capability" == absent ]]; then
-            echo "Metal device unavailable; native contracts will report SKIP(capability)."
+            echo "Metal device unavailable; native contracts report SKIP(capability), and direct Mojo GPU execution is skipped."
             pixi run test --areas execution --contracts execution.backends
           else
             echo "Unexpected Metal capability probe result: $capability" >&2
