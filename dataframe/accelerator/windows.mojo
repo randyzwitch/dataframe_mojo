@@ -16,6 +16,8 @@ from dataframe.expr import (
     ROLLING_MEAN,
     ROLLING_MIN,
     ROLLING_MAX,
+    ROLLING_VAR,
+    ROLLING_STD,
     FORWARD_FILL,
     BACKWARD_FILL,
     SELECTOR,
@@ -56,6 +58,8 @@ def _staged_over(expression: Expr, index: Int) -> Bool:
             or node.op == ROLLING_MEAN
             or node.op == ROLLING_MIN
             or node.op == ROLLING_MAX
+            or node.op == ROLLING_VAR
+            or node.op == ROLLING_STD
             or node.op == SHIFT
             or node.op == FORWARD_FILL
             or node.op == BACKWARD_FILL

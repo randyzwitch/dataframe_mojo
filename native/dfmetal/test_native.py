@@ -897,7 +897,7 @@ def check_shift_fill_preflight_without_device():
                 expected = (2 * 65 if dtype == 4 else 513 * 16 + 65 if dtype == 12
                             else 513 * {1:4,2:4,3:8,5:1,6:2,7:1,8:2,9:4,10:8,11:8}[dtype] + 65)
                 assert memory.result == expected
-        for method, reverse in ((-1, 0), (11, 0), (4, 1), (5, 1), (6, 0)):
+        for method, reverse in ((-1, 0), (13, 0), (4, 1), (5, 1), (6, 0)):
             code[2], code[3] = reverse, method
             memory, err = Memory(), P()
             assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
@@ -941,6 +941,44 @@ def check_rolling_preflight_without_device():
             err = P()
             assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
             lib.dfm_free(err)
+
+
+def check_rolling_moments_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    code = (I * 4)(214, 0, 1, 11)
+    literals = (C.c_uint64 * 1)(3 | (1 << 32))
+    nodes, slots = (I * 1)(11), (I * 2)(11, 11)
+    steps = (Step * 1)(Step(0, 1, 1, 5, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for method in (11, 12):
+        code[3] = method
+        for window in (1, 3, (1 << 32)-1):
+            for ddof in (0, 1, (1 << 32)-1):
+                literals[0] = window | (ddof << 32)
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for ddof in (0, 1, (1 << 32)-1):
+            literals[0] = ddof << 32
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"rolling window size" in C.string_at(err)
+            lib.dfm_free(err)
+        literals[0] = 3
+        for dtype in (1, 3, 4, 10, 12):
+            inputs[0].dtype = nodes[0] = slots[0] = dtype
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"cumulative result type" in C.string_at(err)
+            lib.dfm_free(err)
+        inputs[0].dtype = nodes[0] = slots[0] = 11
+        slots[1] = outputs[0].dtype = 1
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        lib.dfm_free(err)
+        slots[1] = outputs[0].dtype = 11
 
 
 def check_moment_preflight_without_device():
@@ -1027,6 +1065,7 @@ check_pair_moment_preflight_without_device()
 
 check_moment_preflight_without_device()
 check_rolling_preflight_without_device()
+check_rolling_moments_preflight_without_device()
 check_shift_fill_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:

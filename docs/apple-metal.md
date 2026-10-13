@@ -170,6 +170,19 @@ explicit Float64 cast, matching the CPU's current unsupported operation.
 Rolling plans use `metal-rolling-v1`. Work grows with the number of rows times
 the trailing window length; these kernels prioritize matching CPU evaluation.
 
+Fixed-size `rolling_var` and `rolling_std` use sliding Welford updates with
+removal and CPU-contracted binary64 fused multiply-adds, translating inputs by
+the partition's first finite value to preserve
+small variances around large offsets. Each valid nonfinite value contributes
+to the sample count and makes that window NaN; the finite state recovers after
+it leaves the window. A result is null unless the non-null count meets
+`min_samples` and exceeds `ddof`. Primitive inputs, including the full UInt64
+range, and Decimal32/64/128 inputs convert privately to Float64 first, matching
+the CPU window path. These operations support nested `over()` scopes and later
+resident consumers. Each partition walks its source rows once, with integer-only
+binary64 arithmetic, and uses the separate `metal-rolling-moments-v1` cost
+family. Duration-based rolling windows remain unsupported.
+
 Variance (`var`) and standard deviation (`std`) run as scalar, grouped,
 or `over()` reductions for primitive numeric inputs. They convert each value
 to Float64, skip nulls, and use integer-only Welford updates and Chan merges.
@@ -599,6 +612,28 @@ forced accelerator execution remains available independently of that decision.
 
 Floating power and transcendentals are not yet supported by this subset.
 
+## CPU parity work remaining
+
+The Metal engine does not yet cover the complete CPU lazy-query surface.
+The following gaps are visible in the public expression and plan APIs and the
+current accelerator lowering; this is an implementation inventory, not a claim
+that unlisted query combinations are already equivalent.
+
+| Area | Remaining CPU operations or behavior |
+| --- | --- |
+| Numeric expressions | Floating power, `exp`, and `log`. |
+| Reductions | Median, quantile, skew, kurtosis, mode, implode, and value counts. |
+| Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
+| Temporal expressions | Calendar month/year truncation, offsets, duration totals, row-valued parsing/formatting, and timezone operations. |
+| Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
+| Plans and sources | As-of joins, file-backed scans, and chunked in-memory inputs without explicit rechunking. |
+| Composition | Selector expansion and remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
+
+Native validation and the backend contract suite cover each implemented feature.
+They must be extended as these gaps close; passing the current suite alone does
+not establish CPU parity. Fixed-size rolling variance/std now have an independent
+host/GPU state-word differential test in addition to CPU query comparisons.
+
 ## Validation
 
 ```sh
@@ -607,6 +642,7 @@ python3 native/dfmetal/test_join.py
 python3 native/dfmetal/test_resident.py
 python3 native/dfmetal/test_float64.py
 python3 native/dfmetal/test_moments.py
+python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py
 python3 native/dfmetal/test_decimal_comparisons.py
