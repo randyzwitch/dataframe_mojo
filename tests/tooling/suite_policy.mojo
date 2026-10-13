@@ -1033,6 +1033,7 @@ def production_policy() -> SuitePolicy:
                 "tests/kernel_equivalence/test_order_keys.mojo",
                 "tests/kernel_equivalence/test_parallel_order_selection.mojo",
                 "tests/kernel_equivalence/test_set_routes.mojo",
+                "tests/kernel_equivalence/test_string_view_hashing.mojo",
                 "tests/kernel_equivalence/test_top_rows.mojo",
             ],
         )
