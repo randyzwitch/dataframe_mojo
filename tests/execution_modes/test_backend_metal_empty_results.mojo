@@ -63,6 +63,32 @@ def test_empty_outputs_capability_metadata_and_distinct_cpu_selection_shapes() r
     assert_true("unsupported" not in runtime.describe(unmatched))
 
 
+def test_empty_selection_slices_preserve_cpu_scalar_and_row_shapes() raises:
+    for rows in List[Int]([0, 1, 17]):
+        var frame = fixture(rows)
+        var selections = List[LazyFrame](
+            [
+                frame.lazy().select_exprs(List[Expr]()),
+                frame.lazy().select(by_dtype(["uint8"])),
+                frame.lazy().select(lit(Int32(7)).alias("literal")),
+            ]
+        )
+        for selection in selections:
+            for limit in List[Int]([0, 1, 7]):
+                var query = selection.head(limit)
+                var expected = query.collect(
+                    engine="cpu", optimize=False, streaming=False
+                )
+                var actual = query.collect(engine="cpu", streaming=False)
+                assert_equal(actual.height(), expected.height())
+                assert_equal(actual.width(), expected.width())
+                assert_equal(actual.columns(), expected.columns())
+                var batched = query.collect(engine="cpu", batch_size=2)
+                assert_equal(batched.height(), expected.height())
+                assert_equal(batched.width(), expected.width())
+                assert_equal(batched.columns(), expected.columns())
+
+
 def test_native_metal_empty_results_rows_filters_slices_groups_and_joins() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
