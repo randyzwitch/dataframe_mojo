@@ -1007,6 +1007,22 @@ def _exp_edge[
         ]()
 
 
+@always_inline
+def _log_value[
+    D: DType
+](value: Scalar[D]) -> Scalar[D] where D.is_floating_point():
+    # The toolchain approximation loses accuracy (including log(10)) and
+    # returns NaN for +infinity. Use the platform IEEE implementation.
+    comptime if D == DType.float32:
+        return external_call["logf", Float32](value.cast[DType.float32]()).cast[
+            D
+        ]()
+    else:
+        return external_call["log", Float64](value.cast[DType.float64]()).cast[
+            D
+        ]()
+
+
 def _unary_block[
     op: Int, width: Int, D: DType
 ](
@@ -1034,11 +1050,10 @@ def _unary_block[
             ):
                 result[lane] = _exp_edge[D](value)
     elif op == LOG:
-        result = log(x)
+        result = SIMD[D, width](0)
         comptime for lane in range(width):
-            # The toolchain log approximation returns NaN for +infinity.
-            if isinf(x[lane]) and x[lane] > 0:
-                result[lane] = x[lane]
+            if valid[start + lane]:
+                result[lane] = _log_value[D](x[lane])
     elif op == FLOOR:
         result = floor(x)
     elif op == CEIL:
@@ -1093,7 +1108,7 @@ def _unary_int[
                 value
             ) > 700 else exp(value)
         elif op == LOG:
-            floats[i] = log(x.cast[DType.float64]())
+            floats[i] = _log_value[DType.float64](x.cast[DType.float64]())
         else:
             values[i] = x
     comptime if floating:

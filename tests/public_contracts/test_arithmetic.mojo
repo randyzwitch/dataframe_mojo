@@ -1383,6 +1383,23 @@ def _transcendental_exceptional_values[D: DType]() raises:
         else:
             assert_equal(bitcast[DType.uint64](e._get(8)), UInt64(1))
         assert_true(not e.is_valid(10) and not l.is_valid(10))
+        var ordinary = (
+            DataFrame([Series("x", Column[Scalar[D]]([10, 0.5, 2]))])
+            .lazy()
+            .select(col("x").log())
+            .collect(engine="cpu", streaming=streaming)
+        )
+        var anchors: List[Float64] = [
+            2.302585092994046,
+            -0.6931471805599453,
+            0.6931471805599453,
+        ]
+        for row in range(3):
+            _close(
+                Float64(ordinary.column("x").numeric[D]()._get(row)),
+                anchors[row],
+                Float64(1e-5) if D == DType.float32 else Float64(5e-12),
+            )
 
 
 def test_transcendental_nan_infinity_and_boundary_classifications() raises:

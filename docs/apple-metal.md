@@ -712,9 +712,11 @@ encodings. Conditional expressions, resident consumers, and chunked inputs use
 the same kernels. Estimates include separate exponential/logarithm node counts
 in `transcendentals-v1:e<count>:l<count>` and corresponding `metal-` families.
 Decimal inputs require an explicit Float64 cast, as with square root. CPU
-expression kernels also preserve exponential NaNs and logarithmic positive
-infinity, and use system libm for exponential boundary lanes to avoid premature
-overflow and retain gradual underflow in the toolchain approximation.
+expression kernels use system libm for logarithms to preserve positive infinity
+and the existing numeric tolerance (the toolchain approximation misses it for
+`log(10)`). Exponential NaNs and boundary lanes also use libm to avoid premature
+overflow and retain gradual underflow; ordinary finite exponentials keep their
+vector kernel.
 
 Floating power is not yet supported by this subset.
 
