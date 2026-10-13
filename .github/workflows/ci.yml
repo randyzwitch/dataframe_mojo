@@ -27,7 +27,8 @@ jobs:
       - name: Check benchmark separation
         if: github.event_name == 'pull_request'
         env:
-          BASE_REF: origin/${{ github.base_ref }}
+          # A stacked PR's base branch can be deleted while its run is queued.
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
         run: bash scripts/check_benchmark_separation.sh "$BASE_REF"
       - name: Check benchmark report provenance and coverage
         run: |
