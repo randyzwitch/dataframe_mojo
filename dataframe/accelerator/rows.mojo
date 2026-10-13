@@ -708,10 +708,14 @@ def lower_rows(
     var frame = query._frames[query._nodes[cursor].offset].copy()
     if len(projected_query._nodes[cursor].names):
         frame = frame.select(projected_query._nodes[cursor].names)
-    if frame.width() < 1 or frame.width() > capabilities.max_slots:
+    if (
+        frame.width() < 1 and not capabilities.empty_inputs
+    ) or frame.width() > capabilities.max_slots:
         capabilities.reject(
             "plan",
-            "resident region requires 1 to "
+            "resident region requires "
+            + String(0 if capabilities.empty_inputs else 1)
+            + " to "
             + String(capabilities.max_slots)
             + " source columns",
         )

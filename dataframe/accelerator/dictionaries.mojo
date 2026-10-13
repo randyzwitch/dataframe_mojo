@@ -503,7 +503,7 @@ def encode_query(
             if dictionary_dtype(column.dtype()):
                 codes = codes.with_dtype(DataType.UINT32)
             columns.append(codes^)
-        frame = DataFrame(columns^)
+        frame = DataFrame(columns^, height=frame.height())
     for o in range(len(encoded._nodes)):
         ref operation = encoded._nodes[o]
         for e in range(len(operation.exprs)):

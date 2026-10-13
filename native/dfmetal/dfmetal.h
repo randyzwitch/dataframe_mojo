@@ -211,7 +211,7 @@ typedef struct DFMRequest {
   int64_t rows;
   int64_t dtype; // Common numeric type, or zero for typed 64-bit word storage.
   int64_t slots;
-  int64_t input_count;
+  int64_t input_count; // Zero-column sources retain rows with no inputs.
   int64_t code_words;
   int64_t literal_count;
   int64_t step_count;

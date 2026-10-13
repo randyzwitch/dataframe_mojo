@@ -1117,6 +1117,30 @@ def check_empty_outputs_preflight_without_device():
             lib.dfm_free(err)
 
 
+def empty_input_request(rows, reduction=0, typed=False):
+    return Request(2, rows, 0 if typed else 1, 0, 0, 0, 0, 0, 0, 0,
+                   -1, reduction, 0, -1,
+                   None, None, None, None, None, None, None, None)
+
+
+def check_empty_inputs_preflight_without_device():
+    for rows in (0, 1, 513):
+        for typed in (False, True):
+            for reduction in (0, 1):
+                request = empty_input_request(rows, reduction, typed)
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                assert memory.result == memory.upload == memory.launches == 0
+                assert memory.peak > 0
+                for field in ("slots", "input_count"):
+                    setattr(request, field, -1)
+                    err = P()
+                    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+                    lib.dfm_free(err)
+                    setattr(request, field, 0)
+
+
+check_empty_inputs_preflight_without_device()
 check_empty_outputs_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
@@ -3768,6 +3792,30 @@ def test_empty_outputs_native():
 
 
 test_empty_outputs_native()
+def test_empty_inputs_native():
+    for rows in (0, 1, 513):
+        for typed in (False, True):
+            for reduction in (0, 1):
+                request = empty_input_request(rows, reduction, typed)
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                for limit in (-1, 0, 3):
+                    request.limit = limit
+                    stats, err = Stats(), P()
+                    check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+                    expected = 1 if reduction else rows
+                    assert stats.rows == (expected if limit < 0 else min(expected, limit))
+                    assert stats.memory.result == stats.memory.upload == stats.memory.launches == 0
+                    assert stats.memory.shared == memory.shared and stats.waits == 1
+                request.budget = memory.peak - 1
+                stats, err = Stats(), P()
+                assert lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+                assert b"budget" in C.string_at(err)
+                lib.dfm_free(err)
+    print("PASS zero-column source native cardinality, no-input/no-output accounting, limits and budget regressions")
+
+
+test_empty_inputs_native()
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"

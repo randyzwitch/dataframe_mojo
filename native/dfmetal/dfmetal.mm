@@ -386,8 +386,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
                bool resident_output = false) {
   if (r.abi_version != DFM_ABI_VERSION)
     fail("Metal ABI version mismatch");
-  if (r.rows < 0 || r.rows > INT32_MAX || r.slots < 1 || r.slots > DFM_MAX_SLOTS ||
-      r.input_count < 1 || r.input_count > r.slots || r.step_count < 0 ||
+  if (r.rows < 0 || r.rows > INT32_MAX || r.slots < 0 || r.slots > DFM_MAX_SLOTS ||
+      r.input_count < 0 || r.input_count > r.slots || r.step_count < 0 ||
       r.step_count > DFM_MAX_STEPS || r.output_count < 0 || r.output_count > DFM_MAX_SLOTS ||
       r.literal_count < 0 || r.literal_count > 4096 ||
       r.code_words != mul(r.literal_count, 4) || r.gather_count < 0 ||
@@ -395,7 +395,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
       (r.reductions != 0 && r.reductions != 1))
     fail("Invalid Metal request shape");
   if (typed(r)) {
-    if ((r.literal_count && !r.node_types) || !r.slot_types)
+    if ((r.literal_count && !r.node_types) || (r.slots && !r.slot_types))
       fail("Missing typed Metal descriptors");
     for (int64_t i = 0; i < r.slots; ++i)
       width(r.slot_types[i]);
@@ -409,7 +409,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
     fail("Metal common storage must be numeric");
   if (r.dtype == DFM_FLOAT64_STORAGE)
     fail("Metal opaque Float64 requires typed storage");
-  if (!r.inputs || (r.output_count && !r.outputs) || (r.step_count && !r.steps) ||
+  if ((r.input_count && !r.inputs) || (r.output_count && !r.outputs) || (r.step_count && !r.steps) ||
       (r.literal_count && (!r.code || !r.literals)) ||
       (r.gather_count && !r.gathers))
     fail("Missing Metal request descriptors");

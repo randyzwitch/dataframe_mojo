@@ -65,7 +65,9 @@ count, including after filters, groups, joins, and limits. Native result and
 dictionary materialization retain that row count without allocating column
 payloads. Zero-column plans use `metal-empty-outputs-v1` so automatic placement
 requires matching calibration for this result shape. Zero-column sources and
-subsequent consumers still require resident input support.
+row consumers also execute natively, retaining row
+counts without a synthetic host column. Their calibration families include
+`empty-inputs-v1` and `metal-empty-inputs-v1`.
 
 Skewness and kurtosis execute global, grouped, and partitioned central-moment
 reductions in emulated Float64, including bias correction and Fisher/Pearson
@@ -649,7 +651,7 @@ that unlisted query combinations are already equivalent.
 | Temporal expressions | Calendar month/year truncation, offsets, duration totals, row-valued parsing/formatting, and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins, file-backed scans, and chunked in-memory inputs without explicit rechunking. |
-| Composition | Zero-column sources and subsequent consumers, plus remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
+| Composition | Remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
 
 Native validation and the backend contract suite cover each implemented feature.
 They must be extended as these gaps close; passing the current suite alone does

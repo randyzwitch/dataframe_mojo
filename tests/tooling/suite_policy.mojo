@@ -1301,6 +1301,24 @@ def production_policy() -> SuitePolicy:
 
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_empty_inputs.mojo::test_native_metal_empty_inputs_rows_slices_filters_and_literal_broadcasts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_empty_inputs.mojo::test_native_metal_empty_inputs_selectors_and_resident_scalar_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_empty_inputs.mojo::test_native_metal_empty_inputs_profiles_cost_budget_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_higher_moments.mojo::test_native_metal_higher_moments_numeric_widths_flags_nulls_groups_and_partitions",
             "metal",
         )
@@ -1871,6 +1889,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_rolling_moments.mojo",
                 "tests/execution_modes/test_backend_metal_selectors.mojo",
                 "tests/execution_modes/test_backend_metal_empty_results.mojo",
+                "tests/execution_modes/test_backend_metal_empty_inputs.mojo",
                 "tests/execution_modes/test_backend_metal_moments.mojo",
                 "tests/execution_modes/test_backend_metal_higher_moments.mojo",
                 "tests/execution_modes/test_backend_metal_pair_moments.mojo",

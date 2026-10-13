@@ -364,6 +364,7 @@ def _capabilities() -> RowCapabilities:
         rolling_windows=True,
         rolling_moments=True,
         empty_outputs=True,
+        empty_inputs=True,
         shift_fill_windows=True,
         decimal128=True,
         decimal128_reductions=True,
@@ -1622,6 +1623,8 @@ struct MetalRuntime(AcceleratorBackend):
         device[13] = Float64(metadata[4] == 0)
         device[14] = 0
         var family = work[1].copy()
+        if not plan.source.width():
+            family += ";metal-empty-inputs-v1"
         if not len(plan.outputs):
             family += ";metal-empty-outputs-v1"
         if plan.reused_columns:

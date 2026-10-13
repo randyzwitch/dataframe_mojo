@@ -1,5 +1,5 @@
 """Resolve CPU selectors against metadata before accelerator normalization."""
-from dataframe.expr import SELECTOR, Expr, col
+from dataframe.expr import SELECTOR, Expr, col, lit
 from dataframe.lazy import (
     LazyFrame,
     PlanNode,
@@ -90,9 +90,19 @@ def lower_selectors(query: LazyFrame) raises -> LazyFrame:
             # preserves the input height. Count every input then drop the
             # counters to retain the scalar shape and all producer references.
             if not schema.width():
-                raise Error(
-                    "Metal unsupported [selector]: zero-column sources require resident input support"
+                # A zero-column frame still has rows. Broadcast a private
+                # counter input so the reduction produces one row even when
+                # that input has zero rows, then remove the counter as usual.
+                var input = "__metal_empty_selection_input"
+                result._nodes.append(
+                    _plan_node(
+                        WITH_COLUMNS,
+                        operation.left,
+                        exprs=[lit(Int8(0)).alias(input)],
+                    )
                 )
+                operation.left = len(result._nodes) - 1
+                schema = schema_frame(result, operation.left)
             var names = List[String]()
             for column in schema._columns:
                 var name = "__metal_empty_selection_" + String(len(names))
