@@ -1065,12 +1065,17 @@ struct LazyFrame(Copyable):
     # Observed execution counters (#439), attached by `profile` and shared
     # by every copy of the plan made while it runs; None otherwise.
     var _report: Optional[ArcPointer[ExecutionReport]]
+    # For a frame slot holding a shared subplan's result: the rows of the
+    # table that subplan narrowed, so the join order still sees how
+    # selective it is (`_spine_rows`, `_selectivity`).
+    var _origin_rows: Dict[Int, Int]
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
         self._schemas = [Optional[CsvSchema]()]
         self._nodes = [_plan_node(SCAN_FRAME, offset=0)]
         self._report = None
+        self._origin_rows = Dict[Int, Int]()
 
     def __init__(
         out self,
@@ -1082,6 +1087,7 @@ struct LazyFrame(Copyable):
         self._frames = frames^
         self._schemas = schemas^
         self._report = None
+        self._origin_rows = Dict[Int, Int]()
 
     def _record(
         self,
@@ -3474,13 +3480,21 @@ struct LazyFrame(Copyable):
         store are joined with a different year's weeks on each side, and
         shared whole cost 40 to 56 ms).
 
-        Only a subtree holding an aggregation or a unique is shared: its
-        result is small next to its input, and holding it whole costs
-        little. Joins and filters alone are not, since their output can
-        be as large as their input (TPC-DS q39's two branches agree only
+        A subtree holding an aggregation or a unique is shared: its result
+        is small next to its input, and holding it whole costs little. A
+        subtree is also shared when every copy is read whole
+        (`_read_whole`): as a join's build side, materialized in any case
+        (TPC-DS q83 builds one date subquery three times), or as the
+        direct input of an aggregation when it holds joins (q27's rollup
+        aggregates one five-way join three ways). DuckDB turns common
+        subplans into materialized CTEs and Polars caches a repeated
+        subplan.
+        Other joins and filters are not shared, since their output can
+        be as large as their input and a consumer's filter above one
+        copy would have narrowed it (TPC-DS q39's two branches agree only
         on the 11.7M-row joins below their date filters, and holding
-        those doubled the query) and a stream processes them in batches
-        in whatever join order the planner picks."""
+        those doubled the query; Polars likewise drops a cache whose
+        consumers filter differently)."""
         # Two plans joined carry their own copies of a frame they both
         # scan, in separate slots: a scan's signature names the first slot
         # holding the same buffers.
@@ -3510,6 +3524,19 @@ struct LazyFrame(Copyable):
                 reduces = reduces or reducing[node.right]
             sizes.append(size)
             reducing.append(reduces)
+        # Which nodes hold a join, and each node's parent.
+        var joining = List[Bool]()
+        var parents = List[Int](length=len(self._nodes), fill=-1)
+        for i in range(len(self._nodes)):
+            ref node = self._nodes[i]
+            var joins = node.kind == JOIN
+            if node.left >= 0:
+                joins = joins or joining[node.left]
+                parents[node.left] = i
+            if node.right >= 0:
+                joins = joins or joining[node.right]
+                parents[node.right] = i
+            joining.append(joins)
         # Nodes under a shared subtree are replaced with it.
         var covered = List[Bool](length=len(self._nodes), fill=False)
         var shared = False
@@ -3517,7 +3544,11 @@ struct LazyFrame(Copyable):
             # The largest subtree that two uncovered nodes hold.
             var best = -1
             for i in range(len(self._nodes)):
-                if covered[i] or not reducing[i]:
+                if covered[i]:
+                    continue
+                if not reducing[i] and not self._read_whole(
+                    i, signatures, parents, joining, covered
+                ):
                     continue
                 if best >= 0 and sizes[i] <= sizes[best]:
                     continue
@@ -3532,6 +3563,7 @@ struct LazyFrame(Copyable):
             if best < 0:
                 break
             trace_path("lazy.shared_subplan")
+            var origin = self._spine_rows(best)
             var sub = self.copy()
             sub._reorder(best)
             var frame = sub._collect(
@@ -3540,6 +3572,8 @@ struct LazyFrame(Copyable):
             self._frames.append(frame^)
             self._schemas.append(Optional[CsvSchema]())
             var slot = len(self._frames) - 1
+            if origin > 0:
+                self._origin_rows[slot] = origin
             for j in range(len(self._nodes)):
                 if not covered[j] and signatures[j] == signatures[best]:
                     self._cover(j, covered)
@@ -3548,6 +3582,43 @@ struct LazyFrame(Copyable):
         if shared:
             self._reorder()
             self._compact_scan_slots()
+
+    def _read_whole(
+        self,
+        index: Int,
+        signatures: List[String],
+        parents: List[Int],
+        joining: List[Bool],
+        covered: List[Bool],
+    ) -> Bool:
+        """Whether every uncovered copy of the subtree at `index` is read
+        whole: as a join's build side, which the executor materializes in
+        any case, or, when the subtree holds a join, as the direct input of
+        a grouped aggregation or a selection of reductions. One result then
+        serves every copy (DuckDB's common subplans become materialized
+        CTEs). A chain of row steps over a scan under aggregations reads
+        its input once either way and is not worth holding."""
+        if self._nodes[index].kind == SCAN_FRAME:
+            return False
+        var copies = 0
+        for j in range(len(self._nodes)):
+            if covered[j] or signatures[j] != signatures[index]:
+                continue
+            var parent = parents[j]
+            if parent < 0:
+                return False
+            ref consumer = self._nodes[parent]
+            if consumer.kind == JOIN and consumer.right == j:
+                copies += 1
+            elif consumer.left != j or not joining[index]:
+                return False
+            elif consumer.kind == AGG or (
+                consumer.kind == SELECT and _stream_reductions(consumer.exprs)
+            ):
+                copies += 1
+            else:
+                return False
+        return copies >= 2
 
     def _cover(self, index: Int, mut covered: List[Bool]):
         var stack = List[Int]()
@@ -4424,6 +4495,9 @@ struct LazyFrame(Copyable):
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if node.kind == SCAN_FRAME:
+                var origin = self._origin_rows.get(node.offset, -1)
+                if origin > 0:
+                    return origin
                 return self._frames[node.offset].height()
             if (
                 node.kind == FILTER
@@ -4440,12 +4514,13 @@ struct LazyFrame(Copyable):
         return -1
 
     def _measurable(self, index: Int) -> Bool:
-        """Whether `_selectivity` would run node `index`: a known table,
-        narrowed by steps above it."""
-        return (
-            self._nodes[index].kind != SCAN_FRAME
-            and self._spine_rows(index) > 0
-        )
+        """Whether `_selectivity` measures node `index`: a known table
+        narrowed by steps above it, or a shared subplan's result, which
+        knows the table it narrowed."""
+        ref node = self._nodes[index]
+        if node.kind == SCAN_FRAME:
+            return node.offset in self._origin_rows
+        return self._spine_rows(index) > 0
 
     def _selectivity(
         mut self, index: Int, streaming: Bool, batch_size: Int
@@ -4454,7 +4529,11 @@ struct LazyFrame(Copyable):
         it and replacing it with its result; 1 when it is a plain table or
         no table is known."""
         var table = self._spine_rows(index)
-        if table <= 0 or self._nodes[index].kind == SCAN_FRAME:
+        ref node = self._nodes[index]
+        if node.kind == SCAN_FRAME and node.offset in self._origin_rows:
+            # A shared subplan's result: the share of its table it kept.
+            return Float64(self._frames[node.offset].height()) / Float64(table)
+        if table <= 0 or node.kind == SCAN_FRAME:
             return 1.0
         var frame = self._execute(index, False, streaming, batch_size)
         var rows = frame.height()
@@ -4701,8 +4780,13 @@ struct LazyFrame(Copyable):
                 frames.append(self._frames[old].copy())
                 schemas.append(self._schemas[old].copy())
             self._nodes[i].offset = slots[old]
+        var origins = Dict[Int, Int]()
+        for entry in self._origin_rows.items():
+            if slots[entry.key] >= 0:
+                origins[slots[entry.key]] = entry.value
         self._frames = frames^
         self._schemas = schemas^
+        self._origin_rows = origins^
 
     def _available(
         self,
