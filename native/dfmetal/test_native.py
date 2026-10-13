@@ -1067,6 +1067,29 @@ check_moment_preflight_without_device()
 check_rolling_preflight_without_device()
 check_rolling_moments_preflight_without_device()
 check_shift_fill_preflight_without_device()
+def empty_request(rows, reduction=0):
+    values = (C.c_float * max(1, rows))(*([1.0] * max(1, rows)))
+    inputs = (Input * 1)(Input(ptr(values), None, 1, 0, 0))
+    request = Request(2, rows, 1, 1, 1, 0, 0, 0, 0, 0, -1, reduction, 0, -1,
+                      ptr(inputs), None, None, None, None, None, None, None)
+    return request, (values, inputs)
+
+
+def check_empty_outputs_preflight_without_device():
+    for rows in (0, 1, 513):
+        for reduction in (0, 1):
+            request, owners = empty_request(rows, reduction)
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+            assert memory.result == 0 and memory.launches == 1
+            request.output_count = -1
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"Invalid Metal request shape" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+check_empty_outputs_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
@@ -3693,6 +3716,30 @@ def test_exact_decimal_means():
 
 test_exact_decimal_means()
 
+def test_empty_outputs_native():
+    for rows in (0, 1, 513):
+        for reduction in (0, 1):
+            request, owners = empty_request(rows, reduction)
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+            for limit in (-1, 0, 3):
+                request.limit = limit
+                stats, err = Stats(), P()
+                check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+                expected = 1 if reduction else rows
+                assert stats.rows == (expected if limit < 0 else min(expected, limit))
+                assert stats.memory.result == 0
+                assert stats.memory.shared == memory.shared
+                assert stats.memory.launches == 1
+            request.budget = memory.peak - 1
+            stats, err = Stats(), P()
+            assert lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+            assert b"budget" in C.string_at(err)
+            lib.dfm_free(err)
+    print("PASS zero-column native cardinality, reduction, limits and budget regressions")
+
+
+test_empty_outputs_native()
 lib.dfm_context_release(ctx)
 print(
     "Native Metal ABI, boundaries, filters, bitmaps, integer checks, reductions and cache: PASS"

@@ -65,8 +65,11 @@ def test_metal_selectors_metadata_names_positions_dtypes_and_errors() raises:
         _ = lower_selectors(
             frame.lazy().filter(by_dtype(["float64"]) > lit(Float64(2)))
         )
-    with assert_raises(contains="zero-column"):
-        _ = lower_selectors(frame.lazy().select(by_dtype(["uint8"])))
+    var empty = frame.lazy().select(by_dtype(["uint8"]))
+    same(
+        lower_selectors(empty).collect(engine="cpu"),
+        empty.collect(engine="cpu"),
+    )
     with assert_raises(contains="at most one selector"):
         _ = lower_selectors(frame.lazy().select(nth(0) + nth(1)))
     var missing = scan_csv("/nonexistent/metal-selector-must-not-read.csv")

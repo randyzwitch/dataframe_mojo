@@ -66,6 +66,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             moments=True,
             rolling_windows=True,
             rolling_moments=True,
+            empty_outputs=True,
             shift_fill_windows=True,
         ),
     )
@@ -81,6 +82,8 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             family = current
         elif family != current:
             family = "mixed"
+    if not len(plan.outputs):
+        family += ";empty-outputs-v1"
     var paired = False
     for output in plan.outputs:
         paired |= output.reduction == COV or output.reduction == CORR

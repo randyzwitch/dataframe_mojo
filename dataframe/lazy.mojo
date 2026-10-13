@@ -327,11 +327,15 @@ def _stream_rows(node: PlanNode) -> Bool:
         if not _row_local(node.exprs):
             return False
         # An all-scalar select produces one row for the whole input.
+        # Unbound selectors can match nothing and therefore have that shape;
+        # batching them would produce one row per batch instead.
+        var has_column = False
         for expression in node.exprs:
             for item in expression._nodes:
-                if item.op == COL or item.op == SELECTOR:
-                    return True
-        return False
+                if item.op == SELECTOR:
+                    return False
+                has_column |= item.op == COL
+        return has_column
     return node.kind == DROP or node.kind == EXPLODE or node.kind == UNNEST
 
 
@@ -4748,9 +4752,21 @@ struct LazyFrame(Copyable):
                 if node.kind != SLICE or node.offset != 0 or node.length < 0:
                     continue
                 ref below = self._nodes[node.left]
+                var preserves_rows = _row_local(below.exprs)
+                if below.kind == SELECT and len(below.exprs):
+                    # Literal-only selections and selectors matching no
+                    # columns produce one row, even over an empty input.
+                    # Until selectors are bound, their shape is unknown.
+                    var has_column = False
+                    var has_selector = False
+                    for expression in below.exprs:
+                        for item in expression._nodes:
+                            has_column |= item.op == COL
+                            has_selector |= item.op == SELECTOR
+                    preserves_rows &= has_column and not has_selector
                 if (
                     below.kind == SELECT or below.kind == WITH_COLUMNS
-                ) and _row_local(below.exprs):
+                ) and preserves_rows:
                     self._swap_down(i, node.left, False)
                     changed = True
                     break
