@@ -420,3 +420,62 @@ def test_categorical_value_counts_preserve_documented_value_dtype() raises:
             actual.item(row, "x").struct_field("count").numeric[DType.uint32](),
             UInt32(1 if row == 0 else 2),
         )
+
+
+def test_uint64_quantiles_preserve_full_domain_values_and_interpolation() raises:
+    var raw = DataFrame(
+        [
+            Series(
+                "x",
+                Column[UInt64](
+                    [0, UInt64.MAX, UInt64(1) << 63, 4],
+                    [True, True, True, False],
+                ),
+            ),
+            Series("g", Column[Int64]([0, 0, 0, 0])),
+        ]
+    )
+    var a = Float64("4611686018427387904")
+    var b = Float64("9223372036854775808")
+    var c = Float64("13835058055282163712")
+    var d = Float64("18446744073709551616")
+    var probabilities: List[Float64] = [0, 0.25, 0.5, 0.75, 1]
+    var linear: List[Float64] = [0, a, b, c, d]
+    var lower: List[Float64] = [0, 0, b, b, d]
+    var higher: List[Float64] = [0, b, b, d, d]
+    for layout in range(3):
+        var frame = (
+            raw.copy() if layout
+            == 0 else offset_layout(raw) if layout
+            == 1 else chunk_layout(raw)
+        )
+        for q in range(len(probabilities)):
+            var expressions: List[Expr] = [
+                col("x").median().alias("median"),
+                col("x").quantile(probabilities[q], "linear").alias("linear"),
+                col("x").quantile(probabilities[q], "lower").alias("lower"),
+                col("x").quantile(probabilities[q], "higher").alias("higher"),
+                col("x").quantile(probabilities[q], "nearest").alias("nearest"),
+                col("x")
+                .quantile(probabilities[q], "midpoint")
+                .alias("midpoint"),
+            ]
+            for grouped in [False, True]:
+                var query = (
+                    frame.lazy()
+                    .group_by("g")
+                    .agg(expressions) if grouped else frame.lazy()
+                    .select_exprs(expressions)
+                )
+                for streaming in [False, True]:
+                    var actual = query.collect(
+                        engine="cpu", streaming=streaming
+                    )
+                    assert_equal(actual.item(0, "median").float64(), b)
+                    assert_equal(actual.item(0, "linear").float64(), linear[q])
+                    assert_equal(actual.item(0, "lower").float64(), lower[q])
+                    assert_equal(actual.item(0, "higher").float64(), higher[q])
+                    assert_equal(actual.item(0, "nearest").float64(), higher[q])
+                    assert_equal(
+                        actual.item(0, "midpoint").float64(), linear[q]
+                    )

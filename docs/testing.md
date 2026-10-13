@@ -37,7 +37,8 @@ Test functions are discovered automatically. `--contracts` selects named module
 groups; it does not require assigning every test to a coverage registry.
 
 Native Metal contracts execute in macOS CI when a device is exposed. Extreme
-Date epoch-shift overflow has strict expected failures on CPU and Metal.
+Date calendar fields are checked against an independent Int128 Gregorian model
+on CPU and Metal, including the complete signed day-storage endpoints.
 Capability skips do not establish GPU parity. Multiworker positional global
 FIRST/LAST and ARGMIN/ARGMAX also remain a known coverage limit: schedule-dependent results were
 observed, so their deterministic assertions currently use one worker. No flaky

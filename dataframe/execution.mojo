@@ -71,6 +71,8 @@ from .expr import (
     INTERPOLATE_BY,
     is_rolling_by,
     is_dt_op,
+    DT_OFFSET_BY,
+    DT_TRUNCATE,
     SEP,
     split_names,
     subtree,
@@ -135,10 +137,21 @@ def _numeric_literal(node: Node) raises -> Series:
             return Series("", Column[Int64]([node.integer]))
         return Series("", Column[Float64]([node.floating]))
     var dtype = node.dtypes[0].value()
+    if dtype.is_decimal() and dtype.decimal_width() == 128:
+        # Internal bound decimal literals carry the low word in integer and
+        # the signed high word in text2, without floating conversion.
+        var high = Int64(atol(node.text2)) if node.text2 else (
+            Int64(-1) if node.integer < 0 else Int64(0)
+        )
+        var raw = (Int128(high) << 64) | Int128(
+            node.integer.cast[DType.uint64]()
+        )
+        return Series("", Column[Int128]([raw])).with_dtype(dtype)
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
         if dtype == DataType.of(D) or (
-            dtype.is_temporal() and dtype.physical() == DataType.of(D)
+            (dtype.is_temporal() or dtype.is_decimal())
+            and dtype.physical() == DataType.of(D)
         ):
             comptime if D.is_floating_point():
                 return Series("", Column[Scalar[D]]([node.floating.cast[D]()]))
@@ -146,7 +159,7 @@ def _numeric_literal(node: Node) raises -> Series:
                 var result = Series(
                     "", Column[Scalar[D]]([node.integer.cast[D]()])
                 )
-                if dtype.is_temporal():
+                if dtype.is_temporal() or dtype.is_decimal():
                     return result.with_dtype(dtype)
                 return result^
     raise Error("Unsupported literal dtype " + node.text)
@@ -312,7 +325,13 @@ def _eval[
         bound, columns, aggregates, node.left, offset, length, grouped, mask
     )
     if is_dt_op(node.op):
-        return dt_op(node, left, bound.dtypes[node.left])
+        return dt_op(
+            node,
+            left,
+            bound.dtypes[node.left],
+            fit_mask(mask, len(left)) if node.op == DT_OFFSET_BY
+            or node.op == DT_TRUNCATE else List[Bool](),
+        )
     if node.op == CAST:
         # Categoricals are carried as strings inside an expression and
         # encoded once the whole result is assembled (see evaluate).
@@ -959,6 +978,12 @@ def _direct_grouped_count_part(
                 if column._valid(i):
                     reducer.counts[groups[offset + i]] += 1
             return
+    if part._data.isa[Column[Int128]]():
+        ref column = part._data[Column[Int128]]
+        for i in range(start, end):
+            if column._valid(i):
+                reducer.counts[groups[offset + i]] += 1
+        return
     if part._data.isa[BoolColumn]():
         ref column = part._data[BoolColumn]
         for i in range(start, end):
@@ -2198,6 +2223,11 @@ def _dense_partitions(keys: List[Series]) raises -> Optional[RowKeys]:
     )
 
 
+# Imported here, not with the others: a recorded process-failure diagnostic
+# in tests/tooling/suite_policy.mojo names a line number above.
+from .aggregate_table import key_supported, table_row_keys
+
+
 def _over[
     width: Int
 ](
@@ -2233,7 +2263,17 @@ def _over[
     if dense:
         partitions = dense.take()
     elif workers <= 1:
-        partitions = encode_rows(keys, nulls_equal=True)
+        # On one thread, the aggregate table's hashing numbers partitions
+        # without a row-encoded copy of string keys (TPC-DS q47's four
+        # string partition keys: three quarters of its window step went to
+        # encoding them).
+        var supported = True
+        for key in keys:
+            supported = supported and key_supported(key)
+        if supported:
+            partitions = table_row_keys(keys)
+        else:
+            partitions = encode_rows(keys, nulls_equal=True)
     elif low_cardinality(keys):
         partitions = encode_rows_parallel(keys, True, workers)
     else:

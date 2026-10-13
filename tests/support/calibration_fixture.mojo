@@ -1,5 +1,5 @@
 """Literal calibration-format fixtures; this encoder is not a cost oracle."""
-from dataframe.json_value import JsonValue
+from dataframe.json_value import JsonValue, json_quote
 
 
 def calibration_features() -> List[String]:
@@ -56,6 +56,7 @@ def calibration_record(
     cpu: Float64 = 1000,
     device: Float64 = 100,
     *,
+    family: String = "integer",
     expiry: Int = 200,
     validated: Bool = True,
     safety: Float64 = 1.5,
@@ -63,7 +64,9 @@ def calibration_record(
     device_residual: Float64 = 1,
 ) -> String:
     return (
-        '{"provider":"probe","device":"device","runtime_build_id":"runtime-v1","cpu_build_id":"cpu-v1","host":"host","threads":1,"optimize":true,"streaming":false,"batch_size":7,"family":"integer","expires_at":'
+        '{"provider":"probe","device":"device","runtime_build_id":"runtime-v1","cpu_build_id":"cpu-v1","host":"host","threads":1,"optimize":true,"streaming":false,"batch_size":7,"family":'
+        + json_quote(family)
+        + ',"expires_at":'
         + String(expiry)
         + ',"validated":'
         + ("true" if validated else "false")

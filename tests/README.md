@@ -44,7 +44,8 @@ combinations in that test remain unvalidated.
 Hardware omissions are recorded as `SKIP(capability)`. Enable actual Metal checks
 with `--capabilities metal` after probing the native device. An enabled test fails
 if its prerequisites are absent. macOS CI runs the native contracts when a device
-is exposed; extreme Date epoch-shift overflow is a strict expected failure.
+is exposed. Extreme Date fields are checked against an independent Int128
+Gregorian model across the signed day-storage domain.
 Multiworker global positional reductions also remain a known
 limit: deterministic FIRST/LAST/ARGMIN/ARGMAX assertions currently use one worker
 because schedule-dependent results were observed.

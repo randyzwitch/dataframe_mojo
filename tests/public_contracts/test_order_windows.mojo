@@ -396,10 +396,7 @@ def test_interpolation_keeps_end_nulls_nearest_ties_and_coordinate_distances() r
             col("x").interpolate("nearest").alias("nearest"),
             col("y").interpolate().alias("float"),
         ]
-        # The chunked coordinate path has its own strict failure witness,
-        # allowing these independent unary-window assertions to keep running.
-        if layout != 2:
-            expressions.append(col("x").interpolate_by(col("axis")).alias("by"))
+        expressions.append(col("x").interpolate_by(col("axis")).alias("by"))
         var actual = frame.select_exprs(expressions)
         assert_cells(
             actual.column("linear"),
@@ -412,13 +409,12 @@ def test_interpolation_keeps_end_nulls_nearest_ties_and_coordinate_distances() r
             interpolated(cells, True, row_positions),
             DataType.INT64,
         )
-        if layout != 2:
-            assert_cells(
-                actual.column("by"),
-                interpolated(cells, False, positions),
-                DataType.FLOAT64,
-                True,
-            )
+        assert_cells(
+            actual.column("by"),
+            interpolated(cells, False, positions),
+            DataType.FLOAT64,
+            True,
+        )
         assert_cells(
             actual.column("float"),
             interpolated(cells, False, row_positions),

@@ -26,6 +26,8 @@ ulong key_hash(ulong value){
  value^=value>>27;value*=0x94d049bb133111ebUL;return value^(value>>31);
 }
 ulong canonical_key(ulong word,long type){
+ if(type==11){ulong a=word&0x7fffffffffffffffUL;
+  if(a==0)return 0;if(a>0x7ff0000000000000UL)return 0x7ff8000000000000UL;return word;}
  if(type==1){uint x=uint(word),a=x&0x7fffffffU;
   if(a==0)return 0;if(a>0x7f800000U)return 0x7fc00000UL;return x;}
  return word;

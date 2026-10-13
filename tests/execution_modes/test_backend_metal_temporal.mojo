@@ -90,17 +90,10 @@ def temporal_cases(runtime: MetalRuntime, native: Bool) raises:
     var bits = List[Bool](length=len(raw), fill=True)
     bits[3] = False
     for dtype in dtypes:
-        var safe = List[Bool]()
-        var calendar_safe = List[Bool]()
+        var safe = List[Bool](length=len(raw), fill=True)
+        var calendar_safe = safe.copy()
         var weekday_bits = bits.copy()
         var calendar_bits = bits.copy()
-        for at in range(len(raw)):
-            safe.append(not dtype.is_date() or raw[at] <= Int64.MAX - 3)
-            weekday_bits[at] = weekday_bits[at] and safe[at]
-            calendar_safe.append(
-                not dtype.is_date() or raw[at] <= Int64.MAX - 719468
-            )
-            calendar_bits[at] = calendar_bits[at] and calendar_safe[at]
         var source = DataFrame(
             [
                 tagged("t", dtype, raw.copy(), bits.copy()),
@@ -108,8 +101,6 @@ def temporal_cases(runtime: MetalRuntime, native: Bool) raises:
                 Series("safe_calendar", Column[Bool](calendar_safe^)),
             ]
         )
-        # The public maximum-Date weekday regression is isolated separately;
-        # observing its known CPU failure here would hide other native fields.
         var expressions = List[Expr]()
         if not dtype.is_time():
             expressions.extend(
@@ -290,8 +281,7 @@ def test_native_metal_extreme_date_epoch_shifts_keep_independent_gregorian_field
             tagged("ordinal", DataType.INT64, [269, 209], [True, True]),
         ]
     )
-    # Current CPU Date epoch-shift overflow is a separate strict public
-    # regression; CPU parity must not turn that implementation into an oracle.
+    # Literal fields and the independent Int128 model remain the oracle.
     var measured = plan.profile(accelerator=runtime)
     var first_year = measured[0].item(0, "year").int64()
     assert_true(
@@ -384,7 +374,7 @@ def truncation_cases(runtime: MetalRuntime, native: Bool) raises:
         fused=True,
     )
     # A row projection makes literal broadcasting a native GPU contract;
-    # scalar-only selects have a separate unsupported-plan preflight below.
+    # Scalar-only selects also have native one-row normalization coverage.
     var literals: List[Expr] = [
         col("t"),
         lit("2000-02-29T12:34:56.123456")
@@ -504,42 +494,33 @@ def temporal_preflight_cases() raises:
             .collect(accelerator=unavailable)
         )
     var dates = DataFrame([tagged("t", DataType.DATE, [0], [True])])
-    with assert_raises(
-        contains="scalar-only select is not a resident row projection"
-    ):
-        _ = (
-            dates.lazy()
-            .select_exprs(
-                [
-                    lit("2000-02-29T12:34:56.123456")
-                    .str()
-                    .strptime("datetime[us]")
-                    .alias("dt"),
-                    lit("12:34:56.123456789")
-                    .str()
-                    .strptime("time")
-                    .alias("clock"),
-                ]
-            )
-            .collect(accelerator=unavailable)
+    var scalar_query = dates.lazy().select_exprs(
+        [
+            lit("2000-02-29T12:34:56.123456")
+            .str()
+            .strptime("datetime[us]")
+            .alias("dt"),
+            lit("12:34:56.123456789").str().strptime("time").alias("clock"),
+        ]
+    )
+    assert_true("unsupported" not in unavailable.describe(scalar_query))
+    assert_true(
+        "unsupported"
+        not in unavailable.describe(
+            dates.lazy().select(col("t").dt().truncate("1mo"))
         )
-    with assert_raises(contains="positive fixed interval"):
-        _ = (
-            dates.lazy()
-            .select(col("t").dt().truncate("1mo"))
-            .collect(accelerator=unavailable)
-        )
+    )
     var decimals = DataFrame(
         [
-            Series("d", Column[Int32]([100])).with_dtype(
-                DataType.decimal(9, 2, 32)
+            Series("d", Column[Int128]([100])).with_dtype(
+                DataType.decimal(38, 2, 128)
             )
         ]
     )
-    with assert_raises(contains="Decimal128 accumulation"):
+    with assert_raises(contains="Decimal128 input reductions"):
         _ = (
             decimals.lazy()
-            .select(col("d").sum())
+            .select(col("d").arg_min())
             .collect(accelerator=unavailable)
         )
 
@@ -560,3 +541,19 @@ def verify_metal_temporal_cpu_models() raises:
 
 def test_metal_temporal_lowering_and_cpu_models() raises:
     verify_metal_temporal_cpu_models()
+
+
+def test_native_metal_date_fields_match_independent_full_storage_domain() raises:
+    from tests.public_contracts.test_temporal_extremes import (
+        full_date_fixture,
+        full_date_fields,
+        full_date_expected,
+    )
+
+    var runtime = require_metal()
+    var frame = full_date_fixture()
+    var expected = full_date_expected(frame)
+    var plan = frame.lazy().select_exprs(full_date_fields())
+    var profiled = plan.profile(accelerator=runtime)
+    assert_frame(profiled[0], expected)
+    assert_native_report(profiled[1])
