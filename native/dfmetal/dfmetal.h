@@ -103,6 +103,9 @@ enum DFMOp {
   DFM_DT_TRUNCATE = 141,
   // Positive calendar months in code[2]; Date/Datetime unit 0..3 in code[3].
   DFM_DT_CALENDAR_TRUNCATE = 144,
+  // Signed months in code[2], Date/Datetime unit 0..3 in code[3],
+  // signed fixed ticks in the node literal, applied after the month shift.
+  DFM_DT_CALENDAR_OFFSET = 145,
   // Whole duration units: positive factor in code[2], code[3] is 1 for
   // signed division toward zero, 0 for Int64 storage multiplication.
   DFM_DT_TOTAL = 143,

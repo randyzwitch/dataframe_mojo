@@ -50,7 +50,7 @@ bool binaryOp(int64_t op) {
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return op == DFM_DT_CALENDAR_TRUNCATE || op == DFM_DT_OFFSET_BY || op == DFM_DT_TOTAL || op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+  return op == DFM_DT_CALENDAR_OFFSET || op == DFM_DT_CALENDAR_TRUNCATE || op == DFM_DT_OFFSET_BY || op == DFM_DT_TOTAL || op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
          op == DFM_CEIL || op == DFM_ROUND || op == DFM_SQRT ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
@@ -731,6 +731,10 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_DECIMAL_FLOAT_CAST && c[0] != DFM_DECIMAL_CAST && c[0] != DFM_DECIMAL_COMPARE &&
           c[0] != DFM_DECIMAL_ARITHMETIC && c[0] != DFM_DECIMAL_UNARY)
         fail("Metal Decimal128 row arithmetic requires CPU execution");
+      if (c[0] == DFM_DT_CALENDAR_OFFSET) {
+        if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 || c[2] == 0 || c[3] < 0 || c[3] > 3)
+          fail("Invalid Metal calendar offset descriptor");
+      }
       if (c[0] == DFM_DT_CALENDAR_TRUNCATE) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 || c[2] <= 0 || c[3] < 0 || c[3] > 3)
           fail("Invalid Metal calendar truncation descriptor");
@@ -2308,6 +2312,32 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
             text += z + "=" + (c[3]
                 ? "as_type<ulong>(as_type<long>(" + a + ")/" + std::to_string(c[2]) + "L)"
                 : "as_type<ulong>(" + a + ")*" + std::to_string(c[2]) + "UL") + ";";
+          } else if (op == DFM_DT_CALENDAR_OFFSET) {
+            const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
+            const auto dayTicks = std::to_string(perSecond * 86400) + "L";
+            const auto monthBits = std::to_string(uint64_t(c[2])) + "UL";
+            if (c[3] == 0) text += "long days=" + a + ",within=0;";
+            else text += "long days=" + a + "/" + dayTicks + ",within=" + a + "%" + dayTicks + ";if(within<0){--days;within+=" + dayTicks + ";}";
+            text += "long era=days/146097L,rem=days%146097L;if(rem<0){--era;rem+=146097L;}"
+                    "rem+=719468L;era+=rem/146097L;long doe=rem%146097L;"
+                    "long yoe=(doe-doe/1460L+doe/36524L-doe/146096L)/365L;"
+                    "long doy=doe-(365L*yoe+yoe/4L-yoe/100L);long mp=(5L*doy+2L)/153L;"
+                    "long day=doy-(153L*mp+2L)/5L+1L;long month=mp<10L?mp+3L:mp-9L;"
+                    "long year=yoe+era*400L+(month<=2L?1L:0L);"
+                    "long index=as_type<long>(as_type<ulong>(year*12L+month-1L)+" + monthBits + ");"
+                    "year=index/12L;month=index%12L;if(month<0){--year;month+=12L;}++month;"
+                    "bool leap=(year%4L==0L&&year%100L!=0L)||year%400L==0L;"
+                    "long length=month==2L?(leap?29L:28L):(month==4L||month==6L||month==9L||month==11L?30L:31L);day=min(day,length);"
+                    "long y=year-(month<=2L?1L:0L);era=y/400L;if(y%400L<0)--era;yoe=y-era*400L;"
+                    "mp=(month+9L)%12L;doe=yoe*365L+yoe/4L-yoe/100L+(153L*mp+2L)/5L+day-1L;"
+                    "days=as_type<long>(as_type<ulong>(era)*146097UL+ulong(doe)-719468UL);bool ok=true;";
+            if (c[3] == 0) text += z + "=days;";
+            else text += "long seconds=0;ok=d3::checked_mul(days,86400L,seconds)&&d3::checked_add(seconds,within/" +
+                std::to_string(perSecond) + "L,seconds)&&d3::checked_mul(seconds," + std::to_string(perSecond) +
+                "L," + z + ")&&d3::checked_add(" + z + ",within%" + std::to_string(perSecond) + "L," + z + ");";
+            text += "long fixed=as_type<long>(lit[" + std::to_string(s.start+j) + "]);"
+                    "ok=ok&&d3::checked_add(" + z + ",fixed," + z + ");if(!ok)atomic_fetch_min_explicit(error," +
+                    std::to_string(s.start+j+1) + "u,memory_order_relaxed);";
           } else if (op == DFM_DT_CALENDAR_TRUNCATE) {
             const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
             const auto dayTicks = std::to_string(perSecond * 86400) + "L";

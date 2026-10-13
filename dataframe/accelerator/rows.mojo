@@ -135,6 +135,7 @@ comptime ROW_QUANTILE_HIGHER = 1012
 comptime ROW_QUANTILE_NEAREST = 1013
 comptime ROW_QUANTILE_MIDPOINT = 1014
 comptime ROW_CALENDAR_TRUNCATE = 1015
+comptime ROW_CALENDAR_OFFSET = 1016
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -606,19 +607,30 @@ def _program(
                 // nanos_per_tick if source else nanos_per_tick
                 // nanos_per_unit
             )
+        var lowered_op = op
+        var calendar_ticks = Int64(0)
         if op == DT_OFFSET_BY:
             var interval = parse_every(node.text)
             var per_tick = (
                 NANOS_PER_DAY if left_type.is_date() else Int64(1000000000)
                 // left_type.per_second()
             )
-            if interval[0] != 0 or interval[1] % per_tick != 0:
+            if (
+                interval[0] != 0 and not capabilities.calendar_offsets
+            ) or interval[1] % per_tick != 0:
                 capabilities.reject(
                     "temporal",
                     "offset requires a fixed interval aligned to the storage unit",
                 )
             right = interval[1] // per_tick
-        var lowered_op = op
+            if interval[0] != 0:
+                if left_type.is_time():
+                    capabilities.reject(
+                        "temporal", "Time cannot be offset by calendar months"
+                    )
+                lowered_op = ROW_CALENDAR_OFFSET
+                calendar_ticks = right
+                right = interval[0]
         if op == DT_TRUNCATE:
             var interval = parse_every(node.text)
             var per_tick = NANOS_PER_DAY if left_type.is_date() else (
@@ -655,7 +667,10 @@ def _program(
         # Integer payloads travel as raw 64-bit words, never through a float
         # conversion (Int64 literals beyond 2**53 must remain exact).
         literals.append(
-            bitcast[DType.float64](node.integer) if op
+            bitcast[DType.float64](calendar_ticks) if lowered_op
+            == ROW_CALENDAR_OFFSET else bitcast[DType.float64](
+                node.integer
+            ) if op
             == LIT_INT else (
                 Float64(node.integer) if op
                 == LIT_BOOL else (
@@ -991,7 +1006,15 @@ def lower_rows(
                     var interval = parse_every(
                         bound.expr._nodes[part_index].text
                     )
-                    if interval[1] != 0 and (
+                    if (
+                        interval[1] != 0
+                        or (
+                            interval[0] != 0
+                            and bound.dtypes[
+                                bound.expr._nodes[part_index].left
+                            ].is_datetime()
+                        )
+                    ) and (
                         not terminal_boundary
                         or k != 0
                         or node.kind == FILTER

@@ -21,6 +21,7 @@ from .rows import (
     ROW_GROUP_OUTPUT,
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
+    ROW_CALENDAR_OFFSET,
     ROW_CALENDAR_TRUNCATE,
     ROW_QUANTILE_LINEAR,
     ROW_QUANTILE_MIDPOINT,
@@ -70,6 +71,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             extrema=True,
             fixed_logical=True,
             duration_totals=True,
+            calendar_offsets=True,
             calendar_truncation=True,
             temporal_offsets=True,
             decimal128=True,
@@ -124,6 +126,11 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
     if paired:
         family += ";paired-moments-v1"
+    var calendar_offset = False
+    for i in range(0, len(plan.code), 4):
+        calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET
+    if calendar_offset:
+        family += ";calendar-offsets-v1"
     var calendar = False
     for i in range(0, len(plan.code), 4):
         calendar |= plan.code[i] == ROW_CALENDAR_TRUNCATE
