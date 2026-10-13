@@ -661,14 +661,16 @@ def _string_words(
         if not views and strings._start(i) + 16 <= size:
             # Sixteen readable bytes from the string's start: its words by
             # two loads, masked to its length.
-            var low = start_ptr.bitcast[UInt64]().unsafe_load[alignment=1]()
+            var low = start_ptr.unsafe_bitcast[UInt64]().unsafe_load[
+                alignment=1
+            ]()
             head |= (low & 0xFFFFFFFF) << 32
             first[unsafe_offset=k] = head
             if length <= 12:
                 var high = (low >> 32) | (
                     UInt64(
                         start_ptr.unsafe_offset(8)
-                        .bitcast[UInt32]()
+                        .unsafe_bitcast[UInt32]()
                         .unsafe_load[alignment=1]()
                     )
                     << 32
@@ -1986,7 +1988,7 @@ def _string_keys(
             continue
         buffer_bytes += length
         var found = held.find(Int(tail), length)
-        var b = -1
+        var b: Int
         var offset = found[1]
         if found[0] >= 0 and offset <= _STRING_VIEW_BUFFER_LIMIT - length:
             b = local[found[0]]

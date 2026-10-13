@@ -41,7 +41,7 @@ def expected_partition_mask(
     if strict and k > 0:
         k -= 1
     var members = List[List[Int]]()
-    for g in range(groups + 1):
+    for _ in range(groups + 1):
         members.append(List[Int]())
     for row in range(n):
         if parallel_present(row + offset):
