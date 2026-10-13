@@ -78,6 +78,7 @@ from .partition import (
     _mix,
 )
 from .series import Series
+from .hashing import RowKeys
 from .string_column import StringBuilder, StringColumn
 
 # Rows hashed and probed at a time (DuckDB's STANDARD_VECTOR_SIZE).
@@ -633,6 +634,7 @@ def _string_words(
     var nulls = Pointer[UInt64, MutAnyOrigin](unsafe_from_address=nulls_at)
     var has_nulls = strings.null_count() > 0
     var views = strings._is_view_storage()
+    var size = 0 if views else len(strings._bytes[])
     for k in range(count):
         var i = start + k
         if has_nulls and not strings._valid(i):
@@ -649,6 +651,32 @@ def _string_words(
         var length = len(bytes)
         var start_ptr = bytes.unsafe_ptr()
         var head = UInt64(length)
+        if not views and strings._start(i) + 16 <= size:
+            # Sixteen readable bytes from the string's start: its words by
+            # two loads, masked to its length.
+            var low = start_ptr.bitcast[UInt64]().unsafe_load[alignment=1]()
+            head |= (low & 0xFFFFFFFF) << 32
+            first[unsafe_offset=k] = head
+            if length <= 12:
+                var high = (low >> 32) | (
+                    UInt64(
+                        start_ptr.unsafe_offset(8)
+                        .bitcast[UInt32]()
+                        .unsafe_load[alignment=1]()
+                    )
+                    << 32
+                )
+                var keep = 8 * max(length - 4, 0)
+                second[unsafe_offset=k] = high & (
+                    (UInt64(1) << UInt64(keep)) - 1 if keep < 64 else UInt64.MAX
+                )
+                if length < 4:
+                    first[unsafe_offset=k] = UInt64(length) | (
+                        (low & ((UInt64(1) << UInt64(8 * length)) - 1)) << 32
+                    )
+            else:
+                second[unsafe_offset=k] = UInt64(Int(start_ptr))
+            continue
         for b in range(min(length, 4)):
             head |= UInt64(start_ptr[unsafe_offset=b]) << UInt64(32 + 8 * b)
         first[unsafe_offset=k] = head
@@ -926,12 +954,16 @@ def _same(
     var base = _words_at(address)
     if base[unsafe_offset=1] != null:
         return False
+    # The lists through their pointers: indexing checked bounds on every
+    # word of every probed row.
+    var long_words = addressed.unsafe_ptr()
+    var buffers = words.unsafe_ptr()
     for w in range(len(addressed)):
         var stored = base[unsafe_offset=_HEAD + w]
-        var mine = _words_at(words[w])[unsafe_offset=row]
+        var mine = _words_at(buffers[unsafe_offset=w])[unsafe_offset=row]
         if stored == mine:
             continue
-        if not addressed[w]:
+        if not long_words[unsafe_offset=w]:
             return False
         # Unequal addresses of a long string (equal lengths, by the word
         # before): compare the bytes.
@@ -1323,6 +1355,11 @@ struct AggregateSink(Movable):
     # as DuckDB's rows point into their collection's heap (a morsel's
     # column holds its buffers by reference, so nothing is copied).
     var held: List[Series]
+    # Numbering mode (`table_row_keys`): each new group's dense id in its
+    # first state word, every row's id, and each group's first row.
+    var numbering: Bool
+    var row_ids: List[Int]
+    var representatives: List[Int]
 
     def __init__(out self, layout: AggregateLayout, workers: Int):
         self.slots = layout.slots.copy()
@@ -1353,6 +1390,9 @@ struct AggregateSink(Movable):
         for _ in range(len(layout.key_templates)):
             self.dictionaries.append(_DictionaryKeys())
         self.held = List[Series]()
+        self.numbering = False
+        self.row_ids = List[Int]()
+        self.representatives = List[Int]()
 
     def _full(mut self, count: Int):
         """A table without room for `count` more groups (DuckDB main's fill
@@ -1499,6 +1539,11 @@ struct AggregateSink(Movable):
                             var at = self.parts.append(
                                 hash, null, word_ptrs, k, first + lo + k
                             )
+                            if self.numbering:
+                                _words_at(
+                                    at + 8 * self.parts.states_at
+                                )[] = UInt64(self.made)
+                                self.representatives.append(first + lo + k)
                             table[unsafe_offset=slot] = _entry(hash, at)
                             self.live += 1
                             self.made += 1
@@ -1512,6 +1557,13 @@ struct AggregateSink(Movable):
                                 group_at[unsafe_offset=k] = at
                                 break
                         slot = (slot + _stride(hash)) & mask
+            if self.numbering:
+                var states_at = 8 * self.parts.states_at
+                var ids = self.row_ids.unsafe_ptr()
+                for k in range(count):
+                    ids[unsafe_offset=first + lo + k] = Int(
+                        _words_at(group_at[unsafe_offset=k] + states_at)[]
+                    )
             # The batch's states, by the address of each row's group.
             _update_states(
                 self.slots,
@@ -1922,3 +1974,33 @@ struct AggregateResult(Movable):
         self.firsts = List[List[Int]]()
         self.states = List[List[Reducer]]()
         self.keys = List[List[Series]]()
+
+
+def table_row_keys(keys: List[Series]) raises -> RowKeys:
+    """Dense ids of the rows' key tuples in first-occurrence order, with
+    nulls equal (`encode_rows` with `nulls_equal`), by the aggregate table's
+    hashing and in-place key compare on one thread: no row-encoded copy of
+    the keys (Polars numbers window groups with its hash groupers the same
+    way). Every key must be `key_supported`."""
+    var n = len(keys[0])
+    var flat = List[Series](capacity=len(keys))
+    for key in keys:
+        flat.append(key.rechunk() if key.is_chunked() else key.copy())
+    var layout = aggregate_layout(flat, List[Series](), List[ReducerSpec]())
+    layout.state_words = 1
+    var sink = AggregateSink(layout, 1)
+    sink.numbering = True
+    sink.row_ids = List[Int](length=n, fill=0)
+    var step = 1 << 16
+    for lo in range(0, n, step):
+        var length = min(step, n - lo)
+        var part = List[Series](capacity=len(flat))
+        for key in flat:
+            part.append(_one_chunk(key.slice(lo, length)))
+        sink.sink(part, List[Series](), lo)
+    var ids = List[Int]()
+    var representatives = List[Int]()
+    swap(ids, sink.row_ids)
+    swap(representatives, sink.representatives)
+    _ = sink^
+    return RowKeys(ids^, representatives^)
