@@ -213,10 +213,16 @@ Temporal and decimal columns retain their complete logical metadata through
 projection, stable filtering, null tests, fill-null, counts, and extrema.
 Decimal128 values use two 64-bit words throughout resident storage, sorting,
 ranking, grouping, and joins; final export reconstructs the complete 16-byte
-payload. Decimal comparisons require matching scales. They also require matching
-storage widths unless one operand is Decimal128, in which case Decimal32/64
-operands are sign-extended exactly. Logical arithmetic and row-valued casts
-remain unsupported.
+payload. Decimal comparisons support different scales and storage widths. Both
+operands are sign-extended and rescaled to the common scale using exact integer
+arithmetic, including the CPU's checked Int128 rescaling overflow. Comparisons
+whose rescaling cannot be proved safe require a terminal projection without a
+head or conditional branches. This preserves errors on rows the CPU observes.
+The CPU has an unchecked one-row fast path when rescaling Decimal128 against
+Decimal64; this combination requires a static proof on Metal. Safe comparisons
+can feed filters, joins, aggregates, and windows. Estimates
+include `metal-decimal-comparisons-v1`; prior comparison calibrations do not
+apply. Decimal row arithmetic remains unsupported.
 
 Decimal32/64 sums accumulate exactly in two words and return Decimal128 with
 precision 38 and the original scale, including through joins and scalar
@@ -533,6 +539,7 @@ python3 native/dfmetal/test_resident.py
 python3 native/dfmetal/test_float64.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py
+python3 native/dfmetal/test_decimal_comparisons.py
 pixi run mojo run -I . tests/test_accelerator_planning.mojo
 pixi run mojo run -I . tests/test_metal.mojo
 pixi run mojo run -I . tests/test_metal_completeness.mojo
