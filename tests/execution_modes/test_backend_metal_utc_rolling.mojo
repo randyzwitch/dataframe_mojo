@@ -57,7 +57,7 @@ def test_utc_duration_capability_staged_metadata_wide_days_and_no_device_preflig
                 "unsupported"
                 not in MetalRuntime(device_id=999999).describe(query)
             )
-    with assert_raises(contains="timezone-free or UTC"):
+    with assert_raises(contains="timezone-free or fixed-offset"):
         _ = lower_rows(
             fixture(DataType.datetime("ns", "America/New_York"))
             .lazy()

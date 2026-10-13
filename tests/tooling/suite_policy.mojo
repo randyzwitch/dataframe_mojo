@@ -1333,6 +1333,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_fixed_zone_rolling.mojo::test_native_metal_fixed_zone_duration_literal_local_month_clamps_units_offsets_types_layouts_and_partitions",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_fixed_zone_rolling.mojo::test_native_metal_fixed_zone_duration_full_width_local_wrapping_checked_reconstruction_and_pure_fixed_ticks",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_fixed_zone_rolling.mojo::test_native_metal_fixed_zone_duration_resident_consumers_offset_families_and_exact_budgets",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_utc_rolling.mojo::test_native_metal_utc_duration_units_zero_offset_zones_calendar_days_fixed_ticks_decimals_and_layouts",
             "metal",
         )
@@ -2126,6 +2144,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_duration_decimals.mojo",
                 "tests/execution_modes/test_backend_metal_calendar_rolling.mojo",
                 "tests/execution_modes/test_backend_metal_utc_rolling.mojo",
+                "tests/execution_modes/test_backend_metal_fixed_zone_rolling.mojo",
                 "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",

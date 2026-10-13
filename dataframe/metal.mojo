@@ -391,6 +391,7 @@ def _capabilities() -> RowCapabilities:
         duration_rolling=True,
         calendar_duration_rolling=True,
         utc_duration_rolling=True,
+        fixed_zone_duration_rolling=True,
         empty_outputs=True,
         empty_inputs=True,
         chunked_inputs=True,

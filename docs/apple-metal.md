@@ -295,7 +295,13 @@ so wider periods such as `200000d` work in millisecond/microsecond storage
 without first requiring the entire interval to fit signed nanoseconds. An
 empty input observes no row bound overflow; null/unsorted indices still fail
 before bound arithmetic. UTC families include `:utc<unit>:days<count>`.
-Nonzero fixed-offset and IANA timezone indices remain outside this subset.
+Arrow fixed-offset zones from `-23:59` through `+23:59` also support these
+windows. Each month or day stage converts UTC ticks to local ticks, shifts the
+local calendar, then reconstructs UTC with checked whole-second arithmetic.
+The local conversion retains the CPU Int64 wrapping policy at storage extremes.
+Pure fixed-time periods skip localization entirely. Nonzero offset seconds
+are validated as whole minutes and included in calibration families as
+`:offset<seconds>`. IANA timezone indices remain outside this subset.
 
 Variance (`var`) and standard deviation (`std`) run as scalar, grouped,
 or `over()` reductions for primitive numeric inputs. They convert each value
@@ -812,7 +818,7 @@ that unlisted query combinations are already equivalent.
 | Area | Remaining CPU operations or behavior |
 | --- | --- |
 | Reductions | Mode, implode, and value counts. |
-| Ordered windows | Nonzero fixed-offset and IANA timezone rolling durations, cut, and qcut. |
+| Ordered windows | IANA timezone rolling durations, cut, and qcut. |
 | Temporal expressions | Row-valued parsing/formatting and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins and file-backed scans. |
@@ -852,6 +858,7 @@ python3 native/dfmetal/test_duration_rolling.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_duration_decimals.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_calendar_rolling.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_utc_rolling.py build/dfmetal/libdfmetal.dylib
+python3 native/dfmetal/test_fixed_zone_rolling.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py

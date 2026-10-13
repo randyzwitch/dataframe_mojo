@@ -1308,6 +1308,28 @@ def check_utc_duration_preflight_without_device():
 
 
 check_utc_duration_preflight_without_device()
+
+
+def check_fixed_zone_duration_preflight_without_device():
+    inputs=(Input*2)(Input(None,None,3,0,0),Input(None,None,3,0,0))
+    code=(I*12)(226,0,1,0,227,0,2,1,229,1,1,0)
+    literals=(I*3)(0,0,0);nodes=(I*3)(3,3,3);slots=(I*3)(3,3,3)
+    steps=(Step*1)(Step(0,3,2,5,0,0));outputs=(Output*1)(Output(None,None,3,2,-1,0))
+    request=Request(2,513,0,3,2,12,3,1,0,1,-1,0,0,-1,ptr(inputs),ptr(code),ptr(literals),ptr(steps),None,ptr(outputs),ptr(nodes),ptr(slots))
+    memory=Memory()
+    for unit in (1,2,3):
+        code[10]=unit
+        for offset in (-86340,-12600,-60,0,60,20700,50400,86340):
+            code[11]=offset;err=P()
+            check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+    for offset in (-86400,-86341,-1,1,86341,86400,(1<<63)-1,-(1<<63)):
+        code[11]=offset;err=P()
+        assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
+        assert b"UTC duration descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_fixed_zone_duration_preflight_without_device()
 check_shift_fill_preflight_without_device()
 def empty_request(rows, reduction=0):
     values = (C.c_float * max(1, rows))(*([1.0] * max(1, rows)))
