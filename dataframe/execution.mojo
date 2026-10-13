@@ -113,7 +113,7 @@ from .aggregate import Reducer
 from .trace import trace_path
 from .parallel import Job, partitions, run_jobs, worker_count
 from std.collections import Optional
-from std.memory import ArcPointer
+from std.memory import ArcPointer, Pointer
 from std.math import isnan
 from std.sys import size_of
 
@@ -2201,6 +2201,207 @@ def _dense_partitions(keys: List[Series]) raises -> Optional[RowKeys]:
 # Imported here, not with the others: a recorded process-failure diagnostic
 # in tests/tooling/suite_policy.mojo names a line number above.
 from .aggregate_table import key_supported, table_row_keys
+from .gather import take_parallel
+from .parallel import configured_workers
+from .window_layout import PartitionLayout, keyed_layout, partition_layout
+
+
+# Rows per block of a window's work: DuckDB evaluates windows in vectors of
+# STANDARD_VECTOR_SIZE (2048) rows and gives each thread whole blocks.
+comptime _WINDOW_BLOCK = 2048
+
+
+struct WindowLayouts(Movable):
+    """Partition layouts of one frame's window expressions, by partition
+    keys, so every `over()` on the same keys in a `with_columns` lays the
+    rows out once (as DuckDB sorts once per PhysicalWindow and Polars
+    caches its window groups by key names)."""
+
+    var keys: List[String]
+    var layouts: List[PartitionLayout]
+
+    def __init__(out self):
+        self.keys = List[String]()
+        self.layouts = List[PartitionLayout]()
+
+    def find(self, keys: String) -> Int:
+        for k in range(len(self.keys)):
+            if self.keys[k] == keys:
+                return k
+        return -1
+
+
+def _partition_ids(keys: List[Series], height: Int) raises -> RowKeys:
+    """Partition ids of `keys`' rows: consistent, not in first-occurrence
+    order (#387)."""
+    # Few distinct keys encode row ranges and merge (#336); many encode one
+    # hash bucket at a time. One thread numbering 5M partition keys was
+    # most of H2O q8 at k2.
+    var workers = worker_count(height)
+    # One integer key over a small span numbers by direct lookup in one
+    # pass, faster than either parallel route (TPC-DS q51's 611K item keys:
+    # 8 ms partitioned).
+    var dense = _dense_partitions(keys)
+    if dense:
+        return dense.take()
+    if workers <= 1:
+        # On one thread, the aggregate table's hashing numbers partitions
+        # without a row-encoded copy of string keys (TPC-DS q47's four
+        # string partition keys: three quarters of its window step went to
+        # encoding them).
+        var supported = True
+        for key in keys:
+            supported = supported and key_supported(key)
+        if supported:
+            return table_row_keys(keys)
+        return encode_rows(keys, nulls_equal=True)
+    if low_cardinality(keys):
+        return encode_rows_parallel(keys, True, workers)
+    return encode_partitioned(keys, workers, nulls_equal=True)
+
+
+def _has_over(bound: BoundExpr) -> Bool:
+    for node in bound.expr._nodes:
+        if node.op == OVER:
+            return True
+    return False
+
+
+struct _OverJob(Job):
+    """One run of whole partitions, contiguous in the layout, evaluated on
+    its own: the rows [lo, hi) of the gathered columns, partitions
+    [first, last)."""
+
+    var inner: BoundExpr
+    var columns: List[Series]
+    var starts: Int
+    var lo: Int
+    var hi: Int
+    var first: Int
+    var last: Int
+    var batch_size: Int
+    var result: Series
+
+    def __init__(
+        out self,
+        inner: BoundExpr,
+        columns: List[Series],
+        starts: Int,
+        first: Int,
+        last: Int,
+        lo: Int,
+        hi: Int,
+        batch_size: Int,
+    ):
+        self.inner = inner.copy()
+        self.columns = columns.copy()
+        self.starts = starts
+        self.first = first
+        self.last = last
+        self.lo = lo
+        self.hi = hi
+        self.batch_size = batch_size
+        self.result = Series("", Column[Int64](List[Int64]()))
+
+    def run(mut self) raises:
+        var starts = Pointer[Int, MutAnyOrigin](unsafe_from_address=self.starts)
+        var rows = self.hi - self.lo
+        var part = List[Series](capacity=len(self.columns))
+        for column in self.columns:
+            part.append(column.slice(self.lo, rows))
+        # The run's partitions, numbered from 0 in layout order.
+        var groups = List[Int](length=rows, fill=0)
+        for g in range(self.first, self.last):
+            for k in range(
+                starts[unsafe_offset=g] - self.lo,
+                starts[unsafe_offset=g + 1] - self.lo,
+            ):
+                groups[k] = g - self.first
+        self.result = evaluate(
+            self.inner,
+            part,
+            rows,
+            batch_size=self.batch_size,
+            grouped=True,
+            groups=groups,
+            group_count=self.last - self.first,
+        )
+
+
+def _over_contiguous[
+    width: Int
+](
+    bound: BoundExpr,
+    index: Int,
+    columns: List[Series],
+    layout: PartitionLayout,
+    height: Int,
+    lanes: Int,
+    batch_size: Int,
+) raises -> Optional[Series]:
+    """`over()` evaluated on contiguous partitions, runs of partitions in
+    parallel (DuckDB's window tasks per hash group); None when the rows
+    make a single run, which the row-order route evaluates as well."""
+    ref node = bound.expr._nodes[index]
+    # Runs of whole partitions of about a quarter of a worker's share.
+    var target = max(_WINDOW_BLOCK, (height + 4 * lanes - 1) // (4 * lanes))
+    var cuts = List[Int]()
+    cuts.append(0)
+    var since = 0
+    for g in range(layout.count):
+        if layout.starts[g] - since >= target:
+            cuts.append(g)
+            since = layout.starts[g]
+    cuts.append(layout.count)
+    if len(cuts) <= 2:
+        return None
+    # The columns the expression reads, gathered into layout order.
+    var probe = bind(subtree(bound.expr, node.left), columns)
+    var used = List[Bool](length=len(columns), fill=False)
+    for source in probe.sources:
+        if source >= 0:
+            used[source] = True
+    var reads = List[Series]()
+    for c in range(len(columns)):
+        if used[c]:
+            reads.append(columns[c].copy())
+    var gathered = reads.copy() if layout.in_place else take_parallel(
+        reads, layout.order.copy(), lanes
+    )
+    var inner = bind(subtree(bound.expr, node.left), gathered)
+    var jobs = List[_OverJob](capacity=len(cuts) - 1)
+    for r in range(len(cuts) - 1):
+        jobs.append(
+            _OverJob(
+                inner,
+                gathered,
+                Int(layout.starts.unsafe_ptr()),
+                cuts[r],
+                cuts[r + 1],
+                layout.starts[cuts[r]],
+                layout.starts[cuts[r + 1]],
+                batch_size,
+            )
+        )
+    run_jobs(jobs)
+    var parts = List[Series](capacity=len(jobs))
+    for k in range(len(jobs)):
+        parts.append(jobs[k].result.copy())
+    var dtype = parts[0].dtype()
+    for k in range(len(parts)):
+        if parts[k].dtype() != dtype:
+            parts[k] = parts[k].cast(dtype)
+    var combined = Series._from_chunks(parts)
+    combined._name = parts[0].name()
+    # Row results go back to row order; one value per partition is spread
+    # to its rows.
+    if inner.shape() == ROWS and layout.in_place:
+        return combined.rechunk()
+    var rows = layout.inverse.copy() if inner.shape() == ROWS else (
+        layout.ids.copy()
+    )
+    var spread = take_parallel([combined^], rows^, lanes)
+    return spread[0].copy()
 
 
 def _over[
@@ -2211,6 +2412,7 @@ def _over[
     index: Int,
     height: Int,
     batch_size: Int,
+    layouts: Int = 0,
 ) raises -> Series:
     """Evaluate a node's child per partition and align results to rows."""
     ref node = bound.expr._nodes[index]
@@ -2225,34 +2427,42 @@ def _over[
         for column in columns:
             if column.name() == part:
                 keys.append(column.copy())
-    # Partition ids need only be consistent, not in first-occurrence order:
-    # number them on every worker (#387). Few distinct keys encode row
-    # ranges and merge (#336); many encode one hash bucket at a time. One
-    # thread numbering 5M partition keys was most of H2O q8 at k2.
-    var workers = worker_count(height)
-    # One integer key over a small span numbers by direct lookup in one
-    # pass, faster than either parallel route (TPC-DS q51's 611K item keys:
-    # 8 ms partitioned).
-    var partitions: RowKeys
-    var dense = _dense_partitions(keys)
-    if dense:
-        partitions = dense.take()
-    elif workers <= 1:
-        # On one thread, the aggregate table's hashing numbers partitions
-        # without a row-encoded copy of string keys (TPC-DS q47's four
-        # string partition keys: three quarters of its window step went to
-        # encoding them).
-        var supported = True
-        for key in keys:
-            supported = supported and key_supported(key)
-        if supported:
-            partitions = table_row_keys(keys)
-        else:
-            partitions = encode_rows(keys, nulls_equal=True)
-    elif low_cardinality(keys):
-        partitions = encode_rows_parallel(keys, True, workers)
-    else:
-        partitions = encode_partitioned(keys, workers, nulls_equal=True)
+    # Whole partitions laid out contiguously and evaluated many at once,
+    # when the rows fill more than one block per thread. A nested over()
+    # partitions differently, so it keeps the row-order route.
+    var lanes = min(configured_workers(), height // _WINDOW_BLOCK)
+    if lanes > 1 and not _has_over(inner):
+        var owned = WindowLayouts()
+        var cache = Pointer[WindowLayouts, MutAnyOrigin](
+            unsafe_from_address=layouts if layouts
+            != 0 else Int(Pointer(to=owned))
+        )
+        var at = cache[].find(node.text2)
+        if at < 0:
+            var dense = _dense_partitions(keys)
+            cache[].keys.append(node.text2)
+            if dense:
+                var ids = dense.take()
+                cache[].layouts.append(
+                    partition_layout(ids.ids.copy(), ids.count(), lanes)
+                )
+            else:
+                cache[].layouts.append(keyed_layout(keys, lanes))
+            at = len(cache[].layouts) - 1
+        var done = _over_contiguous[width](
+            bound,
+            index,
+            columns,
+            cache[].layouts[at],
+            height,
+            lanes,
+            batch_size,
+        )
+        _ = owned^
+        if done:
+            trace_path("window.contiguous")
+            return done.take()
+    var partitions = _partition_ids(keys, height)
     var result = evaluate[width](
         inner,
         columns,
@@ -2280,8 +2490,12 @@ def evaluate[
     grouped: Bool = False,
     groups: List[Int] = List[Int](),
     group_count: Int = 1,
+    layouts: Int = 0,
 ) raises -> Series:
     """Evaluate a bound expression; temporary vectors are bounded by batch_size.
+
+    `layouts`, when not 0, is the address of a `WindowLayouts` that every
+    `over()` of one frame shares.
 
     Reductions, window operations, and over() partitions are computed first,
     in node order, and then read per batch. Full output and
@@ -2464,7 +2678,12 @@ def evaluate[
                 states[node_index] = window_op(node, input, window_groups)
         elif node.op == OVER:
             states[node_index] = _over[width](
-                bound, prepared_columns, node_index, height, batch_size
+                bound,
+                prepared_columns,
+                node_index,
+                height,
+                batch_size,
+                layouts if not grouped else 0,
             )
     var size = height if bound.shape() == ROWS else (
         group_count if grouped else 1

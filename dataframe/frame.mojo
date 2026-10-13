@@ -71,7 +71,7 @@ from .expr import (
     UNTYPED,
 )
 from .binding import bind, BoundExpr, ROWS, AGGREGATE
-from .execution import evaluate, _ReduceJob, _ColumnStats
+from .execution import WindowLayouts, evaluate, _ReduceJob, _ColumnStats
 from .aggregate import Reducer
 from .sampling import sample_size, sample_indices
 from .mask_filter import filter_columns
@@ -2435,9 +2435,15 @@ struct DataFrame(Copyable, Sized, Writable):
         if batch_size <= 0:
             raise Error("batch_size must be positive")
         var columns = self._columns.copy()
+        # Window partitions laid out once per key set for all expressions.
+        var layouts = WindowLayouts()
         for expression in bound:
             var result = evaluate(
-                expression, self._columns, self._height, batch_size=batch_size
+                expression,
+                self._columns,
+                self._height,
+                batch_size=batch_size,
+                layouts=Int(Pointer(to=layouts)),
             )
             if expression.shape() != ROWS:
                 result = result._broadcast(self._height)
@@ -2450,6 +2456,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 columns.append(result^)
             else:
                 columns[replacement] = result^
+        _ = layouts^
         return Self(columns^, height=self._height)
 
     def filter(
