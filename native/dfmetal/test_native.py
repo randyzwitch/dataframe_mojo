@@ -3991,6 +3991,71 @@ def test_calendar_truncation_native():
 test_calendar_truncation_native()
 
 
+def test_calendar_offsets_native():
+    import struct
+    lo,hi=-(1 << 63),(1 << 63)-1
+    def wrap(value):
+        return (value-lo) % (1 << 64)+lo
+    def checked(value):
+        if not lo <= value <= hi:
+            raise OverflowError
+        return value
+    def start(year):
+        previous=year-1
+        return 365*previous+previous//4-previous//100+previous//400-719162
+    def lengths(year):
+        return [31,29 if year%4 == 0 and (year%100 != 0 or year%400 == 0) else 28,31,30,31,30,31,31,30,31,30,31]
+    def reference(value,unit,months,fixed):
+        per_second=(0,1000,1000000,1000000000)[unit]
+        days=value if not unit else value//(86400*per_second)
+        within=0 if not unit else value%(86400*per_second)
+        left,right=-30000000000000000,30000000000000000
+        while left+1 < right:
+            middle=(left+right)//2
+            if start(middle) <= days:
+                left=middle
+            else:
+                right=middle
+        year,day,month=left,days-start(left),0
+        old_lengths=lengths(year)
+        while day >= old_lengths[month]:
+            day-=old_lengths[month]
+            month+=1
+        index=wrap(year*12+month+months)
+        year,month=divmod(index,12)
+        new_lengths=lengths(year)
+        day=min(day+1,new_lengths[month])
+        days=wrap(start(year)+sum(new_lengths[:month])+day-1)
+        try:
+            result=days if not unit else checked(checked(checked(checked(days*86400)+within//per_second)*per_second)+within%per_second)
+            return checked(result+fixed) if fixed else result
+        except OverflowError:
+            return None
+    rng=random.Random(0x0FF5E7)
+    cases=0
+    for unit in range(4):
+        values=[lo,lo+1,hi-1,hi,-1,0,1,-719528,11016,18321]+[rng.randrange(lo,hi+1) for _ in range(128)]
+        for months in (-8999999999999999988,-999999999999999999,-27,-12,-1,1,12,27,999999999999999999,8999999999999999988):
+            for fixed in (-1,0,1):
+                expected=[reference(value,unit,months,fixed) for value in values]
+                valid=[value is not None and i%11 != 3 for i,value in enumerate(expected)]
+                literal=struct.unpack("d",struct.pack("q",fixed))[0]
+                output,bits,_=execute(values,3,[col,(145,0,months,unit)],[0,literal],valid=valid,offset=5,typed=True)
+                assert bits == valid
+                assert all(not ok or a == b for a,b,ok in zip(output,expected,valid)), (unit,months,fixed,output,expected)
+                cases+=len(values)
+                bad=next((value for value,answer in zip(values,expected) if answer is None),None)
+                if bad is not None:
+                    execute([bad],3,[col,(145,0,months,unit)],[0,literal],typed=True,expect_error="overflow")
+                execute([],3,[col,(145,0,months,unit)],[0,literal],typed=True)
+    for months,unit in ((0,0),(1,-1),(1,4)):
+        execute([0],3,[col,(145,0,months,unit)],[0,0],typed=True,expect_error="calendar offset descriptor")
+    print("PASS calendar offsets: independent ordinal/bisection reference",cases,"rows, clamping, signed month-index wrapping, fixed ticks, overflow and nulls")
+
+
+test_calendar_offsets_native()
+
+
 class InputChunk(C.Structure):
     _fields_ = [("input", Input), ("rows", I)]
 

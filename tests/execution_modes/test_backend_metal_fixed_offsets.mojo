@@ -46,7 +46,7 @@ def test_fixed_offset_capability_units_descriptors_and_observation_boundaries() 
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
-    for interval in List[String](["1mo", "1y", "1ns"]):
+    for interval in List[String](["1mo1ns", "1y1ns", "1ns"]):
         with assert_raises(contains="fixed interval aligned"):
             _ = lower_rows(
                 frame.lazy().select(col("t").dt().offset_by(interval)),

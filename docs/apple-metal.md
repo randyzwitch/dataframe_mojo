@@ -368,7 +368,17 @@ terminal projections without head or later filters. Calendar Date buckets may
 feed resident consumers. Estimates use `calendar-truncation-v1` and
 `metal-calendar-truncation-v1` families.
 
-Calendar month/year offsets and time zone offsets remain unsupported. Estimates use
+Calendar `dt.offset_by` intervals also run on Metal for Date and naive Datetime.
+Signed month/year/quarter shifts clamp the day to the destination month's length
+and retain the time and fractional ticks. Mixed intervals apply the calendar
+shift first, followed by checked fixed ticks. The native expression preserves
+the CPU's signed month-index and Date storage wrapping, plus each checked step
+of Datetime reconstruction. Conditional masks skip unobserved overflow. Calendar
+Datetime offsets and nonzero fixed additions require terminal projections without
+head or later filters; pure calendar Date offsets can feed resident consumers.
+Estimates use `calendar-offsets-v1` and `metal-calendar-offsets-v1` families.
+
+Time zone offsets remain unsupported. Estimates use
 `fixed-offsets-v1` and `metal-fixed-offsets-v1` calibration families.
 
 Median and quantile reductions return Float64 for numeric inputs, including
@@ -703,7 +713,7 @@ that unlisted query combinations are already equivalent.
 | Numeric expressions | Floating power, `exp`, and `log`. |
 | Reductions | Mode, implode, and value counts. |
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
-| Temporal expressions | Calendar month/year offsets, row-valued parsing/formatting, and timezone operations. |
+| Temporal expressions | Row-valued parsing/formatting and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins and file-backed scans. |
 | Composition | Remaining checked-expression/aggregation observation restrictions, including ordered windows inside grouped aggregation. |
