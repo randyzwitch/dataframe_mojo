@@ -112,7 +112,7 @@ def temporal_binary(
 
 def _weekday(days: Int64) -> Int64:
     # 1970-01-01 was a Thursday (ISO weekday 4).
-    return floor_mod(days + 3, 7) + 1
+    return floor_mod(floor_mod(days, 7) + 3, 7) + 1
 
 
 def _days(value: Int64, dtype: DataType) -> Int64:
