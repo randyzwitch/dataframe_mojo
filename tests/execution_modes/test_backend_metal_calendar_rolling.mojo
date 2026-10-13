@@ -93,7 +93,7 @@ def test_calendar_duration_capability_headers_units_and_no_device_preflight() ra
         )
     with assert_raises(contains="timezone-free"):
         _ = lower_rows(
-            fixture(DataType.datetime("ns", "UTC"))
+            fixture(DataType.datetime("ns", "America/New_York"))
             .lazy()
             .select(col("x").rolling_sum_by("t", "1mo")),
             _capabilities(),

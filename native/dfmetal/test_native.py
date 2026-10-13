@@ -1278,6 +1278,36 @@ def check_calendar_duration_preflight_without_device():
 
 
 check_calendar_duration_preflight_without_device()
+
+
+def check_utc_duration_preflight_without_device():
+    inputs=(Input*2)(Input(None,None,3,0,0),Input(None,None,3,0,0))
+    code=(I*16)(226,0,1,0,227,0,2,1,228,1,1,0,229,0,1,0)
+    literals=(I*4)(0,0,0,0);nodes=(I*4)(3,3,3,3);slots=(I*3)(3,3,3)
+    steps=(Step*1)(Step(0,4,2,5,0,0));outputs=(Output*1)(Output(None,None,3,2,-1,0))
+    request=Request(2,513,0,3,2,16,4,1,0,1,-1,0,0,-1,ptr(inputs),ptr(code),ptr(literals),ptr(steps),None,ptr(outputs),ptr(nodes),ptr(slots))
+    memory=Memory()
+    for unit in (1,2,3):
+        code[10]=code[14]=unit
+        for days in (0,1,200000,(1<<63)-1):
+            code[13]=days;err=P()
+            check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+    code[13],code[14],code[10]=0,1,1
+    for index,bad in ((13,-1),(14,0),(14,4),(14,2),(15,1)):
+        old=code[index];code[index]=bad;err=P()
+        assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
+        assert b"UTC duration descriptor" in C.string_at(err)
+        lib.dfm_free(err);code[index]=old
+    # UTC days can stand alone, but an entirely zero interval cannot.
+    words=(I*12)(226,0,1,0,227,0,2,1,229,1,1,0)
+    request.code=ptr(words);request.code_words=12;request.literal_count=3;steps[0].nodes=3
+    err=P();check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+    words[9]=0;err=P()
+    assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
+    assert b"UTC duration descriptor" in C.string_at(err);lib.dfm_free(err)
+
+
+check_utc_duration_preflight_without_device()
 check_shift_fill_preflight_without_device()
 def empty_request(rows, reduction=0):
     values = (C.c_float * max(1, rows))(*([1.0] * max(1, rows)))

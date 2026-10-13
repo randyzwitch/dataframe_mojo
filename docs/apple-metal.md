@@ -287,8 +287,15 @@ arithmetic retains the CPU Int64 wrapping policy; Datetime reconstruction and
 fixed subtraction check overflow. Calendar bounds use the same closed sides,
 partition ordering, numeric and decimal windows, and error observations as
 fixed durations. Their calibration families additionally include `:months` and
-`:unit` parameters. Timezone-aware indices and wider duration literals remain
-outside this duration subset.
+`:unit` parameters. UTC-aware Datetime indices, including `+00:00` and
+`-00:00`, also support all six duration windows. UTC periods retain separate
+month, calendar-day, and fixed-time stages, including each stage's overflow
+checks and calendar-day relocalization. Calendar days remain Int64 day counts,
+so wider periods such as `200000d` work in millisecond/microsecond storage
+without first requiring the entire interval to fit signed nanoseconds. An
+empty input observes no row bound overflow; null/unsorted indices still fail
+before bound arithmetic. UTC families include `:utc<unit>:days<count>`.
+Nonzero fixed-offset and IANA timezone indices remain outside this subset.
 
 Variance (`var`) and standard deviation (`std`) run as scalar, grouped,
 or `over()` reductions for primitive numeric inputs. They convert each value
@@ -805,7 +812,7 @@ that unlisted query combinations are already equivalent.
 | Area | Remaining CPU operations or behavior |
 | --- | --- |
 | Reductions | Mode, implode, and value counts. |
-| Ordered windows | Timezone-aware rolling durations, wider duration literals, cut, and qcut. |
+| Ordered windows | Nonzero fixed-offset and IANA timezone rolling durations, cut, and qcut. |
 | Temporal expressions | Row-valued parsing/formatting and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins and file-backed scans. |
@@ -844,6 +851,7 @@ python3 native/dfmetal/test_power.py
 python3 native/dfmetal/test_duration_rolling.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_duration_decimals.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_calendar_rolling.py build/dfmetal/libdfmetal.dylib
+python3 native/dfmetal/test_utc_rolling.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py

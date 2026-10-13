@@ -241,11 +241,25 @@ std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i)
           "RollingVarianceState state={0UL,0UL,0UL,0UL};uint previousLower=position,previousUpper=position;";
   text+="for(uint j=position;j<end;++j){uint own=order[j];long time=as_type<long>(x["+axis+"+own]);"
         "long startTime=0;";
-  if(durationHeaders(r,step)==3){
-    auto calendar=h+8;
-    text+=calendarOffsetSource("time","startTime",-calendar[1],calendar[2],"-period",0xB0000002U);
-  }else{
+  auto headers=durationHeaders(r,step);
+  bool calendar=headers>2&&h[8]==DFM_DURATION_CALENDAR;
+  bool utc=headers>2&&h[4*(headers-1)]==DFM_DURATION_UTC;
+  if(calendar){
+    auto metadata=h+8;
+    text+=calendarOffsetSource("time","startTime",-metadata[1],metadata[2],utc?"0L":"-period",0xB0000002U);
+  }else if(!utc){
     text+="if(time<(-9223372036854775807L-1L)+period){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}startTime=time-period;";
+  }else text+="startTime=time;";
+  if(utc){
+    auto metadata=h+4*(headers-1);
+    int64_t perSecond=metadata[2]==1?1000:metadata[2]==2?1000000:1000000000;
+    if(metadata[1]){
+      text+="{long delta=0,seconds=0,fraction=0,base=0;bool valid=d3::checked_mul(-"+std::to_string(metadata[1])+"L,"+std::to_string(perSecond*86400)+"L,delta)&&d3::checked_add(startTime,delta,startTime);"
+            "seconds=startTime/"+std::to_string(perSecond)+"L;fraction=startTime%"+std::to_string(perSecond)+"L;if(fraction<0){--seconds;fraction+="+std::to_string(perSecond)+"L;}"
+            "valid=valid&&d3::checked_mul(seconds,"+std::to_string(perSecond)+"L,base)&&d3::checked_add(base,fraction,startTime);"
+            "if(!valid){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}}";
+    }
+    text+="if(!d3::checked_add(startTime,-period,startTime)){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}";
   }
   text+="lo=position;hi=end;while(lo<hi){uint mid=lo+(hi-lo)/2;long t=as_type<long>(x["+axis+"+order[mid]]);"
         "if(t<startTime"+std::string(bounds[2]&1?"":"||t==startTime")+")lo=mid+1;else hi=mid;}uint start=lo;"
