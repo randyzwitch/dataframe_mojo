@@ -278,7 +278,7 @@ def test_csv_file_writer_decodes_categorical_dictionaries_across_layouts_and_buf
         )
         for buffer in [1, 7, 64]:
             write_csv(frame, _path(), buffer_size=buffer)
-            var text = String()
+            var text: String
             with open(_path(), "r") as file:
                 text = file.read()
             var records = csv_records(text)

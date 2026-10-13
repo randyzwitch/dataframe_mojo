@@ -545,7 +545,7 @@ struct Morsel(Movable):
                     rows
                 )
         var bytes = List[UInt8](unsafe_uninit_length=8 * words)
-        var source = out.unsafe_ptr().bitcast[UInt8]()
+        var source = out.unsafe_ptr().unsafe_bitcast[UInt8]()
         for k in range(8 * words):
             bytes.unsafe_ptr()[unsafe_offset=k] = source[unsafe_offset=k]
         _ = out^

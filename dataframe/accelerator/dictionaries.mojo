@@ -353,7 +353,7 @@ def lower_dictionary_operations(
                 names[key_name] = True
                 names[value_name] = True
                 names[right_name] = True
-                var keys = Series(key_name, StringColumn(List[String]()))
+                var keys: Series
                 var right_keys = Series(
                     right_name, StringColumn(List[String]())
                 )

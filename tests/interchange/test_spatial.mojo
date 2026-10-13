@@ -326,7 +326,7 @@ def test_shapefile_malformed_shp_shx_dbf_encoding_and_record_counts_reject() rai
         var component = String(
             ".shp" if scenario <= 2 else ".shx" if scenario == 3 else ".dbf"
         )
-        var bytes = List[UInt8]()
+        var bytes: List[UInt8]
         with open(stem + component, "r") as file:
             bytes = file.read_bytes()
         if scenario == 0:
