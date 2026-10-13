@@ -58,3 +58,59 @@ def test_rolling_moments_keep_small_residuals_after_thousands_of_window_eviction
                                 <= 1e-12 * (1 + expected),
                                 "rolling moments must retain residual variance after repeated evictions",
                             )
+
+
+def test_rolling_moments_recover_after_finite_outlier_eviction() raises:
+    for dtype in [DataType.FLOAT32, DataType.FLOAT64]:
+        var baseline = Float64(1e6) if dtype == DataType.FLOAT32 else Float64(
+            1e12
+        )
+        var source = DataFrame(
+            [
+                Series(
+                    "x",
+                    Column[Float64](
+                        [0, baseline, baseline + 0.75, 0],
+                        [True, True, True, False],
+                    ),
+                ).cast(dtype),
+                Series("t", Column[Int64]([0, 1, 2, 3])).with_dtype(
+                    DataType.DATE
+                ),
+            ]
+        )
+        for layout in range(3):
+            var frame = (
+                source.copy() if layout
+                == 0 else offset_layout(source) if layout
+                == 1 else chunk_layout(source)
+            )
+            for streaming in [False, True]:
+                var actual = (
+                    frame.lazy()
+                    .select_exprs(
+                        [
+                            col("x").rolling_var(3, 1, 1).alias("row_var"),
+                            col("x").rolling_std(3, 1, 1).alias("row_std"),
+                            col("x")
+                            .rolling_var_by("t", "3d", "right", 1, 1)
+                            .alias("time_var"),
+                            col("x")
+                            .rolling_std_by("t", "3d", "right", 1, 1)
+                            .alias("time_std"),
+                        ]
+                    )
+                    .collect(engine="cpu", streaming=streaming)
+                )
+                for name in ["row_var", "time_var"]:
+                    assert_equal(
+                        actual.column(name).float64()._get(3), Float64(0.28125)
+                    )
+                for name in ["row_std", "time_std"]:
+                    assert_true(
+                        abs(
+                            actual.column(name).float64()._get(3)
+                            - Float64(0.5303300858899106)
+                        )
+                        <= Float64(1e-12)
+                    )

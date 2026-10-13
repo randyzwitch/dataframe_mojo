@@ -1,7 +1,9 @@
 """A pipeline sinking into the aggregate table gives the scalar groups for
 every worker count and batch size, and the same rows in the same order on
 every run: groups come back by hash partition and then by where each group's
-first row sits in the input, never by which worker took which morsel.
+first row sits in the input, never by which worker took which morsel. That
+order comes from merging the workers' rows, each in first-row order, without
+a sort.
 
 Rounding policy: integer states and keys are exact on every run. A floating
 state sums each worker's partial sums, and which rows a worker reduced
@@ -76,6 +78,16 @@ def test_every_worker_count_and_batch_size_gives_the_scalar_groups() raises:
             assert_true(
                 "dataframe-path: pipeline.group_table\n" in observed.text(),
                 "no aggregate table sink at "
+                + String(threads)
+                + " workers, batch "
+                + String(batch),
+            )
+            # Each worker's rows arrive in first-row order, so the finish
+            # merges them into that order without sorting the groups.
+            assert_true(
+                "dataframe-path: aggregate_table.sorted_groups\n"
+                not in observed.text(),
+                "groups needed a sort at "
                 + String(threads)
                 + " workers, batch "
                 + String(batch),

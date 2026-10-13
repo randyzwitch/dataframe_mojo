@@ -169,11 +169,15 @@ checked(
 )
 assert memory.peak == memory.shared and memory.result == 0
 assert memory.upload == 68
+request.how = 7
+checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+assert memory.peak > 0
+request.how = 0
 for field, value in (
     ("abi", 2),
     ("left_rows", -1),
     ("right_rows", 2**31),
-    ("how", 7),
+    ("how", 8),
     ("limit", -2),
     ("budget", -2),
     ("profiling", 2),
@@ -196,12 +200,11 @@ rejected(
 )
 inputs[1].input.dtype = 2
 inputs[0].input.dtype = inputs[1].input.dtype = 11
-rejected(
-    lambda e: lib.dfm_join_estimate(
-        C.byref(request), C.byref(memory), C.byref(e)
-    ),
-    b"Float64 join keys",
-)
+outputs[0].dtype = 11
+err = P()
+checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+assert memory.peak > 0
+outputs[0].dtype = 2
 inputs[0].input.dtype = inputs[1].input.dtype = 2
 keys[0].left = 1
 rejected(
@@ -223,6 +226,42 @@ rejected(
     ),
     b"output",
 )
+def check_extended_join_shapes_without_device():
+    inputs = (JoinInput * 256)(
+        *(JoinInput(Input(None, None, 2, 5, 1), 0 if i < 129 else 1) for i in range(256))
+    )
+    outputs = (Output * 256)(
+        *(Output(None, None, 2, i if i < 129 else -1, i if i >= 129 else -1, 0)
+          for i in range(256))
+    )
+    request = Request(1, 17, 3, 256, 0, 256, 6, -1, -1, 0,
+                      ptr(inputs), None, ptr(outputs))
+    memory, err = Memory(), P()
+    checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.upload == 129 * (17 * 4 + 3) + 127 * (3 * 4 + 1)
+    for i in range(256):
+        inputs[i].input.dtype = outputs[i].dtype = 12
+    err = P()
+    checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.upload == 129 * (17 * 16 + 3) + 127 * (3 * 16 + 1)
+    for i in range(256):
+        inputs[i].input.dtype = outputs[i].dtype = 2
+    assert memory.peak > 0
+    for field in ("inputs_count", "outputs_count"):
+        setattr(request, field, 257)
+        rejected(lambda e: lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(e)),
+                 b"Invalid Metal join request")
+        setattr(request, field, 256)
+    keys = (Key * 256)(*(Key(0, 129) for _ in range(256)))
+    request.how, request.keys_count, request.keys = 0, 256, ptr(keys)
+    err = P()
+    checked(lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    request.keys_count = 257
+    rejected(lambda e: lib.dfm_join_estimate(C.byref(request), C.byref(memory), C.byref(e)),
+             b"Invalid Metal join request")
+
+
+check_extended_join_shapes_without_device()
 print("Metal join pure ABI validation passed")
 if lib.dfm_device_count() == 0:
     print("No Metal device; skipped join GPU fixtures")
@@ -326,7 +365,9 @@ def run(
 
     def token(side, i):
         if not (lv if side == 0 else rv)[i]:
-            return None
+            if how != 7:
+                return None
+            return (None, (lk if side == 0 else rk)[i] if second else 0)
         return (
             key_token((left if side == 0 else right)[i]),
             (lk if side == 0 else rk)[i] if second else 0,
@@ -355,7 +396,7 @@ def run(
             for other in matches:
                 expected.append((other, row) if how == 2 else (row, other))
                 matched.add(other)
-            if not matches and how in (1, 2, 3):
+            if not matches and how in (1, 2, 3, 7):
                 expected.append((None, row) if how == 2 else (row, None))
         if limit >= 0 and len(expected) >= limit:
             break
@@ -551,7 +592,7 @@ def run(
 
 try:
     for dtype in SCALARS:
-        for how in range(7):
+        for how in range(8):
             for n, m in [(0, 0), (0, 9), (7, 0), (17, 23), (521, 263)]:
                 run(dtype, n, m, how)
             run(dtype, 17, 23, how, all_null=True)
@@ -559,7 +600,7 @@ try:
             for limit in [0, 1, 29]:
                 run(dtype, 33, 41, how, limit=limit, second=False)
     for dtype in SCALARS:
-        for how in range(6):
+        for how in [0, 1, 2, 3, 4, 5, 7]:
             for build in (4095, 4096, 4097):
                 n, m = (build, 7) if how == 2 else (7, build)
                 run(dtype, n, m, how, limit=257)
@@ -576,7 +617,7 @@ try:
     run(2, 17, 23, 0, budget=-2)
     run(2, 17, 23, 3, bad_finish=True)
     print(
-        "Metal join GPU parity passed: seven joins, ten types, nulls, stable order, slicing, large scans, limits, lifecycle"
+        "Metal join GPU parity passed: seven public joins and null-equal internal join, ten types, nulls, stable order, slicing, large scans, limits, lifecycle"
     )
 finally:
     lib.dfm_context_release(context)

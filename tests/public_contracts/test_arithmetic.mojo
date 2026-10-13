@@ -5,6 +5,7 @@ errors are then exercised as valid cells and as hidden null payloads. Integer
 expectations use exact Int128 references, never floating-point range checks.
 """
 from std.math import abs, isnan, isinf
+from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import Column, DataFrame, DataType, Series, Expr, col, lit
 from tests.support.numeric_model import (
@@ -1300,3 +1301,233 @@ def test_float32_modulo_infinite_divisor_matches_selected_python_policy() raises
 
 def test_float64_modulo_infinite_divisor_matches_selected_python_policy() raises:
     _infinite_divisor_modulo[DType.float64]()
+
+
+def _transcendental_exceptional_values[D: DType]() raises:
+    var nan = Float64(0) / Float64(0)
+    var inf = Float64(1) / Float64(0)
+    var upper = Float64(88.72283172607422) if D == DType.float32 else Float64(
+        709.782712893384
+    )
+    var lower = Float64(-103.97207641601562) if D == DType.float32 else Float64(
+        -745.1332191019411
+    )
+    var values: List[Float64] = [
+        nan,
+        inf,
+        -inf,
+        -0.0,
+        0,
+        1,
+        -1,
+        upper,
+        lower,
+        1,
+        nan,
+    ]
+    var input = List[Scalar[D]]()
+    for value in values:
+        input.append(value.cast[D]())
+    var frame = DataFrame(
+        [
+            Series(
+                "x",
+                Column[Scalar[D]](
+                    input^,
+                    [
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        True,
+                        False,
+                    ],
+                ),
+            )
+        ]
+    )
+    for streaming in [False, True]:
+        var actual = (
+            frame.lazy()
+            .select_exprs(
+                [col("x").exp().alias("e"), col("x").log().alias("l")]
+            )
+            .collect(engine="cpu", streaming=streaming)
+        )
+        var e = actual.column("e").numeric[D]()
+        var l = actual.column("l").numeric[D]()
+        assert_true(isnan(e._get(0)))
+        assert_true(isnan(l._get(0)))
+        assert_true(isinf(e._get(1)) and e._get(1) > 0)
+        assert_true(isinf(l._get(1)) and l._get(1) > 0)
+        assert_equal(e._get(2), Scalar[D](0))
+        assert_true(isnan(l._get(2)))
+        assert_equal(e._get(3), Scalar[D](1))
+        assert_equal(e._get(4), Scalar[D](1))
+        assert_true(isinf(l._get(3)) and l._get(3) < 0)
+        assert_true(isinf(l._get(4)) and l._get(4) < 0)
+        assert_equal(l._get(5), Scalar[D](0))
+        assert_true(isnan(l._get(6)))
+        assert_true(not isinf(e._get(7)) and not isnan(e._get(7)))
+        assert_true(
+            e._get(7)
+            > Scalar[D](3.4027e38 if D == DType.float32 else 1.7976e308)
+        )
+        comptime if D == DType.float32:
+            assert_equal(bitcast[DType.uint32](e._get(8)), UInt32(1))
+        else:
+            assert_equal(bitcast[DType.uint64](e._get(8)), UInt64(1))
+        assert_true(not e.is_valid(10) and not l.is_valid(10))
+        var ordinary = (
+            DataFrame([Series("x", Column[Scalar[D]]([10, 0.5, 2]))])
+            .lazy()
+            .select(col("x").log())
+            .collect(engine="cpu", streaming=streaming)
+        )
+        var anchors: List[Float64] = [
+            2.302585092994046,
+            -0.6931471805599453,
+            0.6931471805599453,
+        ]
+        for row in range(3):
+            _close(
+                Float64(ordinary.column("x").numeric[D]()._get(row)),
+                anchors[row],
+                Float64(1e-5) if D == DType.float32 else Float64(5e-12),
+            )
+
+
+def test_transcendental_nan_infinity_and_boundary_classifications() raises:
+    _transcendental_exceptional_values[DType.float32]()
+    _transcendental_exceptional_values[DType.float64]()
+
+
+def power_anchors[D: DType]() raises -> Tuple[DataFrame, Series]:
+    var nan = Float64("nan")
+    var inf = Float64("inf")
+    var left: List[Float64] = [
+        nan,
+        nan,
+        1,
+        -1,
+        inf,
+        -inf,
+        -inf,
+        -inf,
+        -0.0,
+        -0.0,
+        -2,
+        10,
+        -2,
+        2,
+        2,
+        2,
+        2,
+        nan,
+        1,
+    ]
+    var right: List[Float64] = [
+        0.5,
+        0,
+        nan,
+        inf,
+        -0.5,
+        0.5,
+        -0.5,
+        3,
+        3,
+        -3,
+        0.5,
+        0.5,
+        3,
+        1024,
+        -1074,
+        -149,
+        -150,
+        2,
+        nan,
+    ]
+    var minimum = bitcast[DType.float64](
+        UInt64(1)
+    ) if D == DType.float64 else Float64(0)
+    var expected: List[Float64] = [
+        nan,
+        1,
+        1,
+        1,
+        0,
+        inf,
+        0,
+        -inf,
+        -0.0,
+        -inf,
+        nan,
+        3.1622776601683795,
+        -8,
+        inf,
+        minimum,
+        1.401298464324817e-45,
+        Float64(0) if D == DType.float32 else Float64(7.006492321624085e-46),
+        0,
+        0,
+    ]
+    var x = List[Scalar[D]]()
+    var y = List[Scalar[D]]()
+    var p = List[Scalar[D]]()
+    var xv = List[Bool](length=len(left), fill=True)
+    var yv = xv.copy()
+    var valid = xv.copy()
+    xv[len(left) - 2] = False
+    yv[len(left) - 1] = False
+    valid[len(left) - 2] = False
+    valid[len(left) - 1] = False
+    for i in range(len(left)):
+        x.append(left[i].cast[D]())
+        y.append(right[i].cast[D]())
+        p.append(expected[i].cast[D]())
+    return (
+        DataFrame(
+            [
+                Series("x", Column[Scalar[D]](x^, xv^)),
+                Series("y", Column[Scalar[D]](y^, yv^)),
+            ]
+        ),
+        Series("p", Column[Scalar[D]](p^, valid^)),
+    )
+
+
+def _floating_power_anchors[D: DType]() raises:
+    var anchored = power_anchors[D]()
+    for layout in range(3):
+        var frame = _layout(anchored[0], layout)
+        for streaming in [False, True]:
+            var actual = (
+                frame.lazy()
+                .select(col("x").pow(col("y")).alias("p"))
+                .collect(engine="cpu", streaming=streaming)
+            )
+            assert_true(actual.column("p").dtype() == DataType.of(D))
+            var a = actual.column("p").numeric[D]()
+            var expected = anchored[1].numeric[D]()
+            for i in range(actual.height()):
+                assert_equal(a.is_valid(i), expected.is_valid(i))
+                if expected.is_valid(i):
+                    _close(
+                        Float64(a._get(i)),
+                        Float64(expected._get(i)),
+                        1e-5 if D == DType.float32 else 5e-12,
+                    )
+            comptime if D == DType.float32:
+                assert_equal(bitcast[DType.uint32](a._get(15)), UInt32(1))
+            else:
+                assert_equal(bitcast[DType.uint64](a._get(14)), UInt64(1))
+
+
+def test_floating_power_independent_nan_infinity_zero_and_boundary_anchors() raises:
+    _floating_power_anchors[DType.float32]()
+    _floating_power_anchors[DType.float64]()

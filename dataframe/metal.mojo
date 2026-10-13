@@ -1,12 +1,15 @@
 """Optional native Apple Metal provider for the shared accelerator row planner.
 
-Importing this module loads no driver. Float64 arithmetic and floating sum/mean
-remain CPU operations. Int64/UInt64 sums require a GPU proof that all parallel
-partials fit the native range. No arithmetic is emulated.
+Importing this module loads no driver. Binary64 arithmetic uses integer-only
+GPU emulation, including floating sum/mean accumulation. Int64/UInt64 sums and
+means use exact two-word accumulation. Decimal32/64 sums return Decimal128;
+their means preserve the CPU scaled quotient/remainder conversion sequence.
+Automatic placement requires separate calibration for emulated work.
 """
+from .accelerator.metadata import schema_frame
 from std.ffi import external_call
 from std.math import isfinite
-from std.memory import Pointer
+from std.memory import Pointer, bitcast
 from std.os import getenv
 from std.os.path import exists
 from std.sys import CompilationTarget
@@ -16,12 +19,18 @@ from .accelerator.cost import (
     CalibrationKey,
     select_auto as select_cost,
 )
-from .accelerator.cpu_work import cpu_features
+from .accelerator.cpu_work import cpu_features, duration_family
 from ._build_identity import CPU_BUILD_ID
 from .parallel import configured_workers
+from .decimal import pow10
 from .json_value import JsonValue
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.sets import has_set_operations, lower_set_operations
+from .accelerator.selectors import has_selectors, lower_selectors
+from .accelerator.scalars import (
+    has_scalar_projections,
+    lower_scalar_projections,
+)
 from .accelerator.constants import (
     has_literal_text_parsing,
     fold_literal_text_parsing,
@@ -29,6 +38,11 @@ from .accelerator.constants import (
 from .accelerator.distinct_counts import (
     has_distinct_counts,
     lower_distinct_counts,
+)
+from .accelerator.paired_moments import has_spearman, lower_spearman
+from .accelerator.windows import (
+    has_partition_aggregates,
+    lower_partition_aggregates,
 )
 from .accelerator.aggregates import (
     has_aggregate_compositions,
@@ -42,7 +56,21 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.memory import checked_add
-from .accelerator.rows import RowPlan, lower_rows, ROW_SORT_KEY
+from .accelerator.rows import (
+    RowPlan,
+    lower_rows,
+    ROW_SORT_KEY,
+    ROW_RANK_KEY,
+    ROW_CUMULATIVE_KEY,
+    ROW_DURATION_KEY,
+    ROW_DURATION_CALENDAR,
+    ROW_DURATION_UTC,
+    ROW_DURATION_BOUNDS,
+    ROW_CALENDAR_OFFSET,
+    ROW_CALENDAR_TRUNCATE,
+    ROW_QUANTILE_LINEAR,
+    ROW_QUANTILE_MIDPOINT,
+)
 from .accelerator.joins import (
     JoinDag,
     DagTask,
@@ -58,7 +86,11 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .execution_report import ExecutionReport
 from .expr import (
     COL,
+    is_comparison,
+    DIV,
     DT_YEAR,
+    DT_TOTAL,
+    DT_OFFSET_BY,
     DT_TIME,
     DT_TRUNCATE,
     FLOORDIV,
@@ -69,6 +101,9 @@ from .expr import (
     FILL_NAN,
     KEEP_NULLS,
     ABS,
+    SQRT,
+    EXP,
+    LOG,
     FLOOR,
     CEIL,
     ROUND,
@@ -101,6 +136,13 @@ from .expr import (
     IS_NULL,
     IS_NOT_NULL,
     SUM,
+    MEAN,
+    VAR,
+    SKEW,
+    KURTOSIS,
+    COV,
+    CORR,
+    STD,
     MIN,
     MAX,
     COUNT,
@@ -118,6 +160,7 @@ from .lazy import AcceleratorBackend, LazyFrame
 from .accelerator.rows import (
     ROW_GROUP_HEADER,
     ROW_GROUP_HEADER_LAST,
+    ROW_GROUP_HEADER_WINDOW,
     ROW_SLICE,
     ROW_GROUP_KEY,
     ROW_GROUP_OUTPUT,
@@ -310,6 +353,13 @@ def _capabilities() -> RowCapabilities:
         "Metal",
         float64=False,
         float64_storage=True,
+        float64_emulated=True,
+        float_division=True,
+        float_rounding=True,
+        float_modulo=True,
+        float_transcendentals=True,
+        float_power=True,
+        float_sqrt=True,
         wide_integer=False,
         bounded_integer_sum=True,
         extended_integers=True,
@@ -324,10 +374,48 @@ def _capabilities() -> RowCapabilities:
         slices=True,
         scalar_regions=True,
         temporal_fields=True,
+        duration_totals=True,
+        calendar_offsets=True,
+        calendar_truncation=True,
+        temporal_offsets=True,
+        ranks=True,
+        cumulative_windows=True,
+        paired_moments=True,
+        moments=True,
+        quantiles=True,
+        higher_moments=True,
+        rolling_windows=True,
+        rolling_moments=True,
+        interpolation_windows=True,
+        coordinate_interpolation=True,
+        duration_rolling=True,
+        calendar_duration_rolling=True,
+        utc_duration_rolling=True,
+        fixed_zone_duration_rolling=True,
+        empty_outputs=True,
+        empty_inputs=True,
+        chunked_inputs=True,
+        shift_fill_windows=True,
+        decimal128=True,
+        decimal128_reductions=True,
+        decimal_mean=True,
+        decimal_float_cast=True,
+        decimal_casts=True,
+        decimal_comparisons=True,
+        decimal_arithmetic=True,
+        decimal_multiplicative=True,
+        reuse_column_slots=True,
+        proven_integer_operations=True,
+        max_nodes=128,
+        max_slots=256,
+        max_steps=128,
+        max_join_columns=256,
     )
 
 
 def _type(dtype: DataType) raises -> Int64:
+    if dtype.is_decimal() and dtype.decimal_width() == 128:
+        return 12
     if dtype.physical() == DataType.FLOAT64:
         return 11
     if dtype.physical() == DataType.FLOAT32:
@@ -354,6 +442,18 @@ def _type(dtype: DataType) raises -> Int64:
 
 
 def _op(op: Int) raises -> Int64:
+    if op == ROW_DURATION_UTC:
+        return 229
+    if op == ROW_DURATION_CALENDAR:
+        return 228
+    if op == ROW_DURATION_KEY or op == ROW_DURATION_BOUNDS:
+        return 226 if op == ROW_DURATION_KEY else 227
+    if op == EXP or op == LOG:
+        return 53 if op == EXP else 54
+    if op == ROW_CALENDAR_OFFSET:
+        return 145
+    if op == ROW_CALENDAR_TRUNCATE:
+        return 144
     if op >= DT_YEAR and op <= DT_TRUNCATE:
         return Int64(130 + op - DT_YEAR)
     if op == INT_IS_IN:
@@ -372,6 +472,8 @@ def _op(op: Int) raises -> Int64:
         return 201
     if op == ROW_GROUP_HEADER_LAST:
         return 205
+    if op == ROW_GROUP_HEADER_WINDOW:
+        return 209
     if op == ROW_SLICE:
         return 206
     if op == ROW_GROUP_KEY:
@@ -379,6 +481,10 @@ def _op(op: Int) raises -> Int64:
     if op == ROW_GROUP_OUTPUT:
         return 203
     # The native ABI has its own versioned opcodes.
+    if op == ROW_CUMULATIVE_KEY:
+        return 214
+    if op == ROW_RANK_KEY:
+        return 207
     if op == ROW_SORT_KEY:
         return 200
     if op == FLOORDIV:
@@ -397,6 +503,8 @@ def _op(op: Int) raises -> Int64:
         return 35
     if op == ABS:
         return 51
+    if op == SQRT:
+        return 52
     if op == FLOOR:
         return 55
     if op == CEIL:
@@ -429,6 +537,8 @@ def _op(op: Int) raises -> Int64:
         return 6
     if op == MUL:
         return 7
+    if op == DIV:
+        return 24
     if op == GT:
         return 8
     if op == EQ:
@@ -439,6 +549,24 @@ def _op(op: Int) raises -> Int64:
         return 81
     if op == SUM:
         return 10
+    if op == COV:
+        return 161
+    if op == CORR:
+        return 160
+    if op == SKEW:
+        return 98
+    if op == KURTOSIS:
+        return 99
+    if op == DT_OFFSET_BY:
+        return 142
+    if op == DT_TOTAL:
+        return 143
+    if op == VAR:
+        return 87
+    if op == STD:
+        return 86
+    if op == MEAN:
+        return 82
     if op == COUNT:
         return 11
     if op == LIT_NULL:
@@ -487,6 +615,10 @@ def _input[T: DType](column: Column[Scalar[T]], dtype: Int64) -> List[Int64]:
 
 
 def _input_series(column: Series) raises -> List[Int64]:
+    if column.is_chunked():
+        raise Error("Metal chunked inputs require owned chunk descriptors")
+    if column.dtype().is_decimal() and column.dtype().decimal_width() == 128:
+        return _input(column.numeric[DType.int128](), Int64(12))
     if column.dtype() == DataType.BOOL:
         var source = column.bool()
         var offset = source.validity_offset()
@@ -507,7 +639,46 @@ def _input_series(column: Series) raises -> List[Int64]:
     raise Error("Metal unsupported input dtype")
 
 
+def _reduction_op(op: Int, source_dtype: DataType) raises -> Int64:
+    if ROW_QUANTILE_LINEAR <= op <= ROW_QUANTILE_MIDPOINT:
+        return Int64(221 + op - ROW_QUANTILE_LINEAR)
+    if source_dtype.is_decimal() and source_dtype.decimal_width() == 128:
+        if op == SUM:
+            return 215
+        if op == MEAN:
+            return 216
+    if op == SUM and source_dtype.is_decimal():
+        return 208
+    if op == MEAN and source_dtype.is_decimal():
+        return 212
+    if op == SUM and (
+        source_dtype.physical() == DataType.INT64
+        or source_dtype == DataType.UINT64
+    ):
+        return 210
+    if op == MEAN and (
+        source_dtype == DataType.INT64 or source_dtype == DataType.UINT64
+    ):
+        return 211
+    return _op(op)
+
+
+def _decimal128_reduction_metadata(
+    dtype: DataType, min_count: Int, workers: Int
+) raises -> Int64:
+    """Pack worker and logical decimal metadata into the native descriptor."""
+    if min_count < 0 or min_count > Int(Int32.MAX):
+        raise Error("Decimal128 reduction min_count exceeds native row bounds")
+    return (
+        Int64(min_count)
+        | Int64(dtype.precision()) << 32
+        | Int64(dtype.scale()) << 38
+        | Int64(min(max(1, workers), 0xFFFF)) << 44
+    )
+
+
 struct _Descriptors(Movable):
+    var input_chunks: List[List[Int64]]
     var inputs: List[Int64]
     var code: List[Int64]
     var literals: List[Float64]
@@ -519,6 +690,7 @@ struct _Descriptors(Movable):
     var typed: Bool
 
     def __init__(out self, plan: RowPlan) raises:
+        self.input_chunks = List[List[Int64]]()
         self.inputs = List[Int64]()
         self.code = plan.code.copy()
         self.literals = plan.literals.copy()
@@ -533,6 +705,7 @@ struct _Descriptors(Movable):
         for output in plan.outputs:
             self.typed |= (
                 output.reduction == MIN
+                or output.reduction == MEAN
                 or output.reduction == MAX
                 or output.reduction == FIRST
                 or output.reduction == LAST
@@ -553,22 +726,159 @@ struct _Descriptors(Movable):
         for i in range(0, len(self.code), 4):
             self.typed |= (
                 self.code[i] == CAST
+                or self.code[i] == DIV
                 or self.code[i] == WHEN
                 or self.code[i] == INT_IS_IN
                 or self.code[i] == ROW_SLICE
+                or (
+                    self.code[i] == ROUND
+                    and self.code[i + 3] != 0
+                    and plan.node_dtypes[i // 4].is_float()
+                )
             )
             if self.code[i] == ROW_GROUP_OUTPUT:
-                self.code[i + 3] = _op(Int(self.code[i + 3]))
+                self.code[i + 3] = _reduction_op(
+                    Int(self.code[i + 3]),
+                    plan.slot_dtypes[Int(self.code[i + 1])],
+                )
+                if self.code[i + 3] == 212:
+                    self.literals[i // 4] = bitcast[DType.float64](
+                        Int64(plan.slot_dtypes[Int(self.code[i + 1])].scale())
+                    )
+                elif self.code[i + 3] == 215 or self.code[i + 3] == 216:
+                    var source = plan.slot_dtypes[Int(self.code[i + 1])]
+                    self.literals[i // 4] = bitcast[DType.float64](
+                        _decimal128_reduction_metadata(
+                            source,
+                            Int(bitcast[DType.int64](self.literals[i // 4])),
+                            configured_workers(),
+                        )
+                    )
             self.code[i] = _op(Int(self.code[i]))
         for column in plan.source._columns:
-            self.inputs.extend(_input_series(column))
+            if column.is_chunked():
+                var words = List[Int64]()
+                for part in column.chunks():
+                    words.extend(_input_series(part))
+                    words.append(Int64(len(part)))
+                self.input_chunks.append(words^)
+                self.inputs.extend(
+                    [
+                        Int64(
+                            Int(
+                                self.input_chunks[
+                                    len(self.input_chunks) - 1
+                                ].unsafe_ptr()
+                            )
+                        ),
+                        Int64(0),
+                        _type(column.dtype()),
+                        Int64(column.n_chunks()),
+                        Int64(2),
+                    ]
+                )
+            else:
+                self.inputs.extend(_input_series(column))
         for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if (
+                    plan.code[4 * i] == GT
+                    or plan.code[4 * i] == LT
+                    or plan.code[4 * i] == GE
+                    or plan.code[4 * i] == LE
+                    or plan.code[4 * i] == EQ
+                    or plan.code[4 * i] == NE
+                ):
+                    var left = Int(plan.code[4 * i + 1])
+                    var right = Int(plan.code[4 * i + 2])
+                    var left_type = plan.node_dtypes[step.start + left]
+                    var right_type = plan.node_dtypes[step.start + right]
+                    if left_type.is_decimal() and right_type.is_decimal():
+                        self.code[4 * i + 3] = (
+                            Int64(left_type.scale())
+                            | Int64(right_type.scale()) << 6
+                            | self.code[4 * i] << 12
+                        )
+                        self.code[4 * i] = 218
+                if plan.node_dtypes[i].is_decimal() and (
+                    plan.code[4 * i] == ADD
+                    or plan.code[4 * i] == SUB
+                    or plan.code[4 * i] == NEG
+                    or plan.code[4 * i] == ABS
+                    or plan.code[4 * i] == MUL
+                    or plan.code[4 * i] == DIV
+                ):
+                    var operand = Int(plan.code[4 * i + 1])
+                    var source = plan.node_dtypes[step.start + operand]
+                    if (
+                        plan.code[4 * i] == ADD
+                        or plan.code[4 * i] == SUB
+                        or plan.code[4 * i] == MUL
+                        or plan.code[4 * i] == DIV
+                    ):
+                        var other = Int(plan.code[4 * i + 2])
+                        self.code[4 * i + 3] = (
+                            Int64(source.scale())
+                            | Int64(
+                                plan.node_dtypes[step.start + other].scale()
+                            )
+                            << 6
+                            | self.code[4 * i] << 12
+                        )
+                        self.code[4 * i] = 219
+                    else:
+                        self.code[4 * i + 3] = self.code[4 * i]
+                        self.code[4 * i] = 220
+                if plan.code[4 * i] == CAST:
+                    var operand = Int(plan.code[4 * i + 1])
+                    if operand >= 0:
+                        var source = plan.node_dtypes[step.start + operand]
+                        if (
+                            source.is_decimal()
+                            and plan.node_dtypes[i] == DataType.FLOAT64
+                        ):
+                            self.code[4 * i] = 213
+                            self.code[4 * i + 2] = -1
+                            self.code[4 * i + 3] = Int64(source.scale())
+                            self.literals[i] = Float64(pow10(source.scale()))
+                        elif (
+                            source.is_decimal()
+                            or plan.node_dtypes[i].is_decimal()
+                        ):
+                            var target = plan.node_dtypes[i]
+                            self.code[4 * i] = 217
+                            self.code[4 * i + 2] = -1
+                            self.code[4 * i + 3] = (
+                                Int64(
+                                    source.scale() if source.is_decimal() else 0
+                                )
+                                | Int64(
+                                    target.scale() if target.is_decimal() else 0
+                                )
+                                << 6
+                                | Int64(
+                                    target.precision() if target.is_decimal() else 0
+                                )
+                                << 12
+                                | self.code[4 * i + 3] << 18
+                                | Int64(source.is_decimal()) << 19
+                                | Int64(target.is_decimal()) << 20
+                            )
+                            if target == DataType.FLOAT32:
+                                self.literals[i] = Float64(
+                                    pow10(source.scale())
+                                )
             self.steps.extend(
                 [
                     Int64(step.start),
                     Int64(step.nodes),
                     Int64(step.slot),
-                    Int64(3) if step.grouped else (
+                    Int64(5) if plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                    or plan.code[step.start * 4]
+                    == ROW_DURATION_KEY else Int64(4) if plan.code[
+                        step.start * 4
+                    ]
+                    == ROW_RANK_KEY else Int64(3) if step.grouped else (
                         Int64(2) if step.order else Int64(step.filter)
                     ),
                     Int64(step.gather_start),
@@ -578,15 +888,45 @@ struct _Descriptors(Movable):
                 ]
             )
         for output in plan.outputs:
+            self.typed |= output.reduction == SUM and (
+                plan.slot_dtypes[output.slot].physical() == DataType.INT64
+                or plan.slot_dtypes[output.slot] == DataType.UINT64
+            )
             self.outputs.extend(
                 [
                     Int64(0),
                     Int64(0),
                     _type(output.dtype),
                     Int64(output.slot),
-                    _op(output.reduction) if output.reduction
+                    _reduction_op(
+                        output.reduction, plan.slot_dtypes[output.slot]
+                    ) if output.reduction
                     >= 0 else Int64(-1),
-                    Int64(output.min_count),
+                    _decimal128_reduction_metadata(
+                        plan.slot_dtypes[output.slot],
+                        output.min_count,
+                        min(
+                            configured_workers(),
+                            min(
+                                8,
+                                max(
+                                    1,
+                                    plan.source.height() * 16 >> 22,
+                                ),
+                            ),
+                        ) if output.slot
+                        < plan.source.width() else configured_workers(),
+                    ) if plan.slot_dtypes[output.slot].is_decimal()
+                    and plan.slot_dtypes[output.slot].decimal_width() == 128
+                    and (
+                        output.reduction == SUM or output.reduction == MEAN
+                    ) else Int64(
+                        plan.slot_dtypes[output.slot].scale()
+                    ) if output.reduction
+                    == MEAN
+                    and plan.slot_dtypes[output.slot].is_decimal() else Int64(
+                        output.min_count
+                    ),
                 ]
             )
 
@@ -630,6 +970,9 @@ def _allocate_output(
 
 
 def _output_addresses(column: Series) raises -> Tuple[Int, Int]:
+    if column.dtype().is_decimal() and column.dtype().decimal_width() == 128:
+        var value = column.numeric[DType.int128]()
+        return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
     if column.dtype() == DataType.BOOL:
         var value = column.bool()
         return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
@@ -733,7 +1076,7 @@ def _execute(
     var columns = List[Series]()
     for column in storage:
         columns.append(column.slice(0, Int(stats[8])))
-    var result = DataFrame(columns^)
+    var result = DataFrame(columns^, height=Int(stats[8]))
     var report = _native_report(
         context,
         device,
@@ -749,7 +1092,10 @@ def _execute(
         & 1 else "native_metal_hash_groups" if features
         & 2 else "native_metal_integer_radix_sort" if features
         & 4 else "specialized_native_metal_stable_compaction",
-        "shared-buffer staging -> native Metal kernels -> synchronized CPU result",
+        (
+            "shared-buffer staging -> native Metal kernels -> synchronized CPU"
+            " result"
+        ),
     )
     return (result^, report^)
 
@@ -1113,7 +1459,14 @@ def _execute_join_dag(
                 task.query, _capabilities(), terminal_boundary=task.terminal
             )
             plan.root = task.root
-            if len(task.query._nodes) == 1 and task.source < 0:
+            var chunked_source = False
+            for column in plan.source._columns:
+                chunked_source |= column.is_chunked()
+            if (
+                len(task.query._nodes) == 1
+                and task.source < 0
+                and not chunked_source
+            ):
                 # Keep original CPU scans until their first consumer. This
                 # avoids a standalone upload/submit/wait for an identity scan.
                 values.append(_ResidentValue(plan.source.copy()))
@@ -1209,7 +1562,10 @@ def _execute_join_dag(
             scope.initialization_ns if report.width() == 0 else 0,
             start,
             algorithm,
-            "CPU source staging -> resident Metal regions -> synchronized final CPU result",
+            (
+                "CPU source staging -> resident Metal regions -> synchronized"
+                " final CPU result"
+            ),
             build_rows=(
                 values[task.source].rows if task.how
                 == 2 else values[task.right].rows
@@ -1324,6 +1680,10 @@ struct MetalRuntime(AcceleratorBackend):
 
     def estimate_auto(self, query: LazyFrame) raises -> PlanEstimate:
         """Bound numeric row work; never read values or submit device work."""
+        if has_selectors(query):
+            return self.estimate_auto(lower_selectors(query))
+        if has_scalar_projections(query):
+            return self.estimate_auto(lower_scalar_projections(query))
         var work = cpu_features(query)
         var plan = lower_rows(query, _capabilities())
         var descriptors = _Descriptors(plan)
@@ -1346,8 +1706,323 @@ struct MetalRuntime(AcceleratorBackend):
         device[12] = Float64(memory[2])
         device[13] = Float64(metadata[4] == 0)
         device[14] = 0
+        var family = work[1].copy()
+        var chunked = False
+        var chunks = 0
+        for column in plan.source._columns:
+            chunked |= column.is_chunked()
+            chunks += column.n_chunks()
+        if chunked:
+            family += ";metal-chunked-inputs-v1:" + String(chunks)
+        if not plan.source.width():
+            family += ";metal-empty-inputs-v1"
+        if not len(plan.outputs):
+            family += ";metal-empty-outputs-v1"
+        if plan.reused_columns:
+            family += ";metal-column-slots-v1"
+        var paired = False
+        for output in plan.outputs:
+            paired |= output.reduction == COV or output.reduction == CORR
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
+        if paired:
+            family += ";metal-paired-moments-v1"
+        var exponentials = 0
+        var logarithms = 0
+        for i in range(0, len(plan.code), 4):
+            exponentials += Int(plan.code[i] == EXP)
+            logarithms += Int(plan.code[i] == LOG)
+        if exponentials or logarithms:
+            family += (
+                ";metal-transcendentals-v1:e"
+                + String(exponentials)
+                + ":l"
+                + String(logarithms)
+            )
+        var powers = 0
+        for i in range(0, len(plan.code), 4):
+            powers += Int(
+                plan.code[i] == POW and plan.node_dtypes[i // 4].is_float()
+            )
+        if powers:
+            family += ";metal-floating-power-v1:p" + String(powers)
+        var calendar_offset = False
+        for i in range(0, len(plan.code), 4):
+            calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET
+        if calendar_offset:
+            family += ";metal-calendar-offsets-v1"
+        var calendar = False
+        for i in range(0, len(plan.code), 4):
+            calendar |= plan.code[i] == ROW_CALENDAR_TRUNCATE
+        if calendar:
+            family += ";metal-calendar-truncation-v1"
+        var offsets = False
+        for i in range(0, len(plan.code), 4):
+            offsets |= plan.code[i] == DT_OFFSET_BY
+        if offsets:
+            family += ";metal-fixed-offsets-v1"
+        var totals = False
+        for i in range(0, len(plan.code), 4):
+            totals |= plan.code[i] == DT_TOTAL
+        if totals:
+            family += ";metal-duration-totals-v1"
+        var quantiles = False
+        for output in plan.outputs:
+            quantiles |= (
+                ROW_QUANTILE_LINEAR <= output.reduction <= ROW_QUANTILE_MIDPOINT
+            )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                quantiles |= (
+                    ROW_QUANTILE_LINEAR
+                    <= Int(plan.code[i + 3])
+                    <= ROW_QUANTILE_MIDPOINT
+                )
+        if quantiles:
+            family += ";metal-quantiles-v1"
+        var higher = False
+        for output in plan.outputs:
+            higher |= output.reduction == SKEW or output.reduction == KURTOSIS
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                higher |= (
+                    plan.code[i + 3] == SKEW or plan.code[i + 3] == KURTOSIS
+                )
+        if higher:
+            family += ";metal-higher-moments-v1"
+        var moments = False
+        for output in plan.outputs:
+            moments |= output.reduction == VAR or output.reduction == STD
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                moments |= plan.code[i + 3] == VAR or plan.code[i + 3] == STD
+        if moments:
+            family += ";metal-moments-v1"
+        var ranked = False
+        var cumulative = False
+        var rolling = False
+        var rolling_moments = False
+        var interpolation = False
+        var coordinate_interpolation = False
+        var shift_fill = False
+        for step in plan.steps:
+            ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
+            cumulative |= (
+                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                and plan.code[step.start * 4 + 3] < 4
+            )
+            shift_fill |= (
+                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                and plan.code[step.start * 4 + 3] >= 4
+                and plan.code[step.start * 4 + 3] <= 6
+            )
+        for step in plan.steps:
+            interpolation |= (
+                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                and plan.code[step.start * 4 + 3] >= 13
+            )
+            coordinate_interpolation |= (
+                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                and plan.code[step.start * 4 + 3] == 15
+            )
+            rolling_moments |= (
+                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                and plan.code[step.start * 4 + 3] >= 11
+                and plan.code[step.start * 4 + 3] <= 12
+            )
+            rolling |= (
+                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+                and plan.code[step.start * 4 + 3] >= 7
+                and plan.code[step.start * 4 + 3] <= 12
+            )
+        if ranked:
+            family += ";metal-rank-v1"
+        if cumulative:
+            family += ";metal-cumulative-v1"
+        if shift_fill:
+            family += ";metal-shift-fill-v1"
+        if rolling:
+            family += ";metal-rolling-v1"
+        if rolling_moments:
+            family += ";metal-rolling-moments-v2"
+        if interpolation:
+            family += ";metal-interpolation-v1"
+        if coordinate_interpolation:
+            family += ";metal-coordinate-interpolation-v1"
+        family += duration_family(plan, "metal-")
+        var decimal_mean = False
+        for output in plan.outputs:
+            decimal_mean |= output.reduction == MEAN and (
+                plan.slot_dtypes[output.slot].is_decimal()
+            )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                decimal_mean |= plan.code[i + 3] == MEAN and (
+                    plan.slot_dtypes[Int(plan.code[i + 1])].is_decimal()
+                )
+        if decimal_mean:
+            family += ";metal-decimal-means-v1"
+        var wide_integer = False
+        for output in plan.outputs:
+            wide_integer |= (
+                (output.reduction == SUM or output.reduction == MEAN)
+                and not plan.slot_dtypes[output.slot].is_decimal()
+                and (
+                    plan.slot_dtypes[output.slot].physical() == DataType.INT64
+                    or plan.slot_dtypes[output.slot] == DataType.UINT64
+                )
+            )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                wide_integer |= (
+                    (plan.code[i + 3] == SUM or plan.code[i + 3] == MEAN)
+                    and not plan.slot_dtypes[Int(plan.code[i + 1])].is_decimal()
+                    and (
+                        plan.slot_dtypes[Int(plan.code[i + 1])].physical()
+                        == DataType.INT64
+                        or plan.slot_dtypes[Int(plan.code[i + 1])]
+                        == DataType.UINT64
+                    )
+                )
+        if wide_integer:
+            family += ";metal-wide-integer-reductions-v1"
+        var wide_decimal = False
+        for dtype in plan.node_dtypes:
+            wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128
+        for output in plan.outputs:
+            wide_decimal |= (
+                output.dtype.is_decimal()
+                and output.dtype.decimal_width() == 128
+            )
+        if wide_decimal:
+            family += ";metal-decimal128-v1"
+        var wide_decimal_reduction = False
+        for output in plan.outputs:
+            wide_decimal_reduction |= (
+                (output.reduction == SUM or output.reduction == MEAN)
+                and plan.slot_dtypes[output.slot].is_decimal()
+                and plan.slot_dtypes[output.slot].decimal_width() == 128
+            )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                var source = plan.slot_dtypes[Int(plan.code[i + 1])]
+                wide_decimal_reduction |= (
+                    (plan.code[i + 3] == SUM or plan.code[i + 3] == MEAN)
+                    and source.is_decimal()
+                    and source.decimal_width() == 128
+                )
+        if wide_decimal_reduction:
+            family += ";metal-decimal128-reductions-v1"
+        var decimal_float_cast = False
+        for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if (
+                    plan.code[4 * i] == CAST
+                    and plan.node_dtypes[i] == DataType.FLOAT64
+                ):
+                    var operand = Int(plan.code[4 * i + 1])
+                    if operand >= 0:
+                        decimal_float_cast |= plan.node_dtypes[
+                            step.start + operand
+                        ].is_decimal()
+        if decimal_float_cast:
+            family += ";metal-decimal-float-casts-v1"
+        var decimal_casts = False
+        for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if plan.code[4 * i] == CAST:
+                    var operand = Int(plan.code[4 * i + 1])
+                    if operand >= 0 and (
+                        plan.node_dtypes[i].is_decimal()
+                        or plan.node_dtypes[step.start + operand].is_decimal()
+                    ):
+                        decimal_casts = True
+        if decimal_casts:
+            family += ";metal-decimal-casts-v1"
+        var decimal_arithmetic = False
+        for i in range(len(plan.node_dtypes)):
+            decimal_arithmetic |= plan.node_dtypes[i].is_decimal() and (
+                plan.code[4 * i] == ADD
+                or plan.code[4 * i] == SUB
+                or plan.code[4 * i] == NEG
+                or plan.code[4 * i] == ABS
+            )
+        if decimal_arithmetic:
+            family += ";metal-decimal-arithmetic-v1"
+        var decimal_multiplicative = False
+        for i in range(len(plan.node_dtypes)):
+            decimal_multiplicative |= plan.node_dtypes[i].is_decimal() and (
+                plan.code[4 * i] == MUL or plan.code[4 * i] == DIV
+            )
+        if decimal_multiplicative:
+            family += ";metal-decimal-multiplicative-v1"
+        var decimal_comparisons = False
+        for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if is_comparison(Int(plan.code[4 * i])):
+                    var operand = Int(plan.code[4 * i + 1])
+                    if operand >= 0:
+                        decimal_comparisons |= plan.node_dtypes[
+                            step.start + operand
+                        ].is_decimal()
+        if decimal_comparisons:
+            family += ";metal-decimal-comparisons-v1"
+        var emulated = False
+        for i in range(len(plan.node_dtypes)):
+            if plan.node_dtypes[i] == DataType.FLOAT64:
+                emulated = True
+            if plan.node_dtypes[i].is_float() and (
+                plan.code[i * 4] == ROUND
+                or plan.code[i * 4] == DIV
+                or plan.code[i * 4] == EXP
+                or plan.code[i * 4] == LOG
+                or plan.code[i * 4] == POW
+                or plan.code[i * 4] == SQRT
+                or plan.code[i * 4] == FLOORDIV
+                or plan.code[i * 4] == MOD
+                or (
+                    plan.code[i * 4] == ROW_DURATION_KEY
+                    and plan.code[i * 4 + 3] == 0
+                )
+            ):
+                emulated = True
+        for output in plan.outputs:
+            emulated |= output.reduction == MEAN or (
+                output.reduction == SUM and output.dtype.is_float()
+            )
+        for step in plan.steps:
+            for i in range(step.start, step.start + step.nodes):
+                if (
+                    plan.code[i * 4] == CAST
+                    and plan.node_dtypes[i] == DataType.FLOAT32
+                ):
+                    var operand = Int(plan.code[i * 4 + 1])
+                    if operand >= 0:
+                        var source = plan.node_dtypes[step.start + operand]
+                        emulated |= (
+                            source == DataType.INT64
+                            or source == DataType.UINT64
+                        )
+        for i in range(0, len(plan.code), 4):
+            if plan.code[i] == ROW_GROUP_OUTPUT:
+                emulated |= plan.code[i + 3] == MEAN or (
+                    plan.code[i + 3] == SUM
+                    and plan.slot_dtypes[Int(plan.code[i + 1])].is_float()
+                )
+        if emulated:
+            family += ";metal-emulated-float64-v1"
+        for i in range(len(plan.node_dtypes)):
+            if plan.node_dtypes[i] == DataType.FLOAT32 and (
+                plan.code[i * 4] == ADD
+                or plan.code[i * 4] == SUB
+                or plan.code[i * 4] == MUL
+                or plan.code[i * 4] == DIV
+            ):
+                family += ";metal-float32-arithmetic-v1"
+                break
         return PlanEstimate(
-            work[0].copy(), device^, Int(memory[2]), work[1].copy(), "accel"
+            work[0].copy(), device^, Int(memory[2]), family^, "accel"
         )
 
     def calibration_key(
@@ -1372,7 +2047,10 @@ struct MetalRuntime(AcceleratorBackend):
             if CPU_BUILD_ID == "development-source-no-calibration":
                 return (
                     "cpu",
-                    "automatic calibration requires an identified CPU/provider package",
+                    (
+                        "automatic calibration requires an identified"
+                        " CPU/provider package"
+                    ),
                 )
             var facts = self.estimate_auto(query)
             if self._budget >= 0 and facts.peak_bytes > self._budget:
@@ -1427,6 +2105,34 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
         var start = Int(perf_counter_ns())
+        if has_selectors(query):
+            var executed = self._run(lower_selectors(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
+        if has_scalar_projections(query):
+            var executed = self._run(lower_scalar_projections(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
         if has_literal_text_parsing(query):
             var executed = self._run(
                 fold_literal_text_parsing(query), profiling
@@ -1443,9 +2149,40 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_partition_aggregates(query):
+            var executed = self._run(
+                lower_partition_aggregates(query), profiling
+            )
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
+        if has_spearman(query):
+            var executed = self._run(lower_spearman(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
         if has_aggregate_compositions(query):
             var executed = self._run(
-                lower_aggregate_compositions(query), profiling
+                lower_aggregate_compositions(query, exact_float32=True),
+                profiling,
             )
             var report = executed[1].with_column(
                 Series(
@@ -1490,7 +2227,7 @@ struct MetalRuntime(AcceleratorBackend):
         if has_dictionary_columns(query):
             # Validate original string semantics before replacing values with
             # ordered codes. Schema execution reads no source rows.
-            var schema = query._execute(len(query._nodes) - 1, True)
+            var schema = schema_frame(query, len(query._nodes) - 1)
             var lowered = lower_dictionary_operations(query, self._budget)
             var staged_query = lowered[0].copy()
             var dictionary = DictionaryCodes(staged_query)
@@ -1592,13 +2329,29 @@ struct MetalRuntime(AcceleratorBackend):
 
     def describe(self, query: LazyFrame) -> String:
         try:
+            if has_selectors(query):
+                return "Metal schema selector expansion; " + self.describe(
+                    lower_selectors(query)
+                )
+            if has_scalar_projections(query):
+                return "Metal resident scalar projection; " + self.describe(
+                    lower_scalar_projections(query)
+                )
             if has_literal_text_parsing(query):
                 return "Metal literal text parsing; " + self.describe(
                     fold_literal_text_parsing(query)
                 )
+            if has_partition_aggregates(query):
+                return "Metal resident partition aggregates; " + self.describe(
+                    lower_partition_aggregates(query)
+                )
+            if has_spearman(query):
+                return "Metal resident Spearman ranks; " + self.describe(
+                    lower_spearman(query)
+                )
             if has_aggregate_compositions(query):
                 return "Metal resident aggregate expressions; " + self.describe(
-                    lower_aggregate_compositions(query)
+                    lower_aggregate_compositions(query, exact_float32=True)
                 )
             if has_distinct_counts(query):
                 return "Metal resident distinct counts; " + self.describe(
@@ -1609,7 +2362,7 @@ struct MetalRuntime(AcceleratorBackend):
                     lower_set_operations(query)
                 )
             if has_dictionary_columns(query):
-                _ = query._execute(len(query._nodes) - 1, True)
+                _ = schema_frame(query, len(query._nodes) - 1)
                 var metadata = query.copy()
                 for i in range(len(metadata._frames)):
                     metadata._frames[i] = metadata._frames[i].slice(0, 0)
@@ -1623,16 +2376,12 @@ struct MetalRuntime(AcceleratorBackend):
             if has_join(query) or has_scalar_consumers(query):
                 var dag = lower_join_dag(query, _capabilities())
                 return (
-                    (
-                        "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
-                    )
-                    + String(dag.joins)
-                    + " joins, "
-                    + String(len(dag.tasks))
-                    + " resident regions; only the final result materializes CPU columns; optional runtime "
-                    + ("present" if metal_installed() else "missing")
-                    + "\n"
-                )
+                    "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
+                ) + String(dag.joins) + " joins, " + String(
+                    len(dag.tasks)
+                ) + " resident regions; only the final result materializes" " CPU columns; optional runtime " + (
+                    "present" if metal_installed() else "missing"
+                ) + "\n"
             var plan = lower_rows(query, _capabilities())
             return (
                 "ENGINE accel: Metal native row expressions; "

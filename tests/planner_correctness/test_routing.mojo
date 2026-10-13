@@ -265,6 +265,28 @@ def test_automatic_placement_uses_conservative_costs_memory_and_calibration_iden
     assert_equal(select_auto(facts, valid, key, 64, 100).engine, "cpu")
 
 
+def test_automatic_placement_isolates_emulated_float64_calibrations() raises:
+    var facts = _facts()
+    facts.family += ";metal-emulated-float64-v1"
+    var key = _key()
+    var old_native = calibration_table(calibration_record())
+    var unmatched = select_auto(facts, old_native, key, 64, 100)
+    assert_equal(unmatched.engine, "cpu")
+    assert_true("no matching" in unmatched.reason)
+    var expensive = calibration_table(
+        calibration_record(
+            1000,
+            10000,
+            family=facts.family,
+        )
+    )
+    assert_equal(select_auto(facts, expensive, key, 64, 100).engine, "cpu")
+    var faster = calibration_table(
+        calibration_record(1000, 100, family=facts.family)
+    )
+    assert_equal(select_auto(facts, faster, key, 64, 100).engine, "accel")
+
+
 def test_automatic_placement_rejects_ambiguous_nonfinite_or_unvalidated_estimates() raises:
     var facts = _facts()
     var key = _key()

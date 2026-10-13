@@ -439,21 +439,22 @@ def _decimal_cum_sum(
 
 def _as_float(input: Series) raises -> Series:
     """Convert a primitive numeric column to Float64, preserving validity."""
-    if input._data.isa[Column[Float64]]():
-        return input.copy()
-    var valid = validity(input)
-    if input.dtype().is_decimal():
-        var wide = input._decimal128()
+    var contiguous = input.rechunk()
+    if contiguous._data.isa[Column[Float64]]():
+        return contiguous.copy()
+    var valid = validity(contiguous)
+    if contiguous.dtype().is_decimal():
+        var wide = contiguous._decimal128()
         ref column = wide._data[Column[Int128]]
         var values = List[Float64](capacity=len(column))
-        var divisor = pow10(input.dtype().scale()).cast[DType.float64]()
+        var divisor = pow10(contiguous.dtype().scale()).cast[DType.float64]()
         for i in range(len(column)):
             values.append(column._get(i).cast[DType.float64]() / divisor)
         return Series("", Column[Float64](values^, valid))
     comptime for k in range(len(NUMERIC_DTYPES)):
         comptime D = NUMERIC_DTYPES[k]
-        if input._data.isa[Column[Scalar[D]]]():
-            ref column = input._data[Column[Scalar[D]]]
+        if contiguous._data.isa[Column[Scalar[D]]]():
+            ref column = contiguous._data[Column[Scalar[D]]]
             var values = List[Float64](capacity=len(column))
             for i in range(len(column)):
                 values.append(column._get(i).cast[DType.float64]())
@@ -850,8 +851,9 @@ def _moments_bounds(
 ) raises -> Series:
     # Sliding Welford updates with removal. Translate by the first finite
     # value so large common offsets do not spoil small variances. Each value
-    # is added/removed once for monotone window bounds; nonfinite values are
-    # counted separately so the state recovers when they leave the window.
+    # ordinarily advances once for monotone bounds. Rebase and rebuild after
+    # a large variance decrease on eviction to recover finite outlier
+    # cancellation; nonfinite values are counted separately.
     var output = List[Float64](length=len(input), fill=0)
     var mask = List[Bool](length=len(input), fill=False)
     for rows in groups:
@@ -869,7 +871,8 @@ def _moments_bounds(
         for row in rows:
             var start = lower[row]
             var stop = upper[row]
-            if start < lo or stop < hi or start >= hi:
+            var rebuild = start < lo or stop < hi or start >= hi
+            if rebuild:
                 lo = start
                 hi = start
                 count = 0
@@ -886,6 +889,7 @@ def _moments_bounds(
                     bad -= 1
                     continue
                 x -= origin
+                var previous_m2 = m2
                 count -= 1
                 if count == 0:
                     mean = 0
@@ -895,6 +899,23 @@ def _moments_bounds(
                     mean -= delta / Float64(count)
                     m2 -= delta * (x - mean)
                     m2 = max(m2, 0)
+                rebuild |= (
+                    count == 0
+                    or not isfinite(previous_m2)
+                    or m2 < previous_m2 * 0.5
+                )
+            if rebuild:
+                lo = start
+                hi = start
+                count = 0
+                bad = 0
+                mean = 0
+                m2 = 0
+                for position in range(start, stop):
+                    var at = rows[position]
+                    if valid[at] and isfinite(_numeric(input, at)):
+                        origin = _numeric(input, at)
+                        break
             while hi < stop:
                 var at = rows[hi]
                 hi += 1
@@ -927,6 +948,11 @@ def rolling_by_op(
 
     if input.is_chunked() or index.is_chunked():
         return rolling_by_op(node, input.rechunk(), index.rechunk(), ids)
+    if input.dtype().is_decimal():
+        if node.op == ROLLING_SUM_BY:
+            return _rolling_decimal_sum_by(node, input, index, ids)
+        if node.op != ROLLING_MIN_BY and node.op != ROLLING_MAX_BY:
+            return rolling_by_op(node, _as_float(input), index, ids)
     if node.op == ROLLING_SUM_BY and input.dtype() == DataType.UINT64:
         var groups = partitions(len(input), ids)
         var bounds = rolling_bounds(
@@ -1022,6 +1048,51 @@ def rolling_by_op(
     if is_int:
         return Series("", Column[Int64](ints^, mask))
     return Series("", Column[Float64](floats^, mask))
+
+
+def _rolling_decimal_sum_by(
+    node: Node, input: Series, index: Series, ids: List[Int]
+) raises -> Series:
+    from .time_windows import rolling_bounds, negate_period
+
+    var groups = partitions(len(input), ids)
+    var bounds = rolling_bounds(
+        index, groups, node.text, negate_period(node.text), node.text2
+    )
+    var wide = input._decimal128()
+    ref column = wide._data[Column[Int128]]
+    var target = input.dtype().sum_type()
+    var limit = precision_limit(target.precision())
+    var output = List[Int128](length=len(input), fill=0)
+    var valid = List[Bool](length=len(input), fill=False)
+    for rows in groups:
+        for row in rows:
+            var begin = bounds[0][row]
+            var stop = bounds[1][row]
+            var count = 0
+            for position in range(begin, stop):
+                count += Int(column._valid(rows[position]))
+            if count < Int(node.floating):
+                continue
+            var total = Int128(0)
+            for position in range(begin, stop):
+                var at = rows[position]
+                if not column._valid(at):
+                    continue
+                var value = check_limit(column._get(at), limit, target)
+                # Check before addition so even precision-38 prefixes cannot
+                # wrap Int128 and hide a precision error behind cancellation.
+                if (value > 0 and total >= limit - value) or (
+                    value < 0 and total <= -limit - value
+                ):
+                    raise Error(
+                        "value exceeds decimal precision "
+                        + String(target.precision())
+                    )
+                total += value
+            output[row] = total
+            valid[row] = True
+    return Series("", Column[Int128](output^, valid^)).with_dtype(target)
 
 
 def _rolling_u64_sum(

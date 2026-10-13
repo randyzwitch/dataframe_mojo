@@ -3,10 +3,10 @@
 No dataframe imports or kernels. Magnitude checks precede multiplication so
 UInt64 extrema cannot overflow the Int128 reference's intermediate products.
 """
+from std.ffi import external_call
 from std.math import (
     floor as reference_floor,
     ceil as reference_ceil,
-    pow as reference_pow,
     isnan,
     isinf,
 )
@@ -99,7 +99,10 @@ def float_result(left: Float64, right: Float64, op: Int) raises -> Float64:
             != 0 else Float64(-0.0) if right
             < 0 else Float64(0)
         )
-    return reference_pow(left, right)
+    # Platform libm supplies IEEE exceptional-value semantics; the toolchain
+    # approximation maps several NaN powers to infinity. Literal public
+    # anchors independently validate these classifications and boundaries.
+    return external_call["pow", Float64](left, right)
 
 
 def infinite_divisor_remainder(left: Float64, right: Float64) -> Float64:

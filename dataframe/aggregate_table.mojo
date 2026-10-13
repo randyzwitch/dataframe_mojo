@@ -48,12 +48,13 @@ from std.bit import count_trailing_zeros
 from std.collections import Optional
 from std.math import isnan, log
 from std.ffi import external_call
-from std.memory import Pointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 
 from .aggregate import Reducer, float_key
+from .decimal import check_limit, precision_limit
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _pack_bits
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
     COUNT,
@@ -78,7 +79,14 @@ from .partition import (
 )
 from .series import Series
 from .hashing import RowKeys
-from .string_column import StringBuilder, StringColumn
+from .trace import trace_path
+from .string_column import StringColumn
+from .string_view import (
+    STRING_VIEW_INLINE_BYTES,
+    StringView,
+    StringViewStorage,
+    _STRING_VIEW_BUFFER_LIMIT,
+)
 
 # Rows hashed and probed at a time (DuckDB's STANDARD_VECTOR_SIZE).
 comptime _BATCH = 2048
@@ -142,6 +150,9 @@ comptime _K_MOMENTS = 7  # count, mean, m2 (Welford, as `VarState`)
 # Int64 total, count: an integer input of at most 32 bits over fewer than
 # 2^31 rows cannot overflow it (DuckDB's `sum_no_overflow`).
 comptime _K_NARROW_SUM = 8
+# A decimal sum or mean: 128-bit total, count; the total is held to the
+# result's precision on every add, as the `Reducer`'s decimal sums are.
+comptime _K_DECIMAL_SUM = 9
 
 
 @fieldwise_init
@@ -153,9 +164,15 @@ struct _Slot(Copyable, Movable):
     var kind: Int
     var offset: Int
     var floating: Bool
+    # The state's type (a decimal sum's result type, for its precision).
+    var dtype: DataType
 
     def words(self) -> Int:
-        if self.kind == _K_INT_SUM or self.kind == _K_MOMENTS:
+        if (
+            self.kind == _K_INT_SUM
+            or self.kind == _K_MOMENTS
+            or self.kind == _K_DECIMAL_SUM
+        ):
             return 3
         if (
             self.kind == _K_FLOAT_SUM
@@ -188,6 +205,11 @@ def _slot_kind(spec: ReducerSpec, input: Series) -> Int:
     state is not a few fixed words here."""
     if spec.op == LEN:
         return _K_LEN
+    if (spec.op == SUM or spec.op == MEAN) and input.dtype().is_decimal():
+        var state = spec.make(0).dtype
+        if state.is_decimal() and _decimal_part(input):
+            return _K_DECIMAL_SUM
+        return -1
     var part = _numeric_part(input)
     if not part:
         return -1
@@ -325,6 +347,51 @@ def _update_slot[
                     at[unsafe_offset=w + 1] |= 1
 
 
+def _decimal_part(column: Series) -> Bool:
+    """Whether a decimal column's storage is 32-, 64- or 128-bit integers."""
+    var part = column.chunks()[
+        0
+    ].copy() if column.is_chunked() else column.copy()
+    return (
+        part._data.isa[Column[Int32]]()
+        or part._data.isa[Column[Int64]]()
+        or part._data.isa[Column[Int128]]()
+    )
+
+
+def _update_decimal[
+    D: DType
+](
+    slot: _Slot,
+    column: Column[Scalar[D]],
+    start: Int,
+    count: Int,
+    rows: Pointer[Int, _],
+    base: Int,
+) raises:
+    """A batch's decimal values (unscaled, at their storage width) into
+    their groups' 128-bit totals and counts, each total held to the
+    state's precision."""
+    var values = column._ptr()
+    var nulls = column.null_count() > 0
+    var limit = precision_limit(slot.dtype.precision())
+    for k in range(count):
+        var i = start + k
+        if nulls and not column._valid(i):
+            continue
+        var at = _words_at(rows[unsafe_offset=k] + base)
+        var total = bitcast[DType.int128](
+            (UInt128(at[unsafe_offset=1]) << 64) | UInt128(at[unsafe_offset=0])
+        )
+        total = check_limit(
+            total + Int128(values[unsafe_offset=i]), limit, slot.dtype
+        )
+        var word = bitcast[DType.uint128](total)
+        at[unsafe_offset=0] = UInt64(word)
+        at[unsafe_offset=1] = UInt64(word >> 64)
+        at[unsafe_offset=2] += 1
+
+
 def _update_states(
     slots: List[_Slot],
     inputs: List[Series],
@@ -344,6 +411,20 @@ def _update_states(
                 _words_at(rows[unsafe_offset=k] + base)[] += 1
             continue
         ref part = inputs[s]
+        if slot.kind == _K_DECIMAL_SUM:
+            if part._data.isa[Column[Int64]]():
+                _update_decimal[DType.int64](
+                    slot, part._data[Column[Int64]], start, count, rows, base
+                )
+            elif part._data.isa[Column[Int32]]():
+                _update_decimal[DType.int32](
+                    slot, part._data[Column[Int32]], start, count, rows, base
+                )
+            else:
+                _update_decimal[DType.int128](
+                    slot, part._data[Column[Int128]], start, count, rows, base
+                )
+            continue
         var done = False
         comptime for t in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[t]
@@ -361,7 +442,7 @@ def _update_states(
             raise Error("aggregate table: unsupported reduction input")
 
 
-def _combine(slots: List[_Slot], into: Int, other: Int):
+def _combine(slots: List[_Slot], into: Int, other: Int) raises:
     """Group row `other`'s states folded into group row `into` (both the
     addresses of their first state word's row)."""
     var a = _words_at(into)
@@ -374,6 +455,25 @@ def _combine(slots: List[_Slot], into: Int, other: Int):
         elif kind == _K_NARROW_SUM:
             a[unsafe_offset=w] += b[unsafe_offset=w]
             a[unsafe_offset=w + 1] += b[unsafe_offset=w + 1]
+        elif kind == _K_DECIMAL_SUM:
+            var x = bitcast[DType.int128](
+                (UInt128(a[unsafe_offset=w + 1]) << 64)
+                | UInt128(a[unsafe_offset=w])
+            )
+            var y = bitcast[DType.int128](
+                (UInt128(b[unsafe_offset=w + 1]) << 64)
+                | UInt128(b[unsafe_offset=w])
+            )
+            var total = bitcast[DType.uint128](
+                check_limit(
+                    x + y,
+                    precision_limit(slots[s].dtype.precision()),
+                    slots[s].dtype,
+                )
+            )
+            a[unsafe_offset=w] = UInt64(total)
+            a[unsafe_offset=w + 1] = UInt64(total >> 64)
+            a[unsafe_offset=w + 2] += b[unsafe_offset=w + 2]
         elif kind == _K_INT_SUM:
             var x = (UInt128(a[unsafe_offset=w + 1]) << 64) | UInt128(
                 a[unsafe_offset=w]
@@ -456,6 +556,12 @@ def _unload(slot: _Slot, groups: _Groups, spec: ReducerSpec) raises -> Reducer:
             reducer.int_sums[g].count = bitcast[DType.int64](
                 at[unsafe_offset=w + 2]
             )
+        elif kind == _K_DECIMAL_SUM:
+            reducer.decimals[g] = bitcast[DType.int128](
+                (UInt128(at[unsafe_offset=w + 1]) << 64)
+                | UInt128(at[unsafe_offset=w])
+            )
+            reducer.counts[g] = bitcast[DType.int64](at[unsafe_offset=w + 2])
         elif kind == _K_NARROW_SUM:
             reducer.int_sums[g].total = bitcast[DType.int64](
                 at[unsafe_offset=w]
@@ -1082,9 +1188,11 @@ def aggregate_layout(
         if kind < 0:
             raise Error("aggregate table: a state that is not inline")
         var floating = False
-        if kind != _K_LEN:
+        if kind != _K_LEN and kind != _K_DECIMAL_SUM:
             floating = _numeric_part(inputs[s]).value().dtype().is_float()
-        slots.append(_Slot(kind, state_words, floating))
+        slots.append(
+            _Slot(kind, state_words, floating, templates[s].make(0).dtype)
+        )
         state_words += slots[s].words()
     var key_templates = List[Series](capacity=len(keys))
     for key in keys:
@@ -1249,10 +1357,11 @@ struct AggregateSink(Movable):
     # Per key column, its dictionary's entries when its strings carry
     # codes.
     var dictionaries: List[_DictionaryKeys]
-    # Every morsel's string key columns, held until the finish has read
-    # them: a group's long string key is the address of its bytes there,
-    # as DuckDB's rows point into their collection's heap (a morsel's
-    # column holds its buffers by reference, so nothing is copied).
+    # Every morsel's string key columns, held until the finish: a group's
+    # long string key is the address of its bytes there, as DuckDB's rows
+    # point into their collection's heap (a morsel's column holds its
+    # buffers by reference, so nothing is copied). The finished key
+    # columns are views into the same buffers (`_HeldBuffers`).
     var held: List[Series]
     # Numbering mode (`table_row_keys`): each new group's dense id in its
     # first state word, every row's id, and each group's first row.
@@ -1549,6 +1658,54 @@ def _one_chunk(column: Series) -> Series:
     return column.copy()
 
 
+def _next_first(parts: _Partitioned, p: Int, block: Int, row: Int) -> Int:
+    """The first row of a worker's next row of partition p, at `row` of
+    `block` or later, or Int.MAX when it has none."""
+    var b = block
+    var r = row
+    while b < len(parts.blocks[p]):
+        if r < parts.rows_in(p, b):
+            var at = parts.blocks[p][b] + 8 * r * parts.stride
+            return Int(_words_at(at)[unsafe_offset=2])
+        b += 1
+        r = 0
+    return Int.MAX
+
+
+@always_inline
+def _merge_row(
+    at: Int,
+    table: Pointer[UInt64, MutAnyOrigin],
+    mask: Int,
+    mut final: _Groups,
+    addressed: List[Bool],
+    slots: List[_Slot],
+) raises -> Bool:
+    """Row `at` into the finish's table: a new group (True), or its states
+    folded into its group's, which keeps the earlier first row."""
+    var row = _words_at(at)
+    var hash = row[]
+    var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
+    var slot = Int(hash) & mask
+    var states_bytes = 8 * final.states_at
+    while True:
+        var entry = table[unsafe_offset=slot]
+        if entry == 0:
+            var f = final.copy_row(at)
+            table[unsafe_offset=slot] = _entry(hash, f + 1)
+            return True
+        if (entry & ~_ID_MASK) == salt:
+            var f = Int(entry & _ID_MASK) - 1
+            var mine = final.at(f)
+            if _words_at(mine)[] == hash and _same_rows(mine, at, addressed):
+                _combine(slots, mine + states_bytes, at + states_bytes)
+                var first = row[unsafe_offset=2]
+                if first < _words_at(mine)[unsafe_offset=2]:
+                    _words_at(mine)[unsafe_offset=2] = first
+                return False
+        slot = (slot + _stride(hash)) & mask
+
+
 struct _FinishJob(Job):
     """Phase 2: a run of partitions' rows from every worker merged in a
     fresh table sized for them, states folded into each group's row."""
@@ -1564,10 +1721,13 @@ struct _FinishJob(Job):
     var states: List[Reducer]
     var firsts: List[Int]
     var keys: List[Series]
+    # The address of the sinks' `_HeldBuffers`.
+    var held: Int
 
     def __init__(
         out self,
         sinks: Int,
+        held: Int,
         lo: Int,
         hi: Int,
         total: Int,
@@ -1577,6 +1737,7 @@ struct _FinishJob(Job):
         bits: Int,
     ):
         self.sinks = sinks
+        self.held = held
         self.bits = bits
         self.lo = lo
         self.hi = hi
@@ -1598,7 +1759,7 @@ struct _FinishJob(Job):
             capacity *= 2
         var mask = capacity - 1
         var entries = huge_list(capacity, UInt64(0))
-        var table = entries.unsafe_ptr()
+        var table = entries.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
         ref addressed = jobs[0].addressed
         var final = _Groups(
             len(addressed),
@@ -1607,65 +1768,89 @@ struct _FinishJob(Job):
             self.total,
         )
         var stride = final.stride
-        var states_bytes = 8 * final.states_at
-        for j in range(len(jobs)):
-            for p in range(self.lo, self.hi):
-                ref blocks = jobs[j].parts.blocks[p]
-                for b in range(len(blocks)):
-                    var base = blocks[b]
-                    for r in range(jobs[j].parts.rows_in(p, b)):
-                        var at = base + 8 * r * stride
-                        var row = _words_at(at)
-                        var hash = row[]
-                        var salt = (hash >> _SALT_SHIFT) << _SALT_SHIFT
-                        var slot = Int(hash) & mask
-                        while True:
-                            var entry = table[unsafe_offset=slot]
-                            if entry == 0:
-                                var f = final.copy_row(at)
-                                table[unsafe_offset=slot] = _entry(hash, f + 1)
-                                break
-                            if (entry & ~_ID_MASK) == salt:
-                                var f = Int(entry & _ID_MASK) - 1
-                                var mine = final.at(f)
-                                if _words_at(mine)[] == hash and _same_rows(
-                                    mine, at, addressed
-                                ):
-                                    _combine(
-                                        self.slots,
-                                        mine + states_bytes,
-                                        at + states_bytes,
-                                    )
-                                    var first = row[unsafe_offset=2]
-                                    if first < _words_at(mine)[unsafe_offset=2]:
-                                        _words_at(mine)[unsafe_offset=2] = first
-                                    break
-                            slot = (slot + _stride(hash)) & mask
+        # Groups come out by partition, then by first row, so the output
+        # order depends on the rows alone, not on which worker took which
+        # morsel. A worker takes morsels in order and makes a group's row
+        # at its first sight in a fill cycle, so each worker's rows of a
+        # partition are in first-row order: merging them makes every group
+        # at its earliest row, in that order, with no sort and no second
+        # copy of the groups (both were a tenth of near-unique group-bys).
+        var sinks = len(jobs)
+        var block = List[Int](length=sinks, fill=0)
+        var row_in = List[Int](length=sinks, fill=0)
+        # Each worker's next row's first row, Int.MAX when it has none.
+        var head = List[Int](length=sinks, fill=Int.MAX)
+        var in_order = True
+        for p in range(self.lo, self.hi):
+            for j in range(sinks):
+                block[j] = 0
+                row_in[j] = 0
+                head[j] = _next_first(jobs[j].parts, p, 0, 0)
+            var last = -1
+            while True:
+                # The worker whose next row comes first, and the first
+                # row next after it among the others.
+                var best = -1
+                var best_first = Int.MAX
+                var after = Int.MAX
+                for j in range(sinks):
+                    var first = head[j]
+                    if first < best_first:
+                        after = best_first
+                        best_first = first
+                        best = j
+                    elif first < after:
+                        after = first
+                if best < 0:
+                    break
+                ref parts = jobs[best].parts
+                # Its rows up to the others' next, block by block.
+                while block[best] < len(parts.blocks[p]):
+                    var rows = parts.rows_in(p, block[best])
+                    var base = parts.blocks[p][block[best]]
+                    var stop = False
+                    while row_in[best] < rows:
+                        var at = base + 8 * row_in[best] * stride
+                        var first = Int(_words_at(at)[unsafe_offset=2])
+                        if first > after:
+                            stop = True
+                            break
+                        if _merge_row(
+                            at, table, mask, final, addressed, self.slots
+                        ):
+                            in_order = in_order and first > last
+                            last = first
+                        row_in[best] += 1
+                    if stop:
+                        break
+                    block[best] += 1
+                    row_in[best] = 0
+                head[best] = _next_first(parts, p, block[best], row_in[best])
         _ = entries^
-        # Groups by partition, then by first row, so the output order
-        # depends on the rows alone, not on which worker took which morsel
-        # (nor on how many rows each worker's partitions held).
-        # Each group as one 128-bit key: partition and first row above,
-        # the group below (first rows stay under 2^56).
-        var shift = UInt64(48 - self.bits)
-        var part_mask = UInt64((1 << self.bits) - 1)
-        var keyed = List[UInt128](capacity=final.count())
-        for g in range(final.count()):
-            var part = (_words_at(final.at(g))[] >> shift) & part_mask
-            var place = (UInt128(part) << 56) | UInt128(final.first(g))
-            keyed.append((place << 64) | UInt128(g))
-        sort(keyed)
-        var ordered = _Groups(
-            final.width(),
-            final.addressed.copy(),
-            final.stride - final.states_at,
-            final.count(),
-        )
-        for key in keyed:
-            _ = ordered.copy_row(
-                final.at(Int(UInt64(key & 0xFFFFFFFFFFFFFFFF)))
+        if not in_order:
+            # A worker's rows were not in first-row order: sort the groups.
+            trace_path("aggregate_table.sorted_groups")
+            # Each as one 128-bit key: partition and first row above, the
+            # group below (first rows stay under 2^56).
+            var shift = UInt64(48 - self.bits)
+            var part_mask = UInt64((1 << self.bits) - 1)
+            var keyed = List[UInt128](capacity=final.count())
+            for g in range(final.count()):
+                var part = (_words_at(final.at(g))[] >> shift) & part_mask
+                var place = (UInt128(part) << 56) | UInt128(final.first(g))
+                keyed.append((place << 64) | UInt128(g))
+            sort(keyed)
+            var ordered = _Groups(
+                final.width(),
+                final.addressed.copy(),
+                final.stride - final.states_at,
+                final.count(),
             )
-        final = ordered^
+            for key in keyed:
+                _ = ordered.copy_row(
+                    final.at(Int(UInt64(key & 0xFFFFFFFFFFFFFFFF)))
+                )
+            final = ordered^
         for s in range(len(self.templates)):
             self.states.append(_unload(self.slots[s], final, self.templates[s]))
         # Keys scanned out of the stored words (DuckDB's gather from its
@@ -1674,7 +1859,13 @@ struct _FinishJob(Job):
         for c in range(len(self.key_templates)):
             self.keys.append(
                 _key_column(
-                    self.key_templates[c], w, UInt64(1) << UInt64(c), final
+                    self.key_templates[c],
+                    w,
+                    UInt64(1) << UInt64(c),
+                    final,
+                    Pointer[_HeldBuffers, MutAnyOrigin](
+                        unsafe_from_address=self.held
+                    )[],
                 )
             )
             w += _width(self.key_templates[c])
@@ -1684,13 +1875,168 @@ struct _FinishJob(Job):
             self.firsts.append(final.first(g))
 
 
+struct _HeldBuffers(Movable):
+    """The byte buffers of every string key the sinks hold, by address, so
+    a finished string key column is Arrow views into them: no group's
+    bytes are copied or even read, as Polars gathers a BinaryView column
+    and DuckDB's `string_t` points into its heap. A group's long key words
+    hold the address of its bytes, found here by binary search."""
+
+    var buffers: List[ArcPointer[List[UInt8]]]
+    # Buffer ranges in address order: start, end and buffer.
+    var starts: List[Int]
+    var ends: List[Int]
+    var index: List[Int]
+
+    def __init__(out self, sinks: List[AggregateSink]):
+        self.buffers = List[ArcPointer[List[UInt8]]]()
+        self.starts = List[Int]()
+        self.ends = List[Int]()
+        self.index = List[Int]()
+        var keyed = List[UInt128]()
+        for j in range(len(sinks)):
+            for column in sinks[j].held:
+                ref strings = column._data[StringColumn]
+                if strings._is_view_storage():
+                    ref storage = strings._view_storage.value()
+                    for b in range(len(storage._buffers[])):
+                        self._add(storage._buffers[][b], keyed)
+                else:
+                    self._add(strings._bytes, keyed)
+        sort(keyed)
+        var last = -1
+        for key in keyed:
+            var b = Int(UInt64(key & 0xFFFFFFFFFFFFFFFF))
+            var start = Int(self.buffers[b][].unsafe_ptr())
+            if start == last:
+                # Morsels slice one column: its buffers repeat.
+                continue
+            last = start
+            self.starts.append(start)
+            self.ends.append(start + len(self.buffers[b][]))
+            self.index.append(b)
+
+    def _add(
+        mut self, buffer: ArcPointer[List[UInt8]], mut keyed: List[UInt128]
+    ):
+        if len(buffer[]) == 0:
+            return
+        var start = UInt64(Int(buffer[].unsafe_ptr()))
+        keyed.append((UInt128(start) << 64) | UInt128(len(self.buffers)))
+        self.buffers.append(buffer.copy())
+
+    def find(self, address: Int, length: Int) -> Tuple[Int, Int]:
+        """The buffer holding `length` bytes at `address`, and their offset
+        in it; (-1, 0) when none does."""
+        var lo = 0
+        var hi = len(self.starts)
+        while lo < hi:
+            var mid = (lo + hi) // 2
+            if self.starts[mid] <= address:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo == 0:
+            return (-1, 0)
+        var r = lo - 1
+        if address + length > self.ends[r]:
+            return (-1, 0)
+        return (self.index[r], address - self.starts[r])
+
+
+def _string_keys(
+    w: Int, bit: UInt64, groups: _Groups, held: _HeldBuffers
+) -> StringColumn:
+    """A string key column of finished groups as Arrow views, from each
+    group's words: a key up to twelve bytes is its two words exactly (the
+    view's length, prefix and inline bytes, zero past the end); a longer
+    one is its first word and the buffer and offset its address falls in.
+    A key held in no shared buffer (a dictionary's entry) is copied."""
+    var n = groups.count()
+    var views = List[StringView](capacity=n)
+    var valid = List[Bool](capacity=n)
+    var nulls = False
+    var buffers = List[ArcPointer[List[UInt8]]]()
+    # Each held buffer's place among this column's, once it is used.
+    var local = List[Int](length=len(held.buffers), fill=-1)
+    var spill = List[UInt8]()
+    var spill_at = -1
+    var total_bytes = 0
+    var buffer_bytes = 0
+    for g in range(n):
+        if groups.null(g) & bit != 0:
+            views.append(StringView(0, 0, 0, 0))
+            valid.append(False)
+            nulls = True
+            continue
+        valid.append(True)
+        var head = groups.word(g, w)
+        var tail = groups.word(g, w + 1)
+        var length = Int(head & 0xFFFFFFFF)
+        total_bytes += length
+        if length <= STRING_VIEW_INLINE_BYTES:
+            views.append(
+                StringView(
+                    UInt32(head & 0xFFFFFFFF),
+                    UInt32(head >> 32),
+                    UInt32(tail & 0xFFFFFFFF),
+                    UInt32(tail >> 32),
+                )
+            )
+            continue
+        buffer_bytes += length
+        var found = held.find(Int(tail), length)
+        var b = -1
+        var offset = found[1]
+        if found[0] >= 0 and offset <= _STRING_VIEW_BUFFER_LIMIT - length:
+            b = local[found[0]]
+            if b < 0:
+                b = len(buffers)
+                local[found[0]] = b
+                buffers.append(held.buffers[found[0]].copy())
+        else:
+            if spill_at >= 0 and (
+                len(spill) + length > _STRING_VIEW_BUFFER_LIMIT
+            ):
+                buffers[spill_at] = ArcPointer(spill^)
+                spill = List[UInt8]()
+                spill_at = -1
+            if spill_at < 0:
+                spill_at = len(buffers)
+                buffers.append(ArcPointer(List[UInt8]()))
+            b = spill_at
+            offset = len(spill)
+            spill.extend(
+                Span[UInt8, ImmutAnyOrigin](
+                    unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                        unsafe_from_address=Int(tail)
+                    ),
+                    length=length,
+                )
+            )
+        views.append(
+            StringView(
+                UInt32(head & 0xFFFFFFFF),
+                UInt32(head >> 32),
+                UInt32(b),
+                UInt32(offset),
+            )
+        )
+    if spill_at >= 0:
+        buffers[spill_at] = ArcPointer(spill^)
+    var bits = _pack_bits(valid) if nulls else List[UInt8]()
+    return StringColumn(
+        StringViewStorage(views^, buffers^, bits^, n, total_bytes, buffer_bytes)
+    )
+
+
 def _key_column(
-    template: Series, w: Int, bit: UInt64, groups: _Groups
+    template: Series, w: Int, bit: UInt64, groups: _Groups, held: _HeldBuffers
 ) raises -> Series:
     """One key column of a partition's final groups, built from the words
-    of each group's first sight: a string from its inline bytes or the
-    bytes its address names, a number from its value, as the template's
-    type (temporal, decimal and categorical keys keep theirs)."""
+    of each group's first sight: strings as views (`_string_keys`), a
+    number from its value, as the template's type (temporal, decimal and
+    categorical keys keep theirs)."""
     var n = groups.count()
     var name = template.name()
     var dtype = template.dtype()
@@ -1698,49 +2044,9 @@ def _key_column(
         template.copy()
     )
     if part._data.isa[StringColumn]():
-        var builder = StringBuilder(n, 0)
-        var buffer = List[UInt8](length=16, fill=0)
-        var bytes = buffer.unsafe_ptr()
-        for f in range(n):
-            var g = f
-            if groups.null(g) & bit != 0:
-                builder.append_null()
-                continue
-            var head = groups.word(g, w)
-            var length = Int(head & 0xFFFFFFFF)
-            if length <= 12:
-                var tail = groups.word(g, w + 1)
-                for b in range(min(length, 4)):
-                    bytes[unsafe_offset=b] = UInt8(
-                        (head >> UInt64(32 + 8 * b)) & 0xFF
-                    )
-                for b in range(4, length):
-                    bytes[unsafe_offset=b] = UInt8(
-                        (tail >> UInt64(8 * (b - 4))) & 0xFF
-                    )
-                builder.append(
-                    StringSlice[ImmutAnyOrigin](
-                        unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
-                            unsafe_ptr=bytes.unsafe_mut_cast[
-                                False
-                            ]().unsafe_origin_cast[ImmutAnyOrigin](),
-                            length=length,
-                        )
-                    )
-                )
-            else:
-                builder.append(
-                    StringSlice[ImmutAnyOrigin](
-                        unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
-                            unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
-                                unsafe_from_address=Int(groups.word(g, w + 1))
-                            ),
-                            length=length,
-                        )
-                    )
-                )
-        _ = buffer^
-        return Series(name, builder^.finish()).with_dtype(dtype)
+        return Series(name, _string_keys(w, bit, groups, held)).with_dtype(
+            dtype
+        )
     var valid = List[Bool](capacity=n)
     if part._data.isa[BoolColumn]():
         var values = List[Bool](capacity=n)
@@ -1821,6 +2127,7 @@ def aggregate_finish(
         return result^
     var bits = layout.bits
     var stride = sinks[0].parts.stride
+    var held = _HeldBuffers(sinks)
     var per_run = max(1, _PARTITION_BYTES // (8 * stride))
     var finishes = List[_FinishJob]()
     var lo = 0
@@ -1835,6 +2142,7 @@ def aggregate_finish(
                 finishes.append(
                     _FinishJob(
                         Int(Pointer(to=sinks)),
+                        Int(Pointer(to=held)),
                         lo,
                         p + 1,
                         run,
@@ -1847,6 +2155,7 @@ def aggregate_finish(
             lo = p + 1
             run = 0
     run_jobs(finishes)
+    _ = held^
     for p in range(len(finishes)):
         var firsts = List[Int]()
         var states = List[Reducer]()

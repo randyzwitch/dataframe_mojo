@@ -1000,6 +1000,16 @@ struct Reducer(Movable):
                 self.update(part, part_offset, grouped, groups)
                 part_offset += len(part)
             return
+        if self.op == MEDIAN or self.op == QUANTILE:
+            # Quantiles order numeric samples, not the biased UInt64 ordering
+            # keys or the raw scaled decimal payloads used by other states.
+            var values = chunk.cast(DataType.FLOAT64).float64()
+            for i in range(len(values)):
+                if values._valid(i):
+                    self.samples[_group(grouped, groups, offset + i)].append(
+                        values._get(i)
+                    )
+            return
         if self.op == N_UNIQUE and chunk.dtype().is_decimal():
             self._update(_decimal_keys(chunk), offset, grouped, groups)
             return

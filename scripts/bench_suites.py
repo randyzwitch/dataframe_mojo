@@ -360,7 +360,13 @@ def operator_reports(stderr):
             reports[current] = []
         elif line.startswith("dataframe-operator:\t") and current:
             cells = line.split("\t")[1:]
-            row = dict(zip(OPERATOR_COLUMNS, cells))
+            # Reports now lead with the cost table's calibration tag
+            # (`development-source-no-calibration`); a baseline built
+            # before it has none.
+            names = OPERATOR_COLUMNS
+            if cells and not cells[0].lstrip("-").isdigit():
+                names = ["calibration"] + OPERATOR_COLUMNS
+            row = dict(zip(names, cells))
             for name in OPERATOR_COLUMNS:
                 if name not in row:
                     # A baseline built before the column existed.
