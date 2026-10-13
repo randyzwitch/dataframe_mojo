@@ -103,7 +103,14 @@ from .expr import (
     is_window,
     subtree,
 )
-from .frame import DataFrame, GroupBy, _row_local, _stream_reductions
+from .aggregate_table import reduction_supported
+from .frame import (
+    DataFrame,
+    GroupBy,
+    _row_local,
+    _stream_reductions,
+    table_supported,
+)
 from .parquet import (
     _pruned_row_groups,
     parquet_row_group_statistics,
@@ -829,6 +836,18 @@ struct _StreamJob(Job):
                 self.reduced.append(reduction^)
             if not self.keep_frame:
                 self.frame = self.frame.clear()
+
+
+def _table_reductions(keys: List[String], expressions: List[Expr]) -> Bool:
+    """Whether a grouped reduction's operations are ones the aggregate
+    table keeps inline (their input types decide the rest)."""
+    if len(keys) == 0 or len(expressions) == 0:
+        return False
+    for expression in expressions:
+        for node in expression._nodes:
+            if is_reduction(node.op) and not reduction_supported(node.op):
+                return False
+    return True
 
 
 def _filter_keeps(
@@ -1935,6 +1954,68 @@ struct LazyFrame(Copyable):
             cursor = node.left
         return False
 
+    def _swap_join_sides(
+        self, at: Int, built: DataFrame, batch_size: Int
+    ) raises -> Optional[LazyFrame]:
+        """A copy of the plan in which the inner join at `at` takes its
+        executed right side, `built`, as its left and its left side, run
+        now, as its right, under a selection that restores the join's
+        columns: their order, names and key types. None, with nothing run,
+        when a name the sides share other than as a key would be renamed
+        by the join."""
+        ref node = self._nodes[at]
+        if not node.coalesce or node.how != JOIN_INNER:
+            return None
+        var left_names = self._columns_of(node.left)
+        var right_names = built.columns()
+        for i in range(len(node.right_keys)):
+            for j in range(i):
+                if node.right_keys[i] == node.right_keys[j]:
+                    return None
+        for name in right_names:
+            if name in left_names and not (
+                name in node.right_keys and name in node.names
+            ):
+                return None
+        var left_frame = self._execute(node.left, False, True, batch_size)
+        var exprs = List[Expr]()
+        for name in left_frame.columns():
+            var k = -1
+            for i in range(len(node.names)):
+                if node.names[i] == name:
+                    k = i
+            if k < 0:
+                exprs.append(col(name))
+                continue
+            var key = col(node.right_keys[k])
+            var dtype = left_frame.column(name).dtype()
+            if built.column(node.right_keys[k]).dtype() != dtype:
+                key = key.cast(dtype)
+            exprs.append(key.alias(name))
+        for name in right_names:
+            if name not in node.right_keys:
+                exprs.append(col(name))
+        var plan = self.copy()
+        plan._frames.append(built.copy())
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+        var probe = len(plan._nodes) - 1
+        plan._frames.append(left_frame^)
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+        var build = len(plan._nodes) - 1
+        var join = node.copy()
+        join.left = probe
+        join.right = build
+        join.names = node.right_keys.copy()
+        join.right_keys = node.names.copy()
+        plan._nodes.append(join^)
+        plan._nodes[at] = _plan_node(
+            SELECT, left=len(plan._nodes) - 1, exprs=exprs
+        )
+        trace_path("lazy.swap_join_sides")
+        return Optional(plan^)
+
     def _height_bound(self, index: Int) -> Int:
         """An upper bound on the rows a node yields without executing it:
         the scanned frame's height through steps that only drop or keep
@@ -2124,6 +2205,45 @@ struct LazyFrame(Copyable):
                 )
                 var built = self._execute(node.right, False, True, batch_size)
                 if (
+                    node.how == JOIN_INNER
+                    and not ordered
+                    and bound >= 0
+                    and built.height() > bound
+                    and _table_reductions(keys, expressions)
+                ):
+                    # The built right side holds more rows than the left
+                    # can: hash the left instead and stream the right
+                    # through it, as DuckDB's build/probe side optimizer
+                    # and Polars' join both build on the smaller side.
+                    # Under an unordered aggregation into the aggregate
+                    # table the join's row order is free (other grouped
+                    # states grow with how rows arrive), and the stream
+                    # keeps every worker busy over the larger side, where
+                    # probing from a small left ran its few morsels on one
+                    # or two workers.
+                    var swapped = self._swap_join_sides(
+                        cursor, built, batch_size
+                    )
+                    if swapped:
+                        # Joins above keep the right sides they built.
+                        var plan = swapped.take()
+                        for k in range(len(operations)):
+                            if operations[k].kind != JOIN:
+                                continue
+                            plan._frames.append(
+                                joins[operations[k].offset].copy()
+                            )
+                            plan._schemas.append(Optional[CsvSchema]())
+                            plan._nodes.append(
+                                _plan_node(
+                                    SCAN_FRAME, offset=len(plan._frames) - 1
+                                )
+                            )
+                            plan._nodes[operation_nodes[k]].right = (
+                                len(plan._nodes) - 1
+                            )
+                        return plan._execute(index, False, True, batch_size)
+                if (
                     (node.how == JOIN_SEMI or node.how == JOIN_ANTI)
                     and built.height() >= 524288
                     and self._known_height(node.left) < 0
@@ -2290,7 +2410,20 @@ struct LazyFrame(Copyable):
         var insert = False
         # String keys to insert, pending a sample of the narrowed input.
         var strings_sampled = False
-        if piped and len(keys) > 0:
+        # The aggregate table takes any grouped reduction whose states it
+        # keeps inline, over any keys but nested ones, and adapts to how
+        # many groups there are as rows arrive (DuckDB's radix-partitioned
+        # sink): no sample, mode or key-type rule decides for it. The
+        # types are those of an empty frame through every operation.
+        var table = False
+        if piped and len(keys) > 0 and len(expressions) > 0 and not ordered:
+            var empty = self._frames[self._nodes[cursor].offset].clear()
+            var empty_joins = ArcPointer(joins.copy())
+            var empty_indexes = ArcPointer(indexes.copy())
+            for operation in operations:
+                _apply_operation(operation, empty, empty_joins, empty_indexes)
+            table = table_supported(empty, keys, expressions)
+        if piped and len(keys) > 0 and not table:
             var frame = self._nodes[cursor].offset
             ref source_frame = self._frames[frame]
             var fixed = True
@@ -2378,12 +2511,26 @@ struct LazyFrame(Copyable):
                 # Collected strings gather slower than the eager route's
                 # per-chunk filter (ClickBench q12: 85 ms against 48).
                 piped = False
-        if len(late_names) > 0 and not (piped and insert):
+        # Under the aggregate table, coded keys pay as they did in the
+        # insert tables: when the builds holding the keys bound the groups
+        # to a few (the insert rule's bound), coding each build once costs
+        # less than gathering and hashing their strings at every joined
+        # row (TPC-DS q99's three names from 5-, 20- and 6-row builds);
+        # coding a 100K-row customer build per key did not (q4).
+        var late_table = False
+        if table and len(late_names) > 0:
+            ref source_frame = self._frames[self._nodes[cursor].offset]
+            var sample = min(source_frame.height(), 4096)
+            late_table = (
+                _key_group_bound(keys, source_frame, joins, sample // 4) >= 0
+            )
+        if len(late_names) > 0 and not (piped and (insert or late_table)):
             # Coded keys pay only in the insert tables: collecting them
             # for the finish's group-by ran slower than the eager route
             # their strings take (TPC-DS q45 5.9 -> 13.4 ms, q24 40 -> 81),
-            # so those plans take the strings' route, as before.
-            if len(operations) > 0:
+            # so those plans take the strings' route, as before; the
+            # aggregate table groups the strings themselves.
+            if len(operations) > 0 and not table:
                 piped = False
             late_names = List[String]()
         var late_values = List[Series]()
@@ -2604,7 +2751,11 @@ struct LazyFrame(Copyable):
             if any:
                 projection = wanted^
         # Batches of a large in-memory input that streams through joins grow
-        # up to four times the default: each batch probes every join, and
+        # up to four times the default (not into the aggregate table, which
+        # holds no state per batch: there a morsel's size is what spreads
+        # rows a selective join keeps from a few stretches of sorted input
+        # over the workers, as TPC-DS q39's date join keeps 180K of 11.7M
+        # inventory rows from two of 45 grown batches): each batch probes every join, and
         # fewer, larger batches cost less per row (PDS-H q21's two joins of
         # 3.8M rows against 1.5M-row builds: 186 -> 148 ms). They grow only
         # while every worker still gets a batch: a 150K-row customer table
@@ -2629,7 +2780,7 @@ struct LazyFrame(Copyable):
                         ):
                             bounded = False
         var rows_per_batch = batch_size
-        if len(shared_joins[]) > 0 and input.height() > 0:
+        if len(shared_joins[]) > 0 and input.height() > 0 and not table:
             # Still four batches a worker: input stored in key order (sales
             # by date) puts every row a selective join keeps into a few
             # batches, and one batch per worker left the others idle while
@@ -2685,6 +2836,7 @@ struct LazyFrame(Copyable):
                 top_descending=top_descending,
                 top_nulls_last=top_nulls_last,
                 bounded=bounded,
+                table=table,
             )
             if top > 0:
                 piped_result = piped_result.slice(skip, limit)
@@ -2692,14 +2844,17 @@ struct LazyFrame(Copyable):
                 # The groups' codes back to their values (a code is a
                 # representative build row; a left join's missing row is a
                 # null code and stays null).
-                var coded = piped_result.column(late_names[i]).copy()
+                var coded = piped_result.column(late_names[i]).rechunk()
+                ref codes = coded._data[Column[Int64]]
+                var representatives = late_rows[i].unsafe_ptr()
                 var rows = List[Int](capacity=len(coded))
                 for r in range(len(coded)):
-                    var cell = coded.get(r)
-                    if cell.is_null():
+                    if not codes._valid(r):
                         rows.append(-1)
                     else:
-                        rows.append(late_rows[i][Int(cell.int64())])
+                        rows.append(
+                            representatives[unsafe_offset=Int(codes._get(r))]
+                        )
                 piped_result = piped_result.with_column(
                     late_values[i].take_or_null(rows).renamed(late_names[i])
                 )

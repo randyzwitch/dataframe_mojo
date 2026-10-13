@@ -42,9 +42,19 @@ from .expr import (
     is_reduction,
     subtree,
 )
+from .aggregate_table import (
+    AggregateLayout,
+    AggregateSink,
+    aggregate_finish,
+    aggregate_layout,
+)
 from .frame import (
     DataFrame,
     _StreamReduction,
+    table_frame,
+    table_inputs,
+    table_specs,
+    table_supported,
     _equality_words,
     _expand_struct_keys,
     _finish_parts,
@@ -1653,6 +1663,11 @@ struct _PipelineJob(Job):
     # Grouped sink: rows inserted straight into per-part key indexes and
     # reducer states (`_GroupedSink`).
     var grouped: List[_GroupedSink]
+    # Aggregate table sink (`aggregate_table.mojo`): its layout, shared by
+    # every worker, and this worker's sink once it takes a morsel.
+    var layout: List[AggregateLayout]
+    var sinks: List[AggregateSink]
+    var workers: Int
     var rows: Int
     # Rows fed, then each step's input and output rows, for the report.
     var counts: List[Int]
@@ -1677,7 +1692,12 @@ struct _PipelineJob(Job):
         bounded: Bool,
         shared_bound: _SharedBound,
         floating_key: Bool,
+        layout: List[AggregateLayout],
+        workers: Int,
     ):
+        self.layout = layout.copy()
+        self.sinks = List[AggregateSink]()
+        self.workers = workers
         self.shared_bound = shared_bound.copy()
         self.floating_key = floating_key
         self.top = top
@@ -1711,6 +1731,16 @@ struct _PipelineJob(Job):
         # Rows fed, then each step's rows in and out, then each step's
         # busy nanoseconds on this worker.
         self.counts = List[Int](length=3 * len(steps) + 1, fill=0)
+
+    def _table_reads(self) raises -> List[String]:
+        """The columns the keys and reductions read."""
+        var names = self.keys.copy()
+        var reads = _reads(self.expressions)
+        if reads:
+            for name in reads.take():
+                if name not in names:
+                    names.append(name)
+        return names^
 
     def _fold_candidates(mut self) raises:
         """Fold this worker's candidates to the k best (DuckDB's heap), and
@@ -1776,6 +1806,29 @@ struct _PipelineJob(Job):
                 if morsel.height() == 0:
                     break
             if morsel.height() == 0:
+                continue
+            if len(self.layout) > 0:
+                # The aggregate table: the morsel's keys and reduction
+                # inputs into this worker's sink, no matter how many groups
+                # (its tables adapt), with strings compared in place.
+                var source = morsel._compact_frame(
+                    self._table_reads()
+                ) if _reads(self.expressions) else morsel.materialized()
+                var keys = List[Series](capacity=len(self.keys))
+                for name in self.keys:
+                    keys.append(_unchunked(source.column(name)))
+                var inputs = table_inputs(source, keys, self.expressions)
+                for k in range(len(inputs)):
+                    inputs[k] = _unchunked(inputs[k])
+                if len(self.sinks) == 0:
+                    self.sinks.append(
+                        AggregateSink(self.layout[0], self.workers)
+                    )
+                # First rows numbered by morsel, then by row of its output
+                # (a join's may outgrow the morsel), so the table orders
+                # groups the same whichever worker took which morsel.
+                self.sinks[0].sink(keys, inputs, k << 32)
+                self.rows += len(keys[0])
                 continue
             if (
                 len(self.keys) > 0
@@ -1887,6 +1940,16 @@ struct _PipelineJob(Job):
             else:
                 self.parts.append(morsel.materialized())
                 self.sequences.append(morsel.sequence)
+
+
+def _unchunked(column: Series) raises -> Series:
+    """A column as one buffer: a morsel's slice within one chunk is that
+    chunk's view, not a copy; only a slice across chunks is copied."""
+    if not column.is_chunked():
+        return column.copy()
+    if column.n_chunks() == 1:
+        return column.chunks()[0].copy()
+    return column.rechunk()
 
 
 def _top_rows(
@@ -2123,16 +2186,43 @@ def run_pipeline(
     top_descending: List[Bool] = List[Bool](),
     top_nulls_last: List[Bool] = List[Bool](),
     bounded: Bool = False,
+    table: Bool = False,
 ) raises -> DataFrame:
     """Run the steps over `frame` in morsels on `workers` threads, into a
     materialize sink, or a reduce sink when `expressions` are reductions
     over the steps' output, grouped by `keys` when given (`ordered`: groups
     in first-occurrence order; `insert`: rows go into per-worker group
     tables rather than being collected for the eager partitioned
-    group-by). `counts` receives the rows fed, then each step's input and
-    output rows."""
+    group-by; `table`: into the aggregate table, when it keeps every
+    state inline, whatever `insert` says). `counts` receives the rows fed,
+    then each step's input and output rows."""
     trace_path("pipeline.run")
-    if len(keys) > 0 and len(expressions) > 0:
+    # The aggregate table's layout, from the steps' output types (an
+    # empty frame through every step) when it takes this reduction.
+    var layout = List[AggregateLayout]()
+    var template = List[_StreamReduction]()
+    if table and len(keys) > 0 and len(expressions) > 0 and not ordered:
+        var empty = frame.clear()
+        for step in steps:
+            var morsel = Morsel(empty.copy(), 0)
+            morsel.apply(step, batch_size, joins, indexes)
+            empty = morsel.materialized()
+        if table_supported(empty, keys, expressions):
+            var empty_keys = List[Series](capacity=len(keys))
+            for name in keys:
+                empty_keys.append(empty.column(name))
+            var reduction = _StreamReduction(empty, expressions, keys)
+            layout.append(
+                aggregate_layout(
+                    empty_keys,
+                    table_inputs(empty, empty_keys, expressions),
+                    table_specs(reduction),
+                )
+            )
+            template.append(reduction^)
+    if len(layout) > 0:
+        trace_path("pipeline.group_table")
+    elif len(keys) > 0 and len(expressions) > 0:
         if insert:
             trace_path("pipeline.group_insert")
         else:
@@ -2174,6 +2264,8 @@ def run_pipeline(
                 bounded,
                 shared_bound,
                 floating_key,
+                layout,
+                workers,
             )
         )
     try:
@@ -2188,6 +2280,17 @@ def run_pipeline(
     for j in range(len(jobs)):
         for i in range(len(counts)):
             counts[i] += jobs[j].counts[i]
+    if len(layout) > 0:
+        var sinks = List[AggregateSink]()
+        for j in range(len(jobs)):
+            if len(jobs[j].sinks) > 0:
+                sinks.append(jobs[j].sinks.pop())
+        var result = aggregate_finish(sinks, layout[0])
+        # Long key strings live in the sinks' heaps until the finish has
+        # read them out.
+        var finished = table_frame(template[0], result^, False)
+        _ = sinks^
+        return finished^
     if len(expressions) > 0 and len(keys) > 0:
         var sink = -1
         for j in range(len(jobs)):
