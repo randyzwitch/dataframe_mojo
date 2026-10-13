@@ -851,8 +851,9 @@ def _moments_bounds(
 ) raises -> Series:
     # Sliding Welford updates with removal. Translate by the first finite
     # value so large common offsets do not spoil small variances. Each value
-    # is added/removed once for monotone window bounds; nonfinite values are
-    # counted separately so the state recovers when they leave the window.
+    # ordinarily advances once for monotone bounds. Rebase and rebuild after
+    # a large variance decrease on eviction to recover finite outlier
+    # cancellation; nonfinite values are counted separately.
     var output = List[Float64](length=len(input), fill=0)
     var mask = List[Bool](length=len(input), fill=False)
     for rows in groups:
@@ -870,7 +871,8 @@ def _moments_bounds(
         for row in rows:
             var start = lower[row]
             var stop = upper[row]
-            if start < lo or stop < hi or start >= hi:
+            var rebuild = start < lo or stop < hi or start >= hi
+            if rebuild:
                 lo = start
                 hi = start
                 count = 0
@@ -887,6 +889,7 @@ def _moments_bounds(
                     bad -= 1
                     continue
                 x -= origin
+                var previous_m2 = m2
                 count -= 1
                 if count == 0:
                     mean = 0
@@ -896,6 +899,23 @@ def _moments_bounds(
                     mean -= delta / Float64(count)
                     m2 -= delta * (x - mean)
                     m2 = max(m2, 0)
+                rebuild |= (
+                    count == 0
+                    or not isfinite(previous_m2)
+                    or m2 < previous_m2 * 0.5
+                )
+            if rebuild:
+                lo = start
+                hi = start
+                count = 0
+                bad = 0
+                mean = 0
+                m2 = 0
+                for position in range(start, stop):
+                    var at = rows[position]
+                    if valid[at] and isfinite(_numeric(input, at)):
+                        origin = _numeric(input, at)
+                        break
             while hi < stop:
                 var at = rows[hi]
                 hi += 1

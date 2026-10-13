@@ -258,7 +258,7 @@ def test_native_metal_interpolation_profile_budget_family_and_runtime_reuse() ra
     assert_true(";metal-interpolation-v1" in estimate.family)
     assert_true(";metal-emulated-float64-v1" in estimate.family)
     assert_true(";rolling-v1" not in estimate.family)
-    assert_true(";rolling-moments-v1" not in estimate.family)
+    assert_true(";rolling-moments-v2" not in estimate.family)
     var exact_runtime = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
     var profile = query.profile(accelerator=exact_runtime)
     assert_equal(

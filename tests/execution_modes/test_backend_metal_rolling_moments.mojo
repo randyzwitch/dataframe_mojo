@@ -325,8 +325,8 @@ def test_native_metal_rolling_moments_large_offsets_partition_workers_and_nested
     )
     var query = small.lazy().select_exprs(expressions(3, 1, 0))
     var estimate = runtime.estimate_auto(query)
-    assert_true("metal-rolling-moments-v1" in estimate.family)
-    assert_true(";rolling-moments-v1" in estimate.family)
+    assert_true("metal-rolling-moments-v2" in estimate.family)
+    assert_true(";rolling-moments-v2" in estimate.family)
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))
     with assert_raises(contains="checked"):
