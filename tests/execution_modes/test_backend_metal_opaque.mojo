@@ -271,10 +271,11 @@ def verify_metal_opaque_cpu_models() raises:
 def opaque_preflight() raises:
     var source = frame([0, 1, 2])
     var invalid = MetalRuntime(device_id=999999)
-    for expression in [col("f").pow(lit(Float64(2)))]:
-        with assert_raises(contains="Float64 requires CPU"):
-            _ = source.lazy().select(expression).collect(accelerator=invalid)
-    for expression in [col("f").var(), col("f").std()]:
+    for expression in [
+        col("f").pow(lit(Float64(2))),
+        col("f").var(),
+        col("f").std(),
+    ]:
         assert_true(
             "unsupported"
             not in invalid.describe(source.lazy().select(expression))

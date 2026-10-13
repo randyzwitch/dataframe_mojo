@@ -740,7 +740,20 @@ and the existing numeric tolerance (the toolchain approximation misses it for
 overflow and retain gradual underflow; ordinary finite exponentials keep their
 vector kernel.
 
-Floating power is not yet supported by this subset.
+Floating `pow` executes for Float32 and Float64 inputs and retains their width.
+It handles zero, signed zero, infinity, NaN, negative bases, and integral exponent
+parity before arithmetic. Exact power-of-two integer exponents retain their
+normal and subnormal boundaries. Other powers carry a second binary64 residual
+through logarithm, multiplication, and exponential range reduction; this avoids
+large-exponent error amplification and premature overflow/underflow from a
+rounded logarithm product. Independent GPU validation includes 160-digit Decimal
+references at dense overflow/underflow boundaries, plus libm and random cases,
+with a 16 ULP bound. Vendor libm can differ at the last subnormal bit. CPU floating
+powers use system libm to correct the toolchain's exceptional-value and ordinary
+accuracy errors. Plans add `floating-power-v1:p<count>` and the corresponding
+`metal-` cost family, and Float32 powers also identify binary64 emulation. Checked
+integer power retains its existing behavior. Decimal power is outside this
+floating subset; callers can explicitly cast numeric inputs to Float64.
 
 ## CPU parity work remaining
 
@@ -751,7 +764,6 @@ that unlisted query combinations are already equivalent.
 
 | Area | Remaining CPU operations or behavior |
 | --- | --- |
-| Numeric expressions | Floating power. |
 | Reductions | Mode, implode, and value counts. |
 | Ordered windows | Duration-based rolling sum/mean/min/max/var/std, cut, and qcut. |
 | Temporal expressions | Row-valued parsing/formatting and timezone operations. |
@@ -788,6 +800,7 @@ python3 native/dfmetal/test_moments.py
 python3 native/dfmetal/test_higher_moments.py
 python3 native/dfmetal/test_interpolation.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_coordinate_interpolation.py build/dfmetal/libdfmetal.dylib
+python3 native/dfmetal/test_power.py
 python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py

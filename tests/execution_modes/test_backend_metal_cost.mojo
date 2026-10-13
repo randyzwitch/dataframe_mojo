@@ -153,9 +153,7 @@ def cost_preflight() raises:
     var invalid = MetalRuntime(device_id=999999)
     var wide = DataFrame([Series("x", Column[Float64]([1, 2]))])
     with assert_raises(contains="unsupported"):
-        _ = invalid.estimate_auto(
-            wide.lazy().select(col("x").pow(lit(Float64(2))))
-        )
+        _ = invalid.estimate_auto(wide.lazy().select(col("x").implode()))
     with assert_raises(contains="in-memory"):
         _ = invalid.estimate_auto(
             scan_csv(

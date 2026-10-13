@@ -41,6 +41,7 @@ struct RowCapabilities(Copyable):
     var float_division: Bool
     var float_modulo: Bool
     var float_transcendentals: Bool
+    var float_power: Bool
     var float_sqrt: Bool
     var float_rounding: Bool
     var wide_integer: Bool
@@ -101,6 +102,7 @@ struct RowCapabilities(Copyable):
         float_division: Bool = False,
         float_modulo: Bool = False,
         float_transcendentals: Bool = False,
+        float_power: Bool = False,
         float_sqrt: Bool = False,
         float_rounding: Bool = False,
         wide_integer: Bool = True,
@@ -158,6 +160,7 @@ struct RowCapabilities(Copyable):
         self.float_division = float_division
         self.float_modulo = float_modulo
         self.float_transcendentals = float_transcendentals
+        self.float_power = float_power
         self.float_sqrt = float_sqrt
         self.float_rounding = float_rounding
         self.wide_integer = wide_integer

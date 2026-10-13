@@ -354,6 +354,7 @@ def _capabilities() -> RowCapabilities:
         float_rounding=True,
         float_modulo=True,
         float_transcendentals=True,
+        float_power=True,
         float_sqrt=True,
         wide_integer=False,
         bounded_integer_sum=True,
@@ -1724,6 +1725,13 @@ struct MetalRuntime(AcceleratorBackend):
                 + ":l"
                 + String(logarithms)
             )
+        var powers = 0
+        for i in range(0, len(plan.code), 4):
+            powers += Int(
+                plan.code[i] == POW and plan.node_dtypes[i // 4].is_float()
+            )
+        if powers:
+            family += ";metal-floating-power-v1:p" + String(powers)
         var calendar_offset = False
         for i in range(0, len(plan.code), 4):
             calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET
@@ -1953,6 +1961,7 @@ struct MetalRuntime(AcceleratorBackend):
                 or plan.code[i * 4] == DIV
                 or plan.code[i * 4] == EXP
                 or plan.code[i * 4] == LOG
+                or plan.code[i * 4] == POW
                 or plan.code[i * 4] == SQRT
                 or plan.code[i * 4] == FLOORDIV
                 or plan.code[i * 4] == MOD

@@ -415,6 +415,8 @@ def _program(
                         or op == SQRT
                         or (op == EXP or op == LOG)
                         and capabilities.float_transcendentals
+                        or op == POW
+                        and capabilities.float_power
                         or op == CAST
                         or op == FLOOR
                         or op == CEIL
@@ -581,6 +583,8 @@ def _program(
                 and capabilities.float_division
                 or op == MOD
                 and capabilities.float_modulo
+                or op == POW
+                and capabilities.float_power
             )
         ):
             capabilities.reject(

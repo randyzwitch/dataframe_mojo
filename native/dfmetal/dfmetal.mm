@@ -768,7 +768,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL && c[0] != DFM_FILL_NULL &&
           c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
           c[0] != DFM_ADD && c[0] != DFM_SUB && c[0] != DFM_MUL &&
-          c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_MOD && c[0] != DFM_CAST && c[0] != DFM_DECIMAL_FLOAT_CAST &&
+          c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_MOD && c[0] != DFM_POW && c[0] != DFM_CAST && c[0] != DFM_DECIMAL_FLOAT_CAST &&
           c[0] != DFM_FLOOR && c[0] != DFM_CEIL && c[0] != DFM_ROUND && c[0] != DFM_SQRT && c[0] != DFM_EXP && c[0] != DFM_LOG &&
           c[0] != DFM_NEG && c[0] != DFM_ABS &&
           c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE &&
@@ -792,9 +792,6 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if ((c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
           operand != DFM_FLOAT32 && operand != DFM_FLOAT64_STORAGE)
         fail("Metal floating classification requires Float32");
-      if (c[0] == DFM_POW &&
-          operand == DFM_FLOAT32)
-        fail("Metal floating operator requires CPU execution");
       if (c[0] == DFM_ROUND && c[3] != 0 &&
           (operand == DFM_FLOAT32 || operand == DFM_FLOAT64_STORAGE) && !typed(r))
         fail("Metal floating decimal rounding requires typed descriptors");
@@ -2271,6 +2268,10 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           } else if (op == DFM_DIV) {
             text += z + "=f64_div(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) +
                     "),f64_word(" + encode(operandType,b) + "," + std::to_string(operandType) + "));";
+          } else if (op == DFM_POW && (operandType == DFM_FLOAT32 || operandType == DFM_FLOAT64_STORAGE)) {
+            auto expression = "f64_power(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) +
+                "),f64_word(" + encode(operandType,b) + "," + std::to_string(operandType) + "))";
+            text += z + "=" + (dtype == DFM_FLOAT32 ? "as_type<float>(f64_to_float32(" + expression + "))" : expression) + ";";
           } else if (op == DFM_EXP || op == DFM_LOG) {
             auto expression = std::string(op == DFM_EXP ? "f64_exp" : "f64_log") + "(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) + "))";
             text += z + "=" + (dtype == DFM_FLOAT32 ? "as_type<float>(f64_to_float32(" + expression + "))" : expression) + ";";

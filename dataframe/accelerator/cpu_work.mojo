@@ -4,6 +4,7 @@ from ..expr import (
     DT_TOTAL,
     EXP,
     LOG,
+    POW,
     DT_OFFSET_BY,
     CAST,
     LEN,
@@ -65,6 +66,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             float_rounding=True,
             float_modulo=True,
             float_transcendentals=True,
+            float_power=True,
             float_sqrt=True,
             wide_integer=True,
             int64_arithmetic=True,
@@ -143,6 +145,13 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             + ":l"
             + String(logarithms)
         )
+    var powers = 0
+    for i in range(0, len(plan.code), 4):
+        powers += Int(
+            plan.code[i] == POW and plan.node_dtypes[i // 4].is_float()
+        )
+    if powers:
+        family += ";floating-power-v1:p" + String(powers)
     var calendar_offset = False
     for i in range(0, len(plan.code), 4):
         calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET

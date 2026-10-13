@@ -567,9 +567,7 @@ def check_float32_floor_division_preflight_without_device():
     for opcode in (27,):
         code[4] = opcode
         err = P()
-        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
-        assert b"Metal floating operator requires CPU execution" in C.string_at(err)
-        lib.dfm_free(err)
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
 
 
 check_float32_floor_division_preflight_without_device()
