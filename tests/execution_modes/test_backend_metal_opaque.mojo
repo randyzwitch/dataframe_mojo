@@ -1,6 +1,6 @@
 """Opaque Float64 follows row identities and preserves every valid IEEE word."""
 from std.memory import bitcast
-from std.testing import assert_equal, assert_raises
+from std.testing import assert_equal, assert_raises, assert_true
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime
@@ -275,8 +275,10 @@ def opaque_preflight() raises:
         with assert_raises(contains="Float64 requires CPU"):
             _ = source.lazy().select(expression).collect(accelerator=invalid)
     for expression in [col("f").var(), col("f").std()]:
-        with assert_raises(contains="unsupported"):
-            _ = source.lazy().select(expression).collect(accelerator=invalid)
+        assert_true(
+            "unsupported"
+            not in invalid.describe(source.lazy().select(expression))
+        )
 
 
 def test_native_metal_opaque_float64_computation_rejects_before_device_setup() raises:

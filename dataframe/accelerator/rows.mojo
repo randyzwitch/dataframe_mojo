@@ -80,6 +80,8 @@ from dataframe.expr import (
     MAX,
     COUNT,
     MEAN,
+    VAR,
+    STD,
     LEN,
     FIRST,
     LAST,
@@ -1341,7 +1343,7 @@ def lower_rows(
             var reduction = -1
             var min_count = 0
             var row_shape = bound.shape() == ROWS
-            ref last = bound.expr._nodes[count - 1]
+            var last = bound.expr._nodes[count - 1].copy()
             if (
                 last.op == MIN
                 or last.op == FIRST
@@ -1355,6 +1357,8 @@ def lower_rows(
                 or last.op == SUM
                 or last.op == COUNT
                 or last.op == MEAN
+                or last.op == VAR
+                or last.op == STD
                 or last.op == LEN
             ):
                 if (node.kind != SELECT and node.kind != AGG) or bound.shapes[
@@ -1420,6 +1424,18 @@ def lower_rows(
                             " numeric input dtype"
                         ),
                     )
+                if reduction == VAR or reduction == STD:
+                    # Counts fit Int32; every larger ddof yields null. The
+                    # middle sixteen bits are reserved for paired moments.
+                    min_count = (
+                        min(Int(last.integer), Int(Int32.MAX))
+                        | min(configured_workers(), 65535) << 47
+                    )
+                    var converted = subtree(bound.expr, last.left).cast(
+                        DataType.FLOAT64
+                    )
+                    bound = bind(converted, rank_schema)
+                    count = len(bound.expr._nodes)
                 has_aggregate = True
             elif bound.aggregated[len(bound.aggregated) - 1]:
                 capabilities.reject(

@@ -1,6 +1,7 @@
 #include "dfmetal.h"
 #include "dfmetal_float64.h"
 #include "dfmetal_decimal.h"
+#include "dfmetal_moments.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
@@ -86,6 +87,8 @@ int64_t sumType(int64_t t) {
   return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
+  if (op == DFM_VAR || op == DFM_STD)
+    return type == DFM_FLOAT64_STORAGE ? DFM_FLOAT64_STORAGE : -1;
   if (op == DFM_WIDE_INTEGER_SUM || op == DFM_WIDE_INTEGER_MEAN)
     return type == DFM_INT64 || type == DFM_UINT64
                ? (op == DFM_WIDE_INTEGER_SUM ? type : DFM_FLOAT64_STORAGE) : -1;
@@ -114,6 +117,11 @@ int64_t reductionType(int64_t type, int64_t op) {
   if (op == DFM_MIN || op == DFM_MAX || op == DFM_FIRST || op == DFM_LAST)
     return type;
   return -1;
+}
+bool momentReduction(int64_t op) { return op == DFM_VAR || op == DFM_STD; }
+bool validMomentMetadata(int64_t metadata) {
+  return metadata >= 0 && ((uint64_t(metadata) >> 31) & 0xffffULL) == 0 &&
+         ((uint64_t(metadata) >> 47) & 0xffffULL) >= 1;
 }
 bool decimal128Reduction(int64_t op) {
   return op == DFM_DECIMAL128_SUM || op == DFM_DECIMAL128_MEAN;
@@ -522,6 +530,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
           if (decimal128Reduction(c[3]) &&
               !validDecimalMetadata(int64_t(r.literals[v.start + j])))
             fail("Invalid Metal Decimal128 reduction metadata");
+          if (momentReduction(c[3]) && !validMomentMetadata(int64_t(r.literals[v.start + j])))
+            fail("Invalid Metal moment metadata");
           if ((c[3] == DFM_ANY || c[3] == DFM_ALL) &&
               r.literals[v.start + j] > 1)
             fail("Invalid Metal Boolean reduction metadata");
@@ -820,6 +830,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if (decimal128Reduction(v.reduction) &&
           !validDecimalMetadata(v.min_count))
         fail("Invalid Metal Decimal128 reduction metadata");
+      if (momentReduction(v.reduction) && !validMomentMetadata(v.min_count))
+        fail("Invalid Metal moment metadata");
       if (v.reduction != DFM_SUM && v.reduction != DFM_COUNT &&
           v.reduction != DFM_LEN && !typed(r))
         fail("Metal reduction requires typed storage");
@@ -1377,6 +1389,20 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
         "long sum=long(total);state_finish(sum,count,o,end-begin);"
         "bool valid=state_valid(o,count);y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);return;}\n"
         : "") + R"MSL(
+ if(MOMENT_REDUCTIONS&&(o.kind==86||o.kind==87)){
+  if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
+        std::string(windowFloating ? "true" : "false") + R"MSL();
+  uint step=moment_step(meta.y,workers,)MSL" + std::string(windowFloating ? "8192U" : "64U") + R"MSL();
+  uint at=begin;VarianceState state={0,0,0};
+  for(uint worker=0;worker<workers;++worker){VarianceState current={0,0,0};
+   uint stop=min(meta.y,(worker+1U)*step);
+   while(at<end){uint row=uint(x[)MSL" + index + R"MSL(+at]);if(row>=stop)break;++at;
+    ulong from=ulong(o.slot)*meta.z+row;if(v[from])current=variance_add(current,x[from]);}
+   state=variance_merge(state,current);
+  }
+  bool valid=state.count>moment_ddof(o.minimum);
+  y[to]=valid?variance_finish(state,moment_ddof(o.minimum),o.kind==86):0UL;w[to]=uchar(valid);return;
+ }
  if(o.kind==215||o.kind==216){
   if(lane)return;uint workers=decimal_worker_count(o.minimum,meta.y,meta.x);
   uint step=decimal_worker_step(meta.y,workers),at=begin;long total=0,upper=0,count=0;
@@ -1425,6 +1451,16 @@ std::string source(const DFMRequest &r) {
         filterSlot = layout.physical[r.steps[i].slot];
   std::string text = "#include <metal_stdlib>\nusing namespace metal;\n#pragma "
                      "clang fp contract(off)\n";
+  // Keep the moment state machine out of unrelated reduction pipelines.
+  // Out.kind is a runtime parameter, so the shader otherwise retains this
+  // expensive binary64 branch even when the request cannot use it.
+  bool moments = false;
+  for (int64_t i = 0; i < r.output_count; ++i)
+    moments |= momentReduction(r.outputs[i].reduction);
+  for (int64_t i = 0; i < r.code_words; i += 4)
+    moments |= r.code[i] == DFM_GROUP_OUTPUT && momentReduction(r.code[i + 3]);
+  text += "constant bool MOMENT_REDUCTIONS=" +
+          std::string(moments ? "true" : "false") + ";\n";
   bool wide = partialWidth(r) == 32;
   if (typed(r))
     for (int64_t i = 0; i < r.slots; ++i) wide |= r.slot_types[i] == DFM_DECIMAL128;
@@ -1447,6 +1483,19 @@ std::string source(const DFMRequest &r) {
   text += residentSource();
   text += dfm_float64_source;
   text += dfm_decimal_source;
+  text += dfm_moments_source;
+  text += R"MSL(
+ulong moment_ddof(long metadata){return ulong(metadata)&0x7fffffffUL;}
+uint moment_workers(long metadata,uint rows,uint groups,bool window){
+ ulong configured=ulong(metadata)>>47;
+ ulong workers=max(1UL,min(configured,ulong(rows)/(window?65536UL:16384UL)));
+ return uint(window?max(1UL,min(workers,ulong(rows)/max(1UL,4UL*ulong(groups)))):workers);
+}
+uint moment_step(uint rows,uint workers,uint alignment){
+ return uint(((ulong(rows)+workers-1UL)/workers+alignment-1UL)/alignment*alignment);
+}
+)MSL";
+
   text += "constant bool DIRECT_FILTERED_REDUCTION=" +
           std::string(direct ? "true" : "false") + ";\n" +
           "constant ulong FILTERED_SLOT=" + std::to_string(filterSlot) + "UL;\n";
@@ -1637,6 +1686,21 @@ kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[bu
  uint2 group[[threadgroup_position_in_grid]],uint lane[[thread_index_in_threadgroup]]) {
  threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  Out o=out[group.y];
+ if(MOMENT_REDUCTIONS&&(o.kind==86||o.kind==87)){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  uint workers=uint(max(1UL,min(ulong(o.minimum)>>47,ulong(meta.x)/65536UL)));
+  uint step=moment_step(meta.x,workers,8192U);VarianceState state={0,0,0};
+  for(uint worker=0;worker<workers;++worker){VarianceState current={0,0,0};
+   uint begin=min(meta.x,worker*step),end=min(meta.x,(worker+1U)*step);
+   for(uint row=begin;row<end;++row){
+    if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+    ulong idx=o.slot*meta.z+row;if(v[idx])current=variance_add(current,x[idx]);}
+   state=variance_merge(state,current);
+  }
+  bool valid=state.count>moment_ddof(o.minimum);
+  partials[group.y*groups]=make_partial(valid?long(variance_finish(state,moment_ddof(o.minimum),o.kind==86)):0L,0L,long(valid));return;
+ }
  if(o.kind==215||o.kind==216){
   if(lane)return;
   if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}

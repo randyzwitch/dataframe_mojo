@@ -4,6 +4,8 @@ from dataframe.expr import (
     SUM,
     COUNT,
     MEAN,
+    VAR,
+    STD,
     LEN,
     MIN,
     MAX,
@@ -58,6 +60,7 @@ struct RowCapabilities(Copyable):
     var decimal_multiplicative: Bool
     var decimal_arithmetic: Bool
     var ranks: Bool
+    var moments: Bool
     var rolling_windows: Bool
     var shift_fill_windows: Bool
     var cumulative_windows: Bool
@@ -96,6 +99,7 @@ struct RowCapabilities(Copyable):
         temporal_fields: Bool = False,
         ranks: Bool = False,
         cumulative_windows: Bool = False,
+        moments: Bool = False,
         rolling_windows: Bool = False,
         shift_fill_windows: Bool = False,
         decimal128: Bool = False,
@@ -138,6 +142,7 @@ struct RowCapabilities(Copyable):
         self.temporal_fields = temporal_fields
         self.ranks = ranks
         self.cumulative_windows = cumulative_windows
+        self.moments = moments
         self.rolling_windows = rolling_windows
         self.shift_fill_windows = shift_fill_windows
         self.decimal128 = decimal128
@@ -209,6 +214,23 @@ struct RowCapabilities(Copyable):
             )
 
     def require_reduction(self, dtype: DataType, op: Int, rows: Int) raises:
+        if op == VAR or op == STD:
+            if not self.moments:
+                self.reject(
+                    "reduction",
+                    "variance and standard deviation require backend support",
+                )
+            if dtype.is_decimal():
+                self.reject(
+                    "logical",
+                    "decimal moments require an explicit Float64 cast",
+                )
+            if not dtype.is_numeric():
+                self.reject("dtype", "moments require primitive numeric input")
+            if not self.float64 and not self.float64_emulated:
+                self.reject("precision", "moments require Float64 arithmetic")
+            self.require_dtype(dtype)
+            return
         if (
             dtype.is_decimal()
             and dtype.decimal_width() == 128
