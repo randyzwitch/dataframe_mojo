@@ -59,7 +59,49 @@ def mojo_variant_abort_exit_code() -> Int:
 
 def production_policy() -> SuitePolicy:
     var policy = empty_policy()
-    policy.capabilities = ["metal"]
+    policy.capabilities = ["metal", "mojo_gpu"]
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_integer_widths_nullable_slices_chunks_and_chained_programs",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_conditional_errors_are_observed_only_in_selected_values",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_preserves_float64_storage_and_reports_direct_execution",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_boolean_kleene_nulls_empty_rows_and_zero_columns",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_integer_endpoints_and_width_overflow_match_exact_anchors",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_floating_arithmetic_predicates_rounding_and_subnormals",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_rows.mojo::test_mojo_gpu_transcendentals_power_and_numeric_casts",
+            "mojo_gpu",
+        )
+    )
     # exit_code zero means an ordinary exception; nonzero means an isolated process.
     policy.failures.append(
         ExpectedFailure(

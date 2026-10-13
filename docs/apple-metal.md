@@ -1,5 +1,35 @@
 # Apple Silicon Metal backend
 
+## Direct Mojo implementation in progress
+
+The GPU implementation is being migrated into `dataframe/accelerator/gpu/`.
+Its row kernels compile from Mojo, and its orchestration uses Mojo's
+`DeviceContext` for allocations, transfers, launches and synchronization.
+The existing `MetalRuntime` calls this code directly when built with
+`-D DATAFRAME_MOJO_GPU=1`; this path does not load `libdfmetal` or cross the
+dataframe's native C ABI. The optional `gpu` environment supplies the pinned
+MAX accelerator library that now contains Mojo's GPU APIs.
+
+```sh
+pixi run -e gpu test-mojo-gpu
+pixi run -e gpu test-mojo-gpu-floating
+```
+
+The migration covers integer/Boolean row expressions, checked arithmetic,
+conditional error observation, numeric casts, nullable/chunked storage, and
+Float32/Float64 arithmetic, comparisons, rounding, square roots, modulo,
+exponentials, logarithms and power. Floating primitives use integer Mojo code,
+including fused arithmetic and gradual underflow; they do not require native
+Float64 GPU instructions. The second task compares GPU results with independent
+host IEEE arithmetic over boundary and randomized inputs. Unsupported regions
+reject before device allocation.
+Automatic placement awaits calibration for the Mojo implementation. The
+remaining operations below continue to use the existing implementation until
+their Mojo replacements are verified; retaining that implementation during
+migration is not evidence of a Mojo limitation.
+
+## Existing runtime
+
 The optional native Metal runtime executes the shared bound row plan on Apple
 Silicon. The normal dataframe package needs no MAX package or GPU SDK. Building
 the runtime needs macOS 15 or later and Xcode's Metal compiler tools:

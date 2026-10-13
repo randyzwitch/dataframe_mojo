@@ -1,4 +1,8 @@
-"""Optional native Apple Metal provider for the shared accelerator row planner.
+"""Apple GPU provider for the shared accelerator row planner.
+
+DATAFRAME_MOJO_GPU builds execute directly in dataframe.accelerator.gpu with
+Mojo kernels and Mojo GPU APIs. The native implementation remains available
+while its operation coverage is migrated and verified.
 
 Importing this module loads no driver. Binary64 arithmetic uses integer-only
 GPU emulation, including floating sum/mean accumulation. Int64/UInt64 sums and
@@ -12,7 +16,7 @@ from std.math import isfinite
 from std.memory import Pointer, bitcast
 from std.os import getenv
 from std.os.path import exists
-from std.sys import CompilationTarget
+from std.sys import CompilationTarget, get_defined_bool
 from std.time import perf_counter_ns
 from .accelerator.cost import (
     PlanEstimate,
@@ -239,6 +243,8 @@ def metal_library_candidates() -> List[String]:
 
 def metal_installed() -> Bool:
     """Library presence only; this does not open Metal or discover devices."""
+    comptime if get_defined_bool["DATAFRAME_MOJO_GPU"]():
+        return CompilationTarget.is_macos()
     comptime if CompilationTarget.is_macos():
         for path in metal_library_candidates():
             if exists(path):
@@ -1674,12 +1680,20 @@ struct MetalRuntime(AcceleratorBackend):
 
     @staticmethod
     def device_count() raises -> Int:
+        comptime if get_defined_bool["DATAFRAME_MOJO_GPU"]():
+            from max.gpu.host import DeviceContext
+
+            return DeviceContext.number_of_devices()
         var library = _Library()
         var callback = library.count
         return Int(Pointer(to=callback).unsafe_bitcast[_Count]()[]())
 
     def estimate_auto(self, query: LazyFrame) raises -> PlanEstimate:
         """Bound numeric row work; never read values or submit device work."""
+        comptime if get_defined_bool["DATAFRAME_MOJO_GPU"]():
+            raise Error(
+                "Mojo GPU automatic placement awaits its own calibration"
+            )
         if has_selectors(query):
             return self.estimate_auto(lower_selectors(query))
         if has_scalar_projections(query):
@@ -2028,6 +2042,8 @@ struct MetalRuntime(AcceleratorBackend):
     def calibration_key(
         self, optimize: Bool, streaming: Bool, batch_size: Int
     ) raises -> CalibrationKey:
+        comptime if get_defined_bool["DATAFRAME_MOJO_GPU"]():
+            raise Error("Mojo GPU calibration identity is not implemented yet")
         var library = _Library()
         var metadata = _probe_metadata(library, self._device, List[Int64]())
         return _metal_calibration_key(
@@ -2104,6 +2120,10 @@ struct MetalRuntime(AcceleratorBackend):
     def _run(
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
+        comptime if get_defined_bool["DATAFRAME_MOJO_GPU"]():
+            from .accelerator.gpu.runtime import execute
+
+            return execute(query, self._device, self._budget, profiling)
         var start = Int(perf_counter_ns())
         if has_selectors(query):
             var executed = self._run(lower_selectors(query), profiling)
@@ -2328,6 +2348,10 @@ struct MetalRuntime(AcceleratorBackend):
         return _execute(plan, self._device, self._budget, profiling, start)
 
     def describe(self, query: LazyFrame) -> String:
+        comptime if get_defined_bool["DATAFRAME_MOJO_GPU"]():
+            from .accelerator.gpu.runtime import describe
+
+            return describe(query)
         try:
             if has_selectors(query):
                 return "Metal schema selector expansion; " + self.describe(

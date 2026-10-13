@@ -101,3 +101,14 @@ build-dfparquet = "bash native/dfparquet/build.sh build/dfparquet"
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }
 native = { features = ["native"], solve-group = "default" }
+gpu = { features = ["gpu"] }
+
+[feature.gpu]
+platforms = ["osx-arm64"]
+
+[feature.gpu.dependencies]
+max-core = "==26.7.0.dev2026100905"
+
+[feature.gpu.tasks]
+test-mojo-gpu-floating = "python3 tests/tooling/mojo_gpu_floating.py"
+test-mojo-gpu = "mojo run -D DATAFRAME_MOJO_GPU=1 -I . tests/tooling/mojo_gpu_rows.mojo"
