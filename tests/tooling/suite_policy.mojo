@@ -1027,6 +1027,7 @@ def production_policy() -> SuitePolicy:
                 "tests/kernel_equivalence/test_bucket_keys.mojo",
                 "tests/kernel_equivalence/test_group_cardinality.mojo",
                 "tests/kernel_equivalence/test_hash_join_routes.mojo",
+                "tests/kernel_equivalence/test_join_key_matching.mojo",
                 "tests/kernel_equivalence/test_join_parallel_boundaries.mojo",
                 "tests/kernel_equivalence/test_native_string_rank.mojo",
                 "tests/kernel_equivalence/test_order_keys.mojo",
