@@ -88,6 +88,7 @@ def test_moments_capability_precision_metadata_and_private_casts() raises:
             decimal_fixture(3, 2).lazy().select(col("wide").var()),
             _capabilities(),
         )
+    _ = setting^
 
 
 def test_native_metal_moments_numeric_widths_ddof_empty_null_and_literal_results() raises:
@@ -181,6 +182,7 @@ def test_native_metal_moments_numeric_widths_ddof_empty_null_and_literal_results
             runtime,
         )
         check(nulls.lazy().select(col("x").var(ddof).over("k")), runtime)
+    _ = setting^
 
 
 def test_native_metal_moments_ieee_words_full_unsigned_and_decimal_casts() raises:
@@ -247,6 +249,7 @@ def test_native_metal_moments_ieee_words_full_unsigned_and_decimal_casts() raise
             ),
             runtime,
         )
+    _ = setting^
 
 
 def test_native_metal_moments_large_worker_merges_and_conditioned_accuracy() raises:
@@ -275,6 +278,9 @@ def test_native_metal_moments_large_worker_merges_and_conditioned_accuracy() rai
                 ]
             )
             var query = frame.lazy().select_exprs(expressions("x", 1))
+            var plan = lower_rows(query, _capabilities())
+            for output in plan.outputs:
+                assert_equal(output.min_count >> 47, workers)
             var actual = query.collect(accelerator=runtime)
             # Check both materializing and streaming CPU routes.
             near(actual, frame.select_exprs(expressions("x", 1)))
@@ -328,6 +334,7 @@ def test_native_metal_moments_large_worker_merges_and_conditioned_accuracy() rai
                     )
                     < Float64(1e-9)
                 )
+        _ = setting^
 
 
 def test_native_metal_moments_nested_consumers_preflight_cost_budget_and_reuse() raises:
@@ -416,12 +423,12 @@ def test_native_metal_moments_nested_consumers_preflight_cost_budget_and_reuse()
         ),
         runtime,
     )
-    var unproven = frame.lazy().select((col("x") + lit(Int32(1))).var())
+    var unproven = frame.lazy().select((col("x") + lit(Int32(1))).var()).head(1)
     assert_true(
         "unsupported" in MetalRuntime(device_id=999999).describe(unproven)
     )
     var query = frame.lazy().select(col("x").var().over("k"))
-    var estimate = runtime.estimate_auto(query)
+    var estimate = runtime.estimate_auto(frame.lazy().select(col("x").var()))
     assert_true(";moments-v1" in estimate.family)
     assert_true(";metal-moments-v1" in estimate.family)
     same(
@@ -438,3 +445,4 @@ def test_native_metal_moments_nested_consumers_preflight_cost_budget_and_reuse()
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))
     for ddof in List[Int]([0, 1, 7, Int(Int64.MAX), 2, 1]):
         check(frame.lazy().select_exprs(expressions("x", ddof)), runtime)
+    _ = setting^
