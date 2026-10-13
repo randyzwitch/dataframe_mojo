@@ -6,6 +6,11 @@
 // The Mojo wrapper passes addresses of these structs; no C++ or Objective-C
 // object crosses the ABI. Bump the version when layouts or meanings change.
 #define DFM_ABI_VERSION 2
+// Bounded shape extensions preserve the existing layouts and opcode meanings.
+#define DFM_MAX_NODES 128
+#define DFM_MAX_SLOTS 256
+#define DFM_MAX_STEPS 128
+#define DFM_MAX_JOIN_COLUMNS 256
 #define DFM_API __attribute__((visibility("default")))
 
 enum DFMType {
@@ -19,15 +24,19 @@ enum DFMType {
   DFM_UINT16 = 8,
   DFM_UINT32 = 9,
   DFM_UINT64 = 10,
-  // Opaque IEEE-754 words: storage, copying and validity only. Native Metal
-  // never performs Float64 arithmetic, conversions, comparisons or ordering.
+  // IEEE-754 binary64 words. Arithmetic and conversions use integer-only
+  // software primitives; the name retains compatibility with opaque storage.
   DFM_FLOAT64_STORAGE = 11,
+  // Signed 128-bit decimal payload, stored as low/high 64-bit columns.
+  DFM_DECIMAL128 = 12,
 };
 
 // Fixed native opcodes. The Mojo wrapper translates the shared expression IR
 // rather than relying on its numeric constants remaining unchanged.
 enum DFMOp {
   DFM_COLUMN = 0,
+  // Decimal128 literals use literals[node] for the low word and code[3]
+  // to name an Int64 literal payload containing the high word.
   DFM_LITERAL_INT = 1,
   DFM_LITERAL_FLOAT = 2,
   DFM_LITERAL_BOOL = 3,
@@ -43,6 +52,7 @@ enum DFMOp {
   DFM_GE = 21,
   DFM_LE = 22,
   DFM_NE = 23,
+  DFM_DIV = 24,
   DFM_AND = 30,
   DFM_OR = 31,
   DFM_XOR = 32,
@@ -59,8 +69,12 @@ enum DFMOp {
   DFM_FILL_NAN = 34,
   DFM_KEEP_NULLS = 35,
   DFM_ABS = 51,
+  DFM_SQRT = 52,
   DFM_FLOOR = 55,
   DFM_CEIL = 56,
+  // Unary ROUND: code[3] is decimals. For nonzero floating decimals,
+  // typed descriptors are required and literals[node] carries the bound
+  // binary64 encoding of 10**abs(decimals), including for Float32 operands.
   DFM_ROUND = 57,
   DFM_IS_NAN = 63,
   DFM_IS_NOT_NAN = 64,
@@ -88,6 +102,17 @@ enum DFMOp {
   // ticks. Whole-week steps align to Monday; other steps to the epoch.
   DFM_DT_TRUNCATE = 141,
   DFM_MIN = 80,
+  DFM_MEAN = 82,
+  // Float64 Welford/Chan reductions. min_count metadata: low 31 bits ddof,
+  // next 16 bits reserved (zero), high 16 bits configured worker limit.
+  DFM_STD = 86,
+  DFM_VAR = 87,
+  DFM_SKEW = 98,
+  DFM_KURTOSIS = 99,
+  // Paired Float64 reductions. Moment metadata uses ddof bits 0..30,
+  // the logical right operand slot in bits 31..46, and workers in 47..62.
+  DFM_CORR = 160,
+  DFM_COV = 161,
   DFM_MAX = 81,
   DFM_FIRST = 83,
   DFM_LAST = 84,
@@ -107,6 +132,51 @@ enum DFMOp {
   // Bool predicate over current resident row positions. Operands name two
   // Int64 literals containing offset and length; negative offsets count back.
   DFM_SLICE = 206,
+  // Rank header: input slot, descending flag, method (average/min/max/dense/ordinal).
+  // Optional following SORT_KEY descriptors name partition columns.
+  DFM_RANK_KEY = 207,
+  // Exact Decimal32/64 sum with Decimal128 output.
+  DFM_WIDE_SUM = 208,
+  // Aggregate-window group header. Its literal is the configured CPU worker
+  // count; floating sums preserve source order and CPU window partitions.
+  DFM_GROUP_HEADER_WINDOW = 209,
+  // Exact signed/unsigned 128-bit accumulation for 64-bit integer sources.
+  // SUM checks the final source-width result; MEAN converts the exact total.
+  DFM_WIDE_INTEGER_SUM = 210,
+  DFM_WIDE_INTEGER_MEAN = 211,
+  // Exact Decimal32/64 mean with CPU quotient/remainder rounding. Metadata
+  // carries the source scale in min_count (or the GROUP_OUTPUT literal).
+  DFM_WIDE_DECIMAL_MEAN = 212,
+  // Unary decimal-to-Float64 conversion. code[3] is scale, code[2] is -1;
+  // literals[node] is the CPU binary64 conversion of the integer 10**scale.
+  DFM_DECIMAL_FLOAT_CAST = 213,
+  // Ordered window header: input slot, reverse flag, method
+  // (sum/min/max/count/shift/forward-fill/backward-fill).
+  // SORT_KEY descriptors name partitions. The header literal is decimal
+  // precision for sums, signed shift offset or fill limit for methods 4..6.
+  // Methods 7/8/9/10: rolling sum/mean/min/max. Header operand 2 is
+  // min_samples; the literal stores the signed Int64 window size bits.
+  // Methods 11/12: rolling variance/std over Float64. Operand 2 is
+  // min_samples; literal low/high UInt32 words carry window size/ddof.
+  // Mojo lowering saturates both fields to UInt32.MAX (the row-count limit).
+  DFM_CUMULATIVE_KEY = 214,
+  // Decimal128 SUM/MEAN preserve CPU worker partitions and check every
+  // precision-bounded partial and merge. Packed metadata carries min_count,
+  // precision, scale, and the configured worker count.
+  DFM_DECIMAL128_SUM = 215,
+  DFM_DECIMAL128_MEAN = 216,
+  // Unary integer/decimal cast. code[3] packs source scale (6 bits), target
+  // scale (6), target decimal precision (6), strict, source/target decimal flags.
+  // Decimal -> Float32 uses the CPU binary64 divisor in literals[node].
+  DFM_DECIMAL_CAST = 217,
+  // Binary decimal comparison: code[3] packs left scale (6 bits), right scale
+  // (6), and the original comparison opcode. Rescaling checks signed Int128.
+  DFM_DECIMAL_COMPARE = 218,
+  // Binary decimal ADD/SUB/MUL/DIV: packed source scales (6 bits each) and opcode.
+  // The output is Decimal128, precision 38, at the larger input scale.
+  DFM_DECIMAL_ARITHMETIC = 219,
+  // Unary decimal NEG/ABS: code[3] is the original unary opcode.
+  DFM_DECIMAL_UNARY = 220,
 };
 
 typedef struct DFMInput {
@@ -122,7 +192,7 @@ typedef struct DFMStep {
   int64_t nodes;
   int64_t slot;
   int64_t filter; // 0 projection, 1 stable filter, 2 stable sort, 3 grouped
-                  // reduction.
+                  // reduction, 4 rank, 5 cumulative (both keep original row order).
   int64_t gather_start;
   int64_t gather_count;
 } DFMStep;
@@ -133,7 +203,7 @@ typedef struct DFMOutput {
   int64_t dtype;
   int64_t slot;
   int64_t reduction; // -1 for row output.
-  int64_t min_count; // Sum minimum; Boolean any/all ignore_nulls flag.
+  int64_t min_count; // Sum minimum; Boolean ignore_nulls; decimal mean scale.
 } DFMOutput;
 
 typedef struct DFMRequest {
@@ -141,11 +211,12 @@ typedef struct DFMRequest {
   int64_t rows;
   int64_t dtype; // Common numeric type, or zero for typed 64-bit word storage.
   int64_t slots;
-  int64_t input_count;
+  int64_t input_count; // Zero-column sources retain rows with no inputs.
   int64_t code_words;
   int64_t literal_count;
   int64_t step_count;
   int64_t gather_count;
+  // Zero columns retain row cardinality; outputs may be null in that case.
   int64_t output_count;
   int64_t limit; // -1 or final head length.
   int64_t reductions;
@@ -237,7 +308,8 @@ typedef struct DFMJoinRequest {
   int64_t abi_version;
   int64_t left_rows, right_rows;
   int64_t input_count, key_count, output_count;
-  int64_t how;   // inner, left, right, full, semi, anti, cross = 0..6.
+  int64_t how;   // inner, left, right, full, semi, anti, cross = 0..6;
+                // 7 is internal left join with null-equal partition keys.
   int64_t limit; // -1 or final head.
   int64_t memory_budget_bytes;
   int64_t profiling;

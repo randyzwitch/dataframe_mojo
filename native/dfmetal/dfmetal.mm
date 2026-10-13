@@ -1,4 +1,7 @@
 #include "dfmetal.h"
+#include "dfmetal_float64.h"
+#include "dfmetal_decimal.h"
+#include "dfmetal_moments.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <algorithm>
@@ -38,15 +41,15 @@ void error(char **p, const std::exception &e) {
     *p = strdup(e.what());
 }
 bool binaryOp(int64_t op) {
-  return op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_GT ||
+  return op == DFM_DECIMAL_ARITHMETIC || op == DFM_DECIMAL_COMPARE || op == DFM_ADD || op == DFM_SUB || op == DFM_MUL || op == DFM_DIV || op == DFM_GT ||
          op == DFM_EQ ||
          ((op >= DFM_LT && op <= DFM_NE) ||
           (op >= DFM_FLOORDIV && op <= DFM_CLIP_HIGH)) ||
          (op >= DFM_AND && op <= DFM_KEEP_NULLS);
 }
 bool unaryOp(int64_t op) {
-  return (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
-         op == DFM_CEIL || op == DFM_ROUND ||
+  return op == DFM_DECIMAL_UNARY || (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) || op == DFM_INT_IS_IN || op == DFM_CAST || op == DFM_DECIMAL_FLOAT_CAST || op == DFM_DECIMAL_CAST || op == DFM_NEG || op == DFM_ABS || op == DFM_FLOOR ||
+         op == DFM_CEIL || op == DFM_ROUND || op == DFM_SQRT ||
          (op >= DFM_NOT && op <= DFM_IS_INFINITE);
 }
 int64_t add(int64_t a, int64_t b) {
@@ -60,6 +63,7 @@ int64_t mul(int64_t a, int64_t b) {
   return a * b;
 }
 int64_t width(int64_t t) {
+  if (t == DFM_DECIMAL128) return 16;
   if (t == DFM_FLOAT32 || t == DFM_INT32 || t == DFM_UINT32)
     return 4;
   if (t == DFM_INT64 || t == DFM_UINT64 || t == DFM_FLOAT64_STORAGE)
@@ -76,15 +80,32 @@ bool unsignedType(int64_t t) {
          t == DFM_UINT64;
 }
 bool sumSupported(int64_t t) {
-  return t != DFM_FLOAT32 && t != DFM_BOOL && t != DFM_FLOAT64_STORAGE;
+  return t != DFM_BOOL;
 }
 int64_t sumType(int64_t t) {
+  if (t == DFM_FLOAT32 || t == DFM_FLOAT64_STORAGE) return t;
   return t == DFM_INT32 || t == DFM_UINT32 || t == DFM_UINT64 ? t : DFM_INT64;
 }
 int64_t reductionType(int64_t type, int64_t op) {
-  if (type == DFM_FLOAT64_STORAGE &&
-      (op == DFM_MIN || op == DFM_MAX || op == DFM_ARG_MIN || op == DFM_ARG_MAX))
+  if (op == DFM_VAR || op == DFM_STD || op == DFM_COV || op == DFM_CORR || op == DFM_SKEW || op == DFM_KURTOSIS)
+    return type == DFM_FLOAT64_STORAGE ? DFM_FLOAT64_STORAGE : -1;
+  if (op == DFM_WIDE_INTEGER_SUM || op == DFM_WIDE_INTEGER_MEAN)
+    return type == DFM_INT64 || type == DFM_UINT64
+               ? (op == DFM_WIDE_INTEGER_SUM ? type : DFM_FLOAT64_STORAGE) : -1;
+  if (op == DFM_WIDE_DECIMAL_MEAN)
+    return type == DFM_INT32 || type == DFM_INT64 ? DFM_FLOAT64_STORAGE : -1;
+  if (op == DFM_WIDE_SUM)
+    return type == DFM_INT32 || type == DFM_INT64 ? DFM_DECIMAL128 : -1;
+  if (op == DFM_DECIMAL128_SUM)
+    return type == DFM_DECIMAL128 ? DFM_DECIMAL128 : -1;
+  if (op == DFM_DECIMAL128_MEAN)
+    return type == DFM_DECIMAL128 ? DFM_FLOAT64_STORAGE : -1;
+  if (type == DFM_DECIMAL128) {
+    if (op == DFM_COUNT || op == DFM_LEN || op == DFM_NULL_COUNT) return DFM_INT64;
+    if (op == DFM_MIN || op == DFM_MAX || op == DFM_FIRST || op == DFM_LAST) return DFM_DECIMAL128;
     return -1;
+  }
+  if (op == DFM_MEAN) return type == DFM_BOOL ? -1 : DFM_FLOAT64_STORAGE;
   if (op == DFM_SUM)
     return sumSupported(type) ? sumType(type) : -1;
   if (op == DFM_COUNT || op == DFM_LEN || op == DFM_NULL_COUNT)
@@ -97,7 +118,54 @@ int64_t reductionType(int64_t type, int64_t op) {
     return type;
   return -1;
 }
+bool pairMomentReduction(int64_t op) { return op == DFM_COV || op == DFM_CORR; }
+int64_t momentRight(int64_t metadata) { return (uint64_t(metadata) >> 31) & 0xffffULL; }
+bool higherMomentReduction(int64_t op) { return op == DFM_SKEW || op == DFM_KURTOSIS; }
+bool momentReduction(int64_t op) { return op == DFM_VAR || op == DFM_STD || higherMomentReduction(op) || pairMomentReduction(op); }
+bool validMomentMetadata(int64_t metadata, int64_t op) {
+  return metadata >= 0 && (!higherMomentReduction(op) || (uint64_t(metadata) & 0x7fffffffULL) <= (op == DFM_SKEW ? 1 : 3)) && (pairMomentReduction(op) || momentRight(metadata) == 0) &&
+         ((uint64_t(metadata) >> 47) & 0xffffULL) >= 1;
+}
+bool decimal128Reduction(int64_t op) {
+  return op == DFM_DECIMAL128_SUM || op == DFM_DECIMAL128_MEAN;
+}
+uint64_t decimalMinCount(int64_t metadata) {
+  return uint64_t(metadata) & 0xffffffffULL;
+}
+uint64_t decimalPrecision(int64_t metadata) {
+  return (uint64_t(metadata) >> 32) & 63ULL;
+}
+uint64_t decimalScale(int64_t metadata) {
+  return (uint64_t(metadata) >> 38) & 63ULL;
+}
+uint64_t decimalWorkers(int64_t metadata) {
+  return (uint64_t(metadata) >> 44) & 0xffffULL;
+}
+bool validDecimalMetadata(int64_t metadata) {
+  auto precision = decimalPrecision(metadata), scale = decimalScale(metadata);
+  return metadata >= 0 && (uint64_t(metadata) >> 60) == 0 && precision >= 1 &&
+         precision <= 38 && scale <= precision && decimalWorkers(metadata) >= 1;
+}
+bool sumReduction(int64_t op) {
+  return op == DFM_SUM || op == DFM_WIDE_SUM ||
+         op == DFM_WIDE_INTEGER_SUM || op == DFM_DECIMAL128_SUM;
+}
+int64_t reductionMinimum(int64_t op, int64_t metadata) {
+  return op == DFM_DECIMAL128_SUM ? int64_t(decimalMinCount(metadata))
+                                  : metadata;
+}
 bool typed(const DFMRequest &r) { return r.dtype == 0; }
+int64_t partialWidth(const DFMRequest &r) {
+  if (!r.reductions) return 16;
+  for (int64_t i = 0; i < r.output_count; ++i) {
+    auto &o = r.outputs[i];
+    if (o.dtype == DFM_DECIMAL128 || o.reduction == DFM_WIDE_INTEGER_SUM ||
+        o.reduction == DFM_WIDE_INTEGER_MEAN ||
+        o.reduction == DFM_WIDE_DECIMAL_MEAN ||
+        o.reduction == DFM_DECIMAL128_MEAN) return 32;
+  }
+  return 16;
+}
 int64_t storageWidth(const DFMRequest &r) {
   return typed(r) ? 8 : width(r.dtype);
 }
@@ -109,6 +177,8 @@ int64_t slotType(const DFMRequest &r, int64_t slot) {
 }
 const char *metalType(int64_t t) {
   switch (t) {
+  case DFM_DECIMAL128:
+    return "ulong2";
   case DFM_FLOAT32:
     return "float";
   case DFM_INT32:
@@ -148,15 +218,17 @@ int64_t aligned(int64_t n) { return mul(add(n, 7) / 8, 8); }
 // inside one segment stay in per-thread variables; only boundary-live slots
 // occupy shared memory. Logical ABI slot identifiers remain unchanged.
 struct Layout {
-  std::array<int64_t, 64> physical;
-  std::array<std::array<bool, 64>, 64> gathered{}, group_after{};
+  std::array<int64_t, DFM_MAX_SLOTS> physical;
+  std::array<std::array<bool, DFM_MAX_SLOTS>, DFM_MAX_STEPS> gathered{},
+      group_after{};
   std::vector<int64_t> ends;
   int64_t slots = 0;
   explicit Layout(const DFMRequest &r) {
     physical.fill(-1);
     auto keep = [&](int64_t slot) {
       if (physical[slot] < 0)
-        physical[slot] = slots++;
+        { physical[slot] = slots;
+          slots += slotType(r, slot) == DFM_DECIMAL128 ? 2 : 1; }
     };
     for (int64_t i = 0; i < r.input_count; ++i)
       keep(i);
@@ -164,7 +236,11 @@ struct Layout {
       if (r.steps[first].filter >= 2) {
         ends.push_back(first);
         auto &step = r.steps[first];
-        if (step.filter == 2) {
+        if (step.filter == 4 || step.filter == 5) {
+          keep(step.slot);
+          for (int64_t j = 0; j < step.nodes; ++j)
+            keep(r.code[4 * (step.start + j) + 1]);
+        } else if (step.filter == 2) {
           for (int64_t j = 0; j < step.nodes; ++j)
             keep(r.code[4 * (step.start + j) + 1]);
         } else {
@@ -175,8 +251,10 @@ struct Layout {
           for (int64_t j = 1; j < step.nodes; ++j) {
             auto c = r.code + 4 * (step.start + j);
             keep(c[1]);
-            if (c[0] == DFM_GROUP_OUTPUT)
+            if (c[0] == DFM_GROUP_OUTPUT) {
               keep(c[2]);
+              if (pairMomentReduction(c[3])) keep(momentRight(int64_t(r.literals[step.start + j])));
+            }
           }
         }
         ++first;
@@ -187,7 +265,7 @@ struct Layout {
              r.steps[end + 1].filter < 2)
         ++end;
       ends.push_back(end);
-      std::array<bool, 64> local{};
+      std::array<bool, DFM_MAX_SLOTS> local{};
       for (int64_t k = first; k <= end; ++k) {
         for (int64_t j = 0; j < r.steps[k].nodes; ++j) {
           auto *c = r.code + 4 * (r.steps[k].start + j);
@@ -200,13 +278,17 @@ struct Layout {
         keep(r.steps[end].slot);
       first = end + 1;
     }
-    for (int64_t i = 0; i < r.output_count; ++i)
+    for (int64_t i = 0; i < r.output_count; ++i) {
       keep(r.outputs[i].slot);
+      if (pairMomentReduction(r.outputs[i].reduction)) keep(momentRight(r.outputs[i].min_count));
+    }
     // A column can need physical storage before a boundary without needing a
     // gather after it. Walk uses backward to distinguish those lifetimes.
-    std::array<bool, 64> live{};
-    for (int64_t i = 0; i < r.output_count; ++i)
+    std::array<bool, DFM_MAX_SLOTS> live{};
+    for (int64_t i = 0; i < r.output_count; ++i) {
       live[r.outputs[i].slot] = true;
+      if (pairMomentReduction(r.outputs[i].reduction)) live[momentRight(r.outputs[i].min_count)] = true;
+    }
     for (int64_t i = r.step_count; i-- > 0;) {
       auto &step = r.steps[i];
       if (step.filter == 1 || step.filter == 2)
@@ -223,9 +305,14 @@ struct Layout {
           if (node[0] == DFM_GROUP_OUTPUT)
             live[node[2]] = false;
         }
-        for (int64_t j = 1; j < step.nodes; ++j)
-          live[r.code[4 * (step.start + j) + 1]] = true;
-      } else if (step.filter == 2) {
+        for (int64_t j = 1; j < step.nodes; ++j) {
+          auto node = r.code + 4 * (step.start + j);
+          live[node[1]] = true;
+          if (node[0] == DFM_GROUP_OUTPUT && pairMomentReduction(node[3]))
+            live[momentRight(int64_t(r.literals[step.start + j]))] = true;
+        }
+      } else if (step.filter == 2 || step.filter == 4 || step.filter == 5) {
+        if (step.filter == 4 || step.filter == 5) live[step.slot] = false;
         for (int64_t j = 0; j < step.nodes; ++j)
           live[r.code[4 * (step.start + j) + 1]] = true;
       } else {
@@ -241,6 +328,12 @@ struct Layout {
     }
   }
 };
+int64_t physicalMomentMetadata(int64_t metadata, const Layout &layout) {
+  auto right = layout.physical[momentRight(metadata)];
+  return (uint64_t(metadata) & ~(0xffffULL << 31)) | (uint64_t(right) << 31);
+}
+#include "dfmetal_rank.inc"
+#include "dfmetal_window.inc"
 struct Shape {
   int64_t cap, packed, blocks, bitmap, matrix, validity, literal, outputBits,
       partial;
@@ -263,7 +356,7 @@ int64_t radixPasses(const DFMRequest &r, int64_t step) {
   const auto &v = r.steps[step];
   for (int64_t j = 0; j < v.nodes; ++j) {
     auto type = slotType(r, r.code[4 * (v.start + j) + 1]);
-    if (type == DFM_FLOAT32) return 0;
+    if (type == DFM_FLOAT32 || type == DFM_FLOAT64_STORAGE) return 0;
     passes += 2 * width(type) + 1;
   }
   return passes <= 18 ? passes : 0;
@@ -293,16 +386,16 @@ Shape validate(const DFMRequest &r, bool storage = false,
                bool resident_output = false) {
   if (r.abi_version != DFM_ABI_VERSION)
     fail("Metal ABI version mismatch");
-  if (r.rows < 0 || r.rows > INT32_MAX || r.slots < 1 || r.slots > 64 ||
-      r.input_count < 1 || r.input_count > r.slots || r.step_count < 0 ||
-      r.step_count > 64 || r.output_count < 1 || r.output_count > 64 ||
+  if (r.rows < 0 || r.rows > INT32_MAX || r.slots < 0 || r.slots > DFM_MAX_SLOTS ||
+      r.input_count < 0 || r.input_count > r.slots || r.step_count < 0 ||
+      r.step_count > DFM_MAX_STEPS || r.output_count < 0 || r.output_count > DFM_MAX_SLOTS ||
       r.literal_count < 0 || r.literal_count > 4096 ||
       r.code_words != mul(r.literal_count, 4) || r.gather_count < 0 ||
       r.gather_count > 4096 || r.limit < -1 || r.memory_budget_bytes < -1 ||
       (r.reductions != 0 && r.reductions != 1))
     fail("Invalid Metal request shape");
   if (typed(r)) {
-    if ((r.literal_count && !r.node_types) || !r.slot_types)
+    if ((r.literal_count && !r.node_types) || (r.slots && !r.slot_types))
       fail("Missing typed Metal descriptors");
     for (int64_t i = 0; i < r.slots; ++i)
       width(r.slot_types[i]);
@@ -310,11 +403,13 @@ Shape validate(const DFMRequest &r, bool storage = false,
       width(r.node_types[i]);
   } else
     width(r.dtype);
+  if (r.dtype == DFM_DECIMAL128)
+    fail("Metal Decimal128 requires typed storage");
   if (r.dtype == DFM_BOOL)
     fail("Metal common storage must be numeric");
   if (r.dtype == DFM_FLOAT64_STORAGE)
     fail("Metal opaque Float64 requires typed storage");
-  if (!r.inputs || !r.outputs || (r.step_count && !r.steps) ||
+  if ((r.input_count && !r.inputs) || (r.output_count && !r.outputs) || (r.step_count && !r.steps) ||
       (r.literal_count && (!r.code || !r.literals)) ||
       (r.gather_count && !r.gathers))
     fail("Missing Metal request descriptors");
@@ -345,32 +440,93 @@ Shape validate(const DFMRequest &r, bool storage = false,
     if (v.has_validity)
       s.bitmap = add(s.bitmap, bytes);
   }
-  std::array<bool, 64> defined{};
+  std::array<bool, DFM_MAX_SLOTS> defined{};
   for (int64_t i = 0; i < r.input_count; ++i)
     defined[i] = true;
   for (int64_t i = 0; i < r.step_count; ++i) {
     const auto &v = r.steps[i];
-    if (v.start < 0 || v.nodes < 1 || v.nodes > 64 ||
+    if (v.start < 0 || v.nodes < 1 || v.nodes > DFM_MAX_NODES ||
         add(v.start, v.nodes) > r.literal_count ||
         (v.filter != 2 && v.slot < r.input_count) || v.slot < 0 ||
         v.slot >= r.slots || v.gather_start < 0 || v.gather_count < 0 ||
         add(v.gather_start, v.gather_count) > r.gather_count ||
-        (v.filter < 0 || v.filter > 3))
+        (v.filter < 0 || v.filter > 5))
       fail("Invalid Metal expression step");
+    if (v.filter == 5) {
+      auto h = r.code + 4 * v.start;
+      if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_CUMULATIVE_KEY ||
+          h[1] < 0 || h[1] >= r.slots || h[2] < 0 || (h[3] < 7 && h[2] > 1) || h[3] < 0 || h[3] > 12 ||
+          (h[3] >= 4 && h[3] <= 6 && h[2] != (h[3] == 6)))
+        fail("Invalid Metal cumulative descriptor");
+      auto input = slotType(r, h[1]), output = slotType(r, v.slot);
+      if ((h[3] >= 4 && h[3] <= 6 && output != input) || (h[3] == 3 && output != DFM_INT64) ||
+          ((h[3] == 1 || h[3] == 2 || h[3] == 9 || h[3] == 10) && output != input) ||
+          (h[3] >= 11 && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
+          (h[3] == 8 && (output != DFM_FLOAT64_STORAGE || input == DFM_DECIMAL128 || input == DFM_BOOL)) ||
+          (h[3] == 7 && (input == DFM_BOOL || input == DFM_DECIMAL128 || output == DFM_DECIMAL128)) ||
+          ((h[3] == 0 || h[3] == 7) && (input == DFM_BOOL ||
+            (output != DFM_DECIMAL128 || (input != DFM_INT32 && input != DFM_INT64 && input != DFM_DECIMAL128)) &&
+            output != (input == DFM_INT8 || input == DFM_INT16 || input == DFM_UINT8 || input == DFM_UINT16
+              ? DFM_INT64 : input))))
+        fail("Invalid Metal cumulative result type");
+      // Decimal32/64 storage also uses the signed integer word types. Its
+      // widened result distinguishes decimal sums from primitive sums.
+      if (h[3] == 0 && output == DFM_DECIMAL128 &&
+          (r.literals[v.start] < 1 || r.literals[v.start] > 38 ||
+           r.literals[v.start] != int64_t(r.literals[v.start])))
+        fail("Invalid Metal cumulative decimal precision");
+      if (h[3] >= 7) {
+        int64_t window;
+        memcpy(&window, r.literals + v.start, 8);
+        if ((h[3] >= 11 ? uint32_t(window) == 0 : window < 1))
+          fail("Invalid Metal rolling window size");
+      }
+      for (int64_t j = 0; j < v.nodes; ++j) {
+        auto key = r.code + 4 * (v.start + j);
+        if (key[1] < 0 || key[1] >= r.slots || !defined[key[1]] ||
+            r.node_types[v.start + j] != slotType(r, key[1]) ||
+            (j && (key[0] != DFM_SORT_KEY || key[2] != 0 || key[3] != 1)))
+          fail("Invalid Metal cumulative input or partition key");
+      }
+      defined[v.slot] = true;
+      s.order = true;
+      continue;
+    }
+    if (v.filter == 4) {
+      auto h = r.code + 4 * v.start;
+      if (!typed(r) || v.gather_count || defined[v.slot] || h[0] != DFM_RANK_KEY ||
+          h[2] < 0 || h[2] > 1 || h[3] < 0 || h[3] > 4 ||
+          slotType(r, v.slot) != (h[3] == 0 ? DFM_FLOAT64_STORAGE : DFM_INT64))
+        fail("Invalid Metal rank descriptor");
+      for (int64_t j = 0; j < v.nodes; ++j) {
+        auto key = r.code + 4 * (v.start + j);
+        if (key[1] < 0 || key[1] >= r.slots || !defined[key[1]] ||
+            r.node_types[v.start + j] != slotType(r, key[1]) ||
+            (j && (key[0] != DFM_SORT_KEY || key[2] != 0 || key[3] != 1)))
+          fail("Invalid Metal rank input or partition key");
+      }
+      defined[v.slot] = true;
+      s.order = true;
+      continue;
+    }
     if (v.filter == 3) {
       if (!typed(r) || v.gather_count || v.nodes < 1)
         fail("Invalid Metal group storage");
       auto h = r.code + 4 * v.start;
-      if ((h[0] != DFM_GROUP_HEADER && h[0] != DFM_GROUP_HEADER_LAST) ||
+      if ((h[0] != DFM_GROUP_HEADER && h[0] != DFM_GROUP_HEADER_LAST &&
+           h[0] != DFM_GROUP_HEADER_WINDOW) ||
           h[1] < 0 || h[1] >= v.nodes ||
           h[2] < r.input_count || h[2] >= r.slots || h[3] < r.input_count ||
           h[3] >= r.slots || h[2] == h[3] || h[2] == v.slot || h[3] == v.slot)
         fail("Invalid Metal group header");
+      if (h[0] == DFM_GROUP_HEADER_WINDOW &&
+          (r.literals[v.start] < 1 || r.literals[v.start] > uint64_t(INT32_MAX)))
+        fail("Invalid Metal window worker metadata");
       if (defined[v.slot] || defined[h[2]] || defined[h[3]] ||
           slotType(r, v.slot) != DFM_INT64 || slotType(r, h[2]) != DFM_INT64 ||
           slotType(r, h[3]) != DFM_INT64)
         fail("Invalid Metal group temporary slots");
-      std::array<bool, 64> targets{};
+      std::array<bool, DFM_MAX_SLOTS> targets{};
       for (int64_t j = 1; j < v.nodes; ++j) {
         auto c = r.code + 4 * (v.start + j);
         if (c[1] < 0 || c[1] >= r.slots || !defined[c[1]])
@@ -379,8 +535,6 @@ Shape validate(const DFMRequest &r, bool storage = false,
           if (c[0] != DFM_GROUP_KEY || c[2] || c[3] ||
               r.node_types[v.start + j] != slotType(r, c[1]))
             fail("Invalid Metal group key");
-          if (slotType(r, c[1]) == DFM_FLOAT64_STORAGE)
-            fail("Metal Float64 grouping requires CPU execution");
         } else {
           if (c[0] != DFM_GROUP_OUTPUT || c[2] < r.input_count ||
               c[2] >= r.slots || defined[c[2]] || targets[c[2]] ||
@@ -389,6 +543,19 @@ Shape validate(const DFMRequest &r, bool storage = false,
           auto t = slotType(r, c[1]), out = slotType(r, c[2]);
           if (out != reductionType(t, c[3]))
             fail("Unsupported Metal grouped reduction precision");
+          if (c[3] == DFM_WIDE_DECIMAL_MEAN &&
+              r.literals[v.start + j] > uint64_t(t == DFM_INT32 ? 9 : 18))
+            fail("Invalid Metal decimal mean scale");
+          if (decimal128Reduction(c[3]) &&
+              !validDecimalMetadata(int64_t(r.literals[v.start + j])))
+            fail("Invalid Metal Decimal128 reduction metadata");
+          if (momentReduction(c[3]) && !validMomentMetadata(int64_t(r.literals[v.start + j]), c[3]))
+            fail("Invalid Metal moment metadata");
+          if (pairMomentReduction(c[3])) {
+            auto right = momentRight(int64_t(r.literals[v.start + j]));
+            if (right >= r.slots || !defined[right] || slotType(r, right) != DFM_FLOAT64_STORAGE)
+              fail("Invalid Metal paired moment right input");
+          }
           if ((c[3] == DFM_ANY || c[3] == DFM_ALL) &&
               r.literals[v.start + j] > 1)
             fail("Invalid Metal Boolean reduction metadata");
@@ -414,8 +581,6 @@ Shape validate(const DFMRequest &r, bool storage = false,
           fail("Invalid Metal sort key descriptor");
         if (r.node_types[v.start + j] != slotType(r, c[1]))
           fail("Metal sort key dtype mismatch");
-        if (slotType(r, c[1]) == DFM_FLOAT64_STORAGE)
-          fail("Metal Float64 sorting requires CPU execution");
       }
       for (int64_t j = 0; j < v.gather_count; ++j) {
         auto slot = r.gathers[v.gather_start + j];
@@ -458,6 +623,87 @@ Shape validate(const DFMRequest &r, bool storage = false,
                          ? nodeType(r, v.start + c[1])
                          : nodeType(r, v.start + j);
       auto resultType = nodeType(r, v.start + j);
+      if (c[0] == DFM_DECIMAL_FLOAT_CAST) {
+        if (!typed(r) || (operand != DFM_INT32 && operand != DFM_INT64 && operand != DFM_DECIMAL128) ||
+            resultType != DFM_FLOAT64_STORAGE || c[2] != -1 || c[3] < 0 ||
+            c[3] > (operand == DFM_INT32 ? 9 : operand == DFM_INT64 ? 18 : 38))
+          fail("Invalid Metal decimal Float64 cast descriptor");
+        unsigned __int128 unit = 1;
+        for (int64_t scale = 0; scale < c[3]; ++scale) unit *= 10;
+        double divisor = double(unit);
+        uint64_t bits;
+        std::memcpy(&bits, &divisor, sizeof(bits));
+        if (r.literals[v.start + j] != bits)
+          fail("Invalid Metal decimal Float64 cast divisor");
+      }
+      if (c[0] == DFM_LITERAL_INT && resultType == DFM_DECIMAL128) {
+        if (c[3] < 0 || c[3] >= r.literal_count ||
+            r.code[4*c[3]] != DFM_LITERAL_INT || nodeType(r,c[3]) != DFM_INT64)
+          fail("Invalid Metal Decimal128 literal high-word payload");
+      }
+      if (c[0] == DFM_DECIMAL_CAST) {
+        auto metadata = uint64_t(c[3]);
+        auto fromScale = metadata & 63, toScale = (metadata >> 6) & 63;
+        auto precision = (metadata >> 12) & 63;
+        bool sourceDecimal = metadata & (1UL << 19), targetDecimal = metadata & (1UL << 20);
+        auto maximum = [](int64_t type) -> uint64_t {
+          return type == DFM_INT32 ? 9 : type == DFM_INT64 ? 18 : type == DFM_DECIMAL128 ? 38 : 0;
+        };
+        if (!typed(r) || c[2] != -1 || c[3] < 0 || metadata >> 21 ||
+            (!sourceDecimal && !targetDecimal) ||
+            (sourceDecimal ? !maximum(operand) || fromScale > maximum(operand)
+                           : fromScale != 0 || operand == DFM_FLOAT32 || operand == DFM_FLOAT64_STORAGE || operand == DFM_DECIMAL128) ||
+            (targetDecimal ? !precision || precision > maximum(resultType) || toScale > precision
+                           : precision != 0 || toScale != 0 || resultType == DFM_FLOAT64_STORAGE || resultType == DFM_DECIMAL128))
+          fail("Invalid Metal decimal cast descriptor");
+        if (resultType == DFM_FLOAT32) {
+          unsigned __int128 unit = 1;
+          for (uint64_t i = 0; i < fromScale; ++i) unit *= 10;
+          double divisor = double(unit);
+          uint64_t bits;
+          std::memcpy(&bits, &divisor, sizeof(bits));
+          if (r.literals[v.start+j] != bits)
+            fail("Invalid Metal decimal Float32 cast divisor");
+        }
+      }
+      if (c[0] == DFM_DECIMAL_UNARY) {
+        if (!typed(r) || c[2] != -1 || operand != resultType ||
+            (operand != DFM_INT32 && operand != DFM_INT64 && operand != DFM_DECIMAL128) ||
+            (c[3] != DFM_NEG && c[3] != DFM_ABS))
+          fail("Invalid Metal decimal unary descriptor");
+      }
+      if (c[0] == DFM_DECIMAL_ARITHMETIC) {
+        auto metadata = uint64_t(c[3]), op = metadata >> 12;
+        auto maximum = [](int64_t type) -> uint64_t {
+          return type == DFM_INT32 ? 9 : type == DFM_INT64 ? 18 : type == DFM_DECIMAL128 ? 38 : 0;
+        };
+        auto rightType = nodeType(r, v.start+c[2]);
+        if (!typed(r) || c[3] < 0 || metadata >> 18 || resultType != DFM_DECIMAL128 ||
+            !maximum(operand) || !maximum(rightType) ||
+            (metadata & 63) > maximum(operand) || ((metadata >> 6) & 63) > maximum(rightType) ||
+            (op != DFM_ADD && op != DFM_SUB && op != DFM_MUL && op != DFM_DIV))
+          fail("Invalid Metal decimal arithmetic descriptor");
+      }
+      if (c[0] == DFM_DECIMAL_COMPARE) {
+        auto metadata = uint64_t(c[3]), op = metadata >> 12;
+        auto maximum = [](int64_t type) -> uint64_t {
+          return type == DFM_INT32 ? 9 : type == DFM_INT64 ? 18 : type == DFM_DECIMAL128 ? 38 : 0;
+        };
+        auto rightType = nodeType(r, v.start+c[2]);
+        if (!typed(r) || c[3] < 0 || metadata >> 18 || resultType != DFM_BOOL ||
+            !maximum(operand) || !maximum(rightType) ||
+            (metadata & 63) > maximum(operand) || ((metadata >> 6) & 63) > maximum(rightType) ||
+            (op != DFM_GT && op != DFM_EQ && op != DFM_LT && op != DFM_GE && op != DFM_LE && op != DFM_NE))
+          fail("Invalid Metal decimal comparison descriptor");
+      }
+      if ((operand == DFM_DECIMAL128 || resultType == DFM_DECIMAL128) &&
+          c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_NULL && c[0] != DFM_LITERAL_INT &&
+          c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE && c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
+          c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL &&
+          c[0] != DFM_FILL_NULL && c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
+          c[0] != DFM_DECIMAL_FLOAT_CAST && c[0] != DFM_DECIMAL_CAST && c[0] != DFM_DECIMAL_COMPARE &&
+          c[0] != DFM_DECIMAL_ARITHMETIC && c[0] != DFM_DECIMAL_UNARY)
+        fail("Metal Decimal128 row arithmetic requires CPU execution");
       if (c[0] >= DFM_DT_YEAR && c[0] <= DFM_DT_TRUNCATE) {
         if (!typed(r) || operand != DFM_INT64 || resultType != DFM_INT64 ||
             (c[0] == DFM_DT_TRUNCATE ? c[2] <= 0 : c[2] != -1) || c[3] < 0 || c[3] > 4 ||
@@ -469,8 +715,20 @@ Shape validate(const DFMRequest &r, bool storage = false,
       if ((operand == DFM_FLOAT64_STORAGE || resultType == DFM_FLOAT64_STORAGE) &&
           c[0] != DFM_COLUMN && c[0] != DFM_LITERAL_FLOAT && c[0] != DFM_LITERAL_NULL &&
           c[0] != DFM_IS_NULL && c[0] != DFM_IS_NOT_NULL && c[0] != DFM_FILL_NULL &&
-          c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN)
+          c[0] != DFM_KEEP_NULLS && c[0] != DFM_WHEN &&
+          c[0] != DFM_ADD && c[0] != DFM_SUB && c[0] != DFM_MUL &&
+          c[0] != DFM_DIV && c[0] != DFM_FLOORDIV && c[0] != DFM_MOD && c[0] != DFM_CAST && c[0] != DFM_DECIMAL_FLOAT_CAST &&
+          c[0] != DFM_FLOOR && c[0] != DFM_CEIL && c[0] != DFM_ROUND && c[0] != DFM_SQRT &&
+          c[0] != DFM_NEG && c[0] != DFM_ABS &&
+          c[0] != DFM_GT && c[0] != DFM_LT && c[0] != DFM_GE &&
+          c[0] != DFM_LE && c[0] != DFM_EQ && c[0] != DFM_NE &&
+          !(c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
+          c[0] != DFM_FILL_NAN && c[0] != DFM_CLIP_LOW && c[0] != DFM_CLIP_HIGH)
         fail("Metal Float64 requires CPU execution for this operation");
+      if (c[0] == DFM_SQRT &&
+          (operand == DFM_BOOL || resultType !=
+              (operand == DFM_FLOAT32 ? DFM_FLOAT32 : DFM_FLOAT64_STORAGE)))
+        fail("Invalid Metal square root dtype");
       if (c[0] == DFM_INT_IS_IN) {
         if (!typed(r) || operand == DFM_FLOAT32 || operand == DFM_BOOL ||
             nodeType(r, v.start + j) != DFM_BOOL || c[2] < 0 || c[3] < 0 ||
@@ -481,13 +739,18 @@ Shape validate(const DFMRequest &r, bool storage = false,
             fail("Metal integer membership literal dtype mismatch");
       }
       if ((c[0] >= DFM_IS_NAN && c[0] <= DFM_IS_INFINITE) &&
-          operand != DFM_FLOAT32)
+          operand != DFM_FLOAT32 && operand != DFM_FLOAT64_STORAGE)
         fail("Metal floating classification requires Float32");
-      if ((c[0] == DFM_FLOORDIV || c[0] == DFM_MOD || c[0] == DFM_POW) &&
+      if (c[0] == DFM_POW &&
           operand == DFM_FLOAT32)
         fail("Metal floating operator requires CPU execution");
-      if (c[0] == DFM_ROUND && operand == DFM_FLOAT32 && c[3] != 0)
-        fail("Metal Float32 decimal rounding requires CPU execution");
+      if (c[0] == DFM_ROUND && c[3] != 0 &&
+          (operand == DFM_FLOAT32 || operand == DFM_FLOAT64_STORAGE) && !typed(r))
+        fail("Metal floating decimal rounding requires typed descriptors");
+      if (c[0] == DFM_ROUND && c[3] != 0 &&
+          (operand == DFM_FLOAT32 || operand == DFM_FLOAT64_STORAGE) &&
+          r.literals[v.start+j] > 0x7ff0000000000000UL)
+        fail("Invalid Metal floating rounding scale");
       if (nodeType(r, v.start + j) != DFM_FLOAT32 &&
           nodeType(r, v.start + j) != DFM_FLOAT64_STORAGE && c[0] == DFM_LITERAL_FLOAT)
         fail("Floating literal requires native Float32 storage");
@@ -527,7 +790,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
           fail("Metal conditional dtype mismatch");
         if (c[0] == DFM_KEEP_NULLS && t != r.node_types[v.start + c[2]])
           fail("Metal validity selection dtype mismatch");
-        if (c[0] == DFM_FILL_NAN && t != DFM_FLOAT32)
+        if (c[0] == DFM_FILL_NAN && t != DFM_FLOAT32 && t != DFM_FLOAT64_STORAGE)
           fail("Metal fill NaN requires Float32");
         if ((compare || logic || nulltest) && t != DFM_BOOL)
           fail("Metal predicate dtype mismatch");
@@ -535,7 +798,22 @@ Shape validate(const DFMRequest &r, bool storage = false,
             (r.node_types[v.start + c[1]] != DFM_BOOL ||
              (c[0] != DFM_NOT && r.node_types[v.start + c[2]] != DFM_BOOL)))
           fail("Metal Boolean operand dtype mismatch");
-        if ((compare || math) &&
+        if (c[0] == DFM_DIV) {
+          auto operand = r.node_types[v.start+c[1]];
+          if (t != (operand == DFM_FLOAT32 ? DFM_FLOAT32 : DFM_FLOAT64_STORAGE) ||
+              operand == DFM_BOOL || operand == DFM_DECIMAL128 ||
+              operand != r.node_types[v.start+c[2]])
+            fail("Invalid Metal floating division dtype");
+        }
+        bool wideCompare = compare && (r.node_types[v.start+c[1]] == DFM_DECIMAL128 || r.node_types[v.start+c[2]] == DFM_DECIMAL128);
+        if (wideCompare) {
+          for (auto child : {c[1], c[2]}) {
+            auto type = r.node_types[v.start+child];
+            if (type != DFM_DECIMAL128 && type != DFM_INT32 && type != DFM_INT64)
+              fail("Invalid Metal Decimal128 comparison operand");
+          }
+        }
+        if ((compare || math) && !wideCompare &&
             (r.node_types[v.start + c[1]] !=
                  (math ? t : r.node_types[v.start + c[2]]) ||
              (!unaryMath &&
@@ -569,6 +847,20 @@ Shape validate(const DFMRequest &r, bool storage = false,
         fail("Metal reduction requires unsupported accumulator precision");
       if (v.dtype != expected)
         fail("Invalid Metal reduction dtype");
+      if (v.reduction == DFM_WIDE_DECIMAL_MEAN &&
+          (v.min_count < 0 ||
+           v.min_count > (slotType(r, v.slot) == DFM_INT32 ? 9 : 18)))
+        fail("Invalid Metal decimal mean scale");
+      if (decimal128Reduction(v.reduction) &&
+          !validDecimalMetadata(v.min_count))
+        fail("Invalid Metal Decimal128 reduction metadata");
+      if (momentReduction(v.reduction) && !validMomentMetadata(v.min_count, v.reduction))
+        fail("Invalid Metal moment metadata");
+      if (pairMomentReduction(v.reduction)) {
+        auto right = momentRight(v.min_count);
+        if (right >= r.slots || !defined[right] || slotType(r, right) != DFM_FLOAT64_STORAGE)
+          fail("Invalid Metal paired moment right input");
+      }
       if (v.reduction != DFM_SUM && v.reduction != DFM_COUNT &&
           v.reduction != DFM_LEN && !typed(r))
         fail("Metal reduction requires typed storage");
@@ -586,7 +878,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
   s.outputBits = mul(mul(s.packed, r.output_count), 2);
   s.partial =
       r.reductions
-          ? mul(mul(std::min<int64_t>(s.blocks, 1024), r.output_count), 16)
+          ? mul(mul(std::min<int64_t>(s.blocks, 1024), r.output_count), partialWidth(r))
           : 1;
   if (directFilteredReduction(r))
     s.filter = false;
@@ -643,7 +935,7 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
   account(16);
   account(4);
   if (r.reductions)
-    account(mul(r.output_count, 16));
+    account(mul(r.output_count, partialWidth(r)));
   for (int64_t i = 0; i < r.input_count; ++i) {
     if (resident && resident[i].table)
       continue;
@@ -671,7 +963,7 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
   m.peak_bytes = add(m.shared_bytes, m.result_bytes);
   auto layout = Layout(r);
   m.launches = r.input_count + layout.ends.size() +
-      (r.reductions ? 2 : (!retain || final));
+      (r.output_count ? (r.reductions ? 2 : (!retain || final)) : 0);
   for (int64_t i = 0; i < r.step_count; ++i)
     if (r.steps[i].filter && !directFilteredReduction(r)) {
       if (r.steps[i].filter == 1)
@@ -691,6 +983,9 @@ DFMMemory estimate(const DFMRequest &r, const Shape &s,
           ++m.launches;
       if (r.steps[i].filter == 3)
         m.launches += 5;
+      if (r.steps[i].filter == 5) m.launches += 1;
+      if (r.steps[i].filter == 4)
+        m.launches += r.code[4 * r.steps[i].start + 3] == 3 ? 3 : 1;
       for (int64_t j = 0; j < r.steps[i].gather_count; ++j)
         m.launches += layout.gathered[i][r.gathers[r.steps[i].gather_start + j]];
     }
@@ -775,7 +1070,7 @@ Context *defaultContext = nullptr;
 std::string residentSource() {
   return R"MSL(
 struct ResidentCopy { ulong source, validity, target, rows;
- long scalar, minimum, sum, padding; };
+ long scalar, minimum, sum, padding; ulong source_high,target_high; };
 kernel void resident_copy(device const ulong *a[[buffer(0)]],
  device const uchar *b[[buffer(1)]],device ulong *x[[buffer(2)]],
  device uchar *v[[buffer(3)]],constant ResidentCopy &p[[buffer(4)]],
@@ -786,6 +1081,7 @@ kernel void resident_copy(device const ulong *a[[buffer(0)]],
                          b[p.validity+row]!=0;
  x[p.target+row]=valid?a[p.source+row]:0UL;
  v[p.target+row]=uchar(valid);
+ if(p.target_high){x[p.target_high+row]=valid?a[p.source_high+row]:0UL;v[p.target_high+row]=uchar(valid);}
 }
 )MSL";
 }
@@ -794,7 +1090,17 @@ std::string castExpression(int64_t from, int64_t to, const std::string &a,
                            bool strict, int64_t id) {
   auto target = std::string(metalType(to));
   std::string body = "bool fits=true;";
-  if (to == DFM_BOOL) {
+  if (to == DFM_FLOAT64_STORAGE) {
+    body += z + "=f64_word(" + encode(from,a) + "," + std::to_string(from) + ");";
+  } else if (from == DFM_FLOAT64_STORAGE) {
+    if (to == DFM_BOOL)
+      body += "fits=!f64_nan(" + a + ");" + z + "=uchar(f64_abs(" + a + ")!=0);";
+    else if (to == DFM_FLOAT32)
+      body += z + "=as_type<float>(f64_to_float32(" + a + "));";
+    else
+      body += "F64Integer casted=f64_to_integer(" + a + "," + std::to_string(width(to)*8) +
+              "," + (unsignedType(to) ? "true" : "false") + ");fits=casted.valid;if(fits)" + z + "=" + target + "(casted.word);";
+  } else if (to == DFM_BOOL) {
     if (from == DFM_FLOAT32)
       body += "uint ab=as_type<uint>(" + a +
               ")&0x7fffffffu;fits=ab<=0x7f800000u;" + z + "=uchar(ab!=0);";
@@ -802,20 +1108,10 @@ std::string castExpression(int64_t from, int64_t to, const std::string &a,
       body += z + "=uchar(" + a + "!=0);";
   } else if (to == DFM_FLOAT32) {
     if (from == DFM_INT64 || from == DFM_UINT64) {
-      auto mag = from == DFM_INT64
-                     ? "(" + a + "<0?0UL-ulong(" + a + "):ulong(" + a + "))"
-                     : "ulong(" + a + ")";
-      // Native Float32 conversion is exact for the CPU contract unless the
-      // CPU's intervening Float64 rounding can land on a Float32 midpoint.
-      // Detect that narrow region; never emulate Float64 on the device.
-      body += "ulong mag=" + mag +
-              ";if(mag>9007199254740992UL){uint e=63-clz(mag);ulong "
-              "step=1UL<<(e-23),rest=mag&(step-1),midpoint=step/"
-              "2,dist=rest>midpoint?rest-midpoint:midpoint-rest;if(dist!=0&&"
-              "dist<=(1UL<<(e-53)))atomic_fetch_min_explicit(error," +
-              std::to_string(0x20000000UL + id) + "u,memory_order_relaxed);}";
-    }
-    body += z + "=float(" + a + ");";
+      // CPU conversion rounds through binary64 before narrowing to Float32.
+      body += z + "=as_type<float>(f64_to_float32(f64_word(ulong(" + a + ")," + std::to_string(from) + ")));";
+    } else
+      body += z + "=float(" + a + ");";
   } else if (from == DFM_FLOAT32) {
     auto bits = width(to) * 8 - (unsignedType(to) ? 0 : 1);
     // Powers of two are exactly representable in Float32, including 2**64.
@@ -858,25 +1154,34 @@ std::string arithmeticSource(int64_t dtype) {
 bool checked_add(T a,T b,thread T &z) {
 )MSL";
   if (dtype == DFM_FLOAT32) {
-    // Metal permits FTZ even in safe mode. Reject value-dependent precision
-    // requirements instead of silently flushing or emulating arithmetic.
+    // Keep native arithmetic for normal results, and recover exact binary32
+    // encodings with integer arithmetic when Metal may flush a value to zero.
     text += R"MSL(
 uint ab=as_type<uint>(a)&0x7fffffffu,bb=as_type<uint>(b)&0x7fffffffu;
-if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u))return false;
+if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u)){
+ z=as_type<float>(f32_add(as_type<uint>(a),as_type<uint>(b)));return true;}
 z=a+b;uint zb=as_type<uint>(z)&0x7fffffffu;
-return !(zb&&zb<0x00800000u)&&!(zb==0&&a!=-b);
+if((zb&&zb<0x00800000u)||(zb==0&&a!=-b))
+ z=as_type<float>(f32_add(as_type<uint>(a),as_type<uint>(b)));
+return true;
 }
 bool checked_sub(T a,T b,thread T &z){
 uint ab=as_type<uint>(a)&0x7fffffffu,bb=as_type<uint>(b)&0x7fffffffu;
-if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u))return false;
+if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u)){
+ z=as_type<float>(f32_sub(as_type<uint>(a),as_type<uint>(b)));return true;}
 z=a-b;uint zb=as_type<uint>(z)&0x7fffffffu;
-return !(zb&&zb<0x00800000u)&&!(zb==0&&a!=b);
+if((zb&&zb<0x00800000u)||(zb==0&&a!=b))
+ z=as_type<float>(f32_sub(as_type<uint>(a),as_type<uint>(b)));
+return true;
 }
 bool checked_mul(T a,T b,thread T &z){
 uint ab=as_type<uint>(a)&0x7fffffffu,bb=as_type<uint>(b)&0x7fffffffu;
-if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u))return false;
+if((ab&&ab<0x00800000u)||(bb&&bb<0x00800000u)){
+ z=as_type<float>(f32_mul(as_type<uint>(a),as_type<uint>(b)));return true;}
 z=a*b;uint zb=as_type<uint>(z)&0x7fffffffu;
-return !(zb&&zb<0x00800000u)&&!(zb==0&&ab&&bb);
+if((zb&&zb<0x00800000u)||(zb==0&&ab&&bb))
+ z=as_type<float>(f32_mul(as_type<uint>(a),as_type<uint>(b)));
+return true;
 }
 bool checked_neg(T a,thread T &z){z=as_type<float>(as_type<uint>(a)^0x80000000u);return true;}
 bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x00800000u;}
@@ -943,7 +1248,55 @@ bool native_operand(T a){uint b=as_type<uint>(a)&0x7fffffffu;return b==0||b>=0x0
 }
 std::string orderingSource() {
   return R"MSL(
+bool wide_less(ulong2 a,ulong2 b) {
+ return a.y==b.y?a.x<b.x:long(a.y)<long(b.y);
+}
+bool wide_compare(ulong2 a,ulong2 b,long op) {
+ bool equal=all(a==b),less=wide_less(a,b);
+ if(op==9)return equal;if(op==23)return !equal;
+ if(op==20)return less;if(op==8)return !equal&&!less;
+ if(op==21)return !less;return equal||less;
+}
+ulong2 wide_word(long value){return ulong2(ulong(value),value<0?~0UL:0UL);}
+uint decimal_minimum(long metadata){return uint(ulong(metadata)&0xffffffffUL);}
+uint decimal_precision(long metadata){return uint((ulong(metadata)>>32)&63UL);}
+uint decimal_scale(long metadata){return uint((ulong(metadata)>>38)&63UL);}
+uint decimal_configured_workers(long metadata){return uint((ulong(metadata)>>44)&0xffffUL);}
+uint decimal_worker_count(long metadata,uint rows,uint groups){
+ return max(1U,min(min(decimal_configured_workers(metadata),rows/65536U),
+                   uint(ulong(rows)/max(1UL,4UL*ulong(groups)))));
+}
+uint decimal_worker_step(uint rows,uint workers){
+ return ((rows+workers-1U)/workers+8191U)/8192U*8192U;
+}
+ulong2 decimal_limit(uint precision){
+ ulong low=0UL,high=0UL;
+ for(uint digit=0;digit<precision;++digit){
+  ulong product=low*10UL,next=product+9UL;
+  high=high*10UL+mulhi(low,10UL)+ulong(next<product);low=next;
+ }
+ return ulong2(low,high);
+}
+bool decimal_add_checked(thread long &low,thread long &high,ulong2 word,uint precision){
+ ulong before=ulong(low),upper=ulong(high),next=before+word.x;
+ ulong nextUpper=upper+word.y+ulong(next<before);
+ bool overflow=((upper^word.y)&0x8000000000000000UL)==0UL&&
+               ((upper^nextUpper)&0x8000000000000000UL)!=0UL;
+ bool negative=long(nextUpper)<0;ulong magnitude=negative?0UL-next:next;
+ ulong magnitudeUpper=negative?~nextUpper+ulong(magnitude==0UL):nextUpper;
+ ulong2 limit=decimal_limit(precision);
+ if(overflow||magnitudeUpper>limit.y||
+    (magnitudeUpper==limit.y&&magnitude>limit.x))return false;
+ low=long(next);high=long(nextUpper);return true;
+}
 bool extrema_better(ulong a,ulong b,long type,bool maximum) {
+ if(type==11){ulong ax=a&0x7fffffffffffffffUL,ay=b&0x7fffffffffffffffUL;
+ bool nx=ax>0x7ff0000000000000UL,ny=ay>0x7ff0000000000000UL;
+ if(nx||ny)return nx!=ny&&(maximum?nx:ny);
+ if(ax==0&&ay==0)return false;
+ ulong kx=(a&0x8000000000000000UL)?~a:(a^0x8000000000000000UL);
+ ulong ky=(b&0x8000000000000000UL)?~b:(b^0x8000000000000000UL);
+ return maximum?kx>ky:kx<ky;}
  if(type==1){uint x=uint(a),y=uint(b),ax=x&0x7fffffffU,ay=y&0x7fffffffU;
  bool nx=ax>0x7f800000U,ny=ay>0x7f800000U;
  if(nx||ny)return nx!=ny&&(maximum?nx:ny);
@@ -967,6 +1320,7 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
     auto h = r.code + 4 * step.start;
     auto keys = h[1];
     bool lastRepresentative = h[0] == DFM_GROUP_HEADER_LAST;
+    bool windowFloating = h[0] == DFM_GROUP_HEADER_WINDOW;
     auto name = std::to_string(i);
     auto index = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
     auto starts = std::to_string(layout.physical[h[2]]) + "UL*meta.z";
@@ -978,11 +1332,14 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
       auto c = r.code + 4 * (step.start + 1 + j);
       auto slot = std::to_string(layout.physical[c[1]]) + "UL*meta.z";
       auto type = std::to_string(slotType(r, c[1]));
-      text += "{ulong ai=" + slot + "+a,bi=" + slot +
-              "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return "
-              "false;if(av&&(extrema_better(x[ai],x[bi]," +
-              type + ",false)||extrema_better(x[bi],x[ai]," + type +
-              ",false)))return false;}";
+      if (slotType(r, c[1]) == DFM_DECIMAL128)
+        text += "{ulong ai=" + slot + "+a,bi=" + slot + "+b;if(v[ai]!=v[bi])return false;if(v[ai]&&(x[ai]!=x[bi]||x[ai+meta.z]!=x[bi+meta.z]))return false;}";
+      else
+        text += "{ulong ai=" + slot + "+a,bi=" + slot +
+                "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return "
+                "false;if(av&&(extrema_better(x[ai],x[bi]," +
+                type + ",false)||extrema_better(x[bi],x[ai]," + type +
+                ",false)))return false;}";
     }
     text += "return true;}\n";
     text +=
@@ -1042,19 +1399,101 @@ std::string groupSource(const DFMRequest &r, const Layout &layout) {
  if(o.kind==-1){if(lane==0){uint row=uint(x[)MSL" +
         index +
         "+" + std::string(lastRepresentative ? "end-1" : "begin") +
-        R"MSL(]);y[to]=x[ulong(o.slot)*meta.z+row];w[to]=v[ulong(o.slot)*meta.z+row];}return;}
- threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
+        R"MSL(]);ulong from=ulong(o.slot)*meta.z+row;y[to]=x[from];w[to]=v[from];if(o.type==12){y[to+meta.z]=x[from+meta.z];w[to+meta.z]=v[from];}}return;}
+)MSL" + (windowFloating ?
+        // CPU OVER reductions add rows in source order within each worker,
+        // then merge contiguous workers in order. Eager select/with_columns
+        // use 8192-row batches, which align those worker boundaries.
+        "if((o.kind==10||o.kind==82)&&(o.type==1||o.type==11)){if(lane)return;"
+        "ulong workers=max(1UL,min(min(ulong(lit[" + std::to_string(step.start) +
+        "]),ulong(meta.y)/65536UL),ulong(meta.y)/max(1UL,4UL*ulong(meta.x))));"
+        "ulong step=((ulong(meta.y)+workers-1UL)/workers+8191UL)/8192UL*8192UL;"
+        "ulong total=0UL;long count=0;uint at=begin;"
+        "for(ulong worker=0;worker<workers;++worker){ulong partial=0UL;"
+        "ulong stop=min(ulong(meta.y),(worker+1UL)*step);"
+        "while(at<end){uint row=uint(x[" + index +
+        "+at]);if(ulong(row)>=stop)break;++at;ulong from=ulong(o.slot)*meta.z+row;"
+        "if(v[from]){partial=f64_add(partial,f64_word(x[from],o.type));++count;}}"
+        "total=worker?f64_add(total,partial):partial;}"
+        "long sum=long(total);state_finish(sum,count,o,end-begin);"
+        "bool valid=state_valid(o,count);y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);return;}\n"
+        : "") + R"MSL(
+ if(PAIRED_MOMENT_REDUCTIONS&&(o.kind==160||o.kind==161)){
+  if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
+        std::string(windowFloating ? "true" : "false") + R"MSL();
+  uint step=moment_step(meta.y,workers,)MSL" + std::string(windowFloating ? "8192U" : "64U") + R"MSL();
+  uint at=begin;CovarianceState state={0,0,0,0,0,0};
+  for(uint worker=0;worker<workers;++worker){CovarianceState current={0,0,0,0,0,0};
+   uint stop=min(meta.y,(worker+1U)*step);
+   while(at<end){uint row=uint(x[)MSL" + index + R"MSL(+at]);if(row>=stop)break;++at;
+    ulong left=ulong(o.slot)*meta.z+row,right=moment_right(o.minimum)*meta.z+row;
+    if(v[left]&&v[right])current=covariance_add(current,x[left],x[right]);}
+   state=covariance_merge(state,current);
+  }
+  bool valid=o.kind==160||state.count>0;
+  y[to]=valid?covariance_finish(state,moment_ddof(o.minimum),o.kind==160):0UL;w[to]=uchar(valid);return;
+ }
+ if(HIGHER_MOMENT_REDUCTIONS&&(o.kind==98||o.kind==99)){
+  if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
+        std::string(windowFloating ? "true" : "false") + R"MSL();
+  uint step=moment_step(meta.y,workers,)MSL" + std::string(windowFloating ? "8192U" : "64U") + R"MSL();
+  uint at=begin;CentralMomentState state={0,0,0,0,0};
+  for(uint worker=0;worker<workers;++worker){CentralMomentState current={0,0,0,0,0};
+   uint stop=min(meta.y,(worker+1U)*step);
+   while(at<end){uint row=uint(x[)MSL" + index + R"MSL(+at]);if(row>=stop)break;++at;
+    ulong from=ulong(o.slot)*meta.z+row;if(v[from])current=central_add(current,x[from]);}
+   state=central_merge(state,current);
+  }
+  bool valid=central_valid(state.count,o.kind==99,moment_ddof(o.minimum));
+  y[to]=valid?central_finish(state,o.kind==99,moment_ddof(o.minimum)):0UL;w[to]=uchar(valid);return;
+ }
+ if(MOMENT_REDUCTIONS&&(o.kind==86||o.kind==87)){
+  if(lane)return;uint workers=moment_workers(o.minimum,meta.y,meta.x,)MSL" +
+        std::string(windowFloating ? "true" : "false") + R"MSL();
+  uint step=moment_step(meta.y,workers,)MSL" + std::string(windowFloating ? "8192U" : "64U") + R"MSL();
+  uint at=begin;VarianceState state={0,0,0};
+  for(uint worker=0;worker<workers;++worker){VarianceState current={0,0,0};
+   uint stop=min(meta.y,(worker+1U)*step);
+   while(at<end){uint row=uint(x[)MSL" + index + R"MSL(+at]);if(row>=stop)break;++at;
+    ulong from=ulong(o.slot)*meta.z+row;if(v[from])current=variance_add(current,x[from]);}
+   state=variance_merge(state,current);
+  }
+  bool valid=state.count>moment_ddof(o.minimum);
+  y[to]=valid?variance_finish(state,moment_ddof(o.minimum),o.kind==86):0UL;w[to]=uchar(valid);return;
+ }
+ if(o.kind==215||o.kind==216){
+  if(lane)return;uint workers=decimal_worker_count(o.minimum,meta.y,meta.x);
+  uint step=decimal_worker_step(meta.y,workers),at=begin;long total=0,upper=0,count=0;
+  for(uint worker=0;worker<workers;++worker){
+   uint stop=min(meta.y,(worker+1U)*step);long partial=0,partialUpper=0,partialCount=0;
+   while(at<end){uint row=uint(x[)MSL" + index + R"MSL(+at]);if(row>=stop)break;++at;
+    ulong from=ulong(o.slot)*meta.z+row;if(!v[from])continue;
+    if(!decimal_add_checked(partial,partialUpper,ulong2(x[from],x[from+meta.z]),decimal_precision(o.minimum))){
+     atomic_fetch_min_explicit(error,0xC0000000U,memory_order_relaxed);return;}++partialCount;
+   }
+   if(!decimal_add_checked(total,upper,ulong2(ulong(partial),ulong(partialUpper)),decimal_precision(o.minimum))){
+    atomic_fetch_min_explicit(error,0xC0000000U,memory_order_relaxed);return;}
+   count+=partialCount;
+  }
+  bool valid=o.kind==215?count>=long(decimal_minimum(o.minimum)):count>0;
+  y[to]=valid?(o.kind==216?f64_decimal128_mean(ulong(total),ulong(upper),ulong(count),decimal_scale(o.minimum)):ulong(total)):0UL;
+  w[to]=uchar(valid);if(o.kind==215){y[to+meta.z]=valid?ulong(upper):0UL;w[to+meta.z]=uchar(valid);}return;
+ }
+ threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  bool first=group.y==0;
  for(uint at=begin+lane;at<end;at+=256){uint row=uint(x[)MSL" +
         index + R"MSL(+at]);ulong idx=ulong(o.slot)*meta.z+row;
  if(first)state_add(sum,count,ulong(row),true,long(row),o);
  else {if(v[idx]&&!sum_bound(x[idx],o,end-begin)){atomic_fetch_min_explicit(error,0xE0000000U,memory_order_relaxed);continue;}
- state_add(sum,count,x[idx],v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);}}
- sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
- for(uint stride=128;stride;stride/=2){if(lane<stride){long a=sums[lane],b=counts[lane];state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;}threadgroup_barrier(mem_flags::mem_threadgroup);}
- if(lane==0){sum=sums[0];count=counts[0];state_finish(sum,count,o,end-begin);bool valid=state_valid(o,count);
+ if(wide_accum(o)){if(v[idx]){wide_accumulate(sum,high,x[idx],o);++count;}}
+ else if(wide_pick(o))state_add_wide(sum,high,count,ulong2(x[idx],x[idx+meta.z]),v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);
+ else state_add(sum,count,x[idx],v[idx]!=0,long((o.kind==95||o.kind==96)?at-begin:row),o);}}
+ sums[lane]=sum;counts[lane]=count;highs[lane]=high;threadgroup_barrier(mem_flags::mem_threadgroup);
+ for(uint stride=128;stride;stride/=2){if(lane<stride){long a=sums[lane],b=counts[lane],h=highs[lane];if(wide_accum(o)){wide_merge(a,h,sums[lane+stride],highs[lane+stride]);b+=counts[lane+stride];}else if(wide_pick(o))state_merge_wide(a,h,b,sums[lane+stride],highs[lane+stride],counts[lane+stride],o);else state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;highs[lane]=h;}threadgroup_barrier(mem_flags::mem_threadgroup);}
+ if(lane==0){sum=sums[0];high=highs[0];count=counts[0];state_finish_wide(sum,high,count,o,end-begin);bool valid=state_valid(o,count);
+ if(o.kind==210&&valid&&(o.type==10?high!=0:high!=(sum<0?-1L:0L)))atomic_fetch_min_explicit(error,0xF0000000U,memory_order_relaxed);
  if(o.kind==10&&valid&&((o.type==2&&(sum<(-2147483647L-1L)||sum>2147483647L))||(o.type==9&&(sum<0||ulong(sum)>4294967295UL))))atomic_fetch_min_explicit(error,0xF0000000U,memory_order_relaxed);
- y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);}}
+ y[to]=valid?ulong(sum):0UL;w[to]=uchar(valid);if(wide_result(o)){y[to+meta.z]=valid?ulong(high):0UL;w[to+meta.z]=uchar(valid);}}}
 )MSL";
   }
   return text;
@@ -1070,9 +1509,62 @@ std::string source(const DFMRequest &r) {
         filterSlot = layout.physical[r.steps[i].slot];
   std::string text = "#include <metal_stdlib>\nusing namespace metal;\n#pragma "
                      "clang fp contract(off)\n";
+  // Keep the moment state machine out of unrelated reduction pipelines.
+  // Out.kind is a runtime parameter, so the shader otherwise retains this
+  // expensive binary64 branch even when the request cannot use it.
+  bool moments = false, paired = false, higher = false;
+  for (int64_t i = 0; i < r.output_count; ++i) {
+    moments |= r.outputs[i].reduction == DFM_VAR || r.outputs[i].reduction == DFM_STD;
+    paired |= pairMomentReduction(r.outputs[i].reduction);
+    higher |= higherMomentReduction(r.outputs[i].reduction);
+  }
+  for (int64_t i = 0; i < r.code_words; i += 4) {
+    moments |= r.code[i] == DFM_GROUP_OUTPUT && (r.code[i+3] == DFM_VAR || r.code[i+3] == DFM_STD);
+    paired |= r.code[i] == DFM_GROUP_OUTPUT && pairMomentReduction(r.code[i + 3]);
+    higher |= r.code[i] == DFM_GROUP_OUTPUT && higherMomentReduction(r.code[i + 3]);
+  }
+  text += "constant bool PAIRED_MOMENT_REDUCTIONS=" +
+          std::string(paired ? "true" : "false") + ";\n";
+  text += "constant bool HIGHER_MOMENT_REDUCTIONS=" +
+          std::string(higher ? "true" : "false") + ";\n";
+  text += "constant bool MOMENT_REDUCTIONS=" +
+          std::string(moments ? "true" : "false") + ";\n";
+  bool wide = partialWidth(r) == 32;
+  if (typed(r))
+    for (int64_t i = 0; i < r.slots; ++i) wide |= r.slot_types[i] == DFM_DECIMAL128;
+  for (int64_t i = 0; i < r.code_words; i += 4)
+    wide |= r.code[i] == DFM_GROUP_OUTPUT &&
+            (r.code[i + 3] == DFM_WIDE_INTEGER_SUM ||
+             r.code[i + 3] == DFM_WIDE_INTEGER_MEAN ||
+             r.code[i + 3] == DFM_WIDE_DECIMAL_MEAN);
+  text += "constant bool USE_WIDE=" + std::string(wide ? "true" : "false") + ";\n";
   text += "struct Out { long slot; long kind; long minimum; long type; "
-          "};\nstruct Partial { long total; long count; };\n";
+          "};\n";
+  if (partialWidth(r) == 32)
+    text += "struct Partial { long total, high, count, padding; };\n"
+            "Partial make_partial(long total,long high,long count){return {total,high,count,0};}\n"
+            "long partial_high(Partial p){return p.high;}\n";
+  else
+    text += "struct Partial { long total,count; };\n"
+            "Partial make_partial(long total,long high,long count){return {total,count};}\n"
+            "long partial_high(Partial p){return 0;}\n";
   text += residentSource();
+  text += dfm_float64_source;
+  text += dfm_decimal_source;
+  text += dfm_moments_source;
+  text += R"MSL(
+ulong moment_ddof(long metadata){return ulong(metadata)&0x7fffffffUL;}
+ulong moment_right(long metadata){return(ulong(metadata)>>31)&65535UL;}
+uint moment_workers(long metadata,uint rows,uint groups,bool window){
+ ulong configured=ulong(metadata)>>47;
+ ulong workers=max(1UL,min(configured,ulong(rows)/(window?65536UL:16384UL)));
+ return uint(window?max(1UL,min(workers,ulong(rows)/max(1UL,4UL*ulong(groups)))):workers);
+}
+uint moment_step(uint rows,uint workers,uint alignment){
+ return uint(((ulong(rows)+workers-1UL)/workers+alignment-1UL)/alignment*alignment);
+}
+)MSL";
+
   text += "constant bool DIRECT_FILTERED_REDUCTION=" +
           std::string(direct ? "true" : "false") + ";\n" +
           "constant ulong FILTERED_SLOT=" + std::to_string(filterSlot) + "UL;\n";
@@ -1097,7 +1589,7 @@ float float_integral(float x,int op){
 )MSL";
   if (typed(r)) {
     text += "typedef ulong T;\n";
-    std::array<bool, 12> used{};
+    std::array<bool, 13> used{};
     for (int64_t i = 0; i < r.literal_count; ++i)
       used[r.node_types[i]] = true;
     for (int64_t t = 1; t <= 10; ++t)
@@ -1139,9 +1631,10 @@ kernel void block_offsets(device uint *blocks[[buffer(0)]],device uint4 &meta[[b
 kernel void gather_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device T *y[[buffer(2)]],device uchar *w[[buffer(3)]],device const uint *rank[[buffer(4)]],
  device const uint *blocks[[buffer(5)]],constant uint4 &meta[[buffer(6)]],
- constant ulong2 &p[[buffer(7)]],uint row[[thread_position_in_grid]]) {
+ constant ulong4 &p[[buffer(7)]],uint row[[thread_position_in_grid]]) {
  if(row>=meta.y||!v[p.x*meta.z+row]||x[p.x*meta.z+row]==T(0))return;
  ulong target=rank[row]+blocks[row/256];y[p.y*meta.z+target]=x[p.y*meta.z+row];w[p.y*meta.z+target]=v[p.y*meta.z+row];
+ if(p.z){y[(p.y+1)*meta.z+target]=x[(p.y+1)*meta.z+row];w[(p.y+1)*meta.z+target]=v[p.y*meta.z+row];}
 }
 kernel void pack_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device uchar *bits[[buffer(2)]],device const Out *out[[buffer(3)]],
@@ -1158,6 +1651,9 @@ kernel void pack_rows(device const T *x[[buffer(0)]],device const uchar *v[[buff
   text += orderingSource();
   text += R"MSL(
 bool candidate_better(ulong a,ulong b,Out o){
+ if((o.kind==95||o.kind==96)&&o.type==11){
+  bool an=f64_nan(a),bn=f64_nan(b);if(an!=bn)return !an;
+ }
  if((o.kind==95||o.kind==96)&&o.type==1){
   bool an=(uint(a)&0x7fffffffU)>0x7f800000U,bn=(uint(b)&0x7fffffffU)>0x7f800000U;
   if(an!=bn)return !an;
@@ -1170,13 +1666,41 @@ bool candidate_better(ulong a,ulong b,Out o){
 // every parallel partial and merge exact without a wider accumulator. A
 // failed proof is unsupported, even if cancellation could fit the result.
 bool sum_bound(ulong word,Out o,ulong rows){
- if(o.kind!=10||(o.type!=3&&o.type!=10)||!rows)return true;
+ if((o.kind!=10&&o.kind!=82)||(o.type!=3&&o.type!=10)||!rows)return true;
  bool negative=o.type==3&&long(word)<0;
  ulong maximum=o.type==10?~0UL:(negative?(1UL<<63):((1UL<<63)-1UL));
 // Variable 64-bit division here crashes the M1 grouped pipeline compiler.
 // A native high multiply checks the identical bound without division.
  ulong magnitude=negative?0UL-word:word;
  return mulhi(magnitude,rows)==0UL&&magnitude*rows<=maximum;
+}
+// At most Int32.MAX rows of 64-bit inputs bound every sum partial below 2**95.
+// Two-word modulo addition is therefore exact in signed128 and precision38.
+void wide_merge(thread long &low,thread long &high,long other,long upper){
+ ulong before=ulong(low),after=before+ulong(other);
+ low=long(after);high=long(ulong(high)+ulong(upper)+ulong(after<before));
+}
+void wide_add(thread long &low,thread long &high,ulong word){
+ wide_merge(low,high,long(word),long(word)<0?-1L:0L);
+}
+bool wide_accum(Out o){return USE_WIDE&&(o.kind==208||o.kind==210||o.kind==211||o.kind==212||o.kind==215||o.kind==216);}
+void wide_accumulate(thread long &low,thread long &high,ulong word,Out o){
+ wide_merge(low,high,long(word),o.type==10?0L:(long(word)<0?-1L:0L));
+}
+bool wide_pick(Out o){return USE_WIDE&&o.type==12&&(o.kind==80||o.kind==81||o.kind==83||o.kind==84);}
+bool wide_result(Out o){return USE_WIDE&&(o.kind==208||(wide_pick(o)&&o.kind!=95&&o.kind!=96));}
+void state_merge_wide(thread long &value,thread long &high,thread long &count,long other,long upper,long n,Out o){
+ if(o.kind==83||o.kind==84){
+  long at=count<0?-count:count,bt=n<0?-n:n;
+  if(bt&&(!at||(o.kind==83?bt<at:bt>at))){value=other;high=upper;count=n;}return;
+ }
+ if(!n)return;ulong2 a=ulong2(ulong(value),ulong(high)),b=ulong2(ulong(other),ulong(upper));
+ bool better=(o.kind==81||o.kind==96)?wide_less(a,b):wide_less(b,a);
+ if(!count||better||(all(a==b)&&n<count)){value=other;high=upper;count=n;}
+}
+void state_add_wide(thread long &value,thread long &high,thread long &count,ulong2 word,bool valid,long row,Out o){
+ long n=(o.kind==83||o.kind==84)?(valid?row+1:-(row+1)):(valid?row+1:0);
+ state_merge_wide(value,high,count,valid?long(word.x):0,valid?long(word.y):0,n,o);
 }
 void state_merge(thread long &value,thread long &count,long other,long n,Out o){
  if(o.kind==83||o.kind==84){
@@ -1190,6 +1714,9 @@ void state_merge(thread long &value,thread long &count,long other,long n,Out o){
   if(take){value=other;count=n;}return;
  }
  if(o.kind==91||o.kind==92){value|=other;return;}
+ if((o.kind==82||o.kind==10)&&(o.type==1||o.type==11)){
+  if(n){value=long(f64_add(ulong(value),ulong(other)));count+=n;}return;
+ }
  value=long(ulong(value)+ulong(other));count+=n;
 }
 void state_add(thread long &value,thread long &count,ulong word,bool valid,long row,Out o){
@@ -1198,10 +1725,15 @@ void state_add(thread long &value,thread long &count,ulong word,bool valid,long 
  if(o.kind==93){count+=!valid;return;}
  if(!valid)return;
  if(o.kind==80||o.kind==81||o.kind==95||o.kind==96||o.kind==204){state_merge(value,count,long(word),row+1,o);return;}
- ++count;if(o.kind==10)value=long(ulong(value)+word);
+ ++count;
+ if((o.kind==82||o.kind==10)&&(o.type==1||o.type==11))value=long(f64_add(ulong(value),f64_word(word,o.type)));
+ else if(o.kind==10||o.kind==82)value=long(ulong(value)+word);
 }
 void state_finish(thread long &value,thread long &count,Out o,long rows){
- if(o.kind==11||o.kind==93){value=count;count=1;}
+ if(o.kind==82){if(count){ulong total=(o.type==1||o.type==11)?ulong(value):f64_word(ulong(value),o.type);
+  value=long(f64_div(total,f64_from_signed(count)));}}
+ else if(o.kind==10&&o.type==1){value=long(ulong(f64_to_float32(ulong(value))));}
+ else if(o.kind==11||o.kind==93){value=count;count=1;}
  else if(o.kind==90){value=rows;count=1;}
  else if(o.kind==83||o.kind==84){count=count>0?1:0;}
  else if(o.kind==95||o.kind==96){value=count?count-1:0;count=count?1:0;}
@@ -1210,42 +1742,116 @@ void state_finish(thread long &value,thread long &count,Out o,long rows){
   count=o.minimum||!unknown||(o.kind==91?yes:no);value=o.kind==91?yes:!no;
  }
 }
-bool state_valid(Out o,long count){return o.kind==10?count>=o.minimum:count>0;}
+void state_finish_wide(thread long &value,thread long &high,thread long &count,Out o,long rows){
+ if(o.kind==211){if(count)value=long(f64_div(f64_from_wide(ulong(value),ulong(high),o.type==10),f64_from_signed(count)));high=0;}
+ else if(o.kind==212){if(count)value=long(f64_decimal_mean(ulong(value),ulong(high),ulong(count),uint(o.minimum)));high=0;}
+ else if(o.kind==216){if(count)value=long(f64_decimal128_mean(ulong(value),ulong(high),ulong(count),decimal_scale(o.minimum)));high=0;}
+ else state_finish(value,count,o,rows);
+}
+bool state_valid(Out o,long count){return o.kind==10||o.kind==208||o.kind==210?count>=o.minimum:o.kind==215?count>=long(decimal_minimum(o.minimum)):count>0;}
 kernel void reduce_rows(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device Partial *partials[[buffer(2)]],device const Out *out[[buffer(3)]],
  constant uint4 &meta[[buffer(4)]],constant ulong &groups[[buffer(5)]],device atomic_uint *error[[buffer(6)]],
  uint2 group[[threadgroup_position_in_grid]],uint lane[[thread_index_in_threadgroup]]) {
- threadgroup long sums[256];threadgroup long counts[256];long sum=0,count=0;
+ threadgroup long sums[256];threadgroup long counts[256];threadgroup long highs[256];long sum=0,count=0,high=0;
  Out o=out[group.y];
+ if(PAIRED_MOMENT_REDUCTIONS&&(o.kind==160||o.kind==161)){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  uint workers=uint(max(1UL,min(ulong(o.minimum)>>47,ulong(meta.x)/65536UL)));
+  uint step=moment_step(meta.x,workers,8192U);CovarianceState state={0,0,0,0,0,0};
+  for(uint worker=0;worker<workers;++worker){CovarianceState current={0,0,0,0,0,0};
+   uint begin=min(meta.x,worker*step),end=min(meta.x,(worker+1U)*step);
+   for(uint row=begin;row<end;++row){
+    if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+    ulong left=o.slot*meta.z+row,right=moment_right(o.minimum)*meta.z+row;
+    if(v[left]&&v[right])current=covariance_add(current,x[left],x[right]);}
+   state=covariance_merge(state,current);
+  }
+  bool valid=o.kind==160||state.count>0;
+  partials[group.y*groups]=make_partial(valid?long(covariance_finish(state,moment_ddof(o.minimum),o.kind==160)):0L,0L,long(valid));return;
+ }
+ if(HIGHER_MOMENT_REDUCTIONS&&(o.kind==98||o.kind==99)){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  uint workers=uint(max(1UL,min(ulong(o.minimum)>>47,ulong(meta.x)/65536UL)));
+  uint step=moment_step(meta.x,workers,8192U);CentralMomentState state={0,0,0,0,0};
+  for(uint worker=0;worker<workers;++worker){CentralMomentState current={0,0,0,0,0};
+   uint begin=min(meta.x,worker*step),end=min(meta.x,(worker+1U)*step);
+   for(uint row=begin;row<end;++row){
+    if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+    ulong idx=o.slot*meta.z+row;if(v[idx])current=central_add(current,x[idx]);}
+   state=central_merge(state,current);
+  }
+  bool valid=central_valid(state.count,o.kind==99,moment_ddof(o.minimum));
+  partials[group.y*groups]=make_partial(valid?long(central_finish(state,o.kind==99,moment_ddof(o.minimum))):0L,0L,long(valid));return;
+ }
+ if(MOMENT_REDUCTIONS&&(o.kind==86||o.kind==87)){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  uint workers=uint(max(1UL,min(ulong(o.minimum)>>47,ulong(meta.x)/65536UL)));
+  uint step=moment_step(meta.x,workers,8192U);VarianceState state={0,0,0};
+  for(uint worker=0;worker<workers;++worker){VarianceState current={0,0,0};
+   uint begin=min(meta.x,worker*step),end=min(meta.x,(worker+1U)*step);
+   for(uint row=begin;row<end;++row){
+    if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+    ulong idx=o.slot*meta.z+row;if(v[idx])current=variance_add(current,x[idx]);}
+   state=variance_merge(state,current);
+  }
+  bool valid=state.count>moment_ddof(o.minimum);
+  partials[group.y*groups]=make_partial(valid?long(variance_finish(state,moment_ddof(o.minimum),o.kind==86)):0L,0L,long(valid));return;
+ }
+ if(o.kind==215||o.kind==216){
+  if(lane)return;
+  if(group.x){partials[group.y*groups+group.x]=make_partial(0,0,0);return;}
+  uint workers=decimal_worker_count(o.minimum,meta.x,1U);
+  uint step=decimal_worker_step(meta.x,workers);
+  for(uint worker=0;worker<workers;++worker){
+   uint begin=min(meta.x,worker*step),end=min(meta.x,(worker+1U)*step);
+   long partial=0,partialHigh=0,partialCount=0;
+   for(uint row=begin;row<end;++row){
+    if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
+    ulong idx=o.slot*meta.z+row;if(!v[idx])continue;
+    if(!decimal_add_checked(partial,partialHigh,ulong2(x[idx],x[idx+meta.z]),decimal_precision(o.minimum))){
+     atomic_fetch_min_explicit(error,0xC0000000U,memory_order_relaxed);return;}++partialCount;
+   }
+   if(!decimal_add_checked(sum,high,ulong2(ulong(partial),ulong(partialHigh)),decimal_precision(o.minimum))){
+    atomic_fetch_min_explicit(error,0xC0000000U,memory_order_relaxed);return;}count+=partialCount;
+  }
+  partials[group.y*groups]=make_partial(sum,high,count);return;
+ }
  for(ulong row=group.x*256+lane;row<meta.x;row+=groups*256){ulong idx=o.slot*meta.z+row;
  if(DIRECT_FILTERED_REDUCTION&&(!v[FILTERED_SLOT*meta.z+row]||x[FILTERED_SLOT*meta.z+row]==T(0)))continue;
  Out current=o;if(DIRECT_FILTERED_REDUCTION&&o.kind==90)current.kind=11;
  ulong word=read_word(x[idx]);
  if(v[idx]&&!sum_bound(word,current,meta.x)){atomic_fetch_min_explicit(error,0xE0000000U,memory_order_relaxed);continue;}
- state_add(sum,count,word,DIRECT_FILTERED_REDUCTION&&o.kind==90?true:v[idx]!=0,long(row),current);}
- sums[lane]=sum;counts[lane]=count;threadgroup_barrier(mem_flags::mem_threadgroup);
+ if(wide_accum(o)){if(v[idx]){wide_accumulate(sum,high,word,o);++count;}}
+ else if(wide_pick(o))state_add_wide(sum,high,count,ulong2(word,x[idx+meta.z]),v[idx]!=0,long(row),o);
+ else state_add(sum,count,word,DIRECT_FILTERED_REDUCTION&&o.kind==90?true:v[idx]!=0,long(row),current);}
+ sums[lane]=sum;counts[lane]=count;highs[lane]=high;threadgroup_barrier(mem_flags::mem_threadgroup);
  for(uint stride=128;stride;stride/=2){if(lane<stride){
- long a=sums[lane],b=counts[lane];state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;}
+ long a=sums[lane],b=counts[lane],h=highs[lane];if(wide_accum(o)){wide_merge(a,h,sums[lane+stride],highs[lane+stride]);b+=counts[lane+stride];}else if(wide_pick(o))state_merge_wide(a,h,b,sums[lane+stride],highs[lane+stride],counts[lane+stride],o);else state_merge(a,b,sums[lane+stride],counts[lane+stride],o);sums[lane]=a;counts[lane]=b;highs[lane]=h;}
  threadgroup_barrier(mem_flags::mem_threadgroup);}
- if(lane==0)partials[group.y*groups+group.x]={sums[0],counts[0]};
+ if(lane==0)partials[group.y*groups+group.x]=make_partial(sums[0],highs[0],counts[0]);
 }
 kernel void finish_reduce(device Partial *partials[[buffer(0)]],device Partial *result[[buffer(1)]],
  device const Out *out[[buffer(2)]],constant uint4 &meta[[buffer(3)]],constant ulong &groups[[buffer(4)]],
  uint column[[thread_position_in_grid]]) {
- long sum=0,count=0;Out o=out[column];
+ long sum=0,count=0,high=0;Out o=out[column];
  for(ulong i=0;i<groups;++i){Partial p=partials[column*groups+i];
- state_merge(sum,count,p.total,p.count,o);}
+ if(wide_accum(o)){wide_merge(sum,high,p.total,partial_high(p));count+=p.count;}else if(wide_pick(o))state_merge_wide(sum,high,count,p.total,partial_high(p),p.count,o);else state_merge(sum,count,p.total,p.count,o);}
  if(DIRECT_FILTERED_REDUCTION&&o.kind==90){sum=count;count=1;}
- else state_finish(sum,count,o,meta.x);
- result[column]={sum,count};
+ else state_finish_wide(sum,high,count,o,meta.x);
+ result[column]=make_partial(sum,high,count);
 }
 kernel void order_init(device uint *index[[buffer(0)]],constant uint4 &meta[[buffer(1)]],uint row[[thread_position_in_grid]]){
  if(row<meta.x)index[row]=row;
 }
 kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[buffer(1)]],
  device T *y[[buffer(2)]],device uchar *w[[buffer(3)]],device const uint *index[[buffer(4)]],
- constant uint4 &meta[[buffer(5)]],constant ulong &slot[[buffer(6)]],uint row[[thread_position_in_grid]]){
- if(row>=meta.x)return;ulong target=slot*meta.z+row,source=slot*meta.z+index[row];y[target]=x[source];w[target]=v[source];
+ constant uint4 &meta[[buffer(5)]],constant ulong2 &p[[buffer(6)]],uint row[[thread_position_in_grid]]){
+ if(row>=meta.x)return;ulong target=p.x*meta.z+row,source=p.x*meta.z+index[row];y[target]=x[source];w[target]=v[source];
+ if(p.y){y[target+meta.z]=x[source+meta.z];w[target+meta.z]=v[source];}
 }
 )MSL";
   auto shape = validate(r);
@@ -1266,7 +1872,10 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
         auto logical = r.code[4 * (step.start + 1 + j) + 1];
         text += "{ulong at=" + std::to_string(layout.physical[logical]) +
           "UL*meta.z+row;hash=key_hash(hash^(v[at]?canonical_key(ulong(x[at])," +
-          std::to_string(slotType(r, logical)) + "):0xd6e8feb86659fd93UL));}";
+          std::to_string(slotType(r, logical)) + "):0xd6e8feb86659fd93UL));";
+        if (slotType(r, logical) == DFM_DECIMAL128)
+          text += "if(v[at])hash=key_hash(hash^x[at+meta.z]);";
+        text += "}";
       }
       auto capacity = std::to_string(hashCapacity(r.rows)) + "U";
       text += "uint bucket=uint(hash)&(" + capacity + "-1);for(uint probes=0;probes<" + capacity +
@@ -1287,12 +1896,16 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
               "at=p.x*meta.z+row,bit=row+p.y;";
       if (t == DFM_BOOL)
         text += "x[at]=ulong((bits[p.z-1+bit/8]>>(bit%8))&1);";
+      else if (t == DFM_DECIMAL128)
+        text += "device const ulong *raw=(device const ulong*)(bits+p.z);x[at]=raw[2*row];x[at+meta.z]=raw[2*row+1];";
       else
         text += "x[at]=" +
                 encode(t, "((device const " + std::string(metalType(t)) +
                               " *)(bits+p.z))[row]") +
                 ";";
-      text += "v[at]=p.w==ulong(-1)?1:uchar((bits[p.w+bit/8]>>(bit%8))&1); }\n";
+      text += "v[at]=p.w==ulong(-1)?1:uchar((bits[p.w+bit/8]>>(bit%8))&1);";
+      if (t == DFM_DECIMAL128) text += "v[at+meta.z]=v[at];";
+      text += "}\n";
     }
   for (int64_t i = 0; i < r.step_count; ++i)
     if (r.steps[i].filter >= 2) {
@@ -1302,23 +1915,32 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
               "(uint a,uint b,device const T *x,device const uchar *v,constant "
               "uint4 &meta){";
       auto keyCount =
-          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes;
+          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes - (step.filter == 5);
       for (int64_t j = 0; j < keyCount; ++j) {
-        auto key = r.code + 4 * (step.start + j + (step.filter == 3));
+        auto key = r.code + 4 * (step.start + (step.filter == 5 ? j + 1 : step.filter == 4
+            ? (j + 1 < keyCount ? j + 1 : 0) : j + (step.filter == 3)));
         auto slot = std::to_string(layout.physical[key[1]]) + "UL*meta.z";
         text += "{ulong ai=" + slot + "+a,bi=" + slot +
                 "+b;bool av=v[ai]!=0,bv=v[bi]!=0;if(av!=bv)return " +
-                std::string(key[3] ? "av" : "!av") + ";if(av){";
+                std::string(step.filter == 4 || key[3] ? "av" : "!av") + ";if(av){";
+        auto nanFirst = step.filter == 4 && key[0] == DFM_RANK_KEY && key[2] ? "an" : "!an";
         if (slotType(r, key[1]) == DFM_FLOAT32)
           text += "bool "
                   "an=(uint(x[ai])&0x7fffffffU)>0x7f800000U,bn=(uint(x[bi])&"
-                  "0x7fffffffU)>0x7f800000U;if(an!=bn)return !an;";
+                  "0x7fffffffU)>0x7f800000U;if(an!=bn)return " + std::string(nanFirst) + ";";
+        if (slotType(r, key[1]) == DFM_FLOAT64_STORAGE)
+          text += "bool an=f64_nan(ulong(x[ai])),bn=f64_nan(ulong(x[bi]));if(an!=bn)return " + std::string(nanFirst) + ";";
         auto type = std::to_string(slotType(r, key[1])),
              maximum = std::string(key[2] ? "true" : "false");
-        text += "if(extrema_better(ulong(x[ai]),ulong(x[bi])," + type + "," +
-                maximum +
-                "))return true;if(extrema_better(ulong(x[bi]),ulong(x[ai])," +
-                type + "," + maximum + "))return false;}}";
+        if (slotType(r, key[1]) == DFM_DECIMAL128) {
+          auto left = std::string(key[2] ? "bi" : "ai"), right = std::string(key[2] ? "ai" : "bi");
+          text += "if(wide_less(ulong2(x[" + left + "],x[" + left + "+meta.z]),ulong2(x[" + right + "],x[" + right + "+meta.z])))return true;"
+                  "if(wide_less(ulong2(x[" + right + "],x[" + right + "+meta.z]),ulong2(x[" + left + "],x[" + left + "+meta.z])))return false;}}";
+        } else
+          text += "if(extrema_better(ulong(x[ai]),ulong(x[bi])," + type + "," +
+                  maximum +
+                  "))return true;if(extrema_better(ulong(x[bi]),ulong(x[ai])," +
+                  type + "," + maximum + "))return false;}}";
       }
       text += "return a<b;}\n";
       text +=
@@ -1337,6 +1959,9 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           "(index[mid],own,x,v,meta))lo=mid+1;else "
           "hi=mid;}target[base+(row-(left?base:middle))+(lo-first)]=own;}\n";
     }
+  for (int64_t i = 0; i < r.step_count; ++i)
+    if (r.steps[i].filter == 4) text += rankSource(r, layout, i);
+    else if (r.steps[i].filter == 5) text += cumulativeSource(r, layout, i);
   if (shape.radixSort)
     for (int64_t i = 0; i < r.step_count; ++i) {
       if (!radixPasses(r, i)) continue;
@@ -1368,7 +1993,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
       first = end + 1;
       continue;
     }
-    std::array<bool, 64> local{};
+    std::array<bool, DFM_MAX_SLOTS> local{};
     text += "kernel void project" + std::to_string(end) +
             "(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],device "
             "const T *lit[[buffer(2)]],constant uint4 "
@@ -1439,7 +2064,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           } else {
             auto idx = std::to_string(layout.physical[c[3]]) + "UL*meta.z+row";
             text += z + "=" +
-                    (typed(r) ? decode(dtype, "x[" + idx + "]")
+                    (dtype == DFM_DECIMAL128 ? "ulong2(x[" + idx + "],x[(" + idx + ")+meta.z])" : typed(r) ? decode(dtype, "x[" + idx + "]")
                               : "x[" + idx + "]") +
                     ";" + valid + "=v[" + idx + "]!=0;";
           }
@@ -1449,11 +2074,76 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                   "]),n=long(meta.x);long begin=off<0?max(n+off,0L):min(off,n);"
                   "long count=length==-1?n-begin:min(length,n-begin);" + z +
                   "=uchar(long(row)>=begin&&long(row)-begin<count);}";
+        } else if (op == DFM_DECIMAL_FLOAT_CAST) {
+          auto operand = nodeType(r, s.start + c[1]);
+          auto converted = operand == DFM_DECIMAL128
+              ? "f64_from_wide(" + a + ".x," + a + ".y,false)"
+              : "f64_word(" + encode(operand,a) + "," + std::to_string(operand) + ")";
+          text += valid + "=" + av + ";if(" + valid + "){" + z + "=f64_div(" +
+                  converted + ",lit[" + std::to_string(s.start+j) + "]);}";
         } else if (op == DFM_CAST) {
           text += valid + "=" + av + ";if(" + valid + "){" +
                   castExpression(r.node_types[s.start + c[1]], dtype, a, z,
                                  valid, c[3] != 0, s.start + j + 1) +
                   "}";
+        } else if (op == DFM_DECIMAL_ARITHMETIC || op == DFM_DECIMAL_UNARY) {
+          auto word = [&](int64_t type, const std::string &value) {
+            return type == DFM_DECIMAL128 ? value : "wide_word(long(" + value + "))";
+          };
+          auto metadata = uint64_t(c[3]);
+          text += valid + "=" + av + (op == DFM_DECIMAL_UNARY ? "" : "&&" + bv) +
+              ";if(" + valid + "){DecimalArithmetic computed=";
+          if (op == DFM_DECIMAL_UNARY)
+            text += "decimal_unary(" + word(dtype,a) + "," + std::to_string(width(dtype)*8) + "," +
+                (c[3] == DFM_ABS ? "true" : "false") + ");";
+          else if ((metadata >> 12) == DFM_MUL || (metadata >> 12) == DFM_DIV)
+            text += std::string((metadata >> 12) == DFM_MUL ? "decimal_multiply(" : "decimal_divide_rows(") +
+                word(nodeType(r,s.start+c[1]),a) + "," + word(nodeType(r,s.start+c[2]),b) + "," +
+                std::to_string(metadata & 63) + "," + std::to_string((metadata >> 6) & 63) + ");";
+          else
+            text += "decimal_add_subtract(" + word(nodeType(r,s.start+c[1]),a) + "," +
+                word(nodeType(r,s.start+c[2]),b) + "," +
+                std::to_string(metadata & 63) + "," + std::to_string((metadata >> 6) & 63) + "," +
+                ((metadata >> 12) == DFM_SUB ? "true" : "false") + ");";
+          text += z + "=" + (dtype == DFM_DECIMAL128 ? "computed.value" : typename_ + "(computed.value.x)") +
+              ";" + valid + "=computed.error==0;if(!" + valid + "&&computed.error!=4){uint fault=computed.error==1?0x08000000u:computed.error==2?0x04000000u:0x02000000u;"
+              "atomic_fetch_min_explicit(error,fault+" + std::to_string(s.start+j+1) + "u,memory_order_relaxed);}}";
+        } else if (op == DFM_DECIMAL_COMPARE) {
+          auto word = [&](int64_t type, const std::string &value) {
+            return type == DFM_DECIMAL128 ? value : "wide_word(long(" + value + "))";
+          };
+          auto metadata = uint64_t(c[3]);
+          text += valid + "=" + av + "&&" + bv + ";if(" + valid + "){DecimalComparison compared=decimal_compare(" +
+              word(nodeType(r,s.start+c[1]), a) + "," + word(nodeType(r,s.start+c[2]), b) + "," +
+              std::to_string(metadata & 63) + "," + std::to_string((metadata >> 6) & 63) + "," +
+              std::to_string(metadata >> 12) + ");" + z + "=uchar(compared.value);" + valid +
+              "=compared.valid;if(!" + valid + ")atomic_fetch_min_explicit(error," +
+              std::to_string(0x08000000UL + s.start+j+1) + "u,memory_order_relaxed);}";
+        } else if (op == DFM_DECIMAL_CAST) {
+          auto from = nodeType(r, s.start + c[1]);
+          auto word = from == DFM_DECIMAL128 ? a :
+              "ulong2(ulong(" + a + ")," + (unsignedType(from) || from == DFM_BOOL
+                 ? std::string("0UL") : "ulong(long(" + a + ")<0?-1L:0L)") + ")";
+          auto metadata = uint64_t(c[3]);
+          text += valid + "=" + av + ";if(" + valid + "){";
+          if (dtype == DFM_FLOAT32) {
+            text += "ulong2 raw=" + word + ";" + z +
+                "=as_type<float>(f64_to_float32(f64_div(f64_from_wide(raw.x,raw.y,false),lit[" +
+                std::to_string(s.start+j) + "])));";
+          } else {
+            text += "DecimalCast casted=decimal_cast(" + word + "," +
+                std::to_string(metadata & 63) + "," +
+                std::to_string((metadata >> 6) & 63) + "," +
+                std::to_string((metadata >> 12) & 63) + "," +
+                std::to_string(width(dtype)*8) + "," + (unsignedType(dtype) ? "true" : "false") +
+                "," + (dtype == DFM_BOOL ? "true" : "false") + ");" +
+                valid + "=casted.valid;if(" + valid + ")" + z + "=" +
+                (dtype == DFM_DECIMAL128 ? "casted.value" : std::string(metalType(dtype)) + "(casted.value.x)") + ";";
+            if (metadata & (1UL << 18))
+              text += "else atomic_fetch_min_explicit(error," +
+                      std::to_string(0x40000000UL + s.start+j+1) + "u,memory_order_relaxed);";
+          }
+          text += "}";
         } else if (op == DFM_INT_IS_IN) {
           auto operand = nodeType(r, s.start + c[1]);
           text += valid + "=" + av + ";if(" + valid + "){bool hit=false;";
@@ -1463,6 +2153,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                   ");" + z + "=uchar(hit);}";
         } else if (op == DFM_LITERAL_NULL)
           text += valid + "=false;";
+        else if (op == DFM_LITERAL_INT && dtype == DFM_DECIMAL128)
+          text += z + "=ulong2(lit[" + std::to_string(s.start+j) + "],lit[" + std::to_string(c[3]) + "]);";
         else if (op == DFM_LITERAL_INT || op == DFM_LITERAL_FLOAT ||
                  op == DFM_LITERAL_BOOL)
           text += z + "=" +
@@ -1480,7 +2172,8 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
         } else if (op == DFM_KEEP_NULLS)
           text += valid + "=" + av + "&&" + bv + ";" + z + "=" + b + ";";
         else if (op == DFM_FILL_NAN) {
-          auto nan = "((as_type<uint>(" + a + ")&0x7fffffffU)>0x7f800000U)";
+          auto nan = dtype == DFM_FLOAT64_STORAGE ? "f64_nan(" + a + ")" :
+              "((as_type<uint>(" + a + ")&0x7fffffffU)>0x7f800000U)";
           text += valid + "=" + av + "&&(!" + nan + "||" + bv + ");" + z + "=" +
                   nan + "?" + b + ":" + a + ";";
         } else if (op == DFM_FILL_NULL)
@@ -1499,7 +2192,47 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
           bool unary = unaryOp(op);
           text += valid + "=" + av + (unary ? "" : "&&" + bv) + ";if(" + valid +
                   "){";
-          if (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) {
+          auto operandType = nodeType(r, s.start + c[1]);
+          if (op == DFM_DIV && operandType == DFM_FLOAT32) {
+            text += z + "=as_type<float>(f32_div(as_type<uint>(" + a + "),as_type<uint>(" + b + ")));";
+          } else if (op == DFM_DIV) {
+            text += z + "=f64_div(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) +
+                    "),f64_word(" + encode(operandType,b) + "," + std::to_string(operandType) + "));";
+          } else if (op == DFM_SQRT) {
+            auto expression = "f64_sqrt(f64_word(" + encode(operandType,a) + "," + std::to_string(operandType) + "))";
+            text += z + "=" + (dtype == DFM_FLOAT32
+                ? "as_type<float>(f64_to_float32(" + expression + "))"
+                : expression) + ";";
+          } else if (op == DFM_FLOORDIV && operandType == DFM_FLOAT32) {
+            text += z + "=as_type<float>(f32_floor_div(as_type<uint>(" + a + "),as_type<uint>(" + b + ")));";
+          } else if (op == DFM_MOD && operandType == DFM_FLOAT32) {
+            text += z + "=as_type<float>(f32_mod(as_type<uint>(" + a + "),as_type<uint>(" + b + ")));";
+          } else if (operandType == DFM_FLOAT64_STORAGE) {
+            std::string expression;
+            if (op == DFM_ADD || op == DFM_SUB || op == DFM_MUL)
+              expression = std::string(op == DFM_ADD ? "f64_add(" : op == DFM_SUB ? "f64_sub(" : "f64_mul(") + a + "," + b + ")";
+            else if (op == DFM_NEG) expression = "(" + a + "^0x8000000000000000UL)";
+            else if (op == DFM_ABS) expression = "f64_abs(" + a + ")";
+            else if (op == DFM_FLOOR || op == DFM_CEIL) expression = "f64_integral(" + a + "," + std::to_string(op) + ")";
+            else if (op == DFM_ROUND)
+              expression = c[3] == 0 ? "f64_round(" + a + ")"
+                  : "f64_decimal_round(" + a + ",lit[" + std::to_string(s.start+j) + "]," + (c[3] < 0 ? "true" : "false") + ")";
+            else if (op == DFM_FLOORDIV) expression = "f64_integral(f64_div(" + a + "," + b + "),55)";
+            else if (op == DFM_MOD) expression = "f64_mod(" + a + "," + b + ")";
+            else if (op == DFM_IS_NAN) expression = "f64_nan(" + a + ")";
+            else if (op == DFM_IS_NOT_NAN) expression = "!f64_nan(" + a + ")";
+            else if (op == DFM_IS_FINITE) expression = "(f64_abs(" + a + ")<0x7ff0000000000000UL)";
+            else if (op == DFM_IS_INFINITE) expression = "f64_inf(" + a + ")";
+            else if (op == DFM_EQ || op == DFM_NE)
+              expression = std::string(op == DFM_NE ? "!" : "") + "f64_equal(" + a + "," + b + ")";
+            else if (op == DFM_GT || op == DFM_LT || op == DFM_GE || op == DFM_LE) {
+              expression = (op == DFM_GT || op == DFM_GE ? "f64_less(" + b + "," + a : "f64_less(" + a + "," + b) + ")";
+              if (op == DFM_GE || op == DFM_LE) expression += "||f64_equal(" + a + "," + b + ")";
+            } else if (op == DFM_CLIP_LOW || op == DFM_CLIP_HIGH)
+              expression = (op == DFM_CLIP_LOW ? "f64_less(" + a + "," + b : "f64_less(" + b + "," + a) + ")?" + b + ":" + a;
+            else fail("Unsupported emulated Float64 expression");
+            text += z + "=" + typename_ + "(" + expression + ");";
+          } else if (op >= DFM_DT_YEAR && op <= DFM_DT_TRUNCATE) {
             const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
             const int64_t dayTicks = c[3] == 0 ? 1 : perSecond * 86400;
             const auto perDay = std::to_string(dayTicks) + "L";
@@ -1545,6 +2278,11 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                         : op == DFM_IS_FINITE  ? bits + "<0x7f800000U"
                                                : bits + "==0x7f800000U";
             text += z + "=uchar(" + test + ");";
+          } else if (op == DFM_ROUND && operandType == DFM_FLOAT32) {
+            auto wide = "f64_from_float32(as_type<uint>(" + a + "))";
+            auto rounded = c[3] == 0 ? "f64_round(" + wide + ")"
+                : "f64_decimal_round(" + wide + ",lit[" + std::to_string(s.start+j) + "]," + (c[3] < 0 ? "true" : "false") + ")";
+            text += z + "=as_type<float>(f64_to_float32(" + rounded + "));";
           } else if (op == DFM_FLOOR || op == DFM_CEIL || op == DFM_ROUND) {
             text += z + "=" +
                     (dtype == DFM_FLOAT32 ? "float_integral(" + a + "," +
@@ -1622,6 +2360,12 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                 op != DFM_XOR)
               expr = "float_compare(" + a + "," + b + "," + std::to_string(op) +
                      ")";
+            if (op != DFM_NOT && op != DFM_XOR &&
+                (nodeType(r,s.start+c[1]) == DFM_DECIMAL128 || nodeType(r,s.start+c[2]) == DFM_DECIMAL128)) {
+              auto left = nodeType(r,s.start+c[1]) == DFM_DECIMAL128 ? a : "wide_word(long(" + a + "))";
+              auto right = nodeType(r,s.start+c[2]) == DFM_DECIMAL128 ? b : "wide_word(long(" + b + "))";
+              expr = "wide_compare(" + left + "," + right + "," + std::to_string(op) + ")";
+            }
             text += z + "=T(" + expr + ");";
           }
           text += "}";
@@ -1645,9 +2389,11 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
       if (layout.physical[s.slot] >= 0) {
         auto idx = std::to_string(layout.physical[s.slot]) + "UL*meta.z+row";
         text += "x[" + idx + "]=" +
-                (typed(r) ? encode(r.slot_types[s.slot], "slot" + slot)
+                (r.slot_types && r.slot_types[s.slot] == DFM_DECIMAL128 ? "slot" + slot + ".x" : typed(r) ? encode(r.slot_types[s.slot], "slot" + slot)
                           : "slot" + slot) +
                 ";v[" + idx + "]=uchar(valid" + slot + ");\n";
+        if (typed(r) && r.slot_types[s.slot] == DFM_DECIMAL128)
+          text += "x[(" + idx + ")+meta.z]=slot" + slot + ".y;v[(" + idx + ")+meta.z]=uchar(valid" + slot + ");\n";
       }
     }
     text += "}\n";
@@ -1742,6 +2488,12 @@ struct GPUOut {
 struct Partial {
   int64_t total, count;
 };
+struct WidePartial { int64_t total, high, count, padding; };
+WidePartial loadPartial(id<MTLBuffer> buffer, int64_t index, int64_t stride) {
+  if (stride == 32) return static_cast<WidePartial *>(buffer.contents)[index];
+  auto p = static_cast<Partial *>(buffer.contents)[index];
+  return {p.total, 0, p.count, 0};
+}
 struct Query {
   std::atomic<int64_t> refs{1}, live{0}, peak{0};
   Context &context;
@@ -1771,6 +2523,7 @@ struct Resident {
   id<MTLBuffer> values = nil, validity = nil, bitmap = nil;
   int64_t rows = 0, cap = 0, packed = 0, retained = 0;
   bool scalar = false, final = false;
+  int64_t scalar_stride = 16;
   std::vector<ResidentColumn> columns;
   DFMStats stats{};
   explicit Resident(Query &q) : query(q), buffers(q.context) { ++q.refs; }
@@ -1786,6 +2539,7 @@ struct Resident {
 struct ResidentCopy {
   uint64_t source, validity, target, rows;
   int64_t scalar, minimum, sum, padding;
+  uint64_t source_high, target_high;
 };
 Resident *residentInput(Query &query, const DFMResidentInput *refs,
                         int64_t index, int64_t rows, int64_t type) {
@@ -1799,12 +2553,17 @@ Resident *residentInput(Query &query, const DFMResidentInput *refs,
   return &t;
 }
 ResidentCopy residentCopy(const Resident &table, int64_t column,
-                          int64_t target) {
+                          int64_t target, int64_t target_cap = 0) {
   auto c = table.columns[column];
-  return {uint64_t(table.scalar ? 2 * c.slot : c.slot * table.cap),
-          uint64_t(table.scalar ? 16 * c.slot + 8 : c.slot * table.cap),
-          uint64_t(target), uint64_t(table.rows), table.scalar, c.minimum,
-          c.reduction == DFM_SUM, 0};
+  bool wide = c.type == DFM_DECIMAL128;
+  auto source = table.scalar ? (table.scalar_stride / 8) * c.slot : c.slot * table.cap;
+  return {uint64_t(source),
+          uint64_t(table.scalar ? table.scalar_stride * c.slot + (table.scalar_stride == 32 ? 16 : 8) : c.slot * table.cap),
+          uint64_t(target), uint64_t(table.rows), table.scalar,
+          reductionMinimum(c.reduction, c.minimum),
+          sumReduction(c.reduction), 0,
+          uint64_t(wide ? source + (table.scalar ? 1 : table.cap) : 0),
+          uint64_t(wide ? target + target_cap : 0)};
 }
 void run(Context &c, const DFMRequest &r, DFMStats &stats,
          Query *query = nullptr, const DFMResidentInput *refs = nullptr,
@@ -1922,7 +2681,15 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     memcpy(&floating, r.literals + i, 8);
     auto op = r.code[4 * i];
     auto dtype = nodeType(r, i);
+    if ((op == DFM_ROUND && r.code[4*i+3] != 0 &&
+         (dtype == DFM_FLOAT32 || dtype == DFM_FLOAT64_STORAGE)) ||
+        (op == DFM_DECIMAL_CAST && dtype == DFM_FLOAT32) ||
+        op == DFM_CUMULATIVE_KEY) {
+      memcpy(static_cast<char *>(literal.contents) + i * 8, r.literals + i, 8);
+      continue;
+    }
     if (op == DFM_GROUP_OUTPUT) {
+      if (pairMomentReduction(r.code[4*i+3])) integer = physicalMomentMetadata(integer, layout);
       memcpy(static_cast<char *>(literal.contents) + i * 8, &integer, 8);
       continue;
     }
@@ -1953,10 +2720,13 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     }
   }
   auto *descriptors = static_cast<GPUOut *>(out.contents);
-  for (int64_t i = 0; i < r.output_count; ++i)
+  for (int64_t i = 0; i < r.output_count; ++i) {
+    auto minimum = r.outputs[i].min_count;
+    if (pairMomentReduction(r.outputs[i].reduction)) minimum = physicalMomentMetadata(minimum, layout);
     descriptors[i] = {layout.physical[r.outputs[i].slot],
-                      r.outputs[i].reduction, r.outputs[i].min_count,
+                      r.outputs[i].reduction, minimum,
                       slotType(r, r.outputs[i].slot)};
+  }
   stats.staging_copy_ns = ns(start);
   Drain drain{[c.queue commandBuffer]};
   if (!drain.command)
@@ -1973,6 +2743,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
   };
   auto dispatch = [&](const std::string &name, int64_t count,
                       int64_t columns = 1, bool full = false) {
+    if (!columns) return;
     [encoder setComputePipelineState:p->kernels.at(name)];
     if (full)
       [encoder dispatchThreadgroups:MTLSizeMake((count + 255) / 256, columns, 1)
@@ -2005,7 +2776,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if (refs && refs[i].table) {
       auto &t = *static_cast<Resident *>(refs[i].table);
       auto params = residentCopy(t, refs[i].column,
-                                layout.physical[i] * shape.cap);
+                                layout.physical[i] * shape.cap, shape.cap);
       buffer(0, t.values);
       buffer(1, t.validity);
       buffer(2, x);
@@ -2070,6 +2841,28 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         dispatch("order_merge" + std::to_string(i), shape.cap);
         std::swap(orderA, orderB);
       }
+      if (step.filter == 5) {
+        buffer(0, x); buffer(1, v); buffer(2, orderA); buffer(3, meta);
+        buffer(4, arithmeticError);
+        buffer(5, literal);
+        dispatch("cumulative_assign" + std::to_string(i), shape.cap);
+        continue;
+      }
+      if (step.filter == 4) {
+        auto name = std::to_string(i);
+        auto h = r.code + 4 * step.start;
+        if (h[3] == 3) {
+          buffer(0, x); buffer(1, v); buffer(2, orderA); buffer(3, y);
+          buffer(4, orderB); buffer(5, meta);
+          dispatch("rank_prepare" + name, shape.cap, 1, true);
+          buffer(0, orderB); buffer(1, meta);
+          dispatch("rank_offsets" + name, 1);
+        }
+        buffer(0, x); buffer(1, v); buffer(2, orderA); buffer(3, y);
+        buffer(4, orderB); buffer(5, meta);
+        dispatch("rank_assign" + name, shape.cap);
+        continue;
+      }
       if (step.filter == 3) {
         auto name = std::to_string(i);
         buffer(0, x);
@@ -2124,9 +2917,9 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
           }
           for (int64_t logical = 0; logical < r.slots; ++logical) {
             if (!layout.group_after[i][logical]) continue;
-            uint64_t slot = layout.physical[logical];
+            uint64_t slot[2] = {uint64_t(layout.physical[logical]), uint64_t(slotType(r, logical) == DFM_DECIMAL128)};
             buffer(0, x); buffer(1, v); buffer(2, y); buffer(3, w);
-            buffer(4, orderA); buffer(5, meta); bytes(6, &slot, 8);
+            buffer(4, orderA); buffer(5, meta); bytes(6, slot, 16);
             indirect("order_gather");
           }
           std::swap(x, y); std::swap(v, w);
@@ -2138,14 +2931,14 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         auto physical = layout.physical[logical];
         if (!layout.gathered[i][logical])
           continue;
-        uint64_t slot = physical;
+        uint64_t slot[2] = {uint64_t(physical), uint64_t(slotType(r, logical) == DFM_DECIMAL128)};
         buffer(0, x);
         buffer(1, v);
         buffer(2, y);
         buffer(3, w);
         buffer(4, orderA);
         buffer(5, meta);
-        bytes(6, &slot, 8);
+        bytes(6, slot, 16);
         dispatch("order_gather", shape.cap);
       }
       std::swap(x, y);
@@ -2175,7 +2968,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         auto physical = layout.physical[logical];
         if (!layout.gathered[i][logical])
           continue;
-        uint64_t params[2] = {slot, static_cast<uint64_t>(physical)};
+        uint64_t params[4] = {slot, static_cast<uint64_t>(physical), uint64_t(slotType(r, logical) == DFM_DECIMAL128), 0};
         buffer(0, x);
         buffer(1, v);
         buffer(2, y);
@@ -2183,7 +2976,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
         buffer(4, rank);
         buffer(5, blocks);
         buffer(6, meta);
-        bytes(7, params, 16);
+        bytes(7, params, 32);
         dispatch("gather_rows", shape.cap);
       }
       std::swap(x, y);
@@ -2203,13 +2996,13 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
   }
   id<MTLBuffer> result = nil;
   if (r.reductions) {
-    result = b.make(mul(r.output_count, 16));
+    result = b.make(mul(r.output_count, partialWidth(r)));
     buffer(0, partial);
     buffer(1, result);
     buffer(2, out);
     buffer(3, meta);
     bytes(4, &groups, 8);
-    dispatch("finish_reduce", r.output_count);
+    if (r.output_count) dispatch("finish_reduce", r.output_count);
   } else if (!query || final) {
     uint64_t params[4] = {
         static_cast<uint64_t>(shape.packed),
@@ -2248,11 +3041,12 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if (fault == 0xE0000000U)
       fail("Metal unsupported [accumulator]: cannot prove exact wide accumulation "
            "within the native Int64/UInt64 range");
+    if (fault == 0xD0000000U)
+      fail("Integer or decimal overflow in Metal cumulative sum");
+    if (fault == 0xC0000000U)
+      fail("value exceeds decimal precision in Metal Decimal128 reduction");
     if (fault == 0xF0000000U)
       fail("Integer overflow in Metal grouped sum");
-    if (fault & 0x20000000u)
-      fail("Metal unsupported [precision]: integer to Float32 double-rounding "
-           "boundary requires CPU execution");
     if (fault & 0x40000000u)
       fail("Metal strict cast failed: value out of target range or NaN has no "
            "Boolean value");
@@ -2261,6 +3055,12 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
            "underflow requires CPU execution");
     if (fault & 0x10000000U)
       fail("Integer power requires a nonnegative exponent");
+    if (fault & 0x08000000U)
+      fail("decimal multiplication overflow in Metal expression");
+    if (fault & 0x04000000U)
+      fail("value exceeds decimal precision 38 in Metal expression");
+    if (fault & 0x02000000U)
+      fail("decimal negation or abs overflow in Metal expression");
     fail("Integer overflow in Metal row expression");
   }
   start = Clock::now();
@@ -2270,15 +3070,21 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
   stats.output_rows = rows;
   // Validate every aggregate before modifying any caller output.
   if (r.reductions && rows) {
-    auto *values = static_cast<Partial *>(result.contents);
-    for (int64_t i = 0; i < r.output_count; ++i)
-      if (r.outputs[i].reduction == DFM_SUM &&
-          values[i].count >= r.outputs[i].min_count &&
-          ((r.outputs[i].dtype == DFM_INT32 &&
-            (values[i].total < INT32_MIN || values[i].total > INT32_MAX)) ||
-           (r.outputs[i].dtype == DFM_UINT32 &&
-            (values[i].total < 0 || uint64_t(values[i].total) > UINT32_MAX))))
+    for (int64_t i = 0; i < r.output_count; ++i) {
+      auto value = loadPartial(result, i, partialWidth(r));
+      if (r.outputs[i].reduction == DFM_WIDE_INTEGER_SUM &&
+          value.count >= r.outputs[i].min_count &&
+          (r.outputs[i].dtype == DFM_UINT64 ? value.high != 0
+              : value.high != (value.total < 0 ? -1 : 0)))
         fail("Integer overflow in Metal sum");
+      if (r.outputs[i].reduction == DFM_SUM &&
+          value.count >= r.outputs[i].min_count &&
+          ((r.outputs[i].dtype == DFM_INT32 &&
+            (value.total < INT32_MIN || value.total > INT32_MAX)) ||
+           (r.outputs[i].dtype == DFM_UINT32 &&
+            (value.total < 0 || uint64_t(value.total) > UINT32_MAX))))
+        fail("Integer overflow in Metal sum");
+    }
   }
   if (query) {
     auto t = std::make_unique<Resident>(*query);
@@ -2286,6 +3092,7 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     t->cap = shape.cap;
     t->packed = shape.packed;
     t->scalar = r.reductions;
+    t->scalar_stride = partialWidth(r);
     t->final = final;
     for (int64_t i = 0; i < r.output_count; ++i) {
       auto o = r.outputs[i];
@@ -2311,8 +3118,8 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     stats.download_bytes = 8;
     if (r.reductions && rows)
       for (int64_t i = 0; i < r.output_count; ++i)
-        if (r.outputs[i].reduction == DFM_SUM)
-          stats.download_bytes += sizeof(Partial);
+        if (sumReduction(r.outputs[i].reduction))
+          stats.download_bytes += partialWidth(r);
     stats.result_copy_ns = 0;
     t->stats = stats;
     t->seal();
@@ -2324,11 +3131,12 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
     if (r.reductions) {
       if (!rows)
         continue;
-      auto a = static_cast<Partial *>(result.contents)[i];
-      bool valid =
-          o.reduction == DFM_SUM ? a.count >= o.min_count : a.count > 0;
+      auto a = loadPartial(result, i, partialWidth(r));
+      bool valid = sumReduction(o.reduction)
+                       ? a.count >= reductionMinimum(o.reduction, o.min_count)
+                       : a.count > 0;
       if (!valid)
-        a.total = 0;
+        a.total = a.high = 0;
       memcpy(o.values, &a.total, width(o.dtype));
       o.validity[0] = valid;
       stats.download_bytes += width(o.dtype) + 1;
@@ -2344,7 +3152,10 @@ void run(Context &c, const DFMRequest &r, DFMStats &stats,
                       layout.physical[o.slot] * shape.cap;
         for (int64_t row = 0; row < rows; ++row)
           memcpy(static_cast<char *>(o.values) + row * width(o.dtype),
-                 words + row, width(o.dtype));
+                 words + row, std::min<int64_t>(8, width(o.dtype)));
+        if (o.dtype == DFM_DECIMAL128)
+          for (int64_t row = 0; row < rows; ++row)
+            memcpy(static_cast<char *>(o.values) + row * 16 + 8, words + shape.cap + row, 8);
       } else if (size)
         memcpy(o.values,
                o.dtype == DFM_BOOL
@@ -2641,7 +3452,7 @@ int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
     *err = nullptr;
   @autoreleasepool {
     try {
-      if (!p || !outputs || !stats)
+      if (!p || (count && !outputs) || !stats)
         fail("Missing Metal resident export table, outputs or stats");
       auto &t = *static_cast<Resident *>(p);
       std::lock_guard<std::mutex> lock(t.query.context.mutex);
@@ -2665,10 +3476,12 @@ int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
         if (!t.rows)
           continue;
         if (t.scalar) {
-          auto a = static_cast<Partial *>(t.values.contents)[c.slot];
-          bool valid = c.reduction == DFM_SUM ? a.count >= c.minimum : a.count > 0;
+          auto a = loadPartial(t.values, c.slot, t.scalar_stride);
+          bool valid = sumReduction(c.reduction)
+                           ? a.count >= reductionMinimum(c.reduction, c.minimum)
+                           : a.count > 0;
           if (!valid)
-            a.total = 0;
+            a.total = a.high = 0;
           memcpy(o.values, &a.total, width(o.dtype));
           o.validity[0] = valid;
         } else {
@@ -2682,7 +3495,10 @@ int32_t dfm_resident_export(void *p, const DFMOutput *outputs, int64_t count,
                           c.slot * t.cap;
             auto bytes = width(o.dtype);
             for (int64_t row = 0; row < t.rows; ++row)
-              memcpy(static_cast<char *>(o.values) + row * bytes, words + row, bytes);
+              memcpy(static_cast<char *>(o.values) + row * bytes, words + row, std::min<int64_t>(8, bytes));
+            if (o.dtype == DFM_DECIMAL128)
+              for (int64_t row = 0; row < t.rows; ++row)
+                memcpy(static_cast<char *>(o.values) + row * 16 + 8, words + t.cap + row, 8);
           }
         }
       }

@@ -531,15 +531,15 @@ def temporal_preflight_cases() raises:
         )
     var decimals = DataFrame(
         [
-            Series("d", Column[Int32]([100])).with_dtype(
-                DataType.decimal(9, 2, 32)
+            Series("d", Column[Int128]([100])).with_dtype(
+                DataType.decimal(38, 2, 128)
             )
         ]
     )
-    with assert_raises(contains="Decimal128 accumulation"):
+    with assert_raises(contains="Decimal128 input reductions"):
         _ = (
             decimals.lazy()
-            .select(col("d").sum())
+            .select(col("d").arg_min())
             .collect(accelerator=unavailable)
         )
 

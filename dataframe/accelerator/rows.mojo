@@ -4,12 +4,38 @@ Expressions use the shared binder and retain their logical dtypes. Programs
 are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
+from .metadata import prune_projections
+from .integer_ranges import proven_integer_nodes, _decimal_scale_safe
 from std.memory import bitcast
+from std.math import pow, abs
+from dataframe.parallel import configured_workers
 from .capabilities import RowCapabilities
 from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.dtype import DataType
 from dataframe.expr import (
     Expr,
+    RANK,
+    CUM_SUM,
+    CUM_MIN,
+    CUM_MAX,
+    CUM_COUNT,
+    SHIFT,
+    ROLLING_SUM,
+    ROLLING_MEAN,
+    ROLLING_MIN,
+    ROLLING_MAX,
+    ROLLING_VAR,
+    ROLLING_STD,
+    FORWARD_FILL,
+    BACKWARD_FILL,
+    OVER,
+    col,
+    subtree,
+    split_names,
+    is_window,
+    is_reduction,
+    is_comparison,
+    DIV,
     FLOORDIV,
     MOD,
     POW,
@@ -18,6 +44,7 @@ from dataframe.expr import (
     FILL_NAN,
     KEEP_NULLS,
     ABS,
+    SQRT,
     FLOOR,
     CEIL,
     ROUND,
@@ -55,6 +82,12 @@ from dataframe.expr import (
     MAX,
     COUNT,
     MEAN,
+    VAR,
+    SKEW,
+    KURTOSIS,
+    COV,
+    CORR,
+    STD,
     LEN,
     FIRST,
     LAST,
@@ -87,6 +120,9 @@ comptime ROW_GROUP_KEY = 1003
 comptime ROW_GROUP_OUTPUT = 1004
 comptime ROW_GROUP_HEADER_LAST = 1005
 comptime ROW_SLICE = 1006
+comptime ROW_CUMULATIVE_KEY = 1009
+comptime ROW_RANK_KEY = 1007
+comptime ROW_GROUP_HEADER_WINDOW = 1008
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -130,6 +166,26 @@ struct RowPlan(Movable):
     var root: Int
     var limit: Int
     var reductions: Bool
+    var reused_columns: Bool
+
+
+def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
+    var reachable = List[Bool](length=root + 1, fill=False)
+    reachable[root] = True
+    for reverse in range(root + 1):
+        var index = root - reverse
+        if not reachable[index]:
+            continue
+        if index == target:
+            return True
+        ref node = expression._nodes[index]
+        if node.left >= 0:
+            reachable[node.left] = True
+        if node.right >= 0:
+            reachable[node.right] = True
+        if node.extra >= 0:
+            reachable[node.extra] = True
+    return False
 
 
 def _empty(name: String, dtype: DataType) raises -> Series:
@@ -146,12 +202,16 @@ def _program(
     mut node_dtypes: List[DataType],
     capabilities: RowCapabilities,
 ) raises:
-    if count < 1 or count > ROW_MAX_NODES:
+    if count < 1 or count > capabilities.max_nodes:
         capabilities.reject(
-            "plan", "expression must contain 1 to 64 row-local nodes"
+            "plan",
+            "expression must contain 1 to "
+            + String(capabilities.max_nodes)
+            + " row-local nodes",
         )
     var program_start = len(literals)
     var memberships = List[Int]()
+    var wide_literals = List[Int]()
     for i in range(count):
         ref node = bound.expr._nodes[i]
         var op = node.op
@@ -166,6 +226,35 @@ def _program(
             )
         if not (
             op == COL
+            or (
+                op == DIV
+                and capabilities.decimal_multiplicative
+                and bound.dtypes[i].is_decimal()
+            )
+            or (
+                op == FLOORDIV
+                and capabilities.float_division
+                and bound.dtypes[i] == DataType.FLOAT32
+            )
+            or (
+                op == SQRT
+                and capabilities.float_sqrt
+                and bound.dtypes[i].is_float()
+            )
+            or (
+                op == ROUND
+                and capabilities.float_rounding
+                and bound.dtypes[i].is_float()
+            )
+            or (
+                (
+                    (op == DIV or op == FLOORDIV)
+                    and capabilities.float_division
+                    or op == MOD
+                    and capabilities.float_modulo
+                )
+                and bound.dtypes[i].is_float()
+            )
             or (
                 capabilities.temporal_fields
                 and op >= DT_YEAR
@@ -226,6 +315,40 @@ def _program(
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
         var temporal = op >= DT_YEAR and op <= DT_TRUNCATE
+        var decimal_float_cast = (
+            op == CAST
+            and left_type.is_decimal()
+            and bound.dtypes[i] == DataType.FLOAT64
+            and capabilities.decimal_float_cast
+            and (capabilities.float64 or capabilities.float64_emulated)
+            and capabilities.casts
+        )
+        var decimal_cast = (
+            op == CAST
+            and capabilities.casts
+            and capabilities.decimal_casts
+            and (
+                (
+                    left_type.is_decimal()
+                    and (
+                        bound.dtypes[i].is_decimal()
+                        or bound.dtypes[i].is_integer()
+                        or bound.dtypes[i] == DataType.BOOL
+                        or bound.dtypes[i] == DataType.FLOAT32
+                    )
+                )
+                or (
+                    bound.dtypes[i].is_decimal()
+                    and (left_type.is_integer() or left_type == DataType.BOOL)
+                )
+            )
+        )
+        var decimal_arithmetic = left_type.is_decimal() and (
+            capabilities.decimal_arithmetic
+            and (op == ADD or op == SUB or op == NEG or op == ABS)
+            or capabilities.decimal_multiplicative
+            and (op == MUL or op == DIV)
+        )
         if (
             temporal
             and left_type.is_datetime()
@@ -250,11 +373,68 @@ def _program(
                 or op == FILL_NULL
                 or op == KEEP_NULLS
                 or op == WHEN
+                or (
+                    capabilities.float64_emulated
+                    and (
+                        op == ADD
+                        or op == SUB
+                        or op == MUL
+                        or op == NEG
+                        or op == DIV
+                        or op == FLOORDIV
+                        or op == MOD
+                        or op == SQRT
+                        or op == CAST
+                        or op == FLOOR
+                        or op == CEIL
+                        or op == ROUND
+                        or op == ABS
+                        or op == GT
+                        or op == LT
+                        or op == GE
+                        or op == LE
+                        or op == EQ
+                        or op == NE
+                        or op == IS_NAN
+                        or op == IS_NOT_NAN
+                        or op == IS_FINITE
+                        or op == IS_INFINITE
+                        or op == FILL_NAN
+                        or op == CLIP_LOW
+                        or op == CLIP_HIGH
+                    )
+                )
             )
         ):
             capabilities.reject(
                 "precision", "Float64 requires CPU execution for this operation"
             )
+        if (left_type.is_decimal() and left_type.decimal_width() == 128) or (
+            right_type.is_decimal() and right_type.decimal_width() == 128
+        ):
+            if (
+                op != COL
+                and op != LIT_NULL
+                and op != IS_NULL
+                and op != IS_NOT_NULL
+                and op != WHEN
+                and op != FILL_NULL
+                and op != KEEP_NULLS
+                and op != LIT_INT
+                and op != GT
+                and op != LT
+                and op != GE
+                and op != LE
+                and op != EQ
+                and op != NE
+                and not decimal_float_cast
+                and not decimal_cast
+                and not decimal_arithmetic
+            ):
+                capabilities.reject(
+                    "logical",
+                    "Decimal128 row arithmetic requires CPU execution",
+                )
         var logical = (
             bound.dtypes[i].is_temporal()
             or bound.dtypes[i].is_decimal()
@@ -263,19 +443,26 @@ def _program(
             or right_type.is_temporal()
             or right_type.is_decimal()
         )
-        if logical and (
-            op == ABS
-            or op == FLOORDIV
-            or op == MOD
-            or op == POW
-            or op == FLOOR
-            or op == CEIL
-            or op == ROUND
-            or op == ADD
-            or op == SUB
-            or op == MUL
-            or op == NEG
-            or op == CAST
+        if (
+            logical
+            and not decimal_float_cast
+            and not decimal_cast
+            and not decimal_arithmetic
+            and (
+                op == SQRT
+                or op == ABS
+                or op == FLOORDIV
+                or op == MOD
+                or op == POW
+                or op == FLOOR
+                or op == CEIL
+                or op == ROUND
+                or op == ADD
+                or op == SUB
+                or op == MUL
+                or op == NEG
+                or op == CAST
+            )
         ):
             capabilities.reject(
                 "logical", "logical arithmetic and casts require CPU execution"
@@ -283,13 +470,25 @@ def _program(
         if left_type.is_decimal() and (
             op == GT or op == LT or op == GE or op == LE or op == EQ or op == NE
         ):
-            if (
+            if not capabilities.decimal_comparisons and (
                 left_type.scale() != right_type.scale()
-                or left_type.physical() != right_type.physical()
+                or (
+                    left_type.physical() != right_type.physical()
+                    and not (
+                        capabilities.decimal128
+                        and (
+                            left_type.decimal_width() == 128
+                            or right_type.decimal_width() == 128
+                        )
+                    )
+                )
             ):
                 capabilities.reject(
                     "logical",
-                    "decimal comparisons require matching scales and storage widths",
+                    (
+                        "decimal comparisons require matching scales and"
+                        " storage widths"
+                    ),
                 )
         if (
             op == ADD
@@ -317,7 +516,14 @@ def _program(
             capabilities.reject(
                 "plan", "scalar integer arithmetic requires CPU execution"
             )
-        if op == CAST and node.integer and bound.shapes[i] != ROWS:
+        if (
+            op == CAST
+            and node.integer
+            and bound.shapes[i] != ROWS
+            and not (
+                capabilities.float64_emulated and bound.dtypes[i].is_float()
+            )
+        ):
             capabilities.reject(
                 "plan", "scalar strict casts require CPU execution"
             )
@@ -325,14 +531,25 @@ def _program(
             op == ROUND
             and bound.dtypes[i] == DataType.FLOAT32
             and node.integer != 0
+            and not capabilities.float_rounding
         ):
             capabilities.reject(
                 "precision",
-                "Float32 decimal rounding requires Float64 intermediate arithmetic",
+                (
+                    "Float32 decimal rounding requires Float64 intermediate"
+                    " arithmetic"
+                ),
             )
-        if (op == FLOORDIV or op == MOD or op == POW) and bound.dtypes[
-            i
-        ].is_float():
+        if (
+            (op == FLOORDIV or op == MOD or op == POW)
+            and bound.dtypes[i].is_float()
+            and not (
+                op == FLOORDIV
+                and capabilities.float_division
+                or op == MOD
+                and capabilities.float_modulo
+            )
+        ):
             capabilities.reject(
                 "precision",
                 "floating division, modulo, and power require CPU execution",
@@ -361,7 +578,10 @@ def _program(
             ):
                 capabilities.reject(
                     "temporal",
-                    "truncate requires a positive fixed interval aligned to the storage unit",
+                    (
+                        "truncate requires a positive fixed interval aligned to"
+                        " the storage unit"
+                    ),
                 )
             right = interval[1] // per_tick
         node_dtypes.append(bound.dtypes[i])
@@ -374,11 +594,34 @@ def _program(
         literals.append(
             bitcast[DType.float64](node.integer) if op
             == LIT_INT else (
-                Float64(node.integer) if op == LIT_BOOL else node.floating
+                Float64(node.integer) if op
+                == LIT_BOOL else (
+                    pow(Float64(10), Float64(abs(node.integer))) if op == ROUND
+                    and capabilities.float_rounding
+                    and bound.dtypes[i].is_float()
+                    and node.integer != 0 else node.floating
+                )
             )
         )
+        if (
+            op == LIT_INT
+            and bound.dtypes[i].is_decimal()
+            and bound.dtypes[i].decimal_width() == 128
+        ):
+            wide_literals.append(i)
         if op == INT_IS_IN:
             memberships.append(i)
+    # Upper words are runtime payloads, like membership lists. Values do not
+    # enter shader source or require a different pipeline cache entry.
+    for i in wide_literals:
+        ref node = bound.expr._nodes[i]
+        var high = Int64(atol(node.text2)) if node.text2 else (
+            Int64(-1) if node.integer < 0 else Int64(0)
+        )
+        code[4 * (program_start + i) + 3] = Int64(len(literals))
+        code.extend([Int64(LIT_INT), Int64(-1), Int64(-1), Int64(-1)])
+        literals.append(bitcast[DType.float64](high))
+        node_dtypes.append(DataType.INT64)
     # Membership values are runtime literal payloads, outside the executable
     # expression's local node range. Changing values reuses the same shader.
     # Preserve exact signed/unsigned 64-bit words without Float64 conversion.
@@ -392,6 +635,17 @@ def _program(
             code.extend([Int64(LIT_INT), Int64(-1), Int64(-1), Int64(-1)])
             literals.append(bitcast[DType.float64](Int64(atol(entries[j]))))
             node_dtypes.append(bound.dtypes[node.left])
+
+
+def _append_gathers(slots: List[Int], mut gathers: List[Int64]) -> Int:
+    # Several output names may refer to one resident value. Gather its data
+    # and validity once while keeping visible column order in the schema.
+    var unique = List[Int]()
+    for slot in slots:
+        if slot not in unique:
+            unique.append(slot)
+            gathers.append(Int64(slot))
+    return len(unique)
 
 
 def lower_rows(
@@ -429,13 +683,19 @@ def lower_rows(
         ):
             capabilities.reject(
                 "plan",
-                "resident region requires an in-memory scan and row-local steps",
+                (
+                    "resident region requires an in-memory scan and row-local"
+                    " steps"
+                ),
             )
         chain.append(cursor)
         cursor = query._nodes[cursor].left
-        if len(chain) > ROW_MAX_STEPS:
+        if len(chain) > capabilities.max_steps:
             capabilities.reject(
-                "plan", "resident region supports at most 64 plan steps"
+                "plan",
+                "resident region supports at most "
+                + String(capabilities.max_steps)
+                + " plan steps",
             )
     if cursor < 0:
         capabilities.reject(
@@ -444,13 +704,20 @@ def lower_rows(
     # Reuse core projection analysis after validating the resident chain.
     # This only narrows the source: no expression evaluation or row movement.
     var projected_query = query.copy()
-    projected_query._push_projections()
+    prune_projections(projected_query)
     var frame = query._frames[query._nodes[cursor].offset].copy()
     if len(projected_query._nodes[cursor].names):
         frame = frame.select(projected_query._nodes[cursor].names)
-    if frame.width() < 1 or frame.width() > ROW_MAX_SLOTS:
+    if (
+        frame.width() < 1 and not capabilities.empty_inputs
+    ) or frame.width() > capabilities.max_slots:
         capabilities.reject(
-            "plan", "resident region requires 1 to 64 source columns"
+            "plan",
+            "resident region requires "
+            + String(0 if capabilities.empty_inputs else 1)
+            + " to "
+            + String(capabilities.max_slots)
+            + " source columns",
         )
     var dtype = DataType.BOOL
     var schema = frame._columns.copy()
@@ -489,6 +756,7 @@ def lower_rows(
     var outputs = List[RowOutput]()
     var next_slot = len(schema)
     var reduced = False
+    var reused_columns = False
     for k in range(len(chain) - 1, -1, -1):
         ref node = query._nodes[chain[k]]
         if reduced:
@@ -498,8 +766,13 @@ def lower_rows(
         if node.kind == SLICE:
             if node.length < -1:
                 raise Error("Slice length must be nonnegative")
-            if next_slot >= ROW_MAX_SLOTS:
-                capabilities.reject("plan", "slice exceeds 64 value slots")
+            if next_slot >= capabilities.max_slots:
+                capabilities.reject(
+                    "plan",
+                    "slice exceeds "
+                    + String(capabilities.max_slots)
+                    + " value slots",
+                )
             var start = len(literals)
             code.extend(
                 [
@@ -518,8 +791,7 @@ def lower_rows(
                 literals.append(bitcast[DType.float64](Int64(parameter)))
                 node_dtypes.append(DataType.INT64)
             var gather_start = len(gathers)
-            for slot in slots:
-                gathers.append(Int64(slot))
+            var gather_count = _append_gathers(slots, gathers)
             slot_dtypes.append(DataType.BOOL)
             steps.append(
                 RowStep(
@@ -528,7 +800,7 @@ def lower_rows(
                     next_slot,
                     True,
                     gather_start,
-                    len(slots),
+                    gather_count,
                     False,
                     False,
                 )
@@ -560,8 +832,7 @@ def lower_rows(
                 literals.append(0)
                 node_dtypes.append(schema[found].dtype())
             var gather_start = len(gathers)
-            for slot in slots:
-                gathers.append(Int64(slot))
+            var gather_count = _append_gathers(slots, gathers)
             steps.append(
                 RowStep(
                     start,
@@ -569,7 +840,7 @@ def lower_rows(
                     0,
                     False,
                     gather_start,
-                    len(slots),
+                    gather_count,
                     True,
                     False,
                 )
@@ -611,7 +882,9 @@ def lower_rows(
         var projected = List[Series]()
         var projected_slots = List[Int]()
         var aggregate_outputs = List[RowOutput]()
-        var has_rows = False
+        # An explicit empty projection keeps its input row shape. A selector
+        # that expands to nothing is normalized separately to a scalar row.
+        var has_rows = node.kind == SELECT and len(node.exprs) == 0
         var has_aggregate = False
         var projection_names = List[String]()
         for expr in node.exprs:
@@ -622,6 +895,14 @@ def lower_rows(
                     )
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
+            var proven = List[Bool](length=len(bound.expr._nodes), fill=False)
+            if (
+                capabilities.proven_integer_operations
+                or capabilities.decimal_comparisons
+                or capabilities.decimal_arithmetic
+                or capabilities.decimal_multiplicative
+            ):
+                proven = proven_integer_nodes(bound)
             for part_index in range(len(bound.expr._nodes)):
                 if bound.dtypes[part_index].is_integer():
                     ref part = bound.expr._nodes[part_index]
@@ -634,10 +915,13 @@ def lower_rows(
                         or part.op == FLOORDIV
                         or part.op == POW
                     ):
-                        # CPU predicate/projection/head pushdown can remove
-                        # checked work. Keep the first integer subset at an
+                        # CPU pushdown can remove checked work. An operation
+                        # without a static no-error proof still needs an
                         # observable terminal boundary, with no final head.
-                        if (
+                        if not (
+                            capabilities.proven_integer_operations
+                            and proven[part_index]
+                        ) and (
                             not terminal_boundary
                             or k != 0
                             or node.kind == FILTER
@@ -645,17 +929,38 @@ def lower_rows(
                         ):
                             capabilities.reject(
                                 "plan",
-                                "checked integer arithmetic requires terminal projections without head",
+                                (
+                                    "checked integer arithmetic requires"
+                                    " terminal projections without head"
+                                ),
                             )
                     if part.op == SUM and limit >= 0 and node.kind != AGG:
                         capabilities.reject(
                             "plan",
-                            "integer sum with final head requires CPU execution",
+                            (
+                                "integer sum with final head requires CPU"
+                                " execution"
+                            ),
                         )
-            for part in bound.expr._nodes:
+            var conditional = False
+            for candidate in bound.expr._nodes:
+                conditional |= candidate.op == WHEN
+            for part_index in range(len(bound.expr._nodes)):
+                ref part = bound.expr._nodes[part_index]
                 if (
-                    part.op == CAST
-                    and part.integer
+                    bound.dtypes[part_index].is_decimal()
+                    and (
+                        capabilities.decimal_arithmetic
+                        and (
+                            part.op == ADD
+                            or part.op == SUB
+                            or part.op == NEG
+                            or part.op == ABS
+                        )
+                        or capabilities.decimal_multiplicative
+                        and (part.op == MUL or part.op == DIV)
+                    )
+                    and not proven[part_index]
                     and (
                         not terminal_boundary
                         or k != 0
@@ -665,14 +970,419 @@ def lower_rows(
                 ):
                     capabilities.reject(
                         "plan",
-                        "strict casts require terminal projections without head",
+                        "checked decimal arithmetic requires terminal projections without head",
                     )
+                if (
+                    capabilities.decimal_multiplicative
+                    and part.op == MUL
+                    and bound.dtypes[part_index].is_decimal()
+                ):
+                    var left = bound.dtypes[part.left]
+                    var right = bound.dtypes[part.right]
+                    var scale = max(left.scale(), right.scale())
+                    # CPU's nullable/masked multiplication checks unused
+                    # rescaling that its dense fast path skips. Require a
+                    # proof so results cannot depend on those paths.
+                    if not (
+                        _decimal_scale_safe(left, scale)
+                        and _decimal_scale_safe(right, scale)
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "decimal multiplication with different scales requires a static rescaling proof",
+                        )
+                if (
+                    is_comparison(part.op)
+                    and part.left >= 0
+                    and bound.dtypes[part.left].is_decimal()
+                    and capabilities.decimal_comparisons
+                    and not proven[part_index]
+                ):
+                    var left = bound.dtypes[part.left]
+                    var right = bound.dtypes[part.right]
+                    # CPU's one-row Decimal128/Decimal64 comparison fast path
+                    # rescales the wide operand without checking overflow.
+                    # A resident filter can change the row count to one, so
+                    # admit this combination only with a static proof.
+                    if (
+                        left.decimal_width() == 128
+                        and right.decimal_width() == 64
+                        and left.scale() < right.scale()
+                    ) or (
+                        right.decimal_width() == 128
+                        and left.decimal_width() == 64
+                        and right.scale() < left.scale()
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "checked decimal comparisons with a rescaled Decimal128 and Decimal64 require a static proof",
+                        )
+                    if (
+                        not terminal_boundary
+                        or k != 0
+                        or node.kind == FILTER
+                        or limit >= 0
+                        or conditional
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "checked decimal comparisons require terminal projections without head or conditional branches",
+                        )
+                if (
+                    part.op == CAST
+                    and part.integer
+                    and not (
+                        capabilities.proven_integer_operations
+                        and proven[part_index]
+                    )
+                    and not (
+                        capabilities.float64_emulated
+                        and bound.dtypes[part_index].is_float()
+                    )
+                    and (
+                        not terminal_boundary
+                        or k != 0
+                        or node.kind == FILTER
+                        or limit >= 0
+                    )
+                ):
+                    capabilities.reject(
+                        "plan",
+                        (
+                            "strict casts require terminal projections without"
+                            " head"
+                        ),
+                    )
+            # Both window families evaluate their input first, then use a
+            # stable partition permutation and scatter results to source rows.
+            var rank_schema = schema.copy()
+            var rank_slots = slots.copy()
+            var ranked = bound.expr.copy()
+            var original_rank_scopes = bound.expr.copy()
+            var rank_scopes = List[Bool](length=len(ranked._nodes), fill=False)
+            var has_rank = False
+            for r in range(len(ranked._nodes)):
+                var window_op = ranked._nodes[r].op
+                var cumulative = (
+                    window_op == CUM_SUM
+                    or window_op == CUM_MIN
+                    or window_op == CUM_MAX
+                    or window_op == CUM_COUNT
+                )
+                var shift_fill = (
+                    window_op == SHIFT
+                    or window_op == FORWARD_FILL
+                    or window_op == BACKWARD_FILL
+                )
+                var rolling_moments = (
+                    window_op == ROLLING_VAR or window_op == ROLLING_STD
+                )
+                var rolling = (
+                    rolling_moments
+                    or window_op == ROLLING_SUM
+                    or window_op == ROLLING_MEAN
+                    or window_op == ROLLING_MIN
+                    or window_op == ROLLING_MAX
+                )
+                if (
+                    window_op != RANK
+                    and not cumulative
+                    and not shift_fill
+                    and not rolling
+                ):
+                    continue
+                if rolling_moments and not capabilities.rolling_moments:
+                    capabilities.reject(
+                        "plan",
+                        "rolling variance and standard deviation require backend support",
+                    )
+                if rolling_moments and not (
+                    capabilities.float64 or capabilities.float64_emulated
+                ):
+                    capabilities.reject(
+                        "plan", "rolling moments require Float64 arithmetic"
+                    )
+                if rolling and not capabilities.rolling_windows:
+                    capabilities.reject(
+                        "plan", "rolling windows require backend support"
+                    )
+                if (
+                    rolling
+                    and window_op == ROLLING_SUM
+                    and bound.dtypes[ranked._nodes[r].left].is_decimal()
+                ):
+                    capabilities.reject(
+                        "logical",
+                        "rolling_sum over a decimal column requires an explicit Float64 cast",
+                    )
+                if shift_fill and not capabilities.shift_fill_windows:
+                    capabilities.reject(
+                        "plan", "shift and fill windows require backend support"
+                    )
+                if cumulative and not capabilities.cumulative_windows:
+                    capabilities.reject(
+                        "plan", "cumulative windows require backend support"
+                    )
+                if (
+                    not cumulative
+                    and not shift_fill
+                    and not rolling
+                    and not capabilities.ranks
+                ):
+                    capabilities.reject("plan", "rank requires backend support")
+                if node.kind == AGG:
+                    capabilities.reject(
+                        "plan",
+                        (
+                            "rank inside grouped aggregation requires CPU"
+                            " execution"
+                        ),
+                    )
+                var rank_node = ranked._nodes[r].copy()
+                var replacement = r
+                var partitions = List[String]()
+                var scope = -1
+                for parent in range(r + 1, len(ranked._nodes)):
+                    ref candidate = original_rank_scopes._nodes[parent]
+                    if candidate.op == OVER and _contains_node(
+                        original_rank_scopes, candidate.left, r
+                    ):
+                        if scope >= 0:
+                            capabilities.reject(
+                                "plan",
+                                "nested over scopes require CPU execution",
+                            )
+                        scope = parent
+                if scope >= 0:
+                    partitions = split_names(
+                        original_rank_scopes._nodes[scope].text2
+                    )
+                    rank_scopes[scope] = True
+                    if original_rank_scopes._nodes[scope].left == r:
+                        replacement = scope
+                var methods = List[String](
+                    ["average", "min", "max", "dense", "ordinal"]
+                )
+                var method = -1
+                for m in range(len(methods)):
+                    if rank_node.text == methods[m]:
+                        method = m
+                if rolling:
+                    method = (
+                        7 if window_op
+                        == ROLLING_SUM else 8 if window_op
+                        == ROLLING_MEAN else 9 if window_op
+                        == ROLLING_MIN else 10 if window_op
+                        == ROLLING_MAX else 11 if window_op
+                        == ROLLING_VAR else 12
+                    )
+                elif shift_fill:
+                    method = (
+                        4 if window_op
+                        == SHIFT else 5 if window_op
+                        == FORWARD_FILL else 6
+                    )
+                elif cumulative:
+                    method = 0 if window_op == CUM_SUM else (
+                        1 if window_op
+                        == CUM_MIN else (2 if window_op == CUM_MAX else 3)
+                    )
+                if method < 0:
+                    raise Error("unknown rank method: " + rank_node.text)
+                var child = bind(subtree(ranked, rank_node.left), rank_schema)
+                if rolling_moments or (
+                    rolling
+                    and window_op == ROLLING_MEAN
+                    and child.dtypes[len(child.dtypes) - 1].is_decimal()
+                ):
+                    var converted = child.expr.cast(DataType.FLOAT64)
+                    child = bind(converted, rank_schema)
+                var child_proven = List[Bool](
+                    length=len(child.expr._nodes), fill=False
+                )
+                if capabilities.proven_integer_operations:
+                    child_proven = proven_integer_nodes(child)
+                for c in range(len(child.expr._nodes)):
+                    var operation = child.expr._nodes[c].op
+                    if not child_proven[c] and (
+                        child.dtypes[c].is_integer()
+                        and (
+                            operation == ADD
+                            or operation == SUB
+                            or operation == MUL
+                            or operation == NEG
+                            or operation == ABS
+                            or operation == FLOORDIV
+                            or operation == POW
+                        )
+                        or operation == CAST
+                        and child.expr._nodes[c].integer
+                        and not child.dtypes[c].is_float()
+                    ):
+                        capabilities.reject(
+                            "plan", "checked rank inputs require CPU execution"
+                        )
+                if (
+                    1 + len(partitions) > capabilities.max_nodes
+                    or next_slot + 2 > capabilities.max_slots
+                    or len(steps) + 2 > capabilities.max_steps
+                ):
+                    capabilities.reject(
+                        "plan", "rank exceeds resident slot or step limits"
+                    )
+                var input_slot = next_slot
+                var input_start = len(literals)
+                _program(
+                    child,
+                    len(child.expr._nodes),
+                    rank_slots,
+                    dtype,
+                    code,
+                    literals,
+                    node_dtypes,
+                    capabilities,
+                )
+                slot_dtypes.append(child.dtypes[len(child.dtypes) - 1])
+                steps.append(
+                    RowStep(
+                        input_start,
+                        len(child.expr._nodes),
+                        input_slot,
+                        False,
+                        0,
+                        0,
+                        False,
+                        False,
+                    )
+                )
+                next_slot += 1
+                var rank_start = len(literals)
+                # Match the CPU Float64-to-Int conversion for min_samples.
+                # A rounded positive value may wrap negative at Int64.MAX;
+                # such a threshold accepts every nonempty window.
+                code.extend(
+                    [
+                        Int64(
+                            ROW_CUMULATIVE_KEY if cumulative
+                            or shift_fill
+                            or rolling else ROW_RANK_KEY
+                        ),
+                        Int64(input_slot),
+                        (
+                            rank_node.integer if rank_node.floating
+                            < 0 else max(Int64(0), Int64(rank_node.floating))
+                        ) if rolling else Int64(
+                            method == 6
+                        ) if shift_fill else Int64(
+                            rank_node.min_count == 1
+                        ),
+                        Int64(method),
+                    ]
+                )
+                var result_type = (
+                    bound.dtypes[r] if cumulative
+                    or shift_fill
+                    or rolling else (
+                        DataType.FLOAT64 if method == 0 else DataType.INT64
+                    )
+                )
+                literals.append(
+                    # Row counts fit UInt32 in the native ABI. Saturating
+                    # larger bounds preserves every observable window/result.
+                    bitcast[DType.float64](
+                        min(rank_node.integer, Int64(UInt32.MAX))
+                        | (
+                            min(Int64(rank_node.min_count), Int64(UInt32.MAX))
+                            << 32
+                        )
+                    ) if rolling_moments else bitcast[DType.float64](
+                        rank_node.integer
+                    ) if shift_fill
+                    or rolling else bitcast[DType.float64](
+                        Int64(result_type.precision())
+                    ) if cumulative
+                    and result_type.is_decimal() else 0
+                )
+                node_dtypes.append(child.dtypes[len(child.dtypes) - 1])
+                for name in partitions:
+                    var key = -1
+                    for c in range(len(schema)):
+                        if schema[c].name() == name:
+                            key = c
+                    if key < 0:
+                        raise Error("Unknown partition column: " + name)
+                    capabilities.require_key(schema[key].dtype())
+                    code.extend(
+                        [
+                            Int64(ROW_SORT_KEY),
+                            Int64(slots[key]),
+                            Int64(0),
+                            Int64(1),
+                        ]
+                    )
+                    literals.append(0)
+                    node_dtypes.append(schema[key].dtype())
+                slot_dtypes.append(result_type)
+                steps.append(
+                    RowStep(
+                        rank_start,
+                        1 + len(partitions),
+                        next_slot,
+                        False,
+                        0,
+                        0,
+                        True,
+                        False,
+                    )
+                )
+                var name = "__metal_rank_" + String(next_slot)
+                var collision = True
+                while collision:
+                    collision = False
+                    for column in rank_schema:
+                        if column.name() == name:
+                            collision = True
+                    if collision:
+                        name += "_"
+                rank_schema.append(_empty(name, result_type))
+                rank_slots.append(next_slot)
+                next_slot += 1
+                ranked._nodes[replacement] = col(name)._nodes[0].copy()
+                if replacement != r:
+                    ranked._nodes[r] = col(name)._nodes[0].copy()
+                has_rank = True
+            if has_rank:
+                for scope in range(len(ranked._nodes)):
+                    if (
+                        not rank_scopes[scope]
+                        or ranked._nodes[scope].op != OVER
+                    ):
+                        continue
+                    var child = ranked._nodes[scope].left
+                    var fragment = subtree(ranked, child)
+                    for part in fragment._nodes:
+                        if (
+                            is_window(part.op)
+                            or is_reduction(part.op)
+                            or part.op == OVER
+                        ):
+                            capabilities.reject(
+                                "plan",
+                                (
+                                    "rank scopes containing other windows or"
+                                    " reductions require CPU execution"
+                                ),
+                            )
+                    ranked._nodes[scope] = ranked._nodes[child].copy()
+                bound = bind(
+                    subtree(ranked, len(ranked._nodes) - 1), rank_schema
+                )
             var count = len(bound.expr._nodes)
             var result_dtype = bound.dtypes[count - 1]
             var reduction = -1
             var min_count = 0
             var row_shape = bound.shape() == ROWS
-            ref last = bound.expr._nodes[count - 1]
+            var last = bound.expr._nodes[count - 1].copy()
             if (
                 last.op == MIN
                 or last.op == FIRST
@@ -686,6 +1396,12 @@ def lower_rows(
                 or last.op == SUM
                 or last.op == COUNT
                 or last.op == MEAN
+                or last.op == COV
+                or last.op == CORR
+                or last.op == SKEW
+                or last.op == KURTOSIS
+                or last.op == VAR
+                or last.op == STD
                 or last.op == LEN
             ):
                 if (node.kind != SELECT and node.kind != AGG) or bound.shapes[
@@ -705,6 +1421,7 @@ def lower_rows(
                     or result_dtype == DataType.UINT32
                     or (
                         capabilities.bounded_integer_sum
+                        and not bound.dtypes[last.left].is_decimal()
                         and (
                             bound.dtypes[last.left].physical() == DataType.INT64
                             or bound.dtypes[last.left] == DataType.UINT64
@@ -723,14 +1440,21 @@ def lower_rows(
                 ):
                     capabilities.reject(
                         "plan",
-                        "checked grouped sums require terminal aggregation without head",
+                        (
+                            "checked grouped sums require terminal aggregation"
+                            " without head"
+                        ),
                     )
                 min_count = (
                     Int(last.integer) if reduction == ANY
                     or reduction == ALL else last.min_count
                 )
                 count -= 1
-                if last.left != count - 1:
+                if (
+                    last.left != count - 1
+                    and reduction != COV
+                    and reduction != CORR
+                ):
                     capabilities.reject(
                         "plan",
                         "reduction must consume the complete row expression",
@@ -742,8 +1466,95 @@ def lower_rows(
                 ):
                     capabilities.reject(
                         "plan",
-                        "resident numeric reduction requires the common numeric input dtype",
+                        (
+                            "resident numeric reduction requires the common"
+                            " numeric input dtype"
+                        ),
                     )
+                if reduction == COV or reduction == CORR:
+                    capabilities.require_reduction(
+                        bound.dtypes[last.right], reduction, frame.height()
+                    )
+                    if bound.shapes[last.right] != ROWS:
+                        capabilities.reject(
+                            "plan",
+                            "paired reductions require two row expressions",
+                        )
+                    if reduction == CORR and last.text != "pearson":
+                        capabilities.reject(
+                            "plan", "Spearman correlation requires rank staging"
+                        )
+                    if next_slot + 1 >= capabilities.max_slots:
+                        capabilities.reject(
+                            "plan", "paired reduction requires two value slots"
+                        )
+                    var left_slot = next_slot
+                    # Keep the original left-to-right error observation order.
+                    for side in List[Int]([last.left, last.right]):
+                        var converted = subtree(bound.expr, side).cast(
+                            DataType.FLOAT64
+                        )
+                        var child = bind(converted, rank_schema)
+                        var child_count = len(child.expr._nodes)
+                        var child_start = len(literals)
+                        _program(
+                            child,
+                            child_count,
+                            rank_slots,
+                            dtype,
+                            code,
+                            literals,
+                            node_dtypes,
+                            capabilities,
+                        )
+                        slot_dtypes.append(DataType.FLOAT64)
+                        steps.append(
+                            RowStep(
+                                child_start,
+                                child_count,
+                                next_slot,
+                                False,
+                                0,
+                                0,
+                                False,
+                                False,
+                            )
+                        )
+                        next_slot += 1
+                    min_count = (
+                        min(Int(last.integer), Int(Int32.MAX))
+                        | (left_slot + 1) << 31
+                        | min(configured_workers(), 65535) << 47
+                    )
+                    aggregate_outputs.append(
+                        RowOutput(
+                            expr._name,
+                            result_dtype,
+                            left_slot,
+                            reduction,
+                            min_count,
+                        )
+                    )
+                    has_aggregate = True
+                    continue
+                if (
+                    reduction == VAR
+                    or reduction == STD
+                    or reduction == SKEW
+                    or reduction == KURTOSIS
+                ):
+                    # Counts fit Int32; every larger ddof yields null. The
+                    # middle sixteen bits are reserved for paired moments.
+                    # Higher moments use the low bits for bias/Fisher flags.
+                    min_count = (
+                        min(Int(last.integer), Int(Int32.MAX))
+                        | min(configured_workers(), 65535) << 47
+                    )
+                    var converted = subtree(bound.expr, last.left).cast(
+                        DataType.FLOAT64
+                    )
+                    bound = bind(converted, rank_schema)
+                    count = len(bound.expr._nodes)
                 has_aggregate = True
             elif bound.aggregated[len(bound.aggregated) - 1]:
                 capabilities.reject(
@@ -753,15 +1564,37 @@ def lower_rows(
                 has_rows |= row_shape
             if node.kind == FILTER and result_dtype != DataType.BOOL:
                 capabilities.reject("plan", "filter predicate must be Boolean")
-            if next_slot >= ROW_MAX_SLOTS:
+            if (
+                capabilities.reuse_column_slots
+                and (node.kind == SELECT or node.kind == WITH_COLUMNS)
+                and reduction < 0
+                and row_shape
+                and count == 1
+                and bound.expr._nodes[0].op == COL
+            ):
+                var existing = rank_slots[bound.sources[0]]
+                capabilities.require_dtype(result_dtype)
+                if slot_dtypes[existing] == result_dtype and (
+                    capabilities.mixed_types
+                    or result_dtype == dtype
+                    or result_dtype == DataType.BOOL
+                ):
+                    projected.append(_empty(expr._name, result_dtype))
+                    projected_slots.append(existing)
+                    reused_columns = True
+                    continue
+            if next_slot >= capabilities.max_slots:
                 capabilities.reject(
-                    "plan", "resident region supports at most 64 value slots"
+                    "plan",
+                    "resident region supports at most "
+                    + String(capabilities.max_slots)
+                    + " value slots",
                 )
             var start = len(literals)
             _program(
                 bound,
                 count,
-                slots,
+                rank_slots,
                 dtype,
                 code,
                 literals,
@@ -770,9 +1603,9 @@ def lower_rows(
             )
             slot_dtypes.append(bound.dtypes[count - 1])
             var gather_start = len(gathers)
+            var gather_count = len(slots)
             if node.kind == FILTER:
-                for slot in slots:
-                    gathers.append(Int64(slot))
+                gather_count = _append_gathers(slots, gathers)
             steps.append(
                 RowStep(
                     start,
@@ -780,7 +1613,7 @@ def lower_rows(
                     next_slot,
                     node.kind == FILTER,
                     gather_start,
-                    len(slots),
+                    gather_count,
                     False,
                     False,
                 )
@@ -808,9 +1641,12 @@ def lower_rows(
                 capabilities.reject(
                     "plan", "group aggregation requires reductions"
                 )
-            if next_slot + 3 + len(aggregate_outputs) > ROW_MAX_SLOTS:
+            if next_slot + 3 + len(aggregate_outputs) > capabilities.max_slots:
                 capabilities.reject(
-                    "plan", "group aggregation exceeds 64 value slots"
+                    "plan",
+                    "group aggregation exceeds "
+                    + String(capabilities.max_slots)
+                    + " value slots",
                 )
             var index_slot = next_slot
             var start_slot = next_slot + 1
@@ -821,7 +1657,10 @@ def lower_rows(
             code.extend(
                 [
                     Int64(
-                        ROW_GROUP_HEADER_LAST if len(node.flags)
+                        ROW_GROUP_HEADER_WINDOW if node.text
+                        == "metal_window_materialization" else ROW_GROUP_HEADER_LAST if len(
+                            node.flags
+                        )
                         and node.flags[0] else ROW_GROUP_HEADER
                     ),
                     Int64(len(group_keys)),
@@ -829,7 +1668,12 @@ def lower_rows(
                     Int64(first_slot),
                 ]
             )
-            literals.append(0)
+            literals.append(
+                bitcast[DType.float64](
+                    Int64(min(configured_workers(), Int(Int32.MAX)))
+                ) if node.text
+                == "metal_window_materialization" else 0
+            )
             node_dtypes.append(DataType.INT64)
             var grouped_schema = List[Series]()
             var grouped_slots = List[Int]()
@@ -888,8 +1732,7 @@ def lower_rows(
                 literals.append(0)
                 node_dtypes.append(DataType.INT64)
                 var gather_start = len(gathers)
-                for slot in grouped_slots:
-                    gathers.append(Int64(slot))
+                var gather_count = _append_gathers(grouped_slots, gathers)
                 steps.append(
                     RowStep(
                         order_start,
@@ -897,7 +1740,7 @@ def lower_rows(
                         0,
                         False,
                         gather_start,
-                        len(grouped_slots),
+                        gather_count,
                         True,
                         False,
                     )
@@ -952,11 +1795,21 @@ def lower_rows(
             outputs.append(
                 RowOutput(schema[i].name(), schema[i].dtype(), slots[i], -1, 0)
             )
-    if len(steps) > ROW_MAX_STEPS:
+    if len(steps) > capabilities.max_steps:
         capabilities.reject(
-            "plan", "resident region supports at most 64 device steps"
+            "plan",
+            "resident region supports at most "
+            + String(capabilities.max_steps)
+            + " device steps",
         )
-    if len(outputs) == 0:
+    if len(outputs) > capabilities.max_slots:
+        capabilities.reject(
+            "plan",
+            "resident region supports at most "
+            + String(capabilities.max_slots)
+            + " output columns",
+        )
+    if len(outputs) == 0 and not capabilities.empty_outputs:
         capabilities.reject(
             "plan", "resident region requires at least one output column"
         )
@@ -974,4 +1827,5 @@ def lower_rows(
         root,
         limit,
         reduced,
+        reused_columns,
     )
