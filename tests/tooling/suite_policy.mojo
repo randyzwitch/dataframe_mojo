@@ -986,6 +986,7 @@ def production_policy() -> SuitePolicy:
             "storage.release",
             [
                 "tests/storage_ownership/test_aggregate_key_lifetime.mojo",
+                "tests/storage_ownership/test_aggregate_key_views.mojo",
                 "tests/storage_ownership/test_release.mojo",
             ],
         )

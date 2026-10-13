@@ -48,12 +48,12 @@ from std.bit import count_trailing_zeros
 from std.collections import Optional
 from std.math import isnan, log
 from std.ffi import external_call
-from std.memory import Pointer, bitcast
+from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 
 from .aggregate import Reducer, float_key
 from .bool_column import BoolColumn
-from .column import Column
+from .column import Column, _pack_bits
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
     COUNT,
@@ -77,7 +77,13 @@ from .partition import (
     _mix,
 )
 from .series import Series
-from .string_column import StringBuilder, StringColumn
+from .string_column import StringColumn
+from .string_view import (
+    STRING_VIEW_INLINE_BYTES,
+    StringView,
+    StringViewStorage,
+    _STRING_VIEW_BUFFER_LIMIT,
+)
 
 # Rows hashed and probed at a time (DuckDB's STANDARD_VECTOR_SIZE).
 comptime _BATCH = 2048
@@ -1217,10 +1223,11 @@ struct AggregateSink(Movable):
     # Per key column, its dictionary's entries when its strings carry
     # codes.
     var dictionaries: List[_DictionaryKeys]
-    # Every morsel's string key columns, held until the finish has read
-    # them: a group's long string key is the address of its bytes there,
-    # as DuckDB's rows point into their collection's heap (a morsel's
-    # column holds its buffers by reference, so nothing is copied).
+    # Every morsel's string key columns, held until the finish: a group's
+    # long string key is the address of its bytes there, as DuckDB's rows
+    # point into their collection's heap (a morsel's column holds its
+    # buffers by reference, so nothing is copied). The finished key
+    # columns are views into the same buffers (`_HeldBuffers`).
     var held: List[Series]
 
     def __init__(out self, layout: AggregateLayout, workers: Int):
@@ -1512,10 +1519,13 @@ struct _FinishJob(Job):
     var states: List[Reducer]
     var firsts: List[Int]
     var keys: List[Series]
+    # The address of the sinks' `_HeldBuffers`.
+    var held: Int
 
     def __init__(
         out self,
         sinks: Int,
+        held: Int,
         lo: Int,
         hi: Int,
         total: Int,
@@ -1525,6 +1535,7 @@ struct _FinishJob(Job):
         bits: Int,
     ):
         self.sinks = sinks
+        self.held = held
         self.bits = bits
         self.lo = lo
         self.hi = hi
@@ -1622,7 +1633,13 @@ struct _FinishJob(Job):
         for c in range(len(self.key_templates)):
             self.keys.append(
                 _key_column(
-                    self.key_templates[c], w, UInt64(1) << UInt64(c), final
+                    self.key_templates[c],
+                    w,
+                    UInt64(1) << UInt64(c),
+                    final,
+                    Pointer[_HeldBuffers, MutAnyOrigin](
+                        unsafe_from_address=self.held
+                    )[],
                 )
             )
             w += _width(self.key_templates[c])
@@ -1632,13 +1649,168 @@ struct _FinishJob(Job):
             self.firsts.append(final.first(g))
 
 
+struct _HeldBuffers(Movable):
+    """The byte buffers of every string key the sinks hold, by address, so
+    a finished string key column is Arrow views into them: no group's
+    bytes are copied or even read, as Polars gathers a BinaryView column
+    and DuckDB's `string_t` points into its heap. A group's long key words
+    hold the address of its bytes, found here by binary search."""
+
+    var buffers: List[ArcPointer[List[UInt8]]]
+    # Buffer ranges in address order: start, end and buffer.
+    var starts: List[Int]
+    var ends: List[Int]
+    var index: List[Int]
+
+    def __init__(out self, sinks: List[AggregateSink]):
+        self.buffers = List[ArcPointer[List[UInt8]]]()
+        self.starts = List[Int]()
+        self.ends = List[Int]()
+        self.index = List[Int]()
+        var keyed = List[UInt128]()
+        for j in range(len(sinks)):
+            for column in sinks[j].held:
+                ref strings = column._data[StringColumn]
+                if strings._is_view_storage():
+                    ref storage = strings._view_storage.value()
+                    for b in range(len(storage._buffers[])):
+                        self._add(storage._buffers[][b], keyed)
+                else:
+                    self._add(strings._bytes, keyed)
+        sort(keyed)
+        var last = -1
+        for key in keyed:
+            var b = Int(UInt64(key & 0xFFFFFFFFFFFFFFFF))
+            var start = Int(self.buffers[b][].unsafe_ptr())
+            if start == last:
+                # Morsels slice one column: its buffers repeat.
+                continue
+            last = start
+            self.starts.append(start)
+            self.ends.append(start + len(self.buffers[b][]))
+            self.index.append(b)
+
+    def _add(
+        mut self, buffer: ArcPointer[List[UInt8]], mut keyed: List[UInt128]
+    ):
+        if len(buffer[]) == 0:
+            return
+        var start = UInt64(Int(buffer[].unsafe_ptr()))
+        keyed.append((UInt128(start) << 64) | UInt128(len(self.buffers)))
+        self.buffers.append(buffer.copy())
+
+    def find(self, address: Int, length: Int) -> Tuple[Int, Int]:
+        """The buffer holding `length` bytes at `address`, and their offset
+        in it; (-1, 0) when none does."""
+        var lo = 0
+        var hi = len(self.starts)
+        while lo < hi:
+            var mid = (lo + hi) // 2
+            if self.starts[mid] <= address:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo == 0:
+            return (-1, 0)
+        var r = lo - 1
+        if address + length > self.ends[r]:
+            return (-1, 0)
+        return (self.index[r], address - self.starts[r])
+
+
+def _string_keys(
+    w: Int, bit: UInt64, groups: _Groups, held: _HeldBuffers
+) -> StringColumn:
+    """A string key column of finished groups as Arrow views, from each
+    group's words: a key up to twelve bytes is its two words exactly (the
+    view's length, prefix and inline bytes, zero past the end); a longer
+    one is its first word and the buffer and offset its address falls in.
+    A key held in no shared buffer (a dictionary's entry) is copied."""
+    var n = groups.count()
+    var views = List[StringView](capacity=n)
+    var valid = List[Bool](capacity=n)
+    var nulls = False
+    var buffers = List[ArcPointer[List[UInt8]]]()
+    # Each held buffer's place among this column's, once it is used.
+    var local = List[Int](length=len(held.buffers), fill=-1)
+    var spill = List[UInt8]()
+    var spill_at = -1
+    var total_bytes = 0
+    var buffer_bytes = 0
+    for g in range(n):
+        if groups.null(g) & bit != 0:
+            views.append(StringView(0, 0, 0, 0))
+            valid.append(False)
+            nulls = True
+            continue
+        valid.append(True)
+        var head = groups.word(g, w)
+        var tail = groups.word(g, w + 1)
+        var length = Int(head & 0xFFFFFFFF)
+        total_bytes += length
+        if length <= STRING_VIEW_INLINE_BYTES:
+            views.append(
+                StringView(
+                    UInt32(head & 0xFFFFFFFF),
+                    UInt32(head >> 32),
+                    UInt32(tail & 0xFFFFFFFF),
+                    UInt32(tail >> 32),
+                )
+            )
+            continue
+        buffer_bytes += length
+        var found = held.find(Int(tail), length)
+        var b = -1
+        var offset = found[1]
+        if found[0] >= 0 and offset <= _STRING_VIEW_BUFFER_LIMIT - length:
+            b = local[found[0]]
+            if b < 0:
+                b = len(buffers)
+                local[found[0]] = b
+                buffers.append(held.buffers[found[0]].copy())
+        else:
+            if spill_at >= 0 and (
+                len(spill) + length > _STRING_VIEW_BUFFER_LIMIT
+            ):
+                buffers[spill_at] = ArcPointer(spill^)
+                spill = List[UInt8]()
+                spill_at = -1
+            if spill_at < 0:
+                spill_at = len(buffers)
+                buffers.append(ArcPointer(List[UInt8]()))
+            b = spill_at
+            offset = len(spill)
+            spill.extend(
+                Span[UInt8, ImmutAnyOrigin](
+                    unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
+                        unsafe_from_address=Int(tail)
+                    ),
+                    length=length,
+                )
+            )
+        views.append(
+            StringView(
+                UInt32(head & 0xFFFFFFFF),
+                UInt32(head >> 32),
+                UInt32(b),
+                UInt32(offset),
+            )
+        )
+    if spill_at >= 0:
+        buffers[spill_at] = ArcPointer(spill^)
+    var bits = _pack_bits(valid) if nulls else List[UInt8]()
+    return StringColumn(
+        StringViewStorage(views^, buffers^, bits^, n, total_bytes, buffer_bytes)
+    )
+
+
 def _key_column(
-    template: Series, w: Int, bit: UInt64, groups: _Groups
+    template: Series, w: Int, bit: UInt64, groups: _Groups, held: _HeldBuffers
 ) raises -> Series:
     """One key column of a partition's final groups, built from the words
-    of each group's first sight: a string from its inline bytes or the
-    bytes its address names, a number from its value, as the template's
-    type (temporal, decimal and categorical keys keep theirs)."""
+    of each group's first sight: strings as views (`_string_keys`), a
+    number from its value, as the template's type (temporal, decimal and
+    categorical keys keep theirs)."""
     var n = groups.count()
     var name = template.name()
     var dtype = template.dtype()
@@ -1646,49 +1818,9 @@ def _key_column(
         template.copy()
     )
     if part._data.isa[StringColumn]():
-        var builder = StringBuilder(n, 0)
-        var buffer = List[UInt8](length=16, fill=0)
-        var bytes = buffer.unsafe_ptr()
-        for f in range(n):
-            var g = f
-            if groups.null(g) & bit != 0:
-                builder.append_null()
-                continue
-            var head = groups.word(g, w)
-            var length = Int(head & 0xFFFFFFFF)
-            if length <= 12:
-                var tail = groups.word(g, w + 1)
-                for b in range(min(length, 4)):
-                    bytes[unsafe_offset=b] = UInt8(
-                        (head >> UInt64(32 + 8 * b)) & 0xFF
-                    )
-                for b in range(4, length):
-                    bytes[unsafe_offset=b] = UInt8(
-                        (tail >> UInt64(8 * (b - 4))) & 0xFF
-                    )
-                builder.append(
-                    StringSlice[ImmutAnyOrigin](
-                        unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
-                            unsafe_ptr=bytes.unsafe_mut_cast[
-                                False
-                            ]().unsafe_origin_cast[ImmutAnyOrigin](),
-                            length=length,
-                        )
-                    )
-                )
-            else:
-                builder.append(
-                    StringSlice[ImmutAnyOrigin](
-                        unsafe_from_utf8=Span[UInt8, ImmutAnyOrigin](
-                            unsafe_ptr=Pointer[UInt8, ImmutAnyOrigin](
-                                unsafe_from_address=Int(groups.word(g, w + 1))
-                            ),
-                            length=length,
-                        )
-                    )
-                )
-        _ = buffer^
-        return Series(name, builder^.finish()).with_dtype(dtype)
+        return Series(name, _string_keys(w, bit, groups, held)).with_dtype(
+            dtype
+        )
     var valid = List[Bool](capacity=n)
     if part._data.isa[BoolColumn]():
         var values = List[Bool](capacity=n)
@@ -1769,6 +1901,7 @@ def aggregate_finish(
         return result^
     var bits = layout.bits
     var stride = sinks[0].parts.stride
+    var held = _HeldBuffers(sinks)
     var per_run = max(1, _PARTITION_BYTES // (8 * stride))
     var finishes = List[_FinishJob]()
     var lo = 0
@@ -1783,6 +1916,7 @@ def aggregate_finish(
                 finishes.append(
                     _FinishJob(
                         Int(Pointer(to=sinks)),
+                        Int(Pointer(to=held)),
                         lo,
                         p + 1,
                         run,
@@ -1795,6 +1929,7 @@ def aggregate_finish(
             lo = p + 1
             run = 0
     run_jobs(finishes)
+    _ = held^
     for p in range(len(finishes)):
         var firsts = List[Int]()
         var states = List[Reducer]()
