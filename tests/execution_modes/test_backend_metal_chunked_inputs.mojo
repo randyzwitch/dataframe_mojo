@@ -13,9 +13,26 @@ from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
-from tests.execution_modes.test_backend_metal_empty_inputs import check
+from dataframe.lazy import LazyFrame
 from tests.execution_modes.test_backend_metal_moments import near
 from tests.support.lifecycle_jobs import WorkerSetting
+
+
+def check(
+    query: LazyFrame,
+    runtime: MetalRuntime,
+    order_by: List[String] = List[String](),
+) raises:
+    var actual = query.collect(accelerator=runtime)
+    var expected = query.collect(engine="cpu", streaming=False)
+    if len(order_by):
+        actual = actual.sort(order_by)
+        expected = expected.sort(order_by)
+    if not actual.equals(expected):
+        print(query.explain(optimize=False, streaming=False))
+        print("Chunked Metal actual:", actual)
+        print("Chunked CPU expected:", expected)
+    assert_true(actual.equals(expected))
 
 
 def fragmented(column: Series, first: Int = 3) raises -> Series:
@@ -165,7 +182,7 @@ def test_native_metal_chunked_inputs_row_consumers_groups_and_resident_joins() r
     check(frame.lazy().select(col("x").shift(2)), runtime)
     check(frame.lazy().select(col("x").median()), runtime)
     check(frame.lazy().select_exprs([col("x").sum(), col("k").mean()]), runtime)
-    check(frame.lazy().group_by("k").agg(col("x").sum()), runtime)
+    check(frame.lazy().group_by("k").agg(col("x").sum()), runtime, ["k"])
     check(
         frame.lazy().with_columns(col("x").sum().over("k").alias("s")), runtime
     )
