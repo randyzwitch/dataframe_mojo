@@ -1189,6 +1189,43 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_cumulative_windows.mojo::test_native_metal_cumulative_numeric_widths_null_partitions_and_reverse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_cumulative_windows.mojo::test_native_metal_cumulative_floating_association_nan_zeros_and_subnormals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_cumulative_windows.mojo::test_native_metal_cumulative_decimal_boolean_text_and_logical_storage",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_cumulative_windows.mojo::test_native_metal_cumulative_nested_scopes_resident_consumers_empty_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_cumulative_windows.mojo::test_native_metal_cumulative_checked_prefixes_remain_observable_under_head_and_when",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_cumulative_windows.mojo::test_native_metal_cumulative_large_global_partition_preserves_serial_float_order",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
@@ -1565,6 +1602,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_decimal_means.mojo",
                 "tests/execution_modes/test_backend_metal_decimal_casts.mojo",
                 "tests/execution_modes/test_backend_metal_string_concat.mojo",
+                "tests/execution_modes/test_backend_metal_cumulative_windows.mojo",
                 "tests/execution_modes/test_backends.mojo",
             ],
         )

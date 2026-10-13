@@ -140,6 +140,9 @@ enum DFMOp {
   // Unary decimal-to-Float64 conversion. code[3] is scale, code[2] is -1;
   // literals[node] is the CPU binary64 conversion of the integer 10**scale.
   DFM_DECIMAL_FLOAT_CAST = 213,
+  // Cumulative header: input slot, reverse flag, method (sum/min/max/count).
+  // SORT_KEY descriptors name partitions; the header literal is decimal precision.
+  DFM_CUMULATIVE_KEY = 214,
 };
 
 typedef struct DFMInput {
@@ -155,7 +158,7 @@ typedef struct DFMStep {
   int64_t nodes;
   int64_t slot;
   int64_t filter; // 0 projection, 1 stable filter, 2 stable sort, 3 grouped
-                  // reduction, 4 rank (keeps original row order).
+                  // reduction, 4 rank, 5 cumulative (both keep original row order).
   int64_t gather_start;
   int64_t gather_count;
 } DFMStep;

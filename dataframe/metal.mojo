@@ -50,7 +50,13 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.memory import checked_add
-from .accelerator.rows import RowPlan, lower_rows, ROW_SORT_KEY, ROW_RANK_KEY
+from .accelerator.rows import (
+    RowPlan,
+    lower_rows,
+    ROW_SORT_KEY,
+    ROW_RANK_KEY,
+    ROW_CUMULATIVE_KEY,
+)
 from .accelerator.joins import (
     JoinDag,
     DagTask,
@@ -342,6 +348,7 @@ def _capabilities() -> RowCapabilities:
         scalar_regions=True,
         temporal_fields=True,
         ranks=True,
+        cumulative_windows=True,
         decimal128=True,
         decimal_mean=True,
         decimal_float_cast=True,
@@ -410,6 +417,8 @@ def _op(op: Int) raises -> Int64:
     if op == ROW_GROUP_OUTPUT:
         return 203
     # The native ABI has its own versioned opcodes.
+    if op == ROW_CUMULATIVE_KEY:
+        return 214
     if op == ROW_RANK_KEY:
         return 207
     if op == ROW_SORT_KEY:
@@ -652,7 +661,10 @@ struct _Descriptors(Movable):
                     Int64(step.start),
                     Int64(step.nodes),
                     Int64(step.slot),
-                    Int64(4) if plan.code[step.start * 4]
+                    Int64(5) if plan.code[step.start * 4]
+                    == ROW_CUMULATIVE_KEY else Int64(4) if plan.code[
+                        step.start * 4
+                    ]
                     == ROW_RANK_KEY else Int64(3) if step.grouped else (
                         Int64(2) if step.order else Int64(step.filter)
                     ),
@@ -1455,10 +1467,15 @@ struct MetalRuntime(AcceleratorBackend):
         var family = work[1].copy()
         if plan.reused_columns:
             family += ";metal-column-slots-v1"
+        var ranked = False
+        var cumulative = False
         for step in plan.steps:
-            if plan.code[step.start * 4] == ROW_RANK_KEY:
-                family += ";metal-rank-v1"
-                break
+            ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
+            cumulative |= plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
+        if ranked:
+            family += ";metal-rank-v1"
+        if cumulative:
+            family += ";metal-cumulative-v1"
         var decimal_mean = False
         for output in plan.outputs:
             decimal_mean |= output.reduction == MEAN and (

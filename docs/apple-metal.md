@@ -135,6 +135,17 @@ grouped aggregation remain unsupported. Rank plans carry a separate
 `metal-rank-v1` calibration family;
 automatic placement stays on CPU without matching validated evidence.
 
+Cumulative `cum_sum`, `cum_min`, `cum_max`, and `cum_count` run globally or
+within one or more `over()` partition keys. Each partition follows original row
+order, or reverse row order when requested; results retain their original row
+positions. Null inputs remain null and do not change sum/min/max state.
+Cumulative count returns a valid count at every row, including null input rows.
+Integer sums check every prefix, decimal sums preserve their declared precision,
+and Float32 sums accumulate in emulated Float64 before rounding each output.
+Numeric, Boolean, dictionary, fixed logical, and Decimal128 values retain their
+normal min/max ordering, including NaNs and signed-zero ties. Cumulative plans
+use the `metal-cumulative-v1` calibration family.
+
 Supported scalar reductions also run within `over()` partitions: Metal groups a
 shared resident prefix and broadcasts each result back in original row order.
 Null partition keys form one group; multiple keys, dictionary codes, fixed logical
@@ -147,10 +158,11 @@ These aggregate-window producers are full observation boundaries, matching the
 CPU's eager preparation of window states even inside a conditional or before
 head. Checked sums and checked expressions inside these producers retain their
 normal overflow checks. Ordinary checked join inputs keep their existing
-restrictions. Nested aggregate windows materialize their inner results before
-feeding them to the outer partition aggregate, retaining the original row order
-and the same observation boundaries at each level. Row-valued partition
-expressions, selectors, other nested window operations, and unsupported
+restrictions. Nested aggregate, rank, and cumulative windows materialize their
+inner scopes before feeding outer scopes, retaining original row order and the
+same observation boundaries at each level. Cumulative prefixes remain checked
+inside unused conditional branches and before head. Unproved checked inputs to
+rank/cumulative kernels, selectors, other window kernels, and unsupported
 underlying reductions still require CPU execution.
 Automatic placement keeps these plans on CPU until their complete DAG has a
 supported estimate and matching calibration.
