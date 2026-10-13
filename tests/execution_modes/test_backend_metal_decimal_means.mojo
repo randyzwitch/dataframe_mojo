@@ -1,4 +1,4 @@
-"""Scaled Decimal32/64 means preserve the CPU quotient/remainder rounding."""
+"""Scaled decimal means preserve the CPU quotient/remainder rounding."""
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_equal, assert_true, assert_raises
@@ -48,6 +48,7 @@ def fixture(n: Int, scale: Int, sign: Int = 0) raises -> DataFrame:
 
 def test_decimal_mean_capabilities_and_scale_descriptors() raises:
     assert_true(not RowCapabilities().decimal_mean)
+    assert_true(not RowCapabilities().decimal128_reductions)
     var frame = fixture(3, 7)
     var query = frame.lazy().select(col("a").mean())
     var caps = _capabilities()
@@ -62,13 +63,32 @@ def test_decimal_mean_capabilities_and_scale_descriptors() raises:
     var wide = DataFrame(
         [Series("a", Column[Int128]([1])).with_dtype(DataType.decimal(38, 2))]
     )
+    var wide_query = wide.lazy().select(col("a").mean())
+    var wide_descriptors = _Descriptors(lower_rows(wide_query, _capabilities()))
+    assert_equal(wide_descriptors.outputs[4], Int64(216))
+    var metadata = wide_descriptors.outputs[5]
+    assert_equal(metadata & 0xFFFFFFFF, Int64(0))
+    assert_equal((metadata >> 32) & 63, Int64(38))
+    assert_equal((metadata >> 38) & 63, Int64(2))
+    assert_true(((metadata >> 44) & 0xFFFF) > 0)
+    var grouped_query = (
+        wide.lazy().group_by("a").agg(col("a").mean().alias("mean"))
+    )
+    var grouped_wide = _Descriptors(lower_rows(grouped_query, _capabilities()))
+    var saw_wide_mean = False
+    for i in range(0, len(grouped_wide.code), 4):
+        if grouped_wide.code[i] == 203 and grouped_wide.code[i + 3] == 216:
+            metadata = bitcast[DType.int64](grouped_wide.literals[i // 4])
+            assert_equal(metadata & 0xFFFFFFFF, Int64(0))
+            assert_equal((metadata >> 32) & 63, Int64(38))
+            assert_equal((metadata >> 38) & 63, Int64(2))
+            assert_true(((metadata >> 44) & 0xFFFF) > 0)
+            saw_wide_mean = True
+    assert_true(saw_wide_mean)
+    var no_wide_reductions = _capabilities()
+    no_wide_reductions.decimal128_reductions = False
     with assert_raises(contains="Decimal128 input reductions"):
-        _ = lower_rows(wide.lazy().select(col("a").mean()), _capabilities())
-    with assert_raises(contains="Decimal128 input reductions"):
-        _ = lower_rows(
-            wide.lazy().group_by("a").agg(col("a").mean().alias("mean")),
-            _capabilities(),
-        )
+        _ = lower_rows(wide_query, no_wide_reductions)
     # Scale is a raw integer payload: a numerical Float64 conversion would
     # silently encode the wrong divisor in the native grouped descriptor.
     for scale in range(19):

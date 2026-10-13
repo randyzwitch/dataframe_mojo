@@ -1,9 +1,14 @@
 """Common CPU work features for the shared bound numeric row subset."""
 from ..dtype import DataType
-from ..expr import CAST, LEN
+from ..expr import CAST, LEN, MEAN, SUM
 from ..lazy import LazyFrame
 from .capabilities import RowCapabilities
-from .rows import lower_rows, ROW_RANK_KEY, ROW_CUMULATIVE_KEY
+from .rows import (
+    lower_rows,
+    ROW_GROUP_OUTPUT,
+    ROW_RANK_KEY,
+    ROW_CUMULATIVE_KEY,
+)
 from .cost import COST_FEATURE_COUNT, cost_feature_names
 
 
@@ -49,6 +54,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             extrema=True,
             fixed_logical=True,
             decimal128=True,
+            decimal128_reductions=True,
             decimal_float_cast=True,
             ranks=True,
             cumulative_windows=True,
@@ -84,6 +90,23 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
         )
     if wide_decimal:
         family += ";decimal128-v1"
+    var wide_decimal_reduction = False
+    for output in plan.outputs:
+        wide_decimal_reduction |= (
+            (output.reduction == SUM or output.reduction == MEAN)
+            and plan.slot_dtypes[output.slot].is_decimal()
+            and plan.slot_dtypes[output.slot].decimal_width() == 128
+        )
+    for i in range(0, len(plan.code), 4):
+        if plan.code[i] == ROW_GROUP_OUTPUT:
+            var source = plan.slot_dtypes[Int(plan.code[i + 1])]
+            wide_decimal_reduction |= (
+                (plan.code[i + 3] == SUM or plan.code[i + 3] == MEAN)
+                and source.is_decimal()
+                and source.decimal_width() == 128
+            )
+    if wide_decimal_reduction:
+        family += ";decimal128-reductions-v1"
     for step in plan.steps:
         features[4 if step.filter else 3] += rows * Float64(step.nodes)
         for i in range(step.start, step.start + step.nodes):

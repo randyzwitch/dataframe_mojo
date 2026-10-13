@@ -539,7 +539,7 @@ def temporal_preflight_cases() raises:
     with assert_raises(contains="Decimal128 input reductions"):
         _ = (
             decimals.lazy()
-            .select(col("d").sum())
+            .select(col("d").arg_min())
             .collect(accelerator=unavailable)
         )
 
