@@ -26,6 +26,7 @@ from dataframe.expr import (
     ROLLING_MAX,
     ROLLING_VAR,
     ROLLING_STD,
+    INTERPOLATE,
     FORWARD_FILL,
     BACKWARD_FILL,
     OVER,
@@ -1215,13 +1216,19 @@ def lower_rows(
                     or window_op == ROLLING_MIN
                     or window_op == ROLLING_MAX
                 )
+                var interpolation = window_op == INTERPOLATE
                 if (
                     window_op != RANK
                     and not cumulative
                     and not shift_fill
                     and not rolling
+                    and not interpolation
                 ):
                     continue
+                if interpolation and not capabilities.interpolation_windows:
+                    capabilities.reject(
+                        "plan", "interpolation windows require backend support"
+                    )
                 if rolling_moments and not capabilities.rolling_moments:
                     capabilities.reject(
                         "plan",
@@ -1258,6 +1265,7 @@ def lower_rows(
                     not cumulative
                     and not shift_fill
                     and not rolling
+                    and not interpolation
                     and not capabilities.ranks
                 ):
                     capabilities.reject("plan", "rank requires backend support")
@@ -1298,7 +1306,9 @@ def lower_rows(
                 for m in range(len(methods)):
                     if rank_node.text == methods[m]:
                         method = m
-                if rolling:
+                if interpolation:
+                    method = 13 if rank_node.text == "linear" else 14
+                elif rolling:
                     method = (
                         7 if window_op
                         == ROLLING_SUM else 8 if window_op
@@ -1321,10 +1331,14 @@ def lower_rows(
                 if method < 0:
                     raise Error("unknown rank method: " + rank_node.text)
                 var child = bind(subtree(ranked, rank_node.left), rank_schema)
-                if rolling_moments or (
-                    rolling
-                    and window_op == ROLLING_MEAN
-                    and child.dtypes[len(child.dtypes) - 1].is_decimal()
+                if (
+                    rolling_moments
+                    or (interpolation and method == 13)
+                    or (
+                        rolling
+                        and window_op == ROLLING_MEAN
+                        and child.dtypes[len(child.dtypes) - 1].is_decimal()
+                    )
                 ):
                     var converted = child.expr.cast(DataType.FLOAT64)
                     child = bind(converted, rank_schema)
@@ -1396,7 +1410,8 @@ def lower_rows(
                         Int64(
                             ROW_CUMULATIVE_KEY if cumulative
                             or shift_fill
-                            or rolling else ROW_RANK_KEY
+                            or rolling
+                            or interpolation else ROW_RANK_KEY
                         ),
                         Int64(input_slot),
                         (
@@ -1413,7 +1428,8 @@ def lower_rows(
                 var result_type = (
                     bound.dtypes[r] if cumulative
                     or shift_fill
-                    or rolling else (
+                    or rolling
+                    or interpolation else (
                         DataType.FLOAT64 if method == 0 else DataType.INT64
                     )
                 )

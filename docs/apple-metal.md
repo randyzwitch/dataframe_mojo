@@ -201,6 +201,17 @@ words, retaining floating-point NaN payloads, signed zeros, dictionary identity,
 logical metadata, and both Decimal128 words. Their parameters remain runtime
 values and their cost family is `metal-shift-fill-v1`.
 
+`interpolate("linear")` and `interpolate("nearest")` fill interior null gaps
+in original row order, globally or within one or more `over()` keys. Leading,
+trailing, and all-null gaps remain null. Linear interpolation converts numeric
+and decimal inputs to Float64 and uses the neighboring original values;
+nearest preserves the input dtype and payload words, with ties choosing the
+following neighbor. NaNs and infinities remain valid anchors. A partition owner
+walks each gap once, without host downloads or per-gap scratch storage. These
+plans use separate `interpolation-v1` and `metal-interpolation-v1` cost families;
+linear interpolation also uses emulated binary64 arithmetic. Interpolation by
+another expression remains unsupported.
+
 Fixed-size `rolling_sum`, `rolling_mean`, `rolling_min`, and `rolling_max`
 run globally or within `over()` partitions. Each trailing window includes the
 current row and skips null inputs; `min_samples` defaults to the window size.
@@ -731,7 +742,7 @@ that unlisted query combinations are already equivalent.
 | --- | --- |
 | Numeric expressions | Floating power. |
 | Reductions | Mode, implode, and value counts. |
-| Ordered windows | Duration-based rolling sum/mean/min/max/var/std, interpolation (including by another expression), cut, and qcut. |
+| Ordered windows | Duration-based rolling sum/mean/min/max/var/std, `interpolate_by`, cut, and qcut. |
 | Temporal expressions | Row-valued parsing/formatting and timezone operations. |
 | Nested data | String split, list expressions, struct packing/fields, explode, and unnest. |
 | Plans and sources | As-of joins and file-backed scans. |
@@ -764,6 +775,7 @@ python3 native/dfmetal/test_resident.py
 python3 native/dfmetal/test_float64.py
 python3 native/dfmetal/test_moments.py
 python3 native/dfmetal/test_higher_moments.py
+python3 native/dfmetal/test_interpolation.py build/dfmetal/libdfmetal.dylib
 python3 native/dfmetal/test_rolling_moments.py
 python3 native/dfmetal/test_decimal.py
 python3 native/dfmetal/test_decimal_casts.py

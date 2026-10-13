@@ -1341,6 +1341,24 @@ def production_policy() -> SuitePolicy:
     )
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_interpolation.mojo::test_native_metal_interpolation_numeric_widths_decimals_null_partitions_slices_and_chunks",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_interpolation.mojo::test_native_metal_interpolation_independent_gaps_payloads_and_resident_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_backend_metal_interpolation.mojo::test_native_metal_interpolation_profile_budget_family_and_runtime_reuse",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_backend_metal_transcendentals.mojo::test_native_metal_transcendentals_float_widths_subnormals_extremes_nulls_and_empty_rows",
             "metal",
         )
@@ -2000,6 +2018,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_backend_metal_calendar_truncation.mojo",
                 "tests/execution_modes/test_backend_metal_calendar_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_transcendentals.mojo",
+                "tests/execution_modes/test_backend_metal_interpolation.mojo",
                 "tests/execution_modes/test_backend_metal_fixed_offsets.mojo",
                 "tests/execution_modes/test_backend_metal_scalar_projections.mojo",
                 "tests/execution_modes/test_backend_metal_quantiles.mojo",

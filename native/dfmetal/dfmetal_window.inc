@@ -48,6 +48,46 @@ std::string shiftFillSource(const DFMRequest &r, const Layout &layout, int64_t i
   return text + "}}}\n";
 }
 
+// One owner per stable partition fills each interior null run once. Original
+// values remain anchors, including NaNs and infinities; nearest copies words.
+std::string interpolationSource(const DFMRequest &r, const Layout &layout, int64_t i) {
+  auto &step = r.steps[i];
+  auto h = r.code + 4 * step.start;
+  auto name = std::to_string(i);
+  auto input = std::to_string(layout.physical[h[1]]) + "UL*meta.z";
+  auto output = std::to_string(layout.physical[step.slot]) + "UL*meta.z";
+  bool wide = slotType(r, h[1]) == DFM_DECIMAL128;
+  std::string text = partitionSource(r, layout, i);
+  text += "kernel void cumulative_assign" + name + R"MSL(
+(device T *x[[buffer(0)]],device uchar *v[[buffer(1)]],
+ device const uint *order[[buffer(2)]],constant uint4 &meta[[buffer(3)]],
+ device atomic_uint *error[[buffer(4)]],device const ulong *lit[[buffer(5)]],
+ uint position[[thread_position_in_grid]]){
+ if(position>=meta.x)return;uint first=order[position];
+)MSL";
+  text += "if(position&&window_partition" + name + "(order[position-1],first,x,v,meta))return;"
+          "uint lo=position+1,hi=meta.x;while(lo<hi){uint mid=(lo+hi)/2;"
+          "if(window_partition" + name + "(order[mid],first,x,v,meta))lo=mid+1;else hi=mid;}"
+          "uint end=lo;for(uint j=position;j<end;++j){uint row=order[j];"
+          "ulong at=" + input + "+row,out=" + output + "+row;"
+          "x[out]=v[at]?x[at]:T(0);v[out]=v[at];";
+  if (wide) text += "x[out+meta.z]=v[at]?x[at+meta.z]:T(0);v[out+meta.z]=v[at];";
+  text += "}uint previous=position;bool seen=false;"
+          "for(uint j=position;j<end;++j){ulong at=" + input + "+order[j];"
+          "if(v[at]){previous=j;seen=true;continue;}if(!seen)continue;"
+          "uint following=j+1;while(following<end&&!v[" + input + "+order[following]])++following;"
+          "if(following==end)break;ulong before=" + input + "+order[previous],after=" + input + "+order[following];"
+          "for(uint p=j;p<following;++p){ulong out=" + output + "+order[p];";
+  if (h[3] == 14) {
+    text += "ulong source=p-previous<following-p?before:after;x[out]=x[source];";
+    if (wide) text += "x[out+meta.z]=x[source+meta.z];v[out+meta.z]=1;";
+  } else {
+    text += "ulong fraction=f64_div(f64_from_unsigned(ulong(p-previous)),f64_from_unsigned(ulong(following-previous)));"
+            "x[out]=T(f64_fma(f64_sub(x[after],x[before]),fraction,x[before]));";
+  }
+  return text + "v[out]=1;}j=following-1;}}\n";
+}
+
 // Each partition owner follows the CPU's monotone sliding bounds. Every
 // input is added/removed once, and output rows retain source order.
 std::string rollingMomentsSource(const DFMRequest &r, const Layout &layout, int64_t i) {
@@ -158,6 +198,7 @@ std::string rollingSource(const DFMRequest &r, const Layout &layout, int64_t i) 
 std::string cumulativeSource(const DFMRequest &r, const Layout &layout, int64_t i) {
   auto &step = r.steps[i];
   auto h = r.code + 4 * step.start;
+  if (h[3] >= 13) return interpolationSource(r, layout, i);
   if (h[3] >= 11) return rollingMomentsSource(r, layout, i);
   if (h[3] >= 7) return rollingSource(r, layout, i);
   if (h[3] >= 4) return shiftFillSource(r, layout, i);

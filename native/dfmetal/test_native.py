@@ -930,7 +930,7 @@ def check_shift_fill_preflight_without_device():
                 expected = (2 * 65 if dtype == 4 else 513 * 16 + 65 if dtype == 12
                             else 513 * {1:4,2:4,3:8,5:1,6:2,7:1,8:2,9:4,10:8,11:8}[dtype] + 65)
                 assert memory.result == expected
-        for method, reverse in ((-1, 0), (13, 0), (4, 1), (5, 1), (6, 0)):
+        for method, reverse in ((-1, 0), (15, 0), (4, 1), (5, 1), (6, 0)):
             code[2], code[3] = reverse, method
             memory, err = Memory(), P()
             assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
@@ -973,6 +973,35 @@ def check_rolling_preflight_without_device():
             code[2] = -1
             err = P()
             assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            lib.dfm_free(err)
+
+
+def check_interpolation_preflight_without_device():
+    for dtype in range(1, 13):
+        inputs = (Input * 1)(Input(None, None, dtype, 5, 1))
+        code = (I * 4)(214, 0, 0, 14)
+        literals = (I * 1)(0)
+        nodes, slots = (I * 1)(dtype), (I * 2)(dtype, dtype)
+        steps = (Step * 1)(Step(0, 1, 1, 5, 0, 0))
+        outputs = (Output * 1)(Output(None, None, dtype, 1, -1, 0))
+        request = Request(2, 513, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                          ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                          ptr(outputs), ptr(nodes), ptr(slots))
+        memory, err = Memory(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        code[2] = 1
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"cumulative descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+        code[2], code[3] = 0, 13
+        slots[1] = outputs[0].dtype = 11
+        err = P()
+        status = lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        if dtype == 11:
+            check(status, err)
+        else:
+            assert status
+            assert b"cumulative result type" in C.string_at(err)
             lib.dfm_free(err)
 
 
@@ -1127,6 +1156,7 @@ check_pair_moment_preflight_without_device()
 check_moment_preflight_without_device()
 check_rolling_preflight_without_device()
 check_rolling_moments_preflight_without_device()
+check_interpolation_preflight_without_device()
 check_shift_fill_preflight_without_device()
 def empty_request(rows, reduction=0):
     values = (C.c_float * max(1, rows))(*([1.0] * max(1, rows)))
