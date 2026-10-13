@@ -112,7 +112,7 @@ def temporal_binary(
 
 def _weekday(days: Int64) -> Int64:
     # 1970-01-01 was a Thursday (ISO weekday 4).
-    return floor_mod(days + 3, 7) + 1
+    return floor_mod(floor_mod(days, 7) + 3, 7) + 1
 
 
 def _days(value: Int64, dtype: DataType) -> Int64:
@@ -222,13 +222,16 @@ def _total(value: Int64, dtype: DataType, unit: String) -> Int64:
     if nanos_per_unit >= nanos_per_tick:
         var ticks = nanos_per_unit // nanos_per_tick
         # Truncate toward zero, like a duration's whole-unit count.
-        return value // ticks if value >= 0 else -((-value) // ticks)
+        var quotient = value // ticks
+        return quotient + 1 if value < 0 and value % ticks != 0 else quotient
     return value * (nanos_per_tick // nanos_per_unit)
 
 
-def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
+def dt_op(
+    node: Node, input: Series, dtype: DataType, mask: List[Bool] = List[Bool]()
+) raises -> Series:
     if input.is_chunked():
-        return dt_op(node, input.rechunk(), dtype)
+        return dt_op(node, input.rechunk(), dtype, mask)
     var op = node.op
     if op == DT_STRPTIME:
         return _strptime(
@@ -252,7 +255,7 @@ def dt_op(node: Node, input: Series, dtype: DataType) raises -> Series:
         return Series("", StringColumn(texts, valid))
     var values = List[Int64](length=n, fill=0)
     for i in range(n):
-        valid[i] = column._valid(i)
+        valid[i] = column._valid(i) and (not len(mask) or mask[i])
         if not valid[i]:
             continue
         var v = column._get(i)

@@ -332,6 +332,18 @@ def check_group_preflight_without_device():
             passes = ((2 * n - 1).bit_length() + 3) // 4
             expected_launches += 6 + 3 * passes
         assert memory.launches == expected_launches
+    code[0] = 209
+    for workers in (1, 8, 2**31 - 1):
+        literals[0] = workers
+        err = P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for workers in (0, -1, 2**31):
+        literals[0] = workers
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"window worker metadata" in C.string_at(err)
+        lib.dfm_free(err)
+    code[0], literals[0] = 201, 0
     for index, value in [(2, 0), (3, 2), (9, 1), (10, 3), (11, 11)]:
         before = code[index]
         code[index] = value
@@ -345,6 +357,40 @@ def check_group_preflight_without_device():
     assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
     lib.dfm_free(err)
     literals[2] = 0
+
+
+    # Decimal means carry an integer scale in the grouped literal payload.
+    # Validate this path even on CI machines without a Metal device.
+    code[11], nt[2], st[4], outputs[0].dtype = 212, 11, 11, 11
+    for dtype, maximum in ((2, 9), (3, 18)):
+        inputs[0].dtype = st[0] = nt[1] = dtype
+        for scale in (0, maximum):
+            literals[2] = scale
+            err = P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for scale in (-1, maximum + 1):
+            literals[2] = scale
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal mean scale" in C.string_at(err)
+            lib.dfm_free(err)
+
+    # Group outputs use the same packed metadata in the node literal.
+    inputs[0].dtype = st[0] = nt[1] = 12
+    request.rows = 131072
+    metadata = 1 | (38 << 32) | (2 << 38) | (8 << 44)
+    for opcode, result_type in ((215, 12), (216, 11)):
+        code[11] = opcode
+        nt[2] = st[4] = outputs[0].dtype = result_type
+        literals[2] = metadata
+        err = P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for invalid in (0, (39 << 32) | (8 << 44), metadata | (1 << 60), -1):
+        literals[2] = invalid
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Decimal128 reduction metadata" in C.string_at(err)
+        lib.dfm_free(err)
 
 
 check_group_preflight_without_device()
@@ -439,6 +485,836 @@ def check_predicate_reduction_preflight_without_device():
 
 check_predicate_reduction_preflight_without_device()
 
+def check_sqrt_preflight_without_device():
+    # Descriptor validation must not depend on a Metal device being exposed.
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    code = (I * 8)(0, -1, -1, 0, 52, 0, -1, -1)
+    literals = (I * 2)()
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+    nt, st = (I * 2)(11, 11), (I * 2)(11, 11)
+    request = Request(2, 0, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nt), ptr(st))
+    memory, err = Memory(), P()
+    for dtype in (11, 3, 10):
+        inputs[0].dtype = nt[0] = st[0] = dtype
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    inputs[0].dtype = nt[0] = st[0] = 4
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"Invalid Metal square root dtype" in C.string_at(err)
+    lib.dfm_free(err)
+    inputs[0].dtype = nt[0] = st[0] = 1
+    outputs[0].dtype = nt[1] = st[1] = 1
+    err = P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    outputs[0].dtype = nt[1] = st[1] = 3
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"Invalid Metal square root dtype" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+def check_transcendental_preflight_without_device():
+    for operation in (53,54):
+        # Descriptor validation must not depend on a Metal device being exposed.
+        inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+        code = (I * 8)(0, -1, -1, 0, 53, 0, -1, -1)
+        literals = (I * 2)()
+        steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+        outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+        nt, st = (I * 2)(11, 11), (I * 2)(11, 11)
+        request = Request(2, 0, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                          ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                          ptr(outputs), ptr(nt), ptr(st))
+        code[4] = operation
+        memory, err = Memory(), P()
+        for dtype in (11, 3, 10):
+            inputs[0].dtype = nt[0] = st[0] = dtype
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        inputs[0].dtype = nt[0] = st[0] = 4
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Invalid Metal transcendental dtype" in C.string_at(err)
+        lib.dfm_free(err)
+        inputs[0].dtype = nt[0] = st[0] = 1
+        outputs[0].dtype = nt[1] = st[1] = 1
+        err = P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        outputs[0].dtype = nt[1] = st[1] = 3
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Invalid Metal transcendental dtype" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_sqrt_preflight_without_device()
+check_transcendental_preflight_without_device()
+
+def check_float32_floor_division_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 1, 0, 0))
+    code = (I * 8)(0, -1, -1, 0, 25, 0, 0, -1)
+    literals = (I * 2)()
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 1, 1, -1, 0))
+    nt, st = (I * 2)(1, 1), (I * 2)(1, 1)
+    request = Request(2, 0, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nt), ptr(st))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    code[4] = 26
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for opcode in (27,):
+        code[4] = opcode
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Metal floating operator requires CPU execution" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_float32_floor_division_preflight_without_device()
+
+def check_rank_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 1, 0, 0))
+    code = (I * 4)(207, 0, 1, 0)
+    literals = (I * 1)()
+    steps = (Step * 1)(Step(0, 1, 1, 4, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+    nt, st = (I * 1)(1), (I * 2)(1, 11)
+    request = Request(2, 0, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nt), ptr(st))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for at, invalid in ((0, 0), (1, 1), (2, 2), (3, 5)):
+        original = code[at]
+        code[at] = invalid
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Metal rank" in C.string_at(err)
+        lib.dfm_free(err)
+        code[at] = original
+
+
+check_rank_preflight_without_device()
+
+def check_decimal128_preflight_without_device():
+    def reduction_metadata(min_count=0, precision=38, scale=2, workers=8):
+        return (
+            min_count
+            | (precision << 32)
+            | (scale << 38)
+            | (workers << 44)
+        )
+
+    inputs = (Input * 1)(Input(None, None, 3, 0, 0))
+    outputs = (Output * 2)(Output(None, None, 12, 0, 208, 0),
+                           Output(None, None, 3, 0, 11, 0))
+    slots = (I * 1)(3)
+    request = Request(2, (1 << 31) - 1, 0, 1, 1, 0, 0, 0, 0, 2,
+                      -1, 1, 0, -1, ptr(inputs), None, None, None,
+                      None, ptr(outputs), None, ptr(slots))
+    # Typed requests require a node-types pointer even when there is no code.
+    nodes = (I * 1)(3)
+    request.node_types = ptr(nodes)
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 26 and memory.upload == 8 * request.rows
+    inputs[0].dtype = slots[0] = 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"unsupported accumulator" in C.string_at(err)
+    lib.dfm_free(err)
+
+    # Decimal128 SUM and MEAN carry the logical decimal contract and CPU
+    # worker count in one signed-positive metadata word.
+    inputs = (Input * 1)(Input(None, None, 12, 0, 0))
+    metadata = reduction_metadata(min_count=1)
+    outputs = (Output * 2)(
+        Output(None, None, 12, 0, 215, metadata),
+        Output(None, None, 11, 0, 216, metadata),
+    )
+    nodes, slots = (I * 1)(12), (I * 1)(12)
+    request = Request(
+        2, 131072, 0, 1, 1, 0, 0, 0, 0, 2, -1, 1, 0, -1,
+        ptr(inputs), None, None, None, None, ptr(outputs), ptr(nodes), ptr(slots)
+    )
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 26
+    for invalid in (
+        reduction_metadata(precision=0),
+        reduction_metadata(precision=39),
+        reduction_metadata(precision=2, scale=3),
+        reduction_metadata(workers=0),
+        reduction_metadata() | (1 << 60),
+    ):
+        outputs[0].min_count = invalid
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Decimal128 reduction metadata" in C.string_at(err)
+        lib.dfm_free(err)
+    outputs[0].min_count = -1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"Invalid Metal output descriptor" in C.string_at(err)
+    lib.dfm_free(err)
+    outputs[0].min_count = metadata
+    outputs[0].dtype = 11
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"Invalid Metal reduction dtype" in C.string_at(err)
+    lib.dfm_free(err)
+
+    # Wide literals require a valid typed high-word payload. Estimates do not
+    # read caller row pointers, including when the physical payload is 16 bytes.
+    inputs[0].dtype = slots[0] = 12
+    code = (I * 8)(1, -1, -1, 1, 1, -1, -1, -1)
+    literals = (I * 2)(0, -2)
+    nodes = (I * 2)(12, 3)
+    slots = (I * 2)(12, 12)
+    steps = (Step * 1)(Step(0, 1, 1, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 12, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 513 * 16 + 65
+    for payload in [-1, 0, 2]:
+        code[3] = payload
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"literal high-word" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_decimal128_preflight_without_device()
+def check_extended_shapes_without_device():
+    # Descriptor-only probes must accept the new boundaries without reading
+    # caller input/output addresses, and reject the next shape before indexing.
+    inputs = (Input * 256)(*(Input(None, None, 3, 5, 1) for _ in range(256)))
+    outputs = (Output * 256)(*(Output(None, None, 3, i, -1, 0) for i in range(256)))
+    slots = (I * 256)(*([3] * 256))
+    request = Request(2, 17, 0, 256, 256, 0, 0, 0, 0, 256, -1, 0, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result >= 256 * (17 * 8 + 3)
+    # Physical two-word storage is independent of the logical slot bound.
+    for i in range(256):
+        inputs[i].dtype = outputs[i].dtype = slots[i] = 12
+    err = P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 256 * (17 * 16 + 3)
+    for i in range(256):
+        inputs[i].dtype = outputs[i].dtype = slots[i] = 3
+    for field, invalid in (("slots", 257), ("input_count", 257), ("output_count", 257), ("step_count", 129)):
+        original = getattr(request, field)
+        setattr(request, field, invalid)
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"Invalid Metal request shape" in C.string_at(err)
+        lib.dfm_free(err)
+        setattr(request, field, original)
+
+    # Sorting reuses the source slot, exercising 128 device steps separately
+    # from the slot limit and the 128-by-256 boundary-liveness storage.
+    inputs = (Input * 1)(Input(None, None, 2, 0, 0))
+    code = (I * 512)(*([200, 0, 0, 1] * 128))
+    literals = (I * 128)()
+    steps = (Step * 128)(*(Step(i, 1, 0, 2, i, 1) for i in range(128)))
+    gathers = (I * 128)()
+    outputs = (Output * 1)(Output(None, None, 2, 0, -1, 0))
+    nodes, slots = (I * 128)(*([2] * 128)), (I * 1)(2)
+    request = Request(2, 17, 0, 1, 1, 512, 128, 128, 128, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), ptr(gathers),
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.launches >= 128 and memory.peak >= memory.result
+
+
+check_extended_shapes_without_device()
+def check_decimal_float_cast_preflight_without_device():
+    def word(value):
+        return C.cast(C.pointer(C.c_double(value)), C.POINTER(C.c_uint64)).contents.value
+
+    for dtype, maximum in [(2, 9), (3, 18), (12, 38)]:
+        inputs = (Input * 1)(Input(None, None, dtype, 5, 1))
+        code = (I * 8)(0, -1, -1, 0, 213, 0, -1, 0)
+        literals = (C.c_uint64 * 2)(0, word(1.0))
+        nodes, slots = (I * 2)(dtype, 11), (I * 2)(dtype, 11)
+        steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+        outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+        request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                          ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                          ptr(outputs), ptr(nodes), ptr(slots))
+        for scale in range(maximum + 1):
+            code[7], literals[1] = scale, word(float(10**scale))
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+            assert memory.result == 513 * 8 + 65
+        for scale in [-1, maximum + 1, 2**63 - 1]:
+            code[7] = scale
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal Float64 cast descriptor" in C.string_at(err)
+            lib.dfm_free(err)
+        code[7] = maximum
+        for bad in [0, word(-1.0), word(float('inf')), word(float('nan')), literals[1] ^ 1]:
+            original = literals[1]
+            literals[1] = bad
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal Float64 cast divisor" in C.string_at(err)
+            lib.dfm_free(err)
+            literals[1] = original
+        code[6] = 0
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal Float64 cast descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+        code[6] = -1
+        for bad_source in [1, 4, 5, 6, 7, 8, 9, 10, 11]:
+            nodes[0] = slots[0] = inputs[0].dtype = bad_source
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal Float64 cast descriptor" in C.string_at(err)
+            lib.dfm_free(err)
+        nodes[0] = slots[0] = inputs[0].dtype = dtype
+        for bad_target in [1, 2, 3, 4, 12]:
+            nodes[1] = slots[1] = outputs[0].dtype = bad_target
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"decimal Float64 cast descriptor" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+check_decimal_float_cast_preflight_without_device()
+
+
+def check_decimal_cast_preflight_without_device():
+    def metadata(source=2, target=1, precision=9, strict=True,
+                 source_decimal=True, target_decimal=True):
+        return (source | target << 6 | precision << 12 | int(strict) << 18
+                | int(source_decimal) << 19 | int(target_decimal) << 20)
+
+    inputs = (Input * 1)(Input(None, None, 12, 5, 1))
+    code = (I * 8)(0, -1, -1, 0, 217, 0, -1, metadata())
+    literals = (I * 2)(0, 0)
+    nodes, slots = (I * 2)(12, 2), (I * 2)(12, 2)
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 2, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    memory, err = Memory(), P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    assert memory.result == 513 * 4 + 65
+    for invalid in (-1, metadata(source=39), metadata(target=10),
+                    metadata(precision=0), metadata(precision=10),
+                    metadata(target_decimal=False),
+                    metadata(source_decimal=False), metadata() | 1 << 21):
+        code[7] = invalid
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal cast descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+    code[7] = metadata()
+    code[6] = 0
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"decimal cast descriptor" in C.string_at(err)
+    lib.dfm_free(err)
+    code[6] = -1
+    nodes[1] = slots[1] = outputs[0].dtype = 1
+    code[7] = metadata(target=0, precision=0, target_decimal=False)
+    literals[1] = C.cast(C.pointer(C.c_double(100.0)), C.POINTER(I)).contents.value
+    err = P()
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    literals[1] ^= 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"decimal Float32 cast divisor" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+check_decimal_cast_preflight_without_device()
+def check_decimal_comparison_preflight_without_device():
+    inputs = (Input * 2)(Input(None, None, 2, 5, 1), Input(None, None, 12, 0, 0))
+    code = (I * 12)(0, -1, -1, 0, 0, -1, -1, 1, 218, 0, 1, 1 | 38 << 6 | 20 << 12)
+    literals = (I * 3)(0, 0, 0)
+    nodes, slots = (I * 3)(2, 12, 4), (I * 3)(2, 12, 4)
+    steps = (Step * 1)(Step(0, 3, 2, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 4, 2, -1, 0))
+    request = Request(2, 513, 0, 3, 2, 12, 3, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for op in (8, 9, 20, 21, 22, 23):
+        code[11] = 1 | 38 << 6 | op << 12
+        memory, err = Memory(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        assert memory.result == 2 * 65
+    for invalid in (-1, 10 | 20 << 12, 39 << 6 | 20 << 12,
+                    7 << 12, 24 << 12, 20 << 12 | 1 << 18):
+        code[11] = invalid
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal comparison descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+    code[11] = 20 << 12
+    for bad_type in (1, 4, 5, 6, 7, 8, 9, 10, 11):
+        nodes[0] = slots[0] = inputs[0].dtype = bad_type
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal comparison descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_decimal_comparison_preflight_without_device()
+def check_decimal_arithmetic_preflight_without_device():
+    inputs = (Input * 2)(Input(None, None, 2, 5, 1), Input(None, None, 12, 0, 0))
+    code = (I * 12)(0, -1, -1, 0, 0, -1, -1, 1, 219, 0, 1, 1 | 38 << 6 | 5 << 12)
+    literals = (I * 3)(0, 0, 0)
+    nodes, slots = (I * 3)(2, 12, 12), (I * 3)(2, 12, 12)
+    steps = (Step * 1)(Step(0, 3, 2, 0, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 12, 2, -1, 0))
+    request = Request(2, 513, 0, 3, 2, 12, 3, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for op in (5, 6, 7, 24):
+        code[11] = 1 | 38 << 6 | op << 12
+        memory, err = Memory(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        assert memory.result == 513 * 16 + 65
+    for invalid in (-1, 10 | 5 << 12, 39 << 6 | 5 << 12, 8 << 12, 5 << 12 | 1 << 18):
+        code[11] = invalid
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal arithmetic descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+    for dtype in (2, 3, 12):
+        nodes[0] = slots[0] = inputs[0].dtype = dtype
+        nodes[2] = slots[2] = outputs[0].dtype = dtype
+        code[8], code[10] = 220, -1
+        for op in (50, 51):
+            code[11] = op
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        code[11] = 52
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"decimal unary descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_decimal_arithmetic_preflight_without_device()
+def check_shift_fill_preflight_without_device():
+    for dtype in range(1, 13):
+        inputs = (Input * 1)(Input(None, None, dtype, 5, 1))
+        code = (I * 4)(214, 0, 0, 4)
+        literals = (I * 1)(-3)
+        nodes, slots = (I * 1)(dtype), (I * 2)(dtype, dtype)
+        steps = (Step * 1)(Step(0, 1, 1, 5, 0, 0))
+        outputs = (Output * 1)(Output(None, None, dtype, 1, -1, 0))
+        request = Request(2, 513, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                          ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                          ptr(outputs), ptr(nodes), ptr(slots))
+        for method in (4, 5, 6):
+            code[2], code[3] = int(method == 6), method
+            for parameter in (-(1 << 63), -3, -1, 0, 1, (1 << 63)-1):
+                literals[0] = parameter
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                expected = (2 * 65 if dtype == 4 else 513 * 16 + 65 if dtype == 12
+                            else 513 * {1:4,2:4,3:8,5:1,6:2,7:1,8:2,9:4,10:8,11:8}[dtype] + 65)
+                assert memory.result == expected
+        for method, reverse in ((-1, 0), (16, 0), (4, 1), (5, 1), (6, 0)):
+            code[2], code[3] = reverse, method
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"cumulative descriptor" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+def check_rolling_preflight_without_device():
+    for dtype in range(1, 13):
+        for method in range(7, 11):
+            result = 11 if method == 8 else (3 if method == 7 and dtype in (5,6,7,8) else dtype)
+            inputs = (Input * 1)(Input(None, None, dtype, 0, 0))
+            code = (I * 4)(214, 0, 2, method)
+            literals = (I * 1)(3)
+            nodes, slots = (I * 1)(dtype), (I * 2)(dtype, result)
+            steps = (Step * 1)(Step(0, 1, 1, 5, 0, 0))
+            outputs = (Output * 1)(Output(None, None, result, 1, -1, 0))
+            request = Request(2, 513, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                              ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                              ptr(outputs), ptr(nodes), ptr(slots))
+            unsupported = dtype in (4,12) and method in (7,8)
+            memory, err = Memory(), P()
+            status = lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            if unsupported:
+                assert status
+                lib.dfm_free(err)
+                continue
+            check(status, err)
+            for parameter in (0, -1, -(1 << 63)):
+                literals[0] = parameter
+                err = P()
+                assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+                assert b"rolling window size" in C.string_at(err)
+                lib.dfm_free(err)
+            literals[0] = (1 << 63)-1
+            for minimum in (0, 1, 513, (1 << 63)-1):
+                code[2] = minimum
+                err = P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+            code[2] = -1
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            lib.dfm_free(err)
+
+
+def check_interpolation_preflight_without_device():
+    for dtype in range(1, 13):
+        inputs = (Input * 1)(Input(None, None, dtype, 5, 1))
+        code = (I * 4)(214, 0, 0, 14)
+        literals = (I * 1)(0)
+        nodes, slots = (I * 1)(dtype), (I * 2)(dtype, dtype)
+        steps = (Step * 1)(Step(0, 1, 1, 5, 0, 0))
+        outputs = (Output * 1)(Output(None, None, dtype, 1, -1, 0))
+        request = Request(2, 513, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                          ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                          ptr(outputs), ptr(nodes), ptr(slots))
+        memory, err = Memory(), P()
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        code[2] = 1
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"cumulative descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+        code[2], code[3] = 0, 13
+        slots[1] = outputs[0].dtype = 11
+        err = P()
+        status = lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        if dtype == 11:
+            check(status, err)
+        else:
+            assert status
+            assert b"cumulative result type" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+def check_rolling_moments_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    code = (I * 4)(214, 0, 1, 11)
+    literals = (C.c_uint64 * 1)(3 | (1 << 32))
+    nodes, slots = (I * 1)(11), (I * 2)(11, 11)
+    steps = (Step * 1)(Step(0, 1, 1, 5, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 11, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for method in (11, 12):
+        code[3] = method
+        for window in (1, 3, (1 << 32)-1):
+            for ddof in (0, 1, (1 << 32)-1):
+                literals[0] = window | (ddof << 32)
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for ddof in (0, 1, (1 << 32)-1):
+            literals[0] = ddof << 32
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"rolling window size" in C.string_at(err)
+            lib.dfm_free(err)
+        literals[0] = 3
+        for dtype in (1, 3, 4, 10, 12):
+            inputs[0].dtype = nodes[0] = slots[0] = dtype
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"cumulative result type" in C.string_at(err)
+            lib.dfm_free(err)
+        inputs[0].dtype = nodes[0] = slots[0] = 11
+        slots[1] = outputs[0].dtype = 1
+        err = P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        lib.dfm_free(err)
+        slots[1] = outputs[0].dtype = 11
+
+
+def check_coordinate_interpolation_preflight_without_device():
+    inputs = (Input * 2)(Input(None, None, 11, 7, 1), Input(None, None, 11, 5, 1))
+    code = (I * 4)(214, 0, 1, 15)
+    literals = (I * 1)(0)
+    nodes, slots = (I * 1)(11), (I * 3)(11, 11, 11)
+    steps = (Step * 1)(Step(0, 1, 2, 5, 0, 0))
+    outputs = (Output * 1)(Output(None, None, 11, 2, -1, 0))
+    request = Request(2, 513, 0, 3, 2, 4, 1, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    memory, err = Memory(), P()
+    for axis in (0, 1):
+        code[2] = axis
+        check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for axis in (-1, 2, 3, (1 << 63) - 1):
+        code[2], err = axis, P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"cumulative descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+    code[2] = 1
+    inputs[1].dtype = slots[1] = 1
+    err = P()
+    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+    assert b"cumulative descriptor" in C.string_at(err)
+    lib.dfm_free(err)
+
+
+def check_moment_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    slots = (I * 1)(11)
+    outputs = (Output * 1)(Output(None, None, 11, 0, 87, 1 << 47))
+    request = Request(2, 513, 0, 1, 1, 0, 0, 0, 0, 1, -1, 1, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    for operation in (86,87):
+        outputs[0].reduction = operation
+        for workers in (1,2,8,65535):
+            for ddof in (0,1,513,(1 << 31)-1):
+                outputs[0].min_count = (workers << 47) | ddof
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                assert memory.result == 9
+        for metadata in (0,1,1 << 31,(1 << 47) | (1 << 31)):
+            outputs[0].min_count = metadata
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"moment metadata" in C.string_at(err)
+            lib.dfm_free(err)
+        outputs[0].min_count = 1 << 47
+        slots[0] = inputs[0].dtype = 3
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"accumulator" in C.string_at(err)
+        lib.dfm_free(err)
+        slots[0] = inputs[0].dtype = 11
+
+
+def check_higher_moment_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    slots = (I * 1)(11)
+    outputs = (Output * 1)(Output(None, None, 11, 0, 98, 1 << 47))
+    request = Request(2, 513, 0, 1, 1, 0, 0, 0, 0, 1, -1, 1, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    for operation, maximum in ((98, 1), (99, 3)):
+        outputs[0].reduction = operation
+        for workers in (1, 2, 8, 65535):
+            for flags in range(maximum + 1):
+                outputs[0].min_count = (workers << 47) | flags
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for metadata in (0, 1, (1 << 47) | (maximum + 1), (1 << 47) | (1 << 31)):
+            outputs[0].min_count = metadata
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"moment metadata" in C.string_at(err)
+            lib.dfm_free(err)
+        outputs[0].min_count = 1 << 47
+        slots[0] = inputs[0].dtype = 3
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        lib.dfm_free(err)
+        slots[0] = inputs[0].dtype = 11
+
+
+def check_pair_moment_preflight_without_device():
+    inputs = (Input * 2)(Input(None, None, 11, 0, 0), Input(None, None, 11, 0, 0))
+    slots = (I * 3)(11, 11, 11)
+    outputs = (Output * 1)(Output(None, None, 11, 0, 160, (1 << 47) | (1 << 31)))
+    request = Request(2, 513, 0, 3, 2, 0, 0, 0, 0, 1, -1, 1, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    for operation in (160, 161):
+        outputs[0].reduction = operation
+        for workers in (1, 2, 8, 65535):
+            for right in (0, 1):
+                for ddof in (0, 1, (1 << 31)-1):
+                    outputs[0].min_count = (workers << 47) | (right << 31) | ddof
+                    memory, err = Memory(), P()
+                    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                    assert memory.result == 9
+        for right in (2, 3, 65535):
+            outputs[0].min_count = (1 << 47) | (right << 31)
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"paired moment right input" in C.string_at(err)
+            lib.dfm_free(err)
+        outputs[0].min_count = (1 << 47) | (1 << 31)
+        inputs[1].dtype = slots[1] = 3
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"paired moment right input" in C.string_at(err)
+        lib.dfm_free(err)
+        inputs[1].dtype = slots[1] = 11
+    # Group output literals carry the same logical right operand slot.
+    code = (I * 12)(201, 1, 3, 4, 202, 0, 0, 0, 203, 0, 5, 160)
+    literals = (I * 3)(0, 0, (1 << 47) | (1 << 31))
+    nt, st = (I * 3)(3, 11, 11), (I * 6)(11, 11, 3, 3, 3, 11)
+    steps = (Step * 1)(Step(0, 3, 2, 3, 0, 0))
+    outputs[0].slot, outputs[0].reduction, outputs[0].min_count = 5, -1, 0
+    request = Request(2, 513, 0, 6, 2, 12, 3, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nt), ptr(st))
+    for operation in (160, 161):
+        code[11] = operation
+        for right in (0, 1):
+            literals[2] = (8 << 47) | (right << 31) | 1
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for right in (2, 5, 6, 65535):
+            literals[2] = (8 << 47) | (right << 31)
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"paired moment right input" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+check_higher_moment_preflight_without_device()
+check_pair_moment_preflight_without_device()
+
+check_moment_preflight_without_device()
+check_rolling_preflight_without_device()
+check_rolling_moments_preflight_without_device()
+check_interpolation_preflight_without_device()
+check_coordinate_interpolation_preflight_without_device()
+check_shift_fill_preflight_without_device()
+def empty_request(rows, reduction=0):
+    values = (C.c_float * max(1, rows))(*([1.0] * max(1, rows)))
+    inputs = (Input * 1)(Input(ptr(values), None, 1, 0, 0))
+    request = Request(2, rows, 1, 1, 1, 0, 0, 0, 0, 0, -1, reduction, 0, -1,
+                      ptr(inputs), None, None, None, None, None, None, None)
+    return request, (values, inputs)
+
+
+def check_empty_outputs_preflight_without_device():
+    for rows in (0, 1, 513):
+        for reduction in (0, 1):
+            request, owners = empty_request(rows, reduction)
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+            assert memory.result == 0 and memory.launches == 1
+            request.output_count = -1
+            err = P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"Invalid Metal request shape" in C.string_at(err)
+            lib.dfm_free(err)
+
+
+def empty_input_request(rows, reduction=0, typed=False):
+    return Request(2, rows, 0 if typed else 1, 0, 0, 0, 0, 0, 0, 0,
+                   -1, reduction, 0, -1,
+                   None, None, None, None, None, None, None, None)
+
+
+def check_empty_inputs_preflight_without_device():
+    for rows in (0, 1, 513):
+        for typed in (False, True):
+            for reduction in (0, 1):
+                request = empty_input_request(rows, reduction, typed)
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                assert memory.result == memory.upload == memory.launches == 0
+                assert memory.peak > 0
+                for field in ("slots", "input_count"):
+                    setattr(request, field, -1)
+                    err = P()
+                    assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+                    lib.dfm_free(err)
+                    setattr(request, field, 0)
+
+
+check_empty_inputs_preflight_without_device()
+def check_fixed_offsets_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 3, 0, 0))
+    code = (I * 8)(0, -1, -1, 0, 142, 0, 1, 0)
+    literals = (I * 2)(0, 0)
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    nodes, slots = (I * 2)(3, 3), (I * 2)(3, 3)
+    outputs = (Output * 1)(Output(None, None, 3, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for unit in range(5):
+        code[7] = unit
+        for offset in (-(2**63), -1, 0, 1, 2**63-1):
+            code[6] = offset
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for unit in (-1, 5):
+        code[7] = unit
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"temporal offset descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_fixed_offsets_preflight_without_device()
+
+
+def check_quantiles_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 11, 0, 0))
+    slots = (I * 1)(11)
+    outputs = (Output * 1)(Output(None, None, 11, 0, 221, 0))
+    request = Request(2, 513, 0, 1, 1, 0, 0, 0, 0, 1, -1, 1, 0, -1,
+                      ptr(inputs), None, None, None, None, ptr(outputs), None, ptr(slots))
+    for operation in range(221, 226):
+        outputs[0].reduction = operation
+        for bits in (0, 1, 0x3fbf9add3746f65e, 0x3fe0000000000000, 0x3ff0000000000000):
+            outputs[0].min_count = bits
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+        for bits in (0x3ff0000000000001, 0x7ff0000000000000, 0x7ff8000000000000):
+            outputs[0].min_count = bits
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            assert b"quantile metadata" in C.string_at(err)
+            lib.dfm_free(err)
+        outputs[0].min_count = 0
+        for dtype in (1, 3, 10):
+            slots[0] = inputs[0].dtype = dtype
+            memory, err = Memory(), P()
+            assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+            lib.dfm_free(err)
+        slots[0] = inputs[0].dtype = 11
+
+
+check_quantiles_preflight_without_device()
+
+
+def check_duration_totals_preflight_without_device():
+    inputs = (Input * 1)(Input(None, None, 3, 0, 0))
+    code = (I * 8)(0, -1, -1, 0, 143, 0, 1, 1)
+    literals = (I * 2)(0, 0)
+    steps = (Step * 1)(Step(0, 2, 1, 0, 0, 0))
+    nodes, slots = (I * 2)(3, 3), (I * 2)(3, 3)
+    outputs = (Output * 1)(Output(None, None, 3, 1, -1, 0))
+    request = Request(2, 513, 0, 2, 1, 8, 2, 1, 0, 1, -1, 0, 0, -1,
+                      ptr(inputs), ptr(code), ptr(literals), ptr(steps), None,
+                      ptr(outputs), ptr(nodes), ptr(slots))
+    for mode in (0, 1):
+        code[7] = mode
+        for factor in (1, 1000, 1000000, 86400000000000):
+            code[6] = factor
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    for factor, mode in ((0, 1), (-1, 1), (86400000000001, 1), (1, -1), (1, 2)):
+        code[6], code[7] = factor, mode
+        memory, err = Memory(), P()
+        assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
+        assert b"duration total descriptor" in C.string_at(err)
+        lib.dfm_free(err)
+
+
+check_duration_totals_preflight_without_device()
+check_empty_outputs_preflight_without_device()
 print("Native Metal ABI and pure request validation: PASS")
 if lib.dfm_device_count() == 0:
     print("Native Metal execution: SKIP (no GPU exposed on this host)")
@@ -563,9 +1439,10 @@ def execute(
     step_array = (Step * len(steps))(*steps)
     gather_array = (I * max(1, len(gathers)))(*gathers)
     out_type = (
-        (dtype if dtype in (2, 9, 10) else 3) if reduction == 10 else 3
+        11 if reduction in (211, 212) else dtype if reduction == 210 else
+        (dtype if dtype in (1, 2, 9, 10) else 3) if reduction == 10 else 3
     ) if reduction >= 0 else (4 if output_bool else dtype)
-    out_scalar = SCALARS[out_type]
+    out_scalar = C.c_uint64 if out_type == 11 else SCALARS[out_type]
     result = (out_scalar * max(1, n))()
     bits = (C.c_uint8 * max(1, (n + 7) // 8))()
     if expect_error:
@@ -755,9 +1632,8 @@ execute([2**31 - 1, 1], 2, [col], [0], reduction=10, expect_error="overflow")
 result, bits, _ = execute([2**31 - 1, 1, -1], 2, [col], [0], reduction=10)
 assert result == [2**31 - 1]
 execute([1.0], 1, [col], [0.0], budget=0, expect_error="memory budget")
-execute(
-    [1.0], 1, [col], [0.0], reduction=10, expect_error="accumulator precision"
-)
+result, bits, _ = execute([1.0], 1, [col], [0.0], reduction=10)
+assert result == [1.0] and bits == [True]
 
 
 # Separate Float32 multiply/add rounding must survive source specialization.
@@ -797,14 +1673,16 @@ for op, a, b in [
     (6, 2.0**-126, f32(2.0**-126 + tiny)),
     (7, 1e-20, 1e-20),
 ]:
-    execute(
+    a, b = f32(a), f32(b)
+    result, bits, _ = execute(
         [a],
         1,
         [col, (2, -1, -1, -1), (op, 0, 1, -1)],
         [0.0, b, 0.0],
         output_bool=op == 8,
-        expect_error="subnormal",
     )
+    expected = f32(a + b if op == 5 else a - b if op == 6 else a * b)
+    assert result == [expected], (op, a, b, result, expected)
 
 
 # Two filter boundaries retain an early branch and the original input while
@@ -1286,7 +2164,7 @@ def test_numeric_casts():
                 )
                 lib.dfm_free(err)
     # A value just below a Float32 halfway point can round via Float64 to
-    # that point. This is a native precision boundary, never a silent mismatch.
+    # that point. Software binary64 must reproduce the CPU's two conversions.
     source, target = 10, 1
     data = (C.c_uint64 * 1)(2**63 + 2**39 - 1)
     inputs = (Input * 1)(Input(ptr(data), None, source, 0, 0))
@@ -1321,9 +2199,9 @@ def test_numeric_casts():
         ptr(st),
     )
     stats, err = Stats(), P()
-    assert lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
-    assert b"double-rounding boundary" in C.string_at(err), C.string_at(err)
-    lib.dfm_free(err)
+    check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+    assert result[0] == C.c_float(float(data[0])).value
+    assert unpack(valid, 1) == [True]
 
 
 test_numeric_casts()
@@ -1612,7 +2490,7 @@ def test_additional_row_ops():
                     )
                 )
                 if expected == 0:
-                    expected = math.copysign(0.0, x)
+                    expected = math.copysign(0.0, x) if op != 57 or x != 0 else 0.0
                 expected = f32(expected)
             assert C.string_at(C.byref(C.c_float(y)), 4) == C.string_at(
                 C.byref(C.c_float(expected)), 4
@@ -2846,15 +3724,18 @@ def test_opaque_float64_storage_and_rejection():
     assert unpack(validity[1], n) == [True] * n
     assert list(literal) == [0x8000000000000001] * n
     assert unpack(validity[2], n) == [True] * n
-    # A valid bytecode DAG requesting Float64 addition must reject before
-    # device submission, rather than treating the IEEE words as UInt64 math.
-    code[8:12] = [5, 0, 0, -1]
+    # Nonzero floating rounding carries the exact bound Float64 scale.
+    # Malformed scale encodings reject before submission.
+    code[8:12] = [57, 0, -1, 2]
     nt[2] = 11
     st[2] = 11
     outputs[1].dtype = 11
     memory, err = Memory(), P()
+    literals[2] = C.cast(C.pointer(C.c_double(100)), C.POINTER(C.c_uint64))[0]
+    check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+    literals[2] = 0xBFF0000000000000
     assert lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err))
-    assert b"Float64 requires CPU execution" in C.string_at(err)
+    assert b"Invalid Metal floating rounding scale" in C.string_at(err)
     lib.dfm_free(err)
 
 
@@ -2953,6 +3834,419 @@ def test_temporal_truncate():
 
 
 test_temporal_truncate()
+
+def test_extended_expression_nodes():
+    values, valid = [-7, 0, 9] * 9, [True, False, True] * 9
+    for count in (65, 127, 128):
+        nodes = [col] + [(50, i - 1, -1, -1) for i in range(1, count)]
+        result, bitmap, _ = execute(values, 2, nodes, [0] * count,
+                                     valid=valid, offset=5, typed=True)
+        sign = -1 if (count - 1) % 2 else 1
+        assert bitmap == valid
+        assert all(not ok or got == sign * want for got, want, ok in zip(result, values, valid))
+    nodes = [col] + [(50, i - 1, -1, -1) for i in range(1, 129)]
+    execute(values, 2, nodes, [0] * 129, valid=valid, typed=True,
+            expect_error="Invalid Metal expression step")
+
+
+test_extended_expression_nodes()
+
+def test_exact_wide_integer_reductions():
+    import struct
+    for dtype in (3, 10):
+        high = (1 << (63 if dtype == 3 else 64)) - 1
+        for n in (0, 1, 4, 257, 4097, 65537):
+            values = [high if dtype == 10 or i % 4 < 2 else -high for i in range(n)]
+            for valid in (None, [i % 7 != 2 for i in range(n)]):
+                selected = values if valid is None else [v for v, ok in zip(values, valid) if ok]
+                total = sum(selected)
+                count = len(selected)
+                for minimum in (0, n + 1):
+                    expected_valid = count >= minimum
+                    fits = -(1 << 63) <= total <= high if dtype == 3 else 0 <= total <= high
+                    fault = "Integer overflow" if expected_valid and not fits else None
+                    result = execute(values, dtype, [col], [0], valid=valid, offset=5,
+                                     reduction=210, minimum=minimum, typed=True, expect_error=fault)
+                    if fault is None:
+                        output, bits, stats = result
+                        assert bits == [expected_valid]
+                        assert output == [total if expected_valid else 0]
+                        assert stats.memory.peak > stats.memory.result
+                output, bits, _ = execute(values, dtype, [col], [0], valid=valid,
+                                         offset=5, reduction=211, typed=True)
+                expected = struct.unpack("Q", struct.pack("d", float(total) / count))[0] if count else 0
+                assert bits == [bool(count)] and output == [expected], (dtype, n, total, count, output, expected)
+        execute([high, 1], dtype, [col], [0], reduction=210, typed=True,
+                expect_error="Integer overflow")
+        output, bits, _ = execute([high, 1], dtype, [col], [0], reduction=210,
+                                 typed=True, limit=0)
+        assert output == bits == []
+    # Final fits after intermediate signed totals cross either 64-bit boundary.
+    for values in ([-(1 << 63), -(1 << 63), (1 << 63)-1, (1 << 63)-1],
+                   [(1 << 63)-1, (1 << 63)-1, -((1 << 63)-1), -((1 << 63)-1)]):
+        output, bits, _ = execute(values, 3, [col], [0], reduction=210, typed=True)
+        assert bits == [True] and output == [sum(values)]
+    for dtype in (1, 2, 4, 5, 6, 7, 8, 9):
+        for op in (210, 211):
+            execute([1], dtype, [col], [0], reduction=op, typed=True,
+                    expect_error="unsupported accumulator precision")
+    print("PASS exact wide integer sum/mean native regressions")
+
+
+test_exact_wide_integer_reductions()
+
+
+
+def test_exact_decimal_means():
+    import struct
+    def expected(values, scale):
+        if not values:
+            return 0
+        total, count = sum(values), len(values)
+        per_row, left = divmod(abs(total), count)
+        whole, digits = divmod(per_row, 10**scale)
+        value = float(whole) + (float(digits) + float(left) / float(count)) / float(10**scale)
+        if total < 0:
+            value = -value
+        return struct.unpack("Q", struct.pack("d", value))[0]
+    for dtype, width, max_scale in ((2, 31, 9), (3, 63, 18)):
+        high = (1 << width) - 1
+        for scale in range(max_scale + 1):
+            for values in ([high, high-1, -high, 7], [-high, -high+1, -3],
+                           [high, high, high], [-(1 << width)], []):
+                output, bits, _ = execute(values, dtype, [col], [0], reduction=212,
+                                         minimum=scale, typed=True)
+                assert bits == [bool(values)] and output == [expected(values, scale)], (dtype, scale, values, output)
+        for n in (257, 4097, 65537):
+            values = [high - i % 31 if i % 3 else -high for i in range(n)]
+            valid = [i % 11 != 3 for i in range(n)]
+            chosen = [v for v, ok in zip(values, valid) if ok]
+            for scale in (0, max_scale):
+                output, bits, _ = execute(values, dtype, [col], [0], valid=valid,
+                                         offset=5, reduction=212, minimum=scale, typed=True)
+                assert bits == [True] and output == [expected(chosen, scale)]
+        output, bits, _ = execute([high, -high], dtype, [col], [0], valid=[False, False],
+                                 reduction=212, minimum=max_scale, typed=True)
+        assert output == [0] and bits == [False]
+        for scale in (-1, max_scale + 1):
+            execute([high], dtype, [col], [0], reduction=212, minimum=scale,
+                    typed=True, expect_error="Invalid Metal output" if scale < 0 else "decimal mean scale")
+        execute([high], dtype, [col], [0], reduction=212, minimum=max_scale,
+                typed=True, budget=0, expect_error="budget")
+    for dtype in (1, 4, 5, 6, 7, 8, 9, 10):
+        execute([1], dtype, [col], [0], reduction=212, typed=True,
+                expect_error="unsupported accumulator precision")
+    print("PASS exact Decimal32/64 mean native regressions")
+
+
+test_exact_decimal_means()
+
+def test_empty_outputs_native():
+    for rows in (0, 1, 513):
+        for reduction in (0, 1):
+            request, owners = empty_request(rows, reduction)
+            memory, err = Memory(), P()
+            check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+            for limit in (-1, 0, 3):
+                request.limit = limit
+                stats, err = Stats(), P()
+                check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+                expected = 1 if reduction else rows
+                assert stats.rows == (expected if limit < 0 else min(expected, limit))
+                assert stats.memory.result == 0
+                assert stats.memory.shared == memory.shared
+                assert stats.memory.launches == 1
+            request.budget = memory.peak - 1
+            stats, err = Stats(), P()
+            assert lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+            assert b"budget" in C.string_at(err)
+            lib.dfm_free(err)
+    print("PASS zero-column native cardinality, reduction, limits and budget regressions")
+
+
+test_empty_outputs_native()
+def test_empty_inputs_native():
+    for rows in (0, 1, 513):
+        for typed in (False, True):
+            for reduction in (0, 1):
+                request = empty_input_request(rows, reduction, typed)
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request), C.byref(memory), C.byref(err)), err)
+                for limit in (-1, 0, 3):
+                    request.limit = limit
+                    stats, err = Stats(), P()
+                    check(lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err)), err)
+                    expected = 1 if reduction else rows
+                    assert stats.rows == (expected if limit < 0 else min(expected, limit))
+                    assert stats.memory.result == stats.memory.upload == stats.memory.launches == 0
+                    assert stats.memory.shared == memory.shared and stats.waits == 1
+                request.budget = memory.peak - 1
+                stats, err = Stats(), P()
+                assert lib.dfm_execute(ctx, C.byref(request), C.byref(stats), C.byref(err))
+                assert b"budget" in C.string_at(err)
+                lib.dfm_free(err)
+    print("PASS zero-column source native cardinality, no-input/no-output accounting, limits and budget regressions")
+
+
+test_empty_inputs_native()
+def test_duration_totals_native():
+    values = [-(1 << 63), -(1 << 63) + 1, -1000000001, -1001, -1, 0,
+              1, 1001, 1000000001, (1 << 63)-1]
+    for factor in (1, 1000, 1000000, 86400000000000):
+        for mode in (0, 1):
+            for validity in ([True] * len(values), [i % 3 != 1 for i in range(len(values))]):
+                output, bits, _ = execute(values, 3, [col, (143, 0, factor, mode)], [0, 0],
+                                          valid=validity, offset=5, typed=True)
+                reference = [((-1 if x < 0 else 1)*(abs(x)//factor)) if mode
+                             else ((x*factor+(1 << 63)) % (1 << 64))-(1 << 63) for x in values]
+                assert bits == validity
+                assert [x for x, valid in zip(output, bits) if valid] == [x for x, valid in zip(reference, validity) if valid]
+    print("PASS signed duration totals, full-width storage, nulls and slice bitmaps")
+
+
+test_duration_totals_native()
+
+
+def test_fixed_offsets_native():
+    lo, hi, day = -(2**63), 2**63-1, 86400000000000
+    for unit in range(5):
+        for offset in (-1, 0, 1):
+            values = [lo, lo+1, -day-1, -1, 0, 1, day-1, day, hi-1, hi]
+            valid = [lo <= value+offset <= hi for value in values]
+            nodes = [col, (142, 0, offset, unit)]
+            actual, bits, _ = execute(values, 3, nodes, [0, 0], valid=valid, offset=5, typed=True)
+            expected = [(value+offset) % day if unit == 4 and offset else value+offset for value in values]
+            assert bits == valid
+            assert all(not ok or a == e for a, e, ok in zip(actual, expected, valid))
+            actual, bits, _ = execute([], 3, nodes, [0, 0], typed=True)
+            assert actual == bits == []
+        execute([hi], 3, [col, (142, 0, 1, unit)], [0, 0], typed=True, expect_error="overflow")
+        execute([lo], 3, [col, (142, 0, -1, unit)], [0, 0], typed=True, expect_error="overflow")
+    print("PASS checked fixed temporal offsets, Time wrapping, endpoints, nulls and empty rows")
+
+
+test_fixed_offsets_native()
+
+def test_calendar_truncation_native():
+    lo, hi = -(1 << 63), (1 << 63)-1
+    def wrap(value):
+        return (value-lo) % (1 << 64)+lo
+    def start(year):
+        previous = year-1
+        return 365*previous+previous//4-previous//100+previous//400-719162
+    def reference(value, unit, months):
+        per_second = (0,1000,1000000,1000000000)[unit]
+        days = value if not unit else value//(86400*per_second)
+        # Invert the independent year ordinal by bisection, then walk months.
+        left, right = -30000000000000000, 30000000000000000
+        while left+1 < right:
+            middle=(left+right)//2
+            if start(middle) <= days:
+                left=middle
+            else:
+                right=middle
+        year, remainder, month = left, days-start(left), 1
+        lengths=[31,29 if year%4 == 0 and (year%100 != 0 or year%400 == 0) else 28,31,30,31,30,31,31,30,31,30,31]
+        while remainder >= lengths[month-1]:
+            remainder-=lengths[month-1]
+            month+=1
+        index=(year*12+month-1)//months*months
+        year, month0=divmod(index,12)
+        lengths=[31,29 if year%4 == 0 and (year%100 != 0 or year%400 == 0) else 28,31,30,31,30,31,31,30,31,30,31]
+        days=wrap(start(year)+sum(lengths[:month0]))
+        if not unit:
+            return days
+        seconds=days*86400
+        result=seconds*per_second
+        return result if lo <= seconds <= hi and lo <= result <= hi else None
+    rng=random.Random(0xCA1E)
+    cases=0
+    for unit in range(4):
+        values=[lo,lo+1,hi-1,hi,-1,0,1,-719528,11016,18321]+[rng.randrange(lo,hi+1) for _ in range(128)]
+        for months in (1,2,3,12,15,1200,999999999999999999):
+            expected=[reference(value,unit,months) for value in values]
+            valid=[value is not None and i%11 != 3 for i,value in enumerate(expected)]
+            output,bits,_=execute(values,3,[col,(144,0,months,unit)],[0,0],valid=valid,offset=5,typed=True)
+            assert bits == valid
+            assert all(not ok or a == b for a,b,ok in zip(output,expected,valid)), (unit,months,output,expected)
+            cases+=len(values)
+            bad=next((value for value,answer in zip(values,expected) if answer is None),None)
+            if bad is not None:
+                execute([bad],3,[col,(144,0,months,unit)],[0,0],typed=True,expect_error="overflow")
+            execute([],3,[col,(144,0,months,unit)],[0,0],typed=True)
+    for months,unit in ((0,0),(-1,0),(1,-1),(1,4)):
+        execute([0],3,[col,(144,0,months,unit)],[0,0],typed=True,expect_error="calendar truncation descriptor")
+    print("PASS calendar truncation: independent ordinal/bisection reference",cases,"rows, overflow, nulls and empty inputs")
+
+
+test_calendar_truncation_native()
+
+
+def test_calendar_offsets_native():
+    import struct
+    lo,hi=-(1 << 63),(1 << 63)-1
+    def wrap(value):
+        return (value-lo) % (1 << 64)+lo
+    def checked(value):
+        if not lo <= value <= hi:
+            raise OverflowError
+        return value
+    def start(year):
+        previous=year-1
+        return 365*previous+previous//4-previous//100+previous//400-719162
+    def lengths(year):
+        return [31,29 if year%4 == 0 and (year%100 != 0 or year%400 == 0) else 28,31,30,31,30,31,31,30,31,30,31]
+    def reference(value,unit,months,fixed):
+        per_second=(0,1000,1000000,1000000000)[unit]
+        days=value if not unit else value//(86400*per_second)
+        within=0 if not unit else value%(86400*per_second)
+        left,right=-30000000000000000,30000000000000000
+        while left+1 < right:
+            middle=(left+right)//2
+            if start(middle) <= days:
+                left=middle
+            else:
+                right=middle
+        year,day,month=left,days-start(left),0
+        old_lengths=lengths(year)
+        while day >= old_lengths[month]:
+            day-=old_lengths[month]
+            month+=1
+        index=wrap(year*12+month+months)
+        year,month=divmod(index,12)
+        new_lengths=lengths(year)
+        day=min(day+1,new_lengths[month])
+        days=wrap(start(year)+sum(new_lengths[:month])+day-1)
+        try:
+            result=days if not unit else checked(checked(checked(checked(days*86400)+within//per_second)*per_second)+within%per_second)
+            return checked(result+fixed) if fixed else result
+        except OverflowError:
+            return None
+    rng=random.Random(0x0FF5E7)
+    cases=0
+    for unit in range(4):
+        values=[lo,lo+1,hi-1,hi,-1,0,1,-719528,11016,18321]+[rng.randrange(lo,hi+1) for _ in range(128)]
+        for months in (-8999999999999999988,-999999999999999999,-27,-12,-1,1,12,27,999999999999999999,8999999999999999988):
+            for fixed in (-1,0,1):
+                expected=[reference(value,unit,months,fixed) for value in values]
+                valid=[value is not None and i%11 != 3 for i,value in enumerate(expected)]
+                literal=struct.unpack("d",struct.pack("q",fixed))[0]
+                output,bits,_=execute(values,3,[col,(145,0,months,unit)],[0,literal],valid=valid,offset=5,typed=True)
+                assert bits == valid
+                assert all(not ok or a == b for a,b,ok in zip(output,expected,valid)), (unit,months,fixed,output,expected)
+                cases+=len(values)
+                bad=next((value for value,answer in zip(values,expected) if answer is None),None)
+                if bad is not None:
+                    execute([bad],3,[col,(145,0,months,unit)],[0,literal],typed=True,expect_error="overflow")
+                execute([],3,[col,(145,0,months,unit)],[0,literal],typed=True)
+    for months,unit in ((0,0),(1,-1),(1,4)):
+        execute([0],3,[col,(145,0,months,unit)],[0,0],typed=True,expect_error="calendar offset descriptor")
+    print("PASS calendar offsets: independent ordinal/bisection reference",cases,"rows, clamping, signed month-index wrapping, fixed ticks, overflow and nulls")
+
+
+test_calendar_offsets_native()
+
+
+class InputChunk(C.Structure):
+    _fields_ = [("input", Input), ("rows", I)]
+
+
+def test_chunked_inputs_native():
+    assert C.sizeof(InputChunk) == 48
+    # Independent child bitmap windows, numeric pointers, and empty fragments.
+    for dtype in range(1, 13):
+        scalar = C.c_uint64 if dtype in (11, 12) else SCALARS[dtype]
+        for typed in (False, True):
+            if not typed and dtype >= 11:
+                continue
+            for sizes in ([0], [0, 3, 0, 5, 2, 0], [1, 255, 1, 256]):
+                owners, parts, expected, validity = [], [], [], []
+                for c, n in enumerate(sizes):
+                    offset = (c * 3 + 1) % 8
+                    values = [int((i+c) % 2) if dtype == 4 else (i+c) % 97 for i in range(n)]
+                    valid = [(i+c) % 4 != 2 for i in range(n)]
+                    if dtype == 12:
+                        # Exercise both words, including negative high words.
+                        words = [word for i, value in enumerate(values) for word in (value, (1 << 64)-1 if i % 2 else 7)]
+                        data = (scalar * max(1, 2*n))(*words)
+                        expected.extend(words)
+                    else:
+                        data = packed(values, offset) if dtype == 4 else (scalar * max(1,n))(*values)
+                        expected.extend(values)
+                    bits = packed(valid, offset)
+                    owners.extend([data, bits])
+                    parts.append(InputChunk(Input(ptr(data) if n else None, ptr(bits) if n else None, dtype, offset, 1), n))
+                    validity.extend(valid)
+                chunks = (InputChunk * len(parts))(*parts)
+                inputs = (Input * 1)(Input(ptr(chunks), None, dtype, len(parts), 2))
+                n = sum(sizes)
+                result = (scalar * max(1,n*(2 if dtype == 12 else 1)))()
+                bits = (C.c_uint8 * max(1,(n+7)//8))()
+                outputs = (Output * 1)(Output(ptr(result),ptr(bits),dtype,0,-1,0))
+                slots = (I * (2 if dtype == 12 else 1))(*([dtype] * (2 if dtype == 12 else 1)))
+                request = Request(2,n,0 if typed else (1 if dtype == 4 else dtype),1,1,0,0,0,0,1,-1,0,1,-1,
+                                  ptr(inputs),None,None,None,None,ptr(outputs),None,ptr(slots) if typed else None)
+                memory, err = Memory(), P()
+                check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+                fragment_bitmap = sum((size+part.input.offset+7)//8 if size else 0 for size,part in zip(sizes,parts))
+                value_bytes = fragment_bitmap if dtype == 4 else n*C.sizeof(scalar)*(2 if dtype == 12 else 1)
+                assert memory.upload == value_bytes+fragment_bitmap
+                assert memory.launches == len(parts)+1
+                request.budget = memory.peak
+                stats,err = Stats(),P()
+                check(lib.dfm_execute(ctx,C.byref(request),C.byref(stats),C.byref(err)),err)
+                assert stats.rows == n and unpack(bits,n) == validity
+                assert stats.memory.peak == memory.peak and stats.memory.launches == memory.launches
+                actual = unpack(result,n) if dtype == 4 else list(result)[:len(expected)]
+                for i,ok in enumerate(validity):
+                    if ok:
+                        if dtype == 12:
+                            assert actual[2*i:2*i+2] == expected[2*i:2*i+2]
+                        else:
+                            assert actual[i] == expected[i], (dtype,typed,sizes,i,actual[i],expected[i])
+                request.budget = memory.peak-1
+                err=P()
+                assert lib.dfm_execute(ctx,C.byref(request),C.byref(stats),C.byref(err))
+                assert b"budget" in C.string_at(err)
+                lib.dfm_free(err)
+                # Estimates must not dereference child payload pointers.
+                for part in chunks:
+                    part.input.values=part.input.validity=None
+                request.budget=-1
+                err=P()
+                check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+                if n:
+                    err=P()
+                    assert lib.dfm_execute(ctx,C.byref(request),C.byref(stats),C.byref(err))
+                    assert b"Missing Metal input data" in C.string_at(err)
+                    lib.dfm_free(err)
+                def invalid(message):
+                    error=P()
+                    assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(error))
+                    assert message in C.string_at(error), C.string_at(error)
+                    lib.dfm_free(error)
+                chunks[0].input.has_validity=2
+                invalid(b"bitmap descriptor")
+                chunks[0].input.has_validity=1
+                chunks[0].input.offset=8
+                invalid(b"bitmap descriptor")
+                chunks[0].input.offset=0
+                chunks[0].rows=-1
+                invalid(b"chunk row count")
+                chunks[0].rows=sizes[0]
+                chunks[0].input.dtype=999
+                invalid(b"chunk row count or dtype")
+                chunks[0].input.dtype=dtype
+                request.rows=n+1
+                invalid(b"chunk rows do not match")
+                request.rows=n
+                inputs[0].validity=1
+                invalid(b"chunk metadata array")
+                inputs[0].validity=None
+    print("PASS chunk fragments: all physical types, sliced bitmaps, empty chunks, exact estimates, budgets and invalid metadata")
+
+
+test_chunked_inputs_native()
 
 lib.dfm_context_release(ctx)
 print(

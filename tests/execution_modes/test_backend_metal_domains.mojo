@@ -411,17 +411,17 @@ def wide_sum_cases(runtime: MetalRuntime, native: Bool) raises:
         var cancel = DataFrame(
             [Series("x", Column[Int64]([Int64.MAX, -Int64.MAX]))]
         )
-        with assert_raises(contains="exact wide accumulation"):
-            _ = (
-                cancel.lazy()
-                .select(col("x").sum())
-                .collect(accelerator=runtime)
-            )
+        check_domain(
+            cancel.lazy().select(col("x").sum()),
+            DataFrame([Series("x", Column[Int64]([0]))]),
+            runtime,
+            native,
+        )
         var bad32 = DataFrame([Series("x", Column[Int32]([Int32.MAX, 1]))])
         with assert_raises(contains="overflow"):
             _ = bad32.lazy().select(col("x").sum()).collect(accelerator=runtime)
         var unsafe = DataFrame([Series("x", Column[UInt64]([UInt64.MAX, 1]))])
-        with assert_raises(contains="exact wide accumulation"):
+        with assert_raises(contains="Integer overflow"):
             _ = (
                 unsafe.lazy()
                 .select(col("x").sum())
@@ -739,12 +739,12 @@ def masked_cases(runtime: MetalRuntime, native: Bool) raises:
                 .select(col("u").cast("int8"))
                 .collect(accelerator=runtime)
             )
-        with assert_raises(contains="subnormal"):
-            _ = (
-                source.lazy()
-                .select(col("f") * lit(Float32(1e-20)))
-                .collect(accelerator=runtime)
+        var underflow = source.lazy().select(col("f") * lit(Float32(1e-20)))
+        assert_true(
+            underflow.collect(accelerator=runtime).equals(
+                underflow.collect(engine="cpu")
             )
+        )
         var boundary = DataFrame(
             [
                 Series(
@@ -753,12 +753,12 @@ def masked_cases(runtime: MetalRuntime, native: Bool) raises:
                 )
             ]
         )
-        with assert_raises(contains="double-rounding boundary"):
-            _ = (
-                boundary.lazy()
-                .select(col("u").cast("float32"))
-                .collect(accelerator=runtime)
+        var rounded_cast = boundary.lazy().select(col("u").cast("float32"))
+        assert_true(
+            rounded_cast.collect(accelerator=runtime).equals(
+                rounded_cast.collect(engine="cpu")
             )
+        )
         check_domain(
             plan,
             DataFrame(
@@ -1105,11 +1105,11 @@ def checked_boundary_preflight() raises:
             .head(0)
             .collect(accelerator=unavailable)
         )
-    var float_source = DataFrame([Series("f", Column[Float32]([1.5]))])
-    with assert_raises(contains="Float64 intermediate"):
+    var float_source = DataFrame([Series("f", Column[Float64]([1.5]))])
+    with assert_raises(contains="Float64 requires CPU"):
         _ = (
             float_source.lazy()
-            .select(col("f").round(2))
+            .select(col("f").pow(lit(Float64(2))))
             .collect(accelerator=unavailable)
         )
 

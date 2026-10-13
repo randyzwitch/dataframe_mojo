@@ -81,7 +81,7 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
         assert_equal(
             cold.accelerator[at], dense_facts.accelerator[at] + bitmap_bytes
         )
-    assert_equal(cold.family, "float32")
+    assert_equal(cold.family, "float32;metal-float32-arithmetic-v1")
     assert_equal(cold.placement, "accel")
     assert_equal(estimate_feature(cold, "fixed", False), Float64(1))
     assert_equal(estimate_feature(cold, "rows", False), Float64(3))
@@ -152,8 +152,10 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
 def cost_preflight() raises:
     var invalid = MetalRuntime(device_id=999999)
     var wide = DataFrame([Series("x", Column[Float64]([1, 2]))])
-    with assert_raises(contains="Float64 requires CPU"):
-        _ = invalid.estimate_auto(wide.lazy().select(col("x") + 1))
+    with assert_raises(contains="unsupported"):
+        _ = invalid.estimate_auto(
+            wide.lazy().select(col("x").pow(lit(Float64(2))))
+        )
     with assert_raises(contains="in-memory"):
         _ = invalid.estimate_auto(
             scan_csv(

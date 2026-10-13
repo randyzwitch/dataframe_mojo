@@ -67,9 +67,11 @@ and include any staging allocations.
 ## Apple implementation scope
 
 The Apple provider lives in this repository and uses native Metal operations.
-It will accelerate supported Float32, integer, and Boolean regions, with no
-Float64 emulation or implicit downcasts. Float64 work and reductions requiring
-unsupported precision remain CPU candidates. GPU selection needs measured
+It accelerates supported Float32, integer, Boolean, and integer-emulated
+Float64 regions, with no implicit downcasts. Emulated binary64 work uses a
+separate calibration family; uncalibrated plans and unsupported operations
+remain CPU candidates. See [Apple Metal](apple-metal.md) for the current
+operation and precision coverage. GPU selection needs measured
 complete-query benefit including initialization, allocation, transfers,
 launches, synchronization, and host result construction. Resident-kernel
 speedups alone do not justify automatic selection.

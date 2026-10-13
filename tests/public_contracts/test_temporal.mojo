@@ -6,6 +6,8 @@ from dataframe import (
     DataFrame,
     DataType,
     Expr,
+    lit,
+    when,
     Series,
     col,
     date_range,
@@ -1548,3 +1550,87 @@ def test_duration_minimum_tick_totals_keep_the_negative_sign() raises:
         actual.item(0, "d").int64() == Int64(-9223372036),
         "minimum duration whole seconds must truncate toward zero without sign overflow",
     )
+
+
+def test_temporal_offsets_skip_unobserved_overflow_in_conditional_branches() raises:
+    var types: List[DataType] = [
+        DataType.DATE,
+        DataType.datetime("ms"),
+        DataType.datetime("us"),
+        DataType.datetime("ns"),
+        DataType.TIME,
+    ]
+    for dtype in types:
+        var tick = (
+            "1d" if dtype.is_date() else "1ms" if dtype.per_second()
+            == 1000 else "1us" if dtype.per_second()
+            == 1000000 else "1ns"
+        )
+        var frame = DataFrame(
+            [
+                Series(
+                    "t", Column[Int64]([Int64.MAX, Int64.MIN, 0])
+                ).with_dtype(dtype)
+            ]
+        )
+        var expression = (
+            when(col("t") < lit(Int64.MAX).cast(dtype))
+            .then(col("t").dt().offset_by(tick))
+            .otherwise(lit(Int64(0)).cast(dtype))
+            .alias("v")
+        )
+        var low = Int64.MIN + 1
+        if dtype.is_time():
+            low %= Int64(86400000000000)
+        var expected: List[Int64] = [0, low, 1]
+        for streaming in [False, True]:
+            var actual = (
+                frame.lazy()
+                .select(expression)
+                .collect(engine="cpu", streaming=streaming)
+            )
+            assert_equal(
+                [
+                    actual.column("v").int64()._get(0),
+                    actual.column("v").int64()._get(1),
+                    actual.column("v").int64()._get(2),
+                ],
+                expected,
+            )
+        var inactive = (
+            when(lit(False))
+            .then(lit(Int64.MAX).cast(dtype).dt().offset_by(tick))
+            .otherwise(lit(Int64(0)).cast(dtype))
+            .alias("v")
+        )
+        var actual = frame.select(inactive)
+        assert_equal(actual.column("v").dtype(), dtype)
+        assert_equal(actual.column("v").int64()._get(0), Int64(0))
+
+
+def test_calendar_truncation_skips_unobserved_datetime_underflow() raises:
+    for dtype in List[DataType](
+        [
+            DataType.datetime("ms"),
+            DataType.datetime("us"),
+            DataType.datetime("ns"),
+        ]
+    ):
+        var frame = DataFrame(
+            [Series("t", Column[Int64]([Int64.MIN, 0])).with_dtype(dtype)]
+        )
+        var expression = (
+            when(col("t") > lit(Int64.MIN).cast(dtype))
+            .then(col("t").dt().truncate("1mo"))
+            .otherwise(lit(Int64(0)).cast(dtype))
+            .alias("v")
+        )
+        for streaming in [False, True]:
+            var actual = (
+                frame.lazy()
+                .select(expression)
+                .collect(engine="cpu", streaming=streaming)
+            )
+            assert_equal(actual.column("v").dtype(), dtype)
+            assert_equal(actual.column("v").int64()._get(0), Int64(0))
+            assert_equal(actual.column("v").int64()._get(1), Int64(0))
