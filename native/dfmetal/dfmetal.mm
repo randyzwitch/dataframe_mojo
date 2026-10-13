@@ -244,6 +244,42 @@ std::string encode(int64_t t, const std::string &value) {
 }
 int64_t aligned(int64_t n) { return mul(add(n, 7) / 8, 8); }
 #include "dfmetal_order.inc"
+std::string calendarOffsetSource(const std::string &a, const std::string &z,
+    int64_t months, int64_t unit, const std::string &fixed, uint32_t fault) {
+  std::string text;
+  const int64_t perSecond = unit == 1 ? 1000 : unit == 2 ? 1000000 : 1000000000;
+  const auto dayTicks = std::to_string(perSecond * 86400) + "L";
+  const auto monthBits = std::to_string(uint64_t(months)) + "UL";
+  if (unit == 0) text += "long days=" + a + ",within=0;";
+  else text += "long days=" + a + "/" + dayTicks + ",within=" + a + "%" + dayTicks + ";if(within<0){--days;within+=" + dayTicks + ";}";
+  text += "long era=days/146097L,rem=days%146097L;if(rem<0){--era;rem+=146097L;}"
+          "rem+=719468L;era+=rem/146097L;long doe=rem%146097L;"
+          "long yoe=(doe-doe/1460L+doe/36524L-doe/146096L)/365L;"
+          "long doy=doe-(365L*yoe+yoe/4L-yoe/100L);long mp=(5L*doy+2L)/153L;"
+          "long day=doy-(153L*mp+2L)/5L+1L;long month=mp<10L?mp+3L:mp-9L;"
+          "long year=yoe+era*400L+(month<=2L?1L:0L);"
+          "long index=as_type<long>(as_type<ulong>(year*12L+month-1L)+" + monthBits + ");"
+          "year=index/12L;month=index%12L;if(month<0){--year;month+=12L;}++month;"
+          "bool leap=(year%4L==0L&&year%100L!=0L)||year%400L==0L;"
+          "long length=month==2L?(leap?29L:28L):(month==4L||month==6L||month==9L||month==11L?30L:31L);day=min(day,length);"
+          "long y=year-(month<=2L?1L:0L);era=y/400L;if(y%400L<0)--era;yoe=y-era*400L;"
+          "mp=(month+9L)%12L;doe=yoe*365L+yoe/4L-yoe/100L+(153L*mp+2L)/5L+day-1L;"
+          "days=as_type<long>(as_type<ulong>(era)*146097UL+ulong(doe)-719468UL);bool ok=true;";
+  if (unit == 0) text += z + "=days;";
+  else text += "long seconds=0;ok=d3::checked_mul(days,86400L,seconds)&&d3::checked_add(seconds,within/" +
+      std::to_string(perSecond) + "L,seconds)&&d3::checked_mul(seconds," + std::to_string(perSecond) +
+      "L," + z + ")&&d3::checked_add(" + z + ",within%" + std::to_string(perSecond) + "L," + z + ");";
+  text += "long fixed=" + fixed + ";"
+          "ok=ok&&d3::checked_add(" + z + ",fixed," + z + ");if(!ok)atomic_fetch_min_explicit(error," +
+          std::to_string(fault) + "u,memory_order_relaxed);";
+  return text;
+}
+
+int64_t durationHeaders(const DFMRequest &r, const DFMStep &step) {
+  if (r.code[4 * step.start] != DFM_DURATION_KEY) return 1;
+  return step.nodes > 2 && r.code[4 * (step.start + 2)] == DFM_DURATION_CALENDAR ? 3 : 2;
+}
+
 // A segment ends at a stable filter boundary. Values produced and consumed
 // inside one segment stay in per-thread variables; only boundary-live slots
 // occupy shared memory. Logical ABI slot identifiers remain unchanged.
@@ -272,7 +308,7 @@ struct Layout {
           if (step.filter == 5 && (duration || r.code[4 * step.start + 3] == 15))
             keep(r.code[4 * step.start + 2]);
           for (int64_t j = 0; j < step.nodes; ++j)
-            if (!duration || j != 1) keep(r.code[4 * (step.start + j) + 1]);
+            if (!duration || j == 0 || j >= durationHeaders(r,step)) keep(r.code[4 * (step.start + j) + 1]);
         } else if (step.filter == 2) {
           for (int64_t j = 0; j < step.nodes; ++j)
             keep(r.code[4 * (step.start + j) + 1]);
@@ -350,7 +386,7 @@ struct Layout {
         if (step.filter == 5 && (duration || r.code[4 * step.start + 3] == 15))
           live[r.code[4 * step.start + 2]] = true;
         for (int64_t j = 0; j < step.nodes; ++j)
-          if (!duration || j != 1) live[r.code[4 * (step.start + j) + 1]] = true;
+          if (!duration || j == 0 || j >= durationHeaders(r,step)) live[r.code[4 * (step.start + j) + 1]] = true;
       } else {
         live[step.slot] = false;
         // Retain inputs even for a dead result: evaluating a checked expression
@@ -494,7 +530,8 @@ Shape validate(const DFMRequest &r, bool storage = false,
         auto bounds = h + 4;
         int64_t period;
         memcpy(&period,r.literals + v.start,8);
-        if (period <= 0 || bounds[0] != DFM_DURATION_BOUNDS || bounds[1] < 0 ||
+        auto headers = durationHeaders(r,v);
+        if ((headers == 2 ? period <= 0 : period < 0) || bounds[0] != DFM_DURATION_BOUNDS || bounds[1] < 0 ||
             bounds[2] < 0 || bounds[2] > 3 || bounds[3] < 0 ||
             nodeType(r,v.start+1) != DFM_INT64)
           fail("Invalid Metal duration window bounds");
@@ -504,7 +541,12 @@ Shape validate(const DFMRequest &r, bool storage = false,
             ((h[3] == 1 || h[3] >= 4) && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
             ((h[3] == 2 || h[3] == 3) && input != output))
           fail("Invalid Metal duration window result type");
-        for (int64_t j=2;j<v.nodes;++j) {
+        if (headers == 3) {
+          auto calendar = h + 8;
+          if (calendar[1] <= 0 || calendar[2] < 0 || calendar[2] > 3 || calendar[3] != 0 || nodeType(r,v.start+2) != DFM_INT64)
+            fail("Invalid Metal calendar duration descriptor");
+        }
+        for (int64_t j=headers;j<v.nodes;++j) {
           auto key = h + 4*j;
           if (key[0] != DFM_SORT_KEY || key[1] < 0 || key[1] >= r.slots ||
               !defined[key[1]] || key[2] != 0 || key[3] != 1 ||
@@ -2017,9 +2059,9 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
               "(uint a,uint b,device const T *x,device const uchar *v,constant "
               "uint4 &meta){";
       auto keyCount =
-          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes - (step.filter == 5 ? (r.code[4 * step.start] == DFM_DURATION_KEY ? 2 : 1) : 0);
+          step.filter == 3 ? r.code[4 * step.start + 1] : step.nodes - (step.filter == 5 ? durationHeaders(r,step) : 0);
       for (int64_t j = 0; j < keyCount; ++j) {
-        auto key = r.code + 4 * (step.start + (step.filter == 5 ? j + (r.code[4 * step.start] == DFM_DURATION_KEY ? 2 : 1) : step.filter == 4
+        auto key = r.code + 4 * (step.start + (step.filter == 5 ? j + durationHeaders(r,step) : step.filter == 4
             ? (j + 1 < keyCount ? j + 1 : 0) : j + (step.filter == 3)));
         auto slot = std::to_string(layout.physical[key[1]]) + "UL*meta.z";
         text += "{ulong ai=" + slot + "+a,bi=" + slot +
@@ -2356,31 +2398,7 @@ kernel void order_gather(device const T *x[[buffer(0)]],device const uchar *v[[b
                 ? "as_type<ulong>(as_type<long>(" + a + ")/" + std::to_string(c[2]) + "L)"
                 : "as_type<ulong>(" + a + ")*" + std::to_string(c[2]) + "UL") + ";";
           } else if (op == DFM_DT_CALENDAR_OFFSET) {
-            const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
-            const auto dayTicks = std::to_string(perSecond * 86400) + "L";
-            const auto monthBits = std::to_string(uint64_t(c[2])) + "UL";
-            if (c[3] == 0) text += "long days=" + a + ",within=0;";
-            else text += "long days=" + a + "/" + dayTicks + ",within=" + a + "%" + dayTicks + ";if(within<0){--days;within+=" + dayTicks + ";}";
-            text += "long era=days/146097L,rem=days%146097L;if(rem<0){--era;rem+=146097L;}"
-                    "rem+=719468L;era+=rem/146097L;long doe=rem%146097L;"
-                    "long yoe=(doe-doe/1460L+doe/36524L-doe/146096L)/365L;"
-                    "long doy=doe-(365L*yoe+yoe/4L-yoe/100L);long mp=(5L*doy+2L)/153L;"
-                    "long day=doy-(153L*mp+2L)/5L+1L;long month=mp<10L?mp+3L:mp-9L;"
-                    "long year=yoe+era*400L+(month<=2L?1L:0L);"
-                    "long index=as_type<long>(as_type<ulong>(year*12L+month-1L)+" + monthBits + ");"
-                    "year=index/12L;month=index%12L;if(month<0){--year;month+=12L;}++month;"
-                    "bool leap=(year%4L==0L&&year%100L!=0L)||year%400L==0L;"
-                    "long length=month==2L?(leap?29L:28L):(month==4L||month==6L||month==9L||month==11L?30L:31L);day=min(day,length);"
-                    "long y=year-(month<=2L?1L:0L);era=y/400L;if(y%400L<0)--era;yoe=y-era*400L;"
-                    "mp=(month+9L)%12L;doe=yoe*365L+yoe/4L-yoe/100L+(153L*mp+2L)/5L+day-1L;"
-                    "days=as_type<long>(as_type<ulong>(era)*146097UL+ulong(doe)-719468UL);bool ok=true;";
-            if (c[3] == 0) text += z + "=days;";
-            else text += "long seconds=0;ok=d3::checked_mul(days,86400L,seconds)&&d3::checked_add(seconds,within/" +
-                std::to_string(perSecond) + "L,seconds)&&d3::checked_mul(seconds," + std::to_string(perSecond) +
-                "L," + z + ")&&d3::checked_add(" + z + ",within%" + std::to_string(perSecond) + "L," + z + ");";
-            text += "long fixed=as_type<long>(lit[" + std::to_string(s.start+j) + "]);"
-                    "ok=ok&&d3::checked_add(" + z + ",fixed," + z + ");if(!ok)atomic_fetch_min_explicit(error," +
-                    std::to_string(s.start+j+1) + "u,memory_order_relaxed);";
+            text += calendarOffsetSource(a,z,c[2],c[3],"as_type<long>(lit[" + std::to_string(s.start+j) + "])",uint32_t(s.start+j+1));
           } else if (op == DFM_DT_CALENDAR_TRUNCATE) {
             const int64_t perSecond = c[3] == 1 ? 1000 : c[3] == 2 ? 1000000 : 1000000000;
             const auto dayTicks = std::to_string(perSecond * 86400) + "L";

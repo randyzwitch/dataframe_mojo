@@ -1251,6 +1251,33 @@ check_rolling_moments_preflight_without_device()
 check_interpolation_preflight_without_device()
 check_coordinate_interpolation_preflight_without_device()
 check_duration_rolling_preflight_without_device()
+
+
+def check_calendar_duration_preflight_without_device():
+    inputs=(Input*2)(Input(None,None,3,0,0),Input(None,None,3,0,0))
+    code=(I*12)(226,0,1,0,227,0,2,1,228,1,0,0)
+    literals=(I*3)(0,0,0);nodes=(I*3)(3,3,3);slots=(I*3)(3,3,3)
+    steps=(Step*1)(Step(0,3,2,5,0,0));outputs=(Output*1)(Output(None,None,3,2,-1,0))
+    request=Request(2,513,0,3,2,12,3,1,0,1,-1,0,0,-1,ptr(inputs),ptr(code),ptr(literals),ptr(steps),None,ptr(outputs),ptr(nodes),ptr(slots))
+    memory=Memory()
+    for months in (1,12,(1<<63)-1):
+        for unit in range(4):
+            code[9],code[10]=months,unit
+            for fixed in (0,1,(1<<63)-1):
+                literals[0]=fixed;err=P()
+                check(lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err)),err)
+    code[9],code[10],literals[0]=1,0,0
+    for index,bad in ((9,0),(9,-1),(10,-1),(10,4),(11,1)):
+        old=code[index];code[index]=bad;err=P()
+        assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
+        assert b"calendar duration descriptor" in C.string_at(err)
+        lib.dfm_free(err);code[index]=old
+    literals[0]=-1;err=P()
+    assert lib.dfm_estimate(C.byref(request),C.byref(memory),C.byref(err))
+    assert b"duration window bounds" in C.string_at(err);lib.dfm_free(err)
+
+
+check_calendar_duration_preflight_without_device()
 check_shift_fill_preflight_without_device()
 def empty_request(rows, reduction=0):
     values = (C.c_float * max(1, rows))(*([1.0] * max(1, rows)))

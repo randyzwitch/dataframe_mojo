@@ -27,6 +27,7 @@ from .rows import (
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
     ROW_DURATION_KEY,
+    ROW_DURATION_CALENDAR,
     ROW_CALENDAR_OFFSET,
     ROW_CALENDAR_TRUNCATE,
     ROW_QUANTILE_LINEAR,
@@ -71,6 +72,13 @@ def duration_family(plan: RowPlan, prefix: String) -> String:
             + ":n"
             + String(plan.code[start + 5])
         )
+        if step.nodes > 2 and plan.code[start + 8] == ROW_DURATION_CALENDAR:
+            family += (
+                ":months"
+                + String(plan.code[start + 9])
+                + ":unit"
+                + String(plan.code[start + 10])
+            )
         family += (
             ":dp" if plan.code[start + 3] == 0
             and plan.slot_dtypes[step.slot].is_decimal() else ":d"
@@ -125,6 +133,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             interpolation_windows=True,
             coordinate_interpolation=True,
             duration_rolling=True,
+            calendar_duration_rolling=True,
             empty_outputs=True,
             empty_inputs=True,
             chunked_inputs=True,
