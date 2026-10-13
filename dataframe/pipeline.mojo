@@ -13,6 +13,7 @@ reads it, once, and the gathered column replaces the shared one. DuckDB
 slices a chunk into dictionary vectors the same way.
 """
 from std.atomic import Atomic
+from std.bit import count_trailing_zeros
 from std.os import getenv
 from std.ffi import external_call
 from std.memory import ArcPointer, Pointer, bitcast
@@ -53,12 +54,17 @@ from .frame import (
     concat,
 )
 from .indexed_reduce import _reduce_floats, _reduce_ints
-from .join_hash import PreparedHashIndex
+from .join_hash import (
+    PreparedHashIndex,
+    prepared_hash_join_rows,
+    prepared_hash_semi_anti_rows,
+)
+from .join_type import JOIN_ANTI, JOIN_INNER, JOIN_SEMI
 from .row_encode import encodable
-from .gather import can_filter_aligned_chunks, true_rows
+from .gather import can_filter_aligned_chunks, take_parallel, true_rows
 from .huge_pages import huge_list
 from .mask_filter import filter_columns
-from .parallel import Job, run_jobs
+from .parallel import Job, run_jobs, worker_count
 from .series import Series
 from .hashing import encode_rows
 from .string_column import StringColumn
@@ -260,6 +266,12 @@ struct Morsel(Movable):
     var count: Int
     var compact: List[Bool]
     var sequence: Int
+    # The selected rows' frame indices, when known (`by_rows`): a join's
+    # or a top-k's selection, read through them as DuckDB reads a
+    # selection vector, so a gather costs the rows kept rather than a scan
+    # of the whole mask.
+    var rows: List[Int]
+    var by_rows: Bool
 
     def __init__(out self, var frame: DataFrame, sequence: Int):
         self.count = frame.height()
@@ -268,6 +280,8 @@ struct Morsel(Movable):
         self.mask = BoolColumn(List[Bool]())
         self.selected = False
         self.sequence = sequence
+        self.rows = List[Int]()
+        self.by_rows = False
 
     def height(self) -> Int:
         return self.count
@@ -291,6 +305,21 @@ struct Morsel(Movable):
                 indices.append(i)
                 pending.append(self.frame._columns[i].copy())
         if len(pending) == 0:
+            return
+        # Sparse selections read the kept rows by index; dense ones scan
+        # the mask in order, as the top-k narrows a morsel only when at
+        # most one row in eight can enter (reading scattered rows costs
+        # more than reading every row past that).
+        if self.by_rows and 8 * self.count <= self.frame.height():
+            var taken = take_parallel(
+                pending^,
+                self.rows.copy(),
+                worker_count(len(self.rows)),
+                or_null=False,
+            )
+            for k in range(len(indices)):
+                self.frame._columns[indices[k]] = taken[k].copy()
+                self.compact[indices[k]] = True
             return
         var filtered = filter_columns(pending, self.mask)
         ref others = filtered[1]
@@ -351,6 +380,7 @@ struct Morsel(Movable):
                 return
             self.mask = narrowed^
             self.selected = True
+            self.by_rows = False
             self.count = kept
             for i in range(len(self.compact)):
                 self.compact[i] = False
@@ -376,6 +406,13 @@ struct Morsel(Movable):
             )
             for k in range(len(compact_at)):
                 self.frame._columns[compact_at[k]] = sliced._columns[k].copy()
+        if self.by_rows:
+            # The kept rows' frame indices, from the selected rows'.
+            var rows = List[Int](capacity=kept)
+            for k in range(self.count):
+                if narrowed._get(k) and narrowed._valid(k):
+                    rows.append(self.rows[k])
+            self.rows = rows^
         self.mask = _spread(self.mask, narrowed)
         self.count = kept
 
@@ -428,6 +465,204 @@ struct Morsel(Movable):
         self.frame = DataFrame(kept^, height=height)
         self.compact = kept_compact^
 
+    def _narrow_rows(mut self, rows: List[Int]) raises:
+        """Keep only the selected rows at positions `rows` (ascending, among
+        the `count` selected rows): compact columns are taken at them, and
+        shared columns are read through a mask whose set bits are those of
+        the old mask the positions name, built a word at a time."""
+        var kept = len(rows)
+        if kept == self.count:
+            return
+        var height = self.frame.height()
+        var words = (height + 63) // 64
+        var out = List[UInt64](length=words, fill=0)
+        var put = out.unsafe_ptr()
+        var at = rows.unsafe_ptr()
+        var frame_rows = List[Int](capacity=kept)
+        if not self.selected:
+            frame_rows = rows.copy()
+            for k in range(kept):
+                var r = at[unsafe_offset=k]
+                put[unsafe_offset=r >> 6] |= UInt64(1) << UInt64(r & 63)
+        else:
+            # The old mask's set bits, in order: position j of the selected
+            # rows is the j-th set bit.
+            var j = 0
+            var next = 0
+            # A mask starting on a byte, every entry valid, is read a word
+            # at a time; any other bit by bit.
+            var aligned = self.mask._offset % 8 == 0 and (
+                self.mask.null_count() == 0
+            )
+            var data = (
+                self.mask._data[]
+                .unsafe_ptr()
+                .unsafe_offset(self.mask._offset // 8)
+            )
+            var data_bytes = (height + 7) // 8
+            for w in range(words):
+                var word = UInt64(0)
+                if aligned:
+                    for k in range(min(8, data_bytes - 8 * w)):
+                        word |= UInt64(data[unsafe_offset=8 * w + k]) << UInt64(
+                            8 * k
+                        )
+                    if 64 * (w + 1) > height:
+                        word &= (UInt64(1) << UInt64(height - 64 * w)) - 1
+                else:
+                    for b in range(64):
+                        var r = 64 * w + b
+                        if r >= height:
+                            break
+                        if self.mask._get(r) and self.mask._valid(r):
+                            word |= UInt64(1) << UInt64(b)
+                while word != 0 and next < kept:
+                    var b = Int(count_trailing_zeros(word))
+                    word &= word - 1
+                    if j == at[unsafe_offset=next]:
+                        put[unsafe_offset=w] |= UInt64(1) << UInt64(b)
+                        frame_rows.append(64 * w + b)
+                        next += 1
+                    j += 1
+            var compact_at = List[Int]()
+            var compact_columns = List[Series]()
+            for i in range(self.frame.width()):
+                if self.compact[i]:
+                    compact_at.append(i)
+                    compact_columns.append(self.frame._columns[i].copy())
+            for k in range(len(compact_at)):
+                self.frame._columns[compact_at[k]] = compact_columns[k].take(
+                    rows
+                )
+        var bytes = List[UInt8](unsafe_uninit_length=8 * words)
+        var source = out.unsafe_ptr().bitcast[UInt8]()
+        for k in range(8 * words):
+            bytes.unsafe_ptr()[unsafe_offset=k] = source[unsafe_offset=k]
+        _ = out^
+        var mask = BoolColumn(List[Bool]())
+        mask._data = ArcPointer(bytes^)
+        mask._bits = ArcPointer(List[UInt8](length=(height + 7) // 8, fill=255))
+        mask._length = height
+        mask._offset = 0
+        if not self.selected:
+            for i in range(len(self.compact)):
+                self.compact[i] = False
+        self.mask = mask^
+        self.selected = True
+        self.rows = frame_rows^
+        self.by_rows = True
+        self.count = kept
+
+    def _join_selected(
+        mut self,
+        step: Step,
+        joins: ArcPointer[List[DataFrame]],
+        indexes: ArcPointer[List[Optional[PreparedHashIndex]]],
+    ) raises -> Bool:
+        """An inner, semi or anti join through its prepared index, kept as a
+        selection when each probe row matches at most once (DuckDB's
+        `NextInnerJoin` slices the probe chunk the same way): the probe
+        reads the key columns only, the matched rows narrow the morsel's
+        selection, and only the build side's output columns are gathered,
+        for the matched rows. The probe side's columns stay where they are
+        until an operator reads them, so a column no later step reads is
+        never copied. A probe row that matches more than once makes the
+        output repeat rows: every column is then gathered at them. False,
+        with nothing changed, when the keys need the general join
+        (categorical, nested or differing types)."""
+        if not (
+            step.how == JOIN_INNER
+            or step.how == JOIN_SEMI
+            or step.how == JOIN_ANTI
+        ):
+            return False
+        if not indexes[][step.join]:
+            return False
+        ref right = joins[][step.join]
+        for i in range(len(step.names)):
+            var lt = self.frame._columns[self._index(step.names[i])].dtype()
+            var rt = right._columns[right._index(step.right_keys[i])].dtype()
+            if lt != rt or lt.is_categorical() or lt.is_nested():
+                return False
+        var keys = self._compact_frame(step.names)
+        if step.how != JOIN_INNER:
+            self._narrow_rows(
+                prepared_hash_semi_anti_rows(
+                    keys._columns,
+                    indexes[][step.join].value(),
+                    step.how == JOIN_SEMI,
+                    0,
+                )
+            )
+            return True
+        var pairs = prepared_hash_join_rows(
+            keys._columns,
+            indexes[][step.join].value(),
+            False,
+            omit_identity=True,
+            workers=0,
+        )
+        # A probe row matching twice (a build key repeated) repeats rows:
+        # no selection can hold them, so every column is gathered at them
+        # from the pairs already probed.
+        var repeated = False
+        if not pairs[2]:
+            var at = pairs[0].unsafe_ptr()
+            for k in range(1, len(pairs[0])):
+                if at[unsafe_offset=k] <= at[unsafe_offset=k - 1]:
+                    repeated = True
+                    break
+        # The build side's output columns, named as the join names them.
+        var names = Dict[String, Bool]()
+        for column in self.frame._columns:
+            names[column.name()] = True
+        var left_names = names.copy()
+        var right_keys = List[Int]()
+        for key in step.right_keys:
+            right_keys.append(right._index(key))
+        var right_output = List[Int]()
+        var right_names = List[String]()
+        for i in range(right.width()):
+            if step.coalesce and i in right_keys:
+                continue
+            var name = right._columns[i].name()
+            if name in left_names:
+                name += step.suffix
+            if name in names:
+                raise Error("Join output name collision: " + name)
+            names[name] = True
+            right_output.append(i)
+            right_names.append(name)
+        if repeated:
+            var input = self.materialized()
+            var columns = take_parallel(
+                input._columns.copy(),
+                pairs[0].copy(),
+                worker_count(len(pairs[0])),
+                or_null=False,
+            )
+            self.frame = DataFrame(columns^, height=len(pairs[0]))
+            self.count = len(pairs[0])
+            self.compact = List[Bool](length=self.frame.width(), fill=True)
+            self.mask = BoolColumn(List[Bool]())
+            self.selected = False
+            self.by_rows = False
+        else:
+            trace_path("pipeline.join_selection")
+            if not pairs[2]:
+                self._narrow_rows(pairs[0])
+        var sources = List[Series](capacity=len(right_output))
+        for k in range(len(right_output)):
+            sources.append(right._columns[right_output[k]].copy())
+        var lanes = worker_count(len(pairs[1]))
+        var gathered = take_parallel(
+            sources, pairs[1].copy(), lanes, or_null=False
+        )
+        for k in range(len(right_output)):
+            self.frame._columns.append(gathered[k].renamed(right_names[k]))
+            self.compact.append(True)
+        return True
+
     def join(
         mut self,
         step: Step,
@@ -453,6 +688,7 @@ struct Morsel(Movable):
         self.frame = joined^
         self.mask = BoolColumn(List[Bool]())
         self.selected = False
+        self.by_rows = False
 
     def apply(
         mut self,
@@ -468,7 +704,8 @@ struct Morsel(Movable):
         elif step.kind == STEP_WITH_COLUMNS:
             self.with_columns(step.exprs, batch_size)
         elif step.kind == STEP_JOIN:
-            self.join(step, joins, indexes)
+            if not self._join_selected(step, joins, indexes):
+                self.join(step, joins, indexes)
         else:
             self.drop(step.names)
 
@@ -477,6 +714,8 @@ struct Morsel(Movable):
         bound applied before any step reads a column."""
         self.mask = _rows_mask(rows, self.frame._height)
         self.selected = True
+        self.rows = rows.copy()
+        self.by_rows = True
         self.count = len(rows)
         for i in range(len(self.compact)):
             self.compact[i] = False

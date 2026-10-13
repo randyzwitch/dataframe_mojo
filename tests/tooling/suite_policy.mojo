@@ -903,6 +903,7 @@ def production_policy() -> SuitePolicy:
             "table.join",
             [
                 "tests/kernel_equivalence/test_join_routes.mojo",
+                "tests/kernel_equivalence/test_pipeline_join_selection.mojo",
                 "tests/planner_correctness/test_asof_sources.mojo",
                 "tests/public_contracts/test_asof.mojo",
                 "tests/public_contracts/test_asof_errors.mojo",
