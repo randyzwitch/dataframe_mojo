@@ -93,6 +93,8 @@ def duration_family(plan: RowPlan, prefix: String) -> String:
                 + ":days"
                 + String(plan.code[utc_header + 1])
             )
+            if plan.code[utc_header + 3]:
+                family += ":offset" + String(plan.code[utc_header + 3])
         family += (
             ":dp" if plan.code[start + 3] == 0
             and plan.slot_dtypes[step.slot].is_decimal() else ":d"
@@ -149,6 +151,7 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             duration_rolling=True,
             calendar_duration_rolling=True,
             utc_duration_rolling=True,
+            fixed_zone_duration_rolling=True,
             empty_outputs=True,
             empty_inputs=True,
             chunked_inputs=True,

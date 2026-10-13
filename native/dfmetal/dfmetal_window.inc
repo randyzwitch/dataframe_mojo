@@ -205,6 +205,16 @@ std::string rollingSource(const DFMRequest &r, const Layout &layout, int64_t i) 
   return text + "}\n";
 }
 
+// Fixed-offset zones have a unique UTC instant for each local second. Match
+// the CPU's checked whole-second reconstruction after each calendar stage.
+std::string relocalizeFixedSource(int64_t perSecond, int64_t offset) {
+  return "{long seconds=startTime/"+std::to_string(perSecond)+"L,fraction=startTime%"+std::to_string(perSecond)+"L;"
+      "if(fraction<0){--seconds;fraction+="+std::to_string(perSecond)+"L;}"
+      "long instant=seconds-("+std::to_string(offset)+"L),base=0;"
+      "if(!d3::checked_mul(instant,"+std::to_string(perSecond)+"L,base)||!d3::checked_add(base,fraction,startTime)){"
+      "atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}}";
+}
+
 // Duration bounds use the original row order within stable partitions. Each
 // owner validates its whole index before evaluating a single window.
 std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i) {
@@ -243,21 +253,29 @@ std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i)
         "long startTime=0;";
   auto headers=durationHeaders(r,step);
   bool calendar=headers>2&&h[8]==DFM_DURATION_CALENDAR;
-  bool utc=headers>2&&h[4*(headers-1)]==DFM_DURATION_UTC;
+  bool zoned=headers>2&&h[4*(headers-1)]==DFM_DURATION_UTC;
+  auto zone=zoned?h+4*(headers-1):nullptr;
+  int64_t perSecond=zoned?(zone[2]==1?1000:zone[2]==2?1000000:1000000000):0;
+  int64_t offset=zoned?zone[3]:0;
+  auto offsetBits=std::to_string(uint64_t(offset*perSecond))+"UL";
   if(calendar){
     auto metadata=h+8;
-    text+=calendarOffsetSource("time","startTime",-metadata[1],metadata[2],utc?"0L":"-period",0xB0000002U);
-  }else if(!utc){
+    std::string value="time";
+    if(zoned){
+      text+="long zoneLocal=as_type<long>(as_type<ulong>(time)+"+offsetBits+");";
+      value="zoneLocal";
+    }
+    text+=calendarOffsetSource(value,"startTime",-metadata[1],metadata[2],zoned?"0L":"-period",0xB0000002U);
+    if(zoned) text+=relocalizeFixedSource(perSecond,offset);
+  }else if(!zoned){
     text+="if(time<(-9223372036854775807L-1L)+period){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}startTime=time-period;";
   }else text+="startTime=time;";
-  if(utc){
-    auto metadata=h+4*(headers-1);
-    int64_t perSecond=metadata[2]==1?1000:metadata[2]==2?1000000:1000000000;
-    if(metadata[1]){
-      text+="{long delta=0,seconds=0,fraction=0,base=0;bool valid=d3::checked_mul(-"+std::to_string(metadata[1])+"L,"+std::to_string(perSecond*86400)+"L,delta)&&d3::checked_add(startTime,delta,startTime);"
-            "seconds=startTime/"+std::to_string(perSecond)+"L;fraction=startTime%"+std::to_string(perSecond)+"L;if(fraction<0){--seconds;fraction+="+std::to_string(perSecond)+"L;}"
-            "valid=valid&&d3::checked_mul(seconds,"+std::to_string(perSecond)+"L,base)&&d3::checked_add(base,fraction,startTime);"
-            "if(!valid){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}}";
+  if(zoned){
+    if(zone[1]){
+      text+="{startTime=as_type<long>(as_type<ulong>(startTime)+"+offsetBits+");long delta=0;"
+            "if(!d3::checked_mul(-"+std::to_string(zone[1])+"L,"+std::to_string(perSecond*86400)+"L,delta)||!d3::checked_add(startTime,delta,startTime)){"
+            "atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}}";
+      text+=relocalizeFixedSource(perSecond,offset);
     }
     text+="if(!d3::checked_add(startTime,-period,startTime)){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}";
   }

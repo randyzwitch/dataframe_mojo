@@ -553,7 +553,7 @@ Shape validate(const DFMRequest &r, bool storage = false,
         bool utcHeader = headers > 2 && h[4 * (headers-1)] == DFM_DURATION_UTC;
         if (utcHeader) {
           auto utc = h + 4 * (headers-1);
-          if (utc[1] < 0 || utc[2] < 1 || utc[2] > 3 || utc[3] != 0 ||
+          if (utc[1] < 0 || utc[2] < 1 || utc[2] > 3 || utc[3] < -86340 || utc[3] > 86340 || utc[3] % 60 ||
               nodeType(r,v.start+headers-1) != DFM_INT64 ||
               (calendarHeader && utc[2] != h[10]) || (!calendarHeader && !period && !utc[1]))
             fail("Invalid Metal UTC duration descriptor");
