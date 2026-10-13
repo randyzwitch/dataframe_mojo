@@ -374,7 +374,7 @@ def truncation_cases(runtime: MetalRuntime, native: Bool) raises:
         fused=True,
     )
     # A row projection makes literal broadcasting a native GPU contract;
-    # scalar-only selects have a separate unsupported-plan preflight below.
+    # Scalar-only selects also have native one-row normalization coverage.
     var literals: List[Expr] = [
         col("t"),
         lit("2000-02-29T12:34:56.123456")
@@ -494,25 +494,16 @@ def temporal_preflight_cases() raises:
             .collect(accelerator=unavailable)
         )
     var dates = DataFrame([tagged("t", DataType.DATE, [0], [True])])
-    with assert_raises(
-        contains="scalar-only select is not a resident row projection"
-    ):
-        _ = (
-            dates.lazy()
-            .select_exprs(
-                [
-                    lit("2000-02-29T12:34:56.123456")
-                    .str()
-                    .strptime("datetime[us]")
-                    .alias("dt"),
-                    lit("12:34:56.123456789")
-                    .str()
-                    .strptime("time")
-                    .alias("clock"),
-                ]
-            )
-            .collect(accelerator=unavailable)
-        )
+    var scalar_query = dates.lazy().select_exprs(
+        [
+            lit("2000-02-29T12:34:56.123456")
+            .str()
+            .strptime("datetime[us]")
+            .alias("dt"),
+            lit("12:34:56.123456789").str().strptime("time").alias("clock"),
+        ]
+    )
+    assert_true("unsupported" not in unavailable.describe(scalar_query))
     with assert_raises(contains="positive fixed interval"):
         _ = (
             dates.lazy()
