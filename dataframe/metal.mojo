@@ -26,6 +26,7 @@ from .decimal import pow10
 from .json_value import JsonValue
 from .accelerator.capabilities import RowCapabilities
 from .accelerator.sets import has_set_operations, lower_set_operations
+from .accelerator.selectors import has_selectors, lower_selectors
 from .accelerator.constants import (
     has_literal_text_parsing,
     fold_literal_text_parsing,
@@ -1588,6 +1589,8 @@ struct MetalRuntime(AcceleratorBackend):
 
     def estimate_auto(self, query: LazyFrame) raises -> PlanEstimate:
         """Bound numeric row work; never read values or submit device work."""
+        if has_selectors(query):
+            return self.estimate_auto(lower_selectors(query))
         var work = cpu_features(query)
         var plan = lower_rows(query, _capabilities())
         var descriptors = _Descriptors(plan)
@@ -1911,6 +1914,20 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
         var start = Int(perf_counter_ns())
+        if has_selectors(query):
+            var executed = self._run(lower_selectors(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
         if has_literal_text_parsing(query):
             var executed = self._run(
                 fold_literal_text_parsing(query), profiling
@@ -2107,6 +2124,10 @@ struct MetalRuntime(AcceleratorBackend):
 
     def describe(self, query: LazyFrame) -> String:
         try:
+            if has_selectors(query):
+                return "Metal schema selector expansion; " + self.describe(
+                    lower_selectors(query)
+                )
             if has_literal_text_parsing(query):
                 return "Metal literal text parsing; " + self.describe(
                     fold_literal_text_parsing(query)
