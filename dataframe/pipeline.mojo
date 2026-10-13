@@ -263,6 +263,15 @@ struct _TopBound(Copyable, Movable):
         return None
 
 
+def _bare_columns(exprs: List[Expr]) -> Bool:
+    """Whether every expression is one column, under its own name or an
+    alias."""
+    for e in exprs:
+        if len(e._nodes) != 1 or e._nodes[0].op != COL:
+            return False
+    return True
+
+
 struct Morsel(Movable):
     """A frame and a selection over its rows.
 
@@ -423,10 +432,31 @@ struct Morsel(Movable):
                 if narrowed._get(k) and narrowed._valid(k):
                     rows.append(self.rows[k])
             self.rows = rows^
-        self.mask = _spread(self.mask, narrowed)
+            # The mask from the kept rows, set where they are: no pass
+            # over every row of the source (a filter after a join keeps a
+            # few of a morsel's rows).
+            self.mask = _rows_mask(self.rows, self.frame._height)
+        else:
+            self.mask = _spread(self.mask, narrowed)
         self.count = kept
 
     def select(mut self, exprs: List[Expr], batch_size: Int) raises:
+        # A select of bare columns (renamed or not) only picks columns:
+        # they keep the selection, as a projection of column references
+        # does in DuckDB, instead of every kept row being gathered here.
+        if self.selected and _bare_columns(exprs):
+            trace_path("pipeline.projection_selection")
+            var columns = List[Series](capacity=len(exprs))
+            var compact = List[Bool](capacity=len(exprs))
+            for e in exprs:
+                var i = self._index(e._nodes[0].text)
+                columns.append(self.frame._columns[i].renamed(e._name))
+                compact.append(self.compact[i])
+            # Gathered and source columns differ in length, as they do in
+            # every morsel, so the columns are set in place.
+            self.frame._columns = columns^
+            self.compact = compact^
+            return
         var reads = _reads(exprs)
         var names: List[String]
         if reads:
@@ -737,16 +767,31 @@ struct Morsel(Movable):
 
 def _spread(outer: BoolColumn, inner: BoolColumn) raises -> BoolColumn:
     """`outer` with its set bits replaced, in order, by `inner`'s bits:
-    the selection of a filter applied to an already selected morsel."""
-    var values = List[Bool](capacity=len(outer))
+    the selection of a filter applied to an already selected morsel. Only
+    the set bits are visited, a byte of the mask at a time."""
+    var height = len(outer)
+    var values = List[UInt8](length=(height + 7) // 8, fill=0)
+    var out = values.unsafe_ptr()
     var next = 0
-    for r in range(len(outer)):
-        if outer._get(r) and outer._valid(r):
-            values.append(inner._get(next) and inner._valid(next))
-            next += 1
-        else:
-            values.append(False)
-    return BoolColumn(values^)
+    if outer._offset % 8 == 0 and outer.null_count() == 0:
+        var data = outer._data[].unsafe_ptr().unsafe_offset(outer._offset // 8)
+        for i in range((height + 7) // 8):
+            var byte = Int(data[unsafe_offset=i])
+            if 8 * (i + 1) > height:
+                byte &= (1 << (height - 8 * i)) - 1
+            while byte != 0:
+                var bit = Int(count_trailing_zeros(byte))
+                byte &= byte - 1
+                if inner._get(next) and inner._valid(next):
+                    out[unsafe_offset=i] |= UInt8(1) << UInt8(bit)
+                next += 1
+    else:
+        for r in range(height):
+            if outer._get(r) and outer._valid(r):
+                if inner._get(next) and inner._valid(next):
+                    out[unsafe_offset=r >> 3] |= UInt8(1) << UInt8(r & 7)
+                next += 1
+    return BoolColumn(values=values^, bits=List[UInt8](), length=height)
 
 
 @fieldwise_init
