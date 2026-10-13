@@ -205,6 +205,16 @@ std::string rollingSource(const DFMRequest &r, const Layout &layout, int64_t i) 
   return text + "}\n";
 }
 
+// Fixed-offset zones have a unique UTC instant for each local second. Match
+// the CPU's checked whole-second reconstruction after each calendar stage.
+std::string relocalizeFixedSource(int64_t perSecond, int64_t offset) {
+  return "{long seconds=startTime/"+std::to_string(perSecond)+"L,fraction=startTime%"+std::to_string(perSecond)+"L;"
+      "if(fraction<0){--seconds;fraction+="+std::to_string(perSecond)+"L;}"
+      "long instant=seconds-("+std::to_string(offset)+"L),base=0;"
+      "if(!d3::checked_mul(instant,"+std::to_string(perSecond)+"L,base)||!d3::checked_add(base,fraction,startTime)){"
+      "atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}}";
+}
+
 // Duration bounds use the original row order within stable partitions. Each
 // owner validates its whole index before evaluating a single window.
 std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i) {
@@ -241,11 +251,33 @@ std::string durationSource(const DFMRequest &r, const Layout &layout, int64_t i)
           "RollingVarianceState state={0UL,0UL,0UL,0UL};uint previousLower=position,previousUpper=position;";
   text+="for(uint j=position;j<end;++j){uint own=order[j];long time=as_type<long>(x["+axis+"+own]);"
         "long startTime=0;";
-  if(durationHeaders(r,step)==3){
-    auto calendar=h+8;
-    text+=calendarOffsetSource("time","startTime",-calendar[1],calendar[2],"-period",0xB0000002U);
-  }else{
+  auto headers=durationHeaders(r,step);
+  bool calendar=headers>2&&h[8]==DFM_DURATION_CALENDAR;
+  bool zoned=headers>2&&h[4*(headers-1)]==DFM_DURATION_UTC;
+  auto zone=zoned?h+4*(headers-1):nullptr;
+  int64_t perSecond=zoned?(zone[2]==1?1000:zone[2]==2?1000000:1000000000):0;
+  int64_t offset=zoned?zone[3]:0;
+  auto offsetBits=std::to_string(uint64_t(offset*perSecond))+"UL";
+  if(calendar){
+    auto metadata=h+8;
+    std::string value="time";
+    if(zoned){
+      text+="long zoneLocal=as_type<long>(as_type<ulong>(time)+"+offsetBits+");";
+      value="zoneLocal";
+    }
+    text+=calendarOffsetSource(value,"startTime",-metadata[1],metadata[2],zoned?"0L":"-period",0xB0000002U);
+    if(zoned) text+=relocalizeFixedSource(perSecond,offset);
+  }else if(!zoned){
     text+="if(time<(-9223372036854775807L-1L)+period){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}startTime=time-period;";
+  }else text+="startTime=time;";
+  if(zoned){
+    if(zone[1]){
+      text+="{startTime=as_type<long>(as_type<ulong>(startTime)+"+offsetBits+");long delta=0;"
+            "if(!d3::checked_mul(-"+std::to_string(zone[1])+"L,"+std::to_string(perSecond*86400)+"L,delta)||!d3::checked_add(startTime,delta,startTime)){"
+            "atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}}";
+      text+=relocalizeFixedSource(perSecond,offset);
+    }
+    text+="if(!d3::checked_add(startTime,-period,startTime)){atomic_fetch_min_explicit(error,0xB0000002U,memory_order_relaxed);return;}";
   }
   text+="lo=position;hi=end;while(lo<hi){uint mid=lo+(hi-lo)/2;long t=as_type<long>(x["+axis+"+order[mid]]);"
         "if(t<startTime"+std::string(bounds[2]&1?"":"||t==startTime")+")lo=mid+1;else hi=mid;}uint start=lo;"

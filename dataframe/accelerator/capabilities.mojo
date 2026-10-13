@@ -82,6 +82,8 @@ struct RowCapabilities(Copyable):
     var coordinate_interpolation: Bool
     var duration_rolling: Bool
     var calendar_duration_rolling: Bool
+    var utc_duration_rolling: Bool
+    var fixed_zone_duration_rolling: Bool
     var empty_outputs: Bool
     var chunked_inputs: Bool
     var empty_inputs: Bool
@@ -138,6 +140,8 @@ struct RowCapabilities(Copyable):
         coordinate_interpolation: Bool = False,
         duration_rolling: Bool = False,
         calendar_duration_rolling: Bool = False,
+        utc_duration_rolling: Bool = False,
+        fixed_zone_duration_rolling: Bool = False,
         empty_outputs: Bool = False,
         chunked_inputs: Bool = False,
         empty_inputs: Bool = False,
@@ -198,6 +202,8 @@ struct RowCapabilities(Copyable):
         self.coordinate_interpolation = coordinate_interpolation
         self.duration_rolling = duration_rolling
         self.calendar_duration_rolling = calendar_duration_rolling
+        self.utc_duration_rolling = utc_duration_rolling
+        self.fixed_zone_duration_rolling = fixed_zone_duration_rolling
         self.empty_outputs = empty_outputs
         self.chunked_inputs = chunked_inputs
         self.empty_inputs = empty_inputs

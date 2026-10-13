@@ -277,7 +277,10 @@ std::string calendarOffsetSource(const std::string &a, const std::string &z,
 
 int64_t durationHeaders(const DFMRequest &r, const DFMStep &step) {
   if (r.code[4 * step.start] != DFM_DURATION_KEY) return 1;
-  return step.nodes > 2 && r.code[4 * (step.start + 2)] == DFM_DURATION_CALENDAR ? 3 : 2;
+  int64_t count = 2;
+  if (step.nodes > count && r.code[4 * (step.start + count)] == DFM_DURATION_CALENDAR) ++count;
+  if (step.nodes > count && r.code[4 * (step.start + count)] == DFM_DURATION_UTC) ++count;
+  return count;
 }
 
 // A segment ends at a stable filter boundary. Values produced and consumed
@@ -541,10 +544,19 @@ Shape validate(const DFMRequest &r, bool storage = false,
             ((h[3] == 1 || h[3] >= 4) && (input != DFM_FLOAT64_STORAGE || output != DFM_FLOAT64_STORAGE)) ||
             ((h[3] == 2 || h[3] == 3) && input != output))
           fail("Invalid Metal duration window result type");
-        if (headers == 3) {
+        bool calendarHeader = headers > 2 && h[8] == DFM_DURATION_CALENDAR;
+        if (calendarHeader) {
           auto calendar = h + 8;
           if (calendar[1] <= 0 || calendar[2] < 0 || calendar[2] > 3 || calendar[3] != 0 || nodeType(r,v.start+2) != DFM_INT64)
             fail("Invalid Metal calendar duration descriptor");
+        }
+        bool utcHeader = headers > 2 && h[4 * (headers-1)] == DFM_DURATION_UTC;
+        if (utcHeader) {
+          auto utc = h + 4 * (headers-1);
+          if (utc[1] < 0 || utc[2] < 1 || utc[2] > 3 || utc[3] < -86340 || utc[3] > 86340 || utc[3] % 60 ||
+              nodeType(r,v.start+headers-1) != DFM_INT64 ||
+              (calendarHeader && utc[2] != h[10]) || (!calendarHeader && !period && !utc[1]))
+            fail("Invalid Metal UTC duration descriptor");
         }
         for (int64_t j=headers;j<v.nodes;++j) {
           auto key = h + 4*j;

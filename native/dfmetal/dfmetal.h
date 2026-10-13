@@ -213,6 +213,10 @@ enum DFMOp {
   DFM_DURATION_BOUNDS = 227,
   // Optional third duration header: positive months, unit (Date/ms/us/ns), 0.
   DFM_DURATION_CALENDAR = 228,
+  // Optional fixed-offset zone header after BOUNDS/CALENDAR: nonnegative
+  // calendar days, Datetime unit (1 ms/2 us/3 ns), signed offset seconds.
+  // Offset is a whole minute within +/-23:59. Literal holds fixed-time ticks.
+  DFM_DURATION_UTC = 229,
 };
 
 typedef struct DFMInput {

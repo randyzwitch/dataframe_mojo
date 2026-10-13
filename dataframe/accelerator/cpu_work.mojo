@@ -28,6 +28,7 @@ from .rows import (
     ROW_CUMULATIVE_KEY,
     ROW_DURATION_KEY,
     ROW_DURATION_CALENDAR,
+    ROW_DURATION_UTC,
     ROW_CALENDAR_OFFSET,
     ROW_CALENDAR_TRUNCATE,
     ROW_QUANTILE_LINEAR,
@@ -79,6 +80,21 @@ def duration_family(plan: RowPlan, prefix: String) -> String:
                 + ":unit"
                 + String(plan.code[start + 10])
             )
+        var utc_header = start + 8
+        if step.nodes > 2 and plan.code[utc_header] == ROW_DURATION_CALENDAR:
+            utc_header += 4
+        if (
+            utc_header < (step.start + step.nodes) * 4
+            and plan.code[utc_header] == ROW_DURATION_UTC
+        ):
+            family += (
+                ":utc"
+                + String(plan.code[utc_header + 2])
+                + ":days"
+                + String(plan.code[utc_header + 1])
+            )
+            if plan.code[utc_header + 3]:
+                family += ":offset" + String(plan.code[utc_header + 3])
         family += (
             ":dp" if plan.code[start + 3] == 0
             and plan.slot_dtypes[step.slot].is_decimal() else ":d"
@@ -134,6 +150,8 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             coordinate_interpolation=True,
             duration_rolling=True,
             calendar_duration_rolling=True,
+            utc_duration_rolling=True,
+            fixed_zone_duration_rolling=True,
             empty_outputs=True,
             empty_inputs=True,
             chunked_inputs=True,

@@ -138,7 +138,7 @@ def test_duration_rolling_capability_intervals_private_indices_types_and_scopes(
             source.lazy().select(col("x").rolling_sum_by("t", "3d", "neither")),
             _capabilities(),
         )
-    var aware = fixture(DataType.datetime("us", "UTC"))
+    var aware = fixture(DataType.datetime("us", "America/New_York"))
     with assert_raises(contains="timezone-free"):
         _ = lower_rows(
             aware.lazy().select(col("x").rolling_mean_by("t", "3us")),

@@ -116,8 +116,9 @@ from dataframe.expr import (
     DT_OFFSET_BY,
 )
 from dataframe.frame import DataFrame
-from dataframe.temporal import parse_every, NANOS_PER_DAY
+from dataframe.temporal import parse_every, parse_interval, NANOS_PER_DAY
 from dataframe.time_windows import positive_period, closed_sides
+from dataframe.timezone import _fixed_offset
 from dataframe.lazy import (
     LazyFrame,
     SCAN_FRAME,
@@ -151,6 +152,7 @@ comptime ROW_CALENDAR_OFFSET = 1016
 comptime ROW_DURATION_KEY = 1017
 comptime ROW_DURATION_BOUNDS = 1018
 comptime ROW_DURATION_CALENDAR = 1019
+comptime ROW_DURATION_UTC = 1020
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -1475,6 +1477,9 @@ def lower_rows(
                 var axis_slot = -1
                 var period_ticks = Int64(0)
                 var period_months = Int64(0)
+                var period_days = Int64(0)
+                var zoned_duration = False
+                var zone_offset = Int64(0)
                 var period_unit = Int64(0)
                 var closed = Int64(0)
                 if coordinate or duration:
@@ -1484,18 +1489,41 @@ def lower_rows(
                     var axis = bind(axis_expr, rank_schema)
                     var axis_type = axis.dtypes[len(axis.dtypes) - 1]
                     if duration:
-                        if (
+                        zoned_duration = (
                             axis_type.is_datetime()
                             and axis_type.time_zone() != ""
-                        ):
-                            capabilities.reject(
-                                "temporal",
-                                "duration rolling requires a timezone-free index",
-                            )
+                        )
+                        if zoned_duration:
+                            var zone_name = axis_type.time_zone()
+                            if zone_name != "UTC":
+                                var fixed = _fixed_offset(zone_name)
+                                if not fixed:
+                                    capabilities.reject(
+                                        "temporal",
+                                        "duration rolling requires a timezone-free or fixed-offset index",
+                                    )
+                                zone_offset = fixed.value()
+                            if zone_offset:
+                                if not capabilities.fixed_zone_duration_rolling:
+                                    capabilities.reject(
+                                        "temporal",
+                                        "fixed-offset duration rolling requires backend support",
+                                    )
+                            elif not capabilities.utc_duration_rolling:
+                                capabilities.reject(
+                                    "temporal",
+                                    "UTC duration rolling requires backend support",
+                                )
                         positive_period(rank_node.text)
                         var sides = closed_sides(rank_node.text2)
                         closed = Int64(sides[0]) | (Int64(sides[1]) << 1)
-                        var interval = parse_every(rank_node.text)
+                        var interval: Tuple[Int64, Int64]
+                        if zoned_duration:
+                            var zoned = parse_interval(rank_node.text)
+                            interval = (zoned[0], zoned[2])
+                            period_days = zoned[1]
+                        else:
+                            interval = parse_every(rank_node.text)
                         var per_tick = (
                             NANOS_PER_DAY if axis_type.is_date() else Int64(
                                 1000000000
@@ -1578,6 +1606,7 @@ def lower_rows(
                     1
                     + Int(duration)
                     + Int(period_months != 0)
+                    + Int(zoned_duration)
                     + len(partitions)
                     > capabilities.max_nodes
                 ):
@@ -1665,6 +1694,17 @@ def lower_rows(
                         )
                         literals.append(0)
                         node_dtypes.append(DataType.INT64)
+                    if zoned_duration:
+                        code.extend(
+                            [
+                                Int64(ROW_DURATION_UTC),
+                                period_days,
+                                period_unit,
+                                zone_offset,
+                            ]
+                        )
+                        literals.append(0)
+                        node_dtypes.append(DataType.INT64)
                 for name in partitions:
                     var key = -1
                     for c in range(len(schema)):
@@ -1690,6 +1730,7 @@ def lower_rows(
                         1
                         + Int(duration)
                         + Int(period_months != 0)
+                        + Int(zoned_duration)
                         + len(partitions),
                         next_slot,
                         False,
