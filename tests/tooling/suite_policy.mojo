@@ -1070,6 +1070,7 @@ def production_policy() -> SuitePolicy:
                 "tests/planner_correctness/test_name_identity.mojo",
                 "tests/planner_correctness/test_nested_boundaries.mojo",
                 "tests/planner_correctness/test_relational.mojo",
+                "tests/planner_correctness/test_shared_aggregated_inputs.mojo",
                 "tests/planner_correctness/test_source_reuse.mojo",
             ],
         )
