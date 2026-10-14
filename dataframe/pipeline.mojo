@@ -26,7 +26,7 @@ from .aggregate import Reducer
 from .binding import BoundExpr, bind
 from .column import Column
 from .dtype import DataType, NUMERIC_DTYPES
-from .execution import _ReduceJob, _new_reducer
+from .execution import _ReduceJob, _new_reducer, _valid_lanes
 from .expr import (
     COUNT,
     FIRST,
@@ -270,6 +270,292 @@ def _bare_columns(exprs: List[Expr]) -> Bool:
         if len(e._nodes) != 1 or e._nodes[0].op != COL:
             return False
     return True
+
+
+@fieldwise_init
+struct _KeyRange(Copyable, Movable):
+    """A finished join build's key range on a source column (DuckDB's
+    min-max runtime join filter, `CreateDynamicMinMaxFilters`): a row
+    whose key is null or outside it joins nothing. `any` is false when the
+    build holds no non-null key, so no row joins."""
+
+    var column: String
+    var low: Int64
+    var high: Int64
+    var any: Bool
+
+
+def _range_key(dtype: DataType) -> Bool:
+    """Keys whose values compare as their physical integers."""
+    var physical = dtype.physical()
+    return physical == DataType.INT64 or physical == DataType.INT32
+
+
+def _int_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
+    """The least and greatest non-null value of an integer column (see
+    `_range_key`), or None when every row is null."""
+    var least = Int64.MAX
+    var most = Int64.MIN
+    var any = False
+    var physical = series.dtype().physical()
+    for part in series.chunks():
+        if physical == DataType.INT64:
+            var found = _column_bounds(part._data[Column[Int64]])
+            if found[0]:
+                any = True
+                least = min(least, found[1])
+                most = max(most, found[2])
+        else:
+            var found = _column_bounds(part._data[Column[Int32]])
+            if found[0]:
+                any = True
+                least = min(least, found[1])
+                most = max(most, found[2])
+    if not any:
+        return None
+    return (least, most)
+
+
+def _column_bounds[
+    D: DType
+](column: Column[Scalar[D]]) -> Tuple[Bool, Int64, Int64]:
+    """Whether any row is valid, and the least and greatest valid value,
+    eight rows (one validity byte) at a time."""
+    var values = column._ptr()
+    var bits = column.unsafe_validity()
+    var n = len(column)
+    var all_valid = column.null_count() == 0
+    var aligned = column._offset % 8 == 0
+    var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+    var least = SIMD[DType.int64, 8](Int64.MAX)
+    var most = SIMD[DType.int64, 8](Int64.MIN)
+    var any = all_valid and n >= 8
+    var i = 0
+    while i + 8 <= n:
+        var v = values.unsafe_load[width=8](i).cast[DType.int64]()
+        if all_valid:
+            least = min(least, v)
+            most = max(most, v)
+        else:
+            var byte = UInt8(0)
+            if aligned:
+                byte = bits[unsafe_offset=(column._offset + i) >> 3]
+            if aligned and byte == 255:
+                least = min(least, v)
+                most = max(most, v)
+                any = True
+            elif not aligned or byte != 0:
+                var valid = (SIMD[DType.uint8, 8](byte) & weights).ne(
+                    0
+                ) if aligned else _valid_lanes(bits, column._offset + i)
+                any = any or valid.reduce_or()
+                least = min(
+                    least, valid.select(v, SIMD[DType.int64, 8](Int64.MAX))
+                )
+                most = max(
+                    most, valid.select(v, SIMD[DType.int64, 8](Int64.MIN))
+                )
+        i += 8
+    var smallest = least.reduce_min()
+    var largest = most.reduce_max()
+    while i < n:
+        if all_valid or column._valid(i):
+            var v = column._get(i).cast[DType.int64]()
+            smallest = min(smallest, v)
+            largest = max(largest, v)
+            any = True
+        i += 1
+    return (any, smallest, largest)
+
+
+comptime _ZONE_ROWS = 2048
+
+
+def _ensure_zones(series: Series):
+    """Fill the zone map (`Column._zones`) of each buffer under an
+    integer column (see `_range_key`) that has none, once, before any
+    worker reads it."""
+    var physical = series.dtype().physical()
+    for part in series.chunks():
+        if physical == DataType.INT64:
+            _fill_zones(part._data[Column[Int64]])
+        elif physical == DataType.INT32:
+            _fill_zones(part._data[Column[Int32]])
+
+
+def _fill_zones[D: DType](column: Column[Scalar[D]]):
+    if len(column._zones[]) > 0:
+        return
+    var whole = column.copy()
+    whole._offset = 0
+    whole._length = len(column._data[])
+    var blocks = (whole._length + _ZONE_ROWS - 1) // _ZONE_ROWS
+    var zones = List[Int64](capacity=2 * blocks)
+    for b in range(blocks):
+        var first = b * _ZONE_ROWS
+        var block = whole.copy()
+        block._offset = first
+        block._length = min(_ZONE_ROWS, whole._length - first)
+        var found = _column_bounds(block)
+        if found[0]:
+            zones.append(found[1])
+            zones.append(found[2])
+        else:
+            zones.append(Int64.MAX)
+            zones.append(Int64.MIN)
+    column._zones[] = zones^
+
+
+def _window_bounds(series: Series) -> Optional[Tuple[Int64, Int64]]:
+    """Bounds on the valid values of an integer column's window, from
+    the zone maps of the blocks it touches (blocks it covers only in part
+    widen them, never narrow them), or exact when a buffer has none; None
+    when it has no valid value."""
+    var least = Int64.MAX
+    var most = Int64.MIN
+    var physical = series.dtype().physical()
+    for part in series.chunks():
+        var found: Tuple[Bool, Int64, Int64]
+        if physical == DataType.INT64:
+            found = _zoned_bounds(part._data[Column[Int64]])
+        else:
+            found = _zoned_bounds(part._data[Column[Int32]])
+        if found[0]:
+            least = min(least, found[1])
+            most = max(most, found[2])
+    if least > most:
+        return None
+    return (least, most)
+
+
+def _zoned_bounds[
+    D: DType
+](column: Column[Scalar[D]]) -> Tuple[Bool, Int64, Int64]:
+    ref zones = column._zones[]
+    if len(zones) == 0:
+        return _column_bounds(column)
+    if len(column) == 0:
+        return (False, Int64.MAX, Int64.MIN)
+    var least = Int64.MAX
+    var most = Int64.MIN
+    var first = column._offset // _ZONE_ROWS
+    var last = (column._offset + len(column) - 1) // _ZONE_ROWS
+    for b in range(first, last + 1):
+        least = min(least, zones[2 * b])
+        most = max(most, zones[2 * b + 1])
+    return (least <= most, least, most)
+
+
+def _range_mask(
+    series: Series, low: Int64, high: Int64
+) raises -> Tuple[BoolColumn, Int]:
+    """The rows of an unchunked integer column (see `_range_key`) whose
+    value is valid and within [low, high], as a packed mask, and how many."""
+    var n = len(series)
+    var values = List[UInt8](length=(n + 7) // 8, fill=0)
+    var target = values.unsafe_ptr().unsafe_origin_cast[MutAnyOrigin]()
+    var kept = 0
+    if series.dtype().physical() == DataType.INT64:
+        kept = _range_bits(series._data[Column[Int64]], low, high, target)
+    else:
+        kept = _range_bits(series._data[Column[Int32]], low, high, target)
+    return (BoolColumn(values=values^, bits=List[UInt8](), length=n), kept)
+
+
+def _range_bits[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    low: Int64,
+    high: Int64,
+    target: Pointer[UInt8, MutAnyOrigin],
+) -> Int:
+    var values = column._ptr()
+    var bits = column.unsafe_validity()
+    var n = len(column)
+    var all_valid = column.null_count() == 0
+    var weights = SIMD[DType.uint8, 8](1, 2, 4, 8, 16, 32, 64, 128)
+    var kept = 0
+    var i = 0
+    while i + 8 <= n:
+        var v = values.unsafe_load[width=8](i).cast[DType.int64]()
+        var inside = v.ge(SIMD[DType.int64, 8](low)) & v.le(
+            SIMD[DType.int64, 8](high)
+        )
+        if not all_valid:
+            inside &= _valid_lanes(bits, column._offset + i)
+        var byte = (inside.cast[DType.uint8]() * weights).reduce_add()
+        target[unsafe_offset=i >> 3] = byte
+        kept += Int(inside.cast[DType.uint8]().reduce_add())
+        i += 8
+    while i < n:
+        if all_valid or column._valid(i):
+            var v = column._get(i).cast[DType.int64]()
+            if v >= low and v <= high:
+                target[unsafe_offset=i >> 3] |= UInt8(1) << UInt8(i & 7)
+                kept += 1
+        i += 1
+    return kept
+
+
+def _key_ranges(
+    frame: DataFrame, steps: List[Step], joins: List[DataFrame]
+) raises -> List[_KeyRange]:
+    """The key ranges of the inner and semi joins among `steps` whose
+    probe key is a source column no earlier step replaces: every build is
+    finished before the first morsel, so its range can narrow the morsel
+    before any step runs, as DuckDB pushes a build's min-max filter into
+    the probe side's scan."""
+    var ranges = List[_KeyRange]()
+    # Names the steps so far show for untouched source columns.
+    var source = Dict[String, String]()
+    for name in frame.columns():
+        source[name] = name
+    for step in steps:
+        if step.kind == STEP_JOIN:
+            ref build = joins[step.join]
+            if (step.how == JOIN_INNER or step.how == JOIN_SEMI) and len(
+                step.names
+            ) == len(step.right_keys):
+                for k in range(len(step.names)):
+                    var probe = source.get(step.names[k])
+                    if not probe:
+                        continue
+                    var name = probe.value()
+                    var key = build.column(step.right_keys[k])
+                    if key.dtype() != frame.column(name).dtype():
+                        continue
+                    if not _range_key(key.dtype()):
+                        continue
+                    var bounds = _int_bounds(key)
+                    if bounds:
+                        ranges.append(
+                            _KeyRange(
+                                name, bounds.value()[0], bounds.value()[1], True
+                            )
+                        )
+                    else:
+                        ranges.append(_KeyRange(name, 0, 0, False))
+            # The build's columns join the output, under their names or
+            # with the suffix.
+            for column in build.columns():
+                if column in source:
+                    _ = source.pop(column)
+                if column + step.suffix in source:
+                    _ = source.pop(column + step.suffix)
+        elif step.kind == STEP_SELECT:
+            var renamed = Dict[String, String]()
+            for e in step.exprs:
+                if len(e._nodes) == 1 and e._nodes[0].op == COL:
+                    var found = source.get(e._nodes[0].text)
+                    if found:
+                        renamed[e._name] = found.value()
+            source = renamed^
+        elif step.kind == STEP_WITH_COLUMNS:
+            for e in step.exprs:
+                if e._name in source:
+                    _ = source.pop(e._name)
+    return ranges^
 
 
 struct Morsel(Movable):
@@ -752,6 +1038,20 @@ struct Morsel(Movable):
                 self.join(step, joins, indexes)
         else:
             self.drop(step.names)
+
+    def keep(mut self, mask: BoolColumn, kept: Int) raises:
+        """Narrow the selection to the source rows `mask` sets (over the
+        whole frame), before any step has run."""
+        if self.selected:
+            self.mask = both_true(self.mask, mask)
+            self.count = true_count(self.mask)
+        else:
+            self.mask = mask.copy()
+            self.count = kept
+        self.selected = True
+        self.by_rows = False
+        for i in range(len(self.compact)):
+            self.compact[i] = False
 
     def narrow(mut self, rows: List[Int]) raises:
         """Select only `rows` (ascending) of a fresh morsel: a top-k's
@@ -1959,6 +2259,8 @@ struct _PipelineJob(Job):
     var rows: Int
     # Rows fed, then each step's input and output rows, for the report.
     var counts: List[Int]
+    # The join builds' key ranges on source columns (`_key_ranges`).
+    var key_ranges: List[_KeyRange]
 
     def __init__(
         out self,
@@ -1982,7 +2284,9 @@ struct _PipelineJob(Job):
         floating_key: Bool,
         layout: List[AggregateLayout],
         workers: Int,
+        key_ranges: List[_KeyRange],
     ):
+        self.key_ranges = key_ranges.copy()
         self.layout = layout.copy()
         self.sinks = List[AggregateSink]()
         self.workers = workers
@@ -2050,6 +2354,45 @@ struct _PipelineJob(Job):
             self.shared_bound.publish(self.bound)
         self.parts = [merged^]
 
+    def _in_key_ranges(self, mut morsel: Morsel) raises -> Bool:
+        """Narrow a fresh morsel to the rows inside every join build's key
+        range; False when none is. A morsel whose keys all fall outside a
+        range is skipped whole, and one whose keys all fall inside is left
+        as it is, both told by its keys' least and greatest values (a
+        zone map); only a morsel straddling the range is filtered row by
+        row."""
+        for r in self.key_ranges:
+            if not r.any:
+                return False
+            var column = morsel.frame.column(r.column)
+            var bounds = _window_bounds(column)
+            if not bounds:
+                return False
+            var least = bounds.value()[0]
+            var most = bounds.value()[1]
+            if most < r.low or least > r.high:
+                return False
+            if least >= r.low and most <= r.high:
+                continue
+            # The share of the morsel's key span the range covers: when
+            # over half, the range likely keeps most rows, and the steps
+            # would read them through a selection for little gain.
+            var span = Float64(most) - Float64(least) + 1.0
+            var covered = (
+                Float64(min(most, r.high)) - Float64(max(least, r.low)) + 1.0
+            )
+            if 2.0 * covered > span:
+                continue
+            var narrowed = _range_mask(_unchunked(column), r.low, r.high)
+            if narrowed[1] == 0:
+                return False
+            if 2 * narrowed[1] > morsel.frame.height():
+                continue
+            morsel.keep(narrowed[0], narrowed[1])
+            if morsel.count == 0:
+                return False
+        return True
+
     def run(mut self) raises:
         var count = len(self.ranges[]) // 2
         var cursor = _Cursor(self.cursor)
@@ -2066,6 +2409,8 @@ struct _PipelineJob(Job):
             var morsel = Morsel(self.frame[].slice(offset, length), k)
             morsel.source_rows = self.frame[].height()
             self.counts[0] += length
+            if not self._in_key_ranges(morsel):
+                continue
             if self.top > 0 and self.bounded:
                 self.shared_bound.tighten(
                     self.bound,
@@ -2544,6 +2889,11 @@ def run_pipeline(
             DataType.FLOAT64,
             DataType.FLOAT32,
         )
+    var key_ranges = _key_ranges(frame, steps, joins[])
+    if len(key_ranges) > 0:
+        trace_path("pipeline.key_range")
+    for r in key_ranges:
+        _ensure_zones(frame.column(r.column))
     # One job per morsel at most: a tiny source (PDS-H q2's five-row
     # region frame) runs on the caller, with no crew dispatch to wait on.
     var job_count = max(1, min(workers, len(ranges[]) // 2))
@@ -2571,6 +2921,7 @@ def run_pipeline(
                 floating_key,
                 layout,
                 workers,
+                key_ranges,
             )
         )
     try:
