@@ -2402,13 +2402,21 @@ struct DataFrame(Copyable, Sized, Writable):
                         " row-valued expressions; their length differs"
                     )
                 modes.append(expression.expr._name)
+        # Window partitions laid out once per key set for all expressions,
+        # as in with_columns.
+        var layouts = WindowLayouts()
         for expression in bound:
             var result = evaluate(
-                expression, self._columns, self._height, batch_size=batch_size
+                expression,
+                self._columns,
+                self._height,
+                batch_size=batch_size,
+                layouts=Int(Pointer(to=layouts)),
             )
             if expression.shape() != ROWS and has_rows:
                 result = result._broadcast(height)
             columns.append(result^)
+        _ = layouts^
         var frame = Self(columns^, height=height)
         if len(modes) > 0:
             # An empty input has no modes: zero rows, not one null row.
