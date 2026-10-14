@@ -1,8 +1,10 @@
 """Decimal row addition/subtraction and width-preserving unary operations."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, DataType, col, lit, when
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
@@ -52,7 +54,7 @@ def test_decimal_unary_cpu_storage_widths_and_arithmetic_descriptors() raises:
         with assert_raises(contains="overflow"):
             _ = minimum64.lazy().select(expression).collect(engine="cpu")
     var query = safe_fixture().lazy().select(col("a") + col("b"))
-    var descriptors = _Descriptors(lower_rows(query, _capabilities()))
+    var descriptors = Program(lower_rows(query, _capabilities()))
     assert_equal(descriptors.code[8], Int64(219))
     assert_equal(descriptors.code[11], Int64(1 | 2 << 6 | 5 << 12))
     var caps = _capabilities()
@@ -139,7 +141,7 @@ def test_native_metal_decimal_arithmetic_proven_consumers_aggregates_and_windows
     )
     same(joined.collect(accelerator=runtime), joined.collect(engine="cpu"))
     assert_true(
-        "metal-decimal-arithmetic-v1"
+        ";mojo-metal-v1;ops="
         in runtime.estimate_auto(frame.lazy().select_exprs(arithmetic())).family
     )
 

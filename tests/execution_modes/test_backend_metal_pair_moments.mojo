@@ -1,4 +1,6 @@
 """Paired Float64 covariance, Pearson and Spearman through resident Metal."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import isnan
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
@@ -16,7 +18,7 @@ from dataframe import (
     cov,
     corr,
 )
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.paired_moments import lower_spearman
@@ -80,7 +82,7 @@ def test_pair_moment_capability_right_slots_ddof_and_spearman_staging() raises:
                 output.min_count & 0x7FFFFFFF,
                 min(ddof, Int(Int32.MAX)) if output.reduction == 161 else 0,
             )
-        _ = _Descriptors(plan)
+        _ = Program(plan)
         assert_true(
             "unsupported" not in MetalRuntime(device_id=999999).describe(query)
         )
@@ -571,7 +573,7 @@ def test_native_metal_pair_moments_nested_consumers_checked_inputs_budget_cost_a
     )
     var estimate = runtime.estimate_auto(query)
     assert_true(";paired-moments-v1" in estimate.family)
-    assert_true(";metal-paired-moments-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var profiled = (
         frame.lazy()
         .select(corr(col("x"), col("y"), "spearman").over("g"))

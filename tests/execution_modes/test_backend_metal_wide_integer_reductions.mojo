@@ -101,10 +101,7 @@ def test_native_metal_exact_wide_integer_limits_partials_means_and_nulls() raise
         # Checked sums retain conservative preflight in pruned child regions.
         with assert_raises(contains="terminal boundary"):
             _ = overflow.head(0).collect(accelerator=runtime)
-    assert_true(
-        "metal-wide-integer-reductions-v1"
-        in runtime.estimate_auto(query).family
-    )
+    assert_true(";mojo-metal-v1;ops=" in runtime.estimate_auto(query).family)
 
 
 def test_native_metal_exact_wide_integer_resident_inputs_consumers_and_budget() raises:

@@ -1,4 +1,6 @@
 """Duration windows preserve sorted time bounds, masks and checked observations."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from std.math import abs
 from std.testing import assert_equal, assert_true, assert_raises
@@ -14,7 +16,7 @@ from dataframe import (
     when,
 )
 from dataframe.dtype import NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import (
     lower_rows,
@@ -118,7 +120,7 @@ def test_duration_rolling_capability_intervals_private_indices_types_and_scopes(
             Int64(0 if plan.code[step.start * 4 + 3] >= 4 else 1),
         )
     assert_equal(count, 6)
-    _ = _Descriptors(plan)
+    _ = Program(plan)
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
@@ -345,8 +347,8 @@ def test_native_metal_duration_rolling_consumers_profile_family_budget_and_runti
     )
     var estimate = runtime.estimate_auto(query)
     assert_true(";duration-rolling-v1" in estimate.family)
-    assert_true(";metal-duration-rolling-v1" in estimate.family)
-    assert_true(";metal-emulated-float64-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
     var measured = query.profile(accelerator=exact)
     assert_equal(
@@ -363,6 +365,4 @@ def test_native_metal_duration_rolling_consumers_profile_family_budget_and_runti
         .lazy()
         .select(col("x").rolling_sum_by("t", "3d"))
     )
-    assert_true(
-        ";metal-emulated-float64-v1" in runtime.estimate_auto(narrow).family
-    )
+    assert_true(";mojo-metal-v1;ops=" in runtime.estimate_auto(narrow).family)

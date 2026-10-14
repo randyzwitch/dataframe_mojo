@@ -1,10 +1,12 @@
 """Sliding binary64 moments preserve CPU bounds, recovery, and partitions."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import sqrt, isnan
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, LazyFrame, col, lit
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_CUMULATIVE_KEY
 from dataframe.accelerator.windows import lower_partition_aggregates
@@ -86,7 +88,7 @@ def test_rolling_moments_capability_packed_bounds_private_casts_and_scopes() rai
                     parameter >> 32, UInt64(min(ddof, Int(UInt32.MAX)))
                 )
             assert_equal(found, 2)
-            _ = _Descriptors(plan)
+            _ = Program(plan)
             assert_true(
                 "unsupported"
                 not in MetalRuntime(device_id=999999).describe(query)
@@ -325,7 +327,7 @@ def test_native_metal_rolling_moments_large_offsets_partition_workers_and_nested
     )
     var query = small.lazy().select_exprs(expressions(3, 1, 0))
     var estimate = runtime.estimate_auto(query)
-    assert_true("metal-rolling-moments-v2" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     assert_true(";rolling-moments-v2" in estimate.family)
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))

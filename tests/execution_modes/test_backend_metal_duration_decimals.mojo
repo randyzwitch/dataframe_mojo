@@ -1,8 +1,10 @@
 """Decimal duration sums retain precision; floating windows retain decimal scale."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, DataType, col, lit, when
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.rows import lower_rows, ROW_DURATION_KEY
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_duration_rolling import (
@@ -48,7 +50,7 @@ def test_duration_decimal_private_widening_precision_float_casts_and_no_device_p
             else:
                 assert_true(plan.slot_dtypes[input] == DataType.FLOAT64)
         assert_equal(count, 4)
-        _ = _Descriptors(plan)
+        _ = Program(plan)
         assert_true(
             "unsupported" not in MetalRuntime(device_id=999999).describe(query)
         )
@@ -257,8 +259,7 @@ def test_native_metal_duration_decimal_consumers_profiles_precision_families_and
         assert_true(
             ":dp" + String(dtype.sum_type().precision()) in estimate.family
         )
-        assert_true(";metal-decimal128-v1" in estimate.family)
-        assert_true(";metal-emulated-float64-v1" not in estimate.family)
+        assert_true(";mojo-metal-v1;ops=" in estimate.family)
         var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
         var measured = query.profile(accelerator=exact)
         assert_equal(

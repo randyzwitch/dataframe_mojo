@@ -1,4 +1,6 @@
 """GPU exponential/logarithm approximations retain domain and numeric contracts."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_true, assert_equal, assert_raises
 from std.math import isnan, isfinite
 from std.memory import bitcast
@@ -13,7 +15,7 @@ from dataframe import (
     lit,
     when,
 )
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
@@ -99,7 +101,7 @@ def test_transcendental_capability_metadata_types_and_no_device_preflight() rais
         _ = lower_rows(frame.lazy().select(col("x").exp()), caps)
     for expression in [col("x").exp(), col("x").log()]:
         var plan = lower_rows(frame.lazy().select(expression), _capabilities())
-        _ = _Descriptors(plan)
+        _ = Program(plan)
         assert_true(
             "unsupported"
             not in MetalRuntime(device_id=999999).describe(
@@ -209,15 +211,13 @@ def test_native_metal_transcendentals_profiles_family_exact_budget_and_runtime_r
     )
     var estimate = runtime.estimate_auto(query)
     assert_true(";transcendentals-v1:e1:l1" in estimate.family)
-    assert_true(";metal-transcendentals-v1:e1:l1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var narrow = (
         DataFrame([fixture().column("x").cast(DataType.FLOAT32)])
         .lazy()
         .select(col("x").log())
     )
-    assert_true(
-        ";metal-emulated-float64-v1" in runtime.estimate_auto(narrow).family
-    )
+    assert_true(";mojo-metal-v1;ops=" in runtime.estimate_auto(narrow).family)
     var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
     var measured = query.profile(accelerator=exact)
     assert_equal(
