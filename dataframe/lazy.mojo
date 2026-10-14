@@ -5206,6 +5206,8 @@ struct LazyFrame(Copyable):
                                 )
                             )
                         ]
+                    elif below.kind == JOIN:
+                        self._transfer_key_filter(i, child, side == 1)
                     elif below.kind == CONCAT:
                         # A copy filters the second input; the filter
                         # itself moves above the first.
@@ -5334,6 +5336,45 @@ struct LazyFrame(Copyable):
             ):
                 return 1
         return -1
+
+    def _transfer_key_filter(
+        mut self, filter: Int, join: Int, right_side: Bool
+    ):
+        """A filter moving into one input of an equi-join that reads only
+        that input's join keys also holds for the other input's keys:
+        a row there whose key fails it matches no row the filter keeps.
+        So a copy in the other input's key names filters that input too
+        (DuckDB derives it through the filter combiner's equivalence
+        sets). TPC-DS q78's `ss_sold_year = 2000`, above two left joins
+        on the year, then also narrows the web and catalog totals."""
+        ref node = self._nodes[join]
+        if len(node.names) != len(node.right_keys) or len(node.names) == 0:
+            return
+        if not _row_local(self._nodes[filter].exprs):
+            return
+        var keys = node.right_keys.copy() if right_side else node.names.copy()
+        var other = node.names.copy() if right_side else node.right_keys.copy()
+        var predicate = self._nodes[filter].exprs[0].copy()
+        for k in range(len(predicate._nodes)):
+            ref item = predicate._nodes[k]
+            if item.op == SELECTOR:
+                return
+            if item.op != COL:
+                continue
+            var at = -1
+            for j in range(len(keys)):
+                if keys[j] == item.text:
+                    at = j
+                    break
+            if at < 0:
+                return
+            predicate._nodes[k].text = other[at]
+        var target = node.left if right_side else node.right
+        self._nodes.append(_plan_node(FILTER, target, exprs=[predicate^]))
+        if right_side:
+            self._nodes[join].left = len(self._nodes) - 1
+        else:
+            self._nodes[join].right = len(self._nodes) - 1
 
     def _swap_down(mut self, filter: Int, child: Int, right_side: Bool):
         """Move filter from above child to directly above child's input."""

@@ -178,3 +178,43 @@ def test_constant_predicates_fold_under_three_valued_logic() raises:
     ]
     for predicate in predicates:
         assert_same(union.filter(predicate))
+
+
+def year_rows(salt: Int, year: Int) raises -> Int:
+    var years = sales(salt).column("year")
+    var count = 0
+    for row in range(ROWS):
+        var y = years.get(row)
+        if not y.is_null() and y.int64() == Int64(year):
+            count += 1
+    return count
+
+
+def test_a_filter_on_join_keys_also_filters_the_other_input() raises:
+    var left = channel(sales(3), "s")
+    var right = channel(sales(5), "w").select_exprs(
+        [
+            col("id").alias("w_id"),
+            col("dyear").alias("w_year"),
+            col("total").alias("w_total"),
+        ]
+    )
+    for how in ["inner", "left", "semi", "anti"]:
+        var joined = left.join(
+            right,
+            left_on=["dyear", "id"],
+            right_on=["w_year", "w_id"],
+            how=how,
+        )
+        for keep in [
+            col("dyear") == lit(Int64(2001)),
+            (col("dyear") >= lit(Int64(2002))) | col("dyear").is_null(),
+            (col("dyear") == lit(Int64(2003))) & (col("id") < lit(Int64(6))),
+        ]:
+            assert_same(joined.filter(keep))
+        # The year reaches both inputs: each groups only 2001's rows.
+        var plan = joined.filter(col("dyear") == lit(Int64(2001)))
+        var read = rows_into(plan, "GROUP_BY")
+        assert_equal(len(read), 2)
+        var total = read[0] + read[1]
+        assert_equal(total, year_rows(3, 2001) + year_rows(5, 2001))
