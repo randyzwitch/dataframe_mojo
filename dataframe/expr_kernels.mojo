@@ -722,6 +722,54 @@ def _round_div[divisor: Int](numerator: Int128) -> Int128:
     return Int128(-q) if negative else Int128(q)
 
 
+def _largest_magnitude[D: DType](column: Column[Scalar[D]]) -> Int128:
+    """The largest absolute value in a column without nulls."""
+    var values = column._ptr()
+    var most = Int128(0)
+    for i in range(len(column)):
+        var v = values[unsafe_offset=i].cast[DType.int128]()
+        most = max(most, -v if v < 0 else v)
+    return most
+
+
+def _decimal_mul_narrow[
+    divisor: Int, A: DType, B: DType
+](a: Column[Scalar[A]], b: Column[Scalar[B]], n: Int) -> Optional[List[Int128]]:
+    """A decimal product rounded half-even by `divisor` (a power of ten,
+    or 1), in 64-bit arithmetic when the operands' largest magnitudes say
+    no product can pass Int64 (DuckDB proves the same from column
+    statistics): the multiply cannot overflow and the division by a
+    constant is a multiply and shift. None when it could."""
+    var x_most = _largest_magnitude(a)
+    var y_most = _largest_magnitude(b)
+    if x_most > Int128(Int64.MAX) or y_most > Int128(Int64.MAX):
+        return None
+    if x_most * y_most >= Int128(Int64.MAX):
+        return None
+    var values = List[Int128](unsafe_uninit_length=n)
+    var out = values.unsafe_ptr()
+    var xs = a._ptr()
+    var ys = b._ptr()
+    var left_one = len(a) == 1
+    var right_one = len(b) == 1
+    comptime d = Int64(divisor)
+    for i in range(n):
+        var product = Int64(xs[unsafe_offset=0 if left_one else i]) * Int64(
+            ys[unsafe_offset=0 if right_one else i]
+        )
+        comptime if divisor > 1:
+            var negative = product < 0
+            var m = -product if negative else product
+            var q = m // d
+            var r = m - q * d
+            var rest = d - r
+            if r > rest or (r == rest and q % 2 == 1):
+                q += 1
+            product = -q if negative else q
+        out[unsafe_offset=i] = Int128(product)
+    return values^
+
+
 def _decimal_dense[
     op: Int, divisor: Int, A: DType, B: DType
 ](
@@ -738,6 +786,10 @@ def _decimal_dense[
     pointers, no validity to build. `divisor` is the multiplication's
     rescaling power of ten when it is one the compiler can specialize (0
     otherwise, which divides by `rescale` at run time)."""
+    comptime if op == MUL and divisor > 0:
+        var narrow = _decimal_mul_narrow[divisor](a, b, n)
+        if narrow:
+            return narrow.take()
     var values = List[Int128](unsafe_uninit_length=n)
     var out = values.unsafe_ptr()
     var xs = a._ptr()
