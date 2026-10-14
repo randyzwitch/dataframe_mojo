@@ -36,17 +36,39 @@ comptime INT64_MIN = Int64(-9223372036854775807) - 1
 
 
 def checked_mul(a: Int64, b: Int64) raises -> Int64:
-    if a != 0 and b != 0:
-        var limit = INT64_MAX // (b if b > 0 else -b)
-        if (a if a > 0 else -a) > limit or a == INT64_MIN:
-            raise Error("temporal value overflows Int64")
-    return a * b
+    # Unsigned magnitudes represent abs(MIN) without signed negation overflow.
+    # A negative product may have magnitude 2**63; a positive one may not.
+    var negative = (a < 0) != (b < 0)
+    var left = a.cast[DType.uint64]()
+    var right = b.cast[DType.uint64]()
+    left = UInt64(0) - left if a < 0 else left
+    right = UInt64(0) - right if b < 0 else right
+    var limit = (UInt64(1) << 63) - UInt64(not negative)
+    if right != 0 and left > limit // right:
+        raise Error("temporal value overflows Int64")
+    var magnitude = left * right
+    var result = UInt64(0) - magnitude if negative else magnitude
+    return result.cast[DType.int64]()
 
 
 def checked_add(a: Int64, b: Int64) raises -> Int64:
     if (b > 0 and a > INT64_MAX - b) or (b < 0 and a < INT64_MIN - b):
         raise Error("temporal value overflows Int64")
     return a + b
+
+
+def checked_sub(a: Int64, b: Int64) raises -> Int64:
+    # Test the representable difference directly; -MIN is unrepresentable.
+    if (b > 0 and a < INT64_MIN + b) or (b < 0 and a > INT64_MAX + b):
+        raise Error("temporal value overflows Int64")
+    return a - b
+
+
+def checked_floor_div(a: Int64, b: Int64) raises -> Int64:
+    """Checked temporal quotient; the caller handles zero divisors as null."""
+    if a == INT64_MIN and b == -1:
+        raise Error("temporal value overflows Int64")
+    return floor_div(a, b)
 
 
 def ticks_per_day(dtype: DataType) -> Int64:

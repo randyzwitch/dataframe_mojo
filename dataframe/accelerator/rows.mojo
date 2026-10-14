@@ -5,8 +5,18 @@ are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
 from .metadata import prune_projections
+from . import temporal_expressions
+from .gpu.temporal_descriptors import (
+    ROW_TEMPORAL_BINARY,
+    ROW_TEMPORAL_CAST,
+    binary_literal,
+    cast_literal,
+)
+from .timezone_tables import serialize as serialize_zone
+from .memory import checked_add
+from dataframe.parse import parse_int64
 from .integer_ranges import proven_integer_nodes, _decimal_scale_safe
-from std.memory import bitcast
+from std.memory import ArcPointer, bitcast
 from std.math import pow, abs
 from dataframe.parallel import configured_workers
 from .capabilities import RowCapabilities
@@ -114,11 +124,13 @@ from dataframe.expr import (
     DT_TIME,
     DT_TRUNCATE,
     DT_OFFSET_BY,
+    DT_REPLACE_TZ,
+    DT_CONVERT_TZ,
 )
 from dataframe.frame import DataFrame
 from dataframe.temporal import parse_every, parse_interval, NANOS_PER_DAY
 from dataframe.time_windows import positive_period, closed_sides
-from dataframe.timezone import _fixed_offset
+from dataframe.timezone import TimeZone, _fixed_offset
 from dataframe.lazy import (
     LazyFrame,
     SCAN_FRAME,
@@ -153,6 +165,10 @@ comptime ROW_DURATION_KEY = 1017
 comptime ROW_DURATION_BOUNDS = 1018
 comptime ROW_DURATION_CALENDAR = 1019
 comptime ROW_DURATION_UTC = 1020
+# Temporal unit bits 0..26 retain storage/UTC/calendar-day metadata. Fixed
+# local field operations carry seconds east of UTC in their right operand.
+comptime ROW_FIXED_ZONE_FIELDS = Int64(1 << 27)
+comptime ROW_IANA_ZONE_FIELDS = Int64(1 << 28)
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -172,13 +188,29 @@ struct RowStep(Copyable):
     var grouped: Bool
 
 
-@fieldwise_init
 struct RowOutput(Copyable):
     var name: String
     var dtype: DataType
     var slot: Int
     var reduction: Int
     var min_count: Int
+    var field_metadata: Optional[ArcPointer[List[UInt8]]]
+
+    def __init__(
+        out self,
+        name: String,
+        dtype: DataType,
+        slot: Int,
+        reduction: Int,
+        min_count: Int,
+        field_metadata: Optional[ArcPointer[List[UInt8]]] = None,
+    ):
+        self.name = name
+        self.dtype = dtype
+        self.slot = slot
+        self.reduction = reduction
+        self.min_count = min_count
+        self.field_metadata = field_metadata
 
 
 @fieldwise_init
@@ -197,6 +229,11 @@ struct RowPlan(Movable):
     var limit: Int
     var reductions: Bool
     var reused_columns: Bool
+    var key_values: List[UInt64]
+    var source_failure: String
+    var zone_words: List[UInt64]
+    # Shared immutable ranks avoid a second host payload during Program prep.
+    var ordered_ranks: ArcPointer[List[UInt32]]
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -220,6 +257,17 @@ def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
 
 def _empty(name: String, dtype: DataType) raises -> Series:
     return Series.full_null(name, dtype, 0)
+
+
+def _projected_column(
+    name: String, dtype: DataType, bound: BoundExpr, schema: List[Series]
+) raises -> Series:
+    # CPU evaluate returns the source Series for a bare column, including
+    # aliases. Computed expressions create a new field without its metadata.
+    var result = _empty(name, dtype)
+    if len(bound.expr._nodes) == 1 and bound.expr._nodes[0].op == COL:
+        result._field_metadata = schema[bound.sources[0]]._field_metadata
+    return result^
 
 
 def _program(
@@ -302,6 +350,10 @@ def _program(
             )
             or (op == DT_TRUNCATE and capabilities.calendar_truncation)
             or (op == DT_TOTAL and capabilities.duration_totals)
+            or (
+                capabilities.utc_temporal_conversions
+                and (op == DT_REPLACE_TZ or op == DT_CONVERT_TZ)
+            )
             or (op == DT_OFFSET_BY and capabilities.temporal_offsets)
             or (op == INT_IS_IN and capabilities.extended_integers)
             or (
@@ -357,11 +409,52 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
+        var temporal_binary = (
+            capabilities.temporal_binary_arithmetic
+            and temporal_expressions.binary(bound, i)
+        )
+        var temporal_cast = (
+            capabilities.temporal_physical_casts
+            and temporal_expressions.cast(bound, i)
+        )
+        # Conversion changes validated zone metadata and preserves UTC ticks.
+        # Local-time operations still require their own zone-aware support.
+        if op == DT_REPLACE_TZ and (
+            left_type.time_zone() not in List[String](["", "UTC"])
+            or bound.dtypes[i].time_zone() not in List[String](["", "UTC"])
+        ):
+            capabilities.reject(
+                "temporal",
+                "Mojo time zone replacement requires naive or UTC values",
+            )
         var temporal = (
             (op >= DT_YEAR and op <= DT_TRUNCATE)
             or op == DT_TOTAL
             or op == DT_OFFSET_BY
         )
+        var iana_fields = (
+            op >= DT_YEAR
+            and op <= DT_TIME
+            and left_type.is_datetime()
+            and left_type.time_zone().byte_length() != 0
+            and left_type.time_zone() != "UTC"
+            and not _fixed_offset(left_type.time_zone())
+            and capabilities.iana_zone_temporal_fields
+        )
+        var fixed_fields = False
+        var field_offset = Int64(0)
+        if (
+            op >= DT_YEAR
+            and op <= DT_TIME
+            and left_type.is_datetime()
+            and left_type.time_zone().byte_length()
+            and left_type.time_zone() != "UTC"
+            and capabilities.fixed_zone_temporal_fields
+        ):
+            var fixed = _fixed_offset(left_type.time_zone())
+            if fixed:
+                fixed_fields = True
+                field_offset = fixed.value()
         var decimal_float_cast = (
             op == CAST
             and left_type.is_decimal()
@@ -400,6 +493,12 @@ def _program(
             temporal
             and left_type.is_datetime()
             and left_type.time_zone().byte_length()
+            and not (
+                capabilities.utc_temporal_conversions
+                and left_type.time_zone() == "UTC"
+            )
+            and not fixed_fields
+            and not iana_fields
         ):
             capabilities.reject(
                 "temporal", "time zone field extraction requires CPU execution"
@@ -499,6 +598,8 @@ def _program(
             and not decimal_float_cast
             and not decimal_cast
             and not decimal_arithmetic
+            and not temporal_binary
+            and not temporal_cast
             and (
                 op == SQRT
                 or op == EXP
@@ -576,6 +677,7 @@ def _program(
             and not (
                 capabilities.float64_emulated and bound.dtypes[i].is_float()
             )
+            and not temporal_cast
         ):
             capabilities.reject(
                 "plan", "scalar strict casts require CPU execution"
@@ -620,7 +722,22 @@ def _program(
                     == 1000 else (2 if left_type.per_second() == 1000000 else 3)
                 )
             )
+        if op == DT_CONVERT_TZ or op == DT_REPLACE_TZ:
+            source = (
+                1 if left_type.per_second()
+                == 1000 else 2 if left_type.per_second()
+                == 1000000 else 3
+            )
         var right = Int64(node.right)
+        if fixed_fields:
+            source |= Int(ROW_FIXED_ZONE_FIELDS)
+            right = field_offset
+        elif iana_fields:
+            source |= Int(ROW_IANA_ZONE_FIELDS)
+            # Filled with a zone-tail-relative header after all programs bind.
+            right = -1
+        if op == DT_CONVERT_TZ or op == DT_REPLACE_TZ:
+            right = Int64(bound.dtypes[i].time_zone() == "UTC")
         if op == DT_TOTAL:
             var nanos_per_tick = Int64(1000000000) // left_type.per_second()
             var nanos_per_unit = Int64(1)
@@ -646,6 +763,20 @@ def _program(
         var calendar_ticks = Int64(0)
         if op == DT_OFFSET_BY:
             var interval = parse_every(node.text)
+            if (
+                capabilities.utc_temporal_conversions
+                and left_type.is_datetime()
+                and left_type.time_zone() == "UTC"
+            ):
+                var zoned = parse_interval(node.text)
+                if zoned[1] < -131072 or zoned[1] > 131071:
+                    capabilities.reject(
+                        "temporal",
+                        "UTC calendar-day offset exceeds descriptor range",
+                    )
+                # Bit 8 selects UTC's checked day/relocalization phase;
+                # parse_every bounds days to signed 18 bits in bits 9..26.
+                source |= 256 | ((Int(zoned[1]) & 0x3FFFF) << 9)
             var per_tick = (
                 NANOS_PER_DAY if left_type.is_date() else Int64(1000000000)
                 // left_type.per_second()
@@ -668,6 +799,12 @@ def _program(
                 right = interval[0]
         if op == DT_TRUNCATE:
             var interval = parse_every(node.text)
+            if (
+                capabilities.utc_temporal_conversions
+                and left_type.is_datetime()
+                and left_type.time_zone() == "UTC"
+            ):
+                source |= 256
             var per_tick = NANOS_PER_DAY if left_type.is_date() else (
                 Int64(1000000000) // left_type.per_second()
             )
@@ -695,6 +832,21 @@ def _program(
                     )
                 right = interval[1] // per_tick
         node_dtypes.append(bound.dtypes[i])
+        var temporal_payload = UInt64(0)
+        if temporal_binary:
+            capabilities.require_arithmetic(DataType.INT64)
+            lowered_op = Int(ROW_TEMPORAL_BINARY)
+            right = Int64(node.right)
+            source = -1
+            temporal_payload = binary_literal(Int64(op), left_type, right_type)
+        elif temporal_cast:
+            capabilities.require_arithmetic(DataType.INT64)
+            lowered_op = Int(ROW_TEMPORAL_CAST)
+            right = -1
+            source = -1
+            temporal_payload = cast_literal(
+                left_type, bound.dtypes[i], node.integer != 0
+            )
         code.append(Int64(lowered_op))
         code.append(Int64(node.left))
         code.append(right)
@@ -702,7 +854,10 @@ def _program(
         # Integer payloads travel as raw 64-bit words, never through a float
         # conversion (Int64 literals beyond 2**53 must remain exact).
         literals.append(
-            bitcast[DType.float64](calendar_ticks) if lowered_op
+            bitcast[DType.float64](temporal_payload) if temporal_binary
+            or temporal_cast else bitcast[DType.float64](
+                calendar_ticks
+            ) if lowered_op
             == ROW_CALENDAR_OFFSET else bitcast[DType.float64](
                 node.integer
             ) if op
@@ -766,12 +921,17 @@ def lower_rows(
     capabilities: RowCapabilities = RowCapabilities(),
     *,
     terminal_boundary: Bool = True,
+    source_rows: Int = -1,
 ) raises -> RowPlan:
     """Bind the entire resident region before GPU submission or source I/O.
 
     Regions feeding another operator are not observable terminal boundaries:
     that operator can prune rows and change whether checked work is evaluated.
+    Resident callers may supply the actual source cardinality alongside a
+    metadata-only frame; this never changes or reads the frame's storage.
     """
+    if source_rows < -1:
+        raise Error("Resident source row count must be >= -1")
     var root = len(query._nodes) - 1
     if root < 0:
         capabilities.reject("plan", "empty plan")
@@ -819,6 +979,7 @@ def lower_rows(
     var projected_query = query.copy()
     prune_projections(projected_query)
     var frame = query._frames[query._nodes[cursor].offset].copy()
+    var source_count = frame.height() if source_rows < 0 else source_rows
     if len(projected_query._nodes[cursor].names):
         frame = frame.select(projected_query._nodes[cursor].names)
     if (
@@ -867,9 +1028,11 @@ def lower_rows(
     var gathers = List[Int64]()
     var steps = List[RowStep]()
     var outputs = List[RowOutput]()
+    var key_values = List[UInt64]()
     var next_slot = len(schema)
     var reduced = False
     var reused_columns = False
+    var ordered_ranks = List[UInt32]()
     for k in range(len(chain) - 1, -1, -1):
         ref node = query._nodes[chain[k]]
         if reduced:
@@ -1008,6 +1171,93 @@ def lower_rows(
                     )
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
+            var ordered_scalar = (
+                len(node.names2) >= 2 and node.names2[1] == "ordered_scalar_v1"
+            )
+            if ordered_scalar:
+                if (
+                    node.text != "metal_window_materialization"
+                    or node.names2[0] != "metal_explicit_cut_operand"
+                    or node.kind != SELECT
+                    or len(chain) != 1
+                    or len(node.exprs) != 1
+                    or not terminal_boundary
+                    or limit >= 0
+                    or source_count > 1
+                    or len(node.names2) != 3 + len(expr._nodes)
+                    or len(bound.expr._nodes) != len(expr._nodes)
+                ):
+                    capabilities.reject(
+                        "ordered scalar",
+                        "requires a private one-row CUT producer",
+                    )
+                var anchor = False
+                for field in schema:
+                    anchor |= (
+                        field.name() == node.names2[2]
+                        and field.dtype() == DataType.INT8
+                    )
+                if not anchor:
+                    capabilities.reject(
+                        "ordered scalar", "missing literal anchor provenance"
+                    )
+                var previous_rank = Int64(0)
+                for at in range(len(expr._nodes)):
+                    ref original = expr._nodes[at]
+                    ref actual = bound.expr._nodes[at]
+                    if (
+                        original.op != actual.op
+                        or original.left != actual.left
+                        or original.right != actual.right
+                        or original.extra != actual.extra
+                        or is_window(actual.op)
+                        or is_reduction(actual.op)
+                    ):
+                        capabilities.reject(
+                            "ordered scalar", "binder changed the ranked AST"
+                        )
+                    var rank = parse_int64(node.names2[3 + at])
+                    if rank < 0 or rank > 0x1FFFFFE:
+                        capabilities.reject(
+                            "ordered scalar", "fault rank exceeds token range"
+                        )
+                    if rank:
+                        if rank <= previous_rank:
+                            capabilities.reject(
+                                "ordered scalar",
+                                "requires canonical occurrence order",
+                            )
+                        previous_rank = rank
+                    elif not (
+                        actual.op == COL
+                        or actual.op == LIT_INT
+                        or actual.op == LIT_FLOAT
+                        or actual.op == LIT_BOOL
+                        or actual.op == LIT_NULL
+                        or actual.op == IS_NOT_NULL
+                        or actual.op == WHEN
+                    ):
+                        capabilities.reject(
+                            "ordered scalar",
+                            "generated checked node lacks an occurrence rank",
+                        )
+                    ordered_ranks.append(UInt32(rank))
+            if (
+                capabilities.temporal_binary_arithmetic
+                or capabilities.temporal_physical_casts
+            ) and temporal_expressions.contains(bound):
+                if (
+                    len(chain) != 1
+                    or node.kind != SELECT
+                    or not terminal_boundary
+                    or limit >= 0
+                    or source_rows >= 0
+                ):
+                    capabilities.reject(
+                        "temporal",
+                        "prototype requires a direct scan and terminal projections without head (SELECT only)",
+                    )
+                temporal_expressions.validate(bound)
             if capabilities.calendar_truncation:
                 for part in bound.expr._nodes:
                     if (
@@ -1034,6 +1284,25 @@ def lower_rows(
             ):
                 proven = proven_integer_nodes(bound)
             for part_index in range(len(bound.expr._nodes)):
+                if capabilities.utc_temporal_conversions:
+                    ref utc_part = bound.expr._nodes[part_index]
+                    var checked_utc = (
+                        utc_part.op == DT_REPLACE_TZ and utc_part.text == "UTC"
+                    ) or (
+                        utc_part.op == DT_TRUNCATE
+                        and bound.dtypes[utc_part.left].is_datetime()
+                        and bound.dtypes[utc_part.left].time_zone() == "UTC"
+                    )
+                    if checked_utc and (
+                        not terminal_boundary
+                        or k != 0
+                        or node.kind == FILTER
+                        or limit >= 0
+                    ):
+                        capabilities.reject(
+                            "plan",
+                            "checked UTC operations require terminal projections without head",
+                        )
                 if (
                     bound.expr._nodes[part_index].op == DT_OFFSET_BY
                     and capabilities.temporal_offsets
@@ -1072,15 +1341,20 @@ def lower_rows(
                     ):
                         # CPU pushdown can remove checked work. An operation
                         # without a static no-error proof still needs an
-                        # observable terminal boundary, with no final head.
+                        # observable terminal boundary, with no final head,
+                        # unless the backend carries per-value errors through
+                        # row selection and checks each observing consumer.
                         if not (
                             capabilities.proven_integer_operations
                             and proven[part_index]
                         ) and (
                             not terminal_boundary
-                            or k != 0
-                            or node.kind == FILTER
-                            or limit >= 0
+                            or (
+                                not capabilities.deferred_integer_errors
+                                and (
+                                    k != 0 or node.kind == FILTER or limit >= 0
+                                )
+                            )
                         ):
                             capabilities.reject(
                                 "plan",
@@ -1648,7 +1922,7 @@ def lower_rows(
                     )
                 )
                 literals.append(
-                    # Row counts fit UInt32 in the native ABI. Saturating
+                    # Device row indices fit UInt32. Saturating
                     # larger bounds preserves every observable window/result.
                     bitcast[DType.float64](
                         period_ticks
@@ -1820,7 +2094,7 @@ def lower_rows(
                     )
                 reduction = last.op
                 capabilities.require_reduction(
-                    bound.dtypes[last.left], reduction, frame.height()
+                    bound.dtypes[last.left], reduction, source_count
                 )
                 capabilities.require_dtype(result_dtype)
                 var checked_sum = (
@@ -1880,7 +2154,7 @@ def lower_rows(
                     )
                 if reduction == COV or reduction == CORR:
                     capabilities.require_reduction(
-                        bound.dtypes[last.right], reduction, frame.height()
+                        bound.dtypes[last.right], reduction, source_count
                     )
                     if bound.shapes[last.right] != ROWS:
                         capabilities.reject(
@@ -2006,7 +2280,11 @@ def lower_rows(
                     or result_dtype == dtype
                     or result_dtype == DataType.BOOL
                 ):
-                    projected.append(_empty(expr._name, result_dtype))
+                    projected.append(
+                        _projected_column(
+                            expr._name, result_dtype, bound, rank_schema
+                        )
+                    )
                     projected_slots.append(existing)
                     reused_columns = True
                     continue
@@ -2028,6 +2306,11 @@ def lower_rows(
                 node_dtypes,
                 capabilities,
             )
+            if ordered_scalar:
+                # Decimal high literal words and membership tails are not
+                # evaluated nodes; their rank entries are never dereferenced.
+                while len(ordered_ranks) < len(literals):
+                    ordered_ranks.append(UInt32(0))
             slot_dtypes.append(bound.dtypes[count - 1])
             var gather_start = len(gathers)
             var gather_count = len(slots)
@@ -2056,7 +2339,11 @@ def lower_rows(
                     )
                 )
             else:
-                projected.append(_empty(expr._name, result_dtype))
+                projected.append(
+                    _projected_column(
+                        expr._name, result_dtype, bound, rank_schema
+                    )
+                )
                 projected_slots.append(next_slot)
             next_slot += 1
         if node.kind == FILTER:
@@ -2095,17 +2382,45 @@ def lower_rows(
                     Int64(first_slot),
                 ]
             )
-            literals.append(
-                bitcast[DType.float64](
-                    Int64(min(configured_workers(), Int(Int32.MAX)))
-                ) if node.text
-                == "metal_window_materialization" else 0
-            )
+            var group_metadata = UInt64(0)
+            if node.text == "metal_window_materialization":
+                group_metadata = UInt64(
+                    min(configured_workers(), Int(Int32.MAX))
+                )
+                if (
+                    capabilities.contiguous_window_reductions
+                    and len(node.flags) > 1
+                    and node.flags[1]
+                ):
+                    # Low32 retain configured workers; bit32 records that
+                    # the original inner expression had no nested OVER.
+                    group_metadata |= UInt64(1) << 32
+            literals.append(bitcast[DType.float64](group_metadata))
             node_dtypes.append(DataType.INT64)
             var grouped_schema = List[Series]()
             var grouped_slots = List[Int]()
             var group_names = List[String]()
             for key in group_keys:
+                var key_descriptor = UInt64(0)
+                for original_key in node.window_keys:
+                    if original_key.name != schema[key].name():
+                        continue
+                    if (
+                        original_key.dtype == DataType.STRING
+                        or original_key.dtype._is_bytes()
+                        or original_key.dtype.is_categorical()
+                    ):
+                        if UInt64(len(key_values)) >= UInt64(1) << 62:
+                            raise Error(
+                                "Metal window key lookup capacity exceeded"
+                            )
+                        key_descriptor = (UInt64(1) << 63) | UInt64(
+                            len(key_values)
+                        )
+                        if not original_key.string_hash:
+                            key_descriptor |= UInt64(1) << 62
+                        key_values.extend(original_key.values[].copy())
+                    break
                 code.extend(
                     [
                         Int64(ROW_GROUP_KEY),
@@ -2114,11 +2429,11 @@ def lower_rows(
                         Int64(0),
                     ]
                 )
-                literals.append(0)
+                literals.append(bitcast[DType.float64](key_descriptor))
                 node_dtypes.append(schema[key].dtype())
-                grouped_schema.append(
-                    _empty(schema[key].name(), schema[key].dtype())
-                )
+                var key_column = _empty(schema[key].name(), schema[key].dtype())
+                key_column._field_metadata = schema[key]._field_metadata
+                grouped_schema.append(key_column^)
                 grouped_slots.append(slots[key])
                 group_names.append(schema[key].name())
             for output in aggregate_outputs:
@@ -2220,7 +2535,14 @@ def lower_rows(
     if not reduced:
         for i in range(len(schema)):
             outputs.append(
-                RowOutput(schema[i].name(), schema[i].dtype(), slots[i], -1, 0)
+                RowOutput(
+                    schema[i].name(),
+                    schema[i].dtype(),
+                    slots[i],
+                    -1,
+                    0,
+                    schema[i]._field_metadata,
+                )
             )
     if len(steps) > capabilities.max_steps:
         capabilities.reject(
@@ -2240,6 +2562,46 @@ def lower_rows(
         capabilities.reject(
             "plan", "resident region requires at least one output column"
         )
+    if len(ordered_ranks) and (
+        len(steps) != 1
+        or steps[0].filter
+        or steps[0].order
+        or steps[0].grouped
+        or reduced
+        or len(outputs) != 1
+        or len(ordered_ranks) != len(literals)
+    ):
+        capabilities.reject(
+            "ordered scalar", "requires exactly one row expression"
+        )
+    var zone_names = List[String]()
+    var zone_bases = List[Int64]()
+    var zone_words = List[UInt64]()
+    for step in steps:
+        for node in range(step.start, step.start + step.nodes):
+            var op = code[4 * node]
+            if (
+                op < DT_YEAR
+                or op > DT_TIME
+                or not (code[4 * node + 3] & ROW_IANA_ZONE_FIELDS)
+            ):
+                continue
+            var source = step.start + Int(code[4 * node + 1])
+            var name = node_dtypes[source].time_zone()
+            var found = -1
+            for at in range(len(zone_names)):
+                if zone_names[at] == name:
+                    found = at
+                    break
+            if found < 0:
+                var zone = TimeZone.load(name)
+                var packed = serialize_zone(zone)
+                _ = checked_add(len(zone_words), len(packed))
+                found = len(zone_names)
+                zone_names.append(name)
+                zone_bases.append(Int64(len(zone_words)))
+                zone_words.extend(packed^)
+            code[4 * node + 2] = zone_bases[found]
     return RowPlan(
         frame^,
         dtype,
@@ -2255,4 +2617,8 @@ def lower_rows(
         limit,
         reduced,
         reused_columns,
+        key_values^,
+        query._nodes[cursor].source_failure,
+        zone_words^,
+        ArcPointer(ordered_ranks^),
     )

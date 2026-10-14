@@ -1,4 +1,4 @@
-"""Default provider slot with optional native Metal discovery.
+"""Default provider slot with context-free Mojo Metal availability.
 
 Presence checks do not open a driver. CPU collection never initializes Metal.
 The optional NVIDIA package builder can replace this module in its staged tree.

@@ -40,9 +40,9 @@ def _record(
     return (
         result
         + ',"training_queries":8,"validation_queries":8,"distribution_coverage":"conservative-null-selectivity-envelope","safety_factor":1.5,"cpu":'
-        + calibration_model(1e15).replace("1000000", "1e30")
+        + calibration_model(1e15, max_feature=1e30)
         + ',"accelerator":'
-        + calibration_model(accelerator).replace("1000000", "1e30")
+        + calibration_model(accelerator, max_feature=1e30)
         + "}"
     )
 
@@ -104,11 +104,11 @@ def _run(
 def main() raises:
     var args = argv()
     if len(args) < 2 or len(args) > 3:
-        raise Error(
-            "Usage: package_contracts.mojo PACKAGE_DIRECTORY [--native]"
-        )
-    var native = len(args) == 3 and String(args[2]) == "--native"
-    if len(args) == 3 and not native:
+        raise Error("Usage: package_contracts.mojo PACKAGE_DIRECTORY [--gpu]")
+    var gpu = len(args) == 3 and String(args[2]) in List[String](
+        ["--gpu", "--native"]
+    )
+    if len(args) == 3 and not gpu:
         raise Error("Unknown package capability")
     var path = capture(["realpath", String(args[1])])
     if path[0]:
@@ -149,11 +149,11 @@ def main() raises:
         .string()
     )
     _run(work, binary, "cpu")
-    if not native:
+    if not gpu:
         _run(work, binary, "cpu", setting="DATAFRAME_ACCEL_DEVICE=invalid")
         _run(work, binary, "cpu", setting="DATAFRAME_ACCEL_MEMORY_LIMIT=0")
         print(
-            "SKIP(capability): packaged native calibration and execution; enable --native on provisioned hardware"
+            "SKIP(capability): packaged GPU calibration and execution; enable --gpu on provisioned hardware"
         )
         run_command(["rm", "-r", work])
         print(
@@ -203,19 +203,24 @@ def main() raises:
     for fraction in ["0", "-1", "1.1"]:
         _run(work, binary, "cpu", _table(_record(key, expiry), fraction))
     _run(work, binary, "cpu", "invalid JSON")
-    if native:
+    if gpu:
         _run(work, binary, "gpu", valid)
+        var error_command = _environment()
+        error_command.append(binary)
+        error_command.append("error-fixture")
+        var error_key = JsonValue(String(_invoke(work, error_command).strip()))
+        _run(work, binary, "gpu-error", _table(_record(error_key, expiry)))
         if key.get("provider").string() == "metal":
             _run(
                 work,
                 binary,
-                "cpu",
+                "gpu",
                 valid,
                 "DATAFRAME_METAL_LIBRARY=/nonexistent/package-native.dylib",
             )
     else:
         print(
-            "SKIP(capability): packaged native provider execution; enable --native on provisioned hardware"
+            "SKIP(capability): packaged GPU provider execution; enable --gpu on provisioned hardware"
         )
     run_command(["rm", "-r", work])
     print(

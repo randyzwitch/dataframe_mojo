@@ -1,15 +1,14 @@
 # Measuring Apple Metal development mechanisms
 
 `benchmarks/bench_metal.mojo` and `scripts/bench_metal.py` compare the existing
-DataFrame CPU executor with the optional native Metal runtime on the same Mac.
+DataFrame CPU executor with the Mojo Metal backend on the same Mac.
 These are development mechanisms, not an external suite or evidence of general
 performance. `chain32` deliberately measures fusion across lazy projection
 stages; its ratio includes the current CPU executor's per-stage overhead.
 
-Build the native bridge, then run from an Apple Silicon checkout:
+Run from an Apple Silicon checkout:
 
 ```sh
-pixi run build-dfmetal
 pixi run python3 scripts/bench_metal.py
 ```
 
@@ -19,30 +18,31 @@ The driver builds one optimized Mojo binary. For a quick correctness check:
 pixi run python3 scripts/bench_metal.py --rows 4097 --reps 2 --rounds 1
 ```
 
-Optional `--baseline-library /path/to/older/libdfmetal.dylib` compares two native
-builds with that same binary and CPU executor. Runtime build fingerprints and
-library SHA-256 hashes identify both. This isolates native runtime changes; it
-is not a comparison of different CPU engine revisions. `--binary PATH
+Optional `--baseline-binary /path/to/older/bench-metal` compares separately
+built Mojo executables. Each baseline includes its own CPU/provider revision;
+source/compiler/binary fingerprints identify the comparison. `--binary PATH
 --skip-build` reuses an already built runner. The driver records compiler
 version and flags, source/driver/binary hashes, engine commit and status,
-selected thread count, Mac hardware/OS/SDK details, native profiles, load before
-each process, raw samples, and failed or unsupported outcomes.
+selected thread count, Mac hardware/OS/SDK details, actual Mojo profiles, load
+before each process, raw samples, and failed or unsupported outcomes.
 
-Each workload, variant, runtime build, and round runs in a fresh process.
+Each workload, variant, executable build, and round runs in a fresh process.
 First-use CPU and Metal collections are recorded separately. Two additional
 warmups precede alternating CPU/Metal samples. The initial engine order and
-runtime-build order rotate between rounds; case order reverses. First use
+executable order rotate between rounds; case order reverses. First use
 includes device/context/shader setup, but the machine and filesystem are not
 cold. The input is constructed once outside timing; every collection allocates
 and materializes a complete ordinary CPU result. Validation and result release
 are outside the measured interval. Every measured result is checked exactly
-against the current DataFrame CPU result. These checks supplement the native
-ABI precision and overflow suite; they are not an independent SQL oracle.
+against the current DataFrame CPU result. These checks supplement the precision and overflow contracts; they are not an independent SQL oracle.
 
 Cases cover a simple projection, a 15-repetition single expression, a 32-stage projection
 chain, filters retaining about half or one percent of rows, count/length after a
 filter, exact Int32 sum, filtered Int32 sum, and a filter whose predicate column
-is omitted from the output. Base, sorted, and nullable/permuted distributions
+is omitted from the output. Additional cases exercise stable sorting, low/high
+cardinality grouping and self-left-joins. Their historical workload names
+(`sort_radix`, `group_hash`, `group_high`, `join_hash`) identify input recipes;
+the Mojo provider uses stable sorted paths. Base, sorted, and nullable/permuted distributions
 all run by default. Float32 inputs are exact multiples of 1/1024. Int32 sum
 inputs stay small enough that the final Int32 result fits. The raw record states
 the deterministic input recipe. The report includes every variant and each
@@ -57,19 +57,19 @@ rerunning measurements:
 python3 scripts/bench_metal.py --report-from build/metal/results.json
 ```
 
-Native profile timings come from an additional warm collection after the timed
+Provider profile timings come from an additional warm collection after the timed
 samples. Its GPU interval is not whole-query wall time. Shared-storage staging,
 allocation, launch overhead, synchronization, result copying, and CPU executor
 fusion choices can each explain a measured difference. Power and scheduling
-noise affect short queries on the M1. No threshold for automatic GPU selection
-is derived from these cases; automatic execution remains on CPU.
+noise affect short queries on the M1. These cases do not enable automatic GPU
+selection; placement requires separate validated calibration.
 
 External-suite reporting continues to follow [the benchmark rules](benchmarks.md).
-Joins, group-by, Float64 and floating reductions are outside this development
-matrix. No external-suite coverage or holdout claim is made here.
+Float64 and floating reductions are outside this development matrix. No
+external-suite coverage or holdout claim is made here.
 
 The retained initial smoke record includes three unsupported 16-repetition
-single-expression cases: their 65 nodes exceed the unchanged shared 64-node
+single-expression cases: their 65 nodes exceeded the then-current shared 64-node
 limit. The supported performance case uses 15 repetitions (61 nodes). All
 other initial smoke cases passed. This is a planner bound, not an arithmetic
 precision failure.

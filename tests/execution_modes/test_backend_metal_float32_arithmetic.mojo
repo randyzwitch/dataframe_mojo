@@ -106,7 +106,7 @@ def test_native_metal_float32_arithmetic_words_nulls_consumers_and_cost() raises
         ).head(83)
         same(joined.collect(accelerator=runtime), joined.collect(engine="cpu"))
         var measured = runtime.estimate_auto(frame.lazy().select(expression))
-        assert_true("metal-float32-arithmetic-v1" in measured.family)
+        assert_true(";mojo-metal-v1;ops=" in measured.family)
     var plain = frame.select(["a", "b"])
     var homogeneous = plain.lazy().select_exprs(expressions)
     same(

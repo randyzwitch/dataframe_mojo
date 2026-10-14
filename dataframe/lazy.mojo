@@ -132,6 +132,7 @@ from .hashing import encode_rows
 from .trace import trace_path
 from .execution import direct_reductions
 from .accelerator.cost import PlanEstimate
+from .accelerator.window_keys import WindowKey
 from .execution_report import ExecutionReport
 from .join_type import (
     JOIN_ANTI,
@@ -193,6 +194,8 @@ struct PlanNode(Copyable):
     # No counter storage is allocated unless profiling/tests attach one.
     var _executions: Optional[ArcPointer[Int]]
     var asof_tolerance: Optional[AnyValue]
+    var window_keys: List[WindowKey]
+    var source_failure: String
 
     def _record_execution(self):
         if self._executions:
@@ -215,6 +218,8 @@ def _plan_node(
     how: Int = -1,
     right_keys: List[String] = List[String](),
     coalesce: Bool = True,
+    window_keys: List[WindowKey] = List[WindowKey](),
+    source_failure: String = "",
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -233,6 +238,8 @@ def _plan_node(
         coalesce,
         Optional[ArcPointer[Int]](),
         Optional[AnyValue](),
+        window_keys.copy(),
+        source_failure,
     )
 
 
@@ -2586,6 +2593,9 @@ struct LazyFrame(Copyable):
             and _pipeline_steps(operations, indexes)
             and not _counts_distinct(expressions)
             and (len(joins) == 0 or len(keys) == 0 or not ordered)
+            # Ungrouped states merge in worker order, not morsel order.
+            # Positional reductions therefore retain ordered streaming.
+            and (len(keys) > 0 or not _order_sensitive(expressions))
         )
         # A grouped sink either inserts rows into per-worker group tables
         # (few groups among 4,096 sampled key rows, fixed-width keys) or
@@ -3456,6 +3466,8 @@ struct LazyFrame(Copyable):
         ref node = self._nodes[index]
         if node.kind == SCAN_FRAME:
             if not empty:
+                if node.source_failure:
+                    raise Error(node.source_failure)
                 node._record_execution()
             var frame = self._frames[node.offset].copy()
             if len(node.names) > 0:
@@ -3825,8 +3837,15 @@ struct LazyFrame(Copyable):
         text += "|" + ("o" if node.maintain_order else "u")
         text += "|" + String(node.how) + "|" + _field_list(node.right_keys)
         text += "|" + ("c" if node.coalesce else "n")
+        if node.source_failure:
+            text += "|source-error" + _field(node.source_failure)
         if node.asof_tolerance:
             text += "|" + String(node.asof_tolerance.value())
+        for key in node.window_keys:
+            text += "|wk" + _field(key.name) + _field(key.dtype.name())
+            text += "s" if key.string_hash else "i"
+            for value in key.values[]:
+                text += ":" + String(value)
         for e in node.exprs:
             text += "|" + _expr_signature(e)
         # Children by a hash of their text, so a signature stays short

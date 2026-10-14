@@ -1,4 +1,6 @@
 """Zero columns preserve row cardinality through native materialization."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import (
     DataFrame,
@@ -12,7 +14,7 @@ from dataframe import (
     by_dtype,
     exclude,
 )
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.selectors import lower_selectors
@@ -51,7 +53,7 @@ def test_empty_outputs_capability_metadata_and_distinct_cpu_selection_shapes() r
         _ = lower_rows(empty, caps)
     var plan = lower_rows(empty, _capabilities())
     assert_equal(len(plan.outputs), 0)
-    _ = _Descriptors(plan)
+    _ = Program(plan)
     assert_equal(empty.collect(engine="cpu").height(), 5)
     var unmatched = frame.lazy().select(by_dtype(["uint8"]))
     assert_equal(unmatched.collect(engine="cpu").height(), 1)
@@ -124,7 +126,7 @@ def test_native_metal_empty_results_rows_filters_slices_groups_and_joins() raise
     assert_equal(profiled[0].height(), query.collect(engine="cpu").height())
     var estimate = runtime.estimate_auto(query)
     assert_true(estimate.peak_bytes > 0)
-    assert_true(";metal-empty-outputs-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     assert_true(";empty-outputs-v1" in estimate.family)
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))

@@ -1,4 +1,6 @@
 """Decimal-to-Float64 casts round the integer first, then divide by scale."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_equal, assert_true, assert_raises
@@ -7,8 +9,6 @@ from dataframe.decimal import pow10
 from dataframe.dtype import DataType
 from dataframe.metal import (
     MetalRuntime,
-    _capabilities,
-    _Descriptors,
 )
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
@@ -79,7 +79,7 @@ def test_decimal_cast_capability_scale_descriptors_and_rejections() raises:
     for scale in range(39):
         var query = fixture(3, scale).lazy().select_exprs(cast_columns())
         var plan = lower_rows(query, _capabilities())
-        var descriptors = _Descriptors(plan)
+        var descriptors = Program(plan)
         var casts = 0
         for i in range(0, len(descriptors.code), 4):
             if descriptors.code[i] == 213:
@@ -87,9 +87,12 @@ def test_decimal_cast_capability_scale_descriptors_and_rejections() raises:
                     scale, 18 if casts == 1 else 9
                 )
                 assert_equal(descriptors.code[i + 2], Int64(-1))
-                assert_equal(descriptors.code[i + 3], Int64(actual_scale))
                 assert_equal(
-                    bitcast[DType.uint64](descriptors.literals[i // 4]),
+                    descriptors.code[i + 3],
+                    Int64(actual_scale) | (plan.code[i + 3] << 18),
+                )
+                assert_equal(
+                    descriptors.literals[i // 4],
                     bitcast[DType.uint64](Float64(pow10(actual_scale))),
                 )
                 assert_equal(descriptors.node_types[i // 4], Int64(11))
@@ -247,7 +250,7 @@ def test_native_metal_decimal_cast_profile_budget_and_recovery() raises:
     var runtime = MetalRuntime()
     var query = fixture(4097, 38).lazy().select_exprs(cast_columns())
     var estimate = runtime.estimate_auto(query)
-    assert_true("metal-decimal-float-casts-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var measured = query.profile(accelerator=runtime)
     same(measured[0], query.collect(engine="cpu"))
     var tiny = MetalRuntime(memory_limit_bytes=1)

@@ -49,6 +49,8 @@ struct RowCapabilities(Copyable):
     var int64_arithmetic: Bool
     var extra_reductions: Bool
     var grouped: Bool
+    # Carry original OVER eligibility for proved CPU contiguous-run paths.
+    var contiguous_window_reductions: Bool
     var order: Bool
     var row_extras: Bool
     var fixed_logical: Bool
@@ -58,7 +60,13 @@ struct RowCapabilities(Copyable):
     var extended_integers: Bool
     var slices: Bool
     var scalar_regions: Bool
+    var asof_joins: Bool
     var temporal_fields: Bool
+    var temporal_binary_arithmetic: Bool
+    var temporal_physical_casts: Bool
+    var utc_temporal_conversions: Bool
+    var iana_zone_temporal_fields: Bool
+    var fixed_zone_temporal_fields: Bool
     var calendar_offsets: Bool
     var calendar_truncation: Bool
     var temporal_offsets: Bool
@@ -90,6 +98,8 @@ struct RowCapabilities(Copyable):
     var shift_fill_windows: Bool
     var cumulative_windows: Bool
     var reuse_column_slots: Bool
+    # Carry per-value checked errors through selections and observe consumers.
+    var deferred_integer_errors: Bool
     var proven_integer_operations: Bool
     var max_nodes: Int
     var max_slots: Int
@@ -120,10 +130,17 @@ struct RowCapabilities(Copyable):
         row_extras: Bool = False,
         order: Bool = False,
         grouped: Bool = False,
+        contiguous_window_reductions: Bool = False,
         extra_reductions: Bool = False,
         slices: Bool = False,
         scalar_regions: Bool = False,
+        asof_joins: Bool = False,
         temporal_fields: Bool = False,
+        temporal_binary_arithmetic: Bool = False,
+        temporal_physical_casts: Bool = False,
+        utc_temporal_conversions: Bool = False,
+        iana_zone_temporal_fields: Bool = False,
+        fixed_zone_temporal_fields: Bool = False,
         calendar_offsets: Bool = False,
         calendar_truncation: Bool = False,
         temporal_offsets: Bool = False,
@@ -160,6 +177,7 @@ struct RowCapabilities(Copyable):
         max_join_columns: Int = 64,
         reuse_column_slots: Bool = False,
         proven_integer_operations: Bool = False,
+        deferred_integer_errors: Bool = False,
     ):
         self.backend = backend
         self.float64 = float64
@@ -182,10 +200,17 @@ struct RowCapabilities(Copyable):
         self.row_extras = row_extras
         self.order = order
         self.grouped = grouped
+        self.contiguous_window_reductions = contiguous_window_reductions
         self.extra_reductions = extra_reductions
         self.slices = slices
         self.scalar_regions = scalar_regions
+        self.asof_joins = asof_joins
         self.temporal_fields = temporal_fields
+        self.temporal_binary_arithmetic = temporal_binary_arithmetic
+        self.temporal_physical_casts = temporal_physical_casts
+        self.utc_temporal_conversions = utc_temporal_conversions
+        self.iana_zone_temporal_fields = iana_zone_temporal_fields
+        self.fixed_zone_temporal_fields = fixed_zone_temporal_fields
         self.calendar_offsets = calendar_offsets
         self.calendar_truncation = calendar_truncation
         self.temporal_offsets = temporal_offsets
@@ -218,6 +243,7 @@ struct RowCapabilities(Copyable):
         self.decimal_multiplicative = decimal_multiplicative
         self.reuse_column_slots = reuse_column_slots
         self.proven_integer_operations = proven_integer_operations
+        self.deferred_integer_errors = deferred_integer_errors
         self.max_nodes = max_nodes
         self.max_slots = max_slots
         self.max_steps = max_steps
@@ -327,6 +353,8 @@ struct RowCapabilities(Copyable):
             and op != NULL_COUNT
             and op != MIN
             and op != MAX
+            and op != ARG_MIN
+            and op != ARG_MAX
             and op != FIRST
             and op != LAST
             and not (self.decimal128_reductions and (op == SUM or op == MEAN))
