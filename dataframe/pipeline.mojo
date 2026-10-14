@@ -15,7 +15,7 @@ slices a chunk into dictionary vectors the same way.
 from std.atomic import Atomic
 from std.bit import count_trailing_zeros
 from std.os import getenv
-from std.ffi import external_call
+from std.ffi import _get_global, external_call
 from std.memory import ArcPointer, Pointer, bitcast
 from std.sys import size_of
 from std.time import perf_counter_ns
@@ -371,16 +371,47 @@ def _column_bounds[
 comptime _ZONE_ROWS = 2048
 
 
+def _zones_lock_init() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    var address = external_call["calloc", Int](1, size_of[Atomic[Int64]]())
+    return Pointer[NoneType, MutUntrackedOrigin](unsafe_from_address=address)
+
+
+def _zones_lock_keep(address: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    # Never freed: another operation's pipeline may still take it while
+    # the process exits.
+    pass
+
+
+def _zones_lock() -> ref[MutAnyOrigin] Atomic[Int64]:
+    """The process-wide lock zone maps are filled under."""
+    var address = _get_global[
+        "DATAFRAME_ZONES_LOCK", _zones_lock_init, _zones_lock_keep
+    ]()
+    return Pointer[Atomic[Int64], MutAnyOrigin](
+        unsafe_from_address=Int(address.value())
+    )[]
+
+
 def _ensure_zones(series: Series):
     """Fill the zone map (`Column._zones`) of each buffer under an
     integer column (see `_range_key`) that has none, once, before any
-    worker reads it."""
+    worker reads it. Pipelines run at once (a union's inputs) may scan one
+    table: a buffer is checked and filled under one process-wide lock, so
+    it is written once, before any pipeline's workers read it, and never
+    again while they do."""
+    ref lock = _zones_lock()
+    while True:
+        var free = Int64(0)
+        if lock.compare_exchange(free, Int64(1)):
+            break
+        _ = external_call["sched_yield", Int32]()
     var physical = series.dtype().physical()
     for part in series.chunks():
         if physical == DataType.INT64:
             _fill_zones(part._data[Column[Int64]])
         elif physical == DataType.INT32:
             _fill_zones(part._data[Column[Int32]])
+    lock.store(0)
 
 
 def _fill_zones[D: DType](column: Column[Scalar[D]]):
