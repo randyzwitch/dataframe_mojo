@@ -1,9 +1,11 @@
 """Native binary64 order statistics preserve quantile interpolation semantics."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, LazyFrame, col, lit
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_QUANTILE_LINEAR
 from tests.execution_modes.test_backend_metal import require_metal
@@ -76,7 +78,7 @@ def test_quantile_capabilities_private_casts_full_probability_metadata_and_bindi
                 bitcast[DType.float64](Int64(plan.outputs[i].min_count)),
                 Float64(0.5) if i == 0 else q,
             )
-        _ = _Descriptors(plan)
+        _ = Program(plan)
         assert_true(
             "unsupported" not in MetalRuntime(device_id=999999).describe(query)
         )
@@ -232,7 +234,7 @@ def test_native_metal_quantiles_profiles_cost_budget_and_runtime_reuse() raises:
     var query = frame.lazy().select_exprs(expressions(0.37))
     var estimate = runtime.estimate_auto(query)
     assert_true("quantiles-v1" in estimate.family)
-    assert_true("metal-quantiles-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var profiled = query.profile(accelerator=runtime)
     near(profiled[0], query.collect(engine="cpu", streaming=False))
     assert_true(profiled[1].height() > 0)

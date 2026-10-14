@@ -1,9 +1,11 @@
 """Third and fourth central moments through native Metal reductions."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import sqrt
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, LazyFrame, col, lit
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.support.lifecycle_jobs import WorkerSetting
@@ -56,7 +58,7 @@ def test_higher_moments_capability_flags_private_casts_and_precision() raises:
         assert_equal(output.min_count & 0x7FFFFFFF, flags[i])
         assert_equal(output.min_count >> 47, 8)
         assert_equal((output.min_count >> 31) & 65535, 0)
-    _ = _Descriptors(plan)
+    _ = Program(plan)
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
@@ -211,7 +213,7 @@ def test_native_metal_higher_moments_workers_compositions_cost_budget_and_runtim
     )
     var estimate = runtime.estimate_auto(query)
     assert_true(";higher-moments-v1" in estimate.family)
-    assert_true(";metal-higher-moments-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     assert_true(estimate.peak_bytes > 0)
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))

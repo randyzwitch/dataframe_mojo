@@ -5,7 +5,9 @@ lexicographic string order. Providers retain this owner until final decoding;
 encoding and decoding are host staging work and belong in end-to-end costs.
 """
 from .metadata import schema_frame
+from .window_keys import WindowKey
 from std.collections import Dict
+from std.memory import ArcPointer
 from dataframe.categorical import _values_of, decode, recode
 from dataframe.dtype import CategoricalDictionary, DataType
 from dataframe.expr import (
@@ -42,6 +44,7 @@ from dataframe.join_type import JOIN_LEFT
 from dataframe.series import Series
 from dataframe.string_column import StringColumn
 from dataframe.str_kernels import string_op, concat_strings
+from dataframe.partition import _hash_bytes
 
 
 def dictionary_dtype(dtype: DataType) -> Bool:
@@ -92,12 +95,20 @@ struct DictionaryCodes(Movable):
                 if dictionary_dtype(column.dtype()):
                     total = checked_add(total, checked_mul(len(column), 4))
                     total = checked_add(total, checked_add(len(column), 7) // 8)
+        # Each captured key retains one immutable lookup table throughout
+        # normalized DAG execution. Plan/task copies share that owner; row
+        # lowering and the device separately charge their flattened copies.
+        var lookup_bytes = checked_mul(len(self.dtype.dictionary()[]), 8)
+        for operation in query._nodes:
+            for key in operation.window_keys:
+                if dictionary_dtype(key.dtype):
+                    total = checked_add(total, lookup_bytes)
         return total
 
     def restoration_bytes(
         self, frame: DataFrame, schema: DataFrame
     ) raises -> Int:
-        # Native code outputs remain alive until restoration finishes. String
+        # Encoded outputs remain alive until restoration finishes. String
         # views own a copy of dictionary text; categorical recoding also holds
         # those views while building the original dictionary's result codes.
         var total = 0
@@ -120,10 +131,31 @@ struct DictionaryCodes(Movable):
     def code(self, text: String) raises -> UInt32:
         return self.lookup[text]
 
+    def partition_values(self, key: WindowKey) raises -> List[UInt64]:
+        """Map staged codes to CPU raw partition keys, without source rows.
+
+        Unused values from other input dictionaries have no representative
+        for this key. Their zero entries are never read by valid key rows.
+        """
+        var dictionary = self.dtype.dictionary()
+        var values = List[UInt64](length=len(dictionary[]), fill=0)
+        if key.string_hash:
+            for code in range(len(dictionary[])):
+                values[code] = _hash_bytes(dictionary[].get(code).as_bytes())
+        elif key.dtype.is_categorical():
+            var original = key.dtype.dictionary()
+            for code in range(len(original[])):
+                var staged = Int(self.code(String(original[].get(code))))
+                values[staged] = UInt64(code)
+        return values^
+
     def encode(self, column: Series) raises -> Series:
         if not dictionary_dtype(column.dtype()):
             return column.copy()
-        return recode(column, self.dtype)
+        var result = recode(column, self.dtype)
+        # Ordered codes are transport for this exact field, not a public cast.
+        result._field_metadata = column._field_metadata
+        return result^
 
     def restore(self, codes: Series, dtype: DataType) raises -> Series:
         if not dictionary_dtype(dtype):
@@ -480,6 +512,15 @@ def encode_query(
 ) raises -> LazyFrame:
     """Stage ordered UInt32 codes while retaining the original plan structure."""
     var encoded = query.copy()
+    # The captured dtype owns the original categorical dictionary, even
+    # when the source is a metadata-only resident table. Populate lookups
+    # before frame recoding erases its physical code provenance.
+    for o in range(len(encoded._nodes)):
+        ref operation = encoded._nodes[o]
+        for k in range(len(operation.window_keys)):
+            ref key = operation.window_keys[k]
+            if dictionary_dtype(key.dtype):
+                key.values = ArcPointer(dictionary.partition_values(key))
     # Reject operations that still require text before replacing text operands
     # with integer codes. Binding encoded text would otherwise report a bogus
     # dtype error instead of the provider's actual capability boundary.
@@ -502,6 +543,7 @@ def encode_query(
             var codes = dictionary.encode(column)
             if dictionary_dtype(column.dtype()):
                 codes = codes.with_dtype(DataType.UINT32)
+                codes._field_metadata = column._field_metadata
             columns.append(codes^)
         frame = DataFrame(columns^, height=frame.height())
     for o in range(len(encoded._nodes)):
@@ -541,7 +583,12 @@ def restore_frame(
 ) raises -> DataFrame:
     var columns = List[Series]()
     for i in range(len(frame._columns)):
-        columns.append(
-            dictionary.restore(frame._columns[i], schema._columns[i].dtype())
+        var column = dictionary.restore(
+            frame._columns[i], schema._columns[i].dtype()
         )
+        # The original CPU schema distinguishes a bare field/alias from a
+        # computed expression. Decoding transport codes must preserve that
+        # exact owner, and must not attach input metadata to computed values.
+        column._field_metadata = schema._columns[i]._field_metadata
+        columns.append(column^)
     return DataFrame(columns^, height=frame.height())

@@ -1,7 +1,9 @@
 """Partition aggregates and nested window scopes materialized on the GPU."""
 from .metadata import schema_frame
+from .window_keys import WindowKey
 from std.collections import Dict
 from dataframe.binding import bind, ROWS
+from dataframe.dtype import DataType
 from dataframe.expr import (
     Expr,
     Node,
@@ -193,6 +195,28 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                     names[name] = True
                     temporary.append(name)
                     var keys = split_names(node.text2)
+                    var window_keys = List[WindowKey]()
+                    for key in keys:
+                        for column in schema._columns:
+                            if column.name() != key:
+                                continue
+                            var dtype = column.dtype()
+                            var string_hash = (
+                                dtype == DataType.STRING or dtype._is_bytes()
+                            )
+                            if dtype.is_categorical():
+                                # CPU evaluate() prepares the whole bound
+                                # expression before any OVER state. A COL
+                                # read anywhere decodes this categorical;
+                                # key names in OVER.text2 alone do not.
+                                for original in bound.expr._nodes:
+                                    string_hash |= (
+                                        original.op == COL
+                                        and original.text == key
+                                    )
+                            window_keys.append(
+                                WindowKey(key, dtype, string_hash)
+                            )
                     if inner_bound.shape() == ROWS:
                         result._nodes.append(
                             _plan_node(
@@ -215,6 +239,11 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                                 producer,
                                 exprs=[inner.alias(name)],
                                 names=keys,
+                                # The rewritten graph has no OVER nodes;
+                                # retain the original nested eligibility.
+                                # Flag0 remains first/last representation.
+                                flags=[False, not dependent],
+                                window_keys=window_keys,
                                 maintain_order=True,
                                 text="metal_window_materialization",
                             )

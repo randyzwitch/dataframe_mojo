@@ -1,4 +1,6 @@
 """Fixed temporal offsets preserve checked storage addition and Time wrapping."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     DataFrame,
@@ -13,7 +15,7 @@ from dataframe import (
 )
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from tests.execution_modes.test_backend_metal import require_metal
 from tests.execution_modes.test_backend_metal_empty_inputs import check
 
@@ -42,7 +44,7 @@ def test_fixed_offset_capability_units_descriptors_and_observation_boundaries() 
     assert_equal(plan.code[4], Int64(142))
     assert_equal(plan.code[6], Int64(-2))
     assert_equal(plan.code[7], Int64(0))
-    _ = _Descriptors(plan)
+    _ = Program(plan)
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
@@ -63,10 +65,12 @@ def test_fixed_offset_capability_units_descriptors_and_observation_boundaries() 
             _capabilities(),
         )
     var aware = source(DataType.datetime("us", "UTC"), [0], [True])
+    var utc_query = aware.lazy().select(col("t").dt().offset_by("1h"))
+    var without_utc = _capabilities()
+    without_utc.utc_temporal_conversions = False
     with assert_raises(contains="time zone"):
-        _ = lower_rows(
-            aware.lazy().select(col("t").dt().offset_by("1h")), _capabilities()
-        )
+        _ = lower_rows(utc_query, without_utc)
+    _ = Program(lower_rows(utc_query, _capabilities()))
 
 
 def test_native_metal_fixed_offsets_all_temporal_units_nulls_negative_epochs_and_empty_rows() raises:
@@ -188,7 +192,7 @@ def test_native_metal_fixed_offset_profiles_cost_budget_and_reuse() raises:
     )
     var estimate = runtime.estimate_auto(query)
     assert_true(";fixed-offsets-v1" in estimate.family)
-    assert_true(";metal-fixed-offsets-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var profiled = query.profile(accelerator=runtime)
     assert_equal(profiled[0].height(), 3)
     assert_true(profiled[1].height() > 0)

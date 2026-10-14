@@ -1,11 +1,12 @@
 """Metal shape extensions retain strict preflight and exact row semantics."""
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_raises
 from std.memory import bitcast
 from dataframe.dtype import DataType
 from dataframe import DataFrame, Series, Column, col, lit, Expr
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.joins import lower_join_dag

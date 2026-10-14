@@ -1,4 +1,5 @@
 """GPU partition aggregates preserve null partitions, order and errors."""
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast, ArcPointer
 from tests.execution_modes.test_backend_metal import require_metal
 from dataframe.dtype import DataType
@@ -15,7 +16,7 @@ from dataframe import (
     Expr,
 )
 from dataframe.lazy import LazyFrame, SCAN_FRAME
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.windows import (
     has_partition_aggregates,
     lower_partition_aggregates,

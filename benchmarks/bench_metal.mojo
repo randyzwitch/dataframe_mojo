@@ -1,4 +1,4 @@
-"""Development measurements of native Metal mechanisms, not an external suite.
+"""Development measurements of direct Mojo GPU mechanisms, not an external suite.
 
 Run with scripts/bench_metal.py. Inputs and validation are outside timings;
 collections include allocation, staging, synchronization, and CPU results.
@@ -154,6 +154,85 @@ def timed(
     return (result^, elapsed)
 
 
+def report_profile(profile: DataFrame) raises:
+    """Keep region observations separate from complete-query counters."""
+    print("PROFILE_I", "profile_regions", profile.height())
+    var integers: List[String] = [
+        "upload_bytes",
+        "download_bytes",
+        "host_result_bytes",
+        "peak_requested_bytes",
+        "kernel_launches",
+        "synchronizations",
+    ]
+    for name in integers:
+        if name not in profile.columns():
+            continue
+        var values = profile.column(name).int64()
+        for row in range(profile.height()):
+            print(
+                "PROFILE_I",
+                "region_" + String(row) + "_" + name,
+                values._get(row),
+            )
+        var query_name = "query_" + name
+        var total = Int64(0)
+        var basis = String()
+        if query_name in profile.columns():
+            total = profile.column(query_name).int64()._get(0)
+            for row in range(profile.height()):
+                if profile.column(query_name).int64()._get(row) != total:
+                    raise Error("Inconsistent whole-query profile counter")
+            print("PROFILE_I", query_name, total)
+            basis = "query_counter"
+        elif profile.height() == 1:
+            total = values._get(0)
+            basis = "single_region"
+        elif name == "peak_requested_bytes":
+            raise Error("Missing whole-query peak for multi-region benchmark")
+        else:
+            for row in range(profile.height()):
+                total += values._get(row)
+            basis = "sum_region_deltas"
+        print("PROFILE_I", name, total)
+        print("PROFILE_S", name + "_basis", basis)
+    var floats: List[String] = [
+        "wall_ms",
+        "pipeline_compile_ms",
+        "staging_copy_ms",
+        "submit_wait_ms",
+        "result_copy_ms",
+        "initialization_ms",
+        "gpu_ms",
+    ]
+    for name in floats:
+        if name not in profile.columns():
+            continue
+        var values = profile.column(name).float64()
+        for row in range(profile.height()):
+            if values.is_valid(row):
+                print(
+                    "PROFILE_F",
+                    "region_" + String(row) + "_" + name,
+                    values._get(row),
+                )
+    if "query_wall_ms" in profile.columns():
+        print(
+            "PROFILE_F",
+            "query_wall_ms",
+            profile.item(0, "query_wall_ms").float64(),
+        )
+    var algorithms = String()
+    for row in range(profile.height()):
+        if profile.item(row, "runtime_implementation").string() != "mojo":
+            raise Error("Benchmark profile contains a non-Mojo region")
+        var algorithm = profile.item(row, "algorithm").string()
+        algorithms += (" -> " if row else "") + algorithm
+        print("PROFILE_S", "region_" + String(row) + "_algorithm", algorithm)
+    print("PROFILE_S", "runtime_implementation", "mojo")
+    print("PROFILE_S", "algorithm", algorithms)
+
+
 def main() raises:
     var n = Int(getenv("BENCH_ROWS", "1048576"))
     var reps = Int(getenv("BENCH_REPS", "7"))
@@ -208,35 +287,8 @@ def main() raises:
     var profile = query.profile(accelerator=runtime)
     if not profile[0].equals(expected):
         raise Error("Profiled collection differs from CPU reference")
-    var integers: List[String] = [
-        "upload_bytes",
-        "download_bytes",
-        "shared_buffer_bytes",
-        "host_result_bytes",
-        "peak_requested_bytes",
-        "kernel_launches",
-        "synchronizations",
-    ]
-    for name in integers:
-        print("PROFILE_I", name, profile[1].column(name).int64()._get(0))
-    var floats: List[String] = [
-        "wall_ms",
-        "pipeline_compile_ms",
-        "staging_copy_ms",
-        "submit_wait_ms",
-        "result_copy_ms",
-        "initialization_ms",
-    ]
-    for name in floats:
-        print("PROFILE_F", name, profile[1].column(name).float64()._get(0))
-    if profile[1].column("gpu_ms").float64().is_valid(0):
-        print(
-            "PROFILE_F", "gpu_ms", profile[1].column("gpu_ms").float64()._get(0)
-        )
-    print("BUILD_ID", profile[1].column("runtime_build_id").string()._get(0))
-    print(
-        "PROFILE_S",
-        "algorithm",
-        profile[1].column("algorithm").string()._get(0),
-    )
+    report_profile(profile[1])
+    from dataframe.accelerator.gpu.identity import runtime_build_id
+
+    print("BUILD_ID", runtime_build_id())
     print("VALIDATED", True)
