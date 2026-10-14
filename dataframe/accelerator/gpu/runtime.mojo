@@ -210,6 +210,7 @@ def capabilities() -> RowCapabilities:
         fixed_zone_duration_rolling=True,
         grouped=True,
         asof_joins=True,
+        primitive_list_explode=True,
         contiguous_window_reductions=True,
         int64_arithmetic=True,
         deferred_integer_errors=True,

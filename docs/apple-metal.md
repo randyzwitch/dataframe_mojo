@@ -60,6 +60,7 @@ includes the following operations and their valid compositions:
 | Composition | Selectors, scalar projections/broadcasts, aggregate expressions, computed join branches, post-join consumers and chained joins |
 | Text | Ordered dictionary transport, supported string operations/concatenation, categorical reconciliation and restoration |
 | Struct fields | Direct source Struct projection over fixed-width primitive children, parent/child validity and field metadata; terminal `as_struct` over primitive fields |
+| Lists | Direct source `len`/constant-index `get`, terminal primitive `implode`, source `explode` with resident primitive consumers |
 
 Float64 values retain their exact storage words. Arithmetic uses paired-word
 integer IEEE emulation because Apple GPUs lack native binary64 arithmetic.
@@ -193,6 +194,19 @@ GPU producers finish before trailing slices, including `head(0)`, observe the
 one-row List result. Intermediate List values, nested children and general
 checked reduction-state input compositions remain restricted.
 
+Source `explode` supports fixed-width primitive List children and ordinary
+primitive fields from an immutable scan. It stages descriptors and children
+once, preserves hidden physical child backing, and expands logical counts on
+the GPU. Null and empty parents each produce one null placeholder. Selected
+List columns must have equal logical counts, and complete count validation
+precedes downstream pruning such as `head(0)`. The expanded primitive table
+feeds row, sort, join and aggregate consumers without intermediate value export.
+Child Arrow metadata, Decimal128 high words and IEEE bit patterns survive.
+Chunk compaction uses private buffers and leaves caller caches unchanged;
+profiles and budgets include staging, controls and final typed materialization.
+Every retained nested field must be expanded. Computed/grouped List producers,
+nested children and unselected nested output fields need further integration.
+
 Scalar and grouped quantiles preserve CPU signed-zero representatives, including
 quickselect fallback permutations, and use the same separate rounding steps
 for linear interpolation. A shared device index plane adds four bytes per input
@@ -237,12 +251,12 @@ are not deployable calibration. See [benchmark rules](benchmarks.md) and
 ## Remaining CPU coverage
 
 Migrating the existing Metal implementation does not establish complete CPU
-query parity. Grouped mode/value counts, implode,
-IANA-zone duration windows, row-valued
-text parsing/formatting, remaining timezone operations, nested list/struct
-operations, broader source Struct consumers and explode/unnest remain outside
-this accelerator subset. Partitioned CUT/QCUT, broader dynamic text consumers
-and Binary/Geometry operations remain pending. Some checked-expression/window compositions also
+query parity. Grouped mode/value counts and grouped/nested implode,
+IANA-zone duration windows, row-valued text parsing/formatting, remaining timezone
+operations, nested List/Struct operations, broader source Struct consumers,
+computed/grouped List expansion and unnest remain outside this accelerator
+subset. Partitioned CUT/QCUT, broader dynamic text consumers and Binary/Geometry
+operations remain pending. Some checked-expression/window compositions also
 reject.
 These are implementation gaps, not demonstrated limitations of Mojo.
 

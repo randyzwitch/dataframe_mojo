@@ -8,6 +8,7 @@ from .metadata import prune_projections, schema_frame
 from .qcuts import is_qcut_marker, controls as qcut_controls
 from .capabilities import RowCapabilities
 from .rows import lower_rows
+from .explodes import schema as explode_schema
 from dataframe.dtype import DataType
 from dataframe.frame import DataFrame
 from dataframe.lazy import (
@@ -22,6 +23,7 @@ from dataframe.lazy import (
     AGG,
     JOIN,
     ASOF,
+    EXPLODE,
 )
 from dataframe.series import Series
 from dataframe.expr import is_reduction
@@ -29,6 +31,8 @@ from dataframe.expr import is_reduction
 comptime DAG_ROWS = 0
 comptime DAG_JOIN = 1
 comptime DAG_ASOF = 2
+comptime DAG_SOURCE_FIELDS = 3
+comptime DAG_EXPLODE = 4
 
 
 def _scalar_reduction(query: LazyFrame, index: Int) -> Bool:
@@ -118,10 +122,15 @@ def _validate_sources(query: LazyFrame, capabilities: RowCapabilities) raises:
             and node.kind != DROP
             and node.kind != SORT
             and node.kind != AGG
+            and node.kind != EXPLODE
         ):
             capabilities.reject(
                 "plan",
                 "join regions require in-memory scans and supported row steps",
+            )
+        if node.kind == EXPLODE and not capabilities.primitive_list_explode:
+            capabilities.reject(
+                "explode", "primitive List expansion is unavailable"
             )
         if node.kind == SLICE and node.length < -1:
             raise Error("Slice length must be nonnegative")
@@ -395,9 +404,90 @@ def _asof_task(
 
 def _cached_rows(tasks: List[DagTask], root: Int) -> Int:
     for i in range(len(tasks)):
-        if tasks[i].kind == DAG_ROWS and tasks[i].root == root:
+        if (
+            tasks[i].kind == DAG_ROWS or tasks[i].kind == DAG_EXPLODE
+        ) and tasks[i].root == root:
             return i
     return -1
+
+
+def _explode_task(
+    query: LazyFrame,
+    root: Int,
+    capabilities: RowCapabilities,
+    mut tasks: List[DagTask],
+) raises -> Int:
+    ref operation = query._nodes[root]
+    ref scan = query._nodes[operation.left]
+    if scan.kind != SCAN_FRAME:
+        capabilities.reject(
+            "explode",
+            "initial scoped List producer requires a direct in-memory source",
+        )
+    if scan.code_domain or len(scan.text_fields):
+        capabilities.reject(
+            "explode",
+            "private encoded source domains are not primitive List sources",
+        )
+    var source = query._frames[scan.offset].copy()
+    if len(scan.names):
+        source = source.select(scan.names)
+    var schema = explode_schema(source, operation.names, capabilities)
+    var source_id = -1
+    for index in range(len(tasks)):
+        if (
+            tasks[index].kind == DAG_SOURCE_FIELDS
+            and tasks[index].root == operation.left
+        ):
+            source_id = index
+            break
+    if source_id < 0:
+        var input = LazyFrame(source)
+        input._nodes[0] = scan.copy()
+        input._nodes[0].offset = 0
+        input._nodes[0].names = List[String]()
+        source_id = len(tasks)
+        tasks.append(
+            DagTask(
+                DAG_SOURCE_FIELDS,
+                operation.left,
+                input^,
+                -1,
+                -1,
+                source.clear(),
+                True,
+                -1,
+                -1,
+                List[Int64](),
+                List[JoinField](),
+                False,
+            )
+        )
+    var metadata = LazyFrame(source.clear())
+    var marker = operation.copy()
+    marker.left = 0
+    marker.right = -1
+    metadata._nodes.append(marker^)
+    var id = len(tasks)
+    # Expansion observes the complete producer and all logical counts before
+    # any later projection, filter or head can suppress a cardinality failure.
+    tasks.append(
+        DagTask(
+            DAG_EXPLODE,
+            root,
+            metadata^,
+            source_id,
+            -1,
+            schema^,
+            True,
+            -1,
+            -1,
+            List[Int64](),
+            List[JoinField](),
+            False,
+        )
+    )
+    return id
 
 
 def _task(
@@ -418,6 +508,8 @@ def _task(
         if terminal:
             tasks[cached].terminal = True
         return cached
+    if query._nodes[root].kind == EXPLODE:
+        return _explode_task(query, root, capabilities, tasks)
     if query._nodes[root].kind == JOIN:
         return _join_task(query, root, boundary, -1, capabilities, tasks)
     if query._nodes[root].kind == ASOF:
@@ -448,6 +540,7 @@ def _task(
         and _cached_rows(tasks, cursor) < 0
         and query._nodes[cursor].kind != JOIN
         and query._nodes[cursor].kind != ASOF
+        and query._nodes[cursor].kind != EXPLODE
         and (cursor == root or query._nodes[cursor].kind != SLICE)
         and (
             cursor == root
@@ -478,6 +571,7 @@ def _task(
     elif (
         query._nodes[cursor].kind == JOIN
         or query._nodes[cursor].kind == ASOF
+        or query._nodes[cursor].kind == EXPLODE
         or query._nodes[cursor].kind == SLICE
         or (
             cursor != root

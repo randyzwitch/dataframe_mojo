@@ -86,9 +86,8 @@ def test_source_list_get_primitive_metadata_seed_empty_batched_identity_and_work
     assert_equal(running.item(3, "sum").int64(), Int64(20))
 
 
-def test_source_list_null_parent_nonempty_span_cpu_explode_current_contract() raises:
-    # Literal CPU witness only: documents actual current storage/operator
-    # behavior. It does not enable or repair any GPU EXPLODE implementation.
+def test_source_list_null_parent_nonempty_span_cpu_explode_logical_contract() raises:
+    # Null parent payload stays hidden even when its physical span is nonempty.
     var offsets: List[Int64] = [0, 2, 2, 3]
     var bits: List[UInt8] = [6]
     var source = DataFrame(
@@ -120,15 +119,14 @@ def test_source_list_null_parent_nonempty_span_cpu_explode_current_contract() ra
             == 1 else chunk_layout(source)
         )
         var exploded = frame.explode("xs")
-        assert_equal(exploded.height(), 4)
+        assert_equal(exploded.height(), 3)
         assert_equal(
             exploded.column("id").int64().to_list(),
-            [Int64(0), Int64(0), Int64(1), Int64(2)],
+            [Int64(0), Int64(1), Int64(2)],
         )
-        assert_equal(exploded.item(0, "xs").int64(), Int64(7))
-        assert_equal(exploded.item(1, "xs").int64(), Int64(8))
-        assert_true(exploded.item(2, "xs").is_null())
-        assert_equal(exploded.item(3, "xs").int64(), Int64(9))
+        assert_true(exploded.item(0, "xs").is_null())
+        assert_true(exploded.item(1, "xs").is_null())
+        assert_equal(exploded.item(2, "xs").int64(), Int64(9))
         for optimize in [False, True]:
             for streaming in [False, True]:
                 for batch in [1, 64]:
