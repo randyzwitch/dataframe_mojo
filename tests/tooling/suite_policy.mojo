@@ -2593,6 +2593,7 @@ def production_policy() -> SuitePolicy:
                 "tests/kernel_equivalence/test_parallel_order_selection.mojo",
                 "tests/kernel_equivalence/test_window_contiguous.mojo",
                 "tests/kernel_equivalence/test_window_partition_table.mojo",
+                "tests/kernel_equivalence/test_window_running_minmax.mojo",
                 "tests/public_contracts/test_extended_windows.mojo",
                 "tests/public_contracts/test_order_windows.mojo",
                 "tests/public_contracts/test_window_precision.mojo",
@@ -2675,6 +2676,8 @@ def production_policy() -> SuitePolicy:
             "table.join",
             [
                 "tests/kernel_equivalence/test_join_routes.mojo",
+                "tests/kernel_equivalence/test_morsel_ranges.mojo",
+                "tests/kernel_equivalence/test_full_join_direct.mojo",
                 "tests/kernel_equivalence/test_pipeline_join_selection.mojo",
                 "tests/kernel_equivalence/test_pipeline_key_ranges.mojo",
                 "tests/kernel_equivalence/test_pipeline_projection_selection.mojo",
@@ -2704,6 +2707,7 @@ def production_policy() -> SuitePolicy:
             "types.cast",
             [
                 "tests/public_contracts/test_cast_boundaries.mojo",
+                "tests/kernel_equivalence/test_decimal_fast_paths.mojo",
                 "tests/public_contracts/test_cast_sources.mojo",
                 "tests/public_contracts/test_casts.mojo",
                 "tests/public_contracts/test_temporal.mojo",

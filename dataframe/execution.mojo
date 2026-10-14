@@ -2555,19 +2555,37 @@ def _over[
         if done:
             trace_path("window.contiguous")
             return done.take()
-    var partitions = _partition_ids(keys, height)
+    # Partition ids from the frame's layout of these keys when one was
+    # made for another expression; computed otherwise.
+    var ids = List[Int]()
+    var count = 0
+    if layouts != 0:
+        var cache = Pointer[WindowLayouts, MutAnyOrigin](
+            unsafe_from_address=layouts
+        )
+        var at = cache[].find(node.text2)
+        if at >= 0:
+            ids = cache[].layouts[at].ids.copy()
+            count = cache[].layouts[at].count
+    if count == 0 and height > 0:
+        var partitions = _partition_ids(keys, height)
+        count = partitions.count()
+        ids = partitions.ids.copy()
+    # A nested over() reads the same rows, so it shares the frame's
+    # layouts (the contiguous route's runs read slices, and pass none).
     var result = evaluate[width](
         inner,
         columns,
         height,
         batch_size=batch_size,
         grouped=True,
-        groups=partitions.ids,
-        group_count=partitions.count(),
+        groups=ids,
+        group_count=count,
+        layouts=layouts,
     )
     if inner.shape() == ROWS:
         return result^
-    return result.take(partitions.ids)
+    return result.take(ids)
 
 
 # Eight lanes amortize expression-step dispatch across two AVX2 vectors and
@@ -2776,7 +2794,7 @@ def evaluate[
                 node_index,
                 height,
                 batch_size,
-                layouts if not grouped else 0,
+                layouts,
             )
     var size = height if bound.shape() == ROWS else (
         group_count if grouped else 1

@@ -4,7 +4,7 @@ Most operations choose, for every output row, a source row to gather (or
 none). Ordering uses the same dense sort ranks as `sort`, so NaN sorts above
 every number and ties keep the earlier row.
 """
-from .column import Column
+from .column import Column, _copy_validity
 from .dtype import DataType, NUMERIC_DTYPES
 from .expr import (
     split_names,
@@ -339,9 +339,26 @@ def _running(
             written[unsafe_offset=i] = counts[unsafe_offset=g]
         return Series("", Column[Int64](out^))
     if input._data.isa[Column[Int64]]():
-        return _running_values[DType.int64](
+        var result = _running_values[DType.int64](
             op, input, input._data[Column[Int64]], ids, groups, reverse
         )
+        if input.dtype().is_decimal():
+            # decimal64: CUM_SUM went to `_decimal_cum_sum` above.
+            return result.with_dtype(input.dtype())
+        return result^
+    if op == CUM_MIN or op == CUM_MAX:
+        # A running min or max is one of the input's own values, so it
+        # keeps the input's type: Int32 storage (dates, decimal32) and
+        # Int128 (decimal128) compare as stored, a decimal's values all
+        # sharing its scale.
+        if input._data.isa[Column[Int32]]():
+            return _running_values[DType.int32](
+                op, input, input._data[Column[Int32]], ids, groups, reverse
+            ).with_dtype(input.dtype())
+        if input._data.isa[Column[Int128]]():
+            return _running_values[DType.int128](
+                op, input, input._data[Column[Int128]], ids, groups, reverse
+            ).with_dtype(input.dtype())
     if input._data.isa[Column[Float64]]():
         ref column = input._data[Column[Float64]]
         if op != CUM_SUM:
@@ -409,7 +426,13 @@ def _running_values[
         running[unsafe_offset=g] = current
         written[unsafe_offset=i] = current
     if nulls:
-        return Series("", Column[Scalar[D]](out^, validity(input)))
+        return Series(
+            "",
+            Column[Scalar[D]](
+                values=out^,
+                bits=_copy_validity(column._bits[], column._offset, n),
+            ),
+        )
     return Series("", Column[Scalar[D]](out^))
 
 
