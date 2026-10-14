@@ -356,7 +356,9 @@ def test_native_provider_configuration_and_unsupported_types_reject_before_drive
     _ = MetalRuntime(memory_limit_bytes=-1)
     var runtime = MetalRuntime()
     var frame = DataFrame([Series("x", Column[Float64]([1.25, 2.5]))])
-    var unsupported = frame.lazy().select(col("x").implode().alias("x"))
+    var unsupported = frame.lazy().select(
+        col("x").implode().list().len().alias("x")
+    )
     var message = String()
     try:
         _ = unsupported.collect(accelerator=runtime)

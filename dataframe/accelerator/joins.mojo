@@ -407,6 +407,7 @@ def _task(
         terminal
         or query._nodes[root].text == "metal_window_materialization"
         or query._nodes[root].text == "metal_distribution_materialization"
+        or query._nodes[root].text == "metal_implode_materialization"
     )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
@@ -450,6 +451,7 @@ def _task(
                 query._nodes[cursor].text != "metal_window_materialization"
                 and query._nodes[cursor].text
                 != "metal_distribution_materialization"
+                and query._nodes[cursor].text != "metal_implode_materialization"
             )
         )
         and (
@@ -479,6 +481,7 @@ def _task(
                 query._nodes[cursor].text == "metal_window_materialization"
                 or query._nodes[cursor].text
                 == "metal_distribution_materialization"
+                or query._nodes[cursor].text == "metal_implode_materialization"
             )
         )
         or (

@@ -153,7 +153,10 @@ Numeric CUT supports literal edges, custom or default labels, nullable operands
 and terminal breakpoint Struct outputs. Operand errors precede edge validation.
 Scalar and reduction siblings retain CPU evaluation order, including empty
 inputs; a private one-row interpreter path selects the first scalar expression
-fault. General terminal row error ordering remains a separate coverage gap.
+fault. Eligible numeric, Boolean and temporal projections directly from an
+original in-memory scan select faults in CPU projection, 8192-row batch and
+AST occurrence order. Normalized sources,
+state producers and streaming regions need separate ordering proofs.
 QCUT and partitioned CUT remain restricted.
 
 Errors travel with values through conditionals and row movement. Selected
@@ -162,6 +165,19 @@ branches remain unobserved. Intermediate region boundaries observe public
 errors without downloading values. Some checked expressions and reductions
 still require a terminal boundary when metadata cannot prove safe evaluation
 under downstream pruning. Rejection is an explicit capability restriction.
+
+Direct source List `len` and constant-index `get` support primitive row outputs.
+The backend stages each used child once, consumes offsets and parent validity
+on the GPU, and retains primitive child metadata for direct `get` aliases.
+Null parents and out-of-bounds indices mask child reads. Terminal `implode` also supports primitive row operands, preserving source
+order, nulls and child metadata. Its GPU producers finish before trailing
+slices, including `head(0)`, observe the one-row List result. Intermediate List
+values and nested children remain restricted.
+
+Scalar and grouped quantiles preserve CPU signed-zero representatives, including
+quickselect fallback permutations, and use the same separate rounding steps
+for linear interpolation. A shared device index plane adds four bytes per input
+row; correction launches retain the existing synchronization and export boundaries.
 
 Supported bounds are 128 local expression nodes, 128 device steps and 256
 logical slots/source/output columns per row region. Joins support 256 combined

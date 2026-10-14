@@ -26,6 +26,7 @@ from dataframe.expr import (
     null,
 )
 from dataframe.binding import bind
+from dataframe.identity_metadata import identity_column_source
 from dataframe.lazy import SCAN_FRAME, SELECT
 from .memory import checked_add, checked_mul
 from .selectors import _live_nodes
@@ -243,9 +244,12 @@ def projection(
             var source = bound.expr._nodes[field_root.left].text
             var item = field_mapping(layout, source, field_root.text)
             prototypes.append(item.prototype.renamed(expression._name))
-        elif len(expression._nodes) == 1 and root.op == COL:
+        elif identity_column_source(bound, len(bound.expr._nodes) - 1) >= 0:
+            var source = identity_column_source(
+                bound, len(bound.expr._nodes) - 1
+            )
             prototypes.append(
-                layout.source.column(root.text)
+                layout.source._columns[source]
                 .slice(0, 0)
                 .renamed(expression._name)
             )

@@ -97,3 +97,50 @@ def observe_scalar_inputs(
             source = UInt32(column)
     result[unsafe_offset=0] = failure
     result[unsafe_offset=1] = source
+
+
+def observe_partials(
+    errors: Pointer[UInt32, ImmutAnyOrigin],
+    partials: Pointer[UInt32, MutAnyOrigin],
+    target: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    groups: UInt32,
+    batch_rows: UInt32,
+):
+    """At most 1024 independent slices bound the serial scan per GPU lane."""
+    var group = global_idx.x
+    if group >= Int(groups):
+        return
+    var width = (Int(rows) + Int(groups) - 1) // Int(groups)
+    var begin = group * width
+    var end = min(Int(rows), begin + width)
+    var winner = UInt32(0)
+    var winner_row = UInt32.MAX
+    for row in range(begin, end):
+        var error = errors[unsafe_offset=Int(target) * Int(stride) + row]
+        if earlier(error, UInt32(row), winner, winner_row, batch_rows):
+            winner = error
+            winner_row = UInt32(row)
+    partials[unsafe_offset=2 * group] = winner
+    partials[unsafe_offset=2 * group + 1] = winner_row
+
+
+def observe_finish(
+    partials: Pointer[UInt32, ImmutAnyOrigin],
+    result: Pointer[UInt32, MutAnyOrigin],
+    groups: UInt32,
+    batch_rows: UInt32,
+):
+    if global_idx.x != 0:
+        return
+    var winner = UInt32(0)
+    var winner_row = UInt32.MAX
+    for group in range(Int(groups)):
+        var error = partials[unsafe_offset=2 * group]
+        var row = partials[unsafe_offset=2 * group + 1]
+        if earlier(error, row, winner, winner_row, batch_rows):
+            winner = error
+            winner_row = row
+    result[unsafe_offset=0] = winner
+    result[unsafe_offset=1] = winner_row

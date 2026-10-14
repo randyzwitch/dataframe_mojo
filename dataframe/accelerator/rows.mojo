@@ -5,7 +5,7 @@ are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
 from .metadata import prune_projections
-from . import temporal_expressions
+from . import temporal_expressions, ordered_rows
 from .gpu.temporal_descriptors import (
     ROW_TEMPORAL_BINARY,
     ROW_TEMPORAL_CAST,
@@ -20,6 +20,7 @@ from std.memory import ArcPointer, bitcast
 from std.math import pow, abs
 from dataframe.parallel import configured_workers
 from .capabilities import RowCapabilities
+from dataframe.identity_metadata import identity_column_source
 from dataframe.binding import bind, BoundExpr, ROWS, op_name
 from dataframe.dtype import DataType
 from dataframe.expr import (
@@ -234,6 +235,8 @@ struct RowPlan(Movable):
     var zone_words: List[UInt64]
     # Shared immutable ranks avoid a second host payload during Program prep.
     var ordered_ranks: ArcPointer[List[UInt32]]
+    # 0 legacy flags, 1 private CUT scalar, 2 direct terminal ROWS projections.
+    var ordered_mode: Int
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -262,11 +265,13 @@ def _empty(name: String, dtype: DataType) raises -> Series:
 def _projected_column(
     name: String, dtype: DataType, bound: BoundExpr, schema: List[Series]
 ) raises -> Series:
-    # CPU evaluate returns the source Series for a bare column, including
-    # aliases. Computed expressions create a new field without its metadata.
+    # CPU cast_series preserves source owners for exact primitive identity
+    # casts, including complete logical dtype metadata. Computations and
+    # dtype-changing casts create a fresh field.
     var result = _empty(name, dtype)
-    if len(bound.expr._nodes) == 1 and bound.expr._nodes[0].op == COL:
-        result._field_metadata = schema[bound.sources[0]]._field_metadata
+    var source = identity_column_source(bound, len(bound.expr._nodes) - 1)
+    if source >= 0 and schema[source].dtype() == dtype:
+        result._field_metadata = schema[source]._field_metadata
     return result^
 
 
@@ -922,6 +927,7 @@ def lower_rows(
     *,
     terminal_boundary: Bool = True,
     source_rows: Int = -1,
+    ordered_source: Bool = False,
 ) raises -> RowPlan:
     """Bind the entire resident region before GPU submission or source I/O.
 
@@ -1033,6 +1039,7 @@ def lower_rows(
     var reduced = False
     var reused_columns = False
     var ordered_ranks = List[UInt32]()
+    var ordered_mode = 0
     for k in range(len(chain) - 1, -1, -1):
         ref node = query._nodes[chain[k]]
         if reduced:
@@ -1163,6 +1170,29 @@ def lower_rows(
         var has_rows = node.kind == SELECT and len(node.exprs) == 0
         var has_aggregate = False
         var projection_names = List[String]()
+        var ordered_terminal = (
+            ordered_source
+            and len(chain) == 1
+            and len(query._nodes) == 2
+            and cursor == 0
+            and node.kind == SELECT
+            and terminal_boundary
+            and source_rows < 0
+            and limit < 0
+            and len(node.names2) == 0
+            and len(query._nodes[cursor].names2) == 0
+            and not query._nodes[cursor].source_failure
+            and len(node.exprs) > 0
+        )
+        var needs_order = False
+        if ordered_terminal:
+            for expression in node.exprs:
+                var original_bound = bind(expression, schema)
+                ordered_terminal &= ordered_rows.eligible(original_bound)
+                needs_order |= ordered_rows.needed(original_bound)
+        ordered_terminal &= needs_order
+        if ordered_terminal:
+            ordered_mode = 2
         for expr in node.exprs:
             if node.kind != FILTER:
                 if expr._name in projection_names:
@@ -1171,10 +1201,18 @@ def lower_rows(
                     )
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
+            var expression_ranks = List[UInt32]()
+            if ordered_terminal:
+                var cloned = ordered_rows.occurrences(
+                    bound, capabilities.max_nodes
+                )
+                bound = cloned[0].copy()
+                expression_ranks = cloned[1].copy()
             var ordered_scalar = (
                 len(node.names2) >= 2 and node.names2[1] == "ordered_scalar_v1"
             )
             if ordered_scalar:
+                ordered_mode = 1
                 if (
                     node.text != "metal_window_materialization"
                     or node.names2[0] != "metal_explicit_cut_operand"
@@ -1257,7 +1295,10 @@ def lower_rows(
                         "temporal",
                         "prototype requires a direct scan and terminal projections without head (SELECT only)",
                     )
-                temporal_expressions.validate(bound)
+                if ordered_terminal:
+                    temporal_expressions.validate_pairs(bound)
+                else:
+                    temporal_expressions.validate(bound)
             if capabilities.calendar_truncation:
                 for part in bound.expr._nodes:
                     if (
@@ -2306,7 +2347,11 @@ def lower_rows(
                 node_dtypes,
                 capabilities,
             )
-            if ordered_scalar:
+            if ordered_terminal:
+                while len(ordered_ranks) < start:
+                    ordered_ranks.append(UInt32(0))
+                ordered_ranks.extend(expression_ranks.copy())
+            if ordered_scalar or ordered_terminal:
                 # Decimal high literal words and membership tails are not
                 # evaluated nodes; their rank entries are never dereferenced.
                 while len(ordered_ranks) < len(literals):
@@ -2562,7 +2607,7 @@ def lower_rows(
         capabilities.reject(
             "plan", "resident region requires at least one output column"
         )
-    if len(ordered_ranks) and (
+    if ordered_mode == 1 and (
         len(steps) != 1
         or steps[0].filter
         or steps[0].order
@@ -2574,6 +2619,16 @@ def lower_rows(
         capabilities.reject(
             "ordered scalar", "requires exactly one row expression"
         )
+    if ordered_mode == 2:
+        if reduced or len(ordered_ranks) != len(literals):
+            capabilities.reject(
+                "ordered rows", "invalid occurrence descriptor geometry"
+            )
+        for step in steps:
+            if step.filter or step.order or step.grouped:
+                capabilities.reject(
+                    "ordered rows", "requires direct terminal row projections"
+                )
     var zone_names = List[String]()
     var zone_bases = List[Int64]()
     var zone_words = List[UInt64]()
@@ -2621,4 +2676,5 @@ def lower_rows(
         query._nodes[cursor].source_failure,
         zone_words^,
         ArcPointer(ordered_ranks^),
+        ordered_mode,
     )

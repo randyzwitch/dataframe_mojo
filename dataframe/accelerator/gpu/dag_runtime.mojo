@@ -50,6 +50,10 @@ def preflight(
                 task.query, terminal_boundary=task.terminal
             )
             if task.source >= 0:
+                if plan.ordered_mode == 2:
+                    raise Error(
+                        "Metal unsupported [ordered rows]: resident producer provenance is not proved"
+                    )
                 for node in range(len(plan.node_dtypes)):
                     var op = plan.code[4 * node]
                     if op == ROW_TEMPORAL_BINARY or op == ROW_TEMPORAL_CAST:

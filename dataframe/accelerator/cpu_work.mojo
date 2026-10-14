@@ -158,6 +158,15 @@ def cpu_features(query: LazyFrame) raises -> Tuple[List[Float64], String]:
             shift_fill_windows=True,
         ),
     )
+    return features_from_plan(plan)
+
+
+def features_from_plan(plan: RowPlan) raises -> Tuple[List[Float64], String]:
+    """Apply the same metadata formula to an already admitted numeric plan.
+
+    New provider-specific execution families remain separately calibrated.
+    This helper performs no expression evaluation or device setup.
+    """
     var features = List[Float64](length=COST_FEATURE_COUNT, fill=0)
     features[0] = 1
     var rows = Float64(plan.source.height())

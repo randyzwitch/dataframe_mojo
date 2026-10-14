@@ -217,6 +217,7 @@ def prepare_file_sources(
         staged._nodes[index] = _plan_node(
             SCAN_FRAME,
             offset=len(staged._frames) - 1,
+            names2=["metal_staged_file_source"],
             source_failure=failure,
         )
     return PreparedFileSources(

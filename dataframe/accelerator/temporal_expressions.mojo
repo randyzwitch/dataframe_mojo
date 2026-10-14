@@ -177,3 +177,27 @@ def validate(bound: BoundExpr) raises:
             raise Error(
                 "Metal unsupported [temporal]: mixed checked or unsupported expression"
             )
+
+
+def validate_pairs(bound: BoundExpr) raises:
+    """Canonical temporal dtype/unit admission for an ordered ROWS region.
+
+    The ordered interpreter now handles competing checked operands/predicates;
+    schema/type/unit legality remains the same descriptor validation as before.
+    """
+    if bound.shape() != ROWS:
+        raise Error(
+            "Metal unsupported [temporal]: ordered mode requires ROWS roots"
+        )
+    for index in range(len(bound.expr._nodes)):
+        ref node = bound.expr._nodes[index]
+        if binary(bound, index):
+            _ = binary_literal(
+                Int64(node.op),
+                bound.dtypes[node.left],
+                bound.dtypes[node.right],
+            )
+        elif cast(bound, index):
+            _ = cast_literal(
+                bound.dtypes[node.left], bound.dtypes[index], node.integer != 0
+            )

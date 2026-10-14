@@ -17,7 +17,7 @@ from dataframe.accelerator.cost import (
     CalibrationKey,
     select_auto as select_cost,
 )
-from dataframe.accelerator.cpu_work import cpu_features
+from dataframe.accelerator.cpu_work import cpu_features, features_from_plan
 from dataframe.accelerator.selectors import has_selectors, lower_selectors
 from dataframe.accelerator.scalars import (
     has_scalar_projections,
@@ -42,6 +42,9 @@ from dataframe.accelerator.distinct_counts import (
 )
 from dataframe.accelerator.sets import has_set_operations, lower_set_operations
 from dataframe.accelerator.dictionaries import has_dictionary_columns
+from dataframe.accelerator.opaque import has_opaque_columns
+from dataframe.accelerator.source_lists import has_source_lists
+from dataframe.accelerator.source_structs import has_source_structs
 from dataframe.accelerator.joins import has_join, has_scalar_consumers
 from .identity import hardware, key
 from .runtime import _preflight, _kind, estimate_resources
@@ -51,6 +54,12 @@ def _normalized(query: LazyFrame) raises -> LazyFrame:
     # Match MetalRuntime._run's shared, metadata-only normalization sequence.
     if has_selectors(query):
         return _normalized(lower_selectors(query))
+    if has_source_lists(query):
+        raise Error("Mojo source List staging has no analytical calibration")
+    if has_source_structs(query):
+        # Transport owns staging/restoration costs and a recursive execution
+        # boundary, even when row pruning later drops every Struct field.
+        raise Error("Mojo source Struct staging has no analytical calibration")
     if has_scalar_projections(query):
         return _normalized(lower_scalar_projections(query))
     if has_literal_text_parsing(query):
@@ -67,6 +76,10 @@ def _normalized(query: LazyFrame) raises -> LazyFrame:
         return _normalized(lower_distinct_counts(query))
     if has_set_operations(query):
         return _normalized(lower_set_operations(query))
+    if has_opaque_columns(query):
+        # Raw-byte domain construction is not numeric row work. In particular,
+        # pruning an unused byte column cannot grant direct ordered provenance.
+        raise Error("Mojo opaque staging has no analytical calibration")
     if has_dictionary_columns(query):
         # Ordered dictionary construction/restoration reads source values.
         # Its separately measured staging costs are not numeric row features.
@@ -98,8 +111,22 @@ def _signature(values: List[Int]) -> String:
 def estimate(query: LazyFrame) raises -> PlanEstimate:
     """Bound numeric row execution without reading values or opening a device."""
     var normalized = _normalized(query)
-    var plan = _preflight(normalized)
-    var cpu = cpu_features(normalized)
+    # Only an original query with no recursive structural normalization can
+    # use the direct terminal ROWS token mode; mirror MetalRuntime._run.
+    var original_entry = not (
+        has_selectors(query)
+        or has_scalar_projections(query)
+        or has_literal_text_parsing(query)
+        or has_partition_aggregates(query)
+        or has_spearman(query)
+        or has_aggregate_compositions(query)
+        or has_distinct_counts(query)
+        or has_set_operations(query)
+    )
+    var plan = _preflight(normalized, ordered_source=original_entry)
+    var cpu = features_from_plan(
+        plan
+    ) if plan.ordered_mode == 2 else cpu_features(normalized)
     var resources = estimate_resources(plan)
     var device = cpu[0].copy()
     device[8] = Float64(resources.kernel_launches)
@@ -147,6 +174,10 @@ def estimate(query: LazyFrame) raises -> PlanEstimate:
         + ";normalizers="
         + normalization
     )
+    if plan.ordered_mode:
+        # Existing unordered samples cannot match a ranked program's added
+        # sidecar/control costs. New curves require this distinct family.
+        family += ";ordered-errors-v1=" + String(plan.ordered_mode)
     return PlanEstimate(
         cpu[0].copy(), device^, resources.peak_bytes, family^, "accel"
     )

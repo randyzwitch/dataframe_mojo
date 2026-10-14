@@ -62,6 +62,108 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_identity_column_metadata.mojo::test_mojo_gpu_identity_column_metadata_logical_views_empty_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_identity_column_metadata.mojo::test_mojo_gpu_identity_column_metadata_struct_transport_and_fresh_results",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_implode.mojo::test_mojo_gpu_implode_primitive_literals_nulls_layouts_metadata_and_empty",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_implode.mojo::test_mojo_gpu_implode_prior_rows_trailing_slices_and_profiles_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_implode.mojo::test_mojo_gpu_implode_gpu_errors_masks_projection_order_head_and_observer",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_implode.mojo::test_mojo_gpu_implode_explicit_boundaries_and_metadata_only_description",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_source_lists.mojo::test_mojo_gpu_source_list_get_len_null_parents_layouts_metadata_and_computed_rows",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_source_lists.mojo::test_mojo_gpu_source_list_oob_empty_error_order_observer_and_exact_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_source_lists.mojo::test_mojo_gpu_source_list_metadata_only_admission_and_retained_boundaries",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_errors.mojo::test_mojo_gpu_ordered_rows_cross_row_batch_projection_and_workers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_errors.mojo::test_mojo_gpu_ordered_rows_masks_nulls_empty_and_mixed_numeric_faults",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_errors.mojo::test_mojo_gpu_ordered_rows_profile_budget_estimate_and_provenance",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_quantile_zero.mojo::test_mojo_gpu_quantile_zero_scalar_exact_ranks_and_reciprocal",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_quantile_zero.mojo::test_mojo_gpu_quantile_zero_quickselect_fallback_and_nonfinite",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_quantile_zero.mojo::test_mojo_gpu_quantile_zero_grouped_disjoint_scratch_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_quantile_zero.mojo::test_mojo_gpu_quantile_linear_separate_rounding_literal_anchors",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_cut_opaque_interaction.mojo::test_mojo_gpu_cut_and_opaque_transport_preserve_labels_errors_and_budgets",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_cut.mojo::test_mojo_gpu_cut_literals_default_labels_nullable_layouts_and_struct_breakpoints",
             "metal",
         )
@@ -2489,6 +2591,11 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "public.apple_parity",
             [
+                "tests/public_contracts/test_identity_column_metadata.mojo",
+                "tests/public_contracts/test_implode_field_metadata.mojo",
+                "tests/public_contracts/test_list_get_metadata.mojo",
+                "tests/public_contracts/test_ordered_rows_metadata.mojo",
+                "tests/public_contracts/test_ordered_rows_transport_calibration.mojo",
                 "tests/public_contracts/test_cut_lowering.mojo",
                 "tests/public_contracts/test_ordered_scalar_metadata.mojo",
                 "tests/public_contracts/test_struct_field_metadata.mojo",
@@ -2507,6 +2614,12 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.apple_parity",
             [
+                "tests/execution_modes/test_mojo_gpu_identity_column_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_implode.mojo",
+                "tests/execution_modes/test_mojo_gpu_source_lists.mojo",
+                "tests/execution_modes/test_mojo_gpu_ordered_errors.mojo",
+                "tests/execution_modes/test_mojo_gpu_quantile_zero.mojo",
+                "tests/execution_modes/test_mojo_gpu_cut_opaque_interaction.mojo",
                 "tests/execution_modes/test_mojo_gpu_cut.mojo",
                 "tests/execution_modes/test_mojo_gpu_struct_opaque_interaction.mojo",
                 "tests/execution_modes/test_mojo_gpu_opaque_bytes.mojo",
@@ -2902,6 +3015,12 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_identity_column_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_implode.mojo",
+                "tests/execution_modes/test_mojo_gpu_source_lists.mojo",
+                "tests/execution_modes/test_mojo_gpu_ordered_errors.mojo",
+                "tests/execution_modes/test_mojo_gpu_quantile_zero.mojo",
+                "tests/execution_modes/test_mojo_gpu_cut_opaque_interaction.mojo",
                 "tests/execution_modes/test_mojo_gpu_cut.mojo",
                 "tests/execution_modes/test_mojo_gpu_struct_opaque_interaction.mojo",
                 "tests/execution_modes/test_mojo_gpu_opaque_bytes.mojo",
