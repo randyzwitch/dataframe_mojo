@@ -2084,6 +2084,35 @@ struct DataFrame(Copyable, Sized, Writable):
                 direct_right = True
                 swap(right_rows, pairs[0])
                 swap(left_rows, pairs[1])
+        if how == JOIN_FULL and right.height() <= Int(Int32.MAX):
+            # A full join is a left join plus the right rows nothing
+            # matched (DuckDB's FULL OUTER probe, then its scan of the
+            # unmatched build rows): the left join's direct route, then
+            # those rows in order, as the dictionary route below orders
+            # them, without encoding every key of both inputs.
+            var left_sources = List[Series](capacity=len(left_keys))
+            var right_sources = List[Series](capacity=len(right_keys))
+            for k in range(len(left_keys)):
+                left_sources.append(self._columns[left_keys[k]].copy())
+                right_sources.append(right._columns[right_keys[k]].copy())
+            if not low_cardinality(right_sources):
+                trace_path("join.full_direct")
+                var pairs = direct_hash_join_rows(
+                    left_sources, right_sources, True, omit_identity=False
+                )
+                swap(left_rows, pairs[0])
+                swap(right_rows, pairs[1])
+                var matched = List[Bool](length=right.height(), fill=False)
+                var at = right_rows.unsafe_ptr()
+                for k in range(len(right_rows)):
+                    var j = at[unsafe_offset=k]
+                    if j >= 0:
+                        matched[j] = True
+                for j in range(right.height()):
+                    if not matched[j]:
+                        left_rows.append(-1)
+                        right_rows.append(j)
+                direct_right = True
         if not direct_right:
             trace_path("join.dictionary")
             var ids = _joint_key_ids(self, right, left_keys, right_keys)
