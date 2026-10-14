@@ -11,6 +11,7 @@ from . import joins as j
 from . import join_runtime as common
 from .runtime import _width, _stage, _checked_add, _checked_mul, CELL_BYTES
 from .residency import Scope, Matrix, Table, raise_value_error
+from .text_domains import MapPlan, Submission, submit as submit_text
 
 
 @fieldwise_init
@@ -148,9 +149,11 @@ def execute_plan(
     left_resident: Optional[Table] = None,
     right_resident: Optional[Table] = None,
     export_values: Bool = True,
+    var text_remap: Optional[MapPlan] = None,
 ) raises -> Tuple[Table, DataFrame]:
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
+    var text_submission = Optional[Submission]()
     var prepared = preflight(
         task,
         left,
@@ -206,6 +209,8 @@ def execute_plan(
                 ),
             )
     peak = _checked_add(peak, typed)
+    if text_remap:
+        peak = _checked_add(peak, text_remap.value().bytes())
     _ = scope.check(peak)
     var words = List[UInt64](length=2 * host_cells, fill=0)
     var validity = List[UInt8](length=host_cells, fill=0)
@@ -287,6 +292,15 @@ def execute_plan(
                     mapping,
                     left.width() if side else 0,
                 )
+        if text_remap:
+            text_submission = submit_text(
+                scope,
+                text_remap.take(),
+                dw,
+                dv,
+                de,
+                layout.capacity,
+            )
         ctx.enqueue_copy(dc, layout.columns.unsafe_ptr())
         ctx.enqueue_copy(dk, layout.keys.unsafe_ptr())
         ctx.enqueue_copy(dout, layout.outputs.unsafe_ptr())
@@ -513,9 +527,11 @@ def execute_plan(
         _ = output_words_owner^
         _ = output_validity_owner^
         _ = output_errors_owner^
+        _ = text_submission^
         return (result^, report^)
     except error:
         scope.synchronize()
+        _ = text_submission^
         _ = words^
         _ = validity^
         _ = errors^

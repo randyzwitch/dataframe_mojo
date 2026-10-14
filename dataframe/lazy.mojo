@@ -124,7 +124,9 @@ from .trace import trace_path
 from .execution import direct_reductions
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
+from .accelerator.code_domains import TextField
 from .execution_report import ExecutionReport
+from .execution_settings import ExecutionSettings
 from .join_type import (
     JOIN_ANTI,
     JOIN_CROSS,
@@ -187,6 +189,9 @@ struct PlanNode(Copyable):
     var asof_tolerance: Optional[AnyValue]
     var window_keys: List[WindowKey]
     var source_failure: String
+    # Private text-code provenance; never inferred from UInt32 storage.
+    var code_domain: Optional[DataType]
+    var text_fields: List[TextField]
 
     def _record_execution(self):
         if self._executions:
@@ -211,6 +216,8 @@ def _plan_node(
     coalesce: Bool = True,
     window_keys: List[WindowKey] = List[WindowKey](),
     source_failure: String = "",
+    code_domain: Optional[DataType] = None,
+    text_fields: List[TextField] = List[TextField](),
 ) -> PlanNode:
     return PlanNode(
         kind,
@@ -231,6 +238,8 @@ def _plan_node(
         Optional[AnyValue](),
         window_keys.copy(),
         source_failure,
+        code_domain,
+        text_fields.copy(),
     )
 
 
@@ -1080,6 +1089,8 @@ struct LazyFrame(Copyable):
     # table that subplan narrowed, so the join order still sees how
     # selective it is (`_spine_rows`, `_selectivity`).
     var _origin_rows: Dict[Int, Int]
+    # Provider-neutral envelope on dispatch copies; user plans stay unchanged.
+    var _accelerator_settings: Optional[ExecutionSettings]
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -1087,6 +1098,7 @@ struct LazyFrame(Copyable):
         self._nodes = [_plan_node(SCAN_FRAME, offset=0)]
         self._report = None
         self._origin_rows = Dict[Int, Int]()
+        self._accelerator_settings = None
 
     def __init__(
         out self,
@@ -1099,6 +1111,16 @@ struct LazyFrame(Copyable):
         self._schemas = schemas^
         self._report = None
         self._origin_rows = Dict[Int, Int]()
+        self._accelerator_settings = None
+
+    def _with_accelerator_settings(
+        self, optimize: Bool, streaming: Bool, batch_size: Int
+    ) -> Self:
+        var configured = self.copy()
+        configured._accelerator_settings = ExecutionSettings(
+            optimize, streaming, batch_size
+        )
+        return configured^
 
     def _record(
         self,
@@ -1639,10 +1661,18 @@ struct LazyFrame(Copyable):
         backend.require_available()
         if engine == "auto" and backend.engine != "cpu":
             return _execute_auto_accel(
-                self, optimize, streaming, batch_size, False
+                self._with_accelerator_settings(
+                    optimize, streaming, batch_size
+                ),
+                optimize,
+                streaming,
+                batch_size,
+                False,
             )[0].copy()
         if engine == "accel":
-            return _execute_accel(self)[0].copy()
+            return _execute_accel(
+                self._with_accelerator_settings(optimize, streaming, batch_size)
+            )[0].copy()
         var crew = Crew.start()
         try:
             var result = self._collect(
@@ -1667,8 +1697,10 @@ struct LazyFrame(Copyable):
     ) raises -> DataFrame:
         """Execute with an explicit optional runtime and its placement policy.
 
-        The provider lowers the logical plan independently of CPU streaming
-        and optimization. Unsupported plans raise before device submission.
+        Requested execution settings travel with a dispatch copy of the plan.
+        Providers lower supported operators independently; stream batch sizes
+        do not override eager expression batches. Unsupported plans raise
+        before device submission.
         """
         _ = _select_backend(engine)
         if batch_size <= 0:
@@ -1680,7 +1712,13 @@ struct LazyFrame(Copyable):
             _ = _automatic_decision(selected)
             if selected[0] != "cpu":
                 return accelerator.execute_auto(
-                    self, optimize, streaming, batch_size, False
+                    self._with_accelerator_settings(
+                        optimize, streaming, batch_size
+                    ),
+                    optimize,
+                    streaming,
+                    batch_size,
+                    False,
                 )[0].copy()
             return self.collect(
                 engine="cpu",
@@ -1697,7 +1735,9 @@ struct LazyFrame(Copyable):
             )
         if batch_size <= 0:
             raise Error("batch_size must be positive")
-        return accelerator.execute(self)[0].copy()
+        return accelerator.execute(
+            self._with_accelerator_settings(optimize, streaming, batch_size)
+        )[0].copy()
 
     def profile[
         B: AcceleratorBackend
@@ -1721,7 +1761,13 @@ struct LazyFrame(Copyable):
             _ = _automatic_decision(selected)
             if selected[0] != "cpu":
                 var result = accelerator.execute_auto(
-                    self, optimize, streaming, batch_size, True
+                    self._with_accelerator_settings(
+                        optimize, streaming, batch_size
+                    ),
+                    optimize,
+                    streaming,
+                    batch_size,
+                    True,
                 )
                 return (
                     result[0].copy(),
@@ -1741,7 +1787,9 @@ struct LazyFrame(Copyable):
                 streaming=streaming,
                 batch_size=batch_size,
             )
-        return accelerator.execute_profiled(self)
+        return accelerator.execute_profiled(
+            self._with_accelerator_settings(optimize, streaming, batch_size)
+        )
 
     def explain[
         B: AcceleratorBackend
@@ -1786,7 +1834,9 @@ struct LazyFrame(Copyable):
                 streaming=streaming,
                 batch_size=batch_size,
             )
-        return accelerator.describe(self)
+        return accelerator.describe(
+            self._with_accelerator_settings(optimize, streaming, batch_size)
+        )
 
     def fetch[
         B: AcceleratorBackend
@@ -1867,14 +1917,22 @@ struct LazyFrame(Copyable):
         backend.require_available()
         if engine == "auto" and backend.engine != "cpu":
             var result = _execute_auto_accel(
-                self, optimize, streaming, batch_size, True
+                self._with_accelerator_settings(
+                    optimize, streaming, batch_size
+                ),
+                optimize,
+                streaming,
+                batch_size,
+                True,
             )
             return (
                 result[0].copy(),
                 _selection_report(result[1], backend.reason),
             )
         if engine == "accel":
-            return _profile_accel(self)
+            return _profile_accel(
+                self._with_accelerator_settings(optimize, streaming, batch_size)
+            )
         var plan = self._optimized() if optimize else self.copy()
         if optimize:
             plan._push_join_key_sets(streaming, batch_size)
@@ -1926,7 +1984,9 @@ struct LazyFrame(Copyable):
             raise Error("batch_size must be positive")
         var backend = self._backend(engine, optimize, streaming, batch_size)
         if engine == "accel" and backend.available:
-            return _describe_accel(self)
+            return _describe_accel(
+                self._with_accelerator_settings(optimize, streaming, batch_size)
+            )
         if engine == "auto" and backend.engine != "cpu":
             return backend.describe()
         var plan = self._optimized() if optimize else self.copy()

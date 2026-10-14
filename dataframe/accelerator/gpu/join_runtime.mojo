@@ -6,7 +6,7 @@ values. Inputs and outputs are ordinary dataframe columns; no CPU join, native
 Metal library, shader source, or external dataframe ABI executes data logic.
 """
 from std.time import perf_counter_ns
-from dataframe import Column, DataFrame, Series
+from dataframe import Column, DataFrame, Series, Expr, col
 from dataframe.accelerator.joins import DagTask, DAG_JOIN
 from dataframe.execution_report import ExecutionReport
 from .runtime import (
@@ -17,8 +17,11 @@ from .runtime import (
     _checked_mul,
     materialize,
     CELL_BYTES,
+    _preflight as preflight_rows,
+    execute_plan as execute_rows,
 )
 from .residency import Scope, Matrix, Table
+from .text_domains import MapPlan, Submission, submit as submit_text
 from . import joins as j
 
 
@@ -148,9 +151,11 @@ def execute_plan(
     left_resident: Optional[Table] = None,
     right_resident: Optional[Table] = None,
     export_values: Bool = True,
+    var text_remap: Optional[MapPlan] = None,
 ) raises -> Tuple[Table, DataFrame]:
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
+    var text_submission = Optional[Submission]()
     var layout = preflight(
         task,
         left,
@@ -158,6 +163,39 @@ def execute_plan(
         left_resident.value().rows if left_resident else -1,
         right_resident.value().rows if right_resident else -1,
     )
+    if layout.probe == 0 and layout.build == 0:
+        # Both producers have already been observed by the DAG. Every join
+        # style (including validated/full/cross) has exactly zero rows here;
+        # no match/count/gather data or device context is required. Reuse the
+        # context-free empty row executor for typed schema and report fields.
+        if text_remap:
+            text_remap.value().validate_shape(scope, 0, 0, 0, 0)
+        var columns = List[Expr]()
+        for name in task.schema.columns():
+            columns.append(col(name))
+        var empty_plan = preflight_rows(
+            task.schema.clear().lazy().select_exprs(columns^)
+        )
+        var empty = execute_rows(
+            empty_plan, scope, profiling=profiling, export_values=export_values
+        )
+        var report = (
+            empty[1]
+            .with_column(Series("node", Column[Int64]([Int64(task.root)])))
+            .with_column(Series("operator", Column[String](["JOIN"])))
+            .with_column(
+                Series(
+                    "algorithm",
+                    Column[String](
+                        [
+                            "mojo_gpu_cross_join" if task.how
+                            == 6 else "mojo_gpu_sorted_join"
+                        ]
+                    ),
+                )
+            )
+        )
+        return (empty[0].copy(), report^)
     var resident_workspace = _checked_mul(
         (left.width() if left_resident else 0)
         + (right.width() if right_resident else 0),
@@ -175,6 +213,8 @@ def execute_plan(
         _checked_add(matrices, descriptors), j.METADATA_WORDS * 8
     )
     var peak = _checked_add(_checked_add(shared, host), resident_workspace)
+    if text_remap:
+        peak = _checked_add(peak, text_remap.value().bytes())
     _ = scope.check(peak)
     var host_cells = (
         layout.cells if not left_resident or not right_resident else 0
@@ -284,6 +324,15 @@ def execute_plan(
                     mapping,
                     left.width() if side else 0,
                 )
+        if text_remap:
+            text_submission = submit_text(
+                scope,
+                text_remap.take(),
+                device_words,
+                device_validity,
+                device_errors,
+                layout.capacity,
+            )
         ctx.enqueue_copy(device_columns, layout.columns.unsafe_ptr())
         ctx.enqueue_copy(device_keys, layout.keys.unsafe_ptr())
         ctx.enqueue_copy(device_outputs, layout.outputs.unsafe_ptr())
@@ -592,9 +641,11 @@ def execute_plan(
         _ = validity^
         _ = errors^
         _ = layout^
+        _ = text_submission^
         return (result^, report_frame^)
     except error:
         scope.synchronize()
+        _ = text_submission^
         _ = words^
         _ = validity^
         _ = errors^

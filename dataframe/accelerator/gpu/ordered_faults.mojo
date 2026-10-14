@@ -144,3 +144,46 @@ def observe_finish(
             winner_row = row
     result[unsafe_offset=0] = winner
     result[unsafe_offset=1] = winner_row
+
+
+def observe_input_partials(
+    errors: Pointer[UInt32, ImmutAnyOrigin],
+    partials: Pointer[UInt32, MutAnyOrigin],
+    columns: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    groups: UInt32,
+):
+    """Inspect legacy input flags without interpreting them as rank tokens."""
+    var group = global_idx.x
+    if group >= Int(groups):
+        return
+    var cells = Int(columns) * Int(rows)
+    var width = (cells + Int(groups) - 1) // Int(groups)
+    var begin = group * width
+    var end = min(cells, begin + width)
+    var failure = UInt32(0)
+    for at in range(begin, end):
+        var column = at // Int(rows)
+        var row = at % Int(rows)
+        failure = errors[unsafe_offset=column * Int(stride) + row]
+        if failure:
+            break
+    partials[unsafe_offset=2 * group] = failure
+    partials[unsafe_offset=2 * group + 1] = UInt32(0)
+
+
+def observe_input_finish(
+    partials: Pointer[UInt32, ImmutAnyOrigin],
+    result: Pointer[UInt32, MutAnyOrigin],
+    groups: UInt32,
+):
+    if global_idx.x != 0:
+        return
+    var failure = UInt32(0)
+    for group in range(Int(groups)):
+        failure = partials[unsafe_offset=2 * group]
+        if failure:
+            break
+    result[unsafe_offset=0] = failure
+    result[unsafe_offset=1] = UInt32(0)

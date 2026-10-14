@@ -7,7 +7,13 @@ exports CPU values. Shared owner accounting includes all live intermediates,
 region scratch and the final host export before allocation.
 """
 from std.time import perf_counter_ns
-from dataframe import Column, DataFrame, Series
+from std.sys import size_of
+from std.memory import ArcPointer, Pointer
+from dataframe.accelerator.code_domains import TextQuery, TextField
+from .residency import TextDomain, TextColumn
+from .text_domains import union_domain, source_maps, MapPlan, ColumnMap
+from .text_programs import recode_region
+from dataframe import Column, DataFrame, DataType, Series
 from dataframe.lazy import LazyFrame
 from dataframe.accelerator.cuts import control_failure as cut_control_failure
 from dataframe.accelerator.capabilities import RowCapabilities
@@ -19,6 +25,8 @@ from dataframe.accelerator.joins import (
     lower_join_dag,
 )
 from . import runtime as rows
+from . import qcut_runtime as qcuts
+from dataframe.accelerator.qcuts import is_qcut_marker
 from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from . import join_runtime as joins
 from . import asof_runtime as asof
@@ -46,6 +54,9 @@ def preflight(
                 dag.tasks[task.right].schema,
             )
         elif task.kind == DAG_ROWS:
+            if is_qcut_marker(task.query):
+                _ = qcuts.preflight(task.query)
+                continue
             var plan = rows._preflight(
                 task.query, terminal_boundary=task.terminal
             )
@@ -56,7 +67,9 @@ def preflight(
                     )
                 for node in range(len(plan.node_dtypes)):
                     var op = plan.code[4 * node]
-                    if op == ROW_TEMPORAL_BINARY or op == ROW_TEMPORAL_CAST:
+                    if (
+                        op == ROW_TEMPORAL_BINARY or op == ROW_TEMPORAL_CAST
+                    ) and plan.ordered_mode != 3:
                         raise Error(
                             "Metal unsupported [temporal]: prototype requires a direct scan before DAG submission"
                         )
@@ -101,10 +114,16 @@ def execute(
     capabilities: RowCapabilities,
     *,
     observation_only: Bool = False,
+    text_context: Optional[ArcPointer[TextQuery]] = None,
 ) raises -> Tuple[DataFrame, DataFrame]:
     var started = Int(perf_counter_ns())
     var dag = preflight(query, capabilities)
     var scope = Scope(device_id, budget)
+    var base_domain = Optional[ArcPointer[TextDomain]]()
+    if text_context:
+        base_domain = ArcPointer(
+            TextDomain(scope, text_context.value()[].base_domain, False)
+        )
     var uses = List[Int](length=len(dag.tasks), fill=0)
     for task in dag.tasks:
         if task.source >= 0:
@@ -131,9 +150,80 @@ def execute(
                     0
                 ].copy()
             continue
+        if task.kind == DAG_ROWS and task.query._nodes[0].source_failure:
+            raise Error(task.query._nodes[0].source_failure)
         var live_before = scope.info()[0]
         var traffic_before = scope.transfers()
         var executed: Tuple[Table, DataFrame]
+        var target_domain = Optional[ArcPointer[TextDomain]]()
+        var join_maps = Optional[MapPlan]()
+        if base_domain:
+            var input_fields = 0
+            if task.source >= 0 and values[task.source]:
+                input_fields += len(values[task.source].value().text)
+            if (task.kind == DAG_JOIN or task.kind == DAG_ASOF) and values[
+                task.right
+            ]:
+                input_fields += len(values[task.right].value().text)
+            var text_workspace = rows._checked_mul(
+                input_fields, size_of[Optional[TextColumn]]()
+            )
+            _ = scope.check(text_workspace)
+            var input_text = List[Optional[TextColumn]](capacity=input_fields)
+            if task.source >= 0 and values[task.source]:
+                input_text.extend(values[task.source].value().text.copy())
+            if (task.kind == DAG_JOIN or task.kind == DAG_ASOF) and values[
+                task.right
+            ]:
+                input_text.extend(values[task.right].value().text.copy())
+            target_domain = union_domain(
+                scope, base_domain.value(), input_text, text_workspace
+            )
+            recode_region(task.query, target_domain.value())
+            if task.kind == DAG_JOIN or task.kind == DAG_ASOF:
+                var left = _frame(dag, values, task.source)
+                var right = _frame(dag, values, task.right)
+                ref left_node = dag.tasks[task.source].query._nodes[
+                    len(dag.tasks[task.source].query._nodes) - 1
+                ]
+                ref right_node = dag.tasks[task.right].query._nodes[
+                    len(dag.tasks[task.right].query._nodes) - 1
+                ]
+                var left_rows = (
+                    values[task.source]
+                    .value()
+                    .rows if values[task.source] else left.height()
+                )
+                var right_rows = (
+                    values[task.right]
+                    .value()
+                    .rows if values[task.right] else right.height()
+                )
+                _ = scope.check(
+                    rows._checked_mul(
+                        len(left_node.text_fields)
+                        + len(right_node.text_fields),
+                        3 * size_of[ColumnMap](),
+                    )
+                )
+                var columns = source_maps(
+                    left,
+                    left_node.text_fields,
+                    base_domain.value(),
+                    values[task.source],
+                    left_rows,
+                )
+                columns.extend(
+                    source_maps(
+                        right,
+                        right_node.text_fields,
+                        base_domain.value(),
+                        values[task.right],
+                        right_rows,
+                        left.width(),
+                    )
+                )
+                join_maps = MapPlan(target_domain.value(), columns)
         if task.kind == DAG_JOIN:
             if task.equal_rows:
                 # Marked distribution zip children are complete observed
@@ -167,6 +257,7 @@ def execute(
                 left_resident=values[task.source],
                 right_resident=values[task.right],
                 export_values=not (observation_only and index == dag.root),
+                text_remap=join_maps^,
             )
             if not task.terminal:
                 executed[0].observe_errors()
@@ -180,6 +271,7 @@ def execute(
                 left_resident=values[task.source],
                 right_resident=values[task.right],
                 export_values=not (observation_only and index == dag.root),
+                text_remap=join_maps^,
             )
         else:
             var resident = Optional[Table]()
@@ -187,18 +279,37 @@ def execute(
                 task.query._frames[0] = _frame(dag, values, task.source)
                 resident = values[task.source].copy()
             var source_rows = resident.value().rows if resident else -1
-            var plan = rows._preflight(
-                task.query,
-                terminal_boundary=task.terminal,
-                source_rows=source_rows,
-            )
-            executed = rows.execute_plan(
-                plan,
-                scope,
-                resident_input=resident,
-                profiling=profiling,
-                terminal_boundary=task.terminal,
-                export_values=not (observation_only and index == dag.root),
+            if is_qcut_marker(task.query):
+                if not resident:
+                    raise Error("QCUT observed resident producer is missing")
+                # Observed operand precedes dynamic quantile controls;
+                # the classifier keeps values and codes device resident.
+                executed = qcuts.execute_plan(
+                    task.query,
+                    resident.value(),
+                    scope,
+                    export_values=not (observation_only and index == dag.root),
+                    text_domain=target_domain,
+                )
+            else:
+                var plan = rows._preflight(
+                    task.query,
+                    terminal_boundary=task.terminal,
+                    source_rows=source_rows,
+                )
+                executed = rows.execute_plan(
+                    plan,
+                    scope,
+                    resident_input=resident,
+                    profiling=profiling,
+                    terminal_boundary=task.terminal,
+                    export_values=not (observation_only and index == dag.root),
+                    text_domain=target_domain,
+                )
+        if target_domain and (task.kind == DAG_JOIN or task.kind == DAG_ASOF):
+            executed[0].attach_text(
+                task.query._nodes[len(task.query._nodes) - 1].text_fields,
+                target_domain.value(),
             )
         if task.terminal and index != dag.root:
             # Window producers permit checked terminal expressions, but their
@@ -217,6 +328,25 @@ def execute(
                 executed[0].observe_errors()
                 result = task.schema.copy()
             else:
+                if text_context:
+                    _ = scope.check(
+                        rows._checked_mul(
+                            executed[0].schema.width(),
+                            3 * size_of[Optional[DataType]](),
+                        )
+                    )
+                    var domains = List[Optional[DataType]](
+                        capacity=executed[0].schema.width()
+                    )
+                    for field in executed[0].text:
+                        if field:
+                            domains.append(field.value().domain[].dtype)
+                        else:
+                            domains.append(None)
+                    var state = Pointer(
+                        to=text_context.value()[]
+                    ).unsafe_origin_cast[MutAnyOrigin]()
+                    state[].record_final(domains)
                 result = rows.materialize(executed[0])
             for column in result._columns:
                 host_result_bytes = rows._checked_add(

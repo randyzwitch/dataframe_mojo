@@ -4,7 +4,8 @@ Every reachable branch is bound before device initialization. Child regions
 are not terminal boundaries for checked expressions. Executing these tasks
 may materialize intermediate frames; the provider reports those boundaries.
 """
-from .metadata import prune_projections
+from .metadata import prune_projections, schema_frame
+from .qcuts import is_qcut_marker, controls as qcut_controls
 from .capabilities import RowCapabilities
 from .rows import lower_rows
 from dataframe.dtype import DataType
@@ -275,12 +276,15 @@ def _join_task(
             column._field_metadata = left._columns[field.left]._field_metadata
         schema.append(column^)
     var frame = DataFrame(schema^)
+    var metadata = frame.lazy()
+    metadata._nodes[0].code_domain = node.code_domain
+    metadata._nodes[0].text_fields = node.text_fields.copy()
     var id = len(tasks)
     tasks.append(
         DagTask(
             DAG_JOIN,
             root,
-            frame.lazy(),
+            metadata^,
             left_id,
             right_id,
             frame^,
@@ -507,6 +511,34 @@ def _task(
         frame,
         query._nodes[cursor].source_failure if source < 0 else "",
     )
+    region._nodes[0].code_domain = query._nodes[cursor].code_domain
+    region._nodes[0].text_fields = query._nodes[cursor].text_fields.copy()
+    if is_qcut_marker(region):
+        # This private control phase has its own resident kernels/resources.
+        # Bind its harmless placeholder only for metadata; never compile or
+        # execute that placeholder as a generic row interpreter program.
+        _ = qcut_controls(region)
+        if source < 0:
+            raise Error("QCUT marker requires an observed resident producer")
+        var schema = schema_frame(region, len(region._nodes) - 1).clear()
+        var id = len(tasks)
+        tasks.append(
+            DagTask(
+                DAG_ROWS,
+                root,
+                region^,
+                source,
+                -1,
+                schema^,
+                True,
+                -1,
+                -1,
+                List[Int64](),
+                List[JoinField](),
+                False,
+            )
+        )
+        return id
     var plan = lower_rows(region, capabilities, terminal_boundary=boundary)
     # Pure projections preserve the prefix. Push their final head into a join
     # only after binding proves that no reduction or row reordering intervenes.

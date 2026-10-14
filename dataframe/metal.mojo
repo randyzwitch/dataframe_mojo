@@ -42,6 +42,9 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.memory import checked_add
+from .accelerator.code_domains import TextQuery
+from .accelerator.qcuts import has_default_qcuts
+from std.memory import ArcPointer
 from .accelerator.sources import (
     file_source_nodes,
     stage_file_sources,
@@ -84,6 +87,7 @@ from .lazy import AcceleratorBackend, LazyFrame
 from .column import Column
 from .frame import DataFrame
 from .series import Series
+from .execution_settings import ExecutionSettings
 from std.time import perf_counter_ns
 
 
@@ -126,7 +130,9 @@ struct MetalRuntime(AcceleratorBackend):
 
     var _device: Int
     var _budget: Int
+    var _text_context: Optional[ArcPointer[TextQuery]]
     var _observation_only: Bool
+    var _execution_settings: ExecutionSettings
 
     def __init__(
         out self, device_id: Int = 0, *, memory_limit_bytes: Int = -1
@@ -139,6 +145,8 @@ struct MetalRuntime(AcceleratorBackend):
         self._device = device_id
         self._budget = memory_limit_bytes
         self._observation_only = False
+        self._execution_settings = ExecutionSettings(True, True, 65536)
+        self._text_context = None
 
     @staticmethod
     def device_count() raises -> Int:
@@ -170,7 +178,7 @@ struct MetalRuntime(AcceleratorBackend):
 
     def execute(self, query: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
         comptime if METAL_TARGET:
-            return self._run(query, False)
+            return self._configured(query)._run(query, False)
         else:
             raise Error(
                 "Mojo Metal execution requires an Apple Metal compilation target; "
@@ -181,12 +189,20 @@ struct MetalRuntime(AcceleratorBackend):
         self, query: LazyFrame
     ) raises -> Tuple[DataFrame, DataFrame]:
         comptime if METAL_TARGET:
-            return self._run(query, True)
+            return self._configured(query)._run(query, True)
         else:
             raise Error(
                 "Mojo Metal execution requires an Apple Metal compilation target; "
                 + self.describe(query)
             )
+
+    def _configured(self, query: LazyFrame) -> Self:
+        var configured = self.copy()
+        if query._accelerator_settings:
+            configured._execution_settings = (
+                query._accelerator_settings.value().copy()
+            )
+        return configured^
 
     def _run(
         self, query: LazyFrame, profiling: Bool, *, original_entry: Bool = True
@@ -198,10 +214,14 @@ struct MetalRuntime(AcceleratorBackend):
             execute as execute_source_lists,
         )
 
+        if self._execution_settings.batch_size <= 0:
+            raise Error("batch_size must be positive")
         var start = Int(perf_counter_ns())
         if len(file_source_nodes(query)):
             var staged = prepare_file_sources(
-                query, memory_limit_bytes=self._budget
+                query,
+                memory_limit_bytes=self._budget,
+                optimize=self._execution_settings.optimize,
             )
             var staging_bytes = staged.staging_bytes
             var budget = self._budget
@@ -209,6 +229,8 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= staging_bytes
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
             runtime._observation_only = self._observation_only
+            runtime._execution_settings = self._execution_settings.copy()
+            runtime._text_context = self._text_context.copy()
             if staged.failure:
                 runtime._observation_only = True
                 for prefix in staged.prefixes:
@@ -281,7 +303,9 @@ struct MetalRuntime(AcceleratorBackend):
             )
             return (executed[0].copy(), report^)
         if has_implode(query):
-            var plan = lower_terminal_implode(query)
+            var plan = lower_terminal_implode(
+                query, ordered_source=original_entry
+            )
             var assembly_bytes = (
                 0 if self._observation_only else plan.assembly_bytes
             )
@@ -292,6 +316,8 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= assembly_bytes
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
             runtime._observation_only = self._observation_only
+            runtime._execution_settings = self._execution_settings.copy()
+            runtime._text_context = self._text_context.copy()
             var executed = runtime._run(
                 plan.query, profiling, original_entry=False
             )
@@ -385,6 +411,8 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= plan.staging_bytes
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
             runtime._observation_only = self._observation_only
+            runtime._execution_settings = self._execution_settings.copy()
+            runtime._text_context = self._text_context.copy()
             var executed = runtime._run(
                 plan.query, profiling, original_entry=False
             )
@@ -460,6 +488,8 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= staging_bytes
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
             runtime._observation_only = self._observation_only
+            runtime._execution_settings = self._execution_settings.copy()
+            runtime._text_context = self._text_context.copy()
             var executed = runtime._run(
                 lowered, profiling, original_entry=False
             )
@@ -653,6 +683,8 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= plan.staging_bytes
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
             runtime._observation_only = self._observation_only
+            runtime._execution_settings = self._execution_settings.copy()
+            runtime._text_context = self._text_context.copy()
             var executed = runtime._run(
                 plan.query, profiling, original_entry=False
             )
@@ -742,9 +774,16 @@ struct MetalRuntime(AcceleratorBackend):
                         "Metal dictionary staging exceeds payload budget"
                     )
                 budget -= staging_bytes
-            var encoded = encode_query(staged_query, dictionary)
+            var dynamic_text = has_default_qcuts(staged_query)
+            var encoded = encode_query(
+                staged_query, dictionary, dynamic_text=dynamic_text
+            )
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
             runtime._observation_only = self._observation_only
+            runtime._execution_settings = self._execution_settings.copy()
+            runtime._text_context = self._text_context.copy()
+            if dynamic_text:
+                runtime._text_context = ArcPointer(TextQuery(dictionary.dtype))
             var staged_ns = Int(perf_counter_ns()) - start
             var executed = runtime._run(
                 encoded, profiling, original_entry=False
@@ -752,7 +791,7 @@ struct MetalRuntime(AcceleratorBackend):
             if self._observation_only:
                 return executed^
             var restoration_bytes = dictionary.restoration_bytes(
-                executed[0], schema
+                executed[0], schema, runtime._text_context
             )
             if self._budget >= 0:
                 if restoration_bytes > self._budget - staging_bytes:
@@ -760,7 +799,9 @@ struct MetalRuntime(AcceleratorBackend):
                         "Metal dictionary restoration exceeds payload budget"
                     )
             var decode_start = Int(perf_counter_ns())
-            var result = restore_frame(executed[0], schema, dictionary)
+            var result = restore_frame(
+                executed[0], schema, dictionary, runtime._text_context
+            )
             var decoded_ns = Int(perf_counter_ns()) - decode_start
             var report = executed[1].copy()
             # Dictionary owners survive both GPU execution and restoration.
@@ -862,6 +903,7 @@ struct MetalRuntime(AcceleratorBackend):
                 profiling,
                 capabilities(),
                 observation_only=self._observation_only,
+                text_context=self._text_context,
             )
         return execute(
             query,
@@ -873,14 +915,18 @@ struct MetalRuntime(AcceleratorBackend):
         )
 
     def describe(self, query: LazyFrame) -> String:
-        return self._describe(query, True)
+        return self._configured(query)._describe(query, True)
 
     def _describe(self, query: LazyFrame, original_entry: Bool) -> String:
         from .accelerator.gpu.runtime import _preflight
 
         try:
             if len(file_source_nodes(query)):
-                var staged = stage_file_sources(query, empty=True)
+                var staged = stage_file_sources(
+                    query,
+                    empty=True,
+                    optimize=self._execution_settings.optimize,
+                )
                 return "Metal file source decoding; " + self._describe(
                     staged[0], False
                 )
@@ -889,7 +935,9 @@ struct MetalRuntime(AcceleratorBackend):
                     lower_selectors(query), False
                 )
             if has_implode(query):
-                var plan = lower_terminal_implode(query)
+                var plan = lower_terminal_implode(
+                    query, ordered_source=original_entry
+                )
                 return "Metal terminal primitive implode; " + self._describe(
                     plan.query, False
                 )

@@ -7,19 +7,26 @@ Resident variable-length List consumers remain a separate storage layer.
 from std.collections import Dict
 from dataframe import DataFrame, DataType, Expr, ListColumn, Series
 from dataframe.binding import bind, ROWS
-from dataframe.expr import IMPLODE, subtree, col
+from dataframe.expr import IMPLODE, OVER, subtree, col
 from dataframe.lazy import (
     LazyFrame,
     SELECT,
     WITH_COLUMNS,
+    DROP,
     SLICE,
     PlanNode,
     _plan_node,
 )
-from .aggregates import _in_memory_sources
+from .aggregates import (
+    _in_memory_sources,
+    has_aggregate_compositions,
+    lower_aggregate_compositions,
+)
+from .windows import has_partition_aggregates, lower_partition_aggregates
 from .metadata import schema_frame
 from .memory import checked_mul
 from .selectors import _live_nodes
+from . import implode_ordered
 
 comptime IMPLODE_MATERIALIZATION = "metal_implode_materialization"
 
@@ -69,12 +76,53 @@ def _fixed(dtype: DataType) -> Bool:
     )
 
 
-def lower_terminal_implode(query: LazyFrame) raises -> ImplodeOutputs:
+def _prepare_post_state_operand(
+    query: LazyFrame, child_name: String, source_proved: Bool
+) raises -> LazyFrame:
+    """Observe prepared OVER states before certifying the pure ROWS consumer.
+
+    This is called only within the normalizer-owned sequential operand chain.
+    Existing state producers retain their own terminal boundaries and shared
+    prefix; certification grants no admission to grouped state input programs.
+    """
+    var prepared = query.copy()
+    if has_partition_aggregates(prepared):
+        prepared = lower_partition_aggregates(prepared)
+    if has_aggregate_compositions(prepared):
+        prepared = lower_aggregate_compositions(prepared, exact_float32=True)
+    for reverse in range(len(prepared._nodes)):
+        var at = len(prepared._nodes) - 1 - reverse
+        var operation = prepared._nodes[at].copy()
+        if (
+            operation.kind != WITH_COLUMNS
+            or operation.text != IMPLODE_MATERIALIZATION
+            or len(operation.exprs) != 1
+            or operation.exprs[0]._name != child_name
+        ):
+            continue
+        var input = schema_frame(prepared, operation.left)
+        var bound = bind(operation.exprs[0], input._columns)
+        # This exact rebound AST refers to already prepared state columns.
+        # No external caller can turn a synthetic raw scan into source_proved.
+        prepared._nodes[at].names2 = implode_ordered.certificate(
+            bound, source_proved
+        )
+        return prepared^
+    raise Error(
+        "Metal unsupported [ordered implode]: prepared producer missing"
+    )
+
+
+def lower_terminal_implode(
+    query: LazyFrame, *, ordered_source: Bool = False
+) raises -> ImplodeOutputs:
     """Peel one/multiple terminal row-shaped primitive IMPLODE roots.
 
     Trailing slices apply to the one-row List result AFTER all operand errors
     have been observed; in particular head(0) never prunes a faulting operand.
     Original metadata binds first, in CPU projection order, before rewriting.
+    Ordered certification also requires positive original-entry provenance; a
+    structurally raw scan alone cannot distinguish normalized transport frames.
     """
     _in_memory_sources(query)
     var original = query.copy()
@@ -107,6 +155,10 @@ def lower_terminal_implode(query: LazyFrame) raises -> ImplodeOutputs:
     var used = Dict[String, Bool]()
     for name in input.columns():
         used[name] = True
+    var source_proved = ordered_source and implode_ordered.original_source(
+        original, root
+    )
+    var certificates = List[List[String]]()
     var expressions = List[Expr]()
     var outputs = List[ImplodeOutput]()
     for index in range(len(original._nodes[root].exprs)):
@@ -133,7 +185,13 @@ def lower_terminal_implode(query: LazyFrame) raises -> ImplodeOutputs:
         while name in used:
             name += "_"
         used[name] = True
-        expressions.append(subtree(bound.expr, node.left).alias(name))
+        var operand = subtree(bound.expr, node.left).alias(name)
+        certificates.append(
+            implode_ordered.certificate(
+                bind(operand, input._columns), source_proved
+            )
+        )
+        expressions.append(operand^)
         outputs.append(ImplodeOutput(expected._columns[index].copy(), name^))
     if not len(outputs):
         raise Error("Metal unsupported [implode]: no list output")
@@ -146,14 +204,36 @@ def lower_terminal_implode(query: LazyFrame) raises -> ImplodeOutputs:
         # CPU prepares each original expression's states and complete operand
         # before moving to the next original projection. A separate observed
         # producer prevents later aggregate/OVER leaves from running first.
+        if (
+            len(certificates[index])
+            and flattened._nodes[producer].kind == DROP
+            and not flattened._nodes[producer].text
+        ):
+            # A preceding OVER operand leaves a cleanup DROP after its
+            # observed producer. Keep that cleanup in a separate shared input
+            # region; otherwise the next certified producer would fuse it
+            # into its one-step ranked program. Final unused cleanup is left
+            # alone, and the strict mode3 geometry guard stays unchanged.
+            flattened._nodes[producer].text = "metal_shared_prefix"
         flattened._nodes.append(
             _plan_node(
                 WITH_COLUMNS,
                 producer,
                 exprs=[expressions[index].copy()],
                 text=IMPLODE_MATERIALIZATION,
+                names2=certificates[index].copy(),
             )
         )
+        var post_state = False
+        for node in expressions[index]._nodes:
+            post_state |= node.op == OVER
+        if post_state:
+            # CPU evaluate prepares each operand's states before _implode's
+            # sequential _full batches. Normalize that operand now, before the
+            # next original projection can introduce any competing states.
+            flattened = _prepare_post_state_operand(
+                flattened, outputs[index].child_name, source_proved
+            )
         producer = len(flattened._nodes) - 1
         final_columns.append(col(outputs[index].child_name))
     flattened._nodes.append(_plan_node(SELECT, producer, exprs=final_columns^))

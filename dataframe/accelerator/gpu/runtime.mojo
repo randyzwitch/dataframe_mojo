@@ -5,7 +5,14 @@ The compiler emits GPU code from `rows.mojo`; DeviceContext owns the queue,
 buffers, transfers and synchronization. Unsupported regions reject before
 initializing a context while the remaining native operations are migrated.
 """
-from std.memory import bitcast
+from .residency import TextDomain
+from .text_domains import (
+    MapPlan,
+    Submission,
+    source_maps,
+    submit as submit_text,
+)
+from std.memory import bitcast, ArcPointer
 from std.time import perf_counter_ns
 from std.sys import size_of
 from max.gpu.host import DeviceBuffer
@@ -857,7 +864,7 @@ def estimate_resources(
         # Two-word control record has simultaneous host/device owners and is
         # reused for input-zero proof and ranked output observation.
         peak = _checked_add(peak, 16)
-        if plan.ordered_mode == 2:
+        if plan.ordered_mode == 2 or plan.ordered_mode == 3:
             peak = _checked_add(
                 peak, _checked_mul(min(1024, max(1, (rows + 255) // 256)), 8)
             )
@@ -946,9 +953,13 @@ def estimate_resources(
                 + Int(has_float_sums),
             )
     if rows and len(plan.ordered_ranks[]):
-        var observations = 2 if plan.ordered_mode == 1 else len(plan.steps)
+        var observations = 2 if plan.ordered_mode == 1 else len(
+            plan.steps
+        ) + Int(plan.ordered_mode == 3)
         launches = _checked_add(
-            launches, observations * (2 if plan.ordered_mode == 2 else 1)
+            launches,
+            observations
+            * (2 if plan.ordered_mode == 2 or plan.ordered_mode == 3 else 1),
         )
         waits = _checked_add(waits, observations)
         download = _checked_add(download, _checked_mul(observations, 8))
@@ -1065,6 +1076,7 @@ def execute_plan(
     *,
     terminal_boundary: Bool = True,
     export_values: Bool = True,
+    text_domain: Optional[ArcPointer[TextDomain]] = None,
 ) raises -> Tuple[Table, DataFrame]:
     """Execute one preflighted region on the query's shared Metal context.
 
@@ -1081,10 +1093,12 @@ def execute_plan(
     )
     var ordered_scalar = plan.ordered_mode == 1
     var ordered_terminal = plan.ordered_mode == 2
-    var ordered = ordered_scalar or ordered_terminal
+    var ordered_private = plan.ordered_mode == 3
+    var ordered_rows = ordered_terminal or ordered_private
+    var ordered = ordered_scalar or ordered_rows
     if ordered != (len(plan.ordered_ranks[]) != 0):
         raise Error("Mojo GPU ordered error mode does not match its ranks")
-    if ordered_terminal:
+    if ordered_rows:
         for step in plan.steps:
             if step.filter or step.order or step.grouped:
                 raise Error(
@@ -1099,6 +1113,17 @@ def execute_plan(
     ):
         raise Error(
             "Mojo GPU ordered ROWS requires an original raw scan and terminal projections"
+        )
+    if ordered_private and (
+        not terminal_boundary
+        or plan.limit >= 0
+        or plan.reductions
+        or len(plan.steps) != 1
+        or len(plan.outputs) != plan.source.width() + 1
+        or len(plan.ordered_ranks[]) != len(plan.literals)
+    ):
+        raise Error(
+            "Mojo GPU ordered IMPLODE requires one certified observed row producer"
         )
     if ordered_scalar and (
         rows != 1
@@ -1141,7 +1166,20 @@ def execute_plan(
     var resources = estimate_resources(
         plan, rows, Bool(resident_input), terminal_boundary, export_values
     )
+    var remap_plan = Optional[MapPlan]()
+    var remap_owner = Optional[Submission]()
     var peak = resources.peak_bytes
+    if text_domain:
+        var base_domain = ArcPointer(
+            TextDomain(scope, plan.source_domain.value(), False)
+        )
+        remap_plan = MapPlan(
+            text_domain.value(),
+            source_maps(
+                plan.source, plan.source_text, base_domain, resident_input, rows
+            ),
+        )
+        peak = _checked_add(peak, remap_plan.value().bytes())
     _ = scope.check(peak)
     var host_cells = 0 if resident_input else cells
     var words = List[UInt64](length=2 * host_cells, fill=0)
@@ -1239,6 +1277,15 @@ def execute_plan(
                 uploaded += len(validity)
                 ctx.enqueue_copy(device_errors, errors.unsafe_ptr())
                 uploaded += len(errors) * 4
+            if remap_plan:
+                remap_owner = submit_text(
+                    scope,
+                    remap_plan.take(),
+                    device_words,
+                    device_valid,
+                    device_errors,
+                    rows,
+                )
             # Zero-step projections need no program buffers or kernel launches.
             if len(plan.steps):
                 var device_code = ctx.enqueue_create_buffer[DType.int64](
@@ -1266,7 +1313,7 @@ def execute_plan(
                     )
                     uploaded += len(program.ordered_ranks[]) * 4
                     ordered_control = ctx.enqueue_create_buffer[DType.uint32](2)
-                    if ordered_terminal:
+                    if ordered_rows:
                         ordered_partials = ctx.enqueue_create_buffer[
                             DType.uint32
                         ](2 * fault_groups)
@@ -1289,6 +1336,41 @@ def execute_plan(
                         if input_failure[0]:
                             raise Error(
                                 "Mojo GPU ordered scalar requires already observed successful inputs"
+                            )
+                    if ordered_private:
+                        # Input cells are ordinary flags from an already
+                        # observed producer. Prove every staged source cell is
+                        # zero before any kernel can interpret ranked tokens.
+                        ctx.enqueue_function[
+                            ordered_faults.observe_input_partials
+                        ](
+                            device_errors.unsafe_ptr(),
+                            ordered_partials.value().unsafe_ptr(),
+                            UInt32(plan.source.width()),
+                            UInt32(rows),
+                            UInt32(rows),
+                            UInt32(fault_groups),
+                            grid_dim=(fault_groups + 127) // 128,
+                            block_dim=128,
+                        )
+                        ctx.enqueue_function[
+                            ordered_faults.observe_input_finish
+                        ](
+                            ordered_partials.value().unsafe_ptr(),
+                            ordered_control.value().unsafe_ptr(),
+                            UInt32(fault_groups),
+                            grid_dim=1,
+                            block_dim=1,
+                        )
+                        submissions += 2
+                        var input_failure = scope.read_control(
+                            ordered_control.value()
+                        )
+                        downloaded += 8
+                        waits += 1
+                        if input_failure[0]:
+                            raise Error(
+                                "Mojo GPU ordered IMPLODE requires already observed successful inputs"
                             )
                 if len(plan.key_values):
                     var lookup = ctx.enqueue_create_buffer[DType.uint64](
@@ -1921,7 +2003,7 @@ def execute_plan(
                             grid_dim=(current_rows + 255) // 256,
                             block_dim=256,
                         )
-                        if ordered_terminal:
+                        if ordered_rows:
                             ctx.enqueue_function[
                                 ordered_faults.observe_partials
                             ](
@@ -2252,6 +2334,7 @@ def execute_plan(
             _ = device_ranks^
             _ = ordered_control^
             _ = ordered_partials^
+            _ = remap_owner^
             raise error^
     elif plan.reductions:
         # Empty input has no data to submit. The same Mojo state finalizer
@@ -2288,6 +2371,7 @@ def execute_plan(
     _ = device_ranks^
     _ = ordered_control^
     _ = ordered_partials^
+    _ = remap_owner^
     if not resident_result:
         if plan.reductions and count:
             resident_result = Table.identity(
@@ -2310,6 +2394,8 @@ def execute_plan(
     scope.record_download(downloaded)
     scope.record_launches(submissions)
     var result = resident_result.value().copy()
+    if text_domain:
+        result.attach_text(plan.output_text, text_domain.value())
     if not terminal_boundary:
         result.observe_errors()
     var traffic = scope.transfers()
@@ -2324,7 +2410,7 @@ def execute_plan(
         "metal",
         rows,
         count,
-        algorithm="mojo_gpu_grouped_rows" if grouping else "mojo_gpu_reductions" if plan.reductions else "mojo_gpu_windows" if ranking
+        algorithm="mojo_gpu_ordered_implode_rows" if ordered_private else "mojo_gpu_grouped_rows" if grouping else "mojo_gpu_reductions" if plan.reductions else "mojo_gpu_windows" if ranking
         or windows else "mojo_gpu_ordered_rows" if ordering else "mojo_gpu_row_program",
         wall_ns=Int(perf_counter_ns()) - started,
     )
@@ -2373,7 +2459,8 @@ def describe(query: LazyFrame, *, ordered_source: Bool = False) -> String:
             + String(len(plan.steps))
             + (
                 " steps; ordered projection/batch/AST faults" if plan.ordered_mode
-                == 2 else " steps"
+                == 2 else " steps; certified IMPLODE batch/AST faults" if plan.ordered_mode
+                == 3 else " steps"
             )
             + "; kernels and runtime execute directly in the dataframe library\n"
         )

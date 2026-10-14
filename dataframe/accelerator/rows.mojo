@@ -5,7 +5,9 @@ are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
 from .metadata import prune_projections
-from . import temporal_expressions, ordered_rows
+from . import temporal_expressions, ordered_rows, implode_ordered
+from .code_domains import TextField
+from .text_key_domains import append_partition_values
 from .gpu.temporal_descriptors import (
     ROW_TEMPORAL_BINARY,
     ROW_TEMPORAL_CAST,
@@ -235,8 +237,13 @@ struct RowPlan(Movable):
     var zone_words: List[UInt64]
     # Shared immutable ranks avoid a second host payload during Program prep.
     var ordered_ranks: ArcPointer[List[UInt32]]
-    # 0 legacy flags, 1 private CUT scalar, 2 direct terminal ROWS projections.
+    # 0 legacy flags, 1 private CUT scalar, 2 direct terminal ROWS projections,
+    # 3 certified private IMPLODE ROWS producer.
     var ordered_mode: Int
+    var source_text: List[TextField]
+    var output_text: List[TextField]
+    var code_domain: Optional[DataType]
+    var source_domain: Optional[DataType]
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -1193,6 +1200,19 @@ def lower_rows(
         ordered_terminal &= needs_order
         if ordered_terminal:
             ordered_mode = 2
+        var ordered_private = implode_ordered.tagged(node)
+        if ordered_private:
+            if (
+                len(chain) != 1
+                or not terminal_boundary
+                or limit >= 0
+                or len(node.exprs) != 1
+            ):
+                capabilities.reject(
+                    "ordered implode",
+                    "requires one observed private row producer",
+                )
+            ordered_mode = 3
         for expr in node.exprs:
             if node.kind != FILTER:
                 if expr._name in projection_names:
@@ -1202,7 +1222,9 @@ def lower_rows(
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
             var expression_ranks = List[UInt32]()
-            if ordered_terminal:
+            if ordered_private:
+                implode_ordered.validate(node, bound)
+            if ordered_terminal or ordered_private:
                 var cloned = ordered_rows.occurrences(
                     bound, capabilities.max_nodes
                 )
@@ -1284,7 +1306,7 @@ def lower_rows(
                 capabilities.temporal_binary_arithmetic
                 or capabilities.temporal_physical_casts
             ) and temporal_expressions.contains(bound):
-                if (
+                if not ordered_private and (
                     len(chain) != 1
                     or node.kind != SELECT
                     or not terminal_boundary
@@ -1295,7 +1317,7 @@ def lower_rows(
                         "temporal",
                         "prototype requires a direct scan and terminal projections without head (SELECT only)",
                     )
-                if ordered_terminal:
+                if ordered_terminal or ordered_private:
                     temporal_expressions.validate_pairs(bound)
                 else:
                     temporal_expressions.validate(bound)
@@ -2347,11 +2369,11 @@ def lower_rows(
                 node_dtypes,
                 capabilities,
             )
-            if ordered_terminal:
+            if ordered_terminal or ordered_private:
                 while len(ordered_ranks) < start:
                     ordered_ranks.append(UInt32(0))
                 ordered_ranks.extend(expression_ranks.copy())
-            if ordered_scalar or ordered_terminal:
+            if ordered_scalar or ordered_terminal or ordered_private:
                 # Decimal high literal words and membership tails are not
                 # evaluated nodes; their rank entries are never dereferenced.
                 while len(ordered_ranks) < len(literals):
@@ -2464,7 +2486,19 @@ def lower_rows(
                         )
                         if not original_key.string_hash:
                             key_descriptor |= UInt64(1) << 62
-                        key_values.extend(original_key.values[].copy())
+                        if node.code_domain and (
+                            original_key.dtype == DataType.STRING
+                            or original_key.dtype.is_categorical()
+                        ):
+                            append_partition_values(
+                                key_values,
+                                node.code_domain.value(),
+                                original_key,
+                            )
+                        else:
+                            # Opaque byte dictionaries retain their own exact
+                            # raw-byte family and are never text unions.
+                            key_values.extend(original_key.values[].copy())
                     break
                 code.extend(
                     [
@@ -2619,7 +2653,17 @@ def lower_rows(
         capabilities.reject(
             "ordered scalar", "requires exactly one row expression"
         )
-    if ordered_mode == 2:
+    if ordered_mode == 3 and (
+        len(steps) != 1
+        or len(outputs) != frame.width() + 1
+        or limit >= 0
+        or not terminal_boundary
+    ):
+        capabilities.reject(
+            "ordered implode",
+            "requires one fresh private output and preserved inputs",
+        )
+    if ordered_mode == 2 or ordered_mode == 3:
         if reduced or len(ordered_ranks) != len(literals):
             capabilities.reject(
                 "ordered rows", "invalid occurrence descriptor geometry"
@@ -2677,4 +2721,8 @@ def lower_rows(
         zone_words^,
         ArcPointer(ordered_ranks^),
         ordered_mode,
+        query._nodes[cursor].text_fields.copy(),
+        query._nodes[root].text_fields.copy(),
+        query._nodes[root].code_domain,
+        query._nodes[cursor].code_domain,
     )

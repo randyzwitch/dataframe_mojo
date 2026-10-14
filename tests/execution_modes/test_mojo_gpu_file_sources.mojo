@@ -236,7 +236,12 @@ def _source_order_error(
 ) raises -> String:
     try:
         if accelerator:
-            _ = query.collect(engine="accel", accelerator=MetalRuntime())
+            _ = query.collect(
+                engine="accel",
+                accelerator=MetalRuntime(),
+                optimize=optimize,
+                streaming=False,
+            )
         else:
             _ = query.collect(engine="cpu", optimize=optimize, streaming=False)
     except error:
@@ -294,10 +299,12 @@ def test_mojo_gpu_file_sources_planning_metadata_failure_precedes_gpu_prefix() r
     assert_equal(_source_order_error(projected, True), original)
     # CPU optimization asks which join input owns the projected name before
     # it evaluates rows. Without optimization its earlier decimal producer
-    # fails first; the backend currently receives no optimize flag, so the
-    # forced GPU contract here explicitly targets optimize=True.
+    # fails first; providers receive the requested setting on a dispatch copy.
     assert_true(
         "decimal precision" in _source_order_error(projected, False, False)
+    )
+    assert_true(
+        "decimal precision" in _source_order_error(projected, True, False)
     )
 
     var filtered = (
@@ -313,6 +320,9 @@ def test_mojo_gpu_file_sources_planning_metadata_failure_precedes_gpu_prefix() r
     assert_equal(_source_order_error(filtered, True), original)
     assert_true(
         "decimal precision" in _source_order_error(filtered, False, False)
+    )
+    assert_true(
+        "decimal precision" in _source_order_error(filtered, True, False)
     )
     run_command(["rm", "-r", work])
 

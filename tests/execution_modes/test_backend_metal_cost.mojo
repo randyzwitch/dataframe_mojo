@@ -150,7 +150,7 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
 def cost_preflight() raises:
     var invalid = MetalRuntime(device_id=999999)
     var wide = DataFrame([Series("x", Column[Float64]([1, 2]))])
-    with assert_raises(contains="unsupported"):
+    with assert_raises(contains="no analytical calibration"):
         _ = invalid.estimate_auto(wide.lazy().select(col("x").implode()))
     with assert_raises(contains="in-memory"):
         _ = invalid.estimate_auto(

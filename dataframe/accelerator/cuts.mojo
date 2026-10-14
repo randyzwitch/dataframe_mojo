@@ -52,6 +52,7 @@ from .memory import checked_add
 from .metadata import schema_frame
 from .selectors import _live_nodes
 from .aggregates import _in_memory_sources
+from .qcuts import QCUT_TAG, stage_custom as stage_custom_qcut
 
 comptime CUT_TAG = "metal_explicit_cut_operand"
 comptime CUT_ANCHOR_TAG = "metal_explicit_cut_scalar_anchor"
@@ -75,7 +76,10 @@ def has_cut_materializations(query: LazyFrame) -> Bool:
         if (
             operation.text == "metal_window_materialization"
             and len(operation.names2) >= 1
-            and operation.names2[0] == CUT_TAG
+            and (
+                operation.names2[0] == CUT_TAG
+                or operation.names2[0] == QCUT_TAG
+            )
         ):
             return True
     return False
@@ -443,11 +447,7 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
         if live[index]:
             for expression in operation.exprs:
                 for node in expression._nodes:
-                    if node.op == QCUT:
-                        raise Error(
-                            "Metal unsupported [cut]: qcut dynamic edges are pending"
-                        )
-                    changed |= node.op == CUT
+                    changed |= node.op == CUT or node.op == QCUT
         if not changed:
             result._nodes.append(operation^)
             roots.append(len(result._nodes) - 1)
@@ -520,7 +520,7 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
             var packed_value = Optional[Expr]()
             for n in range(len(expression._nodes)):
                 var node = expression._nodes[n].copy()
-                if node.op == CUT:
+                if node.op == CUT or node.op == QCUT:
                     if (node.integer & 2) and (
                         n != len(expression._nodes) - 1
                         or operation.kind != SELECT
@@ -533,7 +533,9 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
                     var operand = subtree(prepared, positions[node.left]).cast(
                         DataType.FLOAT64
                     )
-                    var controls = _controls(node)
+                    var controls = (List[Float64](), List[String](), String())
+                    if node.op == CUT:
+                        controls = _controls(node)
                     var name = _name(used, serial)
                     serial += 1
                     temporary.append(name)
@@ -548,9 +550,23 @@ def lower_cuts(query: LazyFrame) raises -> LazyFrame:
                         )
                     )
                     aligned = len(result._nodes) - 1
-                    var replacement = _values(
-                        name, node, controls[0], controls[1]
-                    )
+                    var replacement: Expr
+                    if node.op == CUT:
+                        replacement = _values(
+                            name, node, controls[0], controls[1]
+                        )
+                    else:
+                        var category = _name(used, serial)
+                        serial += 1
+                        var breakpoint = _name(used, serial)
+                        serial += 1
+                        temporary.append(category)
+                        if node.integer & 2:
+                            temporary.append(breakpoint)
+                        replacement = stage_custom_qcut(
+                            result, aligned, name, category, breakpoint, node
+                        )
+                        aligned = len(result._nodes) - 1
                     if node.integer & 2:
                         # STRUCT_PACK child roots live in text2, not left/right;
                         # keep this terminal expression standalone and intact.

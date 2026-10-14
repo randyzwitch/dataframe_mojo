@@ -62,6 +62,132 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_empty_joins.mojo::test_mojo_gpu_both_empty_join_styles_schema_zero_budget_without_device",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_empty_joins.mojo::test_mojo_gpu_both_empty_join_invalid_metadata_precedes_device_setup",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_dynamic_text_domains.mojo::test_dynamic_text_domain_union_maps_are_metadata_and_private",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_dynamic_text_domains.mojo::test_dynamic_text_domains_keep_original_categorical_and_hash_provenance",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_dynamic_text_domains.mojo::test_dynamic_text_domain_guards_precede_device_creation",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/public_contracts/test_dynamic_text_domains.mojo::test_dynamic_qcut_label_controls_match_cpu_literal_spelling",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_qcut.mojo::test_mojo_gpu_qcut_custom_labels_layouts_closure_and_consumers",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_qcut.mojo::test_mojo_gpu_qcut_duplicate_labels_null_nan_and_control_order",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_qcut.mojo::test_mojo_gpu_qcut_exact_breakpoints_association_and_zero_permutation",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_qcut.mojo::test_mojo_gpu_qcut_eager_producers_scalar_siblings_budget_and_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_qcut_default.mojo::test_mojo_gpu_qcut_default_literal_labels_nulls_closure_and_layouts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_qcut_default.mojo::test_mojo_gpu_qcut_default_downstream_filter_join_and_domain_union",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_qcut_default.mojo::test_mojo_gpu_qcut_default_breakpoints_over_keys_and_exact_controls",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_qcut_default.mojo::test_mojo_gpu_qcut_default_duplicates_signed_zero_and_ordered_failures",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo::test_mojo_gpu_ordered_implode_checked_categories_batches_and_occurrences",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo::test_mojo_gpu_ordered_implode_masks_empty_and_later_eager_states",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo::test_mojo_gpu_ordered_implode_resources_provenance_and_foreign_flags",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo::test_mojo_gpu_ordered_implode_post_state_ast_categories_and_batches",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo::test_mojo_gpu_ordered_implode_prepared_state_order_masks_and_projections",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo::test_mojo_gpu_ordered_implode_state_compositions_resources_empty_provenance",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_execution_settings.mojo::test_mojo_gpu_settings_control_file_planning_and_preserve_eager_fault_batches",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_identity_column_metadata.mojo::test_mojo_gpu_identity_column_metadata_logical_views_empty_and_budget",
             "metal",
         )
@@ -2591,6 +2717,9 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "public.apple_parity",
             [
+                "tests/public_contracts/test_text_domain_metadata.mojo",
+                "tests/public_contracts/test_dynamic_text_domains.mojo",
+                "tests/public_contracts/test_accelerator_execution_settings.mojo",
                 "tests/public_contracts/test_identity_column_metadata.mojo",
                 "tests/public_contracts/test_implode_field_metadata.mojo",
                 "tests/public_contracts/test_list_get_metadata.mojo",
@@ -2614,6 +2743,12 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.apple_parity",
             [
+                "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",
+                "tests/execution_modes/test_mojo_gpu_qcut.mojo",
+                "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",
+                "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
+                "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
+                "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",
                 "tests/execution_modes/test_mojo_gpu_identity_column_metadata.mojo",
                 "tests/execution_modes/test_mojo_gpu_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_source_lists.mojo",
@@ -3015,6 +3150,12 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_empty_joins.mojo",
+                "tests/execution_modes/test_mojo_gpu_qcut.mojo",
+                "tests/execution_modes/test_mojo_gpu_qcut_default.mojo",
+                "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
+                "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
+                "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",
                 "tests/execution_modes/test_mojo_gpu_identity_column_metadata.mojo",
                 "tests/execution_modes/test_mojo_gpu_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_source_lists.mojo",
