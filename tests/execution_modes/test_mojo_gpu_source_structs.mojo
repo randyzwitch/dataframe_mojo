@@ -313,10 +313,20 @@ def test_mojo_gpu_source_struct_refusals_and_explanation_remain_metadata_only() 
     )
     assert_true("nullable source struct fields" in description)
     assert_false("invalid device" in description)
-    with assert_raises(contains="identity field cast"):
-        _ = lower_source_structs(
-            frame.lazy().select(col("record").field("n").cast(DataType.INT64))
-        )
+    var identity = lower_source_structs(
+        frame.lazy().select(
+            col("record").field("n").cast(DataType.INT64).cast(DataType.INT64)
+        ),
+        metadata_only=True,
+    )
+    assert_true(
+        identity.prototypes[0]._field_metadata.value().ptr()
+        == frame.column("record")
+        .struct_column()
+        .field("n")
+        ._field_metadata.value()
+        .ptr()
+    )
     for query in [
         frame.lazy().select(col("record")),
         frame.lazy()
@@ -349,3 +359,132 @@ def test_mojo_gpu_source_struct_refusals_and_explanation_remain_metadata_only() 
         _ = lower_source_structs(
             nested.lazy().select(col("record").field("inner"))
         )
+
+
+def test_mojo_gpu_source_struct_identity_cast_field_metadata_and_masks() raises:
+    var original = _source()
+    var child = original.column("record").struct_column().field("n")
+    for sliced in [False, True]:
+        var source = original.slice(1, 3) if sliced else original.copy()
+        for variant in range(3):
+            var frame = (
+                source.copy() if variant
+                == 0 else offset_layout(source) if variant
+                == 1 else chunk_layout(source)
+            )
+            var field = (
+                col("record")
+                .field("n")
+                .cast(DataType.INT64)
+                .cast(DataType.INT64)
+            )
+            var expressions: List[Expr] = [
+                field.copy().alias("identity"),
+                (field.copy() + 1).alias("computed"),
+                col("record")
+                .field("n")
+                .cast(DataType.INT32)
+                .cast(DataType.INT32)
+                .alias("changed"),
+                when(col("use"))
+                .then(field.copy() + 1)
+                .otherwise(lit(Int64(0)))
+                .alias("masked"),
+            ]
+            for empty in [False, True]:
+                var input = frame.clear() if empty else frame.copy()
+                var query = input.lazy().select_exprs(expressions)
+                var prepared = lower_source_structs(query)
+                assert_true(
+                    prepared.prototypes[0]._field_metadata.value().ptr()
+                    == child._field_metadata.value().ptr()
+                )
+                var gpu = query.collect(
+                    accelerator=MetalRuntime(), engine="accel"
+                )
+                for batch in [1, 64]:
+                    var cpu = input.select_exprs(expressions, batch_size=batch)
+                    assert_true(gpu.equals(cpu))
+                    for actual in [cpu.copy(), gpu.copy()]:
+                        assert_equal(
+                            actual.height(), 0 if empty else 3 if sliced else 4
+                        )
+                        assert_true(
+                            actual.column("identity")
+                            ._field_metadata.value()
+                            .ptr()
+                            == child._field_metadata.value().ptr()
+                        )
+                        assert_false(
+                            Bool(actual.column("computed")._field_metadata)
+                        )
+                        assert_false(
+                            Bool(actual.column("changed")._field_metadata)
+                        )
+                        assert_false(
+                            Bool(actual.column("masked")._field_metadata)
+                        )
+                        assert_equal(
+                            actual.column("changed").dtype(), DataType.INT32
+                        )
+                        for row in range(actual.height()):
+                            var source_row = row + (1 if sliced else 0)
+                            var missing = source_row == 1 or source_row == 2
+                            assert_equal(
+                                actual.item(row, "identity").is_null(), missing
+                            )
+                            assert_equal(
+                                actual.item(row, "computed").is_null(), missing
+                            )
+                            assert_equal(
+                                actual.item(row, "changed").is_null(), missing
+                            )
+                            assert_equal(
+                                actual.item(row, "masked").is_null(),
+                                source_row == 1,
+                            )
+                            if not missing:
+                                var value = Int64(5 if source_row == 0 else 7)
+                                assert_equal(
+                                    actual.item(row, "identity").int64(), value
+                                )
+                                assert_equal(
+                                    actual.item(row, "computed").int64(),
+                                    value + 1,
+                                )
+                                assert_equal(
+                                    actual.item(row, "changed").int32(),
+                                    Int32(value),
+                                )
+                            if source_row != 1:
+                                assert_equal(
+                                    actual.item(row, "masked").int64(),
+                                    Int64(6 if source_row == 0 else 0),
+                                )
+    # A visible MAX value under an unselected outer mask must not overflow;
+    # parent-null and child-null poison rows remain unobserved as well.
+    var masked = (
+        _source(True)
+        .lazy()
+        .select(
+            when(col("use"))
+            .then(
+                col("record")
+                .field("n")
+                .cast(DataType.INT64)
+                .cast(DataType.INT64)
+                + 1
+            )
+            .otherwise(lit(Int64(0)))
+            .alias("out")
+        )
+    )
+    var actual = masked.collect(accelerator=MetalRuntime(), engine="accel")
+    assert_false(Bool(actual.column("out")._field_metadata))
+    assert_equal(actual.item(0, "out").int64(), Int64(6))
+    assert_true(actual.item(1, "out").is_null())
+    assert_equal(actual.item(2, "out").int64(), Int64(0))
+    assert_equal(actual.item(3, "out").int64(), Int64(0))
+    assert_true(actual.equals(masked.collect(engine="cpu", streaming=False)))
+    assert_equal(child.int64()._get(1), Int64.MAX)
+    assert_false(child.int64()._valid(2))

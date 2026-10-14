@@ -138,8 +138,23 @@ valid independently of nullable children. Direct source Struct field projection
 combines parent and child validity on the GPU, so hidden child values under a
 null parent remain unobserved. This currently requires a direct scan and
 terminal primitive projection; nested or variable-byte children, bare Struct
-outputs and identity casts of fields remain explicit restrictions. Profiles
-include conservative host staging for chunk compaction and parent bitmaps.
+outputs remain explicit restrictions. Identity casts of primitive fields retain
+their Arrow field metadata and parent validity. Profiles include conservative
+host staging for chunk compaction and parent bitmaps.
+
+Binary and Geometry columns use reversible, ordered byte dictionaries for
+supported row movement, comparison, joins, grouping and windows. Transport
+preserves raw bytes, geometry CRS/SRID and Arrow field metadata; it does not
+interpret WKB or decode arbitrary bytes as UTF-8. Byte casts, text operations,
+spatial computation and nested byte consumers remain restricted. Profiles
+include byte staging and restoration in whole-query traffic and memory peaks.
+
+Numeric CUT supports literal edges, custom or default labels, nullable operands
+and terminal breakpoint Struct outputs. Operand errors precede edge validation.
+Scalar and reduction siblings retain CPU evaluation order, including empty
+inputs; a private one-row interpreter path selects the first scalar expression
+fault. General terminal row error ordering remains a separate coverage gap.
+QCUT and partitioned CUT remain restricted.
 
 Errors travel with values through conditionals and row movement. Selected
 terminal values and observing consumers check them; unselected conditional
@@ -191,8 +206,9 @@ query parity. Grouped mode/value counts, implode,
 IANA-zone duration windows, row-valued
 text parsing/formatting, remaining timezone operations, nested list/struct
 operations, broader source Struct consumers and explode/unnest remain outside
-this accelerator subset. CUT/QCUT and opaque Binary/Geometry transport are also
-pending. Some checked-expression/window compositions also reject.
+this accelerator subset. QCUT, partitioned CUT and broader Binary/Geometry
+operations remain pending. Some checked-expression/window compositions also
+reject.
 These are implementation gaps, not demonstrated limitations of Mojo.
 
 Whole-DAG metadata validation, including invalid as-of metadata or tolerance,

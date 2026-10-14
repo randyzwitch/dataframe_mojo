@@ -124,8 +124,9 @@ from dataframe.accelerator.rows import (
 from dataframe.accelerator.timezone_tables import (
     validate as validate_zone_table,
 )
-from .residency import Scope, Matrix, Table, HostMatrix
-from .rows import row_program
+from .residency import Scope, Matrix, Table, HostMatrix, raise_value_error
+from .rows import row_program, row_program_ordered
+from . import ordered_faults
 from .temporal_descriptors import (
     ROW_TEMPORAL_BINARY,
     ROW_TEMPORAL_CAST,
@@ -750,6 +751,11 @@ def estimate_resources(
         + len(plan.zone_words),
         8,
     )
+    # One shared host rank owner and one device rank buffer. Both existing
+    # program envelopes charge this term once; upload sends only the device copy.
+    program_bytes = _checked_add(
+        program_bytes, _checked_mul(len(plan.ordered_ranks[]), 4)
+    )
     var shared = _checked_add(matrix_bytes, program_bytes) if rows else 0
     if rows and movement:
         # A second matrix prevents overlapping reads/writes during compaction.
@@ -817,6 +823,10 @@ def estimate_resources(
     )
     if resident_input:
         peak = _checked_add(peak, _checked_mul(plan.source.width(), 48))
+    if rows and len(plan.ordered_ranks[]):
+        # Two-word control record has simultaneous host/device owners and is
+        # reused for input-zero proof and ranked output observation.
+        peak = _checked_add(peak, 16)
     var upload = 0
     var download = 0
     var launches = 0
@@ -899,6 +909,10 @@ def estimate_resources(
                 + 2 * Int(has_quantiles)
                 + Int(has_float_sums),
             )
+    if rows and len(plan.ordered_ranks[]):
+        launches = _checked_add(launches, 2)
+        waits = _checked_add(waits, 2)
+        download = _checked_add(download, 16)
     return ResourceFacts(
         peak,
         matrix_bytes,
@@ -1021,6 +1035,21 @@ def execute_plan(
     var rows = (
         resident_input.value().rows if resident_input else plan.source.height()
     )
+    var ordered_scalar = len(plan.ordered_ranks[]) != 0
+    if ordered_scalar and (
+        rows != 1
+        or plan.reductions
+        or plan.limit >= 0
+        or len(plan.steps) != 1
+        or len(plan.outputs) != 1
+        or plan.steps[0].filter
+        or plan.steps[0].order
+        or plan.steps[0].grouped
+        or len(plan.ordered_ranks[]) != len(plan.literals)
+    ):
+        raise Error(
+            "Mojo GPU ordered scalar requires exactly one proven anchor row"
+        )
     var count = rows if plan.limit < 0 else min(rows, plan.limit)
     if plan.reductions:
         count = 0 if plan.limit == 0 else 1
@@ -1097,6 +1126,8 @@ def execute_plan(
     var uploaded = 0
     var downloaded = 0
     var device_key_values = Optional[DeviceBuffer[DType.uint64]]()
+    var device_ranks = Optional[DeviceBuffer[DType.uint32]]()
+    var ordered_control = Optional[DeviceBuffer[DType.uint32]]()
     if rows and cells:
         var ctx = scope.context()
         # All staging/program host owners are outside this protected block.
@@ -1156,6 +1187,33 @@ def execute_plan(
                 uploaded += len(literals) * 8
                 ctx.enqueue_copy(device_types, types.unsafe_ptr())
                 uploaded += len(types) * 8
+                if ordered_scalar:
+                    device_ranks = ctx.enqueue_create_buffer[DType.uint32](
+                        len(program.ordered_ranks[])
+                    )
+                    ctx.enqueue_copy(
+                        device_ranks.value(),
+                        program.ordered_ranks[].unsafe_ptr(),
+                    )
+                    uploaded += len(program.ordered_ranks[]) * 4
+                    ordered_control = ctx.enqueue_create_buffer[DType.uint32](2)
+                    ctx.enqueue_function[ordered_faults.observe_scalar_inputs](
+                        device_errors.unsafe_ptr(),
+                        ordered_control.value().unsafe_ptr(),
+                        UInt32(plan.source.width()),
+                        grid_dim=1,
+                        block_dim=1,
+                    )
+                    submissions += 1
+                    var input_failure = scope.read_control(
+                        ordered_control.value()
+                    )
+                    downloaded += 8
+                    waits += 1
+                    if input_failure[0]:
+                        raise Error(
+                            "Mojo GPU ordered scalar requires already observed successful inputs"
+                        )
                 if len(plan.key_values):
                     var lookup = ctx.enqueue_create_buffer[DType.uint64](
                         len(plan.key_values)
@@ -1747,22 +1805,60 @@ def execute_plan(
                         device_valid = gathered_valid^
                         device_errors = gathered_errors^
                         continue
-                    ctx.enqueue_function[row_program](
-                        device_words.unsafe_ptr(),
-                        device_valid.unsafe_ptr(),
-                        device_errors.unsafe_ptr(),
-                        device_code.unsafe_ptr(),
-                        device_literals.unsafe_ptr(),
-                        device_types.unsafe_ptr(),
-                        UInt32(step.start),
-                        UInt32(step.nodes),
-                        UInt32(step.slot),
-                        UInt32(current_rows),
-                        UInt32(rows),
-                        UInt32(plan.slots),
-                        grid_dim=(current_rows + 255) // 256,
-                        block_dim=256,
-                    )
+                    if ordered_scalar:
+                        ctx.enqueue_function[row_program_ordered](
+                            device_words.unsafe_ptr(),
+                            device_valid.unsafe_ptr(),
+                            device_errors.unsafe_ptr(),
+                            device_code.unsafe_ptr(),
+                            device_literals.unsafe_ptr(),
+                            device_types.unsafe_ptr(),
+                            device_ranks.value().unsafe_ptr(),
+                            UInt32(step.start),
+                            UInt32(step.nodes),
+                            UInt32(step.slot),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            UInt32(plan.slots),
+                            grid_dim=1,
+                            block_dim=256,
+                        )
+                        ctx.enqueue_function[ordered_faults.observe](
+                            device_errors.unsafe_ptr(),
+                            ordered_control.value().unsafe_ptr(),
+                            UInt32(step.slot),
+                            UInt32(1),
+                            UInt32(1),
+                            UInt32(8192),
+                            grid_dim=1,
+                            block_dim=1,
+                        )
+                        submissions += 1
+                        var fault = scope.read_control(ordered_control.value())
+                        downloaded += 8
+                        waits += 1
+                        if fault[0]:
+                            raise_value_error(
+                                ordered_faults.category(fault[0]),
+                                "Mojo GPU arithmetic overflow or strict cast failed",
+                            )
+                    else:
+                        ctx.enqueue_function[row_program](
+                            device_words.unsafe_ptr(),
+                            device_valid.unsafe_ptr(),
+                            device_errors.unsafe_ptr(),
+                            device_code.unsafe_ptr(),
+                            device_literals.unsafe_ptr(),
+                            device_types.unsafe_ptr(),
+                            UInt32(step.start),
+                            UInt32(step.nodes),
+                            UInt32(step.slot),
+                            UInt32(current_rows),
+                            UInt32(rows),
+                            UInt32(plan.slots),
+                            grid_dim=(current_rows + 255) // 256,
+                            block_dim=256,
+                        )
                     submissions += 1
                     if step.filter:
                         var blocks = (current_rows + 255) // 256
@@ -2017,6 +2113,8 @@ def execute_plan(
             _ = errors^
             _ = program^
             _ = slot_types^
+            _ = device_ranks^
+            _ = ordered_control^
             raise error^
     elif plan.reductions:
         # Empty input has no data to submit. The same Mojo state finalizer
@@ -2049,6 +2147,8 @@ def execute_plan(
     _ = program^
     _ = slot_types^
     _ = device_key_values^
+    _ = device_ranks^
+    _ = ordered_control^
     if not resident_result:
         if plan.reductions and count:
             resident_result = Table.identity(

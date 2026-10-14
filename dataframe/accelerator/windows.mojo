@@ -201,7 +201,9 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                             if column.name() != key:
                                 continue
                             var dtype = column.dtype()
-                            var string_hash = dtype == DataType.STRING
+                            var string_hash = (
+                                dtype == DataType.STRING or dtype._is_bytes()
+                            )
                             if dtype.is_categorical():
                                 # CPU evaluate() prepares the whole bound
                                 # expression before any OVER state. A COL

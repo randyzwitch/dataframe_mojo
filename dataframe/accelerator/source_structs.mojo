@@ -227,9 +227,21 @@ def projection(
     for expression in expressions:
         rewritten.append(rewrite(layout, expression))
         ref root = expression._nodes[len(expression._nodes) - 1]
-        if root.op == STRUCT_FIELD:
-            var source = expression._nodes[root.left].text
-            var item = field_mapping(layout, source, root.text)
+        var bound = bind(expression, layout.source._columns)
+        var field = len(bound.dtypes) - 1
+        while bound.expr._nodes[field].op == CAST:
+            var child = bound.expr._nodes[field].left
+            if (
+                child < 0
+                or bound.dtypes[field].is_nested()
+                or bound.dtypes[field] != bound.dtypes[child]
+            ):
+                break
+            field = child
+        ref field_root = bound.expr._nodes[field]
+        if field_root.op == STRUCT_FIELD:
+            var source = bound.expr._nodes[field_root.left].text
+            var item = field_mapping(layout, source, field_root.text)
             prototypes.append(item.prototype.renamed(expression._name))
         elif len(expression._nodes) == 1 and root.op == COL:
             prototypes.append(
@@ -341,16 +353,6 @@ def lower_source_structs(
         if bound.dtypes[root].is_nested():
             raise Error(
                 "Metal unsupported [source struct]: primitive outputs required"
-            )
-        ref top = bound.expr._nodes[root]
-        if (
-            top.op == CAST
-            and top.left >= 0
-            and bound.expr._nodes[top.left].op == STRUCT_FIELD
-            and bound.dtypes[root] == bound.dtypes[top.left]
-        ):
-            raise Error(
-                "Metal unsupported [source struct]: identity field cast requires CPU metadata repair"
             )
     var layout = flatten_source(
         frame.clear() if metadata_only else frame.copy()

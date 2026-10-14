@@ -131,13 +131,40 @@ def integer_arithmetic(
     return (value, UInt32(not (fits and integer_fits(value, dtype))))
 
 
-def row_program(
+from . import ordered_faults
+
+
+def _combine[ordered: Bool](left: UInt32, right: UInt32) -> UInt32:
+    comptime if ordered:
+        return ordered_faults.merge(left, right)
+    else:
+        return left | right
+
+
+def _new_fault[ordered: Bool](category: UInt32, rank: UInt32) -> UInt32:
+    comptime if ordered:
+        return ordered_faults.pack(rank, category) if category else UInt32(0)
+    else:
+        return category
+
+
+def _temporal_inputs[ordered: Bool](left: UInt32, right: UInt32) -> UInt32:
+    comptime if ordered:
+        return ordered_faults.merge(left, right)
+    else:
+        return left if left else right
+
+
+def _row_program[
+    ordered: Bool
+](
     words: Pointer[UInt64, MutAnyOrigin],
     validity: Pointer[UInt8, MutAnyOrigin],
     errors: Pointer[UInt32, MutAnyOrigin],
     code: Pointer[Int64, ImmutAnyOrigin],
     literals: Pointer[UInt64, ImmutAnyOrigin],
     types: Pointer[Int64, ImmutAnyOrigin],
+    fault_ranks: Pointer[UInt32, ImmutAnyOrigin],
     start: UInt32,
     nodes: UInt32,
     target: UInt32,
@@ -163,6 +190,9 @@ def row_program(
         var high = UInt64(0)
         var present = True
         var error = UInt32(0)
+        var own_rank = UInt32(0)
+        comptime if ordered:
+            own_rank = fault_ranks[unsafe_offset=absolute]
         if op == COL:
             var at = c * Int(stride) + row
             value = words[unsafe_offset=at]
@@ -195,7 +225,9 @@ def row_program(
             value = values[unsafe_offset=chosen]
             high = highs[unsafe_offset=chosen]
             present = valid[unsafe_offset=chosen] != 0
-            error = failed[unsafe_offset=a] | failed[unsafe_offset=chosen]
+            error = _combine[ordered](
+                failed[unsafe_offset=a], failed[unsafe_offset=chosen]
+            )
             var source_type = types[unsafe_offset=Int(start) + chosen]
             if dtype == 12 and source_type != 12:
                 high = UInt64.MAX if value >> 63 else UInt64(0)
@@ -221,7 +253,9 @@ def row_program(
             present = valid[unsafe_offset=chosen] != 0
             # CPU evaluates both operands before choosing the output value.
             # An enclosing WHEN still masks this entire expression's fault.
-            error = failed[unsafe_offset=a] | failed[unsafe_offset=b]
+            error = _combine[ordered](
+                failed[unsafe_offset=a], failed[unsafe_offset=b]
+            )
             var source_type = types[unsafe_offset=Int(start) + chosen]
             if dtype == 12 and source_type != 12:
                 high = UInt64.MAX if value >> 63 else UInt64(0)
@@ -259,7 +293,12 @@ def row_program(
                     )
                     value = result.value.low
                     high = result.value.high
-                    error |= decimal.error_flag(result.error)
+                    error = _combine[ordered](
+                        error,
+                        _new_fault[ordered](
+                            decimal.error_flag(result.error), own_rank
+                        ),
+                    )
                     present = result.error == 0
                 else:
                     var result = decimal.cast(
@@ -275,12 +314,16 @@ def row_program(
                     high = result.value.high if dtype == 12 else UInt64(0)
                     present = result.valid
                     if not present and (c & (1 << 18)):
-                        error |= 1
+                        error = _combine[ordered](
+                            error, _new_fault[ordered](1, own_rank)
+                        )
         elif op == DECIMAL_BINARY or op == DECIMAL_COMPARE:
             present = (
                 valid[unsafe_offset=a] != 0 and valid[unsafe_offset=b] != 0
             )
-            error = failed[unsafe_offset=a] | failed[unsafe_offset=b]
+            error = _combine[ordered](
+                failed[unsafe_offset=a], failed[unsafe_offset=b]
+            )
             if present:
                 var left = values[unsafe_offset=a]
                 var right = values[unsafe_offset=b]
@@ -305,7 +348,12 @@ def row_program(
                     )
                     value = UInt64(result.value)
                     present = result.valid
-                    error |= UInt32(4) if not present else UInt32(0)
+                    error = _combine[ordered](
+                        error,
+                        _new_fault[ordered](
+                            UInt32(4) if not present else UInt32(0), own_rank
+                        ),
+                    )
                 else:
                     var result = decimal.Arithmetic(decimal.Wide(0), 0)
                     if operation == MUL:
@@ -323,14 +371,21 @@ def row_program(
                     value = result.value.low
                     high = result.value.high
                     present = result.error == 0
-                    error |= decimal.error_flag(result.error)
+                    error = _combine[ordered](
+                        error,
+                        _new_fault[ordered](
+                            decimal.error_flag(result.error), own_rank
+                        ),
+                    )
         elif op == KEEP_NULLS:
             value = values[unsafe_offset=b]
             high = highs[unsafe_offset=b]
             present = (
                 valid[unsafe_offset=a] != 0 and valid[unsafe_offset=b] != 0
             )
-            error = failed[unsafe_offset=a] | failed[unsafe_offset=b]
+            error = _combine[ordered](
+                failed[unsafe_offset=a], failed[unsafe_offset=b]
+            )
         elif op == INT_IS_IN:
             present = valid[unsafe_offset=a] != 0
             error = failed[unsafe_offset=a]
@@ -344,9 +399,9 @@ def row_program(
             present = (
                 valid[unsafe_offset=a] != 0 and valid[unsafe_offset=b] != 0
             )
-            error = failed[unsafe_offset=a]
-            if error == 0:
-                error = failed[unsafe_offset=b]
+            error = _temporal_inputs[ordered](
+                failed[unsafe_offset=a], failed[unsafe_offset=b]
+            )
             if present and error == 0:
                 var parameter = literals[unsafe_offset=absolute]
                 var result = temporal_arithmetic.binary(
@@ -357,7 +412,7 @@ def row_program(
                 )
                 value = result[0]
                 present = result[1]
-                error = result[2]
+                error = _new_fault[ordered](result[2], own_rank)
         elif op == ROW_TEMPORAL_CAST:
             value = values[unsafe_offset=a]
             present = valid[unsafe_offset=a] != 0
@@ -369,7 +424,7 @@ def row_program(
                 )
                 value = result[0]
                 present = result[1]
-                error = result[2]
+                error = _new_fault[ordered](result[2], own_rank)
         elif op == CAST:
             value = values[unsafe_offset=a]
             present = valid[unsafe_offset=a] != 0
@@ -407,7 +462,9 @@ def row_program(
                         fits = fits and value >> 63 == 0
                 if not fits:
                     if c:
-                        error |= 1
+                        error = _combine[ordered](
+                            error, _new_fault[ordered](1, own_rank)
+                        )
                     else:
                         present = False
         elif (
@@ -455,7 +512,9 @@ def row_program(
                     literals[unsafe_offset=absolute],
                 )
                 value = result[0]
-                error |= result[1]
+                error = _combine[ordered](
+                    error, _new_fault[ordered](result[1], own_rank)
+                )
         elif op == NEG or op == ABS or op == NOT:
             value = values[unsafe_offset=a]
             present = valid[unsafe_offset=a] != 0
@@ -473,7 +532,9 @@ def row_program(
                         or (value == UInt64(1) << 63)
                         or (unsigned_type(dtype) and value != 0)
                     ):
-                        error |= 1
+                        error = _combine[ordered](
+                            error, _new_fault[ordered](1, own_rank)
+                        )
         elif (
             op == SQRT
             or op == EXP
@@ -515,7 +576,9 @@ def row_program(
             var av = valid[unsafe_offset=a] != 0
             var bv = valid[unsafe_offset=b] != 0
             present = av and bv
-            error = failed[unsafe_offset=a] | failed[unsafe_offset=b]
+            error = _combine[ordered](
+                failed[unsafe_offset=a], failed[unsafe_offset=b]
+            )
             if op == AND or op == OR or op == XOR:
                 if op == AND:
                     present = (
@@ -571,7 +634,9 @@ def row_program(
                 elif op == ADD or op == SUB or op == MUL:
                     var result = integer_arithmetic(op, left, right, dtype)
                     value = result[0]
-                    error |= result[1]
+                    error = _combine[ordered](
+                        error, _new_fault[ordered](result[1], own_rank)
+                    )
                 elif op == FLOORDIV or op == MOD or op == POW:
                     var result = integers.evaluate(
                         op,
@@ -582,10 +647,16 @@ def row_program(
                     )
                     value = result[0]
                     present = result[1]
-                    error |= (
-                        UInt32(32) if op == POW
-                        and not unsigned_type(dtype)
-                        and right >> 63 else result[2]
+                    error = _combine[ordered](
+                        error,
+                        _new_fault[ordered](
+                            (
+                                UInt32(32) if op == POW
+                                and not unsigned_type(dtype)
+                                and right >> 63 else result[2]
+                            ),
+                            own_rank,
+                        ),
                     )
                 else:
                     var operand = types[unsafe_offset=Int(start) + a]
@@ -645,3 +716,66 @@ def row_program(
         ]
     validity[unsafe_offset=destination] = valid[unsafe_offset=root]
     errors[unsafe_offset=destination] = failed[unsafe_offset=root]
+
+
+def row_program(
+    words: Pointer[UInt64, MutAnyOrigin],
+    validity: Pointer[UInt8, MutAnyOrigin],
+    errors: Pointer[UInt32, MutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    literals: Pointer[UInt64, ImmutAnyOrigin],
+    types: Pointer[Int64, ImmutAnyOrigin],
+    start: UInt32,
+    nodes: UInt32,
+    target: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    slots: UInt32 = 0,
+):
+    _row_program[False](
+        words,
+        validity,
+        errors,
+        code,
+        literals,
+        types,
+        code.unsafe_bitcast[UInt32](),
+        start,
+        nodes,
+        target,
+        rows,
+        stride,
+        slots,
+    )
+
+
+def row_program_ordered(
+    words: Pointer[UInt64, MutAnyOrigin],
+    validity: Pointer[UInt8, MutAnyOrigin],
+    errors: Pointer[UInt32, MutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    literals: Pointer[UInt64, ImmutAnyOrigin],
+    types: Pointer[Int64, ImmutAnyOrigin],
+    fault_ranks: Pointer[UInt32, ImmutAnyOrigin],
+    start: UInt32,
+    nodes: UInt32,
+    target: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    slots: UInt32 = 0,
+):
+    _row_program[True](
+        words,
+        validity,
+        errors,
+        code,
+        literals,
+        types,
+        fault_ranks,
+        start,
+        nodes,
+        target,
+        rows,
+        stride,
+        slots,
+    )

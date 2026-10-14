@@ -62,6 +62,78 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_cut.mojo::test_mojo_gpu_cut_literals_default_labels_nullable_layouts_and_struct_breakpoints",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_cut.mojo::test_mojo_gpu_cut_single_nan_edge_empty_edges_filter_and_computed_operands",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_cut.mojo::test_mojo_gpu_cut_eager_operand_and_deferred_control_error_order_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_cut.mojo::test_mojo_gpu_cut_budget_profiles_and_pending_families_are_explicit",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_cut.mojo::test_mojo_gpu_cut_scalar_reduction_siblings_observe_expression_order_and_empty_errors",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_cut.mojo::test_mojo_gpu_cut_literal_only_window_rejections_and_literal_sibling_broadcast",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_source_structs.mojo::test_mojo_gpu_source_struct_identity_cast_field_metadata_and_masks",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_struct_opaque_interaction.mojo::test_mojo_gpu_struct_identity_and_opaque_transport_share_owners_masks_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_opaque_bytes.mojo::test_mojo_gpu_binary_opaque_raw_bytes_literals_stable_orders_layouts_and_metadata",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_opaque_bytes.mojo::test_mojo_gpu_binary_join_grouped_windows_and_raw_hash_provenance",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_opaque_bytes.mojo::test_mojo_gpu_geometry_transport_preserves_wkb_identity_crs_and_field_metadata",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_opaque_bytes.mojo::test_mojo_gpu_opaque_budgets_observers_empty_inputs_and_explicit_refusals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo::test_mojo_gpu_temporal_safe_literal_cast_folding_preserves_dt_fields",
             "metal",
         )
@@ -2393,6 +2465,16 @@ def production_policy() -> SuitePolicy:
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
+            "expr.cut",
+            [
+                "tests/public_contracts/test_cut_lowering.mojo",
+                "tests/public_contracts/test_ordered_scalar_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_cut.mojo",
+            ],
+        )
+    )
+    policy.groups.append(
+        ContractGroup(
             "public.accelerator_staging",
             [
                 "tests/public_contracts/test_struct_field_metadata.mojo",
@@ -2407,6 +2489,8 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "public.apple_parity",
             [
+                "tests/public_contracts/test_cut_lowering.mojo",
+                "tests/public_contracts/test_ordered_scalar_metadata.mojo",
                 "tests/public_contracts/test_struct_field_metadata.mojo",
                 "tests/public_contracts/test_accelerator_field_metadata.mojo",
                 "tests/public_contracts/test_file_source_prefixes.mojo",
@@ -2423,6 +2507,9 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.apple_parity",
             [
+                "tests/execution_modes/test_mojo_gpu_cut.mojo",
+                "tests/execution_modes/test_mojo_gpu_struct_opaque_interaction.mojo",
+                "tests/execution_modes/test_mojo_gpu_opaque_bytes.mojo",
                 "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo",
                 "tests/execution_modes/test_mojo_gpu_source_structs.mojo",
                 "tests/execution_modes/test_mojo_gpu_fill_errors.mojo",
@@ -2815,6 +2902,9 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_cut.mojo",
+                "tests/execution_modes/test_mojo_gpu_struct_opaque_interaction.mojo",
+                "tests/execution_modes/test_mojo_gpu_opaque_bytes.mojo",
                 "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo",
                 "tests/execution_modes/test_mojo_gpu_source_structs.mojo",
                 "tests/execution_modes/test_mojo_gpu_fill_errors.mojo",

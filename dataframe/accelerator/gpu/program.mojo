@@ -3,7 +3,7 @@
 Only dtype/plan metadata and literal payloads are read. The same descriptors
 are inspected by metadata contracts and uploaded by the executor.
 """
-from std.memory import bitcast
+from std.memory import ArcPointer, bitcast
 from dataframe import DataType
 from dataframe.expr import (
     LIT_BOOL,
@@ -48,11 +48,13 @@ struct Program(Movable):
     var literals: List[UInt64]
     var node_types: List[Int64]
     var outputs: List[Int64]
+    var ordered_ranks: ArcPointer[List[UInt32]]
     var has_statistics: Bool
     var has_quantiles: Bool
 
     def __init__(out self, plan: RowPlan) raises:
         self.code = plan.code.copy()
+        self.ordered_ranks = plan.ordered_ranks.copy()
         self.literals = List[UInt64](
             capacity=len(plan.literals) + len(plan.zone_words)
         )

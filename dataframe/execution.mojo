@@ -173,10 +173,25 @@ def _empty(dtype: DataType) raises -> Series:
     return Series.full_null("", dtype, 0)
 
 
+def _field_output(bound: BoundExpr, index: Int) -> Bool:
+    """Seed bare fields and only their primitive identity-cast chains."""
+    var current = index
+    while bound.expr._nodes[current].op == CAST:
+        var child = bound.expr._nodes[current].left
+        if (
+            child < 0
+            or bound.dtypes[current].is_nested()
+            or bound.dtypes[current] != bound.dtypes[child]
+        ):
+            return False
+        current = child
+    return bound.expr._nodes[current].op == STRUCT_FIELD
+
+
 def _empty_output(
     bound: BoundExpr, columns: List[Series], index: Int
 ) raises -> Series:
-    """Seed Struct/STRUCT_FIELD row outputs without evaluating payloads.
+    """Seed Struct/field identity outputs without evaluating payloads.
 
     A dtype describes names and logical types, but does not contain Arrow
     application metadata. Follow only operations that preserve field owners;
@@ -978,8 +993,7 @@ struct _RowsJob[width: Int](Job):
         self.batch_size = batch_size
         self.grouped = grouped
         self.result = _empty_output(bound, columns, root) if (
-            bound.dtypes[root].is_struct()
-            or bound.expr._nodes[root].op == STRUCT_FIELD
+            bound.dtypes[root].is_struct() or _field_output(bound, root)
         ) else _empty(bound.dtypes[root])
         self.result._reserve_rows(end - start, 0)
 
@@ -2246,8 +2260,7 @@ def _full[
     if whole:
         return whole.take()
     var result = _empty_output(bound, columns, index) if (
-        bound.dtypes[index].is_struct()
-        or bound.expr._nodes[index].op == STRUCT_FIELD
+        bound.dtypes[index].is_struct() or _field_output(bound, index)
     ) else _empty(bound.dtypes[index])
     for offset in range(0, height, batch_size):
         var chunk = _batch[width](
@@ -2775,8 +2788,7 @@ def evaluate[
             done._name = bound.expr._name
             return done^
     var result = _empty_output(bound, columns, root) if (
-        bound.dtypes[root].is_struct()
-        or bound.expr._nodes[root].op == STRUCT_FIELD
+        bound.dtypes[root].is_struct() or _field_output(bound, root)
     ) else _empty(bound.dtypes[root])
     var workers = worker_count(size) if bound.shape() == ROWS else 1
     if workers <= 1:

@@ -28,6 +28,12 @@ from .accelerator.aggregates import (
     has_aggregate_compositions,
     lower_aggregate_compositions,
 )
+from .accelerator.opaque import (
+    has_opaque_columns,
+    prepare as prepare_opaque,
+    restore as restore_opaque,
+    restoration_bytes as opaque_restoration_bytes,
+)
 from .accelerator.dictionaries import (
     DictionaryCodes,
     has_dictionary_columns,
@@ -40,6 +46,12 @@ from .accelerator.sources import (
     file_source_nodes,
     stage_file_sources,
     prepare_file_sources,
+)
+from .accelerator.cuts import (
+    has_cut_operations,
+    lower_cuts,
+    has_cut_materializations,
+    staging_bytes as cut_staging_bytes,
 )
 from .accelerator.distributions import has_scalar_modes, lower_scalar_modes
 from .accelerator.source_structs import (
@@ -86,7 +98,11 @@ def _describe_mojo_gpu(query: LazyFrame) -> String:
     from .accelerator.gpu.runtime import describe, capabilities
     from .accelerator.gpu.dag_runtime import describe as describe_dag
 
-    if has_join(query) or has_scalar_consumers(query):
+    if (
+        has_join(query)
+        or has_scalar_consumers(query)
+        or has_cut_materializations(query)
+    ):
         return describe_dag(query, capabilities())
     return describe(query)
 
@@ -310,6 +326,63 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_cut_operations(query):
+            var lowered = lower_cuts(query)
+            var staging_bytes = cut_staging_bytes(lowered)
+            var budget = self._budget
+            if budget >= 0:
+                if staging_bytes > budget:
+                    raise Error(
+                        "Metal CUT scalar staging exceeds payload budget"
+                    )
+                budget -= staging_bytes
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
+            var executed = runtime._run(lowered, profiling)
+            var report = executed[1].copy()
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            var inner_peak = 0
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            report = report.with_column(
+                Series(
+                    "cut_staging_bytes",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(), fill=Int64(staging_bytes)
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "query_peak_requested_bytes",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(),
+                            fill=Int64(checked_add(staging_bytes, inner_peak)),
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
+
         if has_terminal_structs(query):
             var plan = lower_terminal_structs(query)
             var executed = self._run(plan.query, profiling)
@@ -433,6 +506,84 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_opaque_columns(query):
+            var plan = prepare_opaque(query, memory_limit_bytes=self._budget)
+            var opaque_staged_ns = Int(perf_counter_ns()) - start
+            var budget = self._budget
+            if budget >= 0:
+                budget -= plan.staging_bytes
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
+            var executed = runtime._run(plan.query, profiling)
+            var result = executed[0].copy()
+            var restoration_bytes = 0
+            var opaque_restore_ns = 0
+            if not self._observation_only:
+                var opaque_restore_start = Int(perf_counter_ns())
+                restoration_bytes = opaque_restoration_bytes(executed[0], plan)
+                if (
+                    self._budget >= 0
+                    and restoration_bytes > self._budget - plan.staging_bytes
+                ):
+                    raise Error(
+                        "Metal opaque restoration exceeds memory budget"
+                    )
+                result = restore_opaque(executed[0], plan)
+                opaque_restore_ns = (
+                    Int(perf_counter_ns()) - opaque_restore_start
+                )
+            var report = executed[1].copy()
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            var inner_peak = 0
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            for field in List[Tuple[String, Int64]](
+                [
+                    ("opaque_staging_bytes", Int64(plan.staging_bytes)),
+                    ("opaque_restoration_bytes", Int64(restoration_bytes)),
+                    (
+                        "query_peak_requested_bytes",
+                        Int64(
+                            checked_add(
+                                plan.staging_bytes,
+                                max(inner_peak, restoration_bytes),
+                            )
+                        ),
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Int64](
+                            List[Int64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            for field in List[Tuple[String, Float64]](
+                [
+                    ("opaque_encode_ms", Float64(opaque_staged_ns) / 1e6),
+                    ("opaque_decode_ms", Float64(opaque_restore_ns) / 1e6),
+                    (
+                        "query_wall_ms",
+                        Float64(Int(perf_counter_ns()) - start) / 1e6,
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Float64](
+                            List[Float64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            return (result^, report^)
         if has_dictionary_columns(query):
             # Validate original string semantics before replacing values with
             # ordered codes. Schema execution reads no source rows.
@@ -555,7 +706,11 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (result^, report^)
-        if has_join(query) or has_scalar_consumers(query):
+        if (
+            has_join(query)
+            or has_scalar_consumers(query)
+            or has_cut_materializations(query)
+        ):
             return execute_dag(
                 query,
                 self._device,
@@ -590,6 +745,12 @@ struct MetalRuntime(AcceleratorBackend):
                 return "Metal resident scalar mode; " + self.describe(
                     lower_scalar_modes(query)
                 )
+            if has_cut_operations(query):
+                return (
+                    "Metal resident explicit CUT intervals; "
+                    + self.describe(lower_cuts(query))
+                )
+
             if has_terminal_structs(query):
                 var plan = lower_terminal_structs(query)
                 return "Metal terminal struct fields; " + self.describe(
@@ -622,6 +783,11 @@ struct MetalRuntime(AcceleratorBackend):
             if has_set_operations(query):
                 return "Metal resident set operations; " + self.describe(
                     lower_set_operations(query)
+                )
+            if has_opaque_columns(query):
+                var plan = prepare_opaque(query, metadata_only=True)
+                return "Metal opaque byte transport; " + self.describe(
+                    plan.query
                 )
             if has_dictionary_columns(query):
                 _ = schema_frame(query, len(query._nodes) - 1)

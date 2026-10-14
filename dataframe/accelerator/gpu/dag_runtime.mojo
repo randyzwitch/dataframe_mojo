@@ -9,6 +9,7 @@ region scratch and the final host export before allocation.
 from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, Series
 from dataframe.lazy import LazyFrame
+from dataframe.accelerator.cuts import control_failure as cut_control_failure
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.joins import (
     JoinDag,
@@ -199,6 +200,11 @@ def execute(
             # Window producers permit checked terminal expressions, but their
             # complete result is observed before a consumer can prune rows.
             executed[0].observe_errors()
+        var cut_failure = cut_control_failure(task.query)
+        if cut_failure:
+            if not task.terminal or index == dag.root:
+                executed[0].observe_errors()
+            raise Error(cut_failure)
         var region = executed[1].copy()
         var owned = executed[0].retained_bytes()
         var host_result_bytes = 0

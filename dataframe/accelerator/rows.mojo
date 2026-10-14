@@ -14,6 +14,7 @@ from .gpu.temporal_descriptors import (
 )
 from .timezone_tables import serialize as serialize_zone
 from .memory import checked_add
+from dataframe.parse import parse_int64
 from .integer_ranges import proven_integer_nodes, _decimal_scale_safe
 from std.memory import ArcPointer, bitcast
 from std.math import pow, abs
@@ -231,6 +232,8 @@ struct RowPlan(Movable):
     var key_values: List[UInt64]
     var source_failure: String
     var zone_words: List[UInt64]
+    # Shared immutable ranks avoid a second host payload during Program prep.
+    var ordered_ranks: ArcPointer[List[UInt32]]
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -1029,6 +1032,7 @@ def lower_rows(
     var next_slot = len(schema)
     var reduced = False
     var reused_columns = False
+    var ordered_ranks = List[UInt32]()
     for k in range(len(chain) - 1, -1, -1):
         ref node = query._nodes[chain[k]]
         if reduced:
@@ -1167,6 +1171,77 @@ def lower_rows(
                     )
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
+            var ordered_scalar = (
+                len(node.names2) >= 2 and node.names2[1] == "ordered_scalar_v1"
+            )
+            if ordered_scalar:
+                if (
+                    node.text != "metal_window_materialization"
+                    or node.names2[0] != "metal_explicit_cut_operand"
+                    or node.kind != SELECT
+                    or len(chain) != 1
+                    or len(node.exprs) != 1
+                    or not terminal_boundary
+                    or limit >= 0
+                    or source_count > 1
+                    or len(node.names2) != 3 + len(expr._nodes)
+                    or len(bound.expr._nodes) != len(expr._nodes)
+                ):
+                    capabilities.reject(
+                        "ordered scalar",
+                        "requires a private one-row CUT producer",
+                    )
+                var anchor = False
+                for field in schema:
+                    anchor |= (
+                        field.name() == node.names2[2]
+                        and field.dtype() == DataType.INT8
+                    )
+                if not anchor:
+                    capabilities.reject(
+                        "ordered scalar", "missing literal anchor provenance"
+                    )
+                var previous_rank = Int64(0)
+                for at in range(len(expr._nodes)):
+                    ref original = expr._nodes[at]
+                    ref actual = bound.expr._nodes[at]
+                    if (
+                        original.op != actual.op
+                        or original.left != actual.left
+                        or original.right != actual.right
+                        or original.extra != actual.extra
+                        or is_window(actual.op)
+                        or is_reduction(actual.op)
+                    ):
+                        capabilities.reject(
+                            "ordered scalar", "binder changed the ranked AST"
+                        )
+                    var rank = parse_int64(node.names2[3 + at])
+                    if rank < 0 or rank > 0x1FFFFFE:
+                        capabilities.reject(
+                            "ordered scalar", "fault rank exceeds token range"
+                        )
+                    if rank:
+                        if rank <= previous_rank:
+                            capabilities.reject(
+                                "ordered scalar",
+                                "requires canonical occurrence order",
+                            )
+                        previous_rank = rank
+                    elif not (
+                        actual.op == COL
+                        or actual.op == LIT_INT
+                        or actual.op == LIT_FLOAT
+                        or actual.op == LIT_BOOL
+                        or actual.op == LIT_NULL
+                        or actual.op == IS_NOT_NULL
+                        or actual.op == WHEN
+                    ):
+                        capabilities.reject(
+                            "ordered scalar",
+                            "generated checked node lacks an occurrence rank",
+                        )
+                    ordered_ranks.append(UInt32(rank))
             if (
                 capabilities.temporal_binary_arithmetic
                 or capabilities.temporal_physical_casts
@@ -2231,6 +2306,11 @@ def lower_rows(
                 node_dtypes,
                 capabilities,
             )
+            if ordered_scalar:
+                # Decimal high literal words and membership tails are not
+                # evaluated nodes; their rank entries are never dereferenced.
+                while len(ordered_ranks) < len(literals):
+                    ordered_ranks.append(UInt32(0))
             slot_dtypes.append(bound.dtypes[count - 1])
             var gather_start = len(gathers)
             var gather_count = len(slots)
@@ -2327,6 +2407,7 @@ def lower_rows(
                         continue
                     if (
                         original_key.dtype == DataType.STRING
+                        or original_key.dtype._is_bytes()
                         or original_key.dtype.is_categorical()
                     ):
                         if UInt64(len(key_values)) >= UInt64(1) << 62:
@@ -2481,6 +2562,18 @@ def lower_rows(
         capabilities.reject(
             "plan", "resident region requires at least one output column"
         )
+    if len(ordered_ranks) and (
+        len(steps) != 1
+        or steps[0].filter
+        or steps[0].order
+        or steps[0].grouped
+        or reduced
+        or len(outputs) != 1
+        or len(ordered_ranks) != len(literals)
+    ):
+        capabilities.reject(
+            "ordered scalar", "requires exactly one row expression"
+        )
     var zone_names = List[String]()
     var zone_bases = List[Int64]()
     var zone_words = List[UInt64]()
@@ -2527,4 +2620,5 @@ def lower_rows(
         key_values^,
         query._nodes[cursor].source_failure,
         zone_words^,
+        ArcPointer(ordered_ranks^),
     )
