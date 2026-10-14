@@ -1297,6 +1297,34 @@ trait AcceleratorBackend(Copyable):
         return self.execute(plan)
 
 
+struct _SubplanJob(Job):
+    """One input of a union, executed from its own copy of the plan."""
+
+    var plan: LazyFrame
+    var index: Int
+    var streaming: Bool
+    var batch_size: Int
+    var result: DataFrame
+
+    def __init__(
+        out self,
+        var plan: LazyFrame,
+        index: Int,
+        streaming: Bool,
+        batch_size: Int,
+    ) raises:
+        self.plan = plan^
+        self.index = index
+        self.streaming = streaming
+        self.batch_size = batch_size
+        self.result = DataFrame(List[Series]())
+
+    def run(mut self) raises:
+        self.result = self.plan._execute(
+            self.index, False, self.streaming, self.batch_size
+        )
+
+
 struct LazyFrame(Copyable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
@@ -3566,6 +3594,53 @@ struct LazyFrame(Copyable):
             )
         return result^
 
+    def _concat(
+        self, index: Int, empty: Bool, streaming: Bool, batch_size: Int
+    ) raises -> DataFrame:
+        """A union's two inputs, each executed, then stacked. The inputs are
+        independent, so outside the empty-schema run, and when no
+        execution report is kept, each runs as a job on its own copy of
+        the plan: a worker runs one while the caller runs the other, and
+        both share the crew's thread budget (as Polars runs a union's
+        inputs at once). A worker the budget cannot cover leaves both on
+        the caller, one after the other."""
+        ref node = self._nodes[index]
+        var input: DataFrame
+        var right: DataFrame
+        if not empty and not self._report:
+            var jobs = List[_SubplanJob](capacity=2)
+            jobs.append(
+                _SubplanJob(self.copy(), node.left, streaming, batch_size)
+            )
+            jobs.append(
+                _SubplanJob(self.copy(), node.right, streaming, batch_size)
+            )
+            run_jobs(jobs)
+            input = jobs[0].result.copy()
+            right = jobs[1].result.copy()
+        else:
+            input = self._execute(node.left, empty, streaming, batch_size)
+            right = self._execute(node.right, empty, streaming, batch_size)
+        var names = input.columns()
+        var other = right.columns()
+        if len(other) != len(names):
+            raise Error(
+                "concat: inputs have "
+                + String(len(names))
+                + " and "
+                + String(len(other))
+                + " columns"
+            )
+        for name in names:
+            if name not in other:
+                raise Error("concat: right input has no column " + name)
+        # The right input's columns in the left's order; `concat`
+        # checks the types.
+        var parts = List[DataFrame]()
+        parts.append(input^)
+        parts.append(right.select(names))
+        return concat(parts)
+
     def _execute_node(
         self,
         index: Int,
@@ -3670,6 +3745,8 @@ struct LazyFrame(Copyable):
                     columns=source.names,
                     predicate=Optional(node.exprs[0].copy()),
                 )
+        if node.kind == CONCAT:
+            return self._concat(index, empty, streaming, batch_size)
         var input = self._execute(node.left, empty, streaming, batch_size)
         # "Empty" inputs can still have rows: a scalar aggregate over no
         # rows gives one.
@@ -3723,27 +3800,6 @@ struct LazyFrame(Copyable):
                 coalesce=node.coalesce,
                 keep_order=not free,
             )
-        if node.kind == CONCAT:
-            var right = self._execute(node.right, empty, streaming, batch_size)
-            var names = input.columns()
-            var other = right.columns()
-            if len(other) != len(names):
-                raise Error(
-                    "concat: inputs have "
-                    + String(len(names))
-                    + " and "
-                    + String(len(other))
-                    + " columns"
-                )
-            for name in names:
-                if name not in other:
-                    raise Error("concat: right input has no column " + name)
-            # The right input's columns in the left's order; `concat`
-            # checks the types.
-            var parts = List[DataFrame]()
-            parts.append(input^)
-            parts.append(right.select(names))
-            return concat(parts)
         if node.kind == SORT:
             var n = len(node.names)
             var descending = List[Bool]()
