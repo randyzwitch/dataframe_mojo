@@ -62,6 +62,132 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_file_sources_observe_left_decimal_failure_before_right_csv_decode",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_scalar_mode_typed_winners_nulls_empty_and_scalar_siblings",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_scalar_mode_float_equality_first_bits_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_scalar_mode_reports_remaining_alignment_and_literal_shape",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_asof.mojo::test_mojo_gpu_asof_raw_kernel_directions_null_duplicate_runs_and_exact_integer_distance",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_asof.mojo::test_mojo_gpu_asof_raw_kernel_ieee_nonfinite_fractional_tolerance_and_cpu_cursor_policy",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_asof.mojo::test_mojo_gpu_asof_raw_kernel_grouped_typed_keys_complete_sortedness_and_error_observation",
+            "mojo_gpu",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_fixed_zone_fields.mojo::test_mojo_gpu_fixed_zone_fields_extreme_wrapping_words_and_independent_civil_anchors",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_fixed_zone_fields.mojo::test_mojo_gpu_fixed_zone_fields_negative_floors_nullable_chunked_empty_and_conversion",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_fixed_zone_fields.mojo::test_mojo_gpu_fixed_zone_fields_capability_descriptor_and_unsupported_local_operations",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_schedule.mojo::test_mojo_gpu_partition_schedule_skewed_float_runs",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_schedule.mojo::test_mojo_gpu_partition_schedule_skewed_decimal_prefixes",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_schedule.mojo::test_mojo_gpu_partition_schedule_dictionary_provenance",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_arg_extrema.mojo::test_mojo_gpu_decimal_arg_extrema_exact_widths_scale_groups_and_layouts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_decimal_arg_extrema.mojo::test_mojo_gpu_decimal_arg_extrema_preserve_high_words_and_first_ties",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_timezone_conversion.mojo::test_mojo_gpu_timezone_conversion_extreme_ticks_nullable_layouts_and_metadata",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_timezone_conversion.mojo::test_mojo_gpu_timezone_conversion_composes_with_gpu_rows_and_utc_roundtrip",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_timezone_conversion.mojo::test_mojo_gpu_timezone_conversion_validates_zones_and_retains_local_operation_refusals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_csv_sources_projection_nullable_rows_budget_and_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_csv_sources_dictionary_join_inference_and_metadata",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_parquet_sources_typed_projection_groups_and_join",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_partition_workers.mojo::test_mojo_gpu_partition_workers_dense_and_hash_order_proofs",
             "mojo_gpu",
         )
@@ -825,7 +951,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_variance_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1231:39: get: wrong variant type",
+            "aggregate.mojo:1236:39: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -833,39 +959,7 @@ def production_policy() -> SuitePolicy:
         ExpectedFailure(
             "tests/public_contracts/test_reduction_types.mojo::test_decimal_standard_deviation_retains_numeric_scale",
             "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1231:39: get: wrong variant type",
-            mojo_variant_abort_exit_code(),
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_reduction_types.mojo::test_decimal_arg_min_accepts_advertised_ordered_input",
-            "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1459:37: get: wrong variant type",
-            mojo_variant_abort_exit_code(),
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_reduction_types.mojo::test_decimal_arg_max_accepts_advertised_ordered_input",
-            "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1459:37: get: wrong variant type",
-            mojo_variant_abort_exit_code(),
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_reduction_types.mojo::test_decimal_mode_retains_typed_values",
-            "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1511:37: get: wrong variant type",
-            mojo_variant_abort_exit_code(),
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_reduction_types.mojo::test_decimal_value_counts_retains_typed_values",
-            "Advertised decimal reduction aborts while accessing physical storage as the wrong variant.",
-            "aggregate.mojo:1511:37: get: wrong variant type",
+            "aggregate.mojo:1236:39: get: wrong variant type",
             mojo_variant_abort_exit_code(),
         )
     )
@@ -2121,6 +2215,41 @@ def production_policy() -> SuitePolicy:
     # Named selectors select whole modules; newly added tests need no registration.
     policy.groups.append(
         ContractGroup(
+            "public.apple_parity",
+            [
+                "tests/public_contracts/test_decimal_arg_extrema.mojo",
+                "tests/public_contracts/test_reduction_types.mojo",
+                "tests/public_contracts/test_window_key_provenance.mojo",
+                "tests/public_contracts/test_scalar_mode.mojo",
+                "tests/public_contracts/test_file_source_staging.mojo",
+            ],
+        )
+    )
+    policy.groups.append(
+        ContractGroup(
+            "execution.apple_parity",
+            [
+                "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo",
+                "tests/execution_modes/test_mojo_gpu_decimal_arg_extrema.mojo",
+                "tests/execution_modes/test_mojo_gpu_timezone_conversion.mojo",
+                "tests/execution_modes/test_mojo_gpu_fixed_zone_fields.mojo",
+                "tests/execution_modes/test_mojo_gpu_file_sources.mojo",
+                "tests/execution_modes/test_mojo_gpu_partition_schedule.mojo",
+            ],
+        )
+    )
+    policy.groups.append(
+        ContractGroup(
+            "expr.decimal_extrema",
+            [
+                "tests/public_contracts/test_decimal_arg_extrema.mojo",
+                "tests/public_contracts/test_reduction_types.mojo",
+                "tests/public_contracts/test_window_key_provenance.mojo",
+            ],
+        )
+    )
+    policy.groups.append(
+        ContractGroup(
             "table.schema",
             [
                 "tests/public_contracts/test_schema.mojo",
@@ -2484,6 +2613,12 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo",
+                "tests/execution_modes/test_mojo_gpu_fixed_zone_fields.mojo",
+                "tests/execution_modes/test_mojo_gpu_partition_schedule.mojo",
+                "tests/execution_modes/test_mojo_gpu_decimal_arg_extrema.mojo",
+                "tests/execution_modes/test_mojo_gpu_timezone_conversion.mojo",
+                "tests/execution_modes/test_mojo_gpu_file_sources.mojo",
                 "tests/execution_modes/test_backend_metal.mojo",
                 "tests/execution_modes/test_backend_metal_cost.mojo",
                 "tests/execution_modes/test_backend_metal_dictionaries.mojo",

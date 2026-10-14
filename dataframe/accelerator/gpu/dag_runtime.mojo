@@ -98,6 +98,8 @@ def execute(
         ):
             # Share original immutable scan buffers; no data evaluation or
             # device staging occurs until the first computed consumer.
+            if task.query._nodes[0].source_failure:
+                raise Error(task.query._nodes[0].source_failure)
             values.append(None)
             if index == dag.root:
                 result = task.query._frames[0].copy()

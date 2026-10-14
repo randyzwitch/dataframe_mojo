@@ -519,9 +519,13 @@ def temporal_preflight_cases() raises:
         ]
     )
     var wide_arg_min = decimals.lazy().select(col("d").arg_min())
-    with assert_raises(contains="Decimal128 input reductions"):
-        _ = lower_rows(wide_arg_min, _capabilities())
-    assert_true("unsupported" in unavailable.describe(wide_arg_min))
+    var arg_plan = lower_rows(wide_arg_min, _capabilities())
+    assert_equal(arg_plan.outputs[0].dtype, DataType.UINT32)
+    assert_true("unsupported" not in unavailable.describe(wide_arg_min))
+    var without_wide_reductions = _capabilities()
+    without_wide_reductions.extra_reductions = False
+    with assert_raises(contains="additional reductions"):
+        _ = lower_rows(wide_arg_min, without_wide_reductions)
 
 
 def test_native_metal_temporal_and_decimal_unsupported_requests_reject_before_device_setup() raises:

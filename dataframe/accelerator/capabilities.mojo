@@ -62,6 +62,7 @@ struct RowCapabilities(Copyable):
     var scalar_regions: Bool
     var temporal_fields: Bool
     var utc_temporal_conversions: Bool
+    var fixed_zone_temporal_fields: Bool
     var calendar_offsets: Bool
     var calendar_truncation: Bool
     var temporal_offsets: Bool
@@ -131,6 +132,7 @@ struct RowCapabilities(Copyable):
         scalar_regions: Bool = False,
         temporal_fields: Bool = False,
         utc_temporal_conversions: Bool = False,
+        fixed_zone_temporal_fields: Bool = False,
         calendar_offsets: Bool = False,
         calendar_truncation: Bool = False,
         temporal_offsets: Bool = False,
@@ -196,6 +198,7 @@ struct RowCapabilities(Copyable):
         self.scalar_regions = scalar_regions
         self.temporal_fields = temporal_fields
         self.utc_temporal_conversions = utc_temporal_conversions
+        self.fixed_zone_temporal_fields = fixed_zone_temporal_fields
         self.calendar_offsets = calendar_offsets
         self.calendar_truncation = calendar_truncation
         self.temporal_offsets = temporal_offsets
@@ -338,6 +341,8 @@ struct RowCapabilities(Copyable):
             and op != NULL_COUNT
             and op != MIN
             and op != MAX
+            and op != ARG_MIN
+            and op != ARG_MAX
             and op != FIRST
             and op != LAST
             and not (self.decimal128_reductions and (op == SUM or op == MEAN))

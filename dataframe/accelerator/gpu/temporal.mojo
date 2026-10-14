@@ -34,8 +34,9 @@ from dataframe.expr import (
 from dataframe.accelerator.rows import (
     ROW_CALENDAR_OFFSET,
     ROW_CALENDAR_TRUNCATE,
+    ROW_FIXED_ZONE_FIELDS,
 )
-from . import floating
+from . import floating, timezone_fields
 
 comptime NANOS_PER_DAY = Int64(86400000000000)
 comptime UTC_FLAG = Int64(256)
@@ -125,6 +126,10 @@ def evaluate(
 ) -> Tuple[UInt64, UInt32]:
     var input = value.cast[DType.int64]()
     var storage_unit = unit & 7
+    if (unit & ROW_FIXED_ZONE_FIELDS) != 0 and op >= DT_YEAR and op <= DT_TIME:
+        input = timezone_fields.local_ticks(
+            value, parameter, per_second(storage_unit)
+        ).cast[DType.int64]()
     var utc = (unit & UTC_FLAG) != 0
     # parse_every bounds fixed nanoseconds to Int64, so calendar days fit
     # a signed 18-bit payload; bits 9..26 retain the CPU's distinct day phase.

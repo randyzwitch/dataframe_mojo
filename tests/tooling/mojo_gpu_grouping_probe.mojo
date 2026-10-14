@@ -16,7 +16,6 @@ from dataframe.accelerator.gpu.grouping import (
     group_mark,
     group_offsets,
     group_starts,
-    group_window_bounds,
     group_reduce,
 )
 from dataframe.accelerator.gpu.reductions import State as BasicState
@@ -215,9 +214,6 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
             UInt32(0),
             grid_dim=blocks,
             block_dim=256,
-        )
-        ctx.enqueue_function[group_window_bounds](
-            ds.unsafe_ptr(), dm.unsafe_ptr(), UInt32(n), grid_dim=1, block_dim=1
         )
         ctx.enqueue_function[group_reduce](
             dw.unsafe_ptr(),

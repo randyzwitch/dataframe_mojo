@@ -72,8 +72,8 @@ def test_metal_selectors_metadata_names_positions_dtypes_and_errors() raises:
     )
     with assert_raises(contains="at most one selector"):
         _ = lower_selectors(frame.lazy().select(nth(0) + nth(1)))
-    var missing = scan_csv("/nonexistent/metal-selector-must-not-read.csv")
-    with assert_raises(contains="in-memory scans"):
+    var missing = scan_csv("/nonexistent/metal-selector-missing.csv")
+    with assert_raises(contains="metal-selector-missing.csv"):
         _ = missing.select(all()).collect(accelerator=runtime)
 
 

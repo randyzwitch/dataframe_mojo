@@ -36,6 +36,8 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.memory import checked_add
+from .accelerator.sources import file_source_nodes, stage_file_sources
+from .accelerator.distributions import has_scalar_modes, lower_scalar_modes
 from .accelerator.metadata import schema_frame
 from .accelerator.cost import PlanEstimate, CalibrationKey
 from .accelerator.capabilities import RowCapabilities
@@ -147,8 +149,79 @@ struct MetalRuntime(AcceleratorBackend):
         from .accelerator.gpu.dag_runtime import execute as execute_dag
 
         var start = Int(perf_counter_ns())
+        if len(file_source_nodes(query)):
+            var staged = stage_file_sources(
+                query, memory_limit_bytes=self._budget
+            )
+            var staging_bytes = staged[1]
+            var budget = self._budget
+            if budget >= 0:
+                budget -= staging_bytes
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            var decode_ms = Float64(Int(perf_counter_ns()) - start) / 1e6
+            var executed = runtime._run(staged[0], profiling)
+            var report = executed[1].copy()
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            var inner_peak = 0
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            for field in List[Tuple[String, Int64]](
+                [
+                    ("file_scan_count", Int64(staged[2])),
+                    ("source_staging_bytes", Int64(staging_bytes)),
+                    (
+                        "query_peak_requested_bytes",
+                        Int64(checked_add(staging_bytes, inner_peak)),
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Int64](
+                            List[Int64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            for field in List[Tuple[String, Float64]](
+                [
+                    ("source_decode_ms", decode_ms),
+                    (
+                        "query_wall_ms",
+                        Float64(Int(perf_counter_ns()) - start) / 1e6,
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Float64](
+                            List[Float64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            return (executed[0].copy(), report^)
         if has_selectors(query):
             var executed = self._run(lower_selectors(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
+        if has_scalar_modes(query):
+            var executed = self._run(lower_scalar_modes(query), profiling)
             var report = executed[1].with_column(
                 Series(
                     "query_wall_ms",
@@ -393,9 +466,16 @@ struct MetalRuntime(AcceleratorBackend):
 
     def describe(self, query: LazyFrame) -> String:
         try:
+            if len(file_source_nodes(query)):
+                var staged = stage_file_sources(query, empty=True)
+                return "Metal file source decoding; " + self.describe(staged[0])
             if has_selectors(query):
                 return "Metal schema selector expansion; " + self.describe(
                     lower_selectors(query)
+                )
+            if has_scalar_modes(query):
+                return "Metal resident scalar mode; " + self.describe(
+                    lower_scalar_modes(query)
                 )
             if has_scalar_projections(query):
                 return "Metal resident scalar projection; " + self.describe(

@@ -3,8 +3,9 @@
 `MetalRuntime` runs Mojo kernels in `dataframe/accelerator/gpu/` through the
 Mojo GPU APIs supplied by MAX. Allocation, transfers, launches, synchronization,
 query orchestration and intermediate ownership are implemented in Mojo inside
-the dataframe library. No dataframe dylib, C ABI bridge, Metal source compiler,
-or separate GPU library is required.
+the dataframe library. GPU execution requires no repository dylib, C ABI bridge,
+Metal source compiler or separate GPU library. Parquet file decoding uses the
+existing CPU decoder in `native/dfparquet`.
 
 The pinned `max-core` SDK is a normal build and package dependency, including
 CPU environments. Importing dataframe, constructing a runtime, explaining a
@@ -41,13 +42,15 @@ includes the following operations and their valid compositions:
 | Area | Mojo execution |
 | --- | --- |
 | Storage | Boolean, all eight integer widths, Float32/64, Decimal32/64/128, Date/Datetime/Duration/Time, nullable/sliced/chunked inputs, empty rows and columns |
+| Sources | CSV and Parquet scans with decoder projection and reader head pushdown; decoded columns feed GPU operators |
 | Expressions | Checked arithmetic, integer floor division/modulo/power, comparisons, Kleene Boolean operations, conditionals, null/NaN handling, clipping, membership, numeric and decimal casts |
 | Floating point | Arithmetic, square root, rounding, exponentials, logarithms and power with CPU-compatible special values and subnormal handling |
 | Reductions | Sum, mean, counts, min/max, first/last, arg min/max, Boolean any/all, variance/std, skewness/kurtosis, covariance/correlation, median and five quantile interpolation modes |
+| Distributions | One scalar mode expression with sorted typed winners, nulls and ordinary scalar siblings |
 | Rows and keys | Stable filters, slices, mixed-key sorting, grouped aggregation, distinct rows/counts, unions and rank methods |
 | Windows | Partition aggregates, cumulative operations, shift/fill, fixed-size rolling operations, interpolation and coordinate interpolation |
 | Duration windows | Numeric/Date/Datetime indices, supported closed bounds, fixed/calendar intervals, UTC and fixed-offset zones |
-| Temporal expressions | Calendar fields, fixed/calendar offsets and truncation, duration totals, bounded UTC conversion/replacement |
+| Temporal expressions | UTC and fixed-offset calendar fields, fixed/calendar offsets and truncation, duration totals, timezone metadata conversion, bounded UTC replacement |
 | Joins | Inner, left, right, full, semi, anti and cross; typed composite keys, null-equal left joins and key coalescing |
 | Composition | Selectors, scalar projections/broadcasts, aggregate expressions, computed join branches, post-join consumers and chained joins |
 | Text | Ordered dictionary transport, supported string operations/concatenation, categorical reconciliation and restoration |
@@ -62,7 +65,7 @@ Int64/UInt64 sums and means use exact paired-word accumulation before checking
 the typed result. Decimal arithmetic likewise uses paired UInt64 words rather
 than device Int128 instructions. Decimal sums/means preserve precision checks,
 ordered worker-prefix behavior, cancellation and scaled conversion semantics.
-Moving, sorting, ranking and joining decimals retain both words.
+Moving, sorting, ranking, joining and arg min/max on decimals retain both words.
 
 Sorts preserve source order on ties, configured per-key null placement, and
 original value encodings. Nulls, NaNs and signed zeros retain the CPU grouping
@@ -70,13 +73,16 @@ and join equivalence rules. Rank direction follows the CPU rank contract,
 including its NaN ordering. Scalar floating sums use a 256-lane reduction tree
 and can differ in rounding from eager or streaming CPU sums. Statistical states
 preserve contiguous worker ranges and ordered merges. Partition reductions
-recognize CPU contiguous runs when group sizes prove equivalent association.
+reconstruct CPU dense/hash group order and whole-group worker runs, including
+skewed partitions and original categorical-code versus decoded-string keys.
 
 Calendar helpers reuse `dataframe/calendar.mojo` on the GPU, including
 proleptic Gregorian behavior across the supported storage domain. Duration
 totals truncate coarser units toward zero and retain fixed-width multiplication
-for finer units. UTC conversion is a physical identity with changed metadata;
-replacement is limited to naive/UTC values and preserves the CPU's checked
+for finer units. Timezone conversion is a physical identity with validated
+destination metadata, including IANA names. Fixed-offset local fields use the
+CPU's wrapped local ticks; IANA local-field extraction remains unsupported.
+Replacement is limited to naive/UTC values and preserves the CPU's checked
 reconstruction behavior.
 
 Shared Mojo normalization expands selectors and decomposes supported aggregate,
@@ -101,6 +107,13 @@ intermediates, active region matrices/descriptors/scratch, control observations,
 and final host export/materialization. Bounds use checked host arithmetic and
 are checked before allocation/submission. They measure requested payload, not
 allocator or driver overhead, and cannot guarantee physical allocation succeeds.
+
+File scans compact decoded source buffers before GPU execution. The budget
+includes their retained values, validity, text offsets, categorical domains and
+field metadata; decoder temporary memory is outside that requested-payload
+budget. Profiles report source staging bytes and decode time. Readable-schema
+value-decode failures remain attached to their source and are observed in plan
+order, allowing an earlier GPU computation to raise first.
 
 Errors travel with values through conditionals and row movement. Selected
 terminal values and observing consumers check them; unselected conditional
@@ -148,18 +161,16 @@ are not deployable calibration. See [benchmark rules](benchmarks.md) and
 ## Remaining CPU coverage
 
 Migrating the existing Metal implementation does not establish complete CPU
-query parity. Mode/implode/value counts, IANA-zone duration windows, row-valued
+query parity. Multiple or grouped mode expressions, implode/value counts,
+IANA-zone duration windows, row-valued
 text parsing/formatting, remaining timezone operations, nested list/struct
-operations, explode/unnest, as-of joins and file-backed scans remain outside this
+operations, explode/unnest and as-of joins remain outside this
 accelerator subset. Some checked-expression/window compositions also reject.
-Arg min/max on Decimal128 remains outside the shared typed reducer contract.
 These are implementation gaps, not demonstrated limitations of Mojo.
 
-For skewed partitions outside the proved contiguous-run cases, window
-reductions retain the former backend's global worker schedule. That schedule
-can differ from CPU hash-order batching: floating rounding and decimal prefix
-overflow observation can differ even when the final mathematical sum agrees.
-Reconstructing arbitrary CPU partition runs remains a CPU-parity gap.
+File-source parity still has a failure-order gap when a later source has no
+readable schema or a speculative dictionary transformation fails. Such metadata
+and transformation errors can precede an earlier computation's error.
 
 ## Validation
 
@@ -189,6 +200,8 @@ pixi run package-smoke --gpu
 
 The maintained backend contracts retain independent typed/bitwise expectations,
 CPU comparisons, checked-error recovery and exact/one-byte-under budget checks.
+The `execution.apple_parity` and `public.apple_parity` runner groups cover the
+additional source, mode, temporal, decimal-extrema and partition-schedule work.
 Hosted macOS runners may expose no Metal device; CI reports that absence
 explicitly and still runs metadata contracts. Execution claims require a real
 local GPU run.

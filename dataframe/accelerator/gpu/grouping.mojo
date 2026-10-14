@@ -14,6 +14,7 @@ from dataframe.accelerator.rows import (
     ROW_GROUP_HEADER_WINDOW,
 )
 from dataframe.expr import ARG_MIN, ARG_MAX, COV, CORR, SUM, MEAN
+from dataframe.partition import _mix, _combine
 from . import floating as f
 from .decimal_descriptors import DECIMAL_SUM, DECIMAL_MEAN
 from .reductions import State as BasicState
@@ -131,7 +132,7 @@ def group_offsets(
     metadata: Pointer[UInt32, MutAnyOrigin],
     count: UInt32,
 ):
-    """Launch one thread; metadata is [groups, key error, minsize, maxsize]."""
+    """Launch one thread; metadata is [groups, key error, local mode, runs]."""
     var groups = UInt32(0)
     var failed = UInt32(0)
     for block in range(Int(count)):
@@ -193,60 +194,281 @@ def _workers(
     ) if window else workers
 
 
-def group_window_bounds(
-    starts: Pointer[UInt32, ImmutAnyOrigin],
-    metadata: Pointer[UInt32, MutAnyOrigin],
-    rows: UInt32,
-):
-    """Launch one thread after group_starts; scan each group exactly once."""
-    var groups = Int(metadata[unsafe_offset=0])
-    var smallest = rows
-    var largest = UInt32(0)
-    for group in range(groups):
-        var begin = starts[unsafe_offset=group]
-        var end = (
-            starts[unsafe_offset=group + 1] if group + 1 < groups else rows
-        )
-        smallest = min(smallest, end - begin)
-        largest = max(largest, end - begin)
-    metadata[unsafe_offset=2] = smallest
-    metadata[unsafe_offset=3] = largest
+@always_inline
+def _partition_key(
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    key_values: Pointer[UInt64, ImmutAnyOrigin],
+    source: Int,
+    dtype: Int64,
+    descriptor: UInt64,
+    cells: Int,
+) -> UInt64:
+    """Return the CPU raw key, before its per-column hash mixing.
+
+    Bit63 denotes dictionary lookup, bit62 an original categorical UInt32
+    code rather than a string hash. The remaining bits locate that key's
+    staged-code-to-raw-key table. Null handling belongs to the caller.
+    """
+    var word = words[unsafe_offset=source]
+    if descriptor & (UInt64(1) << 63):
+        return key_values[
+            unsafe_offset=Int(descriptor & ((UInt64(1) << 62) - 1)) + Int(word)
+        ]
+    if dtype == 12:
+        return word ^ words[unsafe_offset=cells + source]
+    if dtype == 4:
+        return UInt64(1) if word else UInt64(2)
+    if dtype == 1 or dtype == 11:
+        word = f.from_float32(UInt32(word)) if dtype == 1 else word
+        if f.is_nan(word):
+            return UInt64(0x7FF8000000000000)
+        return UInt64(0) if (word & UInt64(0x7FFFFFFFFFFFFFFF)) == 0 else word
+    return word
 
 
-def _local_window_workers(
+def group_window_prepare(
+    words: Pointer[UInt64, MutAnyOrigin],
+    validity: Pointer[UInt8, ImmutAnyOrigin],
+    index: Pointer[UInt32, ImmutAnyOrigin],
     starts: Pointer[UInt32, ImmutAnyOrigin],
-    bounds: Pointer[UInt32, ImmutAnyOrigin],
-    metadata: UInt64,
-    group: Int,
+    order: Pointer[UInt32, MutAnyOrigin],
+    code: Pointer[Int64, ImmutAnyOrigin],
+    literals: Pointer[UInt64, ImmutAnyOrigin],
+    types: Pointer[Int64, ImmutAnyOrigin],
+    key_values: Pointer[UInt64, ImmutAnyOrigin],
+    start: UInt32,
     groups: UInt32,
     rows: UInt32,
-) -> Int:
-    """Return a proved CPU contiguous-run worker count, or zero.
+    stride: UInt32,
+    slots: UInt32,
+):
+    """One thread, linear in groups*keys; build exact CPU group-order keys.
 
-    Bit32 records that the original OVER inner had no nested OVER. CPU
-    layouts may number keys in first-occurrence or hash-bucket order. The
-    two cases below establish identical group-local association under any
-    such ordering; unproved cases retain the existing source-row protocol.
+    Only private source-matrix slots are modified. The ordinary lexical
+    row index and group starts remain intact for grouping and scattering.
     """
-    var configured = Int(metadata & 0xFFFFFFFF)
+    if global_idx.x != 0:
+        return
+    var header = Int(start) * 4
+    var keys = Int(code[unsafe_offset=header + 1])
+    var private_base = (Int(code[unsafe_offset=header + 2]) - 1) * Int(stride)
+    var configured = Int(literals[unsafe_offset=Int(start)] & 0xFFFFFFFF)
     var lanes = min(configured, Int(rows) // 2048)
-    if (metadata & (UInt64(1) << 32)) == 0 or lanes <= 1 or groups <= 1:
-        return 0
+    var buckets = 1
+    var shift = 64
+    while buckets < 2 * lanes and buckets < 256:
+        buckets *= 2
+        shift -= 1
+    var dense = False
+    if keys == 1:
+        var node = Int(start) + 1
+        var dtype = types[unsafe_offset=node]
+        var descriptor = literals[unsafe_offset=node]
+        var lookup = (descriptor & (UInt64(1) << 63)) != 0
+        dense = (descriptor & (UInt64(1) << 62)) != 0 if lookup else (
+            dtype == 2 or dtype == 3 or (dtype >= 5 and dtype <= 10)
+        )
+        if dense:
+            var base = Int(code[unsafe_offset=node * 4 + 1]) * Int(stride)
+            var signed = not lookup and (
+                dtype == 2 or dtype == 3 or dtype == 5 or dtype == 6
+            )
+            var first = True
+            var low = UInt64(0)
+            var high = UInt64(0)
+            for group in range(Int(groups)):
+                var source = base + Int(
+                    index[unsafe_offset=Int(starts[unsafe_offset=group])]
+                )
+                if validity[unsafe_offset=source] == 0:
+                    continue
+                var value = _partition_key(
+                    words,
+                    key_values,
+                    source,
+                    dtype,
+                    descriptor,
+                    Int(stride) * Int(slots),
+                )
+                if first:
+                    low = value
+                    high = value
+                    first = False
+                else:
+                    if (
+                        value.cast[DType.int64]() < low.cast[DType.int64]()
+                    ) if signed else (value < low):
+                        low = value
+                    if (
+                        value.cast[DType.int64]() > high.cast[DType.int64]()
+                    ) if signed else (value > high):
+                        high = value
+            var small = not lookup and (
+                dtype == 5 or dtype == 6 or dtype == 7 or dtype == 8
+            )
+            var limit = min(
+                max(65536 if small else 4096, min(Int(rows), 65536)),
+                max(4096, 4 * Int(rows)),
+            )
+            dense = high - low < UInt64(limit)
+    for group in range(Int(groups)):
+        var representative = Int(
+            index[unsafe_offset=Int(starts[unsafe_offset=group])]
+        )
+        var hashed = UInt64(0)
+        if not dense:
+            for key in range(keys):
+                var node = Int(start) + 1 + key
+                var source = (
+                    Int(code[unsafe_offset=node * 4 + 1]) * Int(stride)
+                    + representative
+                )
+                var raw = UInt64(0x9E3779B97F4A7C15)
+                if validity[unsafe_offset=source] != 0:
+                    raw = _partition_key(
+                        words,
+                        key_values,
+                        source,
+                        types[unsafe_offset=node],
+                        literals[unsafe_offset=node],
+                        Int(stride) * Int(slots),
+                    )
+                hashed = _mix(raw) if key == 0 else _combine(hashed, raw)
+        words[unsafe_offset=private_base + group] = UInt64(
+            0
+        ) if dense else hashed >> UInt64(shift)
+        order[unsafe_offset=group] = UInt32(group)
+
+
+@always_inline
+def _window_group_less(
+    a: UInt32,
+    b: UInt32,
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    index: Pointer[UInt32, ImmutAnyOrigin],
+    starts: Pointer[UInt32, ImmutAnyOrigin],
+    base: Int,
+) -> Bool:
+    var left = words[unsafe_offset=base + Int(a)]
+    var right = words[unsafe_offset=base + Int(b)]
+    return (
+        left
+        < right if left
+        != right else (
+            index[unsafe_offset=Int(starts[unsafe_offset=Int(a)])]
+            < index[unsafe_offset=Int(starts[unsafe_offset=Int(b)])]
+        )
+    )
+
+
+def group_window_merge(
+    words: Pointer[UInt64, ImmutAnyOrigin],
+    index: Pointer[UInt32, ImmutAnyOrigin],
+    starts: Pointer[UInt32, ImmutAnyOrigin],
+    order: Pointer[UInt32, ImmutAnyOrigin],
+    target: Pointer[UInt32, MutAnyOrigin],
+    start_slot: UInt32,
+    groups: UInt32,
+    stride: UInt32,
+    run_width: UInt32,
+):
+    """Stable parallel merge of CPU group IDs in the existing index scratch."""
+    var row = global_idx.x
+    if row >= Int(groups):
+        return
+    var width = Int(run_width)
+    var base = row // (2 * width) * (2 * width)
+    var middle = min(base + width, Int(groups))
+    var end = min(base + 2 * width, Int(groups))
+    var left = row < middle
+    var first = middle if left else base
+    var lo = first
+    var hi = end if left else middle
+    var own = order[unsafe_offset=row]
+    while lo < hi:
+        var mid = lo + (hi - lo) // 2
+        if _window_group_less(
+            order[unsafe_offset=mid],
+            own,
+            words,
+            index,
+            starts,
+            (Int(start_slot) - 1) * Int(stride),
+        ):
+            lo = mid + 1
+        else:
+            hi = mid
+    target[
+        unsafe_offset=base + row - (base if left else middle) + lo - first
+    ] = own
+
+
+def group_window_schedule(
+    words: Pointer[UInt64, MutAnyOrigin],
+    starts: Pointer[UInt32, ImmutAnyOrigin],
+    order: Pointer[UInt32, ImmutAnyOrigin],
+    metadata: Pointer[UInt32, MutAnyOrigin],
+    start_slot: UInt32,
+    groups: UInt32,
+    rows: UInt32,
+    stride: UInt32,
+    configured: UInt32,
+):
+    """One thread; reproduce CPU whole-group greedy runs and worker bounds.
+
+    metadata[2] enables run-local positions only for more than one run:
+    a single greedy run makes CPU _over_contiguous return None. metadata[3]
+    retains the run count. No source values or result slots are modified.
+    """
+    if global_idx.x != 0:
+        return
+    var lanes = min(Int(configured), Int(rows) // 2048)
+    if lanes <= 1 or groups <= 1:
+        metadata[unsafe_offset=2] = 0
+        metadata[unsafe_offset=3] = 0
+        return
     var target = max(2048, (Int(rows) + 4 * lanes - 1) // (4 * lanes))
-    var smallest = Int(bounds[unsafe_offset=2])
-    var largest = Int(bounds[unsafe_offset=3])
-    if smallest >= target:
-        # Every group is a whole CPU run, independently of group ordering.
-        var begin = Int(starts[unsafe_offset=group])
-        var end = Int(starts[unsafe_offset=group + 1]) if group + 1 < Int(
-            groups
-        ) else Int(rows)
-        return max(1, min(configured, (end - begin) // 65536))
-    if Int(rows) - largest >= target and target - 1 + largest < 65536:
-        # There is more than one run, and even the largest possible run
-        # (below target before adding its final group) stays single-worker.
-        return 1
-    return 0
+    var begin = 0
+    var runs = UInt32(0)
+    while begin < Int(groups):
+        var end = begin
+        var count = 0
+        while end < Int(groups):
+            if count >= target:
+                break
+            var group = Int(order[unsafe_offset=end])
+            var first = Int(starts[unsafe_offset=group])
+            var last = Int(starts[unsafe_offset=group + 1]) if group + 1 < Int(
+                groups
+            ) else Int(rows)
+            count += last - first
+            end += 1
+        var workers = max(
+            1,
+            min(
+                Int(configured),
+                min(count // 65536, count // max(1, 4 * (end - begin))),
+            ),
+        )
+        var step = ((count + workers - 1) // workers + 8191) // 8192 * 8192
+        var offset = 0
+        for at in range(begin, end):
+            var group = Int(order[unsafe_offset=at])
+            words[
+                unsafe_offset=(Int(start_slot) - 1) * Int(stride) + group
+            ] = UInt64(workers) | (UInt64(step) << 32)
+            words[unsafe_offset=Int(start_slot) * Int(stride) + group] = UInt64(
+                offset
+            )
+            var first = Int(starts[unsafe_offset=group])
+            var last = Int(starts[unsafe_offset=group + 1]) if group + 1 < Int(
+                groups
+            ) else Int(rows)
+            offset += last - first
+        runs += 1
+        begin = end
+    metadata[unsafe_offset=2] = UInt32(runs > 1)
+    metadata[unsafe_offset=3] = runs
 
 
 def group_reduce(
@@ -316,8 +538,23 @@ def group_reduce(
         or op == DECIMAL_MEAN
         or ((op == SUM or op == MEAN) and (dtype == 1 or dtype == 11))
     ):
-        local_workers = _local_window_workers(
-            starts, group_metadata, window_metadata, group, groups, rows
+        if (window_metadata & (UInt64(1) << 32)) != 0 and group_metadata[
+            unsafe_offset=2
+        ] != 0:
+            var start_slot = Int(code[unsafe_offset=header + 2])
+            local_workers = Int(
+                words[unsafe_offset=(start_slot - 1) * Int(stride) + group]
+                & 0xFFFFFFFF
+            )
+    var local_step = 0
+    var local_offset = 0
+    if local_workers:
+        var start_slot = Int(code[unsafe_offset=header + 2])
+        local_step = Int(
+            words[unsafe_offset=(start_slot - 1) * Int(stride) + group] >> 32
+        )
+        local_offset = Int(
+            words[unsafe_offset=start_slot * Int(stride) + group]
         )
     if quantiles.supported(op):
         var quantile = quantiles.reduce[True](
@@ -352,16 +589,20 @@ def group_reduce(
             ),
         )
         workers = local_workers if local_workers else workers
-        var span = end - begin if local_workers else Int(rows)
+        var span = Int(rows)
         var step = ((span + workers - 1) // workers + 8191) // 8192 * 8192
         var state = BasicState()
         var at = begin
         for worker in range(workers):
             var partial = BasicState()
-            var stop = min(span, (worker + 1) * step)
+            var stop = (worker + 1) * local_step if local_workers else min(
+                span, (worker + 1) * step
+            )
             while at < end:
                 var row = Int(index[unsafe_offset=at])
-                if (at - begin if local_workers else row) >= stop:
+                if (
+                    local_offset + at - begin if local_workers else row
+                ) >= stop:
                     break
                 at += 1
                 var source = source_slot * Int(stride) + row
@@ -390,7 +631,7 @@ def group_reduce(
         var window = code[unsafe_offset=header] == ROW_GROUP_HEADER_WINDOW
         var workers = _workers(parameter, rows, groups, window)
         workers = local_workers if local_workers else workers
-        var span = end - begin if local_workers else Int(rows)
+        var span = Int(rows)
         var alignment = 8192 if window else 64
         var step = (
             ((span + workers - 1) // workers + alignment - 1)
@@ -400,10 +641,14 @@ def group_reduce(
         var at = begin
         for worker in range(workers):
             var partial = StatisticalState()
-            var stop = min(span, (worker + 1) * step)
+            var stop = (worker + 1) * local_step if local_workers else min(
+                span, (worker + 1) * step
+            )
             while at < end:
                 var row = Int(index[unsafe_offset=at])
-                if (at - begin if local_workers else row) >= stop:
+                if (
+                    local_offset + at - begin if local_workers else row
+                ) >= stop:
                     break
                 at += 1
                 var source = source_slot * Int(stride) + row
@@ -431,15 +676,19 @@ def group_reduce(
             ),
         ) if decimal_sum else 1
         workers = local_workers if local_workers else workers
-        var span = end - begin if local_workers else Int(rows)
+        var span = Int(rows)
         var step = ((span + workers - 1) // workers + 8191) // 8192 * 8192
         var at = begin
         for worker in range(workers):
             var partial = BasicState()
-            var stop = min(span, (worker + 1) * step)
+            var stop = (worker + 1) * local_step if local_workers else min(
+                span, (worker + 1) * step
+            )
             while at < end:
                 var row = Int(index[unsafe_offset=at])
-                if (at - begin if local_workers else row) >= stop:
+                if (
+                    local_offset + at - begin if local_workers else row
+                ) >= stop:
                     break
                 var position = (
                     at - begin if op == ARG_MIN or op == ARG_MAX else row

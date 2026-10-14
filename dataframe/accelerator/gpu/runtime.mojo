@@ -8,6 +8,7 @@ initializing a context while the remaining native operations are migrated.
 from std.memory import bitcast
 from std.time import perf_counter_ns
 from std.sys import size_of
+from max.gpu.host import DeviceBuffer
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
 from dataframe.expr import (
@@ -127,7 +128,9 @@ from .grouping import (
     group_mark,
     group_offsets,
     group_starts,
-    group_window_bounds,
+    group_window_prepare,
+    group_window_merge,
+    group_window_schedule,
     group_reduce,
 )
 from .ordering import order_init, order_merge, order_key_errors, order_gather
@@ -205,6 +208,7 @@ def capabilities() -> RowCapabilities:
         decimal_multiplicative=True,
         temporal_fields=True,
         utc_temporal_conversions=True,
+        fixed_zone_temporal_fields=True,
         duration_totals=True,
         temporal_offsets=True,
         calendar_offsets=True,
@@ -647,7 +651,9 @@ def estimate_resources(
     # GPU words, byte validity and per-value errors; one host staging matrix
     # is reused for readback after the stream consumes its upload.
     var matrix_bytes = _checked_mul(cells, CELL_BYTES)
-    var program_bytes = _checked_mul(len(plan.code) + 2 * len(plan.literals), 8)
+    var program_bytes = _checked_mul(
+        len(plan.code) + 2 * len(plan.literals) + len(plan.key_values), 8
+    )
     var shared = _checked_add(matrix_bytes, program_bytes) if rows else 0
     if rows and movement:
         # A second matrix prevents overlapping reads/writes during compaction.
@@ -756,7 +762,9 @@ def estimate_resources(
                     ) & (
                         UInt64(1) << 32
                     ):
-                        launches = _checked_add(launches, 1)
+                        # Exact CPU group ordering adds a bounded merge pass
+                        # for every source-row sort pass, plus preparation.
+                        launches = _checked_add(launches, passes + 2)
             else:
                 launches = _checked_add(launches, 1)
             if step.filter:
@@ -888,6 +896,8 @@ def execute_plan(
     a final materialization exports values. Intermediate error observation is
     eager, matching the previous typed-column boundary.
     """
+    if plan.source_failure:
+        raise Error(plan.source_failure)
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
     var rows = (
@@ -966,6 +976,7 @@ def execute_plan(
     var waits = 0
     var uploaded = 0
     var downloaded = 0
+    var device_key_values = Optional[DeviceBuffer[DType.uint64]]()
     if rows and cells:
         var ctx = scope.context()
         # All staging/program host owners are outside this protected block.
@@ -1025,6 +1036,13 @@ def execute_plan(
                 uploaded += len(literals) * 8
                 ctx.enqueue_copy(device_types, types.unsafe_ptr())
                 uploaded += len(types) * 8
+                if len(plan.key_values):
+                    var lookup = ctx.enqueue_create_buffer[DType.uint64](
+                        len(plan.key_values)
+                    )
+                    ctx.enqueue_copy(lookup, plan.key_values.unsafe_ptr())
+                    uploaded += len(plan.key_values) * 8
+                    device_key_values = lookup^
                 for step in plan.steps:
                     if current_rows == 0:
                         break
@@ -1152,14 +1170,77 @@ def execute_plan(
                             ] & (
                                 UInt64(1) << 32
                             ):
-                                ctx.enqueue_function[group_window_bounds](
+                                var lookup_pointer = (
+                                    device_literals.unsafe_ptr()
+                                    .unsafe_mut_cast[False]()
+                                    .unsafe_origin_cast[ImmutAnyOrigin]()
+                                )
+                                if device_key_values:
+                                    lookup_pointer = (
+                                        device_key_values.value()
+                                        .unsafe_ptr()
+                                        .unsafe_mut_cast[False]()
+                                        .unsafe_origin_cast[ImmutAnyOrigin]()
+                                    )
+                                ctx.enqueue_function[group_window_prepare](
+                                    device_words.unsafe_ptr(),
+                                    device_valid.unsafe_ptr(),
+                                    index.unsafe_ptr(),
                                     starts.unsafe_ptr(),
-                                    metadata.unsafe_ptr(),
+                                    positions.unsafe_ptr(),
+                                    device_code.unsafe_ptr(),
+                                    device_literals.unsafe_ptr(),
+                                    device_types.unsafe_ptr(),
+                                    lookup_pointer,
+                                    UInt32(step.start),
+                                    shape[0],
                                     UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(plan.slots),
                                     grid_dim=1,
                                     block_dim=1,
                                 )
-                                submissions += 1
+                                var group_order = positions^
+                                var next_group_order = next_index^
+                                var group_run_width = 1
+                                var group_start_slot = UInt32(
+                                    code[4 * step.start + 2]
+                                )
+                                while group_run_width < Int(shape[0]):
+                                    ctx.enqueue_function[group_window_merge](
+                                        device_words.unsafe_ptr(),
+                                        index.unsafe_ptr(),
+                                        starts.unsafe_ptr(),
+                                        group_order.unsafe_ptr(),
+                                        next_group_order.unsafe_ptr(),
+                                        group_start_slot,
+                                        shape[0],
+                                        UInt32(rows),
+                                        UInt32(group_run_width),
+                                        grid_dim=(Int(shape[0]) + 255) // 256,
+                                        block_dim=256,
+                                    )
+                                    var previous_group_order = group_order^
+                                    group_order = next_group_order^
+                                    next_group_order = previous_group_order^
+                                    group_run_width *= 2
+                                    submissions += 1
+                                ctx.enqueue_function[group_window_schedule](
+                                    device_words.unsafe_ptr(),
+                                    starts.unsafe_ptr(),
+                                    group_order.unsafe_ptr(),
+                                    metadata.unsafe_ptr(),
+                                    group_start_slot,
+                                    shape[0],
+                                    UInt32(current_rows),
+                                    UInt32(rows),
+                                    UInt32(literals[step.start] & 0xFFFFFFFF),
+                                    grid_dim=1,
+                                    block_dim=1,
+                                )
+                                submissions += 2
+                                positions = group_order^
+                                next_index = next_group_order^
                             ctx.enqueue_function[group_reduce](
                                 device_words.unsafe_ptr(),
                                 device_valid.unsafe_ptr(),
@@ -1187,6 +1268,8 @@ def execute_plan(
                             # Starts, sort indices, and descriptor owners outlive all queued reads.
                             scope.synchronize()
                             waits += 1
+                            _ = positions^
+                            _ = next_index^
                         current_rows = Int(shape[0])
                         device_words = gathered_words^
                         device_valid = gathered_valid^
@@ -1845,6 +1928,7 @@ def execute_plan(
     _ = errors^
     _ = program^
     _ = slot_types^
+    _ = device_key_values^
     if not resident_result:
         if plan.reductions and count:
             resident_result = Table.identity(

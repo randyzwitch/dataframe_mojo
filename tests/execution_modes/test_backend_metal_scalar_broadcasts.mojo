@@ -90,10 +90,8 @@ def test_scalar_broadcast_planning_shares_prefix_and_preserves_schema() raises:
 
 def test_scalar_broadcast_rejects_file_reads_and_checked_integer_children() raises:
     var runtime = MetalRuntime(device_id=999999)
-    var missing = scan_csv(
-        "/nonexistent/metal-scalar-broadcast-must-not-read.csv"
-    )
-    with assert_raises(contains="in-memory scans"):
+    var missing = scan_csv("/nonexistent/metal-scalar-broadcast-missing.csv")
+    with assert_raises(contains="metal-scalar-broadcast-missing.csv"):
         _ = missing.filter(col("x") > col("x").mean()).collect(
             accelerator=runtime
         )

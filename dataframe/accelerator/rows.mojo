@@ -155,6 +155,9 @@ comptime ROW_DURATION_KEY = 1017
 comptime ROW_DURATION_BOUNDS = 1018
 comptime ROW_DURATION_CALENDAR = 1019
 comptime ROW_DURATION_UTC = 1020
+# Temporal unit bits 0..26 retain storage/UTC/calendar-day metadata. Fixed
+# local field operations carry seconds east of UTC in their right operand.
+comptime ROW_FIXED_ZONE_FIELDS = Int64(1 << 27)
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -199,6 +202,8 @@ struct RowPlan(Movable):
     var limit: Int
     var reductions: Bool
     var reused_columns: Bool
+    var key_values: List[UInt64]
+    var source_failure: String
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -363,10 +368,8 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
-        if op == DT_CONVERT_TZ and bound.dtypes[i].time_zone() != "UTC":
-            capabilities.reject(
-                "temporal", "Mojo time zone conversion supports a UTC target"
-            )
+        # Conversion changes validated zone metadata and preserves UTC ticks.
+        # Local-time operations still require their own zone-aware support.
         if op == DT_REPLACE_TZ and (
             left_type.time_zone() not in List[String](["", "UTC"])
             or bound.dtypes[i].time_zone() not in List[String](["", "UTC"])
@@ -380,6 +383,20 @@ def _program(
             or op == DT_TOTAL
             or op == DT_OFFSET_BY
         )
+        var fixed_fields = False
+        var field_offset = Int64(0)
+        if (
+            op >= DT_YEAR
+            and op <= DT_TIME
+            and left_type.is_datetime()
+            and left_type.time_zone().byte_length()
+            and left_type.time_zone() != "UTC"
+            and capabilities.fixed_zone_temporal_fields
+        ):
+            var fixed = _fixed_offset(left_type.time_zone())
+            if fixed:
+                fixed_fields = True
+                field_offset = fixed.value()
         var decimal_float_cast = (
             op == CAST
             and left_type.is_decimal()
@@ -422,6 +439,7 @@ def _program(
                 capabilities.utc_temporal_conversions
                 and left_type.time_zone() == "UTC"
             )
+            and not fixed_fields
         ):
             capabilities.reject(
                 "temporal", "time zone field extraction requires CPU execution"
@@ -649,6 +667,9 @@ def _program(
                 == 1000000 else 3
             )
         var right = Int64(node.right)
+        if fixed_fields:
+            source |= Int(ROW_FIXED_ZONE_FIELDS)
+            right = field_offset
         if op == DT_CONVERT_TZ or op == DT_REPLACE_TZ:
             right = Int64(bound.dtypes[i].time_zone() == "UTC")
         if op == DT_TOTAL:
@@ -923,6 +944,7 @@ def lower_rows(
     var gathers = List[Int64]()
     var steps = List[RowStep]()
     var outputs = List[RowOutput]()
+    var key_values = List[UInt64]()
     var next_slot = len(schema)
     var reduced = False
     var reused_columns = False
@@ -2194,6 +2216,25 @@ def lower_rows(
             var grouped_slots = List[Int]()
             var group_names = List[String]()
             for key in group_keys:
+                var key_descriptor = UInt64(0)
+                for original_key in node.window_keys:
+                    if original_key.name != schema[key].name():
+                        continue
+                    if (
+                        original_key.dtype == DataType.STRING
+                        or original_key.dtype.is_categorical()
+                    ):
+                        if UInt64(len(key_values)) >= UInt64(1) << 62:
+                            raise Error(
+                                "Metal window key lookup capacity exceeded"
+                            )
+                        key_descriptor = (UInt64(1) << 63) | UInt64(
+                            len(key_values)
+                        )
+                        if not original_key.string_hash:
+                            key_descriptor |= UInt64(1) << 62
+                        key_values.extend(original_key.values[].copy())
+                    break
                 code.extend(
                     [
                         Int64(ROW_GROUP_KEY),
@@ -2202,7 +2243,7 @@ def lower_rows(
                         Int64(0),
                     ]
                 )
-                literals.append(0)
+                literals.append(bitcast[DType.float64](key_descriptor))
                 node_dtypes.append(schema[key].dtype())
                 grouped_schema.append(
                     _empty(schema[key].name(), schema[key].dtype())
@@ -2343,4 +2384,6 @@ def lower_rows(
         limit,
         reduced,
         reused_columns,
+        key_values^,
+        query._nodes[cursor].source_failure,
     )

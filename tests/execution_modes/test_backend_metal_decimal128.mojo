@@ -118,8 +118,13 @@ def test_native_metal_decimal128_literal_preflight_and_remaining_boundaries() ra
     caps.decimal_arithmetic = False
     with assert_raises(contains="Decimal128 row arithmetic"):
         _ = lower_rows(frame.lazy().select(col("v") + col("v")), caps)
-    with assert_raises(contains="Decimal128 input reductions"):
-        _ = lower_rows(frame.lazy().select(col("v").arg_min()), _capabilities())
+    var arg_query = frame.lazy().select(col("v").arg_min())
+    var arg_plan = lower_rows(arg_query, _capabilities())
+    assert_equal(arg_plan.outputs[0].dtype, DataType.UINT32)
+    var no_wide_reductions = _capabilities()
+    no_wide_reductions.extra_reductions = False
+    with assert_raises(contains="additional reductions"):
+        _ = lower_rows(arg_query, no_wide_reductions)
     var bad = frame.lazy().select(lit("1000.00").cast(DataType.decimal(3, 2)))
     with assert_raises(contains="literal text parsing"):
         _ = fold_literal_text_parsing(bad)

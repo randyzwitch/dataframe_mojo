@@ -136,9 +136,13 @@ def _validate_sources(query: LazyFrame, capabilities: RowCapabilities) raises:
 
 
 def _region_query(
-    query: LazyFrame, chain: List[Int], source: DataFrame
+    query: LazyFrame,
+    chain: List[Int],
+    source: DataFrame,
+    source_failure: String = "",
 ) -> LazyFrame:
     var region = LazyFrame(source)
+    region._nodes[0].source_failure = source_failure
     for reverse in range(len(chain)):
         var node = query._nodes[chain[len(chain) - reverse - 1]].copy()
         node.left = len(region._nodes) - 1
@@ -361,7 +365,12 @@ def _task(
         frame = query._frames[scan.offset].copy()
         if len(scan.names):
             frame = frame.select(scan.names)
-    var region = _region_query(query, chain, frame)
+    var region = _region_query(
+        query,
+        chain,
+        frame,
+        query._nodes[cursor].source_failure if source < 0 else "",
+    )
     var plan = lower_rows(region, capabilities, terminal_boundary=boundary)
     # Pure projections preserve the prefix. Push their final head into a join
     # only after binding proves that no reduction or row reordering intervenes.
