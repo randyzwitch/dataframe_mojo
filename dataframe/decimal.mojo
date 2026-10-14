@@ -32,18 +32,24 @@ def decimal_width_for(precision: Int) -> Int:
 def decimal_add_type(left: DataType, right: DataType) raises -> DataType:
     """DuckDB's type of a decimal sum or difference
     (`DecimalArithmeticBind`): the larger scale, and room for the larger
-    integer part plus a carry digit, at most 38 digits."""
+    integer part plus a carry digit, at most 38 digits (18 when both
+    inputs fit 64 bits)."""
     var scale = max(left.scale(), right.scale())
     var integral = max(
         left.precision() - left.scale(), right.precision() - right.scale()
     )
     var precision = min(38, integral + scale + 1)
+    # Inputs of at most 18 digits keep 64-bit arithmetic: the result is
+    # capped at 18 digits and checked for overflow, as DuckDB does.
+    if precision > 18 and max(left.precision(), right.precision()) <= 18:
+        precision = 18
     return DataType.decimal(precision, scale, decimal_width_for(precision))
 
 
 def decimal_mul_type(left: DataType, right: DataType) raises -> DataType:
     """DuckDB's type of a decimal product: the scales and precisions
-    added, exact, the precision at most 38."""
+    added, exact, the precision at most 38 (18 when both inputs fit 64
+    bits and the scale is under 18)."""
     var scale = left.scale() + right.scale()
     if scale > 38:
         raise Error(
@@ -52,6 +58,14 @@ def decimal_mul_type(left: DataType, right: DataType) raises -> DataType:
             + ", past the maximum of 38; cast an operand first"
         )
     var precision = min(38, max(left.precision() + right.precision(), scale))
+    # As for sums: 64-bit inputs keep a 64-bit product, checked for
+    # overflow, when its scale leaves room for an integer digit.
+    if (
+        precision > 18
+        and max(left.precision(), right.precision()) <= 18
+        and scale < 18
+    ):
+        precision = 18
     return DataType.decimal(precision, scale, decimal_width_for(precision))
 
 

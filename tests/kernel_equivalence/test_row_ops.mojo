@@ -986,7 +986,8 @@ def duckdb_decimal_type(
 ) raises -> DataType:
     """DuckDB's result type: a sum or difference at the larger scale with
     one more integer digit, a product at the scales added, a quotient as
-    DOUBLE; at most 38 digits, stored at the width the precision needs."""
+    DOUBLE; at most 38 digits (18 for 64-bit inputs), stored at the width
+    the precision needs."""
     if operation == 3:
         return DataType.FLOAT64
     var scale: Int
@@ -1005,6 +1006,14 @@ def duckdb_decimal_type(
             + scale
             + 1,
         )
+    # Inputs that fit 64 bits keep a 64-bit result (a product only when
+    # its scale is under 18).
+    if (
+        precision > 18
+        and max(left.precision(), right.precision()) <= 18
+        and (operation != 2 or scale < 18)
+    ):
+        precision = 18
     var width = 32 if precision <= 9 else 64 if precision <= 18 else 128
     return DataType.decimal(precision, scale, width)
 

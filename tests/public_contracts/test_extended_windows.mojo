@@ -418,13 +418,14 @@ def test_decimal_cumulative_prefixes_are_exact_promoted_and_partitioned_at_every
                             frame, col("x").diff(), partitioned
                         )
                         # A difference is a subtraction: one more integer
-                        # digit, as DuckDB types it.
+                        # digit, at most 18 for 64-bit inputs, as DuckDB
+                        # types it.
                         assert_true(
                             differences.column("out").dtype()
                             == DataType.decimal(
-                                10 if kind == 14 else 19 if kind == 15 else 38,
+                                10 if kind == 14 else 18 if kind == 15 else 38,
                                 2,
-                                64 if kind == 14 else 128,
+                                128 if kind == 16 else 64,
                             )
                         )
                         for row in range(n):

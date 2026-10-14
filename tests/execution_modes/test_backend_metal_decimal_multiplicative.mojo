@@ -49,9 +49,10 @@ def test_decimal_multiplicative_capability_proofs_and_metadata() raises:
     assert_true(not RowCapabilities().decimal_multiplicative)
     # The device gives a product's exact type (DuckDB's: the scales added)
     # when it is 128 bits and one side has scale 0: decimal(18, 0) times
-    # decimal(18, 2) is decimal(36, 2).
+    # decimal(38, 2) is decimal(38, 2). Two 64-bit sides give a 64-bit
+    # product, which runs on the CPU.
     var whole = DataFrame(
-        [decimal_series("a", 64, 0, 99), decimal_series("b", 64, 2, 99)]
+        [decimal_series("a", 64, 0, 99), decimal_series("b", 128, 2, 99)]
     )
     var product = col("a") * col("b")
     var query = whole.lazy().select(product)

@@ -53,7 +53,16 @@ def test_decimal_unary_cpu_storage_widths_and_arithmetic_descriptors() raises:
             _ = minimum32.lazy().select(expression).collect(engine="cpu")
         with assert_raises(contains="overflow"):
             _ = minimum64.lazy().select(expression).collect(engine="cpu")
-    var query = safe_fixture().lazy().select(col("a") + col("b"))
+    # The device adds in 128 bits: a sum of 128-bit decimals is its type.
+    # A sum of 64-bit decimals is 64 bits (DuckDB) and runs on the CPU.
+    with assert_raises(contains="exact result type"):
+        _ = lower_rows(
+            safe_fixture().lazy().select(col("a") + col("b")), _capabilities()
+        )
+    var wide = DataFrame(
+        [decimal_series("a", 128, 1, 99), decimal_series("b", 128, 2, 99)]
+    )
+    var query = wide.lazy().select(col("a") + col("b"))
     var descriptors = Program(lower_rows(query, _capabilities()))
     assert_equal(descriptors.code[8], Int64(219))
     assert_equal(descriptors.code[11], Int64(1 | 2 << 6 | 5 << 12))

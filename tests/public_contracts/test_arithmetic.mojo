@@ -1121,6 +1121,74 @@ def test_decimal_arithmetic_takes_duckdb_types_and_null_zero_divisor() raises:
         _ = fine.select(col("a") * col("a"))
 
 
+def test_decimal_arithmetic_on_64_bit_inputs_stays_64_bit() raises:
+    """Inputs of at most 18 digits give results of at most 18 digits,
+    checked for overflow, as DuckDB does: (18, 2) + (18, 2) is (18, 2),
+    (15, 2) * (15, 2) is (18, 4); a product at scale 18 or more widens."""
+    var frame = DataFrame(
+        [
+            _decimals(
+                "a",
+                [Int128(99999999999999999), 150],
+                [True, True],
+                DataType.decimal(18, 2, 64),
+            ),
+            _decimals("b", [1, 200], [True, True], DataType.decimal(18, 2, 64)),
+            _decimals(
+                "p", [125, -250], [True, True], DataType.decimal(15, 2, 64)
+            ),
+            _decimals("q", [1, 1], [True, True], DataType.decimal(10, 9, 64)),
+        ]
+    )
+    var sums = frame.select_exprs([(col("a") + col("b")).alias("s")])
+    assert_frame(
+        sums,
+        DataFrame(
+            [
+                _decimals(
+                    "s",
+                    [Int128(100000000000000000), 350],
+                    [True, True],
+                    DataType.decimal(18, 2, 64),
+                )
+            ]
+        ),
+    )
+    var products = frame.select_exprs(
+        [
+            (col("p") * col("p")).alias("pp"),
+            (col("q") * col("q")).alias("qq"),
+        ]
+    )
+    assert_frame(
+        products,
+        DataFrame(
+            [
+                _decimals(
+                    "pp",
+                    [15625, 62500],
+                    [True, True],
+                    DataType.decimal(18, 4, 64),
+                ),
+                _decimals("qq", [1, 1], [True, True], DataType.decimal(20, 18)),
+            ]
+        ),
+    )
+    # Past 18 digits is an error, not a wider type.
+    var top = DataFrame(
+        [
+            _decimals(
+                "a",
+                [Int128(999999999999999999)],
+                [True],
+                DataType.decimal(18, 2, 64),
+            )
+        ]
+    )
+    with assert_raises(contains="precision 18"):
+        _ = top.select(col("a") + col("a"))
+
+
 def test_decimal_conditionals_take_the_common_decimal_type() raises:
     """A conditional or fill_null over decimals of different scales takes
     DuckDB's common type: the larger scale and the larger integer part,
