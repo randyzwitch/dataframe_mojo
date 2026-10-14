@@ -42,6 +42,8 @@ from .pipeline import (
     _BOUND_INT,
     _BOUND_NONE,
     _TopBound,
+    _int_bounds,
+    _range_key,
     STEP_DROP,
     STEP_FILTER,
     STEP_JOIN,
@@ -2421,6 +2423,186 @@ struct LazyFrame(Copyable):
             return height
         return -1
 
+    def _keeps_column(self, index: Int, name: String) -> Bool:
+        """Whether row-local node `index` passes column `name` on
+        unchanged: a filter, a drop that keeps it, a with_columns that
+        does not overwrite it, or a select that keeps it as itself."""
+        ref node = self._nodes[index]
+        if node.kind == FILTER:
+            return True
+        if node.kind == DROP:
+            return name not in node.names
+        if node.kind == WITH_COLUMNS:
+            for e in node.exprs:
+                if e._name == name:
+                    return False
+            return True
+        if node.kind == SELECT:
+            for e in node.exprs:
+                if (
+                    len(e._nodes) == 1
+                    and e._nodes[0].op == COL
+                    and e._nodes[0].text == name
+                    and (not e._name.byte_length() or e._name == name)
+                ):
+                    return True
+            return False
+        return False
+
+    def _grouped_on(self, index: Int, key: String) -> Int:
+        """The aggregate under node `index`, through row-local steps that
+        keep column `key`, when `key` is one of its group keys; else -1."""
+        var at = index
+        while at >= 0:
+            ref node = self._nodes[at]
+            if node.kind == AGG:
+                return at if key in node.names else -1
+            if not (_stream_rows(node) or node.kind == DROP):
+                return -1
+            if not self._keeps_column(at, key):
+                return -1
+            at = node.left
+        return -1
+
+    def _key_source(self, index: Int, key: String) raises -> Optional[Series]:
+        """The table column that supplies column `key` at node `index`,
+        through row-local steps that keep it, aggregates grouped on it and
+        the probe side of joins; None when it is made along the way."""
+        var at = index
+        while at >= 0:
+            ref node = self._nodes[at]
+            if node.kind == SCAN_FRAME:
+                ref frame = self._frames[node.offset]
+                if key in frame.columns():
+                    return frame.column(key)
+                return None
+            if node.kind == AGG:
+                if key not in node.names:
+                    return None
+            elif node.kind == JOIN:
+                if node.how == JOIN_CROSS:
+                    return None
+            elif not (_stream_rows(node) or node.kind == DROP):
+                return None
+            elif not self._keeps_column(at, key):
+                return None
+            at = node.left
+        return None
+
+    def _reduce_by_probe_keys(
+        self, top: Int, index: Int, batch_size: Int
+    ) raises -> Optional[DataFrame]:
+        """Semi-join reduction (magic sets) for aggregates built on: when
+        a stream's inner or semi joins build on aggregates grouped by the
+        join key, the probe side below the lowest of them runs first, and
+        its distinct keys filter each aggregate's input through a semi
+        join. A group whose key the probe side lacks joins nothing, and a
+        filter on a group key drops whole groups, so every result is
+        unchanged. DuckDB decorrelates EXISTS this way, over the outer
+        rows' distinct keys (its delim joins); PDS-H q21 counted the
+        suppliers of all 1.5M orders to join with the 76K lines its
+        supplier and order filters keep. Applied to an aggregate when the
+        keys are no more than its input's rows, as DuckDB builds a join
+        filter only from a side no larger than the probe. None when the
+        stream has no such join or no filter narrows its probe side."""
+        var joins = List[Int]()
+        var aggregates = List[Int]()
+        var key = String()
+        var probe = top
+        var lowest = -1
+        var steps = List[Int]()
+        while probe >= 0:
+            ref step = self._nodes[probe]
+            if _stream_rows(step) or step.kind == DROP:
+                steps.append(probe)
+                probe = step.left
+                continue
+            if step.kind != JOIN or not (
+                step.how
+                in [JOIN_INNER, JOIN_LEFT, JOIN_SEMI, JOIN_ANTI, JOIN_CROSS]
+            ):
+                break
+            if (
+                (step.how == JOIN_INNER or step.how == JOIN_SEMI)
+                and len(step.names) == 1
+                and (not key.byte_length() or step.names[0] == key)
+            ):
+                var aggregate = self._grouped_on(step.right, step.right_keys[0])
+                if aggregate >= 0:
+                    # The row-local steps between this join and the one
+                    # above keep the key, so the keys reaching the higher
+                    # join are a subset of those reaching this one (joins
+                    # only drop or repeat left rows, keeping their columns).
+                    var kept = True
+                    if key.byte_length():
+                        for at in steps:
+                            kept = kept and self._keeps_column(at, key)
+                    if kept:
+                        joins.append(probe)
+                        aggregates.append(aggregate)
+                        key = step.names[0]
+                        lowest = probe
+                        steps = List[Int]()
+            probe = step.left
+        if lowest < 0:
+            return None
+        var below = self._nodes[lowest].left
+        # Its keys can be few only if something filters the probe side:
+        # TPC-DS q35's customers joined to addresses and demographics kept
+        # 97% of them, and running that side first cost more than the
+        # filter saved.
+        if not self._has_kind(below, FILTER):
+            return None
+        trace_path("stream.probe_key_reduction")
+        var probed = self._execute(below, False, True, batch_size)
+        var keys = probed.select([key]).unique([key])
+        var plan = self.copy()
+        plan._frames.append(probed^)
+        plan._schemas.append(Optional[CsvSchema]())
+        plan._nodes.append(_plan_node(SCAN_FRAME, offset=len(plan._frames) - 1))
+        plan._nodes[lowest].left = len(plan._nodes) - 1
+        var key_frame = len(plan._frames)
+        var count = keys.height()
+        # Each source column's span, found once: PDS-H q21's two aggregates
+        # read one lineitem column.
+        var spans = Dict[String, Int]()
+        plan._frames.append(keys^)
+        plan._schemas.append(Optional[CsvSchema]())
+        for k in range(len(joins)):
+            var aggregate = aggregates[k]
+            var input = plan._nodes[aggregate].left
+            var group_key = plan._nodes[joins[k]].right_keys[0]
+            # The filter pays when it drops most of the groups: the probe
+            # keys are at most half of the values the aggregate's key
+            # column spans (the half rule the pipeline's key ranges keep).
+            # TPC-DS q35's 97K probing customers kept 94% of a year's
+            # store sales, for 16 ms of probes.
+            var source = plan._key_source(input, group_key)
+            if not source or not _range_key(source.value().dtype()):
+                continue
+            var named = group_key + "/" + String(len(source.value()))
+            if named not in spans:
+                var bounds = _int_bounds(source.value())
+                spans[named] = (
+                    Int(bounds.value()[1]) - Int(bounds.value()[0]) + 1
+                ) if bounds else 0
+            if 2 * count > spans[named]:
+                continue
+            plan._nodes.append(_plan_node(SCAN_FRAME, offset=key_frame))
+            var semi = _plan_node(
+                JOIN,
+                input,
+                len(plan._nodes) - 1,
+                names=[plan._nodes[joins[k]].right_keys[0]],
+                text="semi",
+                how=JOIN_SEMI,
+                right_keys=[key],
+            )
+            semi.names2 = ["_right"]
+            plan._nodes.append(semi^)
+            plan._nodes[aggregate].left = len(plan._nodes) - 1
+        return plan._execute(index, False, True, batch_size)
+
     def _ends_in_breaker(self, index: Int) -> Bool:
         """Whether node `index` is a pipeline breaker (an aggregate, a
         unique or a sort), or row-local steps over one: it is computed in
@@ -2561,6 +2743,9 @@ struct LazyFrame(Copyable):
         var operation_nodes = List[Int]()
         var joins = List[DataFrame]()
         var indexes = List[Optional[PreparedHashIndex]]()
+        var reduced = self._reduce_by_probe_keys(cursor, index, batch_size)
+        if reduced:
+            return reduced^
         if self._prefetched and not self._report:
             self._prefetch_breakers(cursor, batch_size)
         while cursor >= 0:
@@ -2871,9 +3056,17 @@ struct LazyFrame(Copyable):
                 late_names.append(name)
                 late_builds.append(b)
         # Row-local steps and a reduction over an in-memory frame run as a
-        # thread-owned pipeline (#538), grouped or not, unless the
-        # reduction counts distinct values (per-group sets, which the
-        # eager partitioned group-by handles on every worker, #336).
+        # thread-owned pipeline (#538), grouped or not. A reduction that
+        # counts distinct values (per-group sets, which the eager
+        # partitioned group-by handles on every worker, #336) runs its
+        # joins in the pipeline too when grouped (probes run in morsels on
+        # every worker), into the collecting sink, whose finish is that
+        # eager group-by. Without a join the eager route, which reads the
+        # columns in place, was faster (ClickBench q10, q11): PDS-H
+        # q21's semi-join reduced supplier counts filtered and probed 6M
+        # lineitem rows in batches on the streaming route (105 ms busy
+        # filtering, against 10 in morsels).
+        var distinct = _counts_distinct(expressions)
         # Joins run in the pipeline as probe steps; a grouped sink that
         # must keep first-occurrence order does not take them, since a
         # morsel's output rows carry no unique position in the join's
@@ -2882,7 +3075,7 @@ struct LazyFrame(Copyable):
             self._nodes[cursor].kind == SCAN_FRAME
             and (top < 0 and limit < 0 and skip == 0 or top > 0)
             and _pipeline_steps(operations, indexes)
-            and not _counts_distinct(expressions)
+            and (not distinct or len(keys) > 0 and len(joins) > 0)
             and (len(joins) == 0 or len(keys) == 0 or not ordered)
             # Ungrouped states merge in worker order, not morsel order.
             # Positional reductions therefore retain ordered streaming.
@@ -2905,7 +3098,13 @@ struct LazyFrame(Copyable):
         # sink): no sample, mode or key-type rule decides for it. The
         # types are those of an empty frame through every operation.
         var table = False
-        if piped and len(keys) > 0 and len(expressions) > 0 and not ordered:
+        if (
+            piped
+            and len(keys) > 0
+            and len(expressions) > 0
+            and not ordered
+            and not distinct
+        ):
             var empty = self._frames[self._nodes[cursor].offset].clear()
             var empty_joins = ArcPointer(joins.copy())
             var empty_indexes = ArcPointer(indexes.copy())
@@ -3000,6 +3199,9 @@ struct LazyFrame(Copyable):
                 # Collected strings gather slower than the eager route's
                 # per-chunk filter (ClickBench q12: 85 ms against 48).
                 piped = False
+        if distinct:
+            # Distinct counts are collected for the eager group-by.
+            insert = False
         # Under the aggregate table, coded keys pay as they did in the
         # insert tables: when the builds holding the keys bound the groups
         # to a few (the insert rule's bound), coding each build once costs
