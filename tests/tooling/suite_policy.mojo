@@ -979,14 +979,6 @@ def production_policy() -> SuitePolicy:
     )
     policy.failures.append(
         ExpectedFailure(
-            "tests/public_contracts/test_extended_windows.mojo::test_decimal_pct_change_obeys_documented_float64_result_contract",
-            "Verified all three decimal widths return Decimal(38,2) for pct_change, contrary to documented Float64. Focused strict mismatch; later combinations await repair.",
-            "decimal pct_change must return Float64",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
             "tests/public_contracts/test_set_reshape_types.mojo::test_struct_unique_null_parents_ignore_every_hidden_field_payload",
             "Struct key equality reads hidden fields of null parents, retaining extra equivalent null keys.",
             "struct unique must ignore hidden null-parent fields",

@@ -489,6 +489,30 @@ def _program(
             or capabilities.decimal_multiplicative
             and (op == MUL or op == DIV)
         )
+        # The device computes decimal sums, differences and products in
+        # 128 bits at the larger input scale, and decimal quotients. The
+        # CPU gives DuckDB's types: a sum or difference at the larger scale
+        # (the same values; the device runs it when the type is 128 bits),
+        # an exact product at the scales added (the same when one side has
+        # scale 0), a quotient as DOUBLE (never on the device).
+        if left_type.is_decimal() and (
+            op == ADD or op == SUB or op == MUL or op == DIV
+        ):
+            var result = bound.dtypes[i]
+            var same_type = (
+                op != DIV
+                and result.is_decimal()
+                and result.decimal_width() == 128
+                and (
+                    op != MUL or min(left_type.scale(), right_type.scale()) == 0
+                )
+            )
+            if not same_type:
+                capabilities.reject(
+                    "logical",
+                    "decimal arithmetic at its exact result type requires"
+                    " CPU execution",
+                )
         if (
             temporal
             and left_type.is_datetime()

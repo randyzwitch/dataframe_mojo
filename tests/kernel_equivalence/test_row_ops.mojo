@@ -63,7 +63,7 @@ def test_scalar_row_model_has_literal_selection_and_range_anchors() raises:
     assert_equal(half_even_ratio(125, 2), Int128(62))
     assert_equal(half_even_ratio(375, 10), Int128(38))
     assert_equal(half_even_ratio(-125, 2), Int128(-62))
-    assert_equal(decimal_row_result(2, 125, 50, 2, 2), Int128(62))
+    assert_equal(decimal_row_result(2, 125, 50, 2, 2), Int128(6250))
     assert_equal(decimal_row_result(3, 75, 200, 2, 2), Int128(38))
     assert_equal(expected_selection(9, 2, 0), [1, 4, 7])
     assert_equal(expected_selection(9, 2, 1), [1, 4])
@@ -981,6 +981,34 @@ def decimal_series_for_rows[
     )
 
 
+def duckdb_decimal_type(
+    operation: Int, left: DataType, right: DataType
+) raises -> DataType:
+    """DuckDB's result type: a sum or difference at the larger scale with
+    one more integer digit, a product at the scales added, a quotient as
+    DOUBLE; at most 38 digits, stored at the width the precision needs."""
+    if operation == 3:
+        return DataType.FLOAT64
+    var scale: Int
+    var precision: Int
+    if operation == 2:
+        scale = left.scale() + right.scale()
+        precision = min(38, left.precision() + right.precision())
+    else:
+        scale = max(left.scale(), right.scale())
+        precision = min(
+            38,
+            max(
+                left.precision() - left.scale(),
+                right.precision() - right.scale(),
+            )
+            + scale
+            + 1,
+        )
+    var width = 32 if precision <= 9 else 64 if precision <= 18 else 128
+    return DataType.decimal(precision, scale, width)
+
+
 def decimal_row_kernels[
     left_width: Int, right_width: Int, operation: Int
 ]() raises:
@@ -1004,8 +1032,8 @@ def decimal_row_kernels[
                     var fallback = binary[op](
                         left, right, List[Bool](length=n, fill=True)
                     )
-                    var expected_type = DataType.decimal(
-                        38, max(scales[0], scales[1])
+                    var expected_type = duckdb_decimal_type(
+                        operation, left.dtype(), right.dtype()
                     )
                     assert_true(actual.dtype() == expected_type)
                     assert_true(fallback.dtype() == expected_type)
@@ -1019,7 +1047,18 @@ def decimal_row_kernels[
                         )
                         assert_equal(actual.get(row).is_null(), not present)
                         assert_equal(fallback.get(row).is_null(), not present)
-                        if present:
+                        if present and operation == 3:
+                            # Quotients are DOUBLE, from each side's value.
+                            var quotient = (
+                                Float64(xs[position % 8])
+                                / Float64(decimal_power(scales[0]))
+                            ) / (
+                                Float64(ys[position % 8])
+                                / Float64(decimal_power(scales[1]))
+                            )
+                            assert_equal(actual.get(row).float64(), quotient)
+                            assert_equal(fallback.get(row).float64(), quotient)
+                        elif present:
                             var expected = decimal_row_result(
                                 operation,
                                 xs[position % 8],
@@ -1122,9 +1161,14 @@ def decimal_choose_rows[left_width: Int, right_width: Int]() raises:
                         for row in range(n):
                             selected.append(row_selected(row, n, density))
                         var actual = choose(selected, left, right)
-                        var expected_type = (
-                            left.dtype() if left_width
-                            == right_width else DataType.decimal(38, 2)
+                        # One scale: the wider precision, at its width.
+                        var expected_type = DataType.decimal(
+                            max(
+                                left.dtype().precision(),
+                                right.dtype().precision(),
+                            ),
+                            2,
+                            max(left_width, right_width),
                         )
                         assert_true(actual.dtype() == expected_type)
                         assert_equal(len(actual), n)
@@ -1148,14 +1192,22 @@ def decimal_choose_rows[left_width: Int, right_width: Int]() raises:
                 var bad_scale = decimal_series_for_rows[right_width](
                     n, offset, 3, mode, True
                 )
-                with assert_raises():
-                    _ = choose(
-                        List[Bool](length=n, fill=True),
-                        decimal_series_for_rows[left_width](
-                            n, offset, 2, mode, False
-                        ),
-                        bad_scale,
-                    )
+                # Another scale: both at the larger one, exactly (DuckDB's
+                # common type), so the left values gain a digit.
+                var rescaled = choose(
+                    List[Bool](length=n, fill=True),
+                    decimal_series_for_rows[left_width](
+                        n, offset, 2, mode, False
+                    ),
+                    bad_scale,
+                )
+                assert_equal(rescaled.dtype().scale(), 3)
+                for row in range(n):
+                    if row_valid(row + offset, mode):
+                        assert_equal(
+                            rescaled._decimal_raw(row),
+                            xs[(row + offset) % 8] * 10,
+                        )
 
 
 def test_decimal_conditional_storage_and_common_type_follow_selected_branch() raises:

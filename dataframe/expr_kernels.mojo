@@ -7,14 +7,15 @@ from .nested_column import ListColumn, StructColumn
 from .bool_column import BoolColumn
 from .column import Column, _bit, _copy_validity, _pack_bits
 from .dtype import DataType, NUMERIC_DTYPES
+from .cast import _decimal_to_float
 from .decimal import (
     common_decimal,
+    decimal_add_type,
+    decimal_mul_type,
     check_limit,
-    check_precision,
     precision_limit,
     divide_half_even,
     pow10,
-    round_half_even,
 )
 from .string_column import StringColumn, StringBuilder
 from .series import Series
@@ -638,9 +639,59 @@ def _decimal_result(
 ) raises -> DataType:
     if is_comparison(op):
         return DataType.BOOL
-    if op == ADD or op == SUB or op == MUL or op == DIV:
-        return DataType.decimal(38, max(left.scale(), right.scale()))
+    if op == ADD or op == SUB:
+        return decimal_add_type(left, right)
+    if op == MUL:
+        return decimal_mul_type(left, right)
+    if op == DIV:
+        return DataType.FLOAT64
     raise Error("decimal operation is not supported")
+
+
+def _decimal_output(
+    var values: List[Int128], var valid: List[Bool], dtype: DataType
+) raises -> Series:
+    """Exact decimal results stored at `dtype`'s width; each already fits
+    its precision (`check_limit`), so narrowing loses nothing. `valid` is
+    empty when every row is valid."""
+    var width = dtype.decimal_width()
+    if width == 128:
+        if len(valid) == 0:
+            return Series("", Column[Int128](values^)).with_dtype(dtype)
+        return Series("", Column[Int128](values^, valid^)).with_dtype(dtype)
+    var n = len(values)
+    if width == 64:
+        var narrow = List[Int64](unsafe_uninit_length=n)
+        for i in range(n):
+            narrow[i] = Int64(values[i])
+        if len(valid) == 0:
+            return Series("", Column[Int64](narrow^)).with_dtype(dtype)
+        return Series("", Column[Int64](narrow^, valid^)).with_dtype(dtype)
+    var narrow = List[Int32](unsafe_uninit_length=n)
+    for i in range(n):
+        narrow[i] = Int32(values[i])
+    if len(valid) == 0:
+        return Series("", Column[Int32](narrow^)).with_dtype(dtype)
+    return Series("", Column[Int32](narrow^, valid^)).with_dtype(dtype)
+
+
+def _decimal_quotient(left: Series, right: Series) raises -> Series:
+    """A decimal quotient as DuckDB computes it: both sides as DOUBLE,
+    null where the divisor is zero or either side is null."""
+    var x = _decimal_to_float(left)
+    var y = _decimal_to_float(right)
+    ref a = x._data[Column[Float64]]
+    ref b = y._data[Column[Float64]]
+    var n = _length(len(a), len(b))
+    var values = List[Float64](length=n, fill=0)
+    var valid = List[Bool](length=n, fill=False)
+    for i in range(n):
+        var ai = 0 if len(a) == 1 else i
+        var bi = 0 if len(b) == 1 else i
+        if a._valid(ai) and b._valid(bi) and b._get(bi) != 0:
+            values[i] = a._get(ai) / b._get(bi)
+            valid[i] = True
+    return Series("", Column[Float64](values^, valid^))
 
 
 def _decimal_mul(a: Int128, b: Int128) raises -> Int128:
@@ -651,27 +702,6 @@ def _decimal_mul(a: Int128, b: Int128) raises -> Int128:
     if a != 0 and (b > Int128.MAX / abs(a) or b < Int128.MIN / abs(a)):
         raise Error("decimal multiplication overflow")
     return a * b
-
-
-def _decimal_div(
-    a: Int128, b: Int128, shift: Int, dtype: DataType
-) raises -> Int128:
-    var negative = (a < 0) != (b < 0)
-    var numerator = -a if a < 0 else a
-    var denominator = -b if b < 0 else b
-    var result = check_precision(numerator / denominator, dtype)
-    var remainder = numerator % denominator
-    for _ in range(shift):
-        result = check_precision(result * 10, dtype)
-        remainder *= 10
-        result += remainder / denominator
-        remainder %= denominator
-    # The digits past the result scale round half to even, as Polars does
-    # (#342): 0.25 / 2 is 0.12 at scale 2, 0.75 / 2 is 0.38.
-    result = check_precision(
-        round_half_even(result, remainder, denominator), dtype
-    )
-    return -result if negative else result
 
 
 @always_inline
@@ -783,7 +813,7 @@ def _dense_decimal[
         dense = _decimal_dense[op, 1, A, B](
             a, b, n, lf, rf, scale, lim, result_dtype
         )
-    return Series("", Column[Int128](dense^)).with_dtype(result_dtype)
+    return _decimal_output(dense^, List[Bool](), result_dtype)
 
 
 def _decimal_side(
@@ -818,6 +848,14 @@ def _decimal_binary[
         # filter parts ran under an AND's mask.
         if len(mask) > 0:
             return _decimal_binary[op](left, right, List[Bool]())
+    comptime if op == DIV:
+        return _decimal_quotient(left, right)
+    # decimal32 sides, which sums and products of short decimals produce,
+    # are read at 128 bits.
+    if left._data.isa[Column[Int32]]() or right._data.isa[Column[Int32]]():
+        return _decimal_binary[op](
+            left._decimal128(), right._decimal128(), mask
+        )
     var result_dtype = _decimal_result(op, left.dtype(), right.dtype())
     var narrow = (
         left._data.isa[Column[Int64]]() or right._data.isa[Column[Int64]]()
@@ -921,24 +959,10 @@ def _decimal_binary[
             if rescale != 1:
                 raw = divide_half_even(raw, rescale)
             values[i] = check_limit(raw, limit, result_dtype)
-        elif op == DIV:
-            if b._get(bi) == 0:
-                valid[i] = False
-            else:
-                var shift = (
-                    result_dtype.scale()
-                    + right.dtype().scale()
-                    - left.dtype().scale()
-                )
-                values[i] = _decimal_div(
-                    a._get(ai), b._get(bi), shift, result_dtype
-                )
     comptime if predicate:
         return Series("", BoolColumn(predicates^, valid))
     else:
-        return Series("", Column[Int128](values^, valid)).with_dtype(
-            result_dtype
-        )
+        return _decimal_output(values^, valid^, result_dtype)
 
 
 def _arithmetic[
@@ -1468,7 +1492,7 @@ def binary[
         if left.dtype().is_decimal() and right.dtype().is_decimal():
             # Left where valid, else right, at the operands' common type
             # and storage width.
-            var pair = _decimal_pair(left, right, "fill_null")
+            var pair = _decimal_pair(left, right)
             ref a = pair[0]
             ref b = pair[1]
             if a._data.isa[Column[Int128]]():
@@ -1698,18 +1722,13 @@ def _choose_numeric[
     return Column[Scalar[D]](values=values^, bits=bits^)
 
 
-def _decimal_pair(
-    left: Series, right: Series, what: String
-) raises -> Tuple[Series, Series]:
-    """Two decimal inputs at their common type (`common_decimal`), so one
-    typed loop can take a value from either."""
-    var target = common_decimal(left.dtype(), right.dtype(), what)
+def _decimal_pair(left: Series, right: Series) raises -> Tuple[Series, Series]:
+    """Two decimal inputs cast to their common type (`common_decimal`), so
+    one typed loop can take a value from either."""
     if left.dtype() == right.dtype():
         return (left.copy(), right.copy())
-    return (
-        left._decimal128().with_dtype(target),
-        right._decimal128().with_dtype(target),
-    )
+    var target = common_decimal(left.dtype(), right.dtype())
+    return (left.cast(target), right.cast(target))
 
 
 def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
@@ -1719,7 +1738,7 @@ def choose(selected: List[Bool], then: Series, other: Series) raises -> Series:
     if then.dtype().is_decimal() and other.dtype().is_decimal():
         # Decimals are stored as Int32, Int64 or Int128 by declared width.
         # Pick at the branches' common type and keep its tag.
-        var pair = _decimal_pair(then, other, "when/then/otherwise")
+        var pair = _decimal_pair(then, other)
         ref a = pair[0]
         ref b = pair[1]
         if a._data.isa[Column[Int128]]():
