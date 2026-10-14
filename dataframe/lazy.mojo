@@ -3720,6 +3720,7 @@ struct LazyFrame(Copyable):
 
     def _optimized(self) raises -> Self:
         var plan = self.copy()
+        plan._unique_as_aggregate()
         plan._split_filters()
         plan._filter_shared_subplans()
         plan._push_predicates()
@@ -3934,6 +3935,59 @@ struct LazyFrame(Copyable):
     def _columns_of(self, index: Int) raises -> List[String]:
         return self._execute(index, True).columns()
 
+    def _unique_as_aggregate(mut self) raises:
+        """A unique over every column of its input, keeping any row of
+        each set of equal rows (or the first, in input order), is a
+        group_by on all of them: DuckDB plans DISTINCT as a hash
+        aggregate without aggregates, which then runs as the pipeline's
+        aggregate table, on every worker, rather than on the collected
+        rows. The table needs one aggregate, so a row count is added and
+        dropped again."""
+        var count = len(self._nodes)
+        var changed = False
+        self._remember_schemas()
+        for i in range(count):
+            ref node = self._nodes[i]
+            if node.kind != UNIQUE or node.left < 0:
+                continue
+            if node.text != "any" and node.text != "first":
+                continue
+            var columns = self._columns_of(node.left)
+            if len(columns) == 0:
+                continue
+            if len(node.names) > 0:
+                # A subset naming every column, in any order.
+                if len(node.names) != len(columns):
+                    continue
+                var every = True
+                for c in columns:
+                    if c not in node.names:
+                        every = False
+                if not every:
+                    continue
+            var counted = "__unique_rows"
+            while counted in columns:
+                counted += "_"
+            self._nodes.append(
+                _plan_node(
+                    AGG,
+                    node.left,
+                    exprs=[col(columns[0]).len().alias(counted)],
+                    names=columns,
+                    maintain_order=node.maintain_order,
+                )
+            )
+            var shown = List[Expr]()
+            for c in columns:
+                shown.append(col(c))
+            self._nodes[i] = _plan_node(
+                SELECT, len(self._nodes) - 1, exprs=shown
+            )
+            changed = True
+        self._schema_memo = None
+        if changed:
+            self._reorder()
+
     def _subtree_signatures(
         self,
     ) -> Tuple[List[String], List[Int], List[Bool]]:
@@ -3980,14 +4034,37 @@ struct LazyFrame(Copyable):
         disjunction of a CTE's consumers' filters into the CTE). TPC-DS
         q4, q11 and q74 read one yearly total per channel and year from a
         table of every channel and year."""
-        # Copies need two aggregations at least; most plans have fewer,
-        # and their signatures are not worth building (ClickBench q29's
-        # ninety sums).
-        var aggregations = 0
-        for node in self._nodes:
-            if node.kind == AGG or node.kind == UNIQUE:
-                aggregations += 1
-        if aggregations < 2:
+        # Copies need two aggregations alike in their kind, keys,
+        # aggregate count and subtree size at least; most plans have none,
+        # and full signatures are not worth building for them (ClickBench
+        # q29's ninety sums, TPC-DS q41's two small distincts).
+        var subtree = List[Int](capacity=len(self._nodes))
+        var shapes = Dict[String, Int]()
+        var alike = False
+        for i in range(len(self._nodes)):
+            ref node = self._nodes[i]
+            var size = 1
+            if node.left >= 0:
+                size += subtree[node.left]
+            if node.right >= 0:
+                size += subtree[node.right]
+            subtree.append(size)
+            if node.kind != AGG and node.kind != UNIQUE:
+                continue
+            var shape = (
+                String(node.kind)
+                + "|"
+                + _field_list(node.names)
+                + "|"
+                + String(len(node.exprs))
+                + "|"
+                + String(size)
+            )
+            if shape in shapes:
+                alike = True
+                break
+            shapes[shape] = i
+        if not alike:
             return
         var computed = self._subtree_signatures()
         ref signatures = computed[0]

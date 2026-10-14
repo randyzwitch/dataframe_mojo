@@ -218,3 +218,40 @@ def test_a_filter_on_join_keys_also_filters_the_other_input() raises:
         assert_equal(len(read), 2)
         var total = read[0] + read[1]
         assert_equal(total, year_rows(3, 2001) + year_rows(5, 2001))
+
+
+def test_unique_over_every_column_runs_as_a_group_by() raises:
+    """A unique keeping any or the first row over all its columns runs as
+    an aggregation, with the same rows (and the same order when it keeps
+    order); other uniques are left alone. Nulls in a key and a string key
+    included."""
+    var source = (
+        sales(3)
+        .lazy()
+        .with_columns(
+            [
+                (col("customer") % lit(Int64(4))).alias("customer"),
+                col("amount").cast(DataType.STRING).alias("label"),
+            ]
+        )
+        .select(["year", "customer", "label"])
+    )
+    var everything: List[String] = ["label", "year", "customer"]
+    var subsets: List[List[String]] = [List[String](), everything^, ["year"]]
+    for subset in subsets:
+        for keep in ["any", "first", "last", "none"]:
+            for maintain in [False, True]:
+                var plan = source.unique(
+                    subset, keep=keep, maintain_order=maintain
+                )
+                var fast = plan.collect(optimize=True, engine="cpu")
+                var plain = plan.collect(optimize=False, engine="cpu")
+                if maintain:
+                    assert_frame(fast, plain)
+                else:
+                    assert_frame(ordered(fast), ordered(plain))
+                var grouped = len(rows_into(plan, "GROUP_BY")) > 0
+                var eligible = len(subset) != 1 and (
+                    keep == "any" or keep == "first"
+                )
+                assert_equal(grouped, eligible)
