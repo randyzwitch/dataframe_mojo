@@ -48,21 +48,41 @@ jobs:
           mkdir -p build/contract-tests
           pixi run --locked mojo build --target-accelerator=unknown -I . tests/tooling/mojo_gpu_cpu_compile.mojo -o build/contract-tests/mojo-gpu-cpu-compile
           build/contract-tests/mojo-gpu-cpu-compile
-      - name: Run Mojo provider contracts with explicit hardware capability
+      - name: Name the runner's Apple GPU for the compiler
+        # GitHub's macOS runners are virtual machines: Metal serves their
+        # paravirtual GPU (the retired native runtime ran its GPU joins
+        # here), but the Mojo compiler does not detect it, so without a
+        # named target every build had no accelerator and every Metal
+        # contract reported SKIP(capability). A `mojo` wrapper first on
+        # PATH names it for each build and run.
         run: |
-          mkdir -p build/contract-tests
-          pixi run mojo build -I . tests/tooling/metal_available.mojo -o build/contract-tests/metal-available
-          capability="$(build/contract-tests/metal-available)"
-          if [[ "$capability" == available ]]; then
-            pixi run test --areas execution --contracts execution.backends --capabilities metal
-            pixi run --locked -e gpu test-mojo-gpu
-            pixi run --locked -e gpu test-mojo-gpu-floating
-            pixi run --locked -e gpu test-mojo-gpu-decimal
-            pixi run --locked -e gpu test-mojo-gpu-integer
-          elif [[ "$capability" == absent ]]; then
-            echo "Metal device unavailable; GPU execution reports SKIP(capability); metadata contracts still run."
-            pixi run test --areas execution --contracts execution.backends
-          else
-            echo "Unexpected Metal capability probe result: $capability" >&2
+          chip="$(sysctl -n machdep.cpu.brand_string)"
+          echo "CPU: $chip"
+          system_profiler SPDisplaysDataType | sed -n '1,16p' || true
+          generation="$(echo "$chip" | sed -nE 's/.*Apple M([0-9]+).*/\1/p')"
+          if [[ -z "$generation" ]]; then
+            echo "::error::Not an Apple silicon runner: $chip"
             exit 1
           fi
+          mkdir -p "$RUNNER_TEMP/accelerator"
+          cp tests/tooling/mojo_accelerator.sh "$RUNNER_TEMP/accelerator/mojo"
+          chmod +x "$RUNNER_TEMP/accelerator/mojo"
+          echo "DATAFRAME_TARGET_ACCELERATOR=apple-m$generation" >> "$GITHUB_ENV"
+          echo "ACCELERATOR_PATH=$RUNNER_TEMP/accelerator" >> "$GITHUB_ENV"
+      - name: Run Mojo provider contracts on the Metal device
+        run: |
+          mkdir -p build/contract-tests
+          pixi run --locked bash -c 'PATH="$ACCELERATOR_PATH:$PATH" mojo build -I . tests/tooling/metal_available.mojo -o build/contract-tests/metal-available'
+          capability="$(build/contract-tests/metal-available)"
+          echo "capability: $capability (target $DATAFRAME_TARGET_ACCELERATOR)"
+          if [[ "$capability" != available ]]; then
+            # A macOS arm64 runner has a Metal device; a probe that finds
+            # none means the GPU contracts would all skip, so fail instead.
+            echo "::error::No Metal device found for $DATAFRAME_TARGET_ACCELERATOR; GPU contracts cannot run (see the probe's reasons above)."
+            exit 1
+          fi
+          pixi run --locked bash -c 'PATH="$ACCELERATOR_PATH:$PATH" bash tests/run_tests.sh --areas execution --contracts execution.backends --capabilities metal'
+          pixi run --locked -e gpu bash -c 'PATH="$ACCELERATOR_PATH:$PATH" mojo run -I . tests/tooling/mojo_gpu_rows.mojo'
+          pixi run --locked -e gpu bash -c 'PATH="$ACCELERATOR_PATH:$PATH" python3 tests/tooling/mojo_gpu_floating.py'
+          pixi run --locked -e gpu bash -c 'PATH="$ACCELERATOR_PATH:$PATH" python3 tests/tooling/mojo_gpu_decimal_probe.py'
+          pixi run --locked -e gpu bash -c 'PATH="$ACCELERATOR_PATH:$PATH" mkdir -p build/contract-tests && python3 tests/tooling/mojo_gpu_integer_probe.py build/contract-tests/integers.bin && mojo run -I . tests/tooling/mojo_gpu_integer_probe.mojo build/contract-tests/integers.bin'
