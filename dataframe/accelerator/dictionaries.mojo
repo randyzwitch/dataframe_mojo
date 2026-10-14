@@ -152,7 +152,10 @@ struct DictionaryCodes(Movable):
     def encode(self, column: Series) raises -> Series:
         if not dictionary_dtype(column.dtype()):
             return column.copy()
-        return recode(column, self.dtype)
+        var result = recode(column, self.dtype)
+        # Ordered codes are transport for this exact field, not a public cast.
+        result._field_metadata = column._field_metadata
+        return result^
 
     def restore(self, codes: Series, dtype: DataType) raises -> Series:
         if not dictionary_dtype(dtype):
@@ -540,6 +543,7 @@ def encode_query(
             var codes = dictionary.encode(column)
             if dictionary_dtype(column.dtype()):
                 codes = codes.with_dtype(DataType.UINT32)
+                codes._field_metadata = column._field_metadata
             columns.append(codes^)
         frame = DataFrame(columns^, height=frame.height())
     for o in range(len(encoded._nodes)):
@@ -579,7 +583,12 @@ def restore_frame(
 ) raises -> DataFrame:
     var columns = List[Series]()
     for i in range(len(frame._columns)):
-        columns.append(
-            dictionary.restore(frame._columns[i], schema._columns[i].dtype())
+        var column = dictionary.restore(
+            frame._columns[i], schema._columns[i].dtype()
         )
+        # The original CPU schema distinguishes a bare field/alias from a
+        # computed expression. Decoding transport codes must preserve that
+        # exact owner, and must not attach input metadata to computed values.
+        column._field_metadata = schema._columns[i]._field_metadata
+        columns.append(column^)
     return DataFrame(columns^, height=frame.height())

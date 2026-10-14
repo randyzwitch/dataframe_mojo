@@ -147,6 +147,7 @@ def execute_plan(
     profiling: Bool = False,
     left_resident: Optional[Table] = None,
     right_resident: Optional[Table] = None,
+    export_values: Bool = True,
 ) raises -> Tuple[Table, DataFrame]:
     var started = Int(perf_counter_ns())
     var before = scope.transfers()
@@ -438,14 +439,24 @@ def execute_plan(
         var output_cells = _checked_mul(capacity, len(task.fields))
         var matrix_result_bytes = _checked_mul(output_cells, CELL_BYTES)
         shared = _checked_add(shared, matrix_result_bytes)
-        host = _checked_add(host, matrix_result_bytes)
         var typed = 0
-        for field in task.fields:
-            typed = _checked_add(typed, _checked_mul(rows, _width(field.dtype)))
-            typed = _checked_add(typed, (rows + 7) // 8)
+        if export_values:
+            host = _checked_add(host, matrix_result_bytes)
+            for field in task.fields:
+                typed = _checked_add(
+                    typed, _checked_mul(rows, _width(field.dtype))
+                )
+                typed = _checked_add(typed, (rows + 7) // 8)
+        # Error-only observers download every result error, but allocate no
+        # host value/validity matrix or typed output columns.
+        var materialization_scratch = _checked_mul(
+            rows, 4
+        ) if export_values else _checked_mul(
+            _checked_mul(rows, len(task.fields)), 4
+        )
         peak = _checked_add(
             _checked_add(shared, host),
-            _checked_add(typed, _checked_mul(rows, 4)),
+            _checked_add(typed, materialization_scratch),
         )
         peak = _checked_add(peak, resident_workspace)
         _ = scope.check(peak)
@@ -489,11 +500,7 @@ def execute_plan(
         var schema_columns = List[Series](capacity=len(task.fields))
         var output_slots = List[Int64](capacity=len(task.fields))
         for slot in range(len(task.fields)):
-            schema_columns.append(
-                Series.full_null(
-                    task.fields[slot].name, task.fields[slot].dtype, 0
-                )
-            )
+            schema_columns.append(task.schema._columns[slot].copy())
             output_slots.append(Int64(slot))
         var result = Table(
             Matrix(

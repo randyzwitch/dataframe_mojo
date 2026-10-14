@@ -6,7 +6,7 @@ before a provider context or device allocation is created.
 """
 from .metadata import prune_projections
 from .integer_ranges import proven_integer_nodes, _decimal_scale_safe
-from std.memory import bitcast
+from std.memory import ArcPointer, bitcast
 from std.math import pow, abs
 from dataframe.parallel import configured_workers
 from .capabilities import RowCapabilities
@@ -177,13 +177,29 @@ struct RowStep(Copyable):
     var grouped: Bool
 
 
-@fieldwise_init
 struct RowOutput(Copyable):
     var name: String
     var dtype: DataType
     var slot: Int
     var reduction: Int
     var min_count: Int
+    var field_metadata: Optional[ArcPointer[List[UInt8]]]
+
+    def __init__(
+        out self,
+        name: String,
+        dtype: DataType,
+        slot: Int,
+        reduction: Int,
+        min_count: Int,
+        field_metadata: Optional[ArcPointer[List[UInt8]]] = None,
+    ):
+        self.name = name
+        self.dtype = dtype
+        self.slot = slot
+        self.reduction = reduction
+        self.min_count = min_count
+        self.field_metadata = field_metadata
 
 
 @fieldwise_init
@@ -227,6 +243,17 @@ def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
 
 def _empty(name: String, dtype: DataType) raises -> Series:
     return Series.full_null(name, dtype, 0)
+
+
+def _projected_column(
+    name: String, dtype: DataType, bound: BoundExpr, schema: List[Series]
+) raises -> Series:
+    # CPU evaluate returns the source Series for a bare column, including
+    # aliases. Computed expressions create a new field without its metadata.
+    var result = _empty(name, dtype)
+    if len(bound.expr._nodes) == 1 and bound.expr._nodes[0].op == COL:
+        result._field_metadata = schema[bound.sources[0]]._field_metadata
+    return result^
 
 
 def _program(
@@ -2108,7 +2135,11 @@ def lower_rows(
                     or result_dtype == dtype
                     or result_dtype == DataType.BOOL
                 ):
-                    projected.append(_empty(expr._name, result_dtype))
+                    projected.append(
+                        _projected_column(
+                            expr._name, result_dtype, bound, rank_schema
+                        )
+                    )
                     projected_slots.append(existing)
                     reused_columns = True
                     continue
@@ -2158,7 +2189,11 @@ def lower_rows(
                     )
                 )
             else:
-                projected.append(_empty(expr._name, result_dtype))
+                projected.append(
+                    _projected_column(
+                        expr._name, result_dtype, bound, rank_schema
+                    )
+                )
                 projected_slots.append(next_slot)
             next_slot += 1
         if node.kind == FILTER:
@@ -2245,9 +2280,9 @@ def lower_rows(
                 )
                 literals.append(bitcast[DType.float64](key_descriptor))
                 node_dtypes.append(schema[key].dtype())
-                grouped_schema.append(
-                    _empty(schema[key].name(), schema[key].dtype())
-                )
+                var key_column = _empty(schema[key].name(), schema[key].dtype())
+                key_column._field_metadata = schema[key]._field_metadata
+                grouped_schema.append(key_column^)
                 grouped_slots.append(slots[key])
                 group_names.append(schema[key].name())
             for output in aggregate_outputs:
@@ -2349,7 +2384,14 @@ def lower_rows(
     if not reduced:
         for i in range(len(schema)):
             outputs.append(
-                RowOutput(schema[i].name(), schema[i].dtype(), slots[i], -1, 0)
+                RowOutput(
+                    schema[i].name(),
+                    schema[i].dtype(),
+                    slots[i],
+                    -1,
+                    0,
+                    schema[i]._field_metadata,
+                )
             )
     if len(steps) > capabilities.max_steps:
         capabilities.reject(

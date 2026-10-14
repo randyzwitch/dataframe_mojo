@@ -13,11 +13,13 @@ from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.joins import (
     JoinDag,
     DAG_JOIN,
+    DAG_ASOF,
     DAG_ROWS,
     lower_join_dag,
 )
 from . import runtime as rows
 from . import join_runtime as joins
+from . import asof_runtime as asof
 from .residency import Scope, Table
 
 
@@ -31,6 +33,12 @@ def preflight(
     for task in dag.tasks:
         if task.kind == DAG_JOIN:
             _ = joins.preflight(
+                task,
+                dag.tasks[task.source].schema,
+                dag.tasks[task.right].schema,
+            )
+        elif task.kind == DAG_ASOF:
+            _ = asof.preflight(
                 task,
                 dag.tasks[task.source].schema,
                 dag.tasks[task.right].schema,
@@ -76,6 +84,8 @@ def execute(
     budget: Int,
     profiling: Bool,
     capabilities: RowCapabilities,
+    *,
+    observation_only: Bool = False,
 ) raises -> Tuple[DataFrame, DataFrame]:
     var started = Int(perf_counter_ns())
     var dag = preflight(query, capabilities)
@@ -84,7 +94,7 @@ def execute(
     for task in dag.tasks:
         if task.source >= 0:
             uses[task.source] += 1
-        if task.kind == DAG_JOIN:
+        if task.kind == DAG_JOIN or task.kind == DAG_ASOF:
             uses[task.right] += 1
     var values = List[Optional[Table]](capacity=len(dag.tasks))
     var report = DataFrame(List[Series]())
@@ -102,12 +112,37 @@ def execute(
                 raise Error(task.query._nodes[0].source_failure)
             values.append(None)
             if index == dag.root:
-                result = task.query._frames[0].copy()
+                result = task.schema.copy() if observation_only else task.query._frames[
+                    0
+                ].copy()
             continue
         var live_before = scope.info()[0]
         var traffic_before = scope.transfers()
         var executed: Tuple[Table, DataFrame]
         if task.kind == DAG_JOIN:
+            if task.equal_rows:
+                # Marked distribution zip children are complete observed
+                # producers. Unequal lengths fail before join allocation.
+                var left_rows = (
+                    values[task.source]
+                    .value()
+                    .rows if values[task.source] else _frame(
+                        dag, values, task.source
+                    )
+                    .height()
+                )
+                var right_rows = (
+                    values[task.right]
+                    .value()
+                    .rows if values[task.right] else _frame(
+                        dag, values, task.right
+                    )
+                    .height()
+                )
+                if left_rows != right_rows:
+                    raise Error(
+                        "explode: columns have different element counts at row 0"
+                    )
             executed = joins.execute_plan(
                 task,
                 _frame(dag, values, task.source),
@@ -116,9 +151,21 @@ def execute(
                 profiling,
                 left_resident=values[task.source],
                 right_resident=values[task.right],
+                export_values=not (observation_only and index == dag.root),
             )
             if not task.terminal:
                 executed[0].observe_errors()
+        elif task.kind == DAG_ASOF:
+            executed = asof.execute_plan(
+                task,
+                _frame(dag, values, task.source),
+                _frame(dag, values, task.right),
+                scope,
+                profiling,
+                left_resident=values[task.source],
+                right_resident=values[task.right],
+                export_values=not (observation_only and index == dag.root),
+            )
         else:
             var resident = Optional[Table]()
             if task.source >= 0:
@@ -136,6 +183,7 @@ def execute(
                 resident_input=resident,
                 profiling=profiling,
                 terminal_boundary=task.terminal,
+                export_values=not (observation_only and index == dag.root),
             )
         if task.terminal and index != dag.root:
             # Window producers permit checked terminal expressions, but their
@@ -145,7 +193,11 @@ def execute(
         var owned = executed[0].retained_bytes()
         var host_result_bytes = 0
         if index == dag.root:
-            result = rows.materialize(executed[0])
+            if observation_only:
+                executed[0].observe_errors()
+                result = task.schema.copy()
+            else:
+                result = rows.materialize(executed[0])
             for column in result._columns:
                 host_result_bytes = rows._checked_add(
                     host_result_bytes,
@@ -179,7 +231,9 @@ def execute(
                 Column[String](
                     List[String](
                         length=region.height(),
-                        fill="Mojo GPU -> CPU columns" if index
+                        fill="Mojo GPU error observation" if observation_only
+                        and index
+                        == dag.root else "Mojo GPU -> CPU columns" if index
                         == dag.root else "Mojo GPU resident table",
                     )
                 ),
@@ -193,7 +247,7 @@ def execute(
             uses[task.source] -= 1
             if uses[task.source] == 0:
                 values[task.source] = None
-        if task.kind == DAG_JOIN:
+        if task.kind == DAG_JOIN or task.kind == DAG_ASOF:
             uses[task.right] -= 1
             if uses[task.right] == 0:
                 values[task.right] = None

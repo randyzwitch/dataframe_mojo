@@ -309,3 +309,49 @@ def test_file_source_staging_does_not_probe_unreachable_missing_csv() raises:
     assert_equal(result.item(0, "x").int64(), Int64(7))
     assert_equal(result.item(1, "x").int64(), Int64(9))
     run_command(["rm", "-r", work])
+
+
+def test_file_source_bool_staging_packed_byte_budget_and_optional_validity() raises:
+    var values: List[UInt8] = [85, 1]
+    var bits: List[UInt8] = [253, 1]
+    var source = Series("b", BoolColumn(values=values^, bits=bits^, length=9))
+    var compact = compact_source(DataFrame([source.copy()]))
+    # Nine packed values and nine validity bits: two bytes each, not9+2.
+    assert_equal(source_payload_bytes(compact), 4)
+    for rows in [0, 1, 8]:
+        assert_equal(
+            source_payload_bytes(
+                compact_source(DataFrame([source.slice(0, rows)]))
+            ),
+            0 if rows == 0 else 2,
+        )
+    var all_values: List[UInt8] = [85, 1]
+    var all_valid = Series(
+        "b", BoolColumn(values=all_values^, bits=List[UInt8](), length=9)
+    )
+    assert_equal(
+        source_payload_bytes(compact_source(DataFrame([all_valid^]))), 2
+    )
+    var work = temporary_directory("/tmp/mojo-file-bool-budget")
+    var path = work + "/values.csv"
+    write_text(
+        path,
+        "id,b\n0,true\n1,\n2,false\n3,true\n4,false\n5,true\n6,false\n7,true\n8,false\n",
+    )
+    var query = scan_csv(
+        path,
+        CsvSchema(
+            [CsvField("id", DataType.INT64), CsvField("b", DataType.BOOL)]
+        ),
+    ).select(col("b"))
+    var staged = stage_file_sources(query, memory_limit_bytes=4)
+    assert_equal(staged[1], 4)
+    var actual = staged[0].collect(
+        engine="cpu", optimize=False, streaming=False
+    )
+    assert_equal(actual.height(), 9)
+    assert_true(actual.item(1, "b").is_null())
+    assert_false(actual.item(8, "b").bool())
+    with assert_raises(contains="budget"):
+        _ = stage_file_sources(query, memory_limit_bytes=3)
+    run_command(["rm", "-r", work])

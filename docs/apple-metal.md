@@ -46,14 +46,15 @@ includes the following operations and their valid compositions:
 | Expressions | Checked arithmetic, integer floor division/modulo/power, comparisons, Kleene Boolean operations, conditionals, null/NaN handling, clipping, membership, numeric and decimal casts |
 | Floating point | Arithmetic, square root, rounding, exponentials, logarithms and power with CPU-compatible special values and subnormal handling |
 | Reductions | Sum, mean, counts, min/max, first/last, arg min/max, Boolean any/all, variance/std, skewness/kurtosis, covariance/correlation, median and five quantile interpolation modes |
-| Distributions | One scalar mode expression with sorted typed winners, nulls and ordinary scalar siblings |
+| Distributions | Scalar mode and value counts, multiple distributions with equal cardinality, sorted typed winners, nulls and ordinary scalar siblings |
 | Rows and keys | Stable filters, slices, mixed-key sorting, grouped aggregation, distinct rows/counts, unions and rank methods |
 | Windows | Partition aggregates, cumulative operations, shift/fill, fixed-size rolling operations, interpolation and coordinate interpolation |
 | Duration windows | Numeric/Date/Datetime indices, supported closed bounds, fixed/calendar intervals, UTC and fixed-offset zones |
 | Temporal expressions | UTC and fixed-offset calendar fields, fixed/calendar offsets and truncation, duration totals, timezone metadata conversion, bounded UTC replacement |
-| Joins | Inner, left, right, full, semi, anti and cross; typed composite keys, null-equal left joins and key coalescing |
+| Joins | Inner, left, right, full, semi, anti and cross; typed composite keys, null-equal left joins and key coalescing; backward/forward/nearest as-of joins with typed by-keys and tolerance |
 | Composition | Selectors, scalar projections/broadcasts, aggregate expressions, computed join branches, post-join consumers and chained joins |
 | Text | Ordered dictionary transport, supported string operations/concatenation, categorical reconciliation and restoration |
+| Struct output | Terminal `as_struct` over primitive fields, independent child validity and field metadata |
 
 Float64 values retain their exact storage words. Arithmetic uses paired-word
 integer IEEE emulation because Apple GPUs lack native binary64 arithmetic.
@@ -114,6 +115,15 @@ field metadata; decoder temporary memory is outside that requested-payload
 budget. Profiles report source staging bytes and decode time. Readable-schema
 value-decode failures remain attached to their source and are observed in plan
 order, allowing an earlier GPU computation to raise first.
+If a later file has no readable schema, earlier plan prefixes observe their
+errors before the file error is raised. These observations download deferred
+error words without materializing unused values. Metadata planning failures
+retain the default CPU planning order.
+
+Bare column aliases and supported row movement retain Arrow field metadata;
+computed expressions follow the CPU metadata rules. Terminal struct packing
+wraps exported primitive fields without copying their payloads. Parents remain
+valid independently of nullable children.
 
 Errors travel with values through conditionals and row movement. Selected
 terminal values and observing consumers check them; unselected conditional
@@ -161,16 +171,19 @@ are not deployable calibration. See [benchmark rules](benchmarks.md) and
 ## Remaining CPU coverage
 
 Migrating the existing Metal implementation does not establish complete CPU
-query parity. Multiple or grouped mode expressions, implode/value counts,
+query parity. Grouped mode/value counts, implode,
 IANA-zone duration windows, row-valued
 text parsing/formatting, remaining timezone operations, nested list/struct
-operations, explode/unnest and as-of joins remain outside this
+operations, nullable source struct transport and explode/unnest remain outside this
 accelerator subset. Some checked-expression/window compositions also reject.
 These are implementation gaps, not demonstrated limitations of Mojo.
 
-File-source parity still has a failure-order gap when a later source has no
-readable schema or a speculative dictionary transformation fails. Such metadata
-and transformation errors can precede an earlier computation's error.
+Whole-DAG metadata validation, including invalid as-of metadata or tolerance,
+and speculative dictionary transformations can still precede an earlier
+computation's error. File-prefix planning follows the default optimized CPU
+path; the backend interface does not yet convey `optimize=False` to that
+planning pass. Distribution expressions require equal output cardinalities;
+ordinary scalars broadcast, while differing distribution lengths raise.
 
 ## Validation
 

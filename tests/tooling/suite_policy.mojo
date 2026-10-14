@@ -62,6 +62,12 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_file_prefix_unvisited_dictionary_does_not_hide_earlier_error",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_file_sources_observe_left_decimal_failure_before_right_csv_decode",
             "metal",
         )
@@ -2212,11 +2218,141 @@ def production_policy() -> SuitePolicy:
         )
     )
 
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_asof_queries.mojo::test_mojo_gpu_asof_public_directions_nullable_chunks_duplicate_runs",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_asof_queries.mojo::test_mojo_gpu_asof_public_grouped_dictionary_ieee_keys_and_wide_payloads",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_asof_queries.mojo::test_mojo_gpu_asof_public_complete_sortedness_producer_errors_and_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_asof_queries.mojo::test_mojo_gpu_asof_public_resident_consumers_profiles_and_exact_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_asof_queries.mojo::test_mojo_gpu_asof_public_tolerance_temporal_identity_and_optional_capability",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_file_sources_unavailable_schema_preserves_cpu_error_order",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_file_sources_planning_metadata_failure_precedes_gpu_prefix",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_file_sources_prefix_observer_downloads_only_error_words",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_multiple_modes_zip_exact_ordinals_and_cardinality",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_value_counts_typed_counts_sort_proportions_empty_and_null_categories",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_mixed_mode_value_counts_zip_scalar_broadcast_and_mismatches",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_value_counts_float_nan_zero_first_representations",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_terminal_struct_transport.mojo::test_mojo_gpu_terminal_struct_pack_primitive_exports_nullable_children_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_terminal_struct_transport.mojo::test_mojo_gpu_terminal_struct_scalar_only_empty_input_keeps_valid_parent",
+            "metal",
+        )
+    )
+
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_field_metadata.mojo::test_mojo_gpu_field_metadata_rows_groups_empty_and_computed_outputs",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_field_metadata.mojo::test_mojo_gpu_field_metadata_asof_resident_aliases_and_public_export",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_field_metadata.mojo::test_mojo_gpu_field_metadata_dictionary_aliases_asof_and_empty_owners",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_float32_distributions_quiet_valid_signaling_nan_first_occurrence",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo::test_mojo_gpu_distributions_observe_all_original_producers_before_cardinality",
+            "metal",
+        )
+    )
+
     # Named selectors select whole modules; newly added tests need no registration.
+    policy.groups.append(
+        ContractGroup(
+            "public.accelerator_staging",
+            [
+                "tests/public_contracts/test_file_source_staging.mojo",
+                "tests/public_contracts/test_file_source_prefixes.mojo",
+                "tests/public_contracts/test_terminal_struct_transport.mojo",
+                "tests/public_contracts/test_accelerator_field_metadata.mojo",
+            ],
+        )
+    )
     policy.groups.append(
         ContractGroup(
             "public.apple_parity",
             [
+                "tests/public_contracts/test_accelerator_field_metadata.mojo",
+                "tests/public_contracts/test_file_source_prefixes.mojo",
+                "tests/public_contracts/test_terminal_struct_transport.mojo",
                 "tests/public_contracts/test_decimal_arg_extrema.mojo",
                 "tests/public_contracts/test_reduction_types.mojo",
                 "tests/public_contracts/test_window_key_provenance.mojo",
@@ -2229,6 +2365,9 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.apple_parity",
             [
+                "tests/execution_modes/test_mojo_gpu_field_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_asof_queries.mojo",
+                "tests/execution_modes/test_mojo_gpu_terminal_struct_transport.mojo",
                 "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo",
                 "tests/execution_modes/test_mojo_gpu_decimal_arg_extrema.mojo",
                 "tests/execution_modes/test_mojo_gpu_timezone_conversion.mojo",
@@ -2613,6 +2752,9 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_field_metadata.mojo",
+                "tests/execution_modes/test_mojo_gpu_asof_queries.mojo",
+                "tests/execution_modes/test_mojo_gpu_terminal_struct_transport.mojo",
                 "tests/execution_modes/test_mojo_gpu_scalar_mode.mojo",
                 "tests/execution_modes/test_mojo_gpu_fixed_zone_fields.mojo",
                 "tests/execution_modes/test_mojo_gpu_partition_schedule.mojo",

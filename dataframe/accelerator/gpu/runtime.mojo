@@ -190,6 +190,7 @@ def capabilities() -> RowCapabilities:
         utc_duration_rolling=True,
         fixed_zone_duration_rolling=True,
         grouped=True,
+        asof_joins=True,
         contiguous_window_reductions=True,
         int64_arithmetic=True,
         deferred_integer_errors=True,
@@ -610,12 +611,14 @@ def estimate_resources(
     rows_override: Int = -1,
     resident_input: Bool = False,
     terminal_boundary: Bool = True,
+    export_values: Bool = True,
 ) raises -> ResourceFacts:
     """Bound requested payload/traffic using metadata alone.
 
     Peak deliberately retains the conservative standalone allocation envelope
     for resident calls too. Traffic omits an already resident input and a
-    nonterminal result; shape/error observations remain charged. Filters and
+    nonterminal or observation-only result; shape/error observations remain
+    charged. Filters and
     groups use the source-row upper bound, without reading selectivity/nulls.
     """
     if rows_override < -1:
@@ -700,15 +703,18 @@ def estimate_resources(
             shared = _checked_add(
                 shared, _checked_add(descriptors, scalar_results)
             )
-    for output in plan.outputs:
-        result_bytes = _checked_add(
-            result_bytes, _checked_mul(count, _width(output.dtype))
-        )
-        result_bytes = _checked_add(result_bytes, (count + 7) // 8)
+    if export_values:
+        for output in plan.outputs:
+            result_bytes = _checked_add(
+                result_bytes, _checked_mul(count, _width(output.dtype))
+            )
+            result_bytes = _checked_add(result_bytes, (count + 7) // 8)
     # Column construction temporarily holds unpacked Boolean validity and,
     # for Boolean outputs, both byte and packed representations. Charge a
     # conservative upper bound for the largest one-column materialization.
-    var scratch = _checked_mul(count, 4) if len(plan.outputs) else 0
+    var scratch = (
+        _checked_mul(count, 4) if export_values and len(plan.outputs) else 0
+    )
     var peak = _checked_add(_checked_add(shared, result_bytes), scratch)
     if resident_input:
         peak = _checked_add(peak, _checked_mul(plan.source.width(), 48))
@@ -728,7 +734,7 @@ def estimate_resources(
             launches = 1
         if len(plan.steps):
             upload = _checked_add(upload, program_bytes)
-        if terminal_boundary:
+        if terminal_boundary and export_values:
             download = scalar_bytes if plan.reductions else matrix_bytes
         else:
             # Nonterminal regions observe result errors before any consumer.
@@ -812,17 +818,17 @@ def materialize(table: Table) raises -> DataFrame:
     var columns = List[Series](capacity=host.schema.width())
     for column in range(host.schema.width()):
         ref field = host.schema._columns[column]
-        columns.append(
-            _output(
-                field.name(),
-                field.dtype(),
-                column,
-                host.rows,
-                host.rows,
-                host.words,
-                host.validity,
-            )
+        var output = _output(
+            field.name(),
+            field.dtype(),
+            column,
+            host.rows,
+            host.rows,
+            host.words,
+            host.validity,
         )
+        output._field_metadata = field._field_metadata
+        columns.append(output^)
     return DataFrame(columns^, height=host.rows)
 
 
@@ -833,14 +839,26 @@ def execute(
     profiling: Bool,
     *,
     terminal_boundary: Bool = True,
+    observation_only: Bool = False,
 ) raises -> Tuple[DataFrame, DataFrame]:
     var started = Int(perf_counter_ns())
     var plan = _preflight(query, terminal_boundary=terminal_boundary)
     var scope = Scope(device_id, budget)
     var executed = execute_plan(
-        plan, scope, None, profiling, terminal_boundary=terminal_boundary
+        plan,
+        scope,
+        None,
+        profiling,
+        terminal_boundary=terminal_boundary,
+        export_values=not observation_only,
     )
-    var result = materialize(executed[0])
+    var result: DataFrame
+    if observation_only:
+        if terminal_boundary:
+            executed[0].observe_errors()
+        result = executed[0].schema.copy()
+    else:
+        result = materialize(executed[0])
     var traffic = scope.transfers()
     var report = executed[1].copy()
     report = report.with_column(
@@ -889,6 +907,7 @@ def execute_plan(
     profiling: Bool = False,
     *,
     terminal_boundary: Bool = True,
+    export_values: Bool = True,
 ) raises -> Tuple[Table, DataFrame]:
     """Execute one preflighted region on the query's shared Metal context.
 
@@ -928,7 +947,7 @@ def execute_plan(
             duration_windows = duration_windows or header == ROW_DURATION_KEY
         movement = movement or step.filter or step.order or step.grouped
     var resources = estimate_resources(
-        plan, rows, Bool(resident_input), terminal_boundary
+        plan, rows, Bool(resident_input), terminal_boundary, export_values
     )
     var peak = resources.peak_bytes
     _ = scope.check(peak)
@@ -939,9 +958,11 @@ def execute_plan(
     var schema_columns = List[Series](capacity=len(plan.outputs))
     var output_slots = List[Int64](capacity=len(plan.outputs))
     for i in range(len(plan.outputs)):
-        schema_columns.append(
-            Series.full_null(plan.outputs[i].name, plan.outputs[i].dtype, 0)
+        var field = Series.full_null(
+            plan.outputs[i].name, plan.outputs[i].dtype, 0
         )
+        field._field_metadata = plan.outputs[i].field_metadata
+        schema_columns.append(field^)
         output_slots.append(
             Int64(i if plan.reductions else plan.outputs[i].slot)
         )

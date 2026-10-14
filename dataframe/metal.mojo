@@ -36,8 +36,17 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.memory import checked_add
-from .accelerator.sources import file_source_nodes, stage_file_sources
+from .accelerator.sources import (
+    file_source_nodes,
+    stage_file_sources,
+    prepare_file_sources,
+)
 from .accelerator.distributions import has_scalar_modes, lower_scalar_modes
+from .accelerator.structs import (
+    has_terminal_structs,
+    lower_terminal_structs,
+    assemble as assemble_structs,
+)
 from .accelerator.metadata import schema_frame
 from .accelerator.cost import PlanEstimate, CalibrationKey
 from .accelerator.capabilities import RowCapabilities
@@ -82,6 +91,7 @@ struct MetalRuntime(AcceleratorBackend):
 
     var _device: Int
     var _budget: Int
+    var _observation_only: Bool
 
     def __init__(
         out self, device_id: Int = 0, *, memory_limit_bytes: Int = -1
@@ -93,6 +103,7 @@ struct MetalRuntime(AcceleratorBackend):
             )
         self._device = device_id
         self._budget = memory_limit_bytes
+        self._observation_only = False
 
     @staticmethod
     def device_count() raises -> Int:
@@ -150,16 +161,22 @@ struct MetalRuntime(AcceleratorBackend):
 
         var start = Int(perf_counter_ns())
         if len(file_source_nodes(query)):
-            var staged = stage_file_sources(
+            var staged = prepare_file_sources(
                 query, memory_limit_bytes=self._budget
             )
-            var staging_bytes = staged[1]
+            var staging_bytes = staged.staging_bytes
             var budget = self._budget
             if budget >= 0:
                 budget -= staging_bytes
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
+            if staged.failure:
+                runtime._observation_only = True
+                for prefix in staged.prefixes:
+                    _ = runtime._run(prefix, False)
+                raise Error(staged.failure)
             var decode_ms = Float64(Int(perf_counter_ns()) - start) / 1e6
-            var executed = runtime._run(staged[0], profiling)
+            var executed = runtime._run(staged.query, profiling)
             var report = executed[1].copy()
             var peak_field = (
                 "query_peak_requested_bytes" if "query_peak_requested_bytes"
@@ -172,7 +189,7 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             for field in List[Tuple[String, Int64]](
                 [
-                    ("file_scan_count", Int64(staged[2])),
+                    ("file_scan_count", Int64(staged.scan_count)),
                     ("source_staging_bytes", Int64(staging_bytes)),
                     (
                         "query_peak_requested_bytes",
@@ -234,6 +251,24 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_terminal_structs(query):
+            var plan = lower_terminal_structs(query)
+            var executed = self._run(plan.query, profiling)
+            if self._observation_only:
+                return executed^
+            var result = assemble_structs(executed[0], plan)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (result^, report^)
         if has_scalar_projections(query):
             var executed = self._run(lower_scalar_projections(query), profiling)
             var report = executed[1].with_column(
@@ -358,8 +393,11 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= staging_bytes
             var encoded = encode_query(staged_query, dictionary)
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
             var staged_ns = Int(perf_counter_ns()) - start
             var executed = runtime._run(encoded, profiling)
+            if self._observation_only:
+                return executed^
             var restoration_bytes = dictionary.restoration_bytes(
                 executed[0], schema
             )
@@ -460,9 +498,20 @@ struct MetalRuntime(AcceleratorBackend):
             return (result^, report^)
         if has_join(query) or has_scalar_consumers(query):
             return execute_dag(
-                query, self._device, self._budget, profiling, capabilities()
+                query,
+                self._device,
+                self._budget,
+                profiling,
+                capabilities(),
+                observation_only=self._observation_only,
             )
-        return execute(query, self._device, self._budget, profiling)
+        return execute(
+            query,
+            self._device,
+            self._budget,
+            profiling,
+            observation_only=self._observation_only,
+        )
 
     def describe(self, query: LazyFrame) -> String:
         try:
@@ -476,6 +525,11 @@ struct MetalRuntime(AcceleratorBackend):
             if has_scalar_modes(query):
                 return "Metal resident scalar mode; " + self.describe(
                     lower_scalar_modes(query)
+                )
+            if has_terminal_structs(query):
+                var plan = lower_terminal_structs(query)
+                return "Metal terminal struct fields; " + self.describe(
+                    plan.query
                 )
             if has_scalar_projections(query):
                 return "Metal resident scalar projection; " + self.describe(

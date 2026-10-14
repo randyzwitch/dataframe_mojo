@@ -60,6 +60,7 @@ struct RowCapabilities(Copyable):
     var extended_integers: Bool
     var slices: Bool
     var scalar_regions: Bool
+    var asof_joins: Bool
     var temporal_fields: Bool
     var utc_temporal_conversions: Bool
     var fixed_zone_temporal_fields: Bool
@@ -130,6 +131,7 @@ struct RowCapabilities(Copyable):
         extra_reductions: Bool = False,
         slices: Bool = False,
         scalar_regions: Bool = False,
+        asof_joins: Bool = False,
         temporal_fields: Bool = False,
         utc_temporal_conversions: Bool = False,
         fixed_zone_temporal_fields: Bool = False,
@@ -196,6 +198,7 @@ struct RowCapabilities(Copyable):
         self.extra_reductions = extra_reductions
         self.slices = slices
         self.scalar_regions = scalar_regions
+        self.asof_joins = asof_joins
         self.temporal_fields = temporal_fields
         self.utc_temporal_conversions = utc_temporal_conversions
         self.fixed_zone_temporal_fields = fixed_zone_temporal_fields

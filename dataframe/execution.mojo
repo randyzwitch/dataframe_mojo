@@ -83,6 +83,7 @@ from .expr import (
     is_nested_op,
     IMPLODE,
     STRUCT_PACK,
+    STRUCT_FIELD,
     struct_pack_children,
     struct_pack_names,
 )
@@ -170,6 +171,39 @@ def _empty(dtype: DataType) raises -> Series:
     if dtype.is_categorical():
         return Series.full_null("", DataType.STRING, 0)
     return Series.full_null("", dtype, 0)
+
+
+def _empty_output(
+    bound: BoundExpr, columns: List[Series], index: Int
+) raises -> Series:
+    """Preserve struct field metadata without evaluating zero-row payloads.
+
+    A dtype describes names and logical types, but does not contain Arrow
+    application metadata. Follow only operations that preserve field owners;
+    computed fields start with fresh metadata, as their evaluated kernels do.
+    """
+    ref node = bound.expr._nodes[index]
+    if node.op == COL and bound.sources[index] >= 0:
+        ref column = columns[bound.sources[index]]
+        if column.dtype() == bound.dtypes[index]:
+            return column.slice(0, 0).renamed("")
+    if node.op == CAST and bound.dtypes[index] == bound.dtypes[node.left]:
+        return _empty_output(bound, columns, node.left)
+    if node.op == STRUCT_FIELD:
+        var parent = _empty_output(bound, columns, node.left)
+        return parent.struct_column().field(node.text).renamed("")
+    if node.op == STRUCT_PACK:
+        var names = struct_pack_names(node)
+        var children = struct_pack_children(node)
+        var fields = List[Series](capacity=len(children))
+        for field in range(len(children)):
+            fields.append(
+                _empty_output(bound, columns, children[field]).renamed(
+                    names[field]
+                )
+            )
+        return Series("", StructColumn(fields^))
+    return _empty(bound.dtypes[index])
 
 
 def _binary_op[
@@ -937,7 +971,9 @@ struct _RowsJob[width: Int](Job):
         self.end = end
         self.batch_size = batch_size
         self.grouped = grouped
-        self.result = _empty(bound.dtypes[root])
+        self.result = _empty_output(bound, columns, root) if bound.dtypes[
+            root
+        ].is_struct() else _empty(bound.dtypes[root])
         self.result._reserve_rows(end - start, 0)
 
     def into_result(deinit self) -> Series:
@@ -954,7 +990,13 @@ struct _RowsJob[width: Int](Job):
                 min(self.batch_size, self.end - offset),
                 self.grouped,
             )
-            self.result._append_series(chunk)
+            if (
+                self.bound.dtypes[self.root].is_struct()
+                and len(self.result) == 0
+            ):
+                self.result = chunk^
+            else:
+                self.result._append_series(chunk)
 
 
 def _direct_grouped_count_part(
@@ -2196,7 +2238,9 @@ def _full[
     var whole = _whole(bound, columns, states, index, height, grouped)
     if whole:
         return whole.take()
-    var result = _empty(bound.dtypes[index])
+    var result = _empty_output(bound, columns, index) if bound.dtypes[
+        index
+    ].is_struct() else _empty(bound.dtypes[index])
     for offset in range(0, height, batch_size):
         var chunk = _batch[width](
             bound,
@@ -2209,7 +2253,10 @@ def _full[
         )
         if len(chunk) == 1 and min(batch_size, height - offset) != 1:
             chunk = chunk._broadcast(min(batch_size, height - offset))
-        result._append_series(chunk)
+        if bound.dtypes[index].is_struct() and len(result) == 0:
+            result = chunk^
+        else:
+            result._append_series(chunk)
     return result^
 
 
@@ -2719,7 +2766,9 @@ def evaluate[
             var done = whole.take()
             done._name = bound.expr._name
             return done^
-    var result = _empty(bound.dtypes[root])
+    var result = _empty_output(bound, columns, root) if bound.dtypes[
+        root
+    ].is_struct() else _empty(bound.dtypes[root])
     var workers = worker_count(size) if bound.shape() == ROWS else 1
     if workers <= 1:
         result._reserve_rows(size, 0)
@@ -2733,7 +2782,10 @@ def evaluate[
                 min(batch_size, size - offset),
                 grouped,
             )
-            result._append_series(chunk)
+            if bound.dtypes[root].is_struct() and len(result) == 0:
+                result = chunk^
+            else:
+                result._append_series(chunk)
     else:
         # Row-parallel evaluation (#5): each worker evaluates the batches of
         # one contiguous partition into a private series; pieces are joined
