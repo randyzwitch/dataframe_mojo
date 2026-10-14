@@ -23,7 +23,12 @@ var measured = query.profile(engine="accel", accelerator=runtime)
 ```
 
 The default Apple accelerator uses the same implementation. Runtime copies
-retain configuration; query execution owns its context and allocations.
+retain configuration; query execution owns its context and allocations. Public
+collection, profiling and explanation preserve the requested optimization,
+streaming and batch settings through provider dispatch and recursive planning.
+With `optimize=False`, file staging preserves the original source prefix rather
+than applying optimizer projection or head pushdown. A requested streaming batch
+does not replace the CPU's eager expression batch size.
 `DATAFRAME_ACCEL_DEVICE` and `DATAFRAME_ACCEL_MEMORY_LIMIT` configure default
 collections. `DATAFRAME_METAL_LIBRARY` is unnecessary and does not select the
 implementation. `MetalRuntime.device_count()` explicitly discovers devices;
@@ -153,8 +158,20 @@ Numeric CUT supports literal edges, custom or default labels, nullable operands
 and terminal breakpoint Struct outputs. Operand errors precede edge validation.
 Scalar and reduction siblings retain CPU evaluation order, including empty
 inputs; a private one-row interpreter path selects the first scalar expression
-fault. General terminal row error ordering remains a separate coverage gap.
-QCUT and partitioned CUT remain restricted.
+fault. Eligible numeric, Boolean and temporal projections directly from an
+original in-memory scan select faults in CPU projection, 8192-row batch and
+AST occurrence order. Normalized sources,
+state producers and streaming regions need separate ordering proofs.
+QCUT supports scalar quantile controls, custom or default labels, nullable
+operands and terminal breakpoint Structs. GPU-produced edge controls reach
+the shared label formatter; input values and row codes remain on the device.
+Immutable per-column dictionaries retain distinct labels through projections,
+filters, joins and supported windows. Consumers remap tagged text slots on
+the GPU into a shared dictionary while retaining numeric UInt32 and opaque
+code identities. Default labels add eight control bytes per quantile edge
+without an extra wait. Partitioned CUT/QCUT, intermediate breakpoint Structs,
+NaN probability controls and string lookup operations over dynamic label
+dictionaries remain pending.
 
 Errors travel with values through conditionals and row movement. Selected
 terminal values and observing consumers check them; unselected conditional
@@ -162,6 +179,24 @@ branches remain unobserved. Intermediate region boundaries observe public
 errors without downloading values. Some checked expressions and reductions
 still require a terminal boundary when metadata cannot prove safe evaluation
 under downstream pruning. Rejection is an explicit capability restriction.
+
+Direct source List `len` and constant-index `get` support primitive row outputs.
+The backend stages each used child once, consumes offsets and parent validity
+on the GPU, and retains primitive child metadata for direct `get` aliases.
+Null parents and out-of-bounds indices mask child reads. Terminal `implode`
+also supports primitive row operands, preserving source order, nulls and child
+metadata. Certified private producers select operand faults in CPU AST and
+8192-row batch order. Prepared OVER states remain eager, and original projection
+order determines which state or operand fails first. Certification requires a
+proven original source; synthetic or unobserved foreign inputs cannot opt in.
+GPU producers finish before trailing slices, including `head(0)`, observe the
+one-row List result. Intermediate List values, nested children and general
+checked reduction-state input compositions remain restricted.
+
+Scalar and grouped quantiles preserve CPU signed-zero representatives, including
+quickselect fallback permutations, and use the same separate rounding steps
+for linear interpolation. A shared device index plane adds four bytes per input
+row; correction launches retain the existing synchronization and export boundaries.
 
 Supported bounds are 128 local expression nodes, 128 device steps and 256
 logical slots/source/output columns per row region. Joins support 256 combined
@@ -206,16 +241,16 @@ query parity. Grouped mode/value counts, implode,
 IANA-zone duration windows, row-valued
 text parsing/formatting, remaining timezone operations, nested list/struct
 operations, broader source Struct consumers and explode/unnest remain outside
-this accelerator subset. QCUT, partitioned CUT and broader Binary/Geometry
-operations remain pending. Some checked-expression/window compositions also
+this accelerator subset. Partitioned CUT/QCUT, broader dynamic text consumers
+and Binary/Geometry operations remain pending. Some checked-expression/window compositions also
 reject.
 These are implementation gaps, not demonstrated limitations of Mojo.
 
 Whole-DAG metadata validation, including invalid as-of metadata or tolerance,
 and speculative dictionary transformations can still precede an earlier
-computation's error. File-prefix planning follows the default optimized CPU
-path; the backend interface does not yet convey `optimize=False` to that
-planning pass. Distribution expressions require equal output cardinalities;
+computation's error. Execution settings preserve requested options, while
+full CPU streaming schedule and checked state-feed equivalence still need
+separate proofs. Distribution expressions require equal output cardinalities;
 ordinary scalars broadcast, while differing distribution lengths raise.
 
 ## Validation

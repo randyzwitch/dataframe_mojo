@@ -6,6 +6,8 @@ encoding and decoding are host staging work and belong in end-to-end costs.
 """
 from .metadata import schema_frame
 from .window_keys import WindowKey
+from .code_domains import TextField, TextQuery, TEXT_LITERAL
+from .selectors import _live_nodes
 from std.collections import Dict
 from std.memory import ArcPointer
 from dataframe.categorical import _values_of, decode, recode
@@ -106,12 +108,15 @@ struct DictionaryCodes(Movable):
         return total
 
     def restoration_bytes(
-        self, frame: DataFrame, schema: DataFrame
+        self,
+        frame: DataFrame,
+        schema: DataFrame,
+        context: Optional[ArcPointer[TextQuery]] = None,
     ) raises -> Int:
         # Encoded outputs remain alive until restoration finishes. String
         # views own a copy of dictionary text; categorical recoding also holds
         # those views while building the original dictionary's result codes.
-        var total = 0
+        var total = context.value()[].final_owned_bytes if context else 0
         var rows = frame.height()
         var bitmap = checked_add(rows, 7) // 8
         for i in range(frame.width()):
@@ -121,10 +126,27 @@ struct DictionaryCodes(Movable):
             total = checked_add(total, bitmap)
             var dtype = schema._columns[i].dtype()
             if dictionary_dtype(dtype):
+                if context and (
+                    i >= len(context.value()[].final_domains)
+                    or not context.value()[].final_domains[i]
+                ):
+                    raise Error(
+                        "Private dynamic text output lost its dictionary provenance"
+                    )
                 total = checked_add(total, checked_mul(rows, 24))
-                total = checked_add(total, checked_mul(self.bytes, 2))
+                var domain = self.dtype
+                if (
+                    context
+                    and i < len(context.value()[].final_domains)
+                    and context.value()[].final_domains[i]
+                ):
+                    domain = context.value()[].final_domains[i].value()
+                var payload = len(domain.dictionary()[].bytes) + 8 * len(
+                    domain.dictionary()[].offsets
+                )
+                total = checked_add(total, checked_mul(payload, 2))
                 total = checked_add(
-                    total, checked_mul(len(self.dtype.dictionary()[]), 16)
+                    total, checked_mul(len(domain.dictionary()[]), 16)
                 )
         return total
 
@@ -157,10 +179,14 @@ struct DictionaryCodes(Movable):
         result._field_metadata = column._field_metadata
         return result^
 
-    def restore(self, codes: Series, dtype: DataType) raises -> Series:
+    def restore(
+        self, codes: Series, dtype: DataType, domain: Optional[DataType] = None
+    ) raises -> Series:
         if not dictionary_dtype(dtype):
             return codes.copy()
-        var categorical = codes.with_dtype(self.dtype)
+        var categorical = codes.with_dtype(
+            domain.value() if domain else self.dtype
+        )
         if dtype == DataType.STRING:
             return decode(categorical)
         # The query dictionary can contain values from other inputs that are
@@ -295,6 +321,29 @@ def lower_dictionary_operations(
     codes, preserve nulls and input order, and feed downstream GPU operators.
     New string values join the query-wide dictionary before any row encoding.
     """
+    # Static lookup tables cannot enumerate values produced by a later GPU
+    # default-QCUT control phase. Keep this separate boundary explicit until
+    # dictionary-value lookup construction is scheduled at that phase.
+    from .qcuts import QCUT_TAG, QCUT_DEFAULT
+
+    var dynamic = List[Bool](length=len(query._nodes), fill=False)
+    for index in range(len(query._nodes)):
+        ref operation = query._nodes[index]
+        var incoming = (operation.left >= 0 and dynamic[operation.left]) or (
+            operation.right >= 0 and dynamic[operation.right]
+        )
+        if incoming:
+            for expression in operation.exprs:
+                for node in expression._nodes:
+                    if is_string_op(node.op) or node.op == STR_CONCAT:
+                        raise Error(
+                            "Metal unsupported [qcut]: dynamic String operation lookup tables are pending"
+                        )
+        dynamic[index] = incoming or (
+            len(operation.names2) > 1
+            and operation.names2[0] == QCUT_TAG
+            and operation.names2[1] == QCUT_DEFAULT
+        )
     var needed = False
     for operation in query._nodes:
         for expression in operation.exprs:
@@ -508,10 +557,22 @@ def lower_dictionary_operations(
 
 
 def encode_query(
-    query: LazyFrame, dictionary: DictionaryCodes
+    query: LazyFrame, dictionary: DictionaryCodes, *, dynamic_text: Bool = False
 ) raises -> LazyFrame:
     """Stage ordered UInt32 codes while retaining the original plan structure."""
     var encoded = query.copy()
+    if dynamic_text:
+        var live = _live_nodes(query)
+        for index in range(len(encoded._nodes)):
+            if not live[index]:
+                continue
+            var logical = schema_frame(query, index)
+            encoded._nodes[index].code_domain = dictionary.dtype
+            for column in logical._columns:
+                if dictionary_dtype(column.dtype()):
+                    encoded._nodes[index].text_fields.append(
+                        TextField(column.name(), column.dtype())
+                    )
     # The captured dtype owns the original categorical dictionary, even
     # when the source is a metadata-only resident table. Populate lookups
     # before frame recoding erases its physical code provenance.
@@ -553,6 +614,11 @@ def encode_query(
             for n in range(len(expression._nodes)):
                 ref node = expression._nodes[n]
                 if node.op == LIT_STRING:
+                    if dynamic_text:
+                        # Preserve literal identity through domain unions. An
+                        # empty String needs its explicit tag as well.
+                        node.min_count = TEXT_LITERAL
+                        node.text2 = node.text
                     node.op = LIT_INT
                     node.integer = Int64(dictionary.code(node.text))
                     node.text = "uint32"
@@ -579,12 +645,29 @@ def encode_query(
 
 
 def restore_frame(
-    frame: DataFrame, schema: DataFrame, dictionary: DictionaryCodes
+    frame: DataFrame,
+    schema: DataFrame,
+    dictionary: DictionaryCodes,
+    context: Optional[ArcPointer[TextQuery]] = None,
 ) raises -> DataFrame:
     var columns = List[Series]()
     for i in range(len(frame._columns)):
+        var domain = Optional[DataType]()
+        if (
+            context
+            and dictionary_dtype(schema._columns[i].dtype())
+            and (
+                i >= len(context.value()[].final_domains)
+                or not context.value()[].final_domains[i]
+            )
+        ):
+            raise Error(
+                "Private dynamic text output lost its dictionary provenance"
+            )
+        if context and i < len(context.value()[].final_domains):
+            domain = context.value()[].final_domains[i]
         var column = dictionary.restore(
-            frame._columns[i], schema._columns[i].dtype()
+            frame._columns[i], schema._columns[i].dtype(), domain
         )
         # The original CPU schema distinguishes a bare field/alias from a
         # computed expression. Decoding transport codes must preserve that

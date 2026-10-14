@@ -126,8 +126,16 @@ def test_cut_lowering_defers_edge_order_but_keeps_binder_failure() raises:
         _ = lower_cuts(
             frame.lazy().select((col("x") + 1).cut([1, 1], ["wrong"]))
         )
-    with assert_raises(contains="qcut dynamic edges"):
-        _ = lower_cuts(frame.lazy().select(col("x").qcut([0.5])))
+    var dynamic = lower_cuts(
+        frame.lazy().select(col("x").qcut([0.5]).alias("bin"))
+    )
+    assert_true(not has_cut_operations(dynamic))
+    assert_true(has_cut_materializations(dynamic))
+    assert_equal(control_failure(dynamic), "")
+    var dynamic_schema = schema_frame(dynamic, len(dynamic._nodes) - 1)
+    assert_equal(dynamic_schema.columns(), ["bin"])
+    assert_equal(dynamic_schema.dtypes(), [DataType.STRING])
+    assert_equal(dynamic_schema.height(), 0)
 
 
 def test_cut_lowering_checked_scalar_metadata_uses_empty_literal_anchor() raises:

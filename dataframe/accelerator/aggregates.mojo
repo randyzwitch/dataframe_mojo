@@ -257,7 +257,15 @@ def lower_aggregate_compositions(
                 _plan_node(SELECT, operation.left, exprs=columns)
             )
             var prefix = len(result._nodes) - 1
-            result._nodes.append(_plan_node(SELECT, prefix, exprs=leaves))
+            result._nodes.append(
+                _plan_node(
+                    SELECT,
+                    prefix,
+                    exprs=leaves,
+                    text=operation.text if operation.text
+                    == "metal_implode_materialization" else "",
+                )
+            )
             var scalar = len(result._nodes) - 1
             result._nodes.append(
                 _plan_node(

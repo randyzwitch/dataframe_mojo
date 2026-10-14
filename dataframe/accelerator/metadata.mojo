@@ -1,5 +1,6 @@
 """Metadata execution for shared accelerator DAGs without repeated subtrees."""
 from dataframe.frame import DataFrame
+from .code_domains import TextField
 from dataframe.expr import Expr, col
 from dataframe.lazy import (
     LazyFrame,
@@ -193,7 +194,22 @@ def _narrow_projection_inputs(
         var exprs = List[Expr]()
         for name in columns[k]:
             exprs.append(col(name))
-        query._nodes.append(_plan_node(SELECT, child, exprs=exprs))
+        # This projection may be inserted AFTER dictionary recoding. Preserve
+        # logical text lineage for selected fields; UInt32 alone cannot recover
+        # which columns use a dynamic dictionary or its original hash family.
+        var fields = List[TextField]()
+        for field in query._nodes[child].text_fields:
+            if field.name in columns[k]:
+                fields.append(field.copy())
+        query._nodes.append(
+            _plan_node(
+                SELECT,
+                child,
+                exprs=exprs,
+                code_domain=query._nodes[child].code_domain,
+                text_fields=fields^,
+            )
+        )
         if right_sides[k]:
             query._nodes[join].right = len(query._nodes) - 1
         else:

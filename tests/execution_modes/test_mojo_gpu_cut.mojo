@@ -400,12 +400,11 @@ def test_mojo_gpu_cut_budget_profiles_and_pending_families_are_explicit() raises
         .int64(),
         Int64(7),
     )
-    with assert_raises(contains="qcut dynamic edges"):
-        _ = (
-            source.lazy()
-            .select(col("x").qcut([0.5]))
-            .collect(accelerator=MetalRuntime())
-        )
+    var quantiles = source.lazy().select(col("x").qcut([0.5]))
+    assert_frame(
+        quantiles.collect(accelerator=MetalRuntime()),
+        quantiles.collect(engine="cpu", optimize=False, streaming=False),
+    )
     with assert_raises(contains="intermediate Struct"):
         _ = (
             source.lazy()

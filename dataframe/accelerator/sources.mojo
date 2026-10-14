@@ -157,11 +157,17 @@ struct PreparedFileSources(Movable):
 
 
 def prepare_file_sources(
-    query: LazyFrame, *, empty: Bool = False, memory_limit_bytes: Int = -1
+    query: LazyFrame,
+    *,
+    empty: Bool = False,
+    memory_limit_bytes: Int = -1,
+    optimize: Bool = True,
 ) raises -> PreparedFileSources:
     """Read scan nodes only; preserve every expression, filter, join and window.
 
-    Projection analysis narrows decoder columns. Metadata mode uses the CPU
+    With optimization enabled, projection analysis narrows decoder columns.
+    Disabling optimization preserves eager source decode and prefix errors
+    before any later optimizer schema probe. Metadata mode uses the CPU
     readers' schema paths, not an eager zero-row decode. The retained source
     payload is charged before GPU submission; reader scratch is independent.
     """
@@ -173,11 +179,12 @@ def prepare_file_sources(
     # any observation-only GPU prefix execution. Trim dead nodes first: no
     # unreachable source is part of the query's metadata observation order.
     var planning = staged.copy()
-    if len(planning._nodes):
+    if optimize and len(planning._nodes):
         planning._reorder(len(planning._nodes) - 1)
         _ = planning._optimized()
-    staged._push_slices()
-    prune_projections(staged)
+    if optimize:
+        staged._push_slices()
+        prune_projections(staged)
     var sources = file_source_nodes(staged)
     var total = 0
     for index in sources:
@@ -217,6 +224,7 @@ def prepare_file_sources(
         staged._nodes[index] = _plan_node(
             SCAN_FRAME,
             offset=len(staged._frames) - 1,
+            names2=["metal_staged_file_source"],
             source_failure=failure,
         )
     return PreparedFileSources(
@@ -225,11 +233,18 @@ def prepare_file_sources(
 
 
 def stage_file_sources(
-    query: LazyFrame, *, empty: Bool = False, memory_limit_bytes: Int = -1
+    query: LazyFrame,
+    *,
+    empty: Bool = False,
+    memory_limit_bytes: Int = -1,
+    optimize: Bool = True,
 ) raises -> Tuple[LazyFrame, Int, Int]:
     """Compatibility wrapper; unavailable schemas raise without GPU observers."""
     var prepared = prepare_file_sources(
-        query, empty=empty, memory_limit_bytes=memory_limit_bytes
+        query,
+        empty=empty,
+        memory_limit_bytes=memory_limit_bytes,
+        optimize=optimize,
     )
     if prepared.failure:
         raise Error(prepared.failure)

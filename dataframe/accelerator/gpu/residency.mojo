@@ -13,6 +13,12 @@ from std.memory import ArcPointer, Pointer
 from std.sys import size_of
 from dataframe import DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
+from dataframe.accelerator.code_domains import (
+    TextField,
+    dictionary_bytes,
+    same_dictionary,
+    text_less,
+)
 
 comptime CELL_BYTES = 21
 
@@ -307,6 +313,45 @@ def _output_bytes(schema: DataFrame, rows: Int) raises -> Int:
     return checked_add(bytes, checked_mul(rows, 4 if schema.width() else 0))
 
 
+struct TextDomain(Movable):
+    """One scoped immutable ordered UTF8 dictionary, shared across columns."""
+
+    var scope: Scope
+    var dtype: DataType
+    var retained: Int
+
+    def __init__(
+        out self, scope: Scope, dtype: DataType, charge: Bool = True
+    ) raises:
+        if not dtype.is_categorical():
+            raise Error("Private text domain requires an ordered dictionary")
+        var dictionary = dtype.dictionary()
+        for index in range(1, len(dictionary[])):
+            if not text_less(
+                dictionary[].get(index - 1), dictionary[].get(index)
+            ):
+                raise Error(
+                    "Private text domain dictionary must be strictly ordered"
+                )
+        var retained = dictionary_bytes(dtype) if charge else 0
+        # Charge before self becomes fully initialized. A rejected allocation
+        # must not run a destructor that releases an unretained owner.
+        scope._retain(retained)
+        self.scope = scope.copy()
+        self.dtype = dtype
+        self.retained = retained
+        # Static query dictionaries are already charged by outer staging.
+
+    def __deinit__(deinit self):
+        self.scope._release(self.retained)
+
+
+@fieldwise_init
+struct TextColumn(Copyable):
+    var logical: DataType
+    var domain: ArcPointer[TextDomain]
+
+
 struct Table(Copyable):
     var storage: Optional[ArcPointer[Matrix]]
     var identity_storage: Optional[ArcPointer[_Identity]]
@@ -314,6 +359,7 @@ struct Table(Copyable):
     var columns: List[Int64]
     var rows: Int
     var offset: Int
+    var text: List[Optional[TextColumn]]
 
     def __init__(
         out self,
@@ -342,6 +388,9 @@ struct Table(Copyable):
         self.columns = columns^
         self.rows = rows
         self.offset = offset
+        self.text = List[Optional[TextColumn]](capacity=self.schema.width())
+        for _ in range(self.schema.width()):
+            self.text.append(None)
 
     def __init__(out self, var schema: DataFrame) raises:
         if schema.height() != 0:
@@ -354,6 +403,9 @@ struct Table(Copyable):
         self.columns = List[Int64]()
         self.rows = 0
         self.offset = 0
+        self.text = List[Optional[TextColumn]](capacity=self.schema.width())
+        for _ in range(self.schema.width()):
+            self.text.append(None)
 
     @staticmethod
     def empty(var schema: DataFrame) raises -> Self:
@@ -384,17 +436,75 @@ struct Table(Copyable):
         result.identity_storage = ArcPointer(_Identity(scope, host^))
         return result^
 
+    def attach_text(
+        mut self, fields: List[TextField], domain: ArcPointer[TextDomain]
+    ) raises:
+        """Intersect original logical text metadata with the retained schema.
+
+        Projection pruning may leave a node's pre-pruning text-field superset.
+        Present fields retain strict dtype/scope checks; removed fields own no
+        result column and must not create provenance or a dictionary reference.
+        """
+        if (
+            self.storage
+            and not self.storage.value()[].scope.same_query(domain[].scope)
+        ) or (
+            self.identity_storage
+            and not self.identity_storage.value()[].scope.same_query(
+                domain[].scope
+            )
+        ):
+            raise Error(
+                "Private text domain belongs to a different query scope"
+            )
+        for field in fields:
+            if (
+                field.dtype != DataType.STRING
+                and not field.dtype.is_categorical()
+            ):
+                raise Error(
+                    "Private text field must retain original String/categorical dtype"
+                )
+            var index = -1
+            for column in range(self.schema.width()):
+                if self.schema._columns[column].name() == field.name:
+                    index = column
+                    break
+            if index < 0:
+                continue
+            if self.schema._columns[index].dtype() != DataType.UINT32:
+                raise Error(
+                    "Private text field does not have UInt32 transport storage"
+                )
+            self.text[index] = TextColumn(field.dtype, domain.copy())
+
+    def _text_bytes(self) -> Int:
+        var total = 0
+        var seen = List[DataType]()
+        for field in self.text:
+            if not field:
+                continue
+            var domain = field.value().domain
+            var duplicate = False
+            for old in seen:
+                duplicate |= same_dictionary(old, domain[].dtype)
+            if not duplicate:
+                total += domain[].retained
+                seen.append(domain[].dtype)
+        return total
+
     def matrix(self) raises -> ArcPointer[Matrix]:
         if not self.storage:
             raise Error("Mojo GPU resident empty table has no device matrix")
         return self.storage.value().copy()
 
     def retained_bytes(self) -> Int:
-        if self.storage:
-            return self.storage.value()[].retained
-        return (
+        var payload = self.storage.value()[].retained if self.storage else (
             self.identity_storage.value()[].retained if self.identity_storage else 0
         )
+        # Domains are already charged exactly once by their scoped Arc owner.
+        # This per-table report includes each retained dictionary once.
+        return payload + self._text_bytes()
 
     def same_storage(self, other: Self) -> Bool:
         if self.identity_storage and other.identity_storage:

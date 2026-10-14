@@ -5,6 +5,7 @@ The reference reduction schedule is serial; Float64 results may be reassociated
 by future parallel implementations. Int64 sums use exact wide states and check final overflow.
 """
 from .dtype import DataType, NUMERIC_DTYPES
+from .identity_metadata import identity_column_source
 from .expr import INT_IS_IN
 from .expr import (
     Node,
@@ -82,6 +83,7 @@ from .expr import (
     is_string_op,
     is_nested_op,
     IMPLODE,
+    LIST_GET,
     STRUCT_PACK,
     STRUCT_FIELD,
     struct_pack_children,
@@ -174,7 +176,7 @@ def _empty(dtype: DataType) raises -> Series:
 
 
 def _field_output(bound: BoundExpr, index: Int) -> Bool:
-    """Seed bare fields and only their primitive identity-cast chains."""
+    """Seed Struct fields/direct List GET and primitive identity-cast chains."""
     var current = index
     while bound.expr._nodes[current].op == CAST:
         var child = bound.expr._nodes[current].left
@@ -185,7 +187,16 @@ def _field_output(bound: BoundExpr, index: Int) -> Bool:
         ):
             return False
         current = child
-    return bound.expr._nodes[current].op == STRUCT_FIELD
+    ref node = bound.expr._nodes[current]
+    if node.op == STRUCT_FIELD:
+        return True
+    return (
+        node.op == LIST_GET
+        and node.left >= 0
+        and bound.expr._nodes[node.left].op == COL
+        and not bound.dtypes[current].is_nested()
+        and not bound.dtypes[current].is_categorical()
+    )
 
 
 def _empty_output(
@@ -204,6 +215,15 @@ def _empty_output(
             return column.slice(0, 0).renamed("")
     if node.op == CAST and bound.dtypes[index] == bound.dtypes[node.left]:
         return _empty_output(bound, columns, node.left)
+    if (
+        node.op == LIST_GET
+        and node.left >= 0
+        and bound.expr._nodes[node.left].op == COL
+        and not bound.dtypes[index].is_nested()
+        and not bound.dtypes[index].is_categorical()
+    ):
+        var parent = _empty_output(bound, columns, node.left)
+        return parent.list_column().child().slice(0, 0).renamed("")
     if node.op == STRUCT_FIELD:
         var parent = _empty_output(bound, columns, node.left)
         return parent.struct_column().field(node.text).renamed("")
@@ -218,6 +238,45 @@ def _empty_output(
                 )
             )
         return Series("", StructColumn(fields^))
+    return _empty(bound.dtypes[index])
+
+
+def _implode_state_origin(bound: BoundExpr, index: Int) -> Int:
+    """Prepared IMPLODE state behind metadata-preserving identity aliases."""
+    var current = index
+    while bound.expr._nodes[current].op == CAST:
+        var child = bound.expr._nodes[current].left
+        if child < 0 or bound.dtypes[current] != bound.dtypes[child]:
+            return -1
+        current = child
+    var state = current
+    # OVER may already contain an aligned list state. Follow only its original
+    # IMPLODE/identity ancestry, not unrelated List-valued computations.
+    while bound.expr._nodes[current].op == OVER:
+        current = bound.expr._nodes[current].left
+        while bound.expr._nodes[current].op == CAST:
+            var child = bound.expr._nodes[current].left
+            if child < 0 or bound.dtypes[current] != bound.dtypes[child]:
+                return -1
+            current = child
+    return state if bound.expr._nodes[current].op == IMPLODE else -1
+
+
+def _output_seed(
+    bound: BoundExpr,
+    columns: List[Series],
+    states: List[Series],
+    index: Int,
+) raises -> Series:
+    """Retain prepared List child metadata without evaluating new payloads."""
+    var state = _implode_state_origin(bound, index)
+    if state >= 0 and states[state].dtype() == bound.dtypes[index]:
+        return states[state].slice(0, 0).renamed("")
+    var source = identity_column_source(bound, index)
+    if source >= 0 and columns[source].dtype() == bound.dtypes[index]:
+        return columns[source].slice(0, 0).renamed("")
+    if bound.dtypes[index].is_struct() or _field_output(bound, index):
+        return _empty_output(bound, columns, index)
     return _empty(bound.dtypes[index])
 
 
@@ -500,7 +559,13 @@ def _implode[
     """One list per group (or one list of every row): the input rows in
     input order, nulls included."""
     var input = _full[width](
-        bound, columns, states, node.left, height, batch_size, False
+        bound,
+        columns,
+        states,
+        node.left,
+        height,
+        batch_size,
+        False,
     )
     if input.dtype() != bound.dtypes[node.left]:
         input = input.with_dtype(bound.dtypes[node.left])
@@ -992,9 +1057,7 @@ struct _RowsJob[width: Int](Job):
         self.end = end
         self.batch_size = batch_size
         self.grouped = grouped
-        self.result = _empty_output(bound, columns, root) if (
-            bound.dtypes[root].is_struct() or _field_output(bound, root)
-        ) else _empty(bound.dtypes[root])
+        self.result = _output_seed(bound, columns, states, root)
         self.result._reserve_rows(end - start, 0)
 
     def into_result(deinit self) -> Series:
@@ -2259,9 +2322,7 @@ def _full[
     var whole = _whole(bound, columns, states, index, height, grouped)
     if whole:
         return whole.take()
-    var result = _empty_output(bound, columns, index) if (
-        bound.dtypes[index].is_struct() or _field_output(bound, index)
-    ) else _empty(bound.dtypes[index])
+    var result = _output_seed(bound, columns, states, index)
     for offset in range(0, height, batch_size):
         var chunk = _batch[width](
             bound,
@@ -2805,9 +2866,7 @@ def evaluate[
             var done = whole.take()
             done._name = bound.expr._name
             return done^
-    var result = _empty_output(bound, columns, root) if (
-        bound.dtypes[root].is_struct() or _field_output(bound, root)
-    ) else _empty(bound.dtypes[root])
+    var result = _output_seed(bound, columns, states, root)
     var workers = worker_count(size) if bound.shape() == ROWS else 1
     if workers <= 1:
         result._reserve_rows(size, 0)
