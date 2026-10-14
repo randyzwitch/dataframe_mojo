@@ -47,25 +47,33 @@ def parity(query: LazyFrame, runtime: MetalRuntime) raises:
 
 def test_decimal_multiplicative_capability_proofs_and_metadata() raises:
     assert_true(not RowCapabilities().decimal_multiplicative)
+    # The device gives a product's exact type (DuckDB's: the scales added)
+    # when it is 128 bits and one side has scale 0: decimal(18, 0) times
+    # decimal(38, 2) is decimal(38, 2). Two 64-bit sides give a 64-bit
+    # product, which runs on the CPU.
+    var whole = DataFrame(
+        [decimal_series("a", 64, 0, 99), decimal_series("b", 128, 2, 99)]
+    )
+    var product = col("a") * col("b")
+    var query = whole.lazy().select(product)
+    var descriptors = Program(lower_rows(query, _capabilities()))
+    assert_equal(
+        descriptors.code[11] >> 12,
+        Int64(Int(product._nodes[len(product._nodes) - 1].op)),
+    )
+    var caps = _capabilities()
+    caps.decimal_multiplicative = False
+    with assert_raises(contains="unsupported"):
+        _ = lower_rows(query, caps)
+    assert_true(
+        "unsupported" not in MetalRuntime(device_id=999999).describe(query)
+    )
+    # Products at two nonzero scales and quotients (DOUBLE) run on the CPU.
     for expression in List[Expr]([col("a") * col("b"), col("a") / col("b")]):
-        var query = safe_fixture().lazy().select(expression)
-        var descriptors = Program(lower_rows(query, _capabilities()))
-        assert_equal(descriptors.code[8], Int64(219))
-        assert_equal(
-            descriptors.code[11],
-            Int64(
-                1
-                | 2 << 6
-                | Int(expression._nodes[len(expression._nodes) - 1].op) << 12
-            ),
-        )
-        var caps = _capabilities()
-        caps.decimal_multiplicative = False
-        with assert_raises(contains="unsupported"):
-            _ = lower_rows(query, caps)
-        assert_true(
-            "unsupported" not in MetalRuntime(device_id=999999).describe(query)
-        )
+        with assert_raises(contains="exact result type"):
+            _ = lower_rows(
+                safe_fixture().lazy().select(expression), _capabilities()
+            )
     var mixed_wide = DataFrame(
         [
             decimal_series("a", 128, 0, 1),

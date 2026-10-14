@@ -732,9 +732,13 @@ def _masked_branch[
             False,
             then_mask,
         )
+    # Decimals too: only the validity changes, so the branch keeps its
+    # storage and type.
     var branch_numeric = (
         not then.is_chunked()
-        and not then.dtype().is_decimal()
+        and (
+            not then.dtype().is_decimal() or then.dtype() == bound.dtypes[index]
+        )
         and len(then) == size
         and len(flags) == size
     )
@@ -757,6 +761,12 @@ def _masked_branch[
                 _and_validity(flags, masked._bits[], masked._offset, size)
             )
             return Series("", masked^).with_dtype(then.dtype())
+    if then._data.isa[Column[Int128]]():
+        var masked = then._data[Column[Int128]].copy()
+        masked._bits = ArcPointer(
+            _and_validity(flags, masked._bits[], masked._offset, size)
+        )
+        return Series("", masked^).with_dtype(then.dtype())
     if len(selected) == 0:
         selected = List[Bool](unsafe_uninit_length=size)
         var then_mask = List[Bool](unsafe_uninit_length=size)

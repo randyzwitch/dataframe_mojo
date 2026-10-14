@@ -748,12 +748,12 @@ struct DataType(Copyable, Equatable, ImplicitlyCopyable, Movable, Writable):
         return 0
 
     def sum_type(self) -> DataType:
-        """The result type of sum and cumulative sums (as in Polars): 8-
-        and 16-bit integers widen to INT64; other types keep their type."""
+        """The result type of sum and cumulative sums: 8- and 16-bit
+        integers widen to INT64 (as in Polars), decimals to decimal(38) at
+        their scale (as in DuckDB); other types keep their type."""
         if self.is_integer() and self.bit_width() <= 16:
             return DataType.INT64
-        if self.is_decimal() and self.decimal_width() != 128:
-            # A decimal32 or decimal64 sum can outgrow its width: widen it.
+        if self.is_decimal():
             try:
                 return DataType.decimal(38, self.scale())
             except:

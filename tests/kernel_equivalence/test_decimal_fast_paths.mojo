@@ -1,9 +1,9 @@
 """Integer-to-decimal casts take one typed pass per source type and target
-width, and a decimal product whose operands are small enough is computed
-in 64 bits; both give exactly what the row-by-row arithmetic gives: the
-same values and nulls, a strict cast past the precision raising with the
-row and value, a lenient one giving null, and products near the 64-bit
-limit taking the 128-bit path."""
+width, and a decimal product of 64-bit operands is computed in 64 bits;
+both give exactly what the row-by-row arithmetic gives: the same values
+and nulls, a strict cast past the precision raising with the row and
+value, a lenient one giving null, and exact products whether or not the
+overflow check runs."""
 from std.testing import assert_equal, assert_true, assert_raises
 
 from dataframe import Column, DataFrame, DataType, Series, col, lit
@@ -95,10 +95,27 @@ def decimals(
     return Series(name, Column[String](text^)).cast(dtype)
 
 
+def places(value: Int128, digits: Int) -> String:
+    """A scaled integer as decimal text with `digits` places, `-1.0500`
+    for -10500 at four."""
+    var negative = value < 0
+    var magnitude = -value if negative else value
+    var scale = Int128(1)
+    for _ in range(digits):
+        scale *= 10
+    var fraction = String(magnitude % scale)
+    while fraction.byte_length() < digits:
+        fraction = "0" + fraction
+    return (
+        ("-" if negative else "") + String(magnitude // scale) + "." + fraction
+    )
+
+
 def test_decimal_products_agree_in_64_and_128_bits() raises:
-    """Products of two-place decimals rounded half-even back to two places:
-    from operands small enough for 64 bits, and the same rows next to one
-    huge price, which sends the whole column to the 128-bit path."""
+    """Products of two-place decimals, exact at four places (DuckDB's
+    decimal(18, 4) for decimal(18, 2) operands): from operands small
+    enough for 64 bits, and the same rows next to one huge price, which
+    makes the overflow check run; the same products either way."""
     var prices = List[Int64]()
     var rates = List[Int64]()
     for row in range(ROWS):
@@ -108,21 +125,12 @@ def test_decimal_products_agree_in_64_and_128_bits() raises:
     var small = DataFrame(
         [decimals("p", prices, dtype), decimals("r", rates, dtype)]
     )
-    var exact = (
-        small.select_exprs([(col("p") * col("r")).alias("x")])
-        .column("x")
-        .cast(DataType.STRING)
-    )
+    var product = small.select_exprs([(col("p") * col("r")).alias("x")])
+    assert_true(product.column("x").dtype() == DataType.decimal(18, 4, 64))
+    var exact = product.column("x").cast(DataType.STRING)
     for row in range(ROWS):
-        # Hundredths times hundredths, back to hundredths, half to even.
         var raw = Int128(prices[row]) * Int128(rates[row])
-        var q = raw // 100 if raw >= 0 else -((-raw) // 100)
-        var r = raw - q * 100
-        var rest = abs(r)
-        if rest > 50 or (rest == 50 and q % 2 != 0):
-            q += Int128(1) if raw > 0 else Int128(-1)
-        var text = exact.get(row).string()
-        assert_equal(text, cents(Int64(q)))
+        assert_equal(exact.get(row).string(), places(raw, 4))
     prices[0] = Int64(999_999_999_999_999)
     var wide = DataFrame(
         [decimals("p", prices, dtype), decimals("r", rates, dtype)]

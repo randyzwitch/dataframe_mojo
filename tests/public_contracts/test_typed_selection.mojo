@@ -35,9 +35,11 @@ def test_decimal_branch_fill_and_coalesce_resolve_common_type_without_rounding()
         for right_width in [32, 64, 128]:
             var a = DataType.decimal(7, 2, left_width)
             var b = DataType.decimal(7, 2, right_width)
+            # Two widths of one precision: that precision at its width
+            # (DuckDB's common type).
             var common = (
                 a.copy() if left_width
-                == right_width else DataType.decimal(38, 2)
+                == right_width else DataType.decimal(7, 2, 32)
             )
             var raw = DataFrame(
                 [
@@ -102,12 +104,9 @@ def test_decimal_branch_fill_and_coalesce_resolve_common_type_without_rounding()
                 )
                 assert_equal(grouped.columns(), ["g", "sum"])
                 assert_equal(grouped.height(), 2)
+                # A decimal sum is decimal(38) at its scale (DuckDB).
                 assert_true(
-                    grouped.column("sum").dtype()
-                    == (
-                        DataType.decimal(38, 2) if common.decimal_width()
-                        < 128 else common
-                    )
+                    grouped.column("sum").dtype() == DataType.decimal(38, 2)
                 )
                 for row in range(2):
                     var group = 1 - row
@@ -160,17 +159,20 @@ def test_decimal_branch_fill_and_coalesce_resolve_common_type_without_rounding()
                                         lazy.column(name)._decimal_raw(row),
                                         x[row] if choose_x else y[row],
                                     )
-                for current in [frame.copy(), frame.clear()]:
-                    var bad = lit("0").cast(DataType.decimal(7, 3))
-                    for expression in [
-                        when(col("c")).then(col("x")).otherwise(bad.copy()),
-                        col("x").fill_null(bad.copy()),
-                        coalesce([col("x"), bad.copy()]),
-                    ]:
-                        with assert_raises(
-                            contains="requires decimals of one scale"
-                        ):
-                            _ = current.select(expression)
+                # Another scale: the common type holds both exactly, so
+                # (7, 2) values gain a digit at (8, 3).
+                var other = lit("0").cast(DataType.decimal(7, 3))
+                for expression in [
+                    when(col("c")).then(col("x")).otherwise(other.copy()),
+                    col("x").fill_null(other.copy()),
+                    coalesce([col("x"), other.copy()]),
+                ]:
+                    var mixed = frame.select_exprs([expression.alias("m")])
+                    assert_true(
+                        mixed.column("m").dtype() == DataType.decimal(8, 3, 32)
+                    )
+                    # Row 0 takes x (1.25) on every route.
+                    assert_equal(mixed.column("m")._decimal_raw(0), 1250)
 
 
 def test_categorical_expressions_read_decoded_strings_and_derived_casts_reencode_values() raises:

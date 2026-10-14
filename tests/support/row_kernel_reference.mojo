@@ -109,9 +109,8 @@ def decimal_row_result(
         var y = b * decimal_power(result_scale - right_scale)
         return x + y if operation == 0 else x - y
     if operation == 2:
-        return half_even_ratio(
-            a * b, decimal_power(left_scale + right_scale - result_scale)
-        )
+        # Exact, at both scales (DuckDB's product type).
+        return a * b
     return half_even_ratio(
         a * decimal_power(result_scale + right_scale - left_scale), b
     )

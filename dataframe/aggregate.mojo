@@ -93,6 +93,50 @@ def _count_valid[
             counts[_group(grouped, groups, offset + i)] += 1
 
 
+def _sum_decimals[
+    D: DType
+](
+    column: Column[Scalar[D]],
+    offset: Int,
+    grouped: Bool,
+    groups: List[Int],
+    mut sums: List[Int128],
+    mut counts: List[Int64],
+):
+    """Decimal32 or decimal64 values added into 128-bit sums and counts of
+    the valid rows, read at the column's own width."""
+    var n = len(column)
+    var values = column._ptr()
+    var totals = sums.unsafe_ptr()
+    var seen = counts.unsafe_ptr()
+    var ids = groups.unsafe_ptr().unsafe_offset(offset)
+    if column.null_count() == 0:
+        if not grouped:
+            var total = Int128(0)
+            for i in range(n):
+                total += values.unsafe_offset(i)[].cast[DType.int128]()
+            totals[unsafe_offset=0] += total
+            seen[unsafe_offset=0] += Int64(n)
+            return
+        for i in range(n):
+            var g = ids[unsafe_offset=i]
+            totals[unsafe_offset=g] += values.unsafe_offset(i)[].cast[
+                DType.int128
+            ]()
+            seen[unsafe_offset=g] += 1
+        return
+    var bits = column._bits[].unsafe_ptr()
+    var bit_offset = column._offset
+    for i in range(n):
+        if not _validity_at(bits, bit_offset + i):
+            continue
+        var g = ids[unsafe_offset=i] if grouped else 0
+        totals[unsafe_offset=g] += values.unsafe_offset(i)[].cast[
+            DType.int128
+        ]()
+        seen[unsafe_offset=g] += 1
+
+
 def _sum_ints[
     D: DType
 ](
@@ -1017,6 +1061,35 @@ struct Reducer(Movable):
             return
         if self.op == N_UNIQUE and chunk.dtype().is_decimal():
             self._update(_decimal_keys(chunk), offset, grouped, groups)
+            return
+        if (
+            (self.op == SUM or self.op == MEAN)
+            and self.dtype.is_decimal()
+            and chunk.dtype().is_decimal()
+            and chunk.dtype().decimal_width() != 128
+        ):
+            # A decimal32 or decimal64 sum adds at the column's own width
+            # into its 128-bit state, as DuckDB adds into a hugeint: values
+            # under 10^18 cannot reach 10^38 before 10^20 rows, so neither
+            # a widened copy nor a check per row.
+            if chunk._data.isa[Column[Int64]]():
+                _sum_decimals[DType.int64](
+                    chunk._data[Column[Int64]],
+                    offset,
+                    grouped,
+                    groups,
+                    self.decimals,
+                    self.counts,
+                )
+            else:
+                _sum_decimals[DType.int32](
+                    chunk._data[Column[Int32]],
+                    offset,
+                    grouped,
+                    groups,
+                    self.decimals,
+                    self.counts,
+                )
             return
         if chunk.dtype().is_decimal() and chunk.dtype().decimal_width() != 128:
             # Decimal states are 128-bit: widen a narrow decimal input.

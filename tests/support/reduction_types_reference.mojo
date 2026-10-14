@@ -209,10 +209,8 @@ def assert_typed_reductions(
         var expected_dtype = source.dtype()
         if expected_dtype.is_integer() and expected_dtype.bit_width() <= 16:
             expected_dtype = DataType.INT64
-        if (
-            expected_dtype.is_decimal()
-            and expected_dtype.decimal_width() != 128
-        ):
+        if expected_dtype.is_decimal():
+            # Any decimal sums to decimal(38) at its scale, as in DuckDB.
             expected_dtype = DataType.decimal(38, expected_dtype.scale())
         for threshold in [0, 3]:
             var name = "sum" if threshold == 0 else "sum3"
