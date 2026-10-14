@@ -99,8 +99,8 @@ def integer_fits(value: UInt64, dtype: Int64) -> Bool:
 def integer_arithmetic(
     op: Int64, a: UInt64, b: UInt64, dtype: Int64
 ) -> Tuple[UInt64, UInt32]:
-    var value = UInt64(0)
-    var fits = True
+    var value: UInt64
+    var fits: Bool
     if op == ADD:
         value = a + b
         if unsigned_type(dtype):
@@ -355,7 +355,7 @@ def _row_program[
                         ),
                     )
                 else:
-                    var result = decimal.Arithmetic(decimal.Wide(0), 0)
+                    var result: decimal.Arithmetic
                     if operation == MUL:
                         result = decimal.multiply(
                             lhs, rhs, left_scale, right_scale
