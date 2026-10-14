@@ -148,6 +148,7 @@ from .join_type import (
     join_type,
 )
 from .join_hash import (
+    _PERFECT_SPAN,
     PreparedHashIndex,
     int64_progression,
     prepare_hash_index,
@@ -2287,6 +2288,43 @@ struct LazyFrame(Copyable):
             cursor = node.left
         return False
 
+    def _direct_key(self, index: Int, names: List[String]) raises -> Bool:
+        """Whether the one join key `names` of node `index` comes from an
+        in-memory table whose whole key column is unique, never null and
+        spans at most `_PERFECT_SPAN` values: any rows of it then index
+        directly (`_perfect_slots`), so a stream probing them pays one load
+        a row. Told from the table, before anything runs."""
+        if len(names) != 1:
+            return False
+        var found = self._provider_scan(index, names[0])
+        if found[0] < 0:
+            return False
+        var key = self._frames[self._nodes[found[0]].offset].column(found[1])
+        if key.dtype().physical() != DataType.INT64 or key.null_count() > 0:
+            return False
+        # More rows than the span allows cannot all differ: no pass needed.
+        if len(key) > _PERFECT_SPAN:
+            return False
+        var flat = key.rechunk() if key.is_chunked() else key.copy()
+        ref column = flat._data[Column[Int64]]
+        var n = len(column)
+        if n == 0:
+            return False
+        var least = Int64.MAX
+        var most = Int64.MIN
+        for i in range(n):
+            least = min(least, column._get(i))
+            most = max(most, column._get(i))
+        if most - least >= Int64(_PERFECT_SPAN):
+            return False
+        var seen = List[Bool](length=Int(most - least) + 1, fill=False)
+        for i in range(n):
+            var at = Int(column._get(i) - least)
+            if seen[at]:
+                return False
+            seen[at] = True
+        return True
+
     def _swap_join_sides(
         self, at: Int, built: DataFrame, batch_size: Int
     ) raises -> Optional[LazyFrame]:
@@ -2479,6 +2517,44 @@ struct LazyFrame(Copyable):
                     and right_rows >= 524288
                     and (unbounded or (bound >= 0 and 4 * bound <= right_rows))
                 ):
+                    # Under an unordered aggregation into the aggregate
+                    # table the join's row order is free: build on the
+                    # small left and stream the large right through it in
+                    # the pipeline, as DuckDB's build side optimizer does
+                    # whatever side a join was written on, rather than run
+                    # the join outside the pipeline (TPC-DS q43 probed its
+                    # 366 dates with 2.9M sales rows eagerly).
+                    if (
+                        node.how == JOIN_INNER
+                        and not ordered
+                        and _table_reductions(keys, expressions)
+                        and self._direct_key(node.left, node.names)
+                    ):
+                        var large = self._execute(
+                            node.right, False, True, batch_size
+                        )
+                        var swapped = self._swap_join_sides(
+                            cursor, large, batch_size
+                        )
+                        if swapped:
+                            var plan = swapped.take()
+                            for k in range(len(operations)):
+                                if operations[k].kind != JOIN:
+                                    continue
+                                plan._frames.append(
+                                    joins[operations[k].offset].copy()
+                                )
+                                plan._schemas.append(Optional[CsvSchema]())
+                                plan._nodes.append(
+                                    _plan_node(
+                                        SCAN_FRAME,
+                                        offset=len(plan._frames) - 1,
+                                    )
+                                )
+                                plan._nodes[operation_nodes[k]].right = (
+                                    len(plan._nodes) - 1
+                                )
+                            return plan._execute(index, False, True, batch_size)
                     # The bound only says the left side may be small; the
                     # eager join then decides with the real heights (a
                     # filter often keeps far fewer rows than it scans).
