@@ -1299,7 +1299,8 @@ trait AcceleratorBackend(Copyable):
 
 
 struct _SubplanJob(Job):
-    """One input of a union, executed from its own copy of the plan."""
+    """One subplan (a union's or a join's input, a stream's breaker input),
+    executed from its own copy of the plan."""
 
     var plan: LazyFrame
     var index: Int
@@ -1315,6 +1316,8 @@ struct _SubplanJob(Job):
         batch_size: Int,
     ) raises:
         self.plan = plan^
+        # Its own memo: nested prefetches on other threads never share one.
+        self.plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         self.index = index
         self.streaming = streaming
         self.batch_size = batch_size
@@ -1346,6 +1349,11 @@ struct LazyFrame(Copyable):
     # and DuckDB's logical operators keep their schemas; cleared by every
     # rewrite (`_reorder`), None outside those passes.
     var _schema_memo: Optional[ArcPointer[Dict[Int, DataFrame]]]
+    # Results computed ahead of the node that reads them, by node: a
+    # stream's breaker inputs run at once before its joins build
+    # (`_prefetch_breakers`), and `_execute` takes each result out once.
+    # Shared by the copies a run makes; None outside `collect`.
+    var _prefetched: Optional[ArcPointer[Dict[Int, DataFrame]]]
 
     def __init__(out self, frame: DataFrame):
         self._frames = [frame.copy()]
@@ -1355,6 +1363,7 @@ struct LazyFrame(Copyable):
         self._origin_rows = Dict[Int, Int]()
         self._accelerator_settings = None
         self._schema_memo = None
+        self._prefetched = None
 
     def __init__(
         out self,
@@ -1369,6 +1378,7 @@ struct LazyFrame(Copyable):
         self._origin_rows = Dict[Int, Int]()
         self._accelerator_settings = None
         self._schema_memo = None
+        self._prefetched = None
 
     def _with_accelerator_settings(
         self, optimize: Bool, streaming: Bool, batch_size: Int
@@ -2142,6 +2152,7 @@ struct LazyFrame(Copyable):
             plan._push_join_key_sets(streaming, batch_size)
             plan._share_subplans(streaming, batch_size)
             plan._order_joins(streaming, batch_size)
+        plan._prefetched = Optional(ArcPointer(Dict[Int, DataFrame]()))
         return plan._execute(len(plan._nodes) - 1, False, streaming, batch_size)
 
     def profile(
@@ -2410,6 +2421,70 @@ struct LazyFrame(Copyable):
             return height
         return -1
 
+    def _ends_in_breaker(self, index: Int) -> Bool:
+        """Whether node `index` is a pipeline breaker (an aggregate, a
+        unique or a sort), or row-local steps over one: it is computed in
+        full before any of its rows stream on."""
+        var at = index
+        while at >= 0:
+            ref node = self._nodes[at]
+            if node.kind == AGG or node.kind == UNIQUE or node.kind == SORT:
+                return True
+            if node.kind == DROP or _stream_rows(node):
+                at = node.left
+                continue
+            return False
+        return False
+
+    def _prefetch_breakers(self, top: Int, batch_size: Int) raises:
+        """Compute at once, ahead of the stream below `top`, the inputs it
+        will execute in full whatever it decides: its joins' build sides
+        and its source, where each ends in a pipeline breaker. TPC-DS q78
+        aggregated web and catalog sales to build on, then store sales to
+        probe with, one after another on a crew that the aggregates'
+        serial phases left partly idle. Polars and DuckDB run such
+        independent pipelines at once. The stream's decisions do not
+        change: each result waits in `_prefetched` for the `_execute` call
+        that would have computed it."""
+        var ahead = self._prefetched.value()
+        var wanted = List[Int]()
+        var probe = top
+        while probe >= 0:
+            ref step = self._nodes[probe]
+            if _stream_rows(step):
+                probe = step.left
+            elif step.kind == JOIN and step.how in [
+                JOIN_INNER,
+                JOIN_LEFT,
+                JOIN_SEMI,
+                JOIN_ANTI,
+                JOIN_CROSS,
+            ]:
+                if (
+                    self._ends_in_breaker(step.right)
+                    and step.right not in ahead[]
+                ):
+                    wanted.append(step.right)
+                probe = step.left
+            else:
+                break
+        if (
+            probe >= 0
+            and probe != top
+            and self._ends_in_breaker(probe)
+            and probe not in ahead[]
+        ):
+            wanted.append(probe)
+        if len(wanted) < 2:
+            return
+        trace_path("stream.prefetch_breakers")
+        var jobs = List[_SubplanJob](capacity=len(wanted))
+        for i in wanted:
+            jobs.append(_SubplanJob(self.copy(), i, True, batch_size))
+        run_jobs(jobs)
+        for k in range(len(wanted)):
+            ahead[][wanted[k]] = jobs[k].result.copy()
+
     def _known_height(self, index: Int) -> Int:
         """Exact cheap cardinalities only; -1 means execution is required."""
         ref node = self._nodes[index]
@@ -2486,6 +2561,8 @@ struct LazyFrame(Copyable):
         var operation_nodes = List[Int]()
         var joins = List[DataFrame]()
         var indexes = List[Optional[PreparedHashIndex]]()
+        if self._prefetched and not self._report:
+            self._prefetch_breakers(cursor, batch_size)
         while cursor >= 0:
             ref node = self._nodes[cursor]
             if _stream_rows(node):
@@ -3618,6 +3695,10 @@ struct LazyFrame(Copyable):
         streaming: Bool = False,
         batch_size: Int = 65536,
     ) raises -> DataFrame:
+        if self._prefetched and not empty:
+            var ahead = self._prefetched.value()
+            if index in ahead[]:
+                return ahead[].pop(index)
         if streaming and not empty:
             var streamed = self._stream_execute(index, batch_size)
             if streamed:
@@ -3670,6 +3751,57 @@ struct LazyFrame(Copyable):
             )
         return result^
 
+    def _join_frames(
+        self,
+        index: Int,
+        var input: DataFrame,
+        var right: DataFrame,
+        empty: Bool,
+    ) raises -> DataFrame:
+        """Join node `index`'s executed inputs."""
+        ref node = self._nodes[index]
+        if node.how == JOIN_CROSS:
+            return input.join(right, how=node.text, suffix=node.names2[0])
+        # Consumers that ignore row order let the join skip restoring
+        # left-major order after probing.
+        # A schema has no row order to keep.
+        var free = empty or self._order_free_above(
+            index, self._live_parents(len(self._nodes) - 1), True
+        )
+        return input._join_impl(
+            right,
+            left_on=node.names,
+            right_on=node.right_keys,
+            # Parsed here, as `DataFrame.join` would: an unknown type
+            # raises.
+            how=join_type(node.text),
+            suffix=node.names2[0],
+            coalesce=node.coalesce,
+            keep_order=not free,
+        )
+
+    def _both_inputs(
+        self, index: Int, empty: Bool, streaming: Bool, batch_size: Int
+    ) raises -> Tuple[DataFrame, DataFrame]:
+        """A two-input node's inputs, executed at once as jobs on their own
+        copies of the plan outside the empty-schema run and when no
+        execution report is kept (both share the crew's thread budget),
+        else one after the other."""
+        ref node = self._nodes[index]
+        if not empty and not self._report:
+            var jobs = List[_SubplanJob](capacity=2)
+            jobs.append(
+                _SubplanJob(self.copy(), node.left, streaming, batch_size)
+            )
+            jobs.append(
+                _SubplanJob(self.copy(), node.right, streaming, batch_size)
+            )
+            run_jobs(jobs)
+            return (jobs[0].result.copy(), jobs[1].result.copy())
+        var left = self._execute(node.left, empty, streaming, batch_size)
+        var right = self._execute(node.right, empty, streaming, batch_size)
+        return (left^, right^)
+
     def _concat(
         self, index: Int, empty: Bool, streaming: Bool, batch_size: Int
     ) raises -> DataFrame:
@@ -3681,22 +3813,9 @@ struct LazyFrame(Copyable):
         inputs at once). A worker the budget cannot cover leaves both on
         the caller, one after the other."""
         ref node = self._nodes[index]
-        var input: DataFrame
-        var right: DataFrame
-        if not empty and not self._report:
-            var jobs = List[_SubplanJob](capacity=2)
-            jobs.append(
-                _SubplanJob(self.copy(), node.left, streaming, batch_size)
-            )
-            jobs.append(
-                _SubplanJob(self.copy(), node.right, streaming, batch_size)
-            )
-            run_jobs(jobs)
-            input = jobs[0].result.copy()
-            right = jobs[1].result.copy()
-        else:
-            input = self._execute(node.left, empty, streaming, batch_size)
-            right = self._execute(node.right, empty, streaming, batch_size)
+        var both = self._both_inputs(index, empty, streaming, batch_size)
+        var input = both[0].copy()
+        var right = both[1].copy()
         var names = input.columns()
         var other = right.columns()
         if len(other) != len(names):
@@ -3823,6 +3942,16 @@ struct LazyFrame(Copyable):
                 )
         if node.kind == CONCAT:
             return self._concat(index, empty, streaming, batch_size)
+        if (
+            node.kind == JOIN
+            and not _is_scan(self._nodes[node.left].kind)
+            and not _is_scan(self._nodes[node.right].kind)
+        ):
+            # Both inputs computed (not scans): at once, as a union's.
+            var both = self._both_inputs(index, empty, streaming, batch_size)
+            return self._join_frames(
+                index, both[0].copy(), both[1].copy(), empty
+            )
         var input = self._execute(node.left, empty, streaming, batch_size)
         # "Empty" inputs can still have rows: a scalar aggregate over no
         # rows gives one.
@@ -3857,25 +3986,7 @@ struct LazyFrame(Copyable):
             )
         if node.kind == JOIN:
             var right = self._execute(node.right, empty, streaming, batch_size)
-            if node.how == JOIN_CROSS:
-                return input.join(right, how=node.text, suffix=node.names2[0])
-            # Consumers that ignore row order let the join skip restoring
-            # left-major order after probing.
-            # A schema has no row order to keep.
-            var free = empty or self._order_free_above(
-                index, self._live_parents(len(self._nodes) - 1), True
-            )
-            return input._join_impl(
-                right,
-                left_on=node.names,
-                right_on=node.right_keys,
-                # Parsed here, as `DataFrame.join` would: an unknown type
-                # raises.
-                how=join_type(node.text),
-                suffix=node.names2[0],
-                coalesce=node.coalesce,
-                keep_order=not free,
-            )
+            return self._join_frames(index, input^, right^, empty)
         if node.kind == SORT:
             var n = len(node.names)
             var descending = List[Bool]()
