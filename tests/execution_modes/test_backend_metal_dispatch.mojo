@@ -51,7 +51,7 @@ def predicate_case(runtime: MetalRuntime, native: Bool) raises:
         ),
         runtime,
         native,
-        mechanism="native_metal_predicate_reductions",
+        mechanism="mojo_gpu_reductions",
     )
 
 
@@ -117,9 +117,7 @@ def hash_group_cases(runtime: MetalRuntime, native: Bool) raises:
                 Series("len", Column[Int64](lengths^)),
             ]
         )
-        var mechanism = String(
-            "native_metal_hash_groups"
-        ) if n >= 4096 else String("!native_metal_hash_groups")
+        var mechanism = String("mojo_gpu_grouped_rows")
         check_domain(
             source.lazy()
             .group_by(["k", "flag"], maintain_order=True)
@@ -178,14 +176,9 @@ def radix_sort_cases(runtime: MetalRuntime, native: Bool) raises:
                             not composite or row % 5 == tie
                         ):
                             expected_rows.append(row)
-            # UInt64 alone fits the native radix pass budget. Adding Int8
-            # exceeds that budget, so the composite must use the stable fallback
-            # even above the row threshold. Both retain exact UInt64 payloads.
-            var mechanism = String(
-                "native_metal_integer_radix_sort"
-            ) if n >= 65536 and not composite else String(
-                "!native_metal_integer_radix_sort"
-            )
+            # Both simple and composite keys use the actual stable Mojo
+            # ordering kernels, retaining exact UInt64 words at every size.
+            var mechanism = String("mojo_gpu_ordered_rows")
             var keys: List[String] = ["k", "t"] if composite else ["k"]
             var descending: List[Bool] = [True, False] if composite else [True]
             var nulls_last: List[Bool] = [False, True] if composite else [False]

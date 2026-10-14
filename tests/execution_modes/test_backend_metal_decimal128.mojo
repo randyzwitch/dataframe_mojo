@@ -1,10 +1,11 @@
 """Exact two-word decimal transport and reductions on Metal."""
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, col, lit, when
 from dataframe.dtype import DataType
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.cpu_work import cpu_features
 from dataframe.accelerator.constants import fold_literal_text_parsing
@@ -532,10 +533,9 @@ def test_native_metal_decimal128_cost_memory_budget_and_literal_pipeline_cache()
     var runtime = MetalRuntime()
     var estimate = runtime.estimate_auto(query)
     assert_equal(estimate.cpu[2], Float64(17 * 20))
-    assert_true("metal-decimal128-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     assert_true(
-        "metal-decimal128-reductions-v1"
-        in runtime.estimate_auto(reduction).family
+        ";mojo-metal-v1;ops=" in runtime.estimate_auto(reduction).family
     )
     var measured = query.profile(accelerator=runtime)
     assert_true(measured[0].equals(query.collect(engine="cpu")))
@@ -565,5 +565,5 @@ def test_native_metal_decimal128_cost_memory_budget_and_literal_pipeline_cache()
     )
     check(first)
     var folded = fold_literal_text_parsing(second)
-    assert_equal(runtime.estimate_auto(folded).accelerator[13], Float64(0))
+    assert_equal(runtime.estimate_auto(folded).accelerator[13], Float64(1))
     check(second)

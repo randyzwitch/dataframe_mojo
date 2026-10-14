@@ -65,6 +65,20 @@ struct Comparison(Copyable):
         self.valid = valid
 
 
+def error_flag(error: UInt32) -> UInt32:
+    """Preserve decimal fault categories in the shared per-value error word.
+
+    Bits 0/1 belong to ordinary casts/integer sums; decimal scale/product,
+    precision and unary faults use bits 2/3/4. A zero divisor is a null value.
+    """
+    return (
+        UInt32(4) if error
+        == 1 else UInt32(8) if error
+        == 2 else UInt32(16) if error
+        == 3 else UInt32(0)
+    )
+
+
 def divide(low: UInt64, high: UInt64, divisor: UInt64) -> Quotient:
     """Divide a magnitude with high < divisor <= 10**18, without ulong '/'."""
     var value = UInt64(0)

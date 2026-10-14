@@ -16,6 +16,7 @@ from dataframe.accelerator.gpu.grouping import (
     group_mark,
     group_offsets,
     group_starts,
+    group_window_bounds,
     group_reduce,
 )
 from dataframe.accelerator.gpu.reductions import State as BasicState
@@ -117,7 +118,7 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
     var result_errors = List[UInt32](length=cells, fill=0)
     var starts = List[UInt32](length=max(1, n), fill=0)
     var sorted_rows = List[UInt32](length=max(1, n), fill=0)
-    var shape = List[UInt32](length=2, fill=0)
+    var shape = List[UInt32](length=4, fill=0)
     var ctx = DeviceContext()
     var dw = ctx.enqueue_create_buffer[DType.uint64](cells)
     var dv = ctx.enqueue_create_buffer[DType.uint8](cells)
@@ -131,7 +132,7 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
     var dp = ctx.enqueue_create_buffer[DType.uint32](max(1, n))
     var db = ctx.enqueue_create_buffer[DType.uint32](blocks * 2)
     var ds = ctx.enqueue_create_buffer[DType.uint32](max(1, n))
-    var dm = ctx.enqueue_create_buffer[DType.uint32](2)
+    var dm = ctx.enqueue_create_buffer[DType.uint32](4)
     var dow = ctx.enqueue_create_buffer[DType.uint64](cells)
     var dov = ctx.enqueue_create_buffer[DType.uint8](cells)
     var doe = ctx.enqueue_create_buffer[DType.uint32](cells)
@@ -162,6 +163,7 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
             UInt32(n),
             UInt32(capacity),
             UInt32(width),
+            UInt32(0),
             grid_dim=blocks,
             block_dim=256,
         )
@@ -182,6 +184,7 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
         UInt32(2),
         UInt32(n),
         UInt32(capacity),
+        UInt32(0),
         grid_dim=blocks,
         block_dim=256,
     )
@@ -209,8 +212,12 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
             UInt32(2),
             UInt32(n),
             UInt32(capacity),
+            UInt32(0),
             grid_dim=blocks,
             block_dim=256,
+        )
+        ctx.enqueue_function[group_window_bounds](
+            ds.unsafe_ptr(), dm.unsafe_ptr(), UInt32(n), grid_dim=1, block_dim=1
         )
         ctx.enqueue_function[group_reduce](
             dw.unsafe_ptr(),
@@ -221,6 +228,7 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
             doe.unsafe_ptr(),
             di.unsafe_ptr(),
             ds.unsafe_ptr(),
+            dm.unsafe_ptr(),
             dc.unsafe_ptr(),
             dl.unsafe_ptr(),
             dst.unsafe_ptr(),
@@ -229,6 +237,7 @@ def check(n: Int, fail_key: Bool, quantile: Bool = False) raises:
             shape[0],
             UInt32(n),
             UInt32(capacity),
+            UInt32(0),
             grid_dim=(Int(shape[0]) * 8 + 255) // 256,
             block_dim=256,
         )

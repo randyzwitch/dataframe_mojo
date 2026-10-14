@@ -196,17 +196,39 @@ def reduce_partials(
         & 0xFFFF
     )
     var state = State()
-    for row in range(group, Int(rows), Int(groups)):
-        var at = slot * Int(stride) + row
-        var valid = validity[unsafe_offset=at] != 0
-        var error = errors[unsafe_offset=at]
-        var y = UInt64(0)
-        if pair:
-            var right_at = right * Int(stride) + row
-            valid &= validity[unsafe_offset=right_at] != 0
-            error |= errors[unsafe_offset=right_at]
-            y = words[unsafe_offset=right_at]
-        state.add(words[unsafe_offset=at], y, valid, error, op)
+    # Statistical association follows CPU materialization and the former
+    # native kernels: contiguous 8192-row-aligned worker ranges, followed
+    # by worker-order merges. The basic-reduction grid only supplies storage
+    # for these states; it does not determine statistical row membership.
+    var configured = Int(
+        descriptors[unsafe_offset=base + 4].cast[DType.uint64]() >> 47
+    )
+    var workers = max(1, min(configured, Int(rows) // 65536))
+    var step = ((Int(rows) + workers - 1) // workers + 8191) // 8192 * 8192
+    var first = group
+    var last = min(group + 1, workers)
+    # Extremely large inputs can request more workers than the shared grid
+    # has partials. Preserve their association in the first partial instead
+    # of clamping the user's worker count or expanding the shared buffers.
+    if workers > Int(groups):
+        first = 0
+        last = workers if group == 0 else 0
+    for worker in range(first, last):
+        var current = State()
+        var begin = min(Int(rows), worker * step)
+        var end = min(Int(rows), (worker + 1) * step)
+        for row in range(begin, end):
+            var at = slot * Int(stride) + row
+            var valid = validity[unsafe_offset=at] != 0
+            var error = errors[unsafe_offset=at]
+            var y = UInt64(0)
+            if pair:
+                var right_at = right * Int(stride) + row
+                valid &= validity[unsafe_offset=right_at] != 0
+                error |= errors[unsafe_offset=right_at]
+                y = words[unsafe_offset=right_at]
+            current.add(words[unsafe_offset=at], y, valid, error, op)
+        state.merge(current, op)
     state.store(partials, work * STATE_WORDS)
 
 

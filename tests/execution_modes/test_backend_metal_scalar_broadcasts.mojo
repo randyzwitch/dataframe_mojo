@@ -1,11 +1,17 @@
 """Scalar reductions broadcast through resident GPU branches into row expressions."""
+from dataframe.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+    estimate_resources,
+)
+from dataframe.accelerator.gpu.join_runtime import preflight as join_layout
+from dataframe.accelerator.gpu.joins import METADATA_WORDS
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit, when, scan_csv
 from dataframe.dtype import DataType
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.aggregates import lower_aggregate_compositions
 from dataframe.accelerator.joins import lower_join_dag, DAG_ROWS, DAG_JOIN
 from dataframe.accelerator.rows import lower_rows
@@ -255,35 +261,86 @@ def test_native_metal_scalar_broadcast_resident_traffic_budgets_and_recovery() r
     var query = fixture().lazy().with_columns(col("x").mean().alias("mean"))
     var measured = query.profile(accelerator=runtime)
     same(measured[0], query.collect(engine="cpu"))
-    assert_true(measured[1].height() >= 4)
-    var upload = measured[1].column("upload_bytes").int64()
-    var download = measured[1].column("download_bytes").int64()
-    assert_true(upload._get(0) > 0)
+    var report = measured[1].copy()
     var dag = lower_join_dag(
         lower_aggregate_compositions(query), _capabilities()
     )
-    assert_equal(measured[1].height(), len(dag.tasks))
-    for i in range(1, measured[1].height()):
-        # Resident row inputs are not uploaded again. The ABI still stages
-        # an eight-byte literal entry per expression node, including columns.
-        var literal_bytes = Int64(0)
-        if dag.tasks[i].kind == DAG_ROWS:
+    var resident = List[Bool](length=len(dag.tasks), fill=False)
+    var sizes = List[Int](length=len(dag.tasks), fill=0)
+    var region = 0
+    for index in range(len(dag.tasks)):
+        ref task = dag.tasks[index]
+        if (
+            task.kind == DAG_ROWS
+            and task.source < 0
+            and len(task.query._nodes) == 1
+        ):
+            # Original immutable CPU scans have no submitted region/report.
+            sizes[index] = task.query._frames[0].height()
+            continue
+        assert_true(region < report.height())
+        var output_rows = Int(report.item(region, "output_rows").int64())
+        var observed_upload = report.item(region, "upload_bytes").int64()
+        var observed_download = report.item(region, "download_bytes").int64()
+        if task.kind == DAG_ROWS:
+            var rows = Int(report.item(region, "input_rows").int64())
             var plan = lower_rows(
-                dag.tasks[i].query,
+                task.query,
                 _capabilities(),
-                terminal_boundary=dag.tasks[i].terminal,
+                terminal_boundary=task.terminal,
+                source_rows=rows,
             )
-            literal_bytes = Int64(8 * len(plan.literals))
-        assert_equal(upload._get(i), literal_bytes)
-        assert_true(
-            measured[1].column("resident_input_bytes").int64()._get(i) > 0
-        )
-    for i in range(measured[1].height() - 1):
-        # Retained regions synchronize eight bytes of row-count metadata.
-        assert_equal(download._get(i), Int64(8))
-        assert_equal(
-            measured[1].column("host_result_bytes").int64()._get(i), Int64(0)
-        )
+            var from_resident = task.source >= 0 and resident[task.source]
+            var bounds = estimate_resources(
+                plan, rows, from_resident, task.terminal
+            )
+            assert_true(observed_upload <= Int64(bounds.upload_bytes))
+            assert_true(observed_download <= Int64(bounds.download_bytes))
+            if from_resident:
+                assert_true(
+                    report.item(region, "resident_input_bytes").int64() > 0
+                )
+        else:
+            var left_resident = resident[task.source]
+            var right_resident = resident[task.right]
+            var left = dag.tasks[task.source].schema.copy()
+            var right = dag.tasks[task.right].schema.copy()
+            var layout = join_layout(
+                task, left, right, sizes[task.source], sizes[task.right]
+            )
+            # Only descriptor mappings accompany already resident values.
+            var upload = 8 * (
+                len(layout.columns) + len(layout.keys) + len(layout.outputs)
+            )
+            if not left_resident or not right_resident:
+                upload += 21 * layout.cells
+            if left_resident:
+                upload += 24 * left.width()
+            if right_resident:
+                upload += 24 * right.width()
+            assert_equal(observed_upload, Int64(upload))
+            # Joins observe five control words, then output errors or the
+            # terminal paired-word/validity/error value matrix.
+            var bytes_per_cell = 21 if task.terminal else 4
+            assert_equal(
+                observed_download,
+                Int64(
+                    METADATA_WORDS * 8
+                    + output_rows * len(task.fields) * bytes_per_cell
+                ),
+            )
+        if not task.terminal:
+            assert_equal(
+                report.item(region, "host_result_bytes").int64(), Int64(0)
+            )
+            assert_equal(
+                report.item(region, "materialization_boundary").string(),
+                "Mojo GPU resident table",
+            )
+        resident[index] = True
+        sizes[index] = output_rows
+        region += 1
+    assert_equal(region, report.height())
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))

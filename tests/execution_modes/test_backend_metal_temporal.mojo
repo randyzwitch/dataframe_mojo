@@ -1,8 +1,9 @@
 """Native temporal fields and fixed logical values use independent calendars."""
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.constants import (
     has_literal_text_parsing,
     fold_literal_text_parsing,
@@ -487,12 +488,12 @@ def temporal_preflight_cases() raises:
     var aware = DataFrame(
         [tagged("t", DataType.datetime("us", "UTC"), [0], [True])]
     )
+    var utc_fields = aware.lazy().select(col("t").dt().year())
+    var without_utc = _capabilities()
+    without_utc.utc_temporal_conversions = False
     with assert_raises(contains="time zone field extraction"):
-        _ = (
-            aware.lazy()
-            .select(col("t").dt().year())
-            .collect(accelerator=unavailable)
-        )
+        _ = lower_rows(utc_fields, without_utc)
+    assert_true("unsupported" not in unavailable.describe(utc_fields))
     var dates = DataFrame([tagged("t", DataType.DATE, [0], [True])])
     var scalar_query = dates.lazy().select_exprs(
         [
@@ -517,12 +518,10 @@ def temporal_preflight_cases() raises:
             )
         ]
     )
+    var wide_arg_min = decimals.lazy().select(col("d").arg_min())
     with assert_raises(contains="Decimal128 input reductions"):
-        _ = (
-            decimals.lazy()
-            .select(col("d").arg_min())
-            .collect(accelerator=unavailable)
-        )
+        _ = lower_rows(wide_arg_min, _capabilities())
+    assert_true("unsupported" in unavailable.describe(wide_arg_min))
 
 
 def test_native_metal_temporal_and_decimal_unsupported_requests_reject_before_device_setup() raises:

@@ -75,6 +75,52 @@ from tests.execution_modes.test_mojo_gpu_rolling import (
     test_mojo_gpu_rolling_errors_compositions_exact_budget_and_recovery,
 )
 
+from tests.execution_modes.test_mojo_gpu_normalization import (
+    test_mojo_gpu_normalization_dictionary_unicode_operations_and_selectors,
+    test_mojo_gpu_normalization_union_distinct_nulls_and_row_order,
+    test_mojo_gpu_normalization_distinct_counts_partition_and_aggregate_compositions,
+    test_mojo_gpu_normalization_scalar_literals_text_parsing_and_empty_shapes,
+)
+
+from tests.execution_modes.test_mojo_gpu_decimals import (
+    test_mojo_gpu_decimal_transport_expressions_casts_and_arithmetic,
+    test_mojo_gpu_decimal_reductions_grouping_order_rank_and_join,
+    test_mojo_gpu_decimal_windows_keep_both_words_and_precision,
+    test_mojo_gpu_decimal_prefix_merge_errors_and_cancellation,
+)
+
+from tests.execution_modes.test_mojo_gpu_integers import (
+    test_mojo_gpu_integer_division_modulo_power_rounding_and_membership,
+    test_mojo_gpu_integer_operator_endpoints_conditional_errors_and_reuse,
+)
+
+from tests.execution_modes.test_mojo_gpu_residency import (
+    test_mojo_gpu_residency_lazy_empty_identity_and_zero_column_cardinality,
+    test_mojo_gpu_residency_shared_paired_matrix_device_copy_and_lifetime,
+    test_mojo_gpu_residency_export_budget_and_deferred_errors,
+    test_mojo_gpu_residency_structural_identity_lazy_upload_and_target_offset,
+)
+
+from tests.execution_modes.test_mojo_gpu_resident_metadata import (
+    test_mojo_gpu_resident_cardinality_metadata_bounds,
+)
+
+from tests.execution_modes.test_mojo_gpu_calibration import (
+    test_mojo_gpu_calibration_metadata,
+    test_mojo_gpu_calibration_isolation,
+    test_mojo_gpu_calibration_measurements,
+)
+
+from tests.execution_modes.test_mojo_gpu_resident_dag import (
+    test_mojo_gpu_resident_dag_branches_final_export_profile_and_budget,
+    test_mojo_gpu_resident_dag_empty_scalar_identity_and_zero_column_consumers,
+)
+
+
+from tests.execution_modes.test_mojo_gpu_partition_workers import (
+    test_mojo_gpu_partition_workers_dense_and_hash_order_proofs,
+)
+
 
 def main() raises:
     print(
@@ -229,4 +275,68 @@ def main() raises:
         "RUN test_mojo_gpu_rolling_errors_compositions_exact_budget_and_recovery"
     )
     test_mojo_gpu_rolling_errors_compositions_exact_budget_and_recovery()
-    print("PASS direct Mojo dataframe GPU: 43 integrated query tests")
+    print(
+        "RUN test_mojo_gpu_normalization_dictionary_unicode_operations_and_selectors"
+    )
+    test_mojo_gpu_normalization_dictionary_unicode_operations_and_selectors()
+    print("RUN test_mojo_gpu_normalization_union_distinct_nulls_and_row_order")
+    test_mojo_gpu_normalization_union_distinct_nulls_and_row_order()
+    print(
+        "RUN test_mojo_gpu_normalization_distinct_counts_partition_and_aggregate_compositions"
+    )
+    test_mojo_gpu_normalization_distinct_counts_partition_and_aggregate_compositions()
+    print(
+        "RUN test_mojo_gpu_normalization_scalar_literals_text_parsing_and_empty_shapes"
+    )
+    test_mojo_gpu_normalization_scalar_literals_text_parsing_and_empty_shapes()
+    print(
+        "RUN test_mojo_gpu_decimal_transport_expressions_casts_and_arithmetic"
+    )
+    test_mojo_gpu_decimal_transport_expressions_casts_and_arithmetic()
+    print("RUN test_mojo_gpu_decimal_reductions_grouping_order_rank_and_join")
+    test_mojo_gpu_decimal_reductions_grouping_order_rank_and_join()
+    print("RUN test_mojo_gpu_decimal_windows_keep_both_words_and_precision")
+    test_mojo_gpu_decimal_windows_keep_both_words_and_precision()
+    print("RUN test_mojo_gpu_decimal_prefix_merge_errors_and_cancellation")
+    test_mojo_gpu_decimal_prefix_merge_errors_and_cancellation()
+    print(
+        "RUN test_mojo_gpu_integer_division_modulo_power_rounding_and_membership"
+    )
+    test_mojo_gpu_integer_division_modulo_power_rounding_and_membership()
+    print(
+        "RUN test_mojo_gpu_integer_operator_endpoints_conditional_errors_and_reuse"
+    )
+    test_mojo_gpu_integer_operator_endpoints_conditional_errors_and_reuse()
+    print(
+        "RUN test_mojo_gpu_residency_lazy_empty_identity_and_zero_column_cardinality"
+    )
+    test_mojo_gpu_residency_lazy_empty_identity_and_zero_column_cardinality()
+    print(
+        "RUN test_mojo_gpu_residency_shared_paired_matrix_device_copy_and_lifetime"
+    )
+    test_mojo_gpu_residency_shared_paired_matrix_device_copy_and_lifetime()
+    print("RUN test_mojo_gpu_residency_export_budget_and_deferred_errors")
+    test_mojo_gpu_residency_export_budget_and_deferred_errors()
+    print(
+        "RUN test_mojo_gpu_residency_structural_identity_lazy_upload_and_target_offset"
+    )
+    test_mojo_gpu_residency_structural_identity_lazy_upload_and_target_offset()
+    print("RUN test_mojo_gpu_resident_cardinality_metadata_bounds")
+    test_mojo_gpu_resident_cardinality_metadata_bounds()
+    print("RUN test_mojo_gpu_calibration_metadata")
+    test_mojo_gpu_calibration_metadata()
+    print("RUN test_mojo_gpu_calibration_isolation")
+    test_mojo_gpu_calibration_isolation()
+    print("RUN test_mojo_gpu_calibration_measurements")
+    test_mojo_gpu_calibration_measurements()
+    print(
+        "RUN test_mojo_gpu_resident_dag_branches_final_export_profile_and_budget"
+    )
+    test_mojo_gpu_resident_dag_branches_final_export_profile_and_budget()
+    print(
+        "RUN test_mojo_gpu_resident_dag_empty_scalar_identity_and_zero_column_consumers"
+    )
+    test_mojo_gpu_resident_dag_empty_scalar_identity_and_zero_column_consumers()
+    print("RUN test_mojo_gpu_partition_workers_dense_and_hash_order_proofs")
+    test_mojo_gpu_partition_workers_dense_and_hash_order_proofs()
+    print("PASS direct Mojo dataframe GPU: 64 integrated query tests")

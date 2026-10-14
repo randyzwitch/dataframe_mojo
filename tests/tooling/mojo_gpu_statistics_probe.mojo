@@ -13,8 +13,7 @@ from dataframe.accelerator.gpu.statistics import (
 )
 
 
-def check(n: Int) raises:
-    var groups = 7
+def check(n: Int, groups: Int = 7, configured: Int = 11) raises:
     var capacity = n + 5
     var ops: List[Int64] = [
         COUNT,
@@ -57,7 +56,7 @@ def check(n: Int) raises:
         descriptors.append(11)
         descriptors.append(ops[column])
         # Right input slot zero; worker metadata must not alter ddof/flags.
-        descriptors.append(parameters[column] | (Int64(11) << 47))
+        descriptors.append(parameters[column] | (Int64(configured) << 47))
     var words = List[UInt64](length=capacity * 3, fill=0xDEADBEEF)
     var validity = List[UInt8](length=capacity * 3, fill=0)
     var errors = List[UInt32](length=capacity * 3, fill=0)
@@ -135,9 +134,13 @@ def check(n: Int) raises:
                 assert_equal(partials[column * groups * 8 + i], UInt64(0xDEF))
             continue
         var state = State()
-        for group in range(groups):
+        var workers = max(1, min(configured, n // 65536))
+        var step = ((n + workers - 1) // workers + 8191) // 8192 * 8192
+        for worker in range(workers):
             var partial = State()
-            for row in range(group, n, groups):
+            for row in range(
+                min(n, worker * step), min(n, (worker + 1) * step)
+            ):
                 var valid = validity[2 * capacity + row] != 0
                 var error = errors[2 * capacity + row]
                 if op == COV or op == CORR:
@@ -162,6 +165,9 @@ def main() raises:
     check(0)
     check(1)
     check(257)
+    # Two statistical workers, including the one-partial fallback path.
+    check(131073, 7, 2)
+    check(131073, 1, 2)
     print(
         "PASS Mojo statistics kernels: empty/singleton/masked, errors, mixed descriptors, padded stride"
     )

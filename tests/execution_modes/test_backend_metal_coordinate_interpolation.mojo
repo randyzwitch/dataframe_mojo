@@ -1,8 +1,10 @@
 """Coordinate interpolation retains independent value and coordinate validity."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, LazyFrame, col, lit, when
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_CUMULATIVE_KEY
 from tests.execution_modes.test_backend_metal import require_metal
@@ -57,7 +59,7 @@ def test_coordinate_interpolation_capability_private_axis_metadata_and_checked_i
         assert_true(plan.slot_dtypes[step.slot] == DataType.FLOAT64)
         assert_equal(step.nodes, 2)
     assert_true(found)
-    _ = _Descriptors(plan)
+    _ = Program(plan)
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
@@ -231,7 +233,7 @@ def test_native_metal_coordinate_interpolation_profile_exact_budget_cost_and_run
     )
     var estimate = runtime.estimate_auto(query)
     assert_true(";coordinate-interpolation-v1" in estimate.family)
-    assert_true(";metal-coordinate-interpolation-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
     var measured = query.profile(accelerator=exact)
     assert_equal(

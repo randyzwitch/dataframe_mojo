@@ -64,6 +64,7 @@ def filter_gather(
     predicate: UInt32,
     rows: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ):
     var row = global_idx.x
     if row >= Int(rows):
@@ -79,6 +80,11 @@ def filter_gather(
         output_words[unsafe_offset=base + target] = words[
             unsafe_offset=base + row
         ]
+        if slots:
+            var high_base = Int(stride) * Int(slots)
+            output_words[unsafe_offset=high_base + base + target] = words[
+                unsafe_offset=high_base + base + row
+            ]
         output_validity[unsafe_offset=base + target] = validity[
             unsafe_offset=base + row
         ]

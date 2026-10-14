@@ -7,7 +7,7 @@ indices break ties, preserving NaN payloads, signed zeros and nullable values.
 from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives.block import prefix_sum
 from std.memory import Pointer
-from . import floating
+from . import floating, decimal
 from .rows import unsigned_type
 
 
@@ -54,6 +54,7 @@ def order_less(
     start: UInt32,
     keys: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ) -> Bool:
     for key in range(Int(keys)):
         var node = Int(start) + key
@@ -70,6 +71,18 @@ def order_less(
         var aw = words[unsafe_offset=ai]
         var bw = words[unsafe_offset=bi]
         var dtype = types[unsafe_offset=node]
+        if dtype == 12:
+            var high_base = Int(stride) * Int(slots)
+            var ah = words[unsafe_offset=high_base + ai]
+            var bh = words[unsafe_offset=high_base + bi]
+            if ah != bh or aw != bw:
+                var less = decimal.signed_less(
+                    decimal.Wide(aw, ah), decimal.Wide(bw, bh)
+                )
+                return (
+                    not less if code[unsafe_offset=4 * node + 2] != 0 else less
+                )
+            continue
         var an = _nan(aw, dtype)
         var bn = _nan(bw, dtype)
         # Both directions place valid NaNs after non-NaNs. NaN payload and
@@ -108,6 +121,7 @@ def order_merge(
     rows: UInt32,
     stride: UInt32,
     run_width: UInt32,
+    slots: UInt32 = 0,
 ):
     var row = global_idx.x
     if row >= Int(rows):
@@ -134,6 +148,7 @@ def order_merge(
             start,
             keys,
             stride,
+            slots,
         ):
             lo = mid + 1
         else:
@@ -175,6 +190,7 @@ def order_gather(
     count: UInt32,
     rows: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ):
     var row = global_idx.x
     if row >= Int(rows):
@@ -185,6 +201,11 @@ def order_gather(
         output_words[unsafe_offset=base + row] = words[
             unsafe_offset=base + source
         ]
+        if slots:
+            var high_base = Int(stride) * Int(slots)
+            output_words[unsafe_offset=high_base + base + row] = words[
+                unsafe_offset=high_base + base + source
+            ]
         output_validity[unsafe_offset=base + row] = validity[
             unsafe_offset=base + source
         ]

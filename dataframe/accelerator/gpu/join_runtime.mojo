@@ -5,12 +5,20 @@ is checked before output allocation, then a second submission gathers typed
 values. Inputs and outputs are ordinary dataframe columns; no CPU join, native
 Metal library, shader source, or external dataframe ABI executes data logic.
 """
-from max.gpu.host import DeviceContext
 from std.time import perf_counter_ns
 from dataframe import Column, DataFrame, Series
 from dataframe.accelerator.joins import DagTask, DAG_JOIN
 from dataframe.execution_report import ExecutionReport
-from .runtime import _kind, _width, _stage, _output, _checked_add, _checked_mul
+from .runtime import (
+    _kind,
+    _width,
+    _stage,
+    _checked_add,
+    _checked_mul,
+    materialize,
+    CELL_BYTES,
+)
+from .residency import Scope, Matrix, Table
 from . import joins as j
 
 
@@ -20,6 +28,7 @@ struct Layout(Movable):
     var keys: List[Int64]
     var outputs: List[Int64]
     var cells: Int
+    var capacity: Int
     var probe: Int
     var build: Int
     var side: Int
@@ -27,12 +36,22 @@ struct Layout(Movable):
 
 
 def preflight(
-    task: DagTask, left: DataFrame, right: DataFrame
+    task: DagTask,
+    left: DataFrame,
+    right: DataFrame,
+    left_rows: Int = -1,
+    right_rows: Int = -1,
 ) raises -> Layout:
     """Validate schemas and descriptor bounds without accessing row values."""
     if task.kind != DAG_JOIN or task.how < 0 or task.how > 7 or task.limit < -1:
         raise Error("Mojo GPU invalid join task metadata")
-    if left.height() > Int(Int32.MAX) or right.height() > Int(Int32.MAX):
+    if left_rows < -1 or right_rows < -1:
+        raise Error("Mojo GPU invalid join source row override")
+    var sizes: List[Int] = [
+        left.height() if left_rows < 0 else left_rows,
+        right.height() if right_rows < 0 else right_rows,
+    ]
+    if sizes[0] > Int(Int32.MAX) or sizes[1] > Int(Int32.MAX):
         raise Error("Mojo GPU join input exceeds supported device index range")
     if (
         len(task.fields) < 1
@@ -48,13 +67,14 @@ def preflight(
         raise Error("Mojo GPU invalid join key metadata")
     var columns = List[Int64]()
     var cells = 0
+    var capacity = max(1, max(sizes[0], sizes[1]))
     for side in range(2):
         var frame = right.copy() if side else left.copy()
         for column in frame._columns:
             columns.extend(
-                [Int64(cells), Int64(frame.height()), _kind(column.dtype())]
+                [Int64(cells), Int64(sizes[side]), _kind(column.dtype())]
             )
-            cells = _checked_add(cells, max(1, frame.height()))
+            cells = _checked_add(cells, capacity)
     for key in range(0, len(task.keys), 2):
         var l = Int(task.keys[key])
         var r = Int(task.keys[key + 1]) - left.width()
@@ -111,16 +131,468 @@ def preflight(
         keys^,
         outputs^,
         cells,
-        right.height() if task.how == 2 else left.height(),
-        left.height() if task.how == 2 else right.height(),
+        capacity,
+        sizes[1] if task.how == 2 else sizes[0],
+        sizes[0] if task.how == 2 else sizes[1],
         Int(task.how == 2),
         key_count,
     )
 
 
-def _check_budget(peak: Int, budget: Int) raises:
-    if budget >= 0 and peak > budget:
-        raise Error("Mojo GPU join exceeds memory budget before submission")
+def execute_plan(
+    task: DagTask,
+    left: DataFrame,
+    right: DataFrame,
+    scope: Scope,
+    profiling: Bool = False,
+    left_resident: Optional[Table] = None,
+    right_resident: Optional[Table] = None,
+) raises -> Tuple[Table, DataFrame]:
+    var started = Int(perf_counter_ns())
+    var before = scope.transfers()
+    var layout = preflight(
+        task,
+        left,
+        right,
+        left_resident.value().rows if left_resident else -1,
+        right_resident.value().rows if right_resident else -1,
+    )
+    var resident_workspace = _checked_mul(
+        (left.width() if left_resident else 0)
+        + (right.width() if right_resident else 0),
+        48,
+    )
+    var descriptors = _checked_mul(
+        len(layout.columns) + len(layout.keys) + len(layout.outputs), 8
+    )
+    var matrices = _checked_mul(layout.cells, CELL_BYTES)
+    var shared = _checked_add(
+        _checked_add(matrices, descriptors),
+        j.workspace_bytes(layout.probe, layout.build, task.how),
+    )
+    var host = _checked_add(
+        _checked_add(matrices, descriptors), j.METADATA_WORDS * 8
+    )
+    var peak = _checked_add(_checked_add(shared, host), resident_workspace)
+    _ = scope.check(peak)
+    var host_cells = (
+        layout.cells if not left_resident or not right_resident else 0
+    )
+    var words = List[UInt64](length=2 * host_cells, fill=0)
+    var validity = List[UInt8](length=host_cells, fill=0)
+    var errors = List[UInt32](length=host_cells, fill=0)
+    var column = 0
+    for side in range(2):
+        var frame = right.copy() if side else left.copy()
+        var resident = right_resident.copy() if side else left_resident.copy()
+        for source in frame._columns:
+            if not resident:
+                _stage(
+                    source,
+                    layout.cells,
+                    0,
+                    Int(layout.columns[column * j.COLUMN_WORDS]),
+                    words,
+                    validity,
+                )
+            column += 1
+    var ctx = scope.context()
+    # Host staging and layout owners survive every failed submission.
+    try:
+        var device_words = ctx.enqueue_create_buffer[DType.uint64](
+            2 * layout.cells
+        )
+        var device_validity = ctx.enqueue_create_buffer[DType.uint8](
+            layout.cells
+        )
+        var device_errors = ctx.enqueue_create_buffer[DType.uint32](
+            layout.cells
+        )
+        var device_columns = ctx.enqueue_create_buffer[DType.int64](
+            len(layout.columns)
+        )
+        var device_keys = ctx.enqueue_create_buffer[DType.int64](
+            len(layout.keys)
+        )
+        var device_outputs = ctx.enqueue_create_buffer[DType.int64](
+            len(layout.outputs)
+        )
+        var index_count = max(1, layout.build if task.how != 6 else 0)
+        var index = ctx.enqueue_create_buffer[DType.uint32](index_count)
+        var scratch = ctx.enqueue_create_buffer[DType.uint32](index_count)
+        var ranges = ctx.enqueue_create_buffer[DType.uint64](
+            max(1, layout.probe)
+        )
+        var prefix = ctx.enqueue_create_buffer[DType.uint64](
+            max(1, layout.probe)
+        )
+        var pb = max(1, (layout.probe + 255) // 256)
+        var bb = max(1, (layout.build + 255) // 256)
+        var blocks = ctx.enqueue_create_buffer[DType.uint64](pb)
+        var full = task.how == 3
+        var differences = ctx.enqueue_create_buffer[DType.int32](
+            max(1, layout.build + 1 if full else 0)
+        )
+        var build_prefix = ctx.enqueue_create_buffer[DType.uint64](
+            max(1, layout.build if full else 0)
+        )
+        var build_blocks = ctx.enqueue_create_buffer[DType.uint64](
+            bb if full else 1
+        )
+        var flags = ctx.enqueue_create_buffer[DType.uint32](
+            max(1, layout.build if full else 0)
+        )
+        var unmatched = ctx.enqueue_create_buffer[DType.uint32](
+            max(1, layout.build if full else 0)
+        )
+        var metadata = ctx.enqueue_create_buffer[DType.uint64](j.METADATA_WORDS)
+        if host_cells:
+            ctx.enqueue_copy(device_words, words.unsafe_ptr())
+            ctx.enqueue_copy(device_validity, validity.unsafe_ptr())
+            ctx.enqueue_copy(device_errors, errors.unsafe_ptr())
+            scope.record_upload(host_cells * CELL_BYTES)
+        for side in range(2):
+            var resident = (
+                right_resident.copy() if side else left_resident.copy()
+            )
+            if resident:
+                var frame = right.copy() if side else left.copy()
+                var mapping = List[Int64](capacity=frame.width())
+                for column in frame._columns:
+                    var found = -1
+                    for i in range(resident.value().schema.width()):
+                        ref field = resident.value().schema._columns[i]
+                        if (
+                            field.name() == column.name()
+                            and field.dtype() == column.dtype()
+                        ):
+                            found = i
+                            break
+                    if found < 0:
+                        raise Error(
+                            "Mojo GPU resident join source field mismatch"
+                        )
+                    mapping.append(Int64(found))
+                _ = resident.value().copy_to(
+                    scope,
+                    device_words,
+                    device_validity,
+                    device_errors,
+                    layout.capacity,
+                    left.width() + right.width(),
+                    mapping,
+                    left.width() if side else 0,
+                )
+        ctx.enqueue_copy(device_columns, layout.columns.unsafe_ptr())
+        ctx.enqueue_copy(device_keys, layout.keys.unsafe_ptr())
+        ctx.enqueue_copy(device_outputs, layout.outputs.unsafe_ptr())
+        scope.record_upload(descriptors)
+        var launches = 0
+        if task.how != 6:
+            ctx.enqueue_function[j.join_init](
+                index.unsafe_ptr(),
+                UInt32(layout.build),
+                grid_dim=bb,
+                block_dim=256,
+            )
+            launches += 1
+            var width = 1
+            while width < layout.build:
+                ctx.enqueue_function[j.join_merge](
+                    device_words.unsafe_ptr(),
+                    device_validity.unsafe_ptr(),
+                    index.unsafe_ptr(),
+                    scratch.unsafe_ptr(),
+                    device_columns.unsafe_ptr(),
+                    device_keys.unsafe_ptr(),
+                    UInt32(layout.key_count),
+                    UInt32(layout.side),
+                    UInt32(layout.build),
+                    UInt32(width),
+                    UInt64(layout.cells),
+                    grid_dim=bb,
+                    block_dim=256,
+                )
+                var previous = index^
+                index = scratch^
+                scratch = previous^
+                width *= 2
+                launches += 1
+        if full:
+            ctx.enqueue_function[j.join_zero](
+                differences.unsafe_ptr(),
+                UInt32(layout.build),
+                grid_dim=(layout.build + 256) // 256,
+                block_dim=256,
+            )
+            launches += 1
+        ctx.enqueue_function[j.join_match](
+            device_words.unsafe_ptr(),
+            device_validity.unsafe_ptr(),
+            index.unsafe_ptr(),
+            device_columns.unsafe_ptr(),
+            device_keys.unsafe_ptr(),
+            ranges.unsafe_ptr(),
+            prefix.unsafe_ptr(),
+            differences.unsafe_ptr(),
+            UInt32(layout.key_count),
+            UInt32(layout.side),
+            UInt32(layout.probe),
+            UInt32(layout.build),
+            UInt32(task.how),
+            UInt32(task.how == 7),
+            UInt64(layout.cells),
+            grid_dim=pb,
+            block_dim=256,
+        )
+        ctx.enqueue_function[j.join_scan](
+            prefix.unsafe_ptr(),
+            blocks.unsafe_ptr(),
+            differences.unsafe_ptr(),
+            flags.unsafe_ptr(),
+            UInt32(layout.probe),
+            UInt32(0),
+            grid_dim=pb,
+            block_dim=256,
+        )
+        var limit = UInt64(task.limit) if task.limit >= 0 else UInt64.MAX
+        ctx.enqueue_function[j.join_offsets](
+            blocks.unsafe_ptr(),
+            metadata.unsafe_ptr(),
+            UInt32(pb),
+            UInt32(0),
+            limit,
+            grid_dim=1,
+            block_dim=1,
+        )
+        launches += 3
+        if full:
+            ctx.enqueue_function[j.join_scan](
+                build_prefix.unsafe_ptr(),
+                build_blocks.unsafe_ptr(),
+                differences.unsafe_ptr(),
+                flags.unsafe_ptr(),
+                UInt32(layout.build),
+                UInt32(1),
+                grid_dim=bb,
+                block_dim=256,
+            )
+            ctx.enqueue_function[j.join_offsets](
+                build_blocks.unsafe_ptr(),
+                metadata.unsafe_ptr(),
+                UInt32(bb),
+                UInt32(1),
+                limit,
+                grid_dim=1,
+                block_dim=1,
+            )
+            ctx.enqueue_function[j.join_coverage](
+                build_prefix.unsafe_ptr(),
+                build_blocks.unsafe_ptr(),
+                differences.unsafe_ptr(),
+                index.unsafe_ptr(),
+                flags.unsafe_ptr(),
+                UInt32(layout.build),
+                grid_dim=bb,
+                block_dim=256,
+            )
+            ctx.enqueue_function[j.join_scan](
+                build_prefix.unsafe_ptr(),
+                build_blocks.unsafe_ptr(),
+                differences.unsafe_ptr(),
+                flags.unsafe_ptr(),
+                UInt32(layout.build),
+                UInt32(2),
+                grid_dim=bb,
+                block_dim=256,
+            )
+            ctx.enqueue_function[j.join_offsets](
+                build_blocks.unsafe_ptr(),
+                metadata.unsafe_ptr(),
+                UInt32(bb),
+                UInt32(2),
+                limit,
+                grid_dim=1,
+                block_dim=1,
+            )
+            ctx.enqueue_function[j.join_unmatched](
+                build_prefix.unsafe_ptr(),
+                build_blocks.unsafe_ptr(),
+                flags.unsafe_ptr(),
+                unmatched.unsafe_ptr(),
+                UInt32(layout.build),
+                grid_dim=bb,
+                block_dim=256,
+            )
+            launches += 6
+        var shape = scope.read_control(metadata)
+        scope.record_download(j.METADATA_WORDS * 8)
+        # Only the requested prefix must fit device indices. Full fanout may
+        # exceed Int32.MAX when a head bounds the observable output.
+        if shape[0] > UInt64(Int32.MAX):
+            raise Error(
+                "Mojo GPU join output exceeds supported device index range"
+            )
+        var rows = Int(shape[0])
+        var capacity = max(1, rows)
+        var output_cells = _checked_mul(capacity, len(task.fields))
+        var matrix_result_bytes = _checked_mul(output_cells, CELL_BYTES)
+        shared = _checked_add(shared, matrix_result_bytes)
+        host = _checked_add(host, matrix_result_bytes)
+        var typed = 0
+        for field in task.fields:
+            typed = _checked_add(typed, _checked_mul(rows, _width(field.dtype)))
+            typed = _checked_add(typed, (rows + 7) // 8)
+        peak = _checked_add(
+            _checked_add(shared, host),
+            _checked_add(typed, _checked_mul(rows, 4)),
+        )
+        peak = _checked_add(peak, resident_workspace)
+        _ = scope.check(peak)
+        var result_words = ctx.enqueue_create_buffer[DType.uint64](
+            2 * output_cells
+        )
+        var result_validity = ctx.enqueue_create_buffer[DType.uint8](
+            output_cells
+        )
+        var result_errors = ctx.enqueue_create_buffer[DType.uint32](
+            output_cells
+        )
+        var waits = 1
+        if rows:
+            ctx.enqueue_function[j.join_gather](
+                device_words.unsafe_ptr(),
+                device_validity.unsafe_ptr(),
+                device_errors.unsafe_ptr(),
+                device_columns.unsafe_ptr(),
+                device_outputs.unsafe_ptr(),
+                index.unsafe_ptr(),
+                ranges.unsafe_ptr(),
+                prefix.unsafe_ptr(),
+                blocks.unsafe_ptr(),
+                unmatched.unsafe_ptr(),
+                metadata.unsafe_ptr(),
+                result_words.unsafe_ptr(),
+                result_validity.unsafe_ptr(),
+                result_errors.unsafe_ptr(),
+                UInt32(layout.probe),
+                UInt32(layout.side),
+                UInt32(task.how),
+                UInt32(len(task.fields)),
+                UInt64(layout.cells),
+                grid_dim=(rows + 255) // 256,
+                block_dim=256,
+            )
+            scope.synchronize()
+            launches += 1
+            waits += 1
+        var schema_columns = List[Series](capacity=len(task.fields))
+        var output_slots = List[Int64](capacity=len(task.fields))
+        for slot in range(len(task.fields)):
+            schema_columns.append(
+                Series.full_null(
+                    task.fields[slot].name, task.fields[slot].dtype, 0
+                )
+            )
+            output_slots.append(Int64(slot))
+        var result = Table(
+            Matrix(
+                scope,
+                capacity,
+                len(task.fields),
+                result_words^,
+                result_validity^,
+                result_errors^,
+            ),
+            DataFrame(schema_columns^),
+            output_slots^,
+            rows,
+        )
+        scope.record_launches(launches)
+        var traffic = scope.transfers()
+        launches = traffic[2] - before[2]
+        waits = traffic[3] - before[3]
+        var report = ExecutionReport()
+        report.record(
+            task.root,
+            "JOIN",
+            "metal",
+            layout.probe,
+            rows,
+            build_rows=layout.build,
+            builds=Int(task.how != 6),
+            build_side="left" if layout.side else "right",
+            algorithm="mojo_gpu_cross_join" if task.how
+            == 6 else "mojo_gpu_sorted_join",
+            wall_ns=Int(perf_counter_ns()) - started,
+        )
+        var fields = report.frame()._columns.copy()
+        fields.append(
+            Series("kernel_launches", Column[Int64]([Int64(launches)]))
+        )
+        fields.append(Series("synchronizations", Column[Int64]([Int64(waits)])))
+        fields.append(
+            Series("peak_requested_bytes", Column[Int64]([Int64(peak)]))
+        )
+        fields.append(
+            Series("runtime_implementation", Column[String](["mojo"]))
+        )
+        fields.append(
+            Series(
+                "upload_bytes", Column[Int64]([Int64(traffic[0] - before[0])])
+            )
+        )
+        fields.append(
+            Series(
+                "download_bytes", Column[Int64]([Int64(traffic[1] - before[1])])
+            )
+        )
+        fields.append(Series("host_result_bytes", Column[Int64]([Int64(0)])))
+        fields.append(
+            Series(
+                "resident_input_bytes",
+                Column[Int64](
+                    [
+                        Int64(
+                            (
+                                left_resident.value().retained_bytes() if left_resident else 0
+                            )
+                            + (
+                                right_resident.value().retained_bytes() if right_resident else 0
+                            )
+                        )
+                    ]
+                ),
+            )
+        )
+        fields.append(
+            Series(
+                "resident_output_bytes",
+                Column[Int64]([Int64(result.retained_bytes())]),
+            )
+        )
+        fields.append(
+            Series(
+                "query_wall_ms",
+                Column[Float64](
+                    [Float64(Int(perf_counter_ns()) - started) / 1e6]
+                ),
+            )
+        )
+        var report_frame = DataFrame(fields^)
+        # Keep raw-pointer upload owners alive until all queued reads finish.
+        _ = words^
+        _ = validity^
+        _ = errors^
+        _ = layout^
+        return (result^, report_frame^)
+    except error:
+        scope.synchronize()
+        _ = words^
+        _ = validity^
+        _ = errors^
+        _ = layout^
+        raise error^
 
 
 def execute(
@@ -132,305 +604,46 @@ def execute(
     profiling: Bool,
 ) raises -> Tuple[DataFrame, DataFrame]:
     var started = Int(perf_counter_ns())
-    var layout = preflight(task, left, right)
-    var descriptors = _checked_mul(
-        len(layout.columns) + len(layout.keys) + len(layout.outputs), 8
+    _ = preflight(task, left, right)
+    var scope = Scope(device_id, budget)
+    var executed = execute_plan(task, left, right, scope, profiling)
+    var result = materialize(executed[0])
+    var traffic = scope.transfers()
+    var report = executed[1].copy()
+    report = report.with_column(
+        Series("kernel_launches", Column[Int64]([Int64(traffic[2])]))
     )
-    var matrices = _checked_mul(layout.cells, 13)
-    var shared = _checked_add(
-        _checked_add(matrices, descriptors),
-        j.workspace_bytes(layout.probe, layout.build, task.how),
+    report = report.with_column(
+        Series("synchronizations", Column[Int64]([Int64(traffic[3])]))
     )
-    var host = _checked_add(
-        _checked_add(matrices, descriptors), j.METADATA_WORDS * 8
+    report = report.with_column(
+        Series("upload_bytes", Column[Int64]([Int64(traffic[0])]))
     )
-    var peak = _checked_add(shared, host)
-    _check_budget(peak, budget)
-    var words = List[UInt64](length=layout.cells, fill=0)
-    var validity = List[UInt8](length=layout.cells, fill=0)
-    var errors = List[UInt32](length=layout.cells, fill=0)
-    var column = 0
-    for side in range(2):
-        var frame = right.copy() if side else left.copy()
-        for source in frame._columns:
-            _stage(
-                source,
-                layout.cells,
-                0,
-                Int(layout.columns[column * j.COLUMN_WORDS]),
-                words,
-                validity,
-            )
-            column += 1
-    var ctx = DeviceContext(device_id)
-    var device_words = ctx.enqueue_create_buffer[DType.uint64](layout.cells)
-    var device_validity = ctx.enqueue_create_buffer[DType.uint8](layout.cells)
-    var device_errors = ctx.enqueue_create_buffer[DType.uint32](layout.cells)
-    var device_columns = ctx.enqueue_create_buffer[DType.int64](
-        len(layout.columns)
+    report = report.with_column(
+        Series("download_bytes", Column[Int64]([Int64(traffic[1])]))
     )
-    var device_keys = ctx.enqueue_create_buffer[DType.int64](len(layout.keys))
-    var device_outputs = ctx.enqueue_create_buffer[DType.int64](
-        len(layout.outputs)
-    )
-    var index_count = max(1, layout.build if task.how != 6 else 0)
-    var index = ctx.enqueue_create_buffer[DType.uint32](index_count)
-    var scratch = ctx.enqueue_create_buffer[DType.uint32](index_count)
-    var ranges = ctx.enqueue_create_buffer[DType.uint64](max(1, layout.probe))
-    var prefix = ctx.enqueue_create_buffer[DType.uint64](max(1, layout.probe))
-    var pb = max(1, (layout.probe + 255) // 256)
-    var bb = max(1, (layout.build + 255) // 256)
-    var blocks = ctx.enqueue_create_buffer[DType.uint64](pb)
-    var full = task.how == 3
-    var differences = ctx.enqueue_create_buffer[DType.int32](
-        max(1, layout.build + 1 if full else 0)
-    )
-    var build_prefix = ctx.enqueue_create_buffer[DType.uint64](
-        max(1, layout.build if full else 0)
-    )
-    var build_blocks = ctx.enqueue_create_buffer[DType.uint64](
-        bb if full else 1
-    )
-    var flags = ctx.enqueue_create_buffer[DType.uint32](
-        max(1, layout.build if full else 0)
-    )
-    var unmatched = ctx.enqueue_create_buffer[DType.uint32](
-        max(1, layout.build if full else 0)
-    )
-    var metadata = ctx.enqueue_create_buffer[DType.uint64](j.METADATA_WORDS)
-    ctx.enqueue_copy(device_words, words.unsafe_ptr())
-    ctx.enqueue_copy(device_validity, validity.unsafe_ptr())
-    ctx.enqueue_copy(device_errors, errors.unsafe_ptr())
-    ctx.enqueue_copy(device_columns, layout.columns.unsafe_ptr())
-    ctx.enqueue_copy(device_keys, layout.keys.unsafe_ptr())
-    ctx.enqueue_copy(device_outputs, layout.outputs.unsafe_ptr())
-    var launches = 0
-    if task.how != 6:
-        ctx.enqueue_function[j.join_init](
-            index.unsafe_ptr(), UInt32(layout.build), grid_dim=bb, block_dim=256
+    var host_result_bytes = 0
+    for column in result._columns:
+        host_result_bytes = _checked_add(
+            host_result_bytes,
+            _checked_add(
+                _checked_mul(result.height(), _width(column.dtype())),
+                (result.height() + 7) // 8,
+            ),
         )
-        launches += 1
-        var width = 1
-        while width < layout.build:
-            ctx.enqueue_function[j.join_merge](
-                device_words.unsafe_ptr(),
-                device_validity.unsafe_ptr(),
-                index.unsafe_ptr(),
-                scratch.unsafe_ptr(),
-                device_columns.unsafe_ptr(),
-                device_keys.unsafe_ptr(),
-                UInt32(layout.key_count),
-                UInt32(layout.side),
-                UInt32(layout.build),
-                UInt32(width),
-                grid_dim=bb,
-                block_dim=256,
-            )
-            var previous = index^
-            index = scratch^
-            scratch = previous^
-            width *= 2
-            launches += 1
-    if full:
-        ctx.enqueue_function[j.join_zero](
-            differences.unsafe_ptr(),
-            UInt32(layout.build),
-            grid_dim=(layout.build + 256) // 256,
-            block_dim=256,
-        )
-        launches += 1
-    ctx.enqueue_function[j.join_match](
-        device_words.unsafe_ptr(),
-        device_validity.unsafe_ptr(),
-        index.unsafe_ptr(),
-        device_columns.unsafe_ptr(),
-        device_keys.unsafe_ptr(),
-        ranges.unsafe_ptr(),
-        prefix.unsafe_ptr(),
-        differences.unsafe_ptr(),
-        UInt32(layout.key_count),
-        UInt32(layout.side),
-        UInt32(layout.probe),
-        UInt32(layout.build),
-        UInt32(task.how),
-        UInt32(task.how == 7),
-        grid_dim=pb,
-        block_dim=256,
+    report = report.with_column(
+        Series("host_result_bytes", Column[Int64]([Int64(host_result_bytes)]))
     )
-    ctx.enqueue_function[j.join_scan](
-        prefix.unsafe_ptr(),
-        blocks.unsafe_ptr(),
-        differences.unsafe_ptr(),
-        flags.unsafe_ptr(),
-        UInt32(layout.probe),
-        UInt32(0),
-        grid_dim=pb,
-        block_dim=256,
+    report = report.with_column(
+        Series("resident_input_bytes", Column[Int64]([Int64(0)]))
     )
-    var limit = UInt64(task.limit) if task.limit >= 0 else UInt64.MAX
-    ctx.enqueue_function[j.join_offsets](
-        blocks.unsafe_ptr(),
-        metadata.unsafe_ptr(),
-        UInt32(pb),
-        UInt32(0),
-        limit,
-        grid_dim=1,
-        block_dim=1,
+    report = report.with_column(
+        Series("resident_output_bytes", Column[Int64]([Int64(0)]))
     )
-    launches += 3
-    if full:
-        ctx.enqueue_function[j.join_scan](
-            build_prefix.unsafe_ptr(),
-            build_blocks.unsafe_ptr(),
-            differences.unsafe_ptr(),
-            flags.unsafe_ptr(),
-            UInt32(layout.build),
-            UInt32(1),
-            grid_dim=bb,
-            block_dim=256,
+    report = report.with_column(
+        Series(
+            "query_wall_ms",
+            Column[Float64]([Float64(Int(perf_counter_ns()) - started) / 1e6]),
         )
-        ctx.enqueue_function[j.join_offsets](
-            build_blocks.unsafe_ptr(),
-            metadata.unsafe_ptr(),
-            UInt32(bb),
-            UInt32(1),
-            limit,
-            grid_dim=1,
-            block_dim=1,
-        )
-        ctx.enqueue_function[j.join_coverage](
-            build_prefix.unsafe_ptr(),
-            build_blocks.unsafe_ptr(),
-            differences.unsafe_ptr(),
-            index.unsafe_ptr(),
-            flags.unsafe_ptr(),
-            UInt32(layout.build),
-            grid_dim=bb,
-            block_dim=256,
-        )
-        ctx.enqueue_function[j.join_scan](
-            build_prefix.unsafe_ptr(),
-            build_blocks.unsafe_ptr(),
-            differences.unsafe_ptr(),
-            flags.unsafe_ptr(),
-            UInt32(layout.build),
-            UInt32(2),
-            grid_dim=bb,
-            block_dim=256,
-        )
-        ctx.enqueue_function[j.join_offsets](
-            build_blocks.unsafe_ptr(),
-            metadata.unsafe_ptr(),
-            UInt32(bb),
-            UInt32(2),
-            limit,
-            grid_dim=1,
-            block_dim=1,
-        )
-        ctx.enqueue_function[j.join_unmatched](
-            build_prefix.unsafe_ptr(),
-            build_blocks.unsafe_ptr(),
-            flags.unsafe_ptr(),
-            unmatched.unsafe_ptr(),
-            UInt32(layout.build),
-            grid_dim=bb,
-            block_dim=256,
-        )
-        launches += 6
-    var shape = List[UInt64](length=j.METADATA_WORDS, fill=0)
-    ctx.enqueue_copy(shape.unsafe_ptr(), metadata)
-    ctx.synchronize()
-    # Only the requested prefix must fit device indices. Full fanout may
-    # exceed Int32.MAX when a head bounds the observable output.
-    if shape[0] > UInt64(Int32.MAX):
-        raise Error("Mojo GPU join output exceeds supported device index range")
-    var rows = Int(shape[0])
-    var capacity = max(1, rows)
-    var output_cells = _checked_mul(capacity, len(task.fields))
-    var matrix_result_bytes = _checked_mul(output_cells, 13)
-    shared = _checked_add(shared, matrix_result_bytes)
-    host = _checked_add(host, matrix_result_bytes)
-    var typed = 0
-    for field in task.fields:
-        typed = _checked_add(typed, _checked_mul(rows, _width(field.dtype)))
-        typed = _checked_add(typed, (rows + 7) // 8)
-    peak = _checked_add(
-        _checked_add(shared, host), _checked_add(typed, _checked_mul(rows, 4))
     )
-    _check_budget(peak, budget)
-    var output_words = List[UInt64](length=output_cells, fill=0)
-    var output_validity = List[UInt8](length=output_cells, fill=0)
-    var output_errors = List[UInt32](length=output_cells, fill=0)
-    var result_words = ctx.enqueue_create_buffer[DType.uint64](output_cells)
-    var result_validity = ctx.enqueue_create_buffer[DType.uint8](output_cells)
-    var result_errors = ctx.enqueue_create_buffer[DType.uint32](output_cells)
-    var waits = 1
-    if rows:
-        ctx.enqueue_function[j.join_gather](
-            device_words.unsafe_ptr(),
-            device_validity.unsafe_ptr(),
-            device_errors.unsafe_ptr(),
-            device_columns.unsafe_ptr(),
-            device_outputs.unsafe_ptr(),
-            index.unsafe_ptr(),
-            ranges.unsafe_ptr(),
-            prefix.unsafe_ptr(),
-            blocks.unsafe_ptr(),
-            unmatched.unsafe_ptr(),
-            metadata.unsafe_ptr(),
-            result_words.unsafe_ptr(),
-            result_validity.unsafe_ptr(),
-            result_errors.unsafe_ptr(),
-            UInt32(layout.probe),
-            UInt32(layout.side),
-            UInt32(task.how),
-            UInt32(len(task.fields)),
-            grid_dim=(rows + 255) // 256,
-            block_dim=256,
-        )
-        ctx.enqueue_copy(output_words.unsafe_ptr(), result_words)
-        ctx.enqueue_copy(output_validity.unsafe_ptr(), result_validity)
-        ctx.enqueue_copy(output_errors.unsafe_ptr(), result_errors)
-        ctx.synchronize()
-        launches += 1
-        waits += 1
-    var columns = List[Series](capacity=len(task.fields))
-    for slot in range(len(task.fields)):
-        for row in range(rows):
-            if output_errors[slot * capacity + row]:
-                raise Error(
-                    "Mojo GPU join input expression failed checked arithmetic or cast"
-                )
-        ref field = task.fields[slot]
-        columns.append(
-            _output(
-                field.name,
-                field.dtype,
-                slot,
-                capacity,
-                rows,
-                output_words,
-                output_validity,
-            )
-        )
-    var result = DataFrame(columns^, height=rows)
-    var report = ExecutionReport()
-    report.record(
-        task.root,
-        "JOIN",
-        "metal",
-        layout.probe,
-        rows,
-        build_rows=layout.build,
-        builds=Int(task.how != 6),
-        build_side="left" if layout.side else "right",
-        algorithm="mojo_gpu_cross_join" if task.how
-        == 6 else "mojo_gpu_sorted_join",
-        wall_ns=Int(perf_counter_ns()) - started,
-    )
-    var fields = report.frame()._columns.copy()
-    fields.append(Series("kernel_launches", Column[Int64]([Int64(launches)])))
-    fields.append(Series("synchronizations", Column[Int64]([Int64(waits)])))
-    fields.append(Series("peak_requested_bytes", Column[Int64]([Int64(peak)])))
-    fields.append(Series("runtime_implementation", Column[String](["mojo"])))
-    return (result^, DataFrame(fields^))
+    return (result^, report^)

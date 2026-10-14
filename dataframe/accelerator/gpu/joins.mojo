@@ -22,6 +22,7 @@ from std.atomic import Atomic
 from std.memory import Pointer
 from .grouping import key_equal
 from .ordering import _word_less, _nan
+from . import decimal
 
 comptime COLUMN_WORDS = 3
 comptime OUTPUT_WORDS = 4
@@ -51,7 +52,7 @@ def workspace_bytes(probe: Int, build: Int, how: Int) -> Int:
 
 def result_bytes(rows: Int, slots: Int) -> Int:
     """GPU result word/validity/error storage, before host and typed results."""
-    return 13 * max(1, rows) * slots
+    return 21 * max(1, rows) * slots
 
 
 @always_inline
@@ -65,6 +66,7 @@ def tuple_compare(
     keys: Pointer[Int64, ImmutAnyOrigin],
     key_count: UInt32,
     probe_side: UInt32,
+    cells: UInt64 = 0,
 ) -> Int32:
     """Compare build a with build b, or with probe b when cross is true."""
     for key in range(Int(key_count)):
@@ -83,6 +85,14 @@ def tuple_compare(
         var aw = words[unsafe_offset=ai]
         var bw = words[unsafe_offset=bi]
         var dtype = columns[unsafe_offset=Int(build) * COLUMN_WORDS + 2]
+        if dtype == 12:
+            var ah = words[unsafe_offset=Int(cells) + ai]
+            var bh = words[unsafe_offset=Int(cells) + bi]
+            if aw == bw and ah == bh:
+                continue
+            return -1 if decimal.signed_less(
+                decimal.Wide(aw, ah), decimal.Wide(bw, bh)
+            ) else 1
         if key_equal(aw, bw, dtype):
             continue
         var an = _nan(aw, dtype)
@@ -103,9 +113,19 @@ def _less(
     keys: Pointer[Int64, ImmutAnyOrigin],
     key_count: UInt32,
     probe_side: UInt32,
+    cells: UInt64 = 0,
 ) -> Bool:
     var comparison = tuple_compare(
-        a, b, False, words, validity, columns, keys, key_count, probe_side
+        a,
+        b,
+        False,
+        words,
+        validity,
+        columns,
+        keys,
+        key_count,
+        probe_side,
+        cells,
     )
     return comparison < 0 or (comparison == 0 and a < b)
 
@@ -127,6 +147,7 @@ def join_merge(
     probe_side: UInt32,
     build_rows: UInt32,
     run_width: UInt32,
+    cells: UInt64 = 0,
 ):
     var row = global_idx.x
     if row >= Int(build_rows):
@@ -151,6 +172,7 @@ def join_merge(
             keys,
             key_count,
             probe_side,
+            cells,
         ):
             lo = mid + 1
         else:
@@ -181,6 +203,7 @@ def join_match(
     build_rows: UInt32,
     how: UInt32,
     nulls_equal: UInt32,
+    cells: UInt64 = 0,
 ):
     var row = global_idx.x
     if row >= Int(probe_rows):
@@ -215,6 +238,7 @@ def join_match(
                         keys,
                         key_count,
                         probe_side,
+                        cells,
                     )
                     < 0
                 ):
@@ -236,6 +260,7 @@ def join_match(
                         keys,
                         key_count,
                         probe_side,
+                        cells,
                     )
                     <= 0
                 ):
@@ -442,6 +467,7 @@ def join_gather(
     probe_side: UInt32,
     how: UInt32,
     output_count: UInt32,
+    cells: UInt64 = 0,
 ):
     var row = global_idx.x
     var rows = metadata[unsafe_offset=0]
@@ -478,6 +504,7 @@ def join_gather(
             selected = pair[1]
         var target = Int(slot) * Int(max(rows, UInt64(1))) + row
         var word = UInt64(0)
+        var high = UInt64(0)
         var valid = UInt8(0)
         var error = UInt32(0)
         if source >= 0:
@@ -488,6 +515,13 @@ def join_gather(
             error = errors[unsafe_offset=index]
             if valid:
                 word = words[unsafe_offset=index]
+                if cells:
+                    high = words[unsafe_offset=Int(cells) + index]
         output_words[unsafe_offset=target] = word
+        if cells:
+            output_words[
+                unsafe_offset=Int(output_count) * Int(max(rows, UInt64(1)))
+                + target
+            ] = high
         output_validity[unsafe_offset=target] = valid
         output_errors[unsafe_offset=target] = error

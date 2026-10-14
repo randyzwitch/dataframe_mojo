@@ -42,6 +42,8 @@ from dataframe.expr import (
     OR,
     XOR,
     FILL_NULL,
+    KEEP_NULLS,
+    INT_IS_IN,
     NEG,
     ABS,
     NOT,
@@ -50,7 +52,14 @@ from dataframe.expr import (
     WHEN,
 )
 from std.memory import Pointer, unsafe_stack_allocation
-from . import floating, temporal
+from . import floating, temporal, decimal, integers
+from .decimal_descriptors import (
+    DECIMAL_FLOAT,
+    DECIMAL_CAST,
+    DECIMAL_COMPARE,
+    DECIMAL_BINARY,
+    DECIMAL_UNARY,
+)
 from dataframe.accelerator.rows import ROW_SLICE
 
 
@@ -130,11 +139,13 @@ def row_program(
     target: UInt32,
     rows: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ):
     var row = global_idx.x
     if row >= Int(rows):
         return
     var values = unsafe_stack_allocation[128, DType.uint64]()
+    var highs = unsafe_stack_allocation[128, DType.uint64]()
     var valid = unsafe_stack_allocation[128, DType.uint8]()
     var failed = unsafe_stack_allocation[128, DType.uint32]()
     for node in range(Int(nodes)):
@@ -145,11 +156,14 @@ def row_program(
         var c = Int(code[unsafe_offset=4 * absolute + 3])
         var dtype = types[unsafe_offset=absolute]
         var value = UInt64(0)
+        var high = UInt64(0)
         var present = True
         var error = UInt32(0)
         if op == COL:
             var at = c * Int(stride) + row
             value = words[unsafe_offset=at]
+            if dtype == 12:
+                high = words[unsafe_offset=Int(stride) * Int(slots) + at]
             present = validity[unsafe_offset=at] != 0
             error = errors[unsafe_offset=at]
         elif op == ROW_SLICE:
@@ -165,6 +179,8 @@ def row_program(
             value = UInt64(Int64(row) >= begin and Int64(row) - begin < span)
         elif op == LIT_INT or op == LIT_FLOAT or op == LIT_BOOL:
             value = literals[unsafe_offset=absolute]
+            if dtype == 12 and op == LIT_INT:
+                high = literals[unsafe_offset=c]
         elif op == LIT_NULL:
             present = False
         elif op == WHEN:
@@ -173,9 +189,12 @@ def row_program(
                 and (values[unsafe_offset=a] != 0) else c
             )
             value = values[unsafe_offset=chosen]
+            high = highs[unsafe_offset=chosen]
             present = valid[unsafe_offset=chosen] != 0
             error = failed[unsafe_offset=a] | failed[unsafe_offset=chosen]
             var source_type = types[unsafe_offset=Int(start) + chosen]
+            if dtype == 12 and source_type != 12:
+                high = UInt64.MAX if value >> 63 else UInt64(0)
             if (dtype == 1 or dtype == 11) and source_type != dtype:
                 value = floating.word(value, source_type)
                 if dtype == 1:
@@ -194,13 +213,127 @@ def row_program(
                 )
             var chosen = a if use_left else b
             value = values[unsafe_offset=chosen]
+            high = highs[unsafe_offset=chosen]
             present = valid[unsafe_offset=chosen] != 0
             error = failed[unsafe_offset=a] | failed[unsafe_offset=chosen]
             var source_type = types[unsafe_offset=Int(start) + chosen]
+            if dtype == 12 and source_type != 12:
+                high = UInt64.MAX if value >> 63 else UInt64(0)
             if (dtype == 1 or dtype == 11) and source_type != dtype:
                 value = floating.word(value, source_type)
                 if dtype == 1:
                     value = UInt64(floating.to_float32(value))
+        elif op == DECIMAL_FLOAT or op == DECIMAL_CAST or op == DECIMAL_UNARY:
+            value = values[unsafe_offset=a]
+            var source_type = types[unsafe_offset=Int(start) + a]
+            high = highs[unsafe_offset=a] if source_type == 12 else (
+                UInt64.MAX if not unsigned_type(source_type)
+                and source_type != 4
+                and value >> 63 else UInt64(0)
+            )
+            present = valid[unsafe_offset=a] != 0
+            error = failed[unsafe_offset=a]
+            if present:
+                var input = decimal.Wide(value, high)
+                if op == DECIMAL_FLOAT or (
+                    op == DECIMAL_CAST and (dtype == 1 or dtype == 11)
+                ):
+                    value = floating.div(
+                        floating.from_wide(value, high, False),
+                        literals[unsafe_offset=absolute],
+                    )
+                    if dtype == 1:
+                        value = UInt64(floating.to_float32(value))
+                    high = 0
+                elif op == DECIMAL_UNARY:
+                    var result = decimal.unary(
+                        input,
+                        UInt32(128) if dtype == 12 else integer_width(dtype),
+                        c == ABS,
+                    )
+                    value = result.value.low
+                    high = result.value.high
+                    error |= decimal.error_flag(result.error)
+                    present = result.error == 0
+                else:
+                    var result = decimal.cast(
+                        input,
+                        UInt32(c & 63),
+                        UInt32((c >> 6) & 63),
+                        UInt32((c >> 12) & 63),
+                        UInt32(128) if dtype == 12 else integer_width(dtype),
+                        unsigned_type(dtype),
+                        dtype == 4,
+                    )
+                    value = result.value.low
+                    high = result.value.high if dtype == 12 else UInt64(0)
+                    present = result.valid
+                    if not present and (c & (1 << 18)):
+                        error |= 1
+        elif op == DECIMAL_BINARY or op == DECIMAL_COMPARE:
+            present = (
+                valid[unsafe_offset=a] != 0 and valid[unsafe_offset=b] != 0
+            )
+            error = failed[unsafe_offset=a] | failed[unsafe_offset=b]
+            if present:
+                var left = values[unsafe_offset=a]
+                var right = values[unsafe_offset=b]
+                var left_type = types[unsafe_offset=Int(start) + a]
+                var right_type = types[unsafe_offset=Int(start) + b]
+                var lhs = decimal.Wide(
+                    left,
+                    highs[unsafe_offset=a] if left_type
+                    == 12 else (UInt64.MAX if left >> 63 else UInt64(0)),
+                )
+                var rhs = decimal.Wide(
+                    right,
+                    highs[unsafe_offset=b] if right_type
+                    == 12 else (UInt64.MAX if right >> 63 else UInt64(0)),
+                )
+                var left_scale = UInt32(c & 63)
+                var right_scale = UInt32((c >> 6) & 63)
+                var operation = UInt32(c >> 12)
+                if op == DECIMAL_COMPARE:
+                    var result = decimal.compare(
+                        lhs, rhs, left_scale, right_scale, operation
+                    )
+                    value = UInt64(result.value)
+                    present = result.valid
+                    error |= UInt32(4) if not present else UInt32(0)
+                else:
+                    var result = decimal.Arithmetic(decimal.Wide(0), 0)
+                    if operation == MUL:
+                        result = decimal.multiply(
+                            lhs, rhs, left_scale, right_scale
+                        )
+                    elif operation == DIV:
+                        result = decimal.divide_rows(
+                            lhs, rhs, left_scale, right_scale
+                        )
+                    else:
+                        result = decimal.add_subtract(
+                            lhs, rhs, left_scale, right_scale, operation == SUB
+                        )
+                    value = result.value.low
+                    high = result.value.high
+                    present = result.error == 0
+                    error |= decimal.error_flag(result.error)
+        elif op == KEEP_NULLS:
+            value = values[unsafe_offset=b]
+            high = highs[unsafe_offset=b]
+            present = (
+                valid[unsafe_offset=a] != 0 and valid[unsafe_offset=b] != 0
+            )
+            error = failed[unsafe_offset=a] | failed[unsafe_offset=b]
+        elif op == INT_IS_IN:
+            present = valid[unsafe_offset=a] != 0
+            error = failed[unsafe_offset=a]
+            if present:
+                for member in range(c):
+                    value |= UInt64(
+                        values[unsafe_offset=a]
+                        == literals[unsafe_offset=b + member]
+                    )
         elif op == CAST:
             value = values[unsafe_offset=a]
             present = valid[unsafe_offset=a] != 0
@@ -302,7 +435,13 @@ def row_program(
             if present:
                 var operand = types[unsafe_offset=Int(start) + a]
                 var input = floating.word(values[unsafe_offset=a], operand)
-                if op == SQRT:
+                if (
+                    dtype != 1
+                    and dtype != 11
+                    and (op == FLOOR or op == CEIL or op == ROUND)
+                ):
+                    value = values[unsafe_offset=a]
+                elif op == SQRT:
                     value = floating.sqrt(input)
                 elif op == EXP:
                     value = floating.exp(input)
@@ -381,6 +520,21 @@ def row_program(
                     var result = integer_arithmetic(op, left, right, dtype)
                     value = result[0]
                     error |= result[1]
+                elif op == FLOORDIV or op == MOD or op == POW:
+                    var result = integers.evaluate(
+                        op,
+                        left,
+                        right,
+                        integer_width(dtype),
+                        unsigned_type(dtype),
+                    )
+                    value = result[0]
+                    present = result[1]
+                    error |= (
+                        UInt32(32) if op == POW
+                        and not unsigned_type(dtype)
+                        and right >> 63 else result[2]
+                    )
                 else:
                     var operand = types[unsafe_offset=Int(start) + a]
                     var other_operand = types[unsafe_offset=Int(start) + b]
@@ -400,10 +554,18 @@ def row_program(
                         less = floating.less(x, y)
                         equal = floating.equal(x, y)
                         greater = floating.less(y, x)
+                    if operand == 12:
+                        var lhs = decimal.Wide(left, highs[unsafe_offset=a])
+                        var rhs = decimal.Wide(right, highs[unsafe_offset=b])
+                        less = decimal.signed_less(lhs, rhs)
+                        equal = decimal.wide_equal(lhs, rhs)
+                        greater = not less and not equal
                     if op == CLIP_LOW or op == CLIP_HIGH:
-                        value = right if (
+                        var chosen = b if (
                             less if op == CLIP_LOW else greater
-                        ) else left
+                        ) else a
+                        value = values[unsafe_offset=chosen]
+                        high = highs[unsafe_offset=chosen]
                     elif op == GT:
                         value = UInt64(greater)
                     elif op == EQ:
@@ -417,10 +579,17 @@ def row_program(
                     elif op == NE:
                         value = UInt64(not equal)
         values[unsafe_offset=node] = value if present else UInt64(0)
+        highs[unsafe_offset=node] = high if present and dtype == 12 else UInt64(
+            0
+        )
         valid[unsafe_offset=node] = UInt8(present)
         failed[unsafe_offset=node] = error
     var root = Int(nodes) - 1
     var destination = Int(target) * Int(stride) + row
     words[unsafe_offset=destination] = values[unsafe_offset=root]
+    if slots:
+        words[unsafe_offset=Int(stride) * Int(slots) + destination] = highs[
+            unsafe_offset=root
+        ]
     validity[unsafe_offset=destination] = valid[unsafe_offset=root]
     errors[unsafe_offset=destination] = failed[unsafe_offset=root]

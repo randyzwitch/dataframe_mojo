@@ -93,11 +93,18 @@ def test_native_metal_selectors_projection_replacement_filters_strings_and_estim
     check(frame.lazy().with_columns(by_dtype(["uint8"]) + lit(UInt8(1))))
     var query = frame.lazy().select(by_dtype(["float64"]) + lit(Float64(1)))
     var runtime = MetalRuntime()
-    var expanded = lower_selectors(query)
-    assert_equal(
-        runtime.estimate_auto(query).family,
-        runtime.estimate_auto(expanded).family,
-    )
+    # Dictionary staging is executable but has no automatic cost family.
+    with assert_raises(contains="dictionary staging"):
+        _ = runtime.estimate_auto(query)
+    var numeric = frame.select(["x", "y"])
+    var costed = numeric.lazy().select(by_dtype(["float64"]) + lit(Float64(1)))
+    var expanded = lower_selectors(costed)
+    var selected_facts = runtime.estimate_auto(costed)
+    var expanded_facts = runtime.estimate_auto(expanded)
+    assert_equal(selected_facts.cpu, expanded_facts.cpu)
+    assert_equal(selected_facts.accelerator, expanded_facts.accelerator)
+    assert_true(selected_facts.family != expanded_facts.family)
+    assert_true(";normalizers=" in selected_facts.family)
     var profiled = query.profile(accelerator=runtime)
     same(profiled[0], query.collect(engine="cpu"))
     with assert_raises(contains="budget"):

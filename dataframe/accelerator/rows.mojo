@@ -816,12 +816,17 @@ def lower_rows(
     capabilities: RowCapabilities = RowCapabilities(),
     *,
     terminal_boundary: Bool = True,
+    source_rows: Int = -1,
 ) raises -> RowPlan:
     """Bind the entire resident region before GPU submission or source I/O.
 
     Regions feeding another operator are not observable terminal boundaries:
     that operator can prune rows and change whether checked work is evaluated.
+    Resident callers may supply the actual source cardinality alongside a
+    metadata-only frame; this never changes or reads the frame's storage.
     """
+    if source_rows < -1:
+        raise Error("Resident source row count must be >= -1")
     var root = len(query._nodes) - 1
     if root < 0:
         capabilities.reject("plan", "empty plan")
@@ -869,6 +874,7 @@ def lower_rows(
     var projected_query = query.copy()
     prune_projections(projected_query)
     var frame = query._frames[query._nodes[cursor].offset].copy()
+    var source_count = frame.height() if source_rows < 0 else source_rows
     if len(projected_query._nodes[cursor].names):
         frame = frame.select(projected_query._nodes[cursor].names)
     if (
@@ -1722,7 +1728,7 @@ def lower_rows(
                     )
                 )
                 literals.append(
-                    # Row counts fit UInt32 in the native ABI. Saturating
+                    # Device row indices fit UInt32. Saturating
                     # larger bounds preserves every observable window/result.
                     bitcast[DType.float64](
                         period_ticks
@@ -1894,7 +1900,7 @@ def lower_rows(
                     )
                 reduction = last.op
                 capabilities.require_reduction(
-                    bound.dtypes[last.left], reduction, frame.height()
+                    bound.dtypes[last.left], reduction, source_count
                 )
                 capabilities.require_dtype(result_dtype)
                 var checked_sum = (
@@ -1954,7 +1960,7 @@ def lower_rows(
                     )
                 if reduction == COV or reduction == CORR:
                     capabilities.require_reduction(
-                        bound.dtypes[last.right], reduction, frame.height()
+                        bound.dtypes[last.right], reduction, source_count
                     )
                     if bound.shapes[last.right] != ROWS:
                         capabilities.reject(
@@ -2169,12 +2175,20 @@ def lower_rows(
                     Int64(first_slot),
                 ]
             )
-            literals.append(
-                bitcast[DType.float64](
-                    Int64(min(configured_workers(), Int(Int32.MAX)))
-                ) if node.text
-                == "metal_window_materialization" else 0
-            )
+            var group_metadata = UInt64(0)
+            if node.text == "metal_window_materialization":
+                group_metadata = UInt64(
+                    min(configured_workers(), Int(Int32.MAX))
+                )
+                if (
+                    capabilities.contiguous_window_reductions
+                    and len(node.flags) > 1
+                    and node.flags[1]
+                ):
+                    # Low32 retain configured workers; bit32 records that
+                    # the original inner expression had no nested OVER.
+                    group_metadata |= UInt64(1) << 32
+            literals.append(bitcast[DType.float64](group_metadata))
             node_dtypes.append(DataType.INT64)
             var grouped_schema = List[Series]()
             var grouped_slots = List[Int]()

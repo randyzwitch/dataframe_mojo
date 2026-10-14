@@ -49,6 +49,8 @@ struct RowCapabilities(Copyable):
     var int64_arithmetic: Bool
     var extra_reductions: Bool
     var grouped: Bool
+    # Carry original OVER eligibility for proved CPU contiguous-run paths.
+    var contiguous_window_reductions: Bool
     var order: Bool
     var row_extras: Bool
     var fixed_logical: Bool
@@ -123,6 +125,7 @@ struct RowCapabilities(Copyable):
         row_extras: Bool = False,
         order: Bool = False,
         grouped: Bool = False,
+        contiguous_window_reductions: Bool = False,
         extra_reductions: Bool = False,
         slices: Bool = False,
         scalar_regions: Bool = False,
@@ -187,6 +190,7 @@ struct RowCapabilities(Copyable):
         self.row_extras = row_extras
         self.order = order
         self.grouped = grouped
+        self.contiguous_window_reductions = contiguous_window_reductions
         self.extra_reductions = extra_reductions
         self.slices = slices
         self.scalar_regions = scalar_regions

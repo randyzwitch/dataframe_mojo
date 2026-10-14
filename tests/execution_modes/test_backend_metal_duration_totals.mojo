@@ -1,4 +1,6 @@
 """Whole duration units retain signed storage semantics across native consumers."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -13,7 +15,7 @@ from dataframe import (
     when,
 )
 from dataframe.expr import DT_TOTAL
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
@@ -136,7 +138,7 @@ def test_duration_totals_capability_metadata_units_and_minimum_cpu_sign() raises
                 assert_true(plan.code[i + 2] > 0)
                 assert_true(plan.code[i + 3] == 0 or plan.code[i + 3] == 1)
         assert_equal(conversions, 7)
-        _ = _Descriptors(plan)
+        _ = Program(plan)
         assert_true(
             "unsupported" not in MetalRuntime(device_id=999999).describe(query)
         )
@@ -239,7 +241,7 @@ def test_native_metal_duration_totals_profiles_cost_budget_and_runtime_reuse() r
     assert_true(profiled[1].height() > 0)
     var estimate = runtime.estimate_auto(query)
     assert_true(";duration-totals-v1" in estimate.family)
-    assert_true(";metal-duration-totals-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     with assert_raises(contains="budget"):
         _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))
     check(query, runtime)

@@ -215,6 +215,10 @@ def lower_partition_aggregates(query: LazyFrame) raises -> LazyFrame:
                                 producer,
                                 exprs=[inner.alias(name)],
                                 names=keys,
+                                # The rewritten graph has no OVER nodes;
+                                # retain the original nested eligibility.
+                                # Flag0 remains first/last representation.
+                                flags=[False, not dependent],
                                 maintain_order=True,
                                 text="metal_window_materialization",
                             )

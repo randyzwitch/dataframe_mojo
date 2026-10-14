@@ -13,7 +13,7 @@ from .ranking import key_equal
 from .ordering import _nan, _word_less
 from .rows import integer_arithmetic, integer_fits, unsigned_type
 from .moments import RollingVarianceState
-from . import floating, temporal
+from . import floating, temporal, decimal
 
 
 @always_inline
@@ -45,6 +45,7 @@ def _partition_equal(
     start: UInt32,
     nodes: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ) -> Bool:
     var headers = (
         Int(duration_headers(code, start, nodes)) if code[
@@ -54,7 +55,15 @@ def _partition_equal(
     )
     for key in range(headers, Int(nodes)):
         if not key_equal(
-            a, b, words, validity, code, types, start + UInt32(key), stride
+            a,
+            b,
+            words,
+            validity,
+            code,
+            types,
+            start + UInt32(key),
+            stride,
+            slots,
         ):
             return False
     return True
@@ -70,6 +79,7 @@ def _partition_begin(
     start: UInt32,
     nodes: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ) -> Int:
     var own = index[unsafe_offset=position]
     var lo = 0
@@ -86,6 +96,7 @@ def _partition_begin(
             start,
             nodes,
             stride,
+            slots,
         ):
             hi = mid
         else:
@@ -104,6 +115,7 @@ def _partition_end(
     nodes: UInt32,
     rows: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ) -> Int:
     var own = index[unsafe_offset=position]
     var lo = position + 1
@@ -120,6 +132,7 @@ def _partition_end(
             start,
             nodes,
             stride,
+            slots,
         ):
             lo = mid + 1
         else:
@@ -148,7 +161,9 @@ def _aggregate_window(
     method: Int64,
     needed: UInt64,
     duration: Bool,
-) -> Tuple[UInt64, UInt8, UInt32]:
+    high_base: Int = 0,
+    precision: UInt32 = 38,
+) -> Tuple[UInt64, UInt8, UInt32, UInt64]:
     var state = UInt64(0)
     var high = UInt64(0)
     var count = UInt64(0)
@@ -167,16 +182,40 @@ def _aggregate_window(
         ):
             failure |= 2
         if integer_sum:
-            var upper = UInt64(0)
-            if not unsigned_type(dtype) and word >> 63:
+            var upper = words[
+                unsafe_offset=high_base + at
+            ] if dtype == 12 else UInt64(0)
+            if dtype != 12 and not unsigned_type(dtype) and word >> 63:
                 upper = UInt64.MAX
             var next = state + word
             high += upper + UInt64(next < state)
             state = next
+            if (
+                dtype == 12
+                and not decimal.cast(
+                    decimal.Wide(state, high),
+                    0,
+                    0,
+                    precision,
+                    128,
+                    False,
+                    False,
+                ).valid
+            ):
+                failure |= 2
         elif method <= 1:
             state = floating.add(state, floating.word(word, dtype))
         else:
             var better = _extrema_better(word, state, dtype, method == 3)
+            var upper = words[
+                unsafe_offset=high_base + at
+            ] if dtype == 12 else UInt64(0)
+            if dtype == 12:
+                better = decimal.signed_less(
+                    decimal.Wide(state, high), decimal.Wide(word, upper)
+                ) if method == 3 else decimal.signed_less(
+                    decimal.Wide(word, upper), decimal.Wide(state, high)
+                )
             if duration and (dtype == 1 or dtype == 11):
                 # Duration extrema propagate the last source NaN for both
                 # min and max, as window.rolling_by_op does.
@@ -185,10 +224,13 @@ def _aggregate_window(
                 )
             if count == 0 or better:
                 state = word
+                high = upper
         count += 1
     if count < needed or (count == 0 and (not duration or method != 0)):
-        return (0, 0, failure)
-    if integer_sum:
+        # Duration windows count eligible values before checked arithmetic.
+        # Input and axis faults are observed independently by the caller.
+        return (0, 0, UInt32(0) if duration else failure, 0)
+    if integer_sum and dtype != 12:
         var expected_high = UInt64(0)
         if not duration or not unsigned_type(output_type):
             expected_high = UInt64.MAX if state >> 63 else UInt64(0)
@@ -200,7 +242,7 @@ def _aggregate_window(
         state = floating.div(state, floating.from_unsigned(count))
     elif method == 0 and dtype == 1:
         state = UInt64(floating.to_float32(state))
-    return (state, 1, failure)
+    return (state, 1, failure, high if dtype == 12 else UInt64(0))
 
 
 def _first_finite(
@@ -269,12 +311,18 @@ def _interpolate_partition(
     begin: Int,
     end: Int,
     method: Int64,
+    slots: UInt32 = 0,
+    stride: UInt32 = 0,
 ):
     for position in range(begin, end):
         var row = Int(index[unsafe_offset=position])
         var at = input_base + row
         var target = output_base + row
         validity[unsafe_offset=target] = validity[unsafe_offset=at]
+        if slots:
+            words[unsafe_offset=Int(stride) * Int(slots) + target] = words[
+                unsafe_offset=Int(stride) * Int(slots) + at
+            ] if validity[unsafe_offset=at] != 0 else UInt64(0)
         words[unsafe_offset=target] = words[unsafe_offset=at] if validity[
             unsafe_offset=at
         ] != 0 else UInt64(0)
@@ -316,6 +364,14 @@ def _interpolate_partition(
                 words[unsafe_offset=target] = words[
                     unsafe_offset=input_base + anchor
                 ]
+                if slots:
+                    words[
+                        unsafe_offset=Int(stride) * Int(slots) + target
+                    ] = words[
+                        unsafe_offset=Int(stride) * Int(slots)
+                        + input_base
+                        + anchor
+                    ]
             else:
                 var fraction = UInt64(0)
                 if method == 15:
@@ -368,6 +424,7 @@ def window_assign(
     output_type: UInt32,
     rows: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ):
     var position = global_idx.x
     if position >= Int(rows):
@@ -379,7 +436,16 @@ def window_assign(
     var parameter = literals[unsafe_offset=Int(start)].cast[DType.int64]()
     if method >= 7 and method <= 10:
         var begin = _partition_begin(
-            position, words, validity, index, code, types, start, nodes, stride
+            position,
+            words,
+            validity,
+            index,
+            code,
+            types,
+            start,
+            nodes,
+            stride,
+            slots,
         )
         var window = literals[unsafe_offset=Int(start)]
         var lower = (
@@ -398,9 +464,12 @@ def window_assign(
             method - 7,
             UInt64(code[unsafe_offset=4 * Int(start) + 2]),
             False,
+            Int(stride) * Int(slots),
         )
         var target = output_base + Int(first)
         words[unsafe_offset=target] = result[0]
+        if slots:
+            words[unsafe_offset=Int(stride) * Int(slots) + target] = result[3]
         validity[unsafe_offset=target] = result[1]
         errors[unsafe_offset=target] = result[2]
         return
@@ -421,6 +490,7 @@ def window_assign(
                 start,
                 nodes,
                 stride,
+                slots,
             ):
                 hi = mid
             else:
@@ -440,6 +510,7 @@ def window_assign(
                 start,
                 nodes,
                 stride,
+                slots,
             ):
                 lo = mid + 1
             else:
@@ -464,6 +535,10 @@ def window_assign(
         if present:
             var source = input_base + Int(index[unsafe_offset=from_position])
             words[unsafe_offset=target] = words[unsafe_offset=source]
+            if slots:
+                words[unsafe_offset=Int(stride) * Int(slots) + target] = words[
+                    unsafe_offset=Int(stride) * Int(slots) + source
+                ]
             validity[unsafe_offset=target] = validity[unsafe_offset=source]
             errors[unsafe_offset=target] = errors[unsafe_offset=source]
         return
@@ -479,6 +554,7 @@ def window_assign(
         start,
         nodes,
         stride,
+        slots,
     ):
         return
     var lo = position + 1
@@ -495,6 +571,7 @@ def window_assign(
             start,
             nodes,
             stride,
+            slots,
         ):
             lo = mid + 1
         else:
@@ -516,6 +593,8 @@ def window_assign(
             position,
             end,
             method,
+            slots,
+            stride,
         )
         return
     if method == 11 or method == 12:
@@ -564,6 +643,7 @@ def window_assign(
     )
     var dtype = types[unsafe_offset=Int(start)]
     var state = UInt64(0)
+    var state_high = UInt64(0)
     var seen = False
     var last = UInt32(0)
     var distance = UInt64(0)
@@ -590,6 +670,10 @@ def window_assign(
             ):
                 var anchor = input_base + Int(last)
                 words[unsafe_offset=target] = words[unsafe_offset=anchor]
+                if slots:
+                    words[
+                        unsafe_offset=Int(stride) * Int(slots) + target
+                    ] = words[unsafe_offset=Int(stride) * Int(slots) + anchor]
                 validity[unsafe_offset=target] = validity[unsafe_offset=anchor]
                 errors[unsafe_offset=target] = errors[unsafe_offset=anchor]
             continue
@@ -601,7 +685,22 @@ def window_assign(
         if not valid:
             continue
         if method == 0:
-            if dtype == 1 or dtype == 11:
+            if output_type == 12:
+                var upper = words[
+                    unsafe_offset=Int(stride) * Int(slots) + source
+                ] if dtype == 12 else (UInt64.MAX if word >> 63 else UInt64(0))
+                var sum = decimal.wide_add(
+                    decimal.Wide(state, state_high),
+                    decimal.Wide(word, upper),
+                )
+                state = sum.low
+                state_high = sum.high
+                if not decimal.cast(
+                    sum, 0, 0, UInt32(parameter), 128, False, False
+                ).valid:
+                    failure |= 2
+                errors[unsafe_offset=target] |= failure
+            elif dtype == 1 or dtype == 11:
                 state = floating.add(state, floating.word(word, dtype))
             else:
                 # CPU cumulative sums use a checked Int64 accumulator even
@@ -616,9 +715,24 @@ def window_assign(
                     failure |= 2
                 errors[unsafe_offset=target] |= failure
         else:
-            if not seen or _extrema_better(word, state, dtype, method == 2):
+            var better = _extrema_better(word, state, dtype, method == 2)
+            var high = words[
+                unsafe_offset=Int(stride) * Int(slots) + source
+            ] if dtype == 12 else UInt64(0)
+            if dtype == 12:
+                better = decimal.signed_less(
+                    decimal.Wide(state, state_high), decimal.Wide(word, high)
+                ) if method == 2 else decimal.signed_less(
+                    decimal.Wide(word, high), decimal.Wide(state, state_high)
+                )
+            if not seen or better:
                 state = word
+                state_high = high
             seen = True
+        if slots:
+            words[
+                unsafe_offset=Int(stride) * Int(slots) + target
+            ] = state_high if output_type == 12 else UInt64(0)
         words[unsafe_offset=target] = (
             UInt64(floating.to_float32(state)) if method == 0
             and dtype == 1 else state
@@ -751,6 +865,7 @@ def duration_assign(
     output_type: UInt32,
     rows: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ):
     var position = global_idx.x
     if position >= Int(rows):
@@ -766,6 +881,7 @@ def duration_assign(
         start,
         nodes,
         stride,
+        slots,
     ):
         return
     var end = _partition_end(
@@ -779,6 +895,7 @@ def duration_assign(
         nodes,
         rows,
         stride,
+        slots,
     )
     var header = 4 * Int(start)
     var input_base = Int(code[unsafe_offset=header + 1]) * Int(stride)
@@ -876,8 +993,15 @@ def duration_assign(
                 method,
                 needed,
                 True,
+                Int(stride) * Int(slots),
+                UInt32(code[unsafe_offset=header + 7]) if method
+                == 0 else UInt32(38),
             )
             words[unsafe_offset=target] = result[0]
+            if slots:
+                words[unsafe_offset=Int(stride) * Int(slots) + target] = result[
+                    3
+                ]
             validity[unsafe_offset=target] = result[1]
             errors[unsafe_offset=target] = result[2]
 

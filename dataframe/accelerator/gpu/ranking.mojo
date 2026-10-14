@@ -3,7 +3,7 @@ from max.gpu import global_idx, thread_idx, block_idx
 from max.gpu.primitives.block import prefix_sum
 from std.memory import Pointer
 from .ordering import _word_less, _nan
-from . import floating
+from . import floating, decimal
 
 
 @always_inline
@@ -16,6 +16,7 @@ def key_equal(
     types: Pointer[Int64, ImmutAnyOrigin],
     node: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ) -> Bool:
     var base = Int(code[unsafe_offset=4 * Int(node) + 1]) * Int(stride)
     var av = validity[unsafe_offset=base + Int(a)] != 0
@@ -27,6 +28,13 @@ def key_equal(
     var aw = words[unsafe_offset=base + Int(a)]
     var bw = words[unsafe_offset=base + Int(b)]
     var dtype = types[unsafe_offset=Int(node)]
+    if dtype == 12:
+        var high_base = Int(stride) * Int(slots)
+        return (
+            aw == bw
+            and words[unsafe_offset=high_base + base + Int(a)]
+            == words[unsafe_offset=high_base + base + Int(b)]
+        )
     if dtype == 1 or dtype == 11:
         if _nan(aw, dtype) or _nan(bw, dtype):
             return _nan(aw, dtype) and _nan(bw, dtype)
@@ -49,10 +57,19 @@ def partition_equal(
     start: UInt32,
     nodes: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ) -> Bool:
     for key in range(1, Int(nodes)):
         if not key_equal(
-            a, b, words, validity, code, types, start + UInt32(key), stride
+            a,
+            b,
+            words,
+            validity,
+            code,
+            types,
+            start + UInt32(key),
+            stride,
+            slots,
         ):
             return False
     return True
@@ -69,10 +86,30 @@ def _rank_equal(
     start: UInt32,
     nodes: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ) -> Bool:
     return partition_equal(
-        a, b, words, validity, code, types, start, nodes, stride
-    ) and key_equal(a, b, words, validity, code, types, start, stride)
+        a,
+        b,
+        words,
+        validity,
+        code,
+        types,
+        start,
+        nodes,
+        stride,
+        slots,
+    ) and key_equal(
+        a,
+        b,
+        words,
+        validity,
+        code,
+        types,
+        start,
+        stride,
+        slots,
+    )
 
 
 @always_inline
@@ -86,6 +123,7 @@ def _rank_less(
     start: UInt32,
     nodes: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ) -> Bool:
     # Rank metadata stores the input first; partitions must sort before it.
     for key in range(Int(nodes)):
@@ -101,6 +139,19 @@ def _rank_less(
         var aw = words[unsafe_offset=base + Int(a)]
         var bw = words[unsafe_offset=base + Int(b)]
         var dtype = types[unsafe_offset=node]
+        if dtype == 12:
+            var high_base = Int(stride) * Int(slots)
+            var ah = words[unsafe_offset=high_base + base + Int(a)]
+            var bh = words[unsafe_offset=high_base + base + Int(b)]
+            if aw != bw or ah != bh:
+                var less = decimal.signed_less(
+                    decimal.Wide(aw, ah), decimal.Wide(bw, bh)
+                )
+                return (
+                    not less if last
+                    and code[unsafe_offset=4 * node + 2] != 0 else less
+                )
+            continue
         var an = _nan(aw, dtype)
         var bn = _nan(bw, dtype)
         var descending = last and code[unsafe_offset=4 * node + 2] != 0
@@ -131,6 +182,7 @@ def rank_order_merge(
     rows: UInt32,
     stride: UInt32,
     run_width: UInt32,
+    slots: UInt32 = 0,
 ):
     var row = global_idx.x
     if row >= Int(rows):
@@ -156,6 +208,7 @@ def rank_order_merge(
             start,
             nodes,
             stride,
+            slots,
         ):
             lo = mid + 1
         else:
@@ -176,6 +229,7 @@ def rank_prepare(
     nodes: UInt32,
     rows: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ):
     var position = global_idx.x
     var head = UInt32(0)
@@ -195,6 +249,7 @@ def rank_prepare(
                     start,
                     nodes,
                     stride,
+                    slots,
                 )
             )
     var count = prefix_sum[block_size=256](head)
@@ -226,6 +281,7 @@ def rank_assign(
     output: UInt32,
     rows: UInt32,
     stride: UInt32,
+    slots: UInt32 = 0,
 ):
     var position = global_idx.x
     if position >= Int(rows):
@@ -253,6 +309,7 @@ def rank_assign(
             start,
             nodes,
             stride,
+            slots,
         ):
             hi = mid
         else:
@@ -289,6 +346,7 @@ def rank_assign(
             start,
             nodes,
             stride,
+            slots,
         ):
             hi = mid
         else:
@@ -308,6 +366,7 @@ def rank_assign(
             start,
             nodes,
             stride,
+            slots,
         ):
             lo = mid + 1
         else:

@@ -97,7 +97,7 @@ struct DictionaryCodes(Movable):
     def restoration_bytes(
         self, frame: DataFrame, schema: DataFrame
     ) raises -> Int:
-        # Native code outputs remain alive until restoration finishes. String
+        # Encoded outputs remain alive until restoration finishes. String
         # views own a copy of dictionary text; categorical recoding also holds
         # those views while building the original dictionary's result codes.
         var total = 0

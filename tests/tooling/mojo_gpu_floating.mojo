@@ -6,7 +6,7 @@ from std.sys import argv
 from std.testing import assert_equal, assert_true
 from dataframe.accelerator.gpu import floating as f
 
-comptime OPERATIONS = 24
+comptime OPERATIONS = 41
 comptime RECORD = OPERATIONS + 2
 
 
@@ -54,6 +54,27 @@ def evaluate(
     outputs[unsafe_offset=at + 22] = f.from_wide(a, b, True)
     outputs[unsafe_offset=at + 23] = f.from_wide(a, b, False)
 
+    for pair in range(4):
+        var converted = f.to_integer(
+            a, UInt32(64 if pair < 2 else 8), pair % 2 != 0
+        )
+        outputs[unsafe_offset=at + 24 + 2 * pair] = converted[0] if converted[
+            1
+        ] else UInt64(0)
+        outputs[unsafe_offset=at + 25 + 2 * pair] = UInt64(converted[1])
+    outputs[unsafe_offset=at + 32] = f.round_integer(a)
+    outputs[unsafe_offset=at + 33] = f.decimal_round(a, b, False)
+    outputs[unsafe_offset=at + 34] = f.decimal_round(a, b, True)
+    outputs[unsafe_offset=at + 35] = f.integral(f.div(a, b), True)
+    outputs[unsafe_offset=at + 36] = f.modulo(a, b)
+    outputs[unsafe_offset=at + 37] = UInt64(f.to_float32(f.round_integer(p)))
+    outputs[unsafe_offset=at + 38] = UInt64(f.to_float32(f.sqrt(p)))
+    var narrow_quotient = f.from_float32(f.to_float32(f.div(p, q)))
+    outputs[unsafe_offset=at + 39] = UInt64(
+        f.to_float32(f.integral(narrow_quotient, True))
+    )
+    outputs[unsafe_offset=at + 40] = f.modulo(p, q, True)
+
 
 def main() raises:
     var args = argv()
@@ -87,8 +108,9 @@ def main() raises:
         for op in range(OPERATIONS):
             var expected = inputs[row * RECORD + 2 + op]
             var actual = result[row * OPERATIONS + op]
-            var narrow = op == 9 or (op >= 15 and op <= 21)
-            var nan = (
+            var narrow = op == 9 or (op >= 15 and op <= 21) or op >= 37
+            var integer = op >= 24 and op <= 31
+            var nan = False if integer else (
                 expected & 0x7FFFFFFF
             ) > 0x7F800000 if narrow else f.is_nan(expected)
             var actual_nan = (
