@@ -28,7 +28,9 @@ def calibration_vector() -> List[Float64]:
     return vector^
 
 
-def calibration_model(fixed: Float64, residual: Float64 = 1) -> String:
+def calibration_model(
+    fixed: Float64, residual: Float64 = 1, *, max_feature: Float64 = 1e6
+) -> String:
     var coefficients = String("{")
     var minimum = String("{")
     var maximum = String("{")
@@ -38,7 +40,7 @@ def calibration_model(fixed: Float64, residual: Float64 = 1) -> String:
         var key = '"' + names[i] + '":'
         coefficients += comma + key + String(fixed if i == 0 else Float64(0))
         minimum += comma + key + "0"
-        maximum += comma + key + "1000000"
+        maximum += comma + key + String(max_feature)
     return (
         '{"coefficients":'
         + coefficients

@@ -52,9 +52,7 @@ def test_native_metal_float32_modulo_bits_nulls_children_and_cost() raises:
     var runtime = MetalRuntime()
     var expression = col("a") % col("b")
     var query = frame.lazy().select(expression.alias("remainder"))
-    assert_true(
-        "metal-emulated-float64-v1" in runtime.estimate_auto(query).family
-    )
+    assert_true(";mojo-metal-v1;ops=" in runtime.estimate_auto(query).family)
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
     var child = (
         frame.lazy().with_columns(expression.alias("remainder")).slice(3, 17)

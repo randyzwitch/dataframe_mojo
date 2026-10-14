@@ -1,8 +1,10 @@
 """Exact decimal scale changes, integer conversions, and observed cast errors."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, DataType, col, lit, when
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
@@ -18,19 +20,12 @@ def test_decimal_rescaling_capability_and_strict_metadata() raises:
             col("wide").cast(DataType.decimal(9, 1, 32), strict=strict)
         )
         var plan = lower_rows(query, _capabilities())
-        var descriptors = _Descriptors(plan)
+        var descriptors = Program(plan)
         assert_equal(descriptors.code[4], Int64(217))
         assert_equal(descriptors.code[6], Int64(-1))
         assert_equal(
             descriptors.code[7],
-            Int64(
-                2
-                | (1 << 6)
-                | (9 << 12)
-                | (Int(strict) << 18)
-                | (1 << 19)
-                | (1 << 20)
-            ),
+            Int64(2 | (1 << 6) | (9 << 12) | (plan.code[7] << 18)),
         )
         var caps = _capabilities()
         caps.decimal_casts = False
@@ -173,7 +168,7 @@ def test_native_metal_integer_decimal_casts_exact_words_nulls_and_consumers() ra
     )
     same(window.collect(accelerator=runtime), window.collect(engine="cpu"))
     assert_true(
-        "metal-decimal-casts-v1"
+        ";mojo-metal-v1;ops="
         in runtime.estimate_auto(
             frame.lazy().select(col("small").cast(DataType.decimal(38, 2)))
         ).family

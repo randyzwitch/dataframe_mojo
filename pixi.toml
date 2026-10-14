@@ -41,16 +41,20 @@ path = "dataframe"
 
 [package.host-dependencies]
 mojo = ">=1.2.0.dev2026092105,<1.3"
+max-core = "==26.7.0.dev2026100905"
 
 [package.run-dependencies]
 mojo = ">=1.2.0.dev2026092105,<1.3"
+max-core = "==26.7.0.dev2026100905"
 
 [dependencies]
 # What CI runs, matching the package's host and run dependencies above.
 mojo = ">=1.2.0.dev2026092105,<1.3"
+# Mojo's GPU APIs live in max-core. Package/doc compilation resolves these
+# imports even for CPU execution, so every environment needs the matching SDK.
+max-core = "==26.7.0.dev2026100905"
 
 [tasks]
-build-dfmetal = "bash native/dfmetal/build.sh"
 test = "bash tests/run_tests.sh"
 test-interchange-oracles = "mojo run -I . tests/tooling/interchange_oracles.mojo build/contract-tests"
 check-version = "python3 scripts/check_version.py"
@@ -101,3 +105,13 @@ build-dfparquet = "bash native/dfparquet/build.sh build/dfparquet"
 [environments]
 oracle = { features = ["oracle"], solve-group = "default" }
 native = { features = ["native"], solve-group = "default" }
+gpu = { features = ["gpu"] }
+
+[feature.gpu]
+platforms = ["osx-arm64"]
+
+[feature.gpu.tasks]
+test-mojo-gpu-floating = "python3 tests/tooling/mojo_gpu_floating.py"
+test-mojo-gpu = "mojo run -I . tests/tooling/mojo_gpu_rows.mojo"
+test-mojo-gpu-decimal = "python3 tests/tooling/mojo_gpu_decimal_probe.py"
+test-mojo-gpu-integer = "mkdir -p build/contract-tests && python3 tests/tooling/mojo_gpu_integer_probe.py build/contract-tests/integers.bin && mojo run -I . tests/tooling/mojo_gpu_integer_probe.mojo build/contract-tests/integers.bin"

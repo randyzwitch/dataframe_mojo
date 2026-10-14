@@ -1,4 +1,9 @@
 """Physical chunk fragments upload with independent offsets and owned metadata."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+    estimate_resources,
+)
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     DataFrame,
@@ -9,7 +14,7 @@ from dataframe import (
     col,
     lit,
 )
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
@@ -87,12 +92,19 @@ def test_chunked_inputs_capability_owned_descriptors_and_value_blind_estimates()
     with assert_raises(contains="chunked input"):
         _ = lower_rows(frame.lazy(), caps)
     var plan = lower_rows(frame.lazy(), _capabilities())
-    var desc = _Descriptors(plan)
-    assert_equal(len(desc.input_chunks), 2)
-    assert_equal(desc.inputs[3], Int64(3))
-    assert_equal(desc.inputs[4], Int64(2))
-    assert_equal(desc.input_chunks[0][5], Int64(3))
-    assert_equal(desc.input_chunks[1][5], Int64(4))
+    var desc = Program(plan)
+    assert_equal(len(desc.code), 0)
+    assert_equal(plan.source.width(), 2)
+    var keys = plan.source.column("k").chunks()
+    var values = plan.source.column("x").chunks()
+    assert_equal(len(keys), 3)
+    assert_equal(len(values), 3)
+    assert_equal(len(keys[0]), 3)
+    assert_equal(len(values[0]), 4)
+    assert_equal(keys[0].int32()._offset, 1)
+    assert_equal(values[0].int64()._offset, 1)
+    var resources = estimate_resources(plan)
+    assert_equal(resources.matrix_bytes, plan.source.height() * plan.slots * 21)
     assert_true(
         "unsupported"
         not in MetalRuntime(device_id=999999).describe(frame.lazy())
@@ -216,7 +228,7 @@ def test_native_metal_chunked_inputs_profiles_exact_budget_and_float_reductions(
     var query = chunk_frame().lazy().select((col("x") + 1).alias("x"))
     var estimate = runtime.estimate_auto(query)
     assert_true(";chunked-inputs-v1:3" in estimate.family)
-    assert_true(";metal-chunked-inputs-v1:3" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
     var measured = query.profile(accelerator=exact)
     assert_equal(

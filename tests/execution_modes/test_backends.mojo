@@ -6,6 +6,7 @@ from dataframe import Column, DataFrame, Series, col, lit, scan_csv
 from dataframe._accel_provider import installed
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime
+from dataframe.accelerator.gpu.target import compiled_for_metal
 from tests.support.backend_reference import (
     BackendTrace,
     CountedBackend,
@@ -363,3 +364,21 @@ def test_native_provider_configuration_and_unsupported_types_reject_before_drive
         message = String(error)
     assert_true("unsupported" in message)
     assert_true("unsupported" in unsupported.explain(accelerator=runtime))
+
+
+def test_metal_cpu_only_target_keeps_cpu_dispatch_and_rejects_gpu_submission() raises:
+    # This must compile with an unknown accelerator as well as on GPU hosts.
+    # A runtime presence branch alone still specializes unreachable kernels.
+    comptime if not compiled_for_metal():
+        assert_equal(installed(), False)
+        assert_equal(MetalRuntime.device_count(), 0)
+        var plan = backend_plan(65)
+        assert_backend_rows(plan.collect(engine="cpu"), 65)
+        assert_backend_rows(plan.collect(engine="auto"), 65)
+        var runtime = MetalRuntime()
+        with assert_raises(contains="Apple Metal compilation target"):
+            _ = plan.collect(engine="accel", accelerator=runtime)
+        var frame = DataFrame([Series("k", Column[Int64]([1, 2, 3]))])
+        var joined = frame.lazy().join(frame.lazy(), on="k")
+        with assert_raises(contains="Apple Metal compilation target"):
+            _ = joined.collect(engine="accel", accelerator=runtime)
