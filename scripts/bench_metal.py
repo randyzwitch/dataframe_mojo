@@ -45,7 +45,7 @@ def command(args):
     ).strip()
 
 
-def metadata(binary, libraries, threads):
+def metadata(binaries, threads):
     return {
         "recorded_at_utc": datetime.datetime.now(
             datetime.timezone.utc
@@ -63,7 +63,6 @@ def metadata(binary, libraries, threads):
                 "--porcelain",
                 "--",
                 "dataframe",
-                "native/dfmetal",
             ]
         ),
         "benchmark_status": command(
@@ -81,10 +80,10 @@ def metadata(binary, libraries, threads):
         "sdk": command(["xcrun", "--sdk", "macosx", "--show-sdk-version"]),
         "compile_flags": ["-O3", "-I", "."],
         "dataframe_threads": threads,
-        "binary_sha256": sha(binary),
+        "implementation": "mojo",
+        "binaries_sha256": {name: sha(path) for name, path in binaries.items()},
         "source_sha256": sha(ROOT / "benchmarks/bench_metal.mojo"),
         "driver_sha256": sha(__file__),
-        "library_sha256": {k: sha(v) for k, v in libraries.items()},
         "environment": {
             k: v
             for k, v in os.environ.items()
@@ -97,7 +96,7 @@ def metadata(binary, libraries, threads):
             "No external-suite coverage claimed; Float64 and floating reductions are outside these cases. Algorithm comparisons preserve complete output order and values against CPU.",
             "First use includes context/shader initialization but is not a cold machine or cold filesystem measurement.",
             "CPU and GPU share host memory and power limits; short timings can vary with scheduler and thermal state.",
-            "Native profile is a separate warm collection after timed samples; its GPU interval is not a caller-wall substitute.",
+            "The Mojo profile is a separate warm collection after timed samples; complete caller-wall timing remains the performance measure.",
             "Workload exposure: chain32 was used during fusion development; other cases broaden mechanism coverage without a holdout claim.",
         ],
     }
@@ -141,9 +140,31 @@ def parse_run(output, reps):
         or "first_use_ns" not in result
     ):
         raise ValueError("Missing correctness marker or timed samples")
-    waits = 2 if "join" in result["profile"].get("algorithm", "") else 1
-    if result["profile"].get("synchronizations") != waits:
-        raise ValueError("Unexpected native synchronization count")
+    if result["profile"].get("runtime_implementation") != "mojo":
+        raise ValueError(
+            "Benchmark did not execute the Mojo GPU implementation"
+        )
+    if not result.get("runtime_build_id"):
+        raise ValueError("Benchmark did not record its Mojo runtime build identity")
+    for name in (
+        "kernel_launches",
+        "synchronizations",
+        "upload_bytes",
+        "download_bytes",
+        "peak_requested_bytes",
+    ):
+        # Explicit whole-query counters take priority over region observations.
+        value = result["profile"].get("query_" + name, result["profile"].get(name))
+        if not isinstance(value, int) or value < 0:
+            raise ValueError(
+                "Missing or invalid measured Mojo profile field: " + name
+            )
+        result["profile"][name] = value
+    if (
+        result["profile"].get("profile_regions", 1) > 1
+        and "query_peak_requested_bytes" not in result["profile"]
+    ):
+        raise ValueError("Multi-region profile is missing its whole-query peak")
     return result
 
 
@@ -155,7 +176,7 @@ def render(data, target):
         "",
         "Times below are medians of complete warm collections, including allocation, staging, synchronization, and CPU result construction. First-use and all individual samples remain in the JSON. Every selected failed or unsupported case remains visible.",
         "",
-        "| Runtime | Rows | Workload | Variant | CPU ms | Metal ms | CPU/Metal | Launches | Shared MiB |",
+        "| Runtime | Rows | Workload | Variant | CPU ms | Metal ms | CPU/Metal | Launches | Peak payload MiB |",
         "|---|---:|---|---|---:|---:|---:|---:|---:|",
     ]
     groups = {}
@@ -180,12 +201,14 @@ def render(data, target):
             / 1e6
         )
         p = runs[-1]["profile"]
+        launches = p.get("query_kernel_launches", p["kernel_launches"])
+        peak = p.get("query_peak_requested_bytes", p["peak_requested_bytes"])
         ratio = cpu / metal
         ratios.setdefault((runtime, rows, workload), []).append(
             (ratio, variant)
         )
         lines.append(
-            f"| {runtime} | {rows} | {workload} | {variant} | {cpu:.3f} | {metal:.3f} | {ratio:.2f} | {p['kernel_launches']} | {p['shared_buffer_bytes'] / 1048576:.2f} |"
+            f"| {runtime} | {rows} | {workload} | {variant} | {cpu:.3f} | {metal:.3f} | {ratio:.2f} | {launches} | {peak / 1048576:.2f} |"
         )
     lines += [
         "",
@@ -225,9 +248,10 @@ def main():
         "--binary", type=Path, default=ROOT / "build/bench_metal"
     )
     parser.add_argument(
-        "--library", type=Path, default=ROOT / "build/dfmetal/libdfmetal.dylib"
+        "--baseline-binary",
+        type=Path,
+        help="Optional separately built Mojo baseline executable",
     )
-    parser.add_argument("--baseline-library", type=Path)
     parser.add_argument("--rows", default="65536,1048576,8388608")
     parser.add_argument("--workloads", default=",".join(WORKLOADS))
     parser.add_argument("--variants", default=",".join(VARIANTS))
@@ -273,12 +297,12 @@ def main():
             cwd=ROOT,
             check=True,
         )
-    libraries = {"metal": args.library.resolve()}
-    if args.baseline_library:
-        libraries["baseline"] = args.baseline_library.resolve()
+    binaries = {"mojo": binary}
+    if args.baseline_binary:
+        binaries["baseline"] = args.baseline_binary.resolve()
     data = {
-        "schema_version": 1,
-        "metadata": metadata(binary, libraries, args.threads),
+        "schema_version": 2,
+        "metadata": metadata(binaries, args.threads),
         "selection": {
             "rows": rows,
             "workloads": workloads,
@@ -294,15 +318,14 @@ def main():
     cases = list(itertools.product(rows, workloads, variants))
     for round_id in range(args.rounds):
         ordered = cases if round_id % 2 == 0 else list(reversed(cases))
-        builds = list(libraries.items())
+        builds = list(binaries.items())
         if round_id % 2:
             builds.reverse()
         for case_id, (n, workload, variant) in enumerate(ordered):
-            for runtime, library in builds:
+            for runtime, executable in builds:
                 label = f"{round_id}-{runtime}-{n}-{workload}-{variant}"
                 env = os.environ.copy()
                 env.update(
-                    DATAFRAME_METAL_LIBRARY=str(library),
                     DATAFRAME_THREADS=str(args.threads),
                     BENCH_ROWS=str(n),
                     BENCH_WORKLOAD=workload,
@@ -322,7 +345,7 @@ def main():
                 }
                 try:
                     process = subprocess.run(
-                        [str(binary)],
+                        [str(executable)],
                         cwd=ROOT,
                         env=env,
                         text=True,

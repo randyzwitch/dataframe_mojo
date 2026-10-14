@@ -1,9 +1,9 @@
-"""Native Metal witnesses: catalog capability `metal` is mandatory.
+"""Actual Mojo GPU witnesses: catalog capability `metal` is mandatory.
 
-Enabling this capability requires Apple Silicon macOS, an installed libdfmetal,
-its resident ABI, and a working device. Missing prerequisites fail these tests;
-portable provider adapters are never substituted for actual native execution.
+These tests require Apple Silicon macOS and a working MAX Metal device. Reports
+must identify the Mojo implementation and actual kernel submissions.
 """
+from dataframe.accelerator.gpu.runtime import _preflight, estimate_resources
 from std.memory import bitcast
 from std.sys import CompilationTarget
 from std.testing import assert_equal, assert_true
@@ -38,11 +38,11 @@ comptime NATIVE_NUMERIC = (
 def require_metal() raises -> MetalRuntime:
     assert_true(CompilationTarget.is_macos(), "metal capability requires macOS")
     assert_true(
-        metal_installed(), "metal capability requires installed native library"
+        metal_installed(), "metal capability requires the Mojo Metal target"
     )
     assert_true(
         MetalRuntime.device_count() > 0,
-        "metal capability requires a working native device",
+        "metal capability requires a working Mojo GPU device",
     )
     return MetalRuntime()
 
@@ -99,15 +99,19 @@ def assert_native_report(report: DataFrame, nonempty: Bool = True) raises:
     var waits = Int64(0)
     for row in range(report.height()):
         assert_equal(report.item(row, "executor").string(), "metal")
+        assert_equal(
+            report.item(row, "runtime_implementation").string(), "mojo"
+        )
         launches += report.item(row, "kernel_launches").int64()
         waits += report.item(row, "synchronizations").int64()
         assert_true(report.item(row, "host_result_bytes").int64() >= 0)
     if nonempty:
         assert_true(
-            launches > 0, "parity must include actual native kernel submission"
+            launches > 0,
+            "parity must include actual Mojo GPU kernel submission",
         )
         assert_true(
-            waits > 0, "CPU-visible results require native synchronization"
+            waits > 0, "CPU-visible results require Mojo GPU synchronization"
         )
 
 
@@ -182,7 +186,7 @@ def test_native_metal_payload_budget_accepts_exact_estimate_and_rejects_one_byte
         .filter(col("x") >= 3)
         .select((col("x") + 2).alias("result"))
     )
-    var estimate = runtime.estimate_auto(plan)
+    var estimate = estimate_resources(_preflight(plan))
     assert_true(estimate.peak_bytes > 0)
     var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
     var executed = plan.profile(accelerator=exact)
@@ -249,10 +253,7 @@ def test_native_metal_resident_join_regions_export_complete_owned_typed_results(
     for row in range(result[1].height()):
         resident_inputs += result[1].item(row, "resident_input_bytes").int64()
         resident_outputs += result[1].item(row, "resident_output_bytes").int64()
-        if (
-            "resident" in result[1].item(row, "algorithm").string()
-            and "join" in result[1].item(row, "algorithm").string()
-        ):
+        if "join" in result[1].item(row, "algorithm").string():
             joins += 1
     assert_equal(joins, 1)
     assert_true(resident_inputs > 0)

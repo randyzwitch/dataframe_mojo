@@ -1,4 +1,6 @@
 """Exact shift and bounded fill through resident ordered Metal windows."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -15,7 +17,7 @@ from dataframe import (
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.categorical import encode
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_CUMULATIVE_KEY
 from dataframe.accelerator.windows import lower_partition_aggregates
@@ -107,7 +109,7 @@ def test_shift_fill_capability_raw_parameters_and_nested_scopes() raises:
                     )
                     assert_equal(plan.slot_dtypes[step.slot], DataType.FLOAT32)
             assert_true(found)
-            _ = _Descriptors(plan)
+            _ = Program(plan)
             assert_true(
                 "unsupported"
                 not in MetalRuntime(device_id=999999).describe(query)
@@ -453,9 +455,9 @@ def test_native_metal_shift_fill_proofs_budget_cost_and_runtime_reuse() raises:
         check(query, runtime)
     var query = frame.lazy().select(col("x").forward_fill(1).over("k"))
     var estimate = runtime.estimate_auto(query)
-    assert_true("metal-shift-fill-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     assert_true(";shift-fill-v1" in estimate.family)
-    assert_true("metal-cumulative-v1" not in estimate.family)
+    assert_true(";cumulative-v1" not in estimate.family)
     check(query, runtime)
     exact(
         query.collect(engine="auto", accelerator=runtime),
