@@ -10,6 +10,7 @@ The block policy uses: 8 KiB initial growth and a
 16 MiB exponential-growth ceiling.  Validity stays absent until the first
 null, as in validity bitmaps.
 """
+from std.sys.intrinsics import prefetch
 from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
 from .column import _append_validity_bit, _count_valid, _validity_bit
 
@@ -223,7 +224,6 @@ struct StringViewStorage(Copyable, Sized):
         entry, and views and validity bits are written directly (#395).
         """
         var count = last - first
-        var views = List[StringView](capacity=count)
         var source_views = self._views[].unsafe_ptr()
         var nulls = len(self._bits[]) > 0
         var bits = List[UInt8](
@@ -233,24 +233,46 @@ struct StringViewStorage(Copyable, Sized):
         var total_bytes = 0
         var total_buffer_bytes = 0
         var rows = indices.unsafe_ptr().unsafe_offset(first)
+        var limit = self._length - offset
+        # Each view is 16 bytes copied as four words into a buffer sized
+        # once: a join's gather of seven customer strings per fact row
+        # (TPC-DS q4) spent 19 ns a view appending them one by one.
+        var views = List[StringView](unsafe_uninit_length=count)
+        var target = views.unsafe_ptr().unsafe_bitcast[SIMD[DType.uint32, 4]]()
+        var source = source_views.unsafe_bitcast[SIMD[DType.uint32, 4]]()
+        # Random rows make each view's load a cache miss; the view sixteen
+        # rows ahead is fetched while this one is copied, so the misses
+        # overlap rather than queue.
+        var ahead = 16
         for k in range(count):
-            var index = rows.unsafe_offset(k)[]
-            if index == -1 and allow_missing:
-                missing = True
-                views.append(StringView(0, 0, 0, 0))
-                continue
-            if index < 0 or index >= self._length - offset:
+            if k + ahead < count:
+                var next = rows[unsafe_offset=k + ahead]
+                if next >= 0 and next < limit:
+                    prefetch(
+                        source.unsafe_offset(offset + next).unsafe_bitcast[
+                            UInt32
+                        ]()
+                    )
+            var index = rows[unsafe_offset=k]
+            if index < 0 or index >= limit:
+                if index == -1 and allow_missing:
+                    missing = True
+                    target[unsafe_offset=k] = SIMD[DType.uint32, 4](0)
+                    continue
                 raise Error("string view gather index out of bounds")
-            var source = offset + index
-            var view = source_views.unsafe_offset(source)[].copy()
-            if len(bits) > 0 and (
-                not nulls or _validity_bit(self._bits[], source)
-            ):
-                bits[k >> 3] |= UInt8(1) << UInt8(k & 7)
-            total_bytes += Int(view.length)
-            if not view.is_inline():
-                total_buffer_bytes += Int(view.length)
-            views.append(view^)
+            var word = source[unsafe_offset=offset + index]
+            target[unsafe_offset=k] = word
+            var length = Int(word[0])
+            total_bytes += length
+            if length > STRING_VIEW_INLINE_BYTES:
+                total_buffer_bytes += length
+        if len(bits) > 0:
+            for k in range(count):
+                var index = rows[unsafe_offset=k]
+                if index < 0:
+                    continue
+                if not nulls or _validity_bit(self._bits[], offset + index):
+                    bits[k >> 3] |= UInt8(1) << UInt8(k & 7)
         if not nulls and not missing:
             bits = List[UInt8]()
         return Self._sharing(
