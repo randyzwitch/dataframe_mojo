@@ -2927,6 +2927,7 @@ def production_policy() -> SuitePolicy:
                 "tests/kernel_equivalence/test_morsel_ranges.mojo",
                 "tests/kernel_equivalence/test_full_join_direct.mojo",
                 "tests/kernel_equivalence/test_pipeline_join_selection.mojo",
+                "tests/kernel_equivalence/test_pipeline_key_ranges.mojo",
                 "tests/kernel_equivalence/test_pipeline_projection_selection.mojo",
                 "tests/planner_correctness/test_asof_sources.mojo",
                 "tests/public_contracts/test_asof.mojo",

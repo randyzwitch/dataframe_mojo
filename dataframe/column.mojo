@@ -29,6 +29,13 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
     # Buffers are immutable while shared, so it holds until a mutation,
     # which starts a new cell (`sorted_range` reads it).
     var _order: ArcPointer[Int]
+    # The least and greatest valid value of each block of `_ZONE_ROWS`
+    # slots of the whole value buffer, as pairs (Int64.MAX and Int64.MIN
+    # for a block with none), for integer columns: a zone map, found once
+    # before a pipeline reads the buffer (`pipeline._ensure_zones`) and
+    # shared by every window onto it, like `_order`. Empty until then, and
+    # again after a mutation.
+    var _zones: ArcPointer[List[Int64]]
 
     def __init__(out self, var values: List[Self.T]):
         # Bitmaps are shared as little-endian bytes (Arrow layout).
@@ -40,6 +47,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._bits = ArcPointer(List[UInt8]())
         self._data = ArcPointer(values^)
         self._order = ArcPointer(0)
+        self._zones = ArcPointer(List[Int64]())
 
     def __init__(out self, var values: List[Self.T], valid: List[Bool]) raises:
         if len(values) != len(valid):
@@ -50,6 +58,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._bits = ArcPointer(bits^)
         self._data = ArcPointer(values^)
         self._order = ArcPointer(0)
+        self._zones = ArcPointer(List[Int64]())
 
     def __init__(out self, *, var values: List[Self.T], var bits: List[UInt8]):
         """Adopt typed values and a prepacked validity bitmap without copying."""
@@ -58,6 +67,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         self._data = ArcPointer(values^)
         self._bits = ArcPointer(bits^)
         self._order = ArcPointer(0)
+        self._zones = ArcPointer(List[Int64]())
 
     def __len__(self) -> Int:
         return self._length
@@ -235,6 +245,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         if not self._owned():
             self = self._compact()
         self._order = ArcPointer(0)
+        self._zones = ArcPointer(List[Int64]())
         self._data[].reserve(rows)
         if len(self._bits[]) != 0:
             self._bits[].reserve((rows + 7) // 8)
@@ -266,6 +277,7 @@ struct Column[T: Copyable & Deinitable](Copyable, Sized):
         )
         self._length = start + count
         self._order = ArcPointer(0)
+        self._zones = ArcPointer(List[Int64]())
 
     @staticmethod
     def _nulls(length: Int, fill: Self.T) -> Self:
