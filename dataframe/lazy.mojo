@@ -116,6 +116,7 @@ from .aggregate_table import reduction_supported
 from .frame import (
     DataFrame,
     GroupBy,
+    _bind_all,
     _row_local,
     _stream_reductions,
     table_supported,
@@ -131,6 +132,7 @@ from .dtype import DataType, NUMERIC_DTYPES
 from .hashing import encode_rows
 from .trace import trace_path
 from .execution import direct_reductions
+from .binding import ROWS, bind
 from .accelerator.cost import PlanEstimate
 from .accelerator.window_keys import WindowKey
 from .accelerator.code_domains import TextField
@@ -414,6 +416,54 @@ def _emit_folded(
         copy.extra = _emit_folded(nodes, value, node.extra, out)
     out.append(copy^)
     return len(out) - 1
+
+
+def _schema_of(node: PlanNode, input: DataFrame) -> Optional[DataFrame]:
+    """A filter's, select's or with_columns' result on a zero-row `input`
+    from the types its expressions bind to, as DuckDB and Polars resolve
+    a plan's types without running it; None when that is not certain to
+    match running it (a select of scalars has a row; anything that does
+    not bind cleanly), which the caller then does."""
+    try:
+        if node.kind == FILTER:
+            if len(node.exprs) != 1:
+                return None
+            for item in node.exprs[0]._nodes:
+                if item.op == SELECTOR:
+                    return None
+            var bound = bind(node.exprs[0], input._columns)
+            if bound.dtypes[len(bound.dtypes) - 1] != DataType.BOOL:
+                return None
+            return input.copy()
+        if node.kind != SELECT and node.kind != WITH_COLUMNS:
+            return None
+        var bound = _bind_all(node.exprs, input._columns)
+        var produced = List[Series](capacity=len(bound))
+        for b in bound:
+            if node.kind == SELECT and b.shape() != ROWS:
+                return None
+            var dtype = b.dtypes[len(b.dtypes) - 1]
+            if dtype.is_nested() or dtype.is_categorical():
+                return None
+            produced.append(Series.full_null(b.expr._name, dtype, 0))
+        if node.kind == SELECT:
+            if len(produced) == 0:
+                return None
+            return DataFrame(produced^, height=0)
+        var columns = input._columns.copy()
+        for column in produced:
+            var at = -1
+            for k in range(len(columns)):
+                if columns[k].name() == column.name():
+                    at = k
+                    break
+            if at < 0:
+                columns.append(column.copy())
+            else:
+                columns[at] = column.copy()
+        return DataFrame(columns^, height=0)
+    except:
+        return None
 
 
 def _pinned(node: PlanNode) -> Bool:
@@ -3621,6 +3671,12 @@ struct LazyFrame(Copyable):
                     predicate=Optional(node.exprs[0].copy()),
                 )
         var input = self._execute(node.left, empty, streaming, batch_size)
+        # "Empty" inputs can still have rows: a scalar aggregate over no
+        # rows gives one.
+        if empty and input.height() == 0:
+            var schema = _schema_of(node, input)
+            if schema:
+                return schema.take()
         if node.kind == FILTER:
             return input.filter(node.exprs[0])
         if node.kind == SELECT:
@@ -5343,39 +5399,56 @@ struct LazyFrame(Copyable):
         var root = len(self._nodes) - 1
         var moved = False
         var changed = True
+        # Filters found unable to move. A filter's verdict depends on its
+        # input and the run of filters under it, never on its parent, and
+        # a move changes no node's columns: after one, only the filters
+        # around the old and new place are asked again (`_unstick`).
+        var stuck = List[Bool](length=len(self._nodes), fill=False)
         while changed:
             changed = False
             for i in self._topological(root):
                 if self._nodes[i].kind != FILTER:
                     continue
+                if i < len(stuck) and stuck[i]:
+                    continue
                 var child = self._nodes[i].left
                 var side = self._passes(i, child)
                 if side >= 0:
-                    if i == root:
-                        root = child
-                    ref below = self._nodes[child]
-                    if below.kind == SELECT or below.kind == WITH_COLUMNS:
-                        self._nodes[i].exprs = [
-                            _fold_constants(
-                                _through_projection(
-                                    self._nodes[i].exprs[0], below.exprs
+                    # The filter moves as far as it goes before the scan
+                    # restarts: a moved filter stays first in the order it
+                    # was found in, and no move below a filter changes
+                    # where an earlier one can go, so the moves are the
+                    # ones a restart after each would make, without a
+                    # scan of the plan per move.
+                    while side >= 0:
+                        if i == root:
+                            root = child
+                        ref below = self._nodes[child]
+                        if below.kind == SELECT or below.kind == WITH_COLUMNS:
+                            self._nodes[i].exprs = [
+                                _fold_constants(
+                                    _through_projection(
+                                        self._nodes[i].exprs[0], below.exprs
+                                    )
+                                )
+                            ]
+                        elif below.kind == JOIN:
+                            self._transfer_key_filter(i, child, side == 1)
+                        elif below.kind == CONCAT:
+                            # A copy filters the second input; the filter
+                            # itself moves above the first.
+                            self._nodes.append(
+                                _plan_node(
+                                    FILTER,
+                                    below.right,
+                                    exprs=self._nodes[i].exprs.copy(),
                                 )
                             )
-                        ]
-                    elif below.kind == JOIN:
-                        self._transfer_key_filter(i, child, side == 1)
-                    elif below.kind == CONCAT:
-                        # A copy filters the second input; the filter
-                        # itself moves above the first.
-                        self._nodes.append(
-                            _plan_node(
-                                FILTER,
-                                below.right,
-                                exprs=self._nodes[i].exprs.copy(),
-                            )
-                        )
-                        self._nodes[child].right = len(self._nodes) - 1
-                    self._swap_in_place(i, child, side == 1)
+                            self._nodes[child].right = len(self._nodes) - 1
+                        self._unstick(i, child, stuck)
+                        self._swap_in_place(i, child, side == 1)
+                        child = self._nodes[i].left
+                        side = self._passes(i, child)
                     changed = True
                     moved = True
                     break
@@ -5408,12 +5481,29 @@ struct LazyFrame(Copyable):
                 ):
                     if i == root:
                         root = child
+                    self._unstick(i, child, stuck)
                     self._swap_in_place(i, child, False)
                     changed = True
                     moved = True
                     break
+                if i < len(stuck):
+                    stuck[i] = True
         if moved:
             self._reorder(root)
+
+    def _unstick(self, filter: Int, child: Int, mut stuck: List[Bool]):
+        """Before `filter` moves below `child`: forget the verdicts it can
+        change, those of `filter` and `child` and of the run of filters
+        ending at `filter`'s parent, whose input or run below changes."""
+        var parents = self._parents()
+        for node in [filter, child]:
+            if node >= 0 and node < len(stuck):
+                stuck[node] = False
+        var above = parents[filter]
+        while above >= 0 and self._nodes[above].kind == FILTER:
+            if above < len(stuck):
+                stuck[above] = False
+            above = parents[above]
 
     def _passes(self, filter: Int, child: Int) raises -> Int:
         """Whether the filter at `filter` can move below the node at
