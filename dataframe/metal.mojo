@@ -39,6 +39,7 @@ from .accelerator.memory import checked_add
 from .accelerator.metadata import schema_frame
 from .accelerator.cost import PlanEstimate, CalibrationKey
 from .accelerator.capabilities import RowCapabilities
+from .accelerator.gpu.target import METAL_TARGET
 from .accelerator.joins import has_join, has_scalar_consumers
 from .lazy import AcceleratorBackend, LazyFrame
 from .column import Column
@@ -120,12 +121,24 @@ struct MetalRuntime(AcceleratorBackend):
         )
 
     def execute(self, query: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-        return self._run(query, False)
+        comptime if METAL_TARGET:
+            return self._run(query, False)
+        else:
+            raise Error(
+                "Mojo Metal execution requires an Apple Metal compilation target; "
+                + self.describe(query)
+            )
 
     def execute_profiled(
         self, query: LazyFrame
     ) raises -> Tuple[DataFrame, DataFrame]:
-        return self._run(query, True)
+        comptime if METAL_TARGET:
+            return self._run(query, True)
+        else:
+            raise Error(
+                "Mojo Metal execution requires an Apple Metal compilation target; "
+                + self.describe(query)
+            )
 
     def _run(
         self, query: LazyFrame, profiling: Bool

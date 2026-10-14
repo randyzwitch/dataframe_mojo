@@ -43,6 +43,11 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:
           cache: true
+      - name: Compile and run CPU-only Mojo provider contracts
+        run: |
+          mkdir -p build/contract-tests
+          pixi run --locked mojo build --target-accelerator=unknown -I . tests/tooling/mojo_gpu_cpu_compile.mojo -o build/contract-tests/mojo-gpu-cpu-compile
+          build/contract-tests/mojo-gpu-cpu-compile
       - name: Run Mojo provider contracts with explicit hardware capability
         run: |
           mkdir -p build/contract-tests

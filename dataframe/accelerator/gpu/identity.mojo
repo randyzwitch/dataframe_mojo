@@ -12,6 +12,7 @@ from max.gpu.host import DeviceContext
 from dataframe._build_identity import CPU_BUILD_ID
 from dataframe.parallel import configured_workers
 from dataframe.accelerator.cost import CalibrationKey
+from .target import METAL_TARGET
 
 comptime PROVIDER_BUILD = "dataframe-mojo-metal-v1"
 comptime _NameMessage = def(Int) thin abi("C") -> Int
@@ -23,13 +24,19 @@ comptime _IntegerMessage = def(Int, Int) thin abi("C") -> Int64
 def available() -> Bool:
     comptime if not CompilationTarget.is_macos():
         return False
-    return String(DeviceContext.default_device_info.api) == "metal"
+    comptime if not METAL_TARGET:
+        return False
+    else:
+        return String(DeviceContext.default_device_info.api) == "metal"
 
 
 def device_count() raises -> Int:
-    if not available():
+    comptime if not METAL_TARGET:
         return 0
-    return DeviceContext.number_of_devices()
+    else:
+        if not available():
+            return 0
+        return DeviceContext.number_of_devices()
 
 
 def _c_string(value: String) -> List[UInt8]:
@@ -179,6 +186,13 @@ struct HardwareFacts(Copyable):
 
 
 def hardware(device: Int = 0) raises -> HardwareFacts:
+    comptime if METAL_TARGET:
+        return _metal_hardware(device)
+    else:
+        raise Error("Mojo Metal calibration requires an Apple Metal target")
+
+
+def _metal_hardware(device: Int) raises -> HardwareFacts:
     if not available():
         raise Error("Mojo Metal calibration requires an Apple Metal target")
     if device != 0:
