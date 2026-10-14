@@ -291,8 +291,12 @@ struct Morsel(Movable):
     # of the whole mask.
     var rows: List[Int]
     var by_rows: Bool
+    # The height of the source this morsel was cut from: steps choose
+    # their route by it, not by the morsel's own height.
+    var source_rows: Int
 
     def __init__(out self, var frame: DataFrame, sequence: Int):
+        self.source_rows = frame.height()
         self.count = frame.height()
         self.compact = List[Bool](length=frame.width(), fill=True)
         self.frame = frame^
@@ -393,7 +397,7 @@ struct Morsel(Movable):
         var narrowed: BoolColumn
         if not self.selected:
             var input = self._compact_frame(names)
-            narrowed = input._selection(predicate, batch_size)
+            narrowed = input._selection(predicate, batch_size, self.source_rows)
             var kept = true_count(narrowed)
             if kept == self.count:
                 return
@@ -405,7 +409,7 @@ struct Morsel(Movable):
                 self.compact[i] = False
             return
         var input = self._compact_frame(names)
-        narrowed = input._selection(predicate, batch_size)
+        narrowed = input._selection(predicate, batch_size, self.source_rows)
         var kept = true_count(narrowed)
         if kept == self.count:
             return
@@ -2060,6 +2064,7 @@ struct _PipelineJob(Job):
             var offset = self.ranges[][2 * k]
             var length = self.ranges[][2 * k + 1]
             var morsel = Morsel(self.frame[].slice(offset, length), k)
+            morsel.source_rows = self.frame[].height()
             self.counts[0] += length
             if self.top > 0 and self.bounded:
                 self.shared_bound.tighten(
@@ -2373,6 +2378,10 @@ def _merged_mask(
     return BoolColumn(values=values^, bits=List[UInt8](), length=height)
 
 
+# DuckDB's STANDARD_VECTOR_SIZE: the fewest rows a morsel is cut to.
+comptime _VECTOR_ROWS = 2048
+
+
 def _morsel_ranges(
     frame: DataFrame, morsel_rows: Int, workers: Int
 ) -> List[Int]:
@@ -2412,6 +2421,18 @@ def _morsel_ranges(
             )
             total += pieces[len(pieces) - 1]
         start = end
+    if total == 1 and lanes > 1:
+        # One piece left every worker but one idle: a source of about a
+        # batch (a 65K-row common table read twice in TPC-DS q47) is cut
+        # into pieces of a batch's share per worker, as a source of a few
+        # batches is below, and never under one vector of `_VECTOR_ROWS`
+        # (DuckDB's smallest unit of parallel work). A smaller source
+        # stays whole: every morsel pays its steps' setup.
+        var share = max(_VECTOR_ROWS, morsel_rows // lanes)
+        var most = min(lanes, lengths[0] // share)
+        if most > 1:
+            pieces[0] = most
+            total = most
     if total > 1 and total < 4 * lanes and total % lanes != 0:
         # Cut every chunk finer by the same factor, then give the longest
         # chunks one more piece each until the count is a multiple.

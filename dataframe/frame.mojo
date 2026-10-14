@@ -2599,13 +2599,17 @@ struct DataFrame(Copyable, Sized, Writable):
         var mask = self._predicate_mask(bound, batch_size)
         return self._kept(keep).filter(mask)
 
-    def _selection(self, predicate: Expr, batch_size: Int) raises -> BoolColumn:
+    def _selection(
+        self, predicate: Expr, batch_size: Int, source_rows: Int = 0
+    ) raises -> BoolColumn:
         """The rows `predicate` keeps, as a mask over this frame, chosen the
         way `filter` chooses its path: a run answered by a column stored in
         ascending order, a top-k per partition, selective conjuncts (the
         cheap parts first, strings only on the rows they kept, fused
         comparisons), or the predicate's own mask. A pipeline's morsel
-        narrows its selection with this and copies nothing."""
+        narrows its selection with this and copies nothing; it passes its
+        source's height as `source_rows`, so the route is the one the
+        whole source would take, however finely it is cut."""
         if (
             len(predicate._nodes) == 1
             and predicate._nodes[0].op == LIT_BOOL
@@ -2638,7 +2642,7 @@ struct DataFrame(Copyable, Sized, Writable):
                 for k in range(1, len(rest)):
                     remaining = remaining & rest[k]
                 var inner = self.slice(low, length)._selection(
-                    remaining, batch_size
+                    remaining, batch_size, source_rows
                 )
                 return _placed_mask(inner, low, self._height)
         var top = top_k_mask(bound, self._columns, self._height)
@@ -2648,7 +2652,7 @@ struct DataFrame(Copyable, Sized, Writable):
         var parts = conjuncts(predicates[0])
         if (
             len(parts) > 1
-            and self._height >= SELECTIVE_FILTER_ROWS
+            and max(self._height, source_rows) >= SELECTIVE_FILTER_ROWS
             and _row_local(parts)
         ):
             trace_path("filter.selective_and")

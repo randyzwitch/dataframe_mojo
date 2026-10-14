@@ -2676,6 +2676,7 @@ def production_policy() -> SuitePolicy:
             "table.join",
             [
                 "tests/kernel_equivalence/test_join_routes.mojo",
+                "tests/kernel_equivalence/test_morsel_ranges.mojo",
                 "tests/kernel_equivalence/test_full_join_direct.mojo",
                 "tests/kernel_equivalence/test_pipeline_join_selection.mojo",
                 "tests/kernel_equivalence/test_pipeline_projection_selection.mojo",
