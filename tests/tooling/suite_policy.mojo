@@ -1901,6 +1901,7 @@ def production_policy() -> SuitePolicy:
             "types.cast",
             [
                 "tests/public_contracts/test_cast_boundaries.mojo",
+                "tests/kernel_equivalence/test_decimal_fast_paths.mojo",
                 "tests/public_contracts/test_cast_sources.mojo",
                 "tests/public_contracts/test_casts.mojo",
                 "tests/public_contracts/test_temporal.mojo",
