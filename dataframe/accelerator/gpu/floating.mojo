@@ -552,7 +552,7 @@ def from_wide(low: UInt64, high: UInt64, unsigned: Bool) -> UInt64:
     while rest:
         leading += 1
         rest >>= 1
-    var sig = UInt64(0)
+    var sig: UInt64
     if leading <= 55:
         sig = l << UInt64(55 - leading)
     else:
