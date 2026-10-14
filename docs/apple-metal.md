@@ -50,11 +50,11 @@ includes the following operations and their valid compositions:
 | Rows and keys | Stable filters, slices, mixed-key sorting, grouped aggregation, distinct rows/counts, unions and rank methods |
 | Windows | Partition aggregates, cumulative operations, shift/fill, fixed-size rolling operations, interpolation and coordinate interpolation |
 | Duration windows | Numeric/Date/Datetime indices, supported closed bounds, fixed/calendar intervals, UTC and fixed-offset zones |
-| Temporal expressions | UTC and fixed-offset calendar fields, fixed/calendar offsets and truncation, duration totals, timezone metadata conversion, bounded UTC replacement |
+| Temporal expressions | UTC, fixed-offset and IANA local fields; fixed/calendar offsets and truncation, duration totals, timezone metadata conversion, bounded UTC replacement; direct temporal arithmetic and physical casts |
 | Joins | Inner, left, right, full, semi, anti and cross; typed composite keys, null-equal left joins and key coalescing; backward/forward/nearest as-of joins with typed by-keys and tolerance |
 | Composition | Selectors, scalar projections/broadcasts, aggregate expressions, computed join branches, post-join consumers and chained joins |
 | Text | Ordered dictionary transport, supported string operations/concatenation, categorical reconciliation and restoration |
-| Struct output | Terminal `as_struct` over primitive fields, independent child validity and field metadata |
+| Struct fields | Direct source Struct projection over fixed-width primitive children, parent/child validity and field metadata; terminal `as_struct` over primitive fields |
 
 Float64 values retain their exact storage words. Arithmetic uses paired-word
 integer IEEE emulation because Apple GPUs lack native binary64 arithmetic.
@@ -82,9 +82,20 @@ proleptic Gregorian behavior across the supported storage domain. Duration
 totals truncate coarser units toward zero and retain fixed-width multiplication
 for finer units. Timezone conversion is a physical identity with validated
 destination metadata, including IANA names. Fixed-offset local fields use the
-CPU's wrapped local ticks; IANA local-field extraction remains unsupported.
-Replacement is limited to naive/UTC values and preserves the CPU's checked
+CPU's wrapped local ticks. IANA local fields serialize the CPU timezone's
+transition table and POSIX footer once per distinct zone, then select offsets
+and extract fields on the GPU. Transition endpoints, historical offsets and
+footer rules follow the CPU lookup; table owners and uploads count toward the
+query budget. Replacement is limited to naive/UTC values and preserves the CPU's checked
 reconstruction behavior.
+
+Temporal arithmetic and physical casts currently require a direct in-memory
+scan and terminal row projection without a final head. Operand and predicate
+checks reject compositions that could introduce a different fault category or
+change error order. Duration multiplication and subtraction retain valid
+Int64 minimum results; temporal casts honor conditional masks and strict/lax
+conversion semantics. This bounded subset does not enable arbitrary temporal
+consumers across resident regions.
 
 Shared Mojo normalization expands selectors and decomposes supported aggregate,
 partition, distinct and union operations before GPU dispatch. String operations
@@ -123,7 +134,12 @@ retain the default CPU planning order.
 Bare column aliases and supported row movement retain Arrow field metadata;
 computed expressions follow the CPU metadata rules. Terminal struct packing
 wraps exported primitive fields without copying their payloads. Parents remain
-valid independently of nullable children.
+valid independently of nullable children. Direct source Struct field projection
+combines parent and child validity on the GPU, so hidden child values under a
+null parent remain unobserved. This currently requires a direct scan and
+terminal primitive projection; nested or variable-byte children, bare Struct
+outputs and identity casts of fields remain explicit restrictions. Profiles
+include conservative host staging for chunk compaction and parent bitmaps.
 
 Errors travel with values through conditionals and row movement. Selected
 terminal values and observing consumers check them; unselected conditional
@@ -174,8 +190,9 @@ Migrating the existing Metal implementation does not establish complete CPU
 query parity. Grouped mode/value counts, implode,
 IANA-zone duration windows, row-valued
 text parsing/formatting, remaining timezone operations, nested list/struct
-operations, nullable source struct transport and explode/unnest remain outside this
-accelerator subset. Some checked-expression/window compositions also reject.
+operations, broader source Struct consumers and explode/unnest remain outside
+this accelerator subset. CUT/QCUT and opaque Binary/Geometry transport are also
+pending. Some checked-expression/window compositions also reject.
 These are implementation gaps, not demonstrated limitations of Mojo.
 
 Whole-DAG metadata validation, including invalid as-of metadata or tolerance,
@@ -214,7 +231,9 @@ pixi run package-smoke --gpu
 The maintained backend contracts retain independent typed/bitwise expectations,
 CPU comparisons, checked-error recovery and exact/one-byte-under budget checks.
 The `execution.apple_parity` and `public.apple_parity` runner groups cover the
-additional source, mode, temporal, decimal-extrema and partition-schedule work.
+additional source, Struct, mode, temporal, decimal-extrema and partition-schedule
+work. Temporal coverage includes independent arithmetic/cast boundary anchors,
+IANA transition/footer fields and conditional/error recovery contracts.
 Hosted macOS runners may expose no Metal device; CI reports that absence
 explicitly and still runs metadata contracts. Execution claims require a real
 local GPU run.

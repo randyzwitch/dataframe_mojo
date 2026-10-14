@@ -394,17 +394,8 @@ def test_mojo_gpu_utc_temporal_fields_conversions_calendar_and_checked_edges() r
                     accelerator=MetalRuntime(device_id=999999), engine="accel"
                 )
             )
-        with assert_raises(contains="time zone field extraction"):
-            _ = (
-                utc.lazy()
-                .select(
-                    col("t")
-                    .dt()
-                    .convert_time_zone("America/New_York")
-                    .dt()
-                    .year()
-                )
-                .collect(
-                    accelerator=MetalRuntime(device_id=999999), engine="accel"
-                )
+        _ = _check(
+            utc.lazy().select(
+                col("t").dt().convert_time_zone("America/New_York").dt().year()
             )
+        )

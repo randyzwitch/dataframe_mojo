@@ -18,6 +18,7 @@ from dataframe.accelerator.joins import (
     lower_join_dag,
 )
 from . import runtime as rows
+from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from . import join_runtime as joins
 from . import asof_runtime as asof
 from .residency import Scope, Table
@@ -44,7 +45,16 @@ def preflight(
                 dag.tasks[task.right].schema,
             )
         elif task.kind == DAG_ROWS:
-            _ = rows._preflight(task.query, terminal_boundary=task.terminal)
+            var plan = rows._preflight(
+                task.query, terminal_boundary=task.terminal
+            )
+            if task.source >= 0:
+                for node in range(len(plan.node_dtypes)):
+                    var op = plan.code[4 * node]
+                    if op == ROW_TEMPORAL_BINARY or op == ROW_TEMPORAL_CAST:
+                        raise Error(
+                            "Metal unsupported [temporal]: prototype requires a direct scan before DAG submission"
+                        )
         else:
             raise Error("Mojo GPU unexpected execution DAG task")
     return dag^

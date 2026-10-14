@@ -320,9 +320,23 @@ def test_mojo_gpu_fixed_zone_fields_capability_descriptor_and_unsupported_local_
             )
         ]
     )
+    var named_query = iana.lazy().select(col("t").dt().hour())
+    var named_caps = capabilities()
+    assert_true(named_caps.iana_zone_temporal_fields)
+    _ = lower_rows(named_query, named_caps)
+    named_caps.iana_zone_temporal_fields = False
     with assert_raises(contains="time zone field extraction"):
+        _ = lower_rows(named_query, named_caps)
+    var unavailable = MetalRuntime(device_id=999999)
+    for expression in [
+        col("t").dt().truncate("1d"),
+        col("t").dt().offset_by("1d"),
+    ]:
+        with assert_raises(contains="time zone field extraction"):
+            _ = iana.lazy().select(expression).collect(accelerator=unavailable)
+    with assert_raises(contains="naive or UTC"):
         _ = (
             iana.lazy()
-            .select(col("t").dt().hour())
-            .collect(accelerator=MetalRuntime(device_id=999999))
+            .select(col("t").dt().replace_time_zone("UTC"))
+            .collect(accelerator=unavailable)
         )

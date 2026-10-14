@@ -5,8 +5,16 @@ are inspected by metadata contracts and uploaded by the executor.
 """
 from std.memory import bitcast
 from dataframe import DataType
-from dataframe.expr import LIT_BOOL, LIT_INT, LIT_FLOAT, SUM, MEAN
-from dataframe.accelerator.rows import RowPlan
+from dataframe.expr import (
+    LIT_BOOL,
+    LIT_INT,
+    LIT_FLOAT,
+    SUM,
+    MEAN,
+    DT_YEAR,
+    DT_TIME,
+)
+from dataframe.accelerator.rows import RowPlan, ROW_IANA_ZONE_FIELDS
 from . import decimal_descriptors, statistics, quantiles
 
 
@@ -45,7 +53,9 @@ struct Program(Movable):
 
     def __init__(out self, plan: RowPlan) raises:
         self.code = plan.code.copy()
-        self.literals = List[UInt64](capacity=len(plan.literals))
+        self.literals = List[UInt64](
+            capacity=len(plan.literals) + len(plan.zone_words)
+        )
         self.node_types = List[Int64](capacity=len(plan.node_dtypes))
         self.outputs = List[Int64]()
         self.has_statistics = False
@@ -69,6 +79,17 @@ struct Program(Movable):
             self.literals.append(value)
             self.node_types.append(kind(dtype))
         decimal_descriptors.prepare(plan, self.code, self.literals)
+        var ordinary_literals = len(self.literals)
+        for node in range(len(plan.node_dtypes)):
+            var op = self.code[4 * node]
+            if (
+                op >= DT_YEAR
+                and op <= DT_TIME
+                and (self.code[4 * node + 3] & ROW_IANA_ZONE_FIELDS)
+            ):
+                self.code[4 * node + 2] += Int64(ordinary_literals)
+        for word in plan.zone_words:
+            self.literals.append(word)
 
         if plan.reductions:
             for output in plan.outputs:

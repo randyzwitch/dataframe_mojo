@@ -6,6 +6,8 @@ Errors travel with values so an unselected conditional branch is unobserved.
 """
 from max.gpu import global_idx
 from dataframe.expr import (
+    DT_YEAR,
+    DT_TIME,
     COL,
     LIT_INT,
     LIT_FLOAT,
@@ -52,7 +54,9 @@ from dataframe.expr import (
     WHEN,
 )
 from std.memory import Pointer, unsafe_stack_allocation
-from . import floating, temporal, decimal, integers
+from . import floating, temporal, decimal, integers, iana_fields
+from . import temporal_arithmetic
+from .temporal_descriptors import ROW_TEMPORAL_BINARY, ROW_TEMPORAL_CAST
 from .decimal_descriptors import (
     DECIMAL_FLOAT,
     DECIMAL_CAST,
@@ -60,7 +64,7 @@ from .decimal_descriptors import (
     DECIMAL_BINARY,
     DECIMAL_UNARY,
 )
-from dataframe.accelerator.rows import ROW_SLICE
+from dataframe.accelerator.rows import ROW_SLICE, ROW_IANA_ZONE_FIELDS
 
 
 @always_inline
@@ -215,7 +219,9 @@ def row_program(
             value = values[unsafe_offset=chosen]
             high = highs[unsafe_offset=chosen]
             present = valid[unsafe_offset=chosen] != 0
-            error = failed[unsafe_offset=a] | failed[unsafe_offset=chosen]
+            # CPU evaluates both operands before choosing the output value.
+            # An enclosing WHEN still masks this entire expression's fault.
+            error = failed[unsafe_offset=a] | failed[unsafe_offset=b]
             var source_type = types[unsafe_offset=Int(start) + chosen]
             if dtype == 12 and source_type != 12:
                 high = UInt64.MAX if value >> 63 else UInt64(0)
@@ -334,6 +340,36 @@ def row_program(
                         values[unsafe_offset=a]
                         == literals[unsafe_offset=b + member]
                     )
+        elif op == ROW_TEMPORAL_BINARY:
+            present = (
+                valid[unsafe_offset=a] != 0 and valid[unsafe_offset=b] != 0
+            )
+            error = failed[unsafe_offset=a]
+            if error == 0:
+                error = failed[unsafe_offset=b]
+            if present and error == 0:
+                var parameter = literals[unsafe_offset=absolute]
+                var result = temporal_arithmetic.binary(
+                    Int64(parameter >> 12),
+                    values[unsafe_offset=a],
+                    values[unsafe_offset=b],
+                    parameter,
+                )
+                value = result[0]
+                present = result[1]
+                error = result[2]
+        elif op == ROW_TEMPORAL_CAST:
+            value = values[unsafe_offset=a]
+            present = valid[unsafe_offset=a] != 0
+            error = failed[unsafe_offset=a]
+            if present and error == 0:
+                var parameter = literals[unsafe_offset=absolute]
+                var result = temporal_arithmetic.cast(
+                    value, parameter, (parameter & (UInt64(1) << 12)) != 0
+                )
+                value = result[0]
+                present = result[1]
+                error = result[2]
         elif op == CAST:
             value = values[unsafe_offset=a]
             present = valid[unsafe_offset=a] != 0
@@ -395,11 +431,27 @@ def row_program(
             present = valid[unsafe_offset=a] != 0
             error = failed[unsafe_offset=a]
             if present:
+                var temporal_value = values[unsafe_offset=a]
+                var temporal_parameter = Int64(b)
+                var temporal_unit = Int64(c)
+                if (
+                    op >= DT_YEAR
+                    and op <= DT_TIME
+                    and (temporal_unit & ROW_IANA_ZONE_FIELDS)
+                ):
+                    temporal_unit &= 7
+                    temporal_value = iana_fields.local_ticks(
+                        literals,
+                        b,
+                        temporal_value,
+                        temporal.per_second(temporal_unit),
+                    )
+                    temporal_parameter = 0
                 var result = temporal.evaluate(
-                    values[unsafe_offset=a],
+                    temporal_value,
                     op,
-                    Int64(b),
-                    Int64(c),
+                    temporal_parameter,
+                    temporal_unit,
                     literals[unsafe_offset=absolute],
                 )
                 value = result[0]

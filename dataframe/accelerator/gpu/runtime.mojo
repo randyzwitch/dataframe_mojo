@@ -11,6 +11,7 @@ from std.sys import size_of
 from max.gpu.host import DeviceBuffer
 from dataframe import Column, DataFrame, DataType, Series
 from dataframe.dtype import NUMERIC_DTYPES
+from dataframe.binding import temporal_result
 from dataframe.expr import (
     SUM,
     MEAN,
@@ -99,6 +100,7 @@ from dataframe.accelerator.rows import (
     RowPlan,
     lower_rows,
     ROW_SLICE,
+    ROW_IANA_ZONE_FIELDS,
     ROW_SORT_KEY,
     ROW_RANK_KEY,
     ROW_CUMULATIVE_KEY,
@@ -119,8 +121,17 @@ from dataframe.accelerator.rows import (
     ROW_QUANTILE_NEAREST,
     ROW_QUANTILE_MIDPOINT,
 )
+from dataframe.accelerator.timezone_tables import (
+    validate as validate_zone_table,
+)
 from .residency import Scope, Matrix, Table, HostMatrix
 from .rows import row_program
+from .temporal_descriptors import (
+    ROW_TEMPORAL_BINARY,
+    ROW_TEMPORAL_CAST,
+    binary_literal,
+    cast_literal,
+)
 from .movement import filter_scan, filter_offsets, filter_gather
 from . import statistics, quantiles, decimal_descriptors
 from .program import Program, kind as _kind
@@ -208,8 +219,11 @@ def capabilities() -> RowCapabilities:
         decimal_arithmetic=True,
         decimal_multiplicative=True,
         temporal_fields=True,
+        temporal_binary_arithmetic=True,
+        temporal_physical_casts=True,
         utc_temporal_conversions=True,
         fixed_zone_temporal_fields=True,
+        iana_zone_temporal_fields=True,
         duration_totals=True,
         temporal_offsets=True,
         calendar_offsets=True,
@@ -279,6 +293,8 @@ def _preflight(
     for dtype in plan.slot_dtypes:
         _ = _kind(dtype)
     var supported: List[Int] = [
+        Int(ROW_TEMPORAL_BINARY),
+        Int(ROW_TEMPORAL_CAST),
         ROW_CALENDAR_OFFSET,
         ROW_CALENDAR_TRUNCATE,
         DT_YEAR,
@@ -407,6 +423,45 @@ def _preflight(
                 raise Error(
                     "Mojo GPU operation is not implemented: " + String(op)
                 )
+            if op == Int(ROW_TEMPORAL_BINARY) or op == Int(ROW_TEMPORAL_CAST):
+                var left = Int(plan.code[4 * node + 1])
+                var right = Int(plan.code[4 * node + 2])
+                if (
+                    left < 0
+                    or left >= node - step.start
+                    or plan.code[4 * node + 3] != -1
+                ):
+                    raise Error("Mojo GPU invalid temporal operand descriptor")
+                var payload = bitcast[DType.uint64](plan.literals[node])
+                var expected = UInt64(0)
+                if op == Int(ROW_TEMPORAL_BINARY):
+                    if right < 0 or right >= node - step.start:
+                        raise Error("Mojo GPU invalid temporal right operand")
+                    expected = binary_literal(
+                        Int64(payload >> 12),
+                        plan.node_dtypes[step.start + left],
+                        plan.node_dtypes[step.start + right],
+                    )
+                    if (
+                        temporal_result(
+                            Int(payload >> 12),
+                            plan.node_dtypes[step.start + left],
+                            plan.node_dtypes[step.start + right],
+                        )
+                        != plan.node_dtypes[node]
+                    ):
+                        raise Error("Mojo GPU invalid temporal result dtype")
+                else:
+                    if right != -1:
+                        raise Error("Mojo GPU invalid temporal cast descriptor")
+                    expected = cast_literal(
+                        plan.node_dtypes[step.start + left],
+                        plan.node_dtypes[node],
+                        (payload & (UInt64(1) << 12)) != 0,
+                    )
+                if payload != expected:
+                    raise Error("Mojo GPU invalid temporal literal descriptor")
+                continue
             if op == ADD or op == SUB or op == MUL or op == NEG or op == ABS:
                 if not (
                     plan.node_dtypes[node].is_integer()
@@ -446,6 +501,40 @@ def _preflight(
                     raise Error(
                         "Mojo GPU integer division and rounding are not implemented yet"
                     )
+            if (
+                op >= DT_YEAR
+                and op <= DT_TIME
+                and (plan.code[4 * node + 3] & ROW_IANA_ZONE_FIELDS)
+            ):
+                var unit = plan.code[4 * node + 3]
+                var local_source = Int(plan.code[4 * node + 1])
+                if (
+                    local_source < 0
+                    or local_source >= node - step.start
+                    or (unit & 7) < 1
+                    or (unit & 7) > 3
+                    or (unit & ~(ROW_IANA_ZONE_FIELDS | 7))
+                ):
+                    raise Error("Mojo GPU IANA field descriptor is invalid")
+                var source_dtype = plan.node_dtypes[step.start + local_source]
+                if (
+                    not source_dtype.is_datetime()
+                    or not source_dtype.time_zone().byte_length()
+                    or source_dtype.time_zone() == "UTC"
+                ):
+                    raise Error(
+                        "Mojo GPU IANA field source metadata is invalid"
+                    )
+                var expected_unit = Int64(
+                    1 if source_dtype.per_second()
+                    == 1000 else 2 if source_dtype.per_second()
+                    == 1000000 else 3
+                )
+                if (unit & 7) != expected_unit:
+                    raise Error("Mojo GPU IANA field source unit differs")
+                validate_zone_table(
+                    plan.zone_words, Int(plan.code[4 * node + 2])
+                )
             if op == CAST:
                 var source = step.start + Int(plan.code[4 * node + 1])
                 if not (
@@ -655,7 +744,11 @@ def estimate_resources(
     # is reused for readback after the stream consumes its upload.
     var matrix_bytes = _checked_mul(cells, CELL_BYTES)
     var program_bytes = _checked_mul(
-        len(plan.code) + 2 * len(plan.literals) + len(plan.key_values), 8
+        len(plan.code)
+        + 2 * len(plan.literals)
+        + len(plan.key_values)
+        + len(plan.zone_words),
+        8,
     )
     var shared = _checked_add(matrix_bytes, program_bytes) if rows else 0
     if rows and movement:
@@ -716,6 +809,12 @@ def estimate_resources(
         _checked_mul(count, 4) if export_values and len(plan.outputs) else 0
     )
     var peak = _checked_add(_checked_add(shared, result_bytes), scratch)
+    # Program host tail and device tail are in program_bytes above. Keep the
+    # captured host zone owner too; empty execution still creates two host tails.
+    var captured_zone_bytes = _checked_mul(len(plan.zone_words), 8)
+    peak = _checked_add(
+        peak, _checked_mul(captured_zone_bytes, 1 if rows else 2)
+    )
     if resident_input:
         peak = _checked_add(peak, _checked_mul(plan.source.width(), 48))
     var upload = 0

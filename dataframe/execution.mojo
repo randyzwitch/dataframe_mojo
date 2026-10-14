@@ -176,7 +176,7 @@ def _empty(dtype: DataType) raises -> Series:
 def _empty_output(
     bound: BoundExpr, columns: List[Series], index: Int
 ) raises -> Series:
-    """Preserve struct field metadata without evaluating zero-row payloads.
+    """Seed Struct/STRUCT_FIELD row outputs without evaluating payloads.
 
     A dtype describes names and logical types, but does not contain Arrow
     application metadata. Follow only operations that preserve field owners;
@@ -414,7 +414,13 @@ def _eval[
         or node.op == FLOORDIV
     ):
         return temporal_binary(
-            node.op, left, right, left_type, right_type, bound.dtypes[index]
+            node.op,
+            left,
+            right,
+            left_type,
+            right_type,
+            bound.dtypes[index],
+            mask,
         )
     return _binary_op[width](node.op, left, right, mask)
 
@@ -971,9 +977,10 @@ struct _RowsJob[width: Int](Job):
         self.end = end
         self.batch_size = batch_size
         self.grouped = grouped
-        self.result = _empty_output(bound, columns, root) if bound.dtypes[
-            root
-        ].is_struct() else _empty(bound.dtypes[root])
+        self.result = _empty_output(bound, columns, root) if (
+            bound.dtypes[root].is_struct()
+            or bound.expr._nodes[root].op == STRUCT_FIELD
+        ) else _empty(bound.dtypes[root])
         self.result._reserve_rows(end - start, 0)
 
     def into_result(deinit self) -> Series:
@@ -2238,9 +2245,10 @@ def _full[
     var whole = _whole(bound, columns, states, index, height, grouped)
     if whole:
         return whole.take()
-    var result = _empty_output(bound, columns, index) if bound.dtypes[
-        index
-    ].is_struct() else _empty(bound.dtypes[index])
+    var result = _empty_output(bound, columns, index) if (
+        bound.dtypes[index].is_struct()
+        or bound.expr._nodes[index].op == STRUCT_FIELD
+    ) else _empty(bound.dtypes[index])
     for offset in range(0, height, batch_size):
         var chunk = _batch[width](
             bound,
@@ -2766,9 +2774,10 @@ def evaluate[
             var done = whole.take()
             done._name = bound.expr._name
             return done^
-    var result = _empty_output(bound, columns, root) if bound.dtypes[
-        root
-    ].is_struct() else _empty(bound.dtypes[root])
+    var result = _empty_output(bound, columns, root) if (
+        bound.dtypes[root].is_struct()
+        or bound.expr._nodes[root].op == STRUCT_FIELD
+    ) else _empty(bound.dtypes[root])
     var workers = worker_count(size) if bound.shape() == ROWS else 1
     if workers <= 1:
         result._reserve_rows(size, 0)

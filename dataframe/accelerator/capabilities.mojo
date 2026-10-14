@@ -62,7 +62,10 @@ struct RowCapabilities(Copyable):
     var scalar_regions: Bool
     var asof_joins: Bool
     var temporal_fields: Bool
+    var temporal_binary_arithmetic: Bool
+    var temporal_physical_casts: Bool
     var utc_temporal_conversions: Bool
+    var iana_zone_temporal_fields: Bool
     var fixed_zone_temporal_fields: Bool
     var calendar_offsets: Bool
     var calendar_truncation: Bool
@@ -133,7 +136,10 @@ struct RowCapabilities(Copyable):
         scalar_regions: Bool = False,
         asof_joins: Bool = False,
         temporal_fields: Bool = False,
+        temporal_binary_arithmetic: Bool = False,
+        temporal_physical_casts: Bool = False,
         utc_temporal_conversions: Bool = False,
+        iana_zone_temporal_fields: Bool = False,
         fixed_zone_temporal_fields: Bool = False,
         calendar_offsets: Bool = False,
         calendar_truncation: Bool = False,
@@ -200,7 +206,10 @@ struct RowCapabilities(Copyable):
         self.scalar_regions = scalar_regions
         self.asof_joins = asof_joins
         self.temporal_fields = temporal_fields
+        self.temporal_binary_arithmetic = temporal_binary_arithmetic
+        self.temporal_physical_casts = temporal_physical_casts
         self.utc_temporal_conversions = utc_temporal_conversions
+        self.iana_zone_temporal_fields = iana_zone_temporal_fields
         self.fixed_zone_temporal_fields = fixed_zone_temporal_fields
         self.calendar_offsets = calendar_offsets
         self.calendar_truncation = calendar_truncation

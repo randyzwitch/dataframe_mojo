@@ -27,6 +27,8 @@ def raise_value_error(code: UInt32, message: String) raises:
         raise Error("Mojo GPU integer overflow")
     if code & 32:
         raise Error("Mojo GPU integer power requires a nonnegative exponent")
+    if code & 64:
+        raise Error("Mojo GPU temporal value overflows Int64")
     if code:
         raise Error(message)
 

@@ -42,6 +42,11 @@ from .accelerator.sources import (
     prepare_file_sources,
 )
 from .accelerator.distributions import has_scalar_modes, lower_scalar_modes
+from .accelerator.source_structs import (
+    has_source_structs,
+    lower_source_structs,
+    attach_metadata as attach_source_fields,
+)
 from .accelerator.structs import (
     has_terminal_structs,
     lower_terminal_structs,
@@ -237,6 +242,60 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_source_structs(query):
+            var plan = lower_source_structs(
+                query, memory_limit_bytes=self._budget
+            )
+            var budget = self._budget
+            if budget >= 0:
+                budget -= plan.staging_bytes
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
+            var executed = runtime._run(plan.query, profiling)
+            var result = executed[
+                0
+            ].copy() if self._observation_only else attach_source_fields(
+                executed[0], plan
+            )
+            var report = executed[1].copy()
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            var inner_peak = 0
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            for field in List[Tuple[String, Int64]](
+                [
+                    ("source_struct_staging_bytes", Int64(plan.staging_bytes)),
+                    (
+                        "query_peak_requested_bytes",
+                        Int64(checked_add(plan.staging_bytes, inner_peak)),
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Int64](
+                            List[Int64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            report = report.with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=report.height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (result^, report^)
         if has_scalar_modes(query):
             var executed = self._run(lower_scalar_modes(query), profiling)
             var report = executed[1].with_column(
@@ -521,6 +580,11 @@ struct MetalRuntime(AcceleratorBackend):
             if has_selectors(query):
                 return "Metal schema selector expansion; " + self.describe(
                     lower_selectors(query)
+                )
+            if has_source_structs(query):
+                var plan = lower_source_structs(query, metadata_only=True)
+                return "Metal nullable source struct fields; " + self.describe(
+                    plan.query
                 )
             if has_scalar_modes(query):
                 return "Metal resident scalar mode; " + self.describe(

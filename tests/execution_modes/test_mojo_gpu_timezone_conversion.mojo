@@ -155,9 +155,16 @@ def test_mojo_gpu_timezone_conversion_validates_zones_and_retains_local_operatio
     )
     var unavailable = MetalRuntime(device_id=999999)
     var zoned = col("t").dt().convert_time_zone("America/New_York")
+    for expression in [zoned.dt().year(), zoned.dt().hour()]:
+        var query = frame.lazy().select(expression)
+        _ = query.collect(engine="cpu")
+        var named_caps = capabilities()
+        assert_true(named_caps.iana_zone_temporal_fields)
+        _ = lower_rows(query, named_caps)
+        named_caps.iana_zone_temporal_fields = False
+        with assert_raises(contains="time zone field extraction"):
+            _ = lower_rows(query, named_caps)
     var fields: List[Expr] = [
-        zoned.dt().year(),
-        zoned.dt().hour(),
         zoned.dt().truncate("1d"),
         zoned.dt().offset_by("1d"),
         col("t").dt().convert_time_zone("+05:45").dt().truncate("1d"),

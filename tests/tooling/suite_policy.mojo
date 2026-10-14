@@ -62,6 +62,78 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo::test_mojo_gpu_temporal_safe_literal_cast_folding_preserves_dt_fields",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo::test_mojo_gpu_temporal_scalar_faults_any_active_and_empty_rows",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_source_structs.mojo::test_mojo_gpu_source_struct_fields_nullable_layouts_literal_values_and_metadata",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_source_structs.mojo::test_mojo_gpu_source_struct_errors_masks_profile_budget_and_recovery",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_source_structs.mojo::test_mojo_gpu_source_struct_refusals_and_explanation_remain_metadata_only",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_fill_errors.mojo::test_mojo_gpu_fill_observes_unselected_row_rhs_strict_cast",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_fill_errors.mojo::test_mojo_gpu_fill_outer_when_masks_rhs_fault_and_lax_cast_is_safe",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_iana_fields.mojo::test_mojo_gpu_iana_fields_literal_transitions_footer_extrema_and_nullable_layouts",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_iana_fields.mojo::test_mojo_gpu_iana_fields_descriptor_dedup_budgets_conversion_and_refusals",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_temporal_arithmetic.mojo::test_mojo_gpu_temporal_arithmetic_preflight_rejects_checked_producers_and_resident_sources",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_temporal_arithmetic.mojo::test_mojo_gpu_temporal_binary_arithmetic_extremes_layouts_descriptors_and_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_temporal_arithmetic.mojo::test_mojo_gpu_temporal_physical_casts_conditional_masks_and_overflow_contract",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_file_sources.mojo::test_mojo_gpu_file_prefix_unvisited_dictionary_does_not_hide_earlier_error",
             "metal",
         )
@@ -614,22 +686,6 @@ def production_policy() -> SuitePolicy:
             "tests/public_contracts/test_nested.mojo::test_struct_join_matches_valid_records_with_null_fields",
             "Equal valid struct keys containing null fields do not match in equality joins.",
             "valid struct join keys must match equal null fields",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_temporal.mojo::test_temporal_subtraction_equal_minimum_ticks_cancel_exactly",
-            "Subtracting equal minimum Int64 temporal ticks raises overflow even though the exact difference is zero.",
-            "temporal value overflows Int64",
-            0,
-        )
-    )
-    policy.failures.append(
-        ExpectedFailure(
-            "tests/public_contracts/test_temporal.mojo::test_temporal_subtraction_rejects_unrepresentable_minimum_rhs",
-            "Zero minus minimum Int64 temporal ticks succeeds with a wrapped result instead of rejecting the unrepresentable exact difference.",
-            "minimum temporal RHS must reject an out-of-range difference",
             0,
         )
     )
@@ -2339,6 +2395,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "public.accelerator_staging",
             [
+                "tests/public_contracts/test_struct_field_metadata.mojo",
                 "tests/public_contracts/test_file_source_staging.mojo",
                 "tests/public_contracts/test_file_source_prefixes.mojo",
                 "tests/public_contracts/test_terminal_struct_transport.mojo",
@@ -2350,6 +2407,7 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "public.apple_parity",
             [
+                "tests/public_contracts/test_struct_field_metadata.mojo",
                 "tests/public_contracts/test_accelerator_field_metadata.mojo",
                 "tests/public_contracts/test_file_source_prefixes.mojo",
                 "tests/public_contracts/test_terminal_struct_transport.mojo",
@@ -2365,6 +2423,11 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.apple_parity",
             [
+                "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo",
+                "tests/execution_modes/test_mojo_gpu_source_structs.mojo",
+                "tests/execution_modes/test_mojo_gpu_fill_errors.mojo",
+                "tests/execution_modes/test_mojo_gpu_iana_fields.mojo",
+                "tests/execution_modes/test_mojo_gpu_temporal_arithmetic.mojo",
                 "tests/execution_modes/test_mojo_gpu_field_metadata.mojo",
                 "tests/execution_modes/test_mojo_gpu_asof_queries.mojo",
                 "tests/execution_modes/test_mojo_gpu_terminal_struct_transport.mojo",
@@ -2752,6 +2815,11 @@ def production_policy() -> SuitePolicy:
         ContractGroup(
             "execution.backends",
             [
+                "tests/execution_modes/test_mojo_gpu_temporal_scalar_masks.mojo",
+                "tests/execution_modes/test_mojo_gpu_source_structs.mojo",
+                "tests/execution_modes/test_mojo_gpu_fill_errors.mojo",
+                "tests/execution_modes/test_mojo_gpu_iana_fields.mojo",
+                "tests/execution_modes/test_mojo_gpu_temporal_arithmetic.mojo",
                 "tests/execution_modes/test_mojo_gpu_field_metadata.mojo",
                 "tests/execution_modes/test_mojo_gpu_asof_queries.mojo",
                 "tests/execution_modes/test_mojo_gpu_terminal_struct_transport.mojo",

@@ -5,6 +5,15 @@ are device descriptors, not a second public expression API. Rejections happen
 before a provider context or device allocation is created.
 """
 from .metadata import prune_projections
+from . import temporal_expressions
+from .gpu.temporal_descriptors import (
+    ROW_TEMPORAL_BINARY,
+    ROW_TEMPORAL_CAST,
+    binary_literal,
+    cast_literal,
+)
+from .timezone_tables import serialize as serialize_zone
+from .memory import checked_add
 from .integer_ranges import proven_integer_nodes, _decimal_scale_safe
 from std.memory import ArcPointer, bitcast
 from std.math import pow, abs
@@ -120,7 +129,7 @@ from dataframe.expr import (
 from dataframe.frame import DataFrame
 from dataframe.temporal import parse_every, parse_interval, NANOS_PER_DAY
 from dataframe.time_windows import positive_period, closed_sides
-from dataframe.timezone import _fixed_offset
+from dataframe.timezone import TimeZone, _fixed_offset
 from dataframe.lazy import (
     LazyFrame,
     SCAN_FRAME,
@@ -158,6 +167,7 @@ comptime ROW_DURATION_UTC = 1020
 # Temporal unit bits 0..26 retain storage/UTC/calendar-day metadata. Fixed
 # local field operations carry seconds east of UTC in their right operand.
 comptime ROW_FIXED_ZONE_FIELDS = Int64(1 << 27)
+comptime ROW_IANA_ZONE_FIELDS = Int64(1 << 28)
 comptime ROW_SORT_KEY = 1001
 comptime ROW_MAX_NODES = 64
 comptime ROW_MAX_SLOTS = 64
@@ -220,6 +230,7 @@ struct RowPlan(Movable):
     var reused_columns: Bool
     var key_values: List[UInt64]
     var source_failure: String
+    var zone_words: List[UInt64]
 
 
 def _contains_node(expression: Expr, root: Int, target: Int) -> Bool:
@@ -395,6 +406,14 @@ def _program(
         var right_type = (
             bound.dtypes[node.right] if node.right >= 0 else left_type
         )
+        var temporal_binary = (
+            capabilities.temporal_binary_arithmetic
+            and temporal_expressions.binary(bound, i)
+        )
+        var temporal_cast = (
+            capabilities.temporal_physical_casts
+            and temporal_expressions.cast(bound, i)
+        )
         # Conversion changes validated zone metadata and preserves UTC ticks.
         # Local-time operations still require their own zone-aware support.
         if op == DT_REPLACE_TZ and (
@@ -409,6 +428,15 @@ def _program(
             (op >= DT_YEAR and op <= DT_TRUNCATE)
             or op == DT_TOTAL
             or op == DT_OFFSET_BY
+        )
+        var iana_fields = (
+            op >= DT_YEAR
+            and op <= DT_TIME
+            and left_type.is_datetime()
+            and left_type.time_zone().byte_length() != 0
+            and left_type.time_zone() != "UTC"
+            and not _fixed_offset(left_type.time_zone())
+            and capabilities.iana_zone_temporal_fields
         )
         var fixed_fields = False
         var field_offset = Int64(0)
@@ -467,6 +495,7 @@ def _program(
                 and left_type.time_zone() == "UTC"
             )
             and not fixed_fields
+            and not iana_fields
         ):
             capabilities.reject(
                 "temporal", "time zone field extraction requires CPU execution"
@@ -566,6 +595,8 @@ def _program(
             and not decimal_float_cast
             and not decimal_cast
             and not decimal_arithmetic
+            and not temporal_binary
+            and not temporal_cast
             and (
                 op == SQRT
                 or op == EXP
@@ -643,6 +674,7 @@ def _program(
             and not (
                 capabilities.float64_emulated and bound.dtypes[i].is_float()
             )
+            and not temporal_cast
         ):
             capabilities.reject(
                 "plan", "scalar strict casts require CPU execution"
@@ -697,6 +729,10 @@ def _program(
         if fixed_fields:
             source |= Int(ROW_FIXED_ZONE_FIELDS)
             right = field_offset
+        elif iana_fields:
+            source |= Int(ROW_IANA_ZONE_FIELDS)
+            # Filled with a zone-tail-relative header after all programs bind.
+            right = -1
         if op == DT_CONVERT_TZ or op == DT_REPLACE_TZ:
             right = Int64(bound.dtypes[i].time_zone() == "UTC")
         if op == DT_TOTAL:
@@ -793,6 +829,21 @@ def _program(
                     )
                 right = interval[1] // per_tick
         node_dtypes.append(bound.dtypes[i])
+        var temporal_payload = UInt64(0)
+        if temporal_binary:
+            capabilities.require_arithmetic(DataType.INT64)
+            lowered_op = Int(ROW_TEMPORAL_BINARY)
+            right = Int64(node.right)
+            source = -1
+            temporal_payload = binary_literal(Int64(op), left_type, right_type)
+        elif temporal_cast:
+            capabilities.require_arithmetic(DataType.INT64)
+            lowered_op = Int(ROW_TEMPORAL_CAST)
+            right = -1
+            source = -1
+            temporal_payload = cast_literal(
+                left_type, bound.dtypes[i], node.integer != 0
+            )
         code.append(Int64(lowered_op))
         code.append(Int64(node.left))
         code.append(right)
@@ -800,7 +851,10 @@ def _program(
         # Integer payloads travel as raw 64-bit words, never through a float
         # conversion (Int64 literals beyond 2**53 must remain exact).
         literals.append(
-            bitcast[DType.float64](calendar_ticks) if lowered_op
+            bitcast[DType.float64](temporal_payload) if temporal_binary
+            or temporal_cast else bitcast[DType.float64](
+                calendar_ticks
+            ) if lowered_op
             == ROW_CALENDAR_OFFSET else bitcast[DType.float64](
                 node.integer
             ) if op
@@ -1113,6 +1167,22 @@ def lower_rows(
                     )
                 projection_names.append(expr._name)
             var bound = bind(expr, schema)
+            if (
+                capabilities.temporal_binary_arithmetic
+                or capabilities.temporal_physical_casts
+            ) and temporal_expressions.contains(bound):
+                if (
+                    len(chain) != 1
+                    or node.kind != SELECT
+                    or not terminal_boundary
+                    or limit >= 0
+                    or source_rows >= 0
+                ):
+                    capabilities.reject(
+                        "temporal",
+                        "prototype requires a direct scan and terminal projections without head (SELECT only)",
+                    )
+                temporal_expressions.validate(bound)
             if capabilities.calendar_truncation:
                 for part in bound.expr._nodes:
                     if (
@@ -2411,6 +2481,34 @@ def lower_rows(
         capabilities.reject(
             "plan", "resident region requires at least one output column"
         )
+    var zone_names = List[String]()
+    var zone_bases = List[Int64]()
+    var zone_words = List[UInt64]()
+    for step in steps:
+        for node in range(step.start, step.start + step.nodes):
+            var op = code[4 * node]
+            if (
+                op < DT_YEAR
+                or op > DT_TIME
+                or not (code[4 * node + 3] & ROW_IANA_ZONE_FIELDS)
+            ):
+                continue
+            var source = step.start + Int(code[4 * node + 1])
+            var name = node_dtypes[source].time_zone()
+            var found = -1
+            for at in range(len(zone_names)):
+                if zone_names[at] == name:
+                    found = at
+                    break
+            if found < 0:
+                var zone = TimeZone.load(name)
+                var packed = serialize_zone(zone)
+                _ = checked_add(len(zone_words), len(packed))
+                found = len(zone_names)
+                zone_names.append(name)
+                zone_bases.append(Int64(len(zone_words)))
+                zone_words.extend(packed^)
+            code[4 * node + 2] = zone_bases[found]
     return RowPlan(
         frame^,
         dtype,
@@ -2428,4 +2526,5 @@ def lower_rows(
         reused_columns,
         key_values^,
         query._nodes[cursor].source_failure,
+        zone_words^,
     )
