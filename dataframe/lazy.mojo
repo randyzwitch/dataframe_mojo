@@ -91,6 +91,15 @@ from .csv_reader import read_csv_explicit, read_csv_inferred
 from .expr import (
     AND,
     COL,
+    EQ,
+    NE,
+    NOT,
+    WHEN,
+    LIT_BOOL,
+    LIT_FLOAT,
+    LIT_INT,
+    LIT_STRING,
+    UNTYPED,
     Node,
     OR,
     OVER,
@@ -255,6 +264,168 @@ def _output_names(exprs: List[Expr]) -> List[String]:
     for e in exprs:
         names.append(e._name)
     return names^
+
+
+def _produced_at(exprs: List[Expr], name: String) -> Int:
+    """The last of `exprs` named `name` (the one a projection keeps), or
+    -1."""
+    var at = -1
+    for k in range(len(exprs)):
+        if exprs[k]._name == name:
+            at = k
+    return at
+
+
+def _reads_input(exprs: List[Expr]) -> Bool:
+    """Whether some expression reads an input column: a selection of
+    literals alone yields one row whatever its input holds."""
+    for e in exprs:
+        for node in e._nodes:
+            if node.op == SELECTOR:
+                return False
+            if node.op == COL:
+                return True
+    return False
+
+
+def _plain_or_constant(expr: Expr) -> Bool:
+    """A bare column (under any name) or a literal whose type does not
+    depend on what it is compared with."""
+    if len(expr._nodes) != 1:
+        return False
+    ref node = expr._nodes[0]
+    if node.op == COL or node.op == LIT_STRING or node.op == LIT_BOOL:
+        return True
+    if node.op == LIT_INT or node.op == LIT_FLOAT:
+        return node.text != UNTYPED
+    return False
+
+
+def _same_literal(a: Node, b: Node) -> Int:
+    """1 when two literal nodes hold equal values, 0 when unequal, -1
+    when that is unknown (not both literals of one type, or a null)."""
+    if a.op != b.op:
+        return -1
+    if a.op == LIT_STRING:
+        return 1 if a.text == b.text else 0
+    if a.op == LIT_BOOL:
+        return 1 if a.integer == b.integer else 0
+    if (
+        a.op == LIT_INT
+        and a.text != UNTYPED
+        and a.text == b.text
+        and a.text2 == b.text2
+    ):
+        return 1 if a.integer == b.integer else 0
+    return -1
+
+
+def _fold_constants(expr: Expr) -> Expr:
+    """`expr` with its constant boolean parts evaluated: an equality of
+    two literals (a projection's constant substituted into a filter,
+    `_through_projection`), and AND, OR and NOT over known values, under
+    SQL's three-valued logic (false AND null is false, true OR null is
+    true). DuckDB's planner folds constants the same way before filters
+    move."""
+    ref nodes = expr._nodes
+    var n = len(nodes)
+    # -1 unknown, 0 false, 1 true.
+    var value = List[Int](length=n, fill=-1)
+    var folded = False
+    for i in range(n):
+        ref node = nodes[i]
+        var a = value[node.left] if node.left >= 0 else -1
+        var b = value[node.right] if node.right >= 0 else -1
+        if node.op == LIT_BOOL:
+            value[i] = 1 if node.integer != 0 else 0
+            continue
+        if (node.op == EQ or node.op == NE) and node.left >= 0:
+            var same = _same_literal(nodes[node.left], nodes[node.right])
+            if same >= 0:
+                value[i] = same if node.op == EQ else 1 - same
+        elif node.op == AND:
+            if a == 0 or b == 0:
+                value[i] = 0
+            elif a == 1 and b == 1:
+                value[i] = 1
+            elif a == 1 or b == 1:
+                folded = True
+        elif node.op == OR:
+            if a == 1 or b == 1:
+                value[i] = 1
+            elif a == 0 and b == 0:
+                value[i] = 0
+            elif a == 0 or b == 0:
+                folded = True
+        elif node.op == NOT and a >= 0:
+            value[i] = 1 - a
+        folded = folded or value[i] >= 0
+    if not folded:
+        return expr.copy()
+    var out = List[Node]()
+    _ = _emit_folded(nodes, value, n - 1, out)
+    return Expr(out^, expr._name)
+
+
+def _emit_folded(
+    nodes: List[Node], value: List[Int], i: Int, mut out: List[Node]
+) -> Int:
+    """Append node `i` of a folded expression to `out` after its inputs,
+    a known value as a literal and an AND (OR) with a true (false) input
+    as its other input; its index in `out`."""
+    if value[i] >= 0:
+        out.append(
+            Node(
+                LIT_BOOL,
+                -1,
+                -1,
+                "",
+                Int64(value[i]),
+                0,
+                0,
+                -1,
+                "",
+                List[Optional[DataType]](),
+            )
+        )
+        return len(out) - 1
+    ref node = nodes[i]
+    if node.op == AND or node.op == OR:
+        var identity = 1 if node.op == AND else 0
+        if value[node.left] == identity:
+            return _emit_folded(nodes, value, node.right, out)
+        if value[node.right] == identity:
+            return _emit_folded(nodes, value, node.left, out)
+    var copy = node.copy()
+    if copy.left >= 0:
+        copy.left = _emit_folded(nodes, value, node.left, out)
+    if copy.right >= 0:
+        copy.right = _emit_folded(nodes, value, node.right, out)
+    if node.op == WHEN and copy.extra >= 0:
+        copy.extra = _emit_folded(nodes, value, node.extra, out)
+    out.append(copy^)
+    return len(out) - 1
+
+
+def _pinned(node: PlanNode) -> Bool:
+    """A filter that reads a shared subplan and stays above it
+    (`_filter_shared_subplans`)."""
+    return node.kind == FILTER and len(node.flags) > 0 and node.flags[0]
+
+
+def _through_projection(predicate: Expr, exprs: List[Expr]) -> Expr:
+    """`predicate` over a projection's outputs, rewritten over its
+    input: each column it reads that the projection produces becomes the
+    input column or the constant producing it (`_plain_or_constant`)."""
+    var result = predicate.copy()
+    for i in range(len(result._nodes)):
+        if result._nodes[i].op != COL:
+            continue
+        var at = _produced_at(exprs, result._nodes[i].text)
+        if at < 0:
+            continue
+        result._nodes[i] = exprs[at]._nodes[0].copy()
+    return result^
 
 
 def _boolean_parts(expr: Expr, op: Int) -> List[Expr]:
@@ -3490,6 +3661,7 @@ struct LazyFrame(Copyable):
     def _optimized(self) raises -> Self:
         var plan = self.copy()
         plan._split_filters()
+        plan._filter_shared_subplans()
         plan._push_predicates()
         plan._merge_filters()
         plan._push_slices()
@@ -3527,35 +3699,10 @@ struct LazyFrame(Copyable):
         on the 11.7M-row joins below their date filters, and holding
         those doubled the query; Polars likewise drops a cache whose
         consumers filter differently)."""
-        # Two plans joined carry their own copies of a frame they both
-        # scan, in separate slots: a scan's signature names the first slot
-        # holding the same buffers.
-        var canonical = List[Int](capacity=len(self._frames))
-        for f in range(len(self._frames)):
-            var first = f
-            for g in range(f):
-                if canonical[g] == g and self._frames[g]._shares_buffers_with(
-                    self._frames[f]
-                ):
-                    first = g
-                    break
-            canonical.append(first)
-        var signatures = List[String]()
-        var sizes = List[Int]()
-        var reducing = List[Bool]()
-        for i in range(len(self._nodes)):
-            signatures.append(self._signature(i, signatures, canonical))
-            ref node = self._nodes[i]
-            var size = 1
-            var reduces = node.kind == AGG or node.kind == UNIQUE
-            if node.left >= 0:
-                size += sizes[node.left]
-                reduces = reduces or reducing[node.left]
-            if node.right >= 0:
-                size += sizes[node.right]
-                reduces = reduces or reducing[node.right]
-            sizes.append(size)
-            reducing.append(reduces)
+        var computed = self._subtree_signatures()
+        ref signatures = computed[0]
+        ref sizes = computed[1]
+        ref reducing = computed[2]
         # Which nodes hold a join, and each node's parent.
         var joining = List[Bool]()
         var parents = List[Int](length=len(self._nodes), fill=-1)
@@ -3576,7 +3723,11 @@ struct LazyFrame(Copyable):
             # The largest subtree that two uncovered nodes hold.
             var best = -1
             for i in range(len(self._nodes)):
-                if covered[i]:
+                # A reader's pinned filter stays outside what is shared
+                # (`_filter_shared_subplans`): two readers with one filter
+                # in common would otherwise share it, each pair with its
+                # own copy of the subplan below.
+                if covered[i] or _pinned(self._nodes[i]):
                     continue
                 if not reducing[i] and not self._read_whole(
                     i, signatures, parents, joining, covered
@@ -3723,15 +3874,148 @@ struct LazyFrame(Copyable):
     def _columns_of(self, index: Int) raises -> List[String]:
         return self._execute(index, True).columns()
 
-    def _split_filters(mut self):
+    def _subtree_signatures(
+        self,
+    ) -> Tuple[List[String], List[Int], List[Bool]]:
+        """Each node's `_signature`, its subtree's node count, and whether
+        the subtree holds an aggregation or a unique."""
+        # Two plans joined carry their own copies of a frame they both
+        # scan, in separate slots: a scan's signature names the first slot
+        # holding the same buffers.
+        var canonical = List[Int](capacity=len(self._frames))
+        for f in range(len(self._frames)):
+            var first = f
+            for g in range(f):
+                if canonical[g] == g and self._frames[g]._shares_buffers_with(
+                    self._frames[f]
+                ):
+                    first = g
+                    break
+            canonical.append(first)
+        var signatures = List[String]()
+        var sizes = List[Int]()
+        var reducing = List[Bool]()
+        for i in range(len(self._nodes)):
+            signatures.append(self._signature(i, signatures, canonical))
+            ref node = self._nodes[i]
+            var size = 1
+            var reduces = node.kind == AGG or node.kind == UNIQUE
+            if node.left >= 0:
+                size += sizes[node.left]
+                reduces = reduces or reducing[node.left]
+            if node.right >= 0:
+                size += sizes[node.right]
+                reduces = reduces or reducing[node.right]
+            sizes.append(size)
+            reducing.append(reduces)
+        return (signatures^, sizes^, reducing^)
+
+    def _filter_shared_subplans(mut self):
+        """A subplan written in several places that `_share_subplans` will
+        compute once (it aggregates), read by each copy only through
+        row-local filters, needs only the rows some reader keeps: the OR
+        of the readers' filters goes above every copy and moves into it,
+        while each reader's own filters are pinned where they are, so the
+        copies stay alike and are still computed once (DuckDB pushes the
+        disjunction of a CTE's consumers' filters into the CTE). TPC-DS
+        q4, q11 and q74 read one yearly total per channel and year from a
+        table of every channel and year."""
+        # Copies need two aggregations at least; most plans have fewer,
+        # and their signatures are not worth building (ClickBench q29's
+        # ninety sums).
+        var aggregations = 0
+        for node in self._nodes:
+            if node.kind == AGG or node.kind == UNIQUE:
+                aggregations += 1
+        if aggregations < 2:
+            return
+        var computed = self._subtree_signatures()
+        ref signatures = computed[0]
+        ref sizes = computed[1]
+        ref reducing = computed[2]
+        var parents = self._parents()
+        var covered = List[Bool](length=len(self._nodes), fill=False)
+        var count = len(self._nodes)
+        while True:
+            # The largest aggregating subtree written twice or more, under
+            # its readers' filters (two readers may share one).
+            var best = -1
+            for i in range(count):
+                if covered[i] or not reducing[i]:
+                    continue
+                if self._nodes[i].kind == FILTER:
+                    continue
+                if best >= 0 and sizes[i] <= sizes[best]:
+                    continue
+                for j in range(count):
+                    if (
+                        j != i
+                        and not covered[j]
+                        and signatures[j] == signatures[i]
+                    ):
+                        best = i
+                        break
+            if best < 0:
+                break
+            var copies = List[Int]()
+            for j in range(count):
+                if not covered[j] and signatures[j] == signatures[best]:
+                    copies.append(j)
+                    self._cover(j, covered)
+            # Each copy's readers: the run of row-local filters above it.
+            var readers = List[List[Int]]()
+            var kept = List[Expr]()
+            var alike = True
+            for copy in copies:
+                var run = List[Int]()
+                var above = parents[copy]
+                while (
+                    above >= 0
+                    and self._nodes[above].kind == FILTER
+                    and _row_local(self._nodes[above].exprs)
+                    and not _pinned(self._nodes[above])
+                ):
+                    run.append(above)
+                    above = parents[above]
+                if len(run) == 0:
+                    break
+                var keeps = self._nodes[run[0]].exprs[0].copy()
+                for k in range(1, len(run)):
+                    keeps = keeps & self._nodes[run[k]].exprs[0]
+                if len(kept) > 0 and _expr_signature(keeps) != _expr_signature(
+                    kept[0]
+                ):
+                    alike = False
+                kept.append(keeps^)
+                readers.append(run^)
+            # A copy read whole needs every row; readers alike move into
+            # their copies alike anyway.
+            if len(readers) < len(copies) or alike:
+                continue
+            var any = kept[0].copy()
+            for k in range(1, len(kept)):
+                any = any | kept[k]
+            for c in range(len(copies)):
+                ref run = readers[c]
+                for r in run:
+                    self._nodes[r].flags = [True]
+                self._nodes.append(
+                    _plan_node(FILTER, copies[c], exprs=[any.copy()])
+                )
+                self._nodes[run[0]].left = len(self._nodes) - 1
+        if len(self._nodes) > count:
+            self._split_filters(count)
+            self._reorder()
+
+    def _split_filters(mut self, first: Int = 0):
         """A row-local filter on `a & b` becomes a filter on b over one on
         a, so predicate pushdown moves each part as far as it can go; a
         filter on an OR of ANDs also gets the single-input filters it
         implies (`_implied_filters`). `_merge_filters` rejoins the parts
-        that end up together."""
+        that end up together. Only nodes from `first` on are split."""
         var count = len(self._nodes)
         var added = False
-        for i in range(count):
+        for i in range(first, count):
             if self._nodes[i].kind != FILTER:
                 continue
             if not _row_local(self._nodes[i].exprs):
@@ -3775,6 +4059,10 @@ struct LazyFrame(Copyable):
                 if below.kind != FILTER:
                     continue
                 if not (_row_local(node.exprs) and _row_local(below.exprs)):
+                    continue
+                # A reader's pinned filters merge with each other, never
+                # with the shared subplan's own.
+                if _pinned(node) != _pinned(below):
                     continue
                 var merged = below.exprs[0] & node.exprs[0]
                 var child = below.left
@@ -4869,10 +5157,46 @@ struct LazyFrame(Copyable):
         self._remember_schemas()
         try:
             self._push_predicates_now()
+            self._drop_constant_filters()
         except e:
             self._schema_memo = None
             raise e^
         self._schema_memo = None
+
+    def _drop_constant_filters(mut self) raises:
+        """A filter folded to true (`_fold_constants`) keeps every row
+        and goes; one folded to false keeps none, and it and its input
+        become an empty frame of their columns (DuckDB's empty result):
+        a UNION ALL branch whose constant fails a filter is never run."""
+        var parents = self._parents()
+        var changed = False
+        for i in range(len(self._nodes)):
+            ref node = self._nodes[i]
+            if node.kind != FILTER or _pinned(node):
+                continue
+            ref nodes = node.exprs[0]._nodes
+            if len(nodes) != 1 or nodes[0].op != LIT_BOOL:
+                continue
+            if nodes[0].integer != 0:
+                var parent = parents[i]
+                if parent < 0:
+                    continue
+                var input = node.left
+                if self._nodes[parent].left == i:
+                    self._nodes[parent].left = input
+                if self._nodes[parent].right == i:
+                    self._nodes[parent].right = input
+                parents[input] = parent
+            else:
+                var empty = self._execute(i, True)
+                self._frames.append(empty^)
+                self._schemas.append(Optional[CsvSchema]())
+                self._nodes[i] = _plan_node(
+                    SCAN_FRAME, offset=len(self._frames) - 1
+                )
+            changed = True
+        if changed:
+            self._reorder()
 
     def _push_predicates_now(mut self) raises:
         # Filters are visited in children-before-parents order and moved
@@ -4892,6 +5216,26 @@ struct LazyFrame(Copyable):
                 if side >= 0:
                     if i == root:
                         root = child
+                    ref below = self._nodes[child]
+                    if below.kind == SELECT or below.kind == WITH_COLUMNS:
+                        self._nodes[i].exprs = [
+                            _fold_constants(
+                                _through_projection(
+                                    self._nodes[i].exprs[0], below.exprs
+                                )
+                            )
+                        ]
+                    elif below.kind == CONCAT:
+                        # A copy filters the second input; the filter
+                        # itself moves above the first.
+                        self._nodes.append(
+                            _plan_node(
+                                FILTER,
+                                below.right,
+                                exprs=self._nodes[i].exprs.copy(),
+                            )
+                        )
+                        self._nodes[child].right = len(self._nodes) - 1
                     self._swap_in_place(i, child, side == 1)
                     changed = True
                     moved = True
@@ -4937,36 +5281,41 @@ struct LazyFrame(Copyable):
         `child` without changing its result: -1 when not, else the side of
         `child` it moves into (0 left or only input, 1 right)."""
         var reads = _references(self._nodes[filter].exprs[0])
-        if not reads or child < 0:
+        if not reads or child < 0 or _pinned(self._nodes[filter]):
             return -1
         ref below = self._nodes[child]
         if below.kind == WITH_COLUMNS or below.kind == SELECT:
-            # Safe when the filter reads only unchanged input columns: a
-            # select of plain columns changes none, so it checks only that
-            # (below); with_columns may replace what it names.
-            if below.kind == WITH_COLUMNS:
-                # A window or aggregate over the input (a rank, a sum over
-                # a partition) depends on which rows are there: filtering
-                # first changes its values even for rows the filter keeps
-                # (TPC-DS q47 ranked months after `d_year = 1999` was
-                # pushed below the rank, so every rank shifted by one).
-                if not _row_local(below.exprs):
-                    return -1
-                var produced = _output_names(below.exprs)
-                for name in reads.value():
-                    for p in produced:
-                        if p == name:
-                            return -1
-            if below.kind == SELECT:
-                for e in below.exprs:
-                    var r = _references(e)
-                    if (
-                        not r
-                        or len(r.value()) != 1
-                        or r.value()[0] != e._name
-                        or len(e._nodes) != 1
-                    ):
+            # A window or aggregate over the input (a rank, a sum over a
+            # partition) depends on which rows are there: filtering first
+            # changes its values even for rows the filter keeps (TPC-DS
+            # q47 ranked months after `d_year = 1999` was pushed below the
+            # rank, so every rank shifted by one). A select of those, or of
+            # literals alone, also changes the row count.
+            if not _row_local(below.exprs) or not _row_local(
+                self._nodes[filter].exprs
+            ):
+                return -1
+            if below.kind == SELECT and not _reads_input(below.exprs):
+                return -1
+            # Each column the filter reads must be an input column the
+            # projection passes on, renamed or not, or a constant: the
+            # filter is then rewritten in the input's terms
+            # (`_through_projection`), as Polars renames a predicate's
+            # columns through an alias projection and DuckDB substitutes a
+            # projection's expressions (`PushdownProjection`).
+            for name in reads.value():
+                var at = _produced_at(below.exprs, name)
+                if at < 0:
+                    if below.kind == SELECT:
                         return -1
+                    continue
+                if not _plain_or_constant(below.exprs[at]):
+                    return -1
+            return 0
+        if below.kind == CONCAT and _row_local(self._nodes[filter].exprs):
+            # Both inputs supply the same names and types, so the filter
+            # applies to each (`_push_into_concat`), as both engines push
+            # predicates into every branch of a UNION ALL.
             return 0
         if (
             below.kind == AGG
