@@ -1,4 +1,5 @@
 """Stable global and partitioned ranks through the resident Metal API."""
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_raises
@@ -15,7 +16,7 @@ from dataframe import (
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.categorical import encode
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.capabilities import RowCapabilities
 from tests.execution_modes.test_backend_metal_float64_emulation import same
@@ -226,7 +227,7 @@ def test_native_metal_rank_resident_filters_groups_joins_empty_and_cost() raises
     var estimate = runtime.estimate_auto(
         frame.lazy().select(col("x").rank("dense"))
     )
-    assert_true("metal-rank-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     same(
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),

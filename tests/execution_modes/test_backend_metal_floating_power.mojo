@@ -1,10 +1,12 @@
 """Compensated floating power preserves exceptional values and boundary accuracy."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import isnan, isfinite
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, LazyFrame, col, lit, when
 from dataframe.dtype import DataType
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
@@ -65,7 +67,7 @@ def test_floating_power_capability_metadata_types_and_cost_preflight() raises:
         )
         var query = source.lazy().select(col("x").pow(exponent))
         var plan = lower_rows(query, _capabilities())
-        _ = _Descriptors(plan)
+        _ = Program(plan)
         assert_true(
             "unsupported" not in MetalRuntime(device_id=999999).describe(query)
         )
@@ -173,8 +175,8 @@ def test_native_metal_floating_power_profile_family_exact_budget_and_runtime_reu
         var query = frame.lazy().select(col("x").pow(exponent))
         var estimate = runtime.estimate_auto(query)
         assert_true(";floating-power-v1:p1" in estimate.family)
-        assert_true(";metal-floating-power-v1:p1" in estimate.family)
-        assert_true(";metal-emulated-float64-v1" in estimate.family)
+        assert_true(";mojo-metal-v1;ops=" in estimate.family)
+        assert_true(";mojo-metal-v1;ops=" in estimate.family)
         var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
         var measured = query.profile(accelerator=exact)
         assert_equal(

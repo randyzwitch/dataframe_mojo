@@ -1,6 +1,7 @@
 """Fold source-independent scalar parsing and casts before dictionary encoding."""
 from std.collections import Optional
 from dataframe.column import Column
+from dataframe.binding import bind
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.expr import (
     Expr,
@@ -39,17 +40,108 @@ def _constant(expression: Expr, root: Int) -> Bool:
     return True
 
 
+def _checked_temporal_literal(expression: Expr, root: Int) -> Bool:
+    """Keep known overflowing physical temporal casts inside their masks.
+
+    This is a static literal-word proof, not Series evaluation. Existing text
+    parsing and datetime-operation folding keep their previous path. Ancestors
+    of a deferred strict cast must not evaluate it indirectly either.
+    """
+    try:
+        var fragment = subtree(expression, root)
+        var temporal = False
+        for node in fragment._nodes:
+            if len(node.dtypes) and node.dtypes[0]:
+                temporal = temporal or node.dtypes[0].value().is_temporal()
+        if not temporal:
+            return False
+        var bound = bind(fragment, List[Series]())
+        var count = len(bound.dtypes)
+        var known = List[Bool](length=count, fill=False)
+        var absent = List[Bool](length=count, fill=False)
+        var words = List[Int128](length=count, fill=0)
+        for index in range(count):
+            ref node = bound.expr._nodes[index]
+            var target = bound.dtypes[index]
+            if node.op == LIT_NULL:
+                known[index] = True
+                absent[index] = True
+                continue
+            if node.op == LIT_INT and (
+                target == DataType.INT64 or target.is_temporal()
+            ):
+                known[index] = True
+                words[index] = Int128(node.integer)
+                continue
+            if node.op != CAST or node.left < 0 or not known[node.left]:
+                continue
+            var source = bound.dtypes[node.left]
+            if not (
+                (source == DataType.INT64 or source.is_temporal())
+                and (target == DataType.INT64 or target.is_temporal())
+                and (source.is_temporal() or target.is_temporal())
+            ):
+                continue
+            if absent[node.left]:
+                known[index] = True
+                absent[index] = True
+                continue
+            var value = words[node.left]
+            if (
+                source == DataType.INT64
+                or target == DataType.INT64
+                or source == target
+            ):
+                pass
+            elif source.is_date() and target.is_datetime():
+                value *= Int128(86400) * Int128(target.per_second())
+            elif (source.is_datetime() and target.is_datetime()) or (
+                source.is_duration() and target.is_duration()
+            ):
+                var a = Int128(source.per_second())
+                var b = Int128(target.per_second())
+                value = value * (b // a) if b >= a else value // (a // b)
+            elif (
+                source.is_datetime()
+                and (source.time_zone() == "" or source.time_zone() == "UTC")
+                and (target.is_date() or target.is_time())
+            ):
+                var day = Int128(86400) * Int128(source.per_second())
+                value = (
+                    value
+                    // day if target.is_date() else (value % day)
+                    * (Int128(1000000000) // Int128(source.per_second()))
+                )
+            else:
+                continue
+            if value < Int128(Int64.MIN) or value > Int128(Int64.MAX):
+                if node.integer:
+                    return True
+                absent[index] = True
+            known[index] = True
+            words[index] = value
+    except:
+        # Preserve the established literal parser's handling of unrelated
+        # invalid expressions; this proof only defers known checked casts.
+        pass
+    return False
+
+
 def _foldable(expression: Expr, root: Int) -> Bool:
     ref node = expression._nodes[root]
     if node.op == DT_STRPTIME:
-        return _constant(expression, root)
+        return _constant(expression, root) and not _checked_temporal_literal(
+            expression, root
+        )
     if node.op != CAST or len(node.dtypes) == 0 or not node.dtypes[0]:
         return False
     var dtype = node.dtypes[0].value()
     # Dictionary codes cannot represent numeric-to-string formatting, and
     # categorical codes need their dictionary rather than a bare integer.
-    return (dtype.is_numeric() or dtype.is_temporal()) and _constant(
-        expression, root
+    return (
+        (dtype.is_numeric() or dtype.is_temporal())
+        and _constant(expression, root)
+        and not _checked_temporal_literal(expression, root)
     )
 
 
