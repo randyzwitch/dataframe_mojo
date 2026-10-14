@@ -1,4 +1,6 @@
 """Decimal products and quotients preserve checked integer CPU semantics."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     DataFrame,
@@ -12,7 +14,7 @@ from dataframe import (
     when,
 )
 from dataframe.decimal import pow10
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal import require_metal
@@ -47,7 +49,7 @@ def test_decimal_multiplicative_capability_proofs_and_metadata() raises:
     assert_true(not RowCapabilities().decimal_multiplicative)
     for expression in List[Expr]([col("a") * col("b"), col("a") / col("b")]):
         var query = safe_fixture().lazy().select(expression)
-        var descriptors = _Descriptors(lower_rows(query, _capabilities()))
+        var descriptors = Program(lower_rows(query, _capabilities()))
         assert_equal(descriptors.code[8], Int64(219))
         assert_equal(
             descriptors.code[11],
@@ -224,7 +226,7 @@ def test_native_metal_decimal_multiplicative_proven_resident_consumers() raises:
     )
     same(joined.collect(accelerator=runtime), joined.collect(engine="cpu"))
     assert_true(
-        "metal-decimal-multiplicative-v1"
+        ";mojo-metal-v1;ops="
         in runtime.estimate_auto(
             frame.lazy().select(col("a") / col("b"))
         ).family

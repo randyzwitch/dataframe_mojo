@@ -3,6 +3,8 @@
 Public tests require the real Metal capability. CPU model verification is a
 separate callable fixture audit; it is never reported as native execution.
 """
+from dataframe.accelerator.rows import lower_rows
+from dataframe.accelerator.gpu.runtime import capabilities as gpu_capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Series, Column, Expr, col, lit, when
@@ -421,7 +423,7 @@ def wide_sum_cases(runtime: MetalRuntime, native: Bool) raises:
         with assert_raises(contains="overflow"):
             _ = bad32.lazy().select(col("x").sum()).collect(accelerator=runtime)
         var unsafe = DataFrame([Series("x", Column[UInt64]([UInt64.MAX, 1]))])
-        with assert_raises(contains="Integer overflow"):
+        with assert_raises(contains="overflow"):
             _ = (
                 unsafe.lazy()
                 .select(col("x").sum())
@@ -1077,13 +1079,14 @@ def test_native_metal_float32_encodings_and_separate_operator_rounding_match_lit
 def checked_boundary_preflight() raises:
     var unavailable = MetalRuntime(device_id=999999)
     var source = DataFrame([Series("x", Column[Int64]([1, 2]))])
+    var checked_head = source.lazy().select(col("x") + 1).head(0)
+    var restricted = gpu_capabilities()
+    restricted.deferred_integer_errors = False
     with assert_raises(contains="terminal projections without head"):
-        _ = (
-            source.lazy()
-            .select(col("x") + 1)
-            .head(0)
-            .collect(accelerator=unavailable)
-        )
+        _ = lower_rows(checked_head, restricted)
+    # Mojo carries checked per-value errors through row selection, so this
+    # metadata boundary no longer requires the old provider's blanket refusal.
+    assert_true("unsupported" not in unavailable.describe(checked_head))
     with assert_raises(contains="strict casts require terminal"):
         _ = (
             source.lazy()

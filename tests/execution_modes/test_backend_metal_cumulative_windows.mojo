@@ -1,6 +1,6 @@
 """Ordered cumulative state and nested OVER scopes through resident Metal."""
 from tests.execution_modes.test_backend_metal import require_metal
-from std.testing import assert_true, assert_raises
+from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import (
     DataFrame,
@@ -229,11 +229,17 @@ def test_native_metal_cumulative_nested_scopes_resident_consumers_empty_and_budg
         assert_true(
             measured[1].column("host_result_bytes").int64()._get(i) == 0
         )
-        assert_true(measured[1].column("download_bytes").int64()._get(i) == 8)
+        assert_true(
+            measured[1].column("resident_output_bytes").int64()._get(i) > 0
+        )
+        assert_equal(
+            measured[1].item(i, "materialization_boundary").string(),
+            "Mojo GPU resident table",
+        )
     var estimate = MetalRuntime().estimate_auto(
         frame.lazy().select(col("x").cum_count())
     )
-    assert_true("metal-cumulative-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     assert_true(";cumulative-v1" in estimate.family)
     var automatic = frame.lazy().select(col("x").cum_count())
     same(

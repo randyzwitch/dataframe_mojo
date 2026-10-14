@@ -1,10 +1,11 @@
 """Column aliases share resident values without changing visible schemas."""
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, col, lit, Expr
 from dataframe.lazy import LazyFrame
 from dataframe.string_column import StringColumn
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from tests.execution_modes.test_backend_metal_float64_emulation import same
@@ -149,13 +150,13 @@ def test_native_metal_column_slot_gpu_resident_joins_reductions_and_dictionaries
     var facts = MetalRuntime().estimate_auto(
         source.lazy().select_exprs(aliases(2))
     )
-    assert_true("metal-column-slots-v1" in facts.family)
+    assert_true(";mojo-metal-v1;ops=" in facts.family)
     with assert_raises(contains="unsupported"):
         _ = MetalRuntime().estimate_auto(query)
     var ordinary = MetalRuntime().estimate_auto(
         source.lazy().select((col("x") * lit(Float64(2))).alias("twice"))
     )
-    assert_true("metal-column-slots-v1" not in ordinary.family)
+    assert_true(facts.family != ordinary.family)
     var measured = query.profile(accelerator=MetalRuntime())
     same(measured[0], query.collect(engine="cpu"))
     assert_true(measured[1].height() > 0)

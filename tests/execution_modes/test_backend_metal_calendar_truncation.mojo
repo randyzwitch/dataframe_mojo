@@ -1,7 +1,9 @@
 """Calendar buckets preserve proleptic months and checked Datetime storage."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_true, assert_equal, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, col, lit, when
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_CALENDAR_TRUNCATE
 from tests.execution_modes.test_backend_metal import require_metal
@@ -48,8 +50,8 @@ def test_calendar_truncation_capability_month_metadata_and_checked_boundaries() 
     var plan = lower_rows(query, _capabilities())
     assert_equal(plan.code[4], Int64(ROW_CALENDAR_TRUNCATE))
     assert_equal(plan.code[6], Int64(27))
-    var desc = _Descriptors(plan)
-    assert_equal(desc.code[4], Int64(144))
+    var desc = Program(plan)
+    assert_equal(desc.code[4], Int64(ROW_CALENDAR_TRUNCATE))
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
@@ -192,7 +194,7 @@ def test_native_metal_calendar_truncation_profiles_cost_budget_and_reuse() raise
     )
     var estimate = runtime.estimate_auto(query)
     assert_true(";calendar-truncation-v1" in estimate.family)
-    assert_true(";metal-calendar-truncation-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
     var measured = query.profile(accelerator=exact)
     assert_equal(

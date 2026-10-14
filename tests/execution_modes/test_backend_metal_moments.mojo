@@ -1,10 +1,12 @@
 """Stable binary64 moments through scalar, grouped and partitioned Metal."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.math import sqrt, isnan, isfinite
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, LazyFrame, col, lit, when
 from dataframe.dtype import DataType, NUMERIC_DTYPES
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.reductions import VarState
@@ -77,7 +79,7 @@ def test_moments_capability_precision_metadata_and_private_casts() raises:
             )
             assert_equal(output.min_count >> 47, 8)
             assert_equal((output.min_count >> 31) & 65535, 0)
-        _ = _Descriptors(plan)
+        _ = Program(plan)
         assert_true(
             "unsupported" not in MetalRuntime(device_id=999999).describe(query)
         )
@@ -430,7 +432,7 @@ def test_native_metal_moments_nested_consumers_preflight_cost_budget_and_reuse()
     var query = frame.lazy().select(col("x").var().over("k"))
     var estimate = runtime.estimate_auto(frame.lazy().select(col("x").var()))
     assert_true(";moments-v1" in estimate.family)
-    assert_true(";metal-moments-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     same(
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),

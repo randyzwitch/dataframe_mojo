@@ -1,4 +1,6 @@
 """Trailing windows retain CPU recomputation order and checked sum boundaries."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
@@ -15,7 +17,7 @@ from dataframe import (
 )
 from dataframe.dtype import DataType, NUMERIC_DTYPES
 from dataframe.categorical import encode
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_CUMULATIVE_KEY
 from dataframe.accelerator.windows import lower_partition_aggregates
@@ -81,7 +83,7 @@ def test_rolling_capability_threshold_metadata_and_nested_scope_lowering() raise
                             == 8 else DataType.FLOAT32,
                         )
                 assert_true(found)
-                _ = _Descriptors(plan)
+                _ = Program(plan)
                 assert_true(
                     "unsupported"
                     not in MetalRuntime(device_id=999999).describe(query)
@@ -447,9 +449,9 @@ def test_native_metal_rolling_nested_scopes_consumers_cost_budget_and_reuse() ra
         frame.head(17).lazy().select(col("x").rolling_mean(3, 1).over("k"))
     )
     var estimate = runtime.estimate_auto(query)
-    assert_true("metal-rolling-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     assert_true(";rolling-v1" in estimate.family)
-    assert_true("metal-shift-fill-v1" not in estimate.family)
+    assert_true(";shift-fill-v1" not in estimate.family)
     exact(
         query.collect(engine="auto", accelerator=runtime),
         query.collect(engine="cpu"),

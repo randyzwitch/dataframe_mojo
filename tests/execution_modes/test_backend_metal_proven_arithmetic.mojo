@@ -1,10 +1,11 @@
 """Static integer error proofs preserve CPU observations across Metal stages."""
-from std.testing import assert_true, assert_raises
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
+from std.testing import assert_equal, assert_true, assert_raises
 from tests.execution_modes.test_backend_metal import require_metal
 from dataframe import DataFrame, Series, Column, col, lit, Expr, when
 from dataframe.binding import bind
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.integer_ranges import proven_integer_nodes
 from tests.execution_modes.test_backend_metal_float64_emulation import same
@@ -72,16 +73,19 @@ def test_integer_proofs_cover_unsigned_product_and_literal_boundaries() raises:
         .with_columns((col("x") + lit(Int64(1))).alias("bad"))
         .head(0)
     )
+    var restricted = _capabilities()
+    restricted.deferred_integer_errors = False
     with assert_raises(contains="terminal projections"):
-        _ = lower_rows(query, _capabilities())
+        _ = lower_rows(query, restricted)
     # A proof for a parent must never hide an unproved child operation.
     with assert_raises(contains="terminal projections"):
         _ = lower_rows(
             source.lazy()
             .select(((col("x") + lit(Int64(1))) * lit(Int64(0))).alias("bad"))
             .head(0),
-            _capabilities(),
+            restricted,
         )
+    _ = lower_rows(query, _capabilities())
 
 
 def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rejection() raises:
@@ -129,13 +133,29 @@ def test_native_metal_proven_integer_gpu_stages_head_nulls_empty_and_checked_rej
     )
     check(source.lazy().filter((col("x") + lit(Int64(0))) < 0).head(1))
     check(source.lazy().select(col("small").cast("int64")).head(1))
+    var runtime = MetalRuntime()
+    var unsafe = source.lazy().with_columns(
+        (col("x") + lit(Int64(1))).alias("bad")
+    )
+    # CPU pushes a leading slice below row-local arithmetic. The overflowing
+    # last row is unobserved by these prefixes; Mojo carries its deferred fault.
+    for count in [0, 1]:
+        var actual = unsafe.head(count).collect(accelerator=runtime)
+        same(actual, unsafe.head(count).collect(engine="cpu"))
+        assert_equal(actual.columns(), ["x", "u", "small", "bad"])
+        assert_equal(actual.height(), count)
+        if count:
+            assert_equal(actual.item(0, "bad").int64(), Int64.MIN + 1)
+    with assert_raises(contains="overflow"):
+        _ = unsafe.collect(engine="cpu")
+    with assert_raises(contains="overflow"):
+        _ = unsafe.collect(accelerator=runtime)
+    var recovered = unsafe.head(1).collect(accelerator=runtime)
+    assert_equal(recovered.item(0, "bad").int64(), Int64.MIN + 1)
+    var restricted = _capabilities()
+    restricted.deferred_integer_errors = False
     with assert_raises(contains="terminal projections"):
-        _ = (
-            source.lazy()
-            .with_columns((col("x") + lit(Int64(1))).alias("bad"))
-            .head(0)
-            .collect(accelerator=MetalRuntime())
-        )
+        _ = lower_rows(unsafe.head(0), restricted)
     with assert_raises(contains="strict casts"):
         _ = (
             source.lazy()
