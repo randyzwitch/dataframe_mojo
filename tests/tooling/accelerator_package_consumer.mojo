@@ -10,6 +10,7 @@ from dataframe._accel_provider import (
     estimate_auto,
     select_auto,
 )
+from dataframe.lazy import LazyFrame
 from dataframe.json_value import json_quote
 
 
@@ -26,6 +27,28 @@ def assert_literal_cells(frame: DataFrame) raises:
             )
 
 
+def fixture_key(plan: LazyFrame) raises -> String:
+    var key = calibration_key(True, True, 65536)
+    var facts = estimate_auto(plan)
+    return (
+        '{"provider":'
+        + json_quote(key.provider)
+        + ',"device":'
+        + json_quote(key.device)
+        + ',"runtime_build_id":'
+        + json_quote(key.runtime_build_id)
+        + ',"cpu_build_id":'
+        + json_quote(key.cpu_build_id)
+        + ',"host":'
+        + json_quote(key.host)
+        + ',"threads":'
+        + String(key.threads)
+        + ',"optimize":true,"streaming":true,"batch_size":65536,"family":'
+        + json_quote(facts.family)
+        + "}"
+    )
+
+
 def main() raises:
     var args = argv()
     var mode = String(args[1])
@@ -39,25 +62,34 @@ def main() raises:
         ((col("x") + lit(Float32(1))) * lit(Float32(2))).alias("y")
     )
     if mode == "fixture":
-        var key = calibration_key(True, True, 65536)
-        var facts = estimate_auto(plan)
-        print(
-            '{"provider":'
-            + json_quote(key.provider)
-            + ',"device":'
-            + json_quote(key.device)
-            + ',"runtime_build_id":'
-            + json_quote(key.runtime_build_id)
-            + ',"cpu_build_id":'
-            + json_quote(key.cpu_build_id)
-            + ',"host":'
-            + json_quote(key.host)
-            + ',"threads":'
-            + String(key.threads)
-            + ',"optimize":true,"streaming":true,"batch_size":65536,"family":'
-            + json_quote(facts.family)
-            + "}"
+        print(fixture_key(plan))
+        return
+    if mode == "error-fixture" or mode == "gpu-error":
+        var bad = (
+            DataFrame([Series("x", Column[Float32]([300]))])
+            .lazy()
+            .select(col("x").cast("int8"))
         )
+        if mode == "error-fixture":
+            print(fixture_key(bad))
+            return
+        var key = calibration_key(True, True, 65536)
+        assert_equal(select_auto(bad, True, True, 65536)[0], "accel")
+        with assert_raises(
+            contains="strict cast failed" if key.provider
+            == "metal" else "cast from float32"
+        ):
+            _ = bad.collect(engine="auto")
+        var recovered = (
+            DataFrame([Series("x", Column[Float32]([2]))])
+            .lazy()
+            .select(col("x").cast("int8"))
+        )
+        assert_equal(select_auto(recovered, True, True, 65536)[0], "accel")
+        assert_equal(
+            recovered.collect(engine="auto").item(0, "x").int8(), Int8(2)
+        )
+        print("Packaged automatic GPU error and recovery checks passed")
         return
     var expected = plan.collect(engine="cpu")
     assert_literal_cells(expected)
@@ -80,17 +112,6 @@ def main() raises:
         var reused = plan.profile(engine="auto", accelerator=runtime)
         assert_true(reused[0].equals(expected))
         assert_equal(reused[1].item(0, "executor").string(), key.provider)
-        var bad = (
-            DataFrame([Series("x", Column[Float32]([300]))])
-            .lazy()
-            .select(col("x").cast("int8"))
-        )
-        assert_equal(select_auto(bad, True, True, 65536)[0], "accel")
-        with assert_raises(
-            contains="strict cast failed" if key.provider
-            == "metal" else "cast from float32"
-        ):
-            _ = bad.collect(engine="auto")
         assert_true(plan.collect(engine="auto").equals(expected))
     else:
         assert_true(measured[1].item(0, "executor").string() != "metal")

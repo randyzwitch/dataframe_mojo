@@ -549,7 +549,7 @@ def cast_series(
         return _cast_binary(input, source, target, strict, offset, mask)
     if source.is_temporal() or target.is_temporal():
         var observed = input.copy()
-        return cast_temporal(observed, source, target, strict)
+        return cast_temporal(observed, source, target, strict, mask)
     if source == DataType.STRING and (target.is_integer() or target.is_float()):
         comptime for k in range(len(NUMERIC_DTYPES)):
             comptime D = NUMERIC_DTYPES[k]

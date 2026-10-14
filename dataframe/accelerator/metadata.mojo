@@ -96,6 +96,8 @@ def prune_projections(mut query: LazyFrame) raises:
     for reverse in range(len(query._nodes)):
         var i = len(query._nodes) - 1 - reverse
         ref node = query._nodes[i]
+        if not all_needed[i] and not needed[i]:
+            continue
         if node.kind == JOIN and not all_needed[i] and needed[i]:
             var sides = _projection_join_inputs(query, i, needed[i].value())
             if sides:

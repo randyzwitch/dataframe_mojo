@@ -1,4 +1,9 @@
 """Zero-column sources and resident consumers retain independent row metadata."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import (
+    capabilities as _capabilities,
+    estimate_resources,
+)
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import (
     DataFrame,
@@ -11,7 +16,7 @@ from dataframe import (
     all,
     by_dtype,
 )
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows
 from dataframe.accelerator.selectors import lower_selectors
@@ -46,11 +51,13 @@ def test_empty_inputs_capability_schema_descriptors_and_empty_selectors() raises
     assert_equal(plan.source.width(), 0)
     assert_equal(plan.slots, 0)
     assert_equal(len(plan.outputs), 0)
-    var descriptors = _Descriptors(plan)
-    var request = descriptors.request(plan, -1, False)
-    assert_equal(request[1], 7)
-    assert_equal(request[3], 0)
-    assert_equal(request[4], 0)
+    var descriptors = Program(plan)
+    assert_equal(len(descriptors.code), 0)
+    assert_equal(len(descriptors.outputs), 0)
+    var resources = estimate_resources(plan)
+    assert_equal(resources.matrix_bytes, 0)
+    assert_equal(resources.kernel_launches, 0)
+    assert_equal(resources.synchronizations, 0)
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
@@ -128,9 +135,27 @@ def test_native_metal_empty_inputs_profiles_cost_budget_and_runtime_reuse() rais
     assert_equal(profiled[0].height(), 513)
     assert_true(profiled[1].height() > 0)
     var estimate = runtime.estimate_auto(query)
-    assert_true(estimate.peak_bytes > 0)
+    # Cardinality-only tables own no value/program buffers and need no context.
+    assert_equal(estimate.peak_bytes, 0)
+    for field in [
+        "peak_requested_bytes",
+        "kernel_launches",
+        "synchronizations",
+        "upload_bytes",
+        "download_bytes",
+    ]:
+        assert_equal(profiled[1].item(0, field).int64(), Int64(0))
     assert_true(";empty-inputs-v1" in estimate.family)
-    assert_true(";metal-empty-inputs-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
+    check(query, MetalRuntime(device_id=999999, memory_limit_bytes=0))
+    # A real output column still requires storage and obeys the same budget.
+    var materialized = query.with_columns(lit(Int32(7)).alias("x"))
+    assert_true(runtime.estimate_auto(materialized).peak_bytes > 0)
+    var values = materialized.collect(accelerator=runtime)
+    assert_equal(values.columns(), ["x"])
+    assert_equal(values.height(), 513)
+    for row in range(513):
+        assert_equal(values.item(row, "x").int32(), Int32(7))
     with assert_raises(contains="budget"):
-        _ = query.collect(accelerator=MetalRuntime(memory_limit_bytes=1))
+        _ = materialized.collect(accelerator=MetalRuntime(memory_limit_bytes=0))
     check(query, runtime)

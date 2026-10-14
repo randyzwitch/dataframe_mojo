@@ -20,12 +20,14 @@ from dataframe.lazy import (
     SORT,
     AGG,
     JOIN,
+    ASOF,
 )
 from dataframe.series import Series
 from dataframe.expr import is_reduction
 
 comptime DAG_ROWS = 0
 comptime DAG_JOIN = 1
+comptime DAG_ASOF = 2
 
 
 def _scalar_reduction(query: LazyFrame, index: Int) -> Bool:
@@ -71,6 +73,7 @@ struct DagTask(Copyable):
     var limit: Int
     var keys: List[Int64]
     var fields: List[JoinField]
+    var equal_rows: Bool
 
 
 @fieldwise_init
@@ -82,7 +85,7 @@ struct JoinDag(Movable):
 
 def has_join(query: LazyFrame) -> Bool:
     for node in query._nodes:
-        if node.kind == JOIN:
+        if node.kind == JOIN or node.kind == ASOF:
             return True
     return False
 
@@ -106,6 +109,7 @@ def _validate_sources(query: LazyFrame, capabilities: RowCapabilities) raises:
             continue
         if (
             node.kind != JOIN
+            and node.kind != ASOF
             and node.kind != SELECT
             and node.kind != WITH_COLUMNS
             and node.kind != FILTER
@@ -127,7 +131,7 @@ def _validate_sources(query: LazyFrame, capabilities: RowCapabilities) raises:
                 "plan", "join regions require a topological DAG"
             )
         pending.append(node.left)
-        if node.kind == JOIN:
+        if node.kind == JOIN or node.kind == ASOF:
             if node.right < 0 or node.right >= index:
                 capabilities.reject(
                     "plan", "join regions require two input branches"
@@ -136,9 +140,13 @@ def _validate_sources(query: LazyFrame, capabilities: RowCapabilities) raises:
 
 
 def _region_query(
-    query: LazyFrame, chain: List[Int], source: DataFrame
+    query: LazyFrame,
+    chain: List[Int],
+    source: DataFrame,
+    source_failure: String = "",
 ) -> LazyFrame:
     var region = LazyFrame(source)
+    region._nodes[0].source_failure = source_failure
     for reverse in range(len(chain)):
         var node = query._nodes[chain[len(chain) - reverse - 1]].copy()
         node.left = len(region._nodes) - 1
@@ -169,8 +177,9 @@ def _join_task(
         raise Error(
             "Join requires the same nonzero number of left and right keys"
         )
-    var left_id = _task(query, node.left, False, capabilities, tasks)
-    var right_id = _task(query, node.right, False, capabilities, tasks)
+    var equal_rows = len(node.flags) > 1 and node.flags[1]
+    var left_id = _task(query, node.left, equal_rows, capabilities, tasks)
+    var right_id = _task(query, node.right, equal_rows, capabilities, tasks)
     var left = tasks[left_id].schema.copy()
     var right = tasks[right_id].schema.copy()
     if left.width() + right.width() > capabilities.max_join_columns:
@@ -253,7 +262,18 @@ def _join_task(
     var schema = List[Series]()
     for field in fields:
         capabilities.require_dtype(field.dtype)
-        schema.append(Series.full_null(field.name, field.dtype, 0))
+        var column = Series.full_null(field.name, field.dtype, 0)
+        # Match CPU output ownership: RIGHT coalesced keys come from the
+        # right input; FULL coalesced keys are newly chosen values whose
+        # metadata is cleared by expr_kernels.choose. Other fields transport
+        # their source metadata even when the gathered values are all null.
+        if field.prefer_right or field.left < 0:
+            column._field_metadata = right._columns[
+                field.right - left.width()
+            ]._field_metadata
+        elif not (node.how == 3 and field.right >= 0):
+            column._field_metadata = left._columns[field.left]._field_metadata
+        schema.append(column^)
     var frame = DataFrame(schema^)
     var id = len(tasks)
     tasks.append(
@@ -271,6 +291,99 @@ def _join_task(
             limit,
             keys^,
             fields^,
+            equal_rows,
+        )
+    )
+    return id
+
+
+def _asof_task(
+    query: LazyFrame,
+    root: Int,
+    terminal: Bool,
+    limit: Int,
+    capabilities: RowCapabilities,
+    mut tasks: List[DagTask],
+) raises -> Int:
+    if not capabilities.asof_joins:
+        capabilities.reject("plan", "as-of joins require backend support")
+    ref node = query._nodes[root]
+    if len(node.names) != 1 or len(node.right_keys) != 1 or not len(node.flags):
+        raise Error("join_asof requires one ordered key on each side")
+    # CPU materializes and observes complete left then right producers before
+    # validating sortedness. A final head cannot hide producer value errors.
+    var left_id = _task(query, node.left, True, capabilities, tasks)
+    var right_id = _task(query, node.right, True, capabilities, tasks)
+    var left = tasks[left_id].schema.copy()
+    var right = tasks[right_id].schema.copy()
+    if left.width() + right.width() > capabilities.max_join_columns:
+        capabilities.reject("plan", "as-of join exceeds combined column limit")
+    var by = List[String]()
+    for index in range(1, len(node.names2)):
+        by.append(node.names2[index])
+    var suffix = node.names2[0] if len(node.names2) else String("_right")
+    # Empty child schemas run the authoritative dtype/options/name checks;
+    # this touches no source values and cannot perform a CPU data join.
+    var frame = left.join_asof(
+        right,
+        left_on=node.names[0],
+        right_on=node.right_keys[0],
+        by=by,
+        strategy=node.text,
+        tolerance=node.asof_tolerance,
+        suffix=suffix,
+        allow_exact_matches=node.flags[0],
+    )
+    capabilities.require_key(left.column(node.names[0]).dtype())
+    var keys = List[Int64]()
+    for name in by:
+        var l = left._index(name)
+        var r = right._index(name)
+        capabilities.require_key(left._columns[l].dtype())
+        keys.extend([Int64(l), Int64(left.width() + r)])
+    var fields = List[JoinField]()
+    for column in range(left.width()):
+        ref field = left._columns[column]
+        fields.append(JoinField(field.name(), field.dtype(), column, -1, False))
+    var left_names = left.columns()
+    for column in range(right.width()):
+        ref field = right._columns[column]
+        var name = field.name()
+        if name in by or (
+            name == node.right_keys[0] and node.names[0] == node.right_keys[0]
+        ):
+            continue
+        if name in left_names:
+            name += suffix
+        fields.append(
+            JoinField(name, field.dtype(), -1, left.width() + column, False)
+        )
+    if not len(fields) or len(fields) > capabilities.max_join_columns:
+        capabilities.reject("plan", "as-of join exceeds output column limit")
+    for field in fields:
+        capabilities.require_dtype(field.dtype)
+    var metadata = frame.lazy()
+    var marker = node.copy()
+    marker.left = 0
+    marker.right = 0
+    metadata._nodes.append(marker^)
+    var id = len(tasks)
+    tasks.append(
+        DagTask(
+            DAG_ASOF,
+            root,
+            metadata^,
+            left_id,
+            right_id,
+            frame^,
+            terminal,
+            0 if node.text
+            == "backward" else 1 if node.text
+            == "forward" else 2,
+            limit,
+            keys^,
+            fields^,
+            False,
         )
     )
     return id
@@ -291,13 +404,19 @@ def _task(
     mut tasks: List[DagTask],
 ) raises -> Int:
     var boundary = (
-        terminal or query._nodes[root].text == "metal_window_materialization"
+        terminal
+        or query._nodes[root].text == "metal_window_materialization"
+        or query._nodes[root].text == "metal_distribution_materialization"
     )
     var cached = _cached_rows(tasks, root)
     if cached >= 0:
+        if terminal:
+            tasks[cached].terminal = True
         return cached
     if query._nodes[root].kind == JOIN:
         return _join_task(query, root, boundary, -1, capabilities, tasks)
+    if query._nodes[root].kind == ASOF:
+        return _asof_task(query, root, boundary, -1, capabilities, tasks)
     # A direct head is a join output limit, so large fanout can be bounded
     # without allocating the unobserved Cartesian-sized result.
     ref top = query._nodes[root]
@@ -309,16 +428,29 @@ def _task(
         return _join_task(
             query, top.left, boundary, top.length, capabilities, tasks
         )
+    if (
+        top.kind == SLICE
+        and top.offset == 0
+        and query._nodes[top.left].kind == ASOF
+    ):
+        return _asof_task(
+            query, top.left, boundary, top.length, capabilities, tasks
+        )
     var chain = List[Int]()
     var cursor = root
     while (
         query._nodes[cursor].kind != SCAN_FRAME
         and _cached_rows(tasks, cursor) < 0
         and query._nodes[cursor].kind != JOIN
+        and query._nodes[cursor].kind != ASOF
         and (cursor == root or query._nodes[cursor].kind != SLICE)
         and (
             cursor == root
-            or query._nodes[cursor].text != "metal_window_materialization"
+            or (
+                query._nodes[cursor].text != "metal_window_materialization"
+                and query._nodes[cursor].text
+                != "metal_distribution_materialization"
+            )
         )
         and (
             cursor == root or query._nodes[cursor].text != "metal_shared_prefix"
@@ -339,10 +471,15 @@ def _task(
         frame = tasks[source].schema.copy()
     elif (
         query._nodes[cursor].kind == JOIN
+        or query._nodes[cursor].kind == ASOF
         or query._nodes[cursor].kind == SLICE
         or (
             cursor != root
-            and query._nodes[cursor].text == "metal_window_materialization"
+            and (
+                query._nodes[cursor].text == "metal_window_materialization"
+                or query._nodes[cursor].text
+                == "metal_distribution_materialization"
+            )
         )
         or (
             cursor != root
@@ -361,7 +498,12 @@ def _task(
         frame = query._frames[scan.offset].copy()
         if len(scan.names):
             frame = frame.select(scan.names)
-    var region = _region_query(query, chain, frame)
+    var region = _region_query(
+        query,
+        chain,
+        frame,
+        query._nodes[cursor].source_failure if source < 0 else "",
+    )
     var plan = lower_rows(region, capabilities, terminal_boundary=boundary)
     # Pure projections preserve the prefix. Push their final head into a join
     # only after binding proves that no reduction or row reordering intervenes.
@@ -369,14 +511,16 @@ def _task(
     for step in plan.steps:
         prefix &= not step.filter and not step.order and not step.grouped
     if prefix and source >= 0:
-        if tasks[source].kind == DAG_JOIN:
+        if tasks[source].kind == DAG_JOIN or tasks[source].kind == DAG_ASOF:
             var existing = tasks[source].limit
             tasks[source].limit = (
                 min(existing, plan.limit) if existing >= 0 else plan.limit
             )
     var columns = List[Series]()
     for output in plan.outputs:
-        columns.append(Series.full_null(output.name, output.dtype, 0))
+        var column = Series.full_null(output.name, output.dtype, 0)
+        column._field_metadata = output.field_metadata
+        columns.append(column^)
     var id = len(tasks)
     tasks.append(
         DagTask(
@@ -391,6 +535,7 @@ def _task(
             -1,
             List[Int64](),
             List[JoinField](),
+            False,
         )
     )
     return id
@@ -409,5 +554,5 @@ def lower_join_dag(
     )
     var joins = 0
     for task in tasks:
-        joins += Int(task.kind == DAG_JOIN)
+        joins += Int(task.kind == DAG_JOIN or task.kind == DAG_ASOF)
     return JoinDag(tasks^, root, joins)

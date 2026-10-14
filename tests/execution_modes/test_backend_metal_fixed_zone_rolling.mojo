@@ -1,7 +1,9 @@
 """Fixed-offset rolling converts each calendar stage between local and UTC ticks."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, col
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import (
     lower_rows,
@@ -61,7 +63,7 @@ def test_fixed_zone_duration_capability_signed_offsets_no_device_and_independent
                     _fixed_offset(zone).value(),
                 )
             assert_equal(count, 1)
-            _ = _Descriptors(plan)
+            _ = Program(plan)
             assert_true(
                 "unsupported"
                 not in MetalRuntime(device_id=999999).describe(query)

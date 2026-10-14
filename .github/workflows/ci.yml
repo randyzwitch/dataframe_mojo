@@ -35,6 +35,7 @@ jobs:
           pixi run -e oracle python3 tests/tooling/test_bench_reports.py
           pixi run -e oracle python3 tests/tooling/test_accelerator_cost_driver.py
           pixi run -e oracle python3 tests/tooling/test_metal_suite_driver.py
+          pixi run -e oracle python3 tests/tooling/test_metal_benchmark_driver.py
           pixi run -e oracle python3 tests/tooling/test_query_diagrams.py
       - name: Check Mojo test runner
         run: pixi run mojo run -I . tests/tooling/test_contract_runner.mojo

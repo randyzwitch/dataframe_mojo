@@ -18,4 +18,4 @@ if [[ "$output" != $'east 90.0\nwest 180.0' ]]; then
 fi
 
 cd "$root"
-mojo run -I . tests/tooling/package_contracts.mojo "$root/dist"
+mojo run -I . tests/tooling/package_contracts.mojo "$root/dist" "$@"
