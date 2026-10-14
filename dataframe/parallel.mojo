@@ -836,17 +836,31 @@ struct _Crew(Movable):
         )[]
 
     def _take(mut self) -> Int:
-        """Join a posting that still wants a helper: its index, or -1."""
+        """Join a posting that still wants a helper: its index; -1 when
+        none wants one, -2 when one does but the thread budget is spent.
+
+        A thread takes its budget slot as it joins, not the caller when it
+        posts: a call made while every helper is busy still posts, and the
+        threads another call gives back join it and claim its remaining
+        jobs (a pipeline's morsels come from a shared cursor), as DuckDB's
+        and Polars' schedulers hand a freed thread whatever work is
+        waiting. Joined at post time only, the first of two concurrent
+        pipelines took every helper and the other ran on its caller."""
+        var starved = False
         for p in range(_POSTINGS):
             var state = self._state(p).load()
             while (state >> 32) > 0:
+                if _reserve_helpers(1) == 0:
+                    starved = True
+                    break
                 # One fewer wanted, one more running, in one step.
                 if self._state(p).compare_exchange(
                     state, state - (Int64(1) << 32) + 1
                 ):
                     return p
+                _release_helpers(1)
                 state = self._state(p).load()
-        return -1
+        return -2 if starved else -1
 
     def _wanted(mut self) -> Bool:
         for p in range(_POSTINGS):
@@ -867,23 +881,19 @@ struct _Crew(Movable):
                 return p
         return -1
 
-    def retire(mut self, p: Int, claims: Int) -> Int:
+    def retire(mut self, p: Int, claims: Int):
         """Wait until the posting's jobs are done and no crew thread is in
-        it, then free it. New helpers are turned away first; returns how
-        many never joined, whose budget the caller still holds."""
+        it, then free it. New helpers are turned away first."""
         ref list = Pointer[_Claims, MutAnyOrigin](unsafe_from_address=claims)[]
-        var unjoined = 0
         while True:
             var state = self._state(p).load()
             if self._state(p).compare_exchange(state, state & 0xFFFFFFFF):
-                unjoined = Int(state >> 32)
                 break
         while self._state(p).load() != 0 or list.done.load() < Int64(
             list.count
         ):
             _ = external_call["sched_yield", Int32]()
         self._claims(p).store(0)
-        return unjoined
 
 
 def _crew_spawner(address: Int) abi("C") -> Int:
@@ -918,6 +928,12 @@ def _crew_worker(address: Int) abi("C") -> Int:
                     p = crew._take()
                     if p >= 0:
                         break
+                if p == -2:
+                    # Work is waiting for a thread the budget has not
+                    # freed: yield rather than park, and look again.
+                    _ = external_call["sched_yield", Int32]()
+                    deadline = perf_counter_ns() + _CREW_SPIN_NS
+                    continue
                 if perf_counter_ns() > deadline:
                     break
         if p < 0:
@@ -1021,13 +1037,13 @@ def _run_on_crew[
     J: Job
 ](mut slots: List[_Slot[J]], entry: Int, threads: Int) -> Bool:
     """Run every slot with crew threads and the caller; False (nothing
-    run) when no crew is running, no helper is free in the budget, or every
-    posting is taken."""
+    run) when no crew is running or every posting is taken. Crew threads
+    join while jobs remain, each as the budget frees a thread for it."""
     var address = Int(_current_crew().load())
     if address == 0:
         return False
-    var helpers = _reserve_helpers(min(len(slots), threads) - 1)
-    if helpers == 0:
+    var helpers = min(len(slots), threads) - 1
+    if helpers <= 0:
         return False
     ref crew = Pointer[_Crew, MutAnyOrigin](unsafe_from_address=address)[]
     if crew.spawned.load() != 2:
@@ -1038,10 +1054,9 @@ def _run_on_crew[
     var claims_address = Int(Pointer(to=claims))
     var p = crew.post(claims_address, helpers)
     if p < 0:
-        _release_helpers(helpers)
         return False
     claims.run()
-    _release_helpers(crew.retire(p, claims_address))
+    crew.retire(p, claims_address)
     _ = claims^
     return True
 
