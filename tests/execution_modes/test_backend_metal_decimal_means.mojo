@@ -1,4 +1,6 @@
 """Scaled decimal means preserve the CPU quotient/remainder rounding."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.memory import bitcast
 from tests.execution_modes.test_backend_metal import require_metal
 from std.testing import assert_equal, assert_true, assert_raises
@@ -6,10 +8,8 @@ from dataframe import Column, DataFrame, Series, col, lit, when
 from dataframe.dtype import DataType
 from dataframe.metal import (
     MetalRuntime,
-    _capabilities,
-    _Descriptors,
 )
-from dataframe.accelerator.rows import lower_rows
+from dataframe.accelerator.rows import lower_rows, ROW_GROUP_OUTPUT
 from dataframe.accelerator.capabilities import RowCapabilities
 from tests.execution_modes.test_backend_metal_scalar_broadcasts import (
     same,
@@ -54,9 +54,13 @@ def test_decimal_mean_capabilities_and_scale_descriptors() raises:
     var caps = _capabilities()
     var plan = lower_rows(query, caps)
     assert_equal(plan.outputs[0].dtype, DataType.FLOAT64)
-    var descriptors = _Descriptors(plan)
-    assert_equal(descriptors.outputs[4], Int64(212))
-    assert_equal(descriptors.outputs[5], Int64(7))
+    var descriptors = Program(plan)
+    assert_equal(len(descriptors.outputs), 5)
+    assert_equal(descriptors.outputs[3], Int64(216))
+    assert_equal(descriptors.outputs[4] & 0xFFFFFFFF, Int64(0))
+    assert_equal((descriptors.outputs[4] >> 32) & 63, Int64(38))
+    assert_equal((descriptors.outputs[4] >> 38) & 63, Int64(7))
+    assert_true(((descriptors.outputs[4] >> 44) & 0xFFFF) > 0)
     caps.decimal_mean = False
     with assert_raises(contains="decimal mean requires"):
         _ = lower_rows(query, caps)
@@ -64,9 +68,9 @@ def test_decimal_mean_capabilities_and_scale_descriptors() raises:
         [Series("a", Column[Int128]([1])).with_dtype(DataType.decimal(38, 2))]
     )
     var wide_query = wide.lazy().select(col("a").mean())
-    var wide_descriptors = _Descriptors(lower_rows(wide_query, _capabilities()))
-    assert_equal(wide_descriptors.outputs[4], Int64(216))
-    var metadata = wide_descriptors.outputs[5]
+    var wide_descriptors = Program(lower_rows(wide_query, _capabilities()))
+    assert_equal(wide_descriptors.outputs[3], Int64(216))
+    var metadata = wide_descriptors.outputs[4]
     assert_equal(metadata & 0xFFFFFFFF, Int64(0))
     assert_equal((metadata >> 32) & 63, Int64(38))
     assert_equal((metadata >> 38) & 63, Int64(2))
@@ -74,10 +78,13 @@ def test_decimal_mean_capabilities_and_scale_descriptors() raises:
     var grouped_query = (
         wide.lazy().group_by("a").agg(col("a").mean().alias("mean"))
     )
-    var grouped_wide = _Descriptors(lower_rows(grouped_query, _capabilities()))
+    var grouped_wide = Program(lower_rows(grouped_query, _capabilities()))
     var saw_wide_mean = False
     for i in range(0, len(grouped_wide.code), 4):
-        if grouped_wide.code[i] == 203 and grouped_wide.code[i + 3] == 216:
+        if (
+            grouped_wide.code[i] == ROW_GROUP_OUTPUT
+            and grouped_wide.code[i + 3] == 216
+        ):
             metadata = bitcast[DType.int64](grouped_wide.literals[i // 4])
             assert_equal(metadata & 0xFFFFFFFF, Int64(0))
             assert_equal((metadata >> 32) & 63, Int64(38))
@@ -98,14 +105,21 @@ def test_decimal_mean_capabilities_and_scale_descriptors() raises:
             .group_by("i")
             .agg([col("a").mean().alias("a"), col("b").mean().alias("b")])
         )
-        var grouped = _Descriptors(lower_rows(scaled, _capabilities()))
+        var grouped = Program(lower_rows(scaled, _capabilities()))
         var means = 0
         for i in range(0, len(grouped.code), 4):
-            if grouped.code[i] == 203 and grouped.code[i + 3] == 212:
+            if (
+                grouped.code[i] == ROW_GROUP_OUTPUT
+                and grouped.code[i + 3] == 216
+            ):
+                var metadata = bitcast[DType.int64](grouped.literals[i // 4])
+                assert_equal(metadata & 0xFFFFFFFF, Int64(0))
+                assert_equal((metadata >> 32) & 63, Int64(38))
                 assert_equal(
-                    bitcast[DType.int64](grouped.literals[i // 4]),
+                    (metadata >> 38) & 63,
                     Int64(scale if means == 0 else min(scale, 9)),
                 )
+                assert_true(((metadata >> 44) & 0xFFFF) > 0)
                 means += 1
         assert_equal(means, 2)
     var runtime = MetalRuntime(device_id=999999)
@@ -247,13 +261,18 @@ def test_native_metal_decimal_mean_broadcast_conditionals_join_and_group_consume
 def test_native_metal_decimal_mean_profile_cost_budget_and_recovery() raises:
     _ = require_metal()
     var runtime = MetalRuntime()
-    var query = (
-        fixture(4097, 18)
+    var source = fixture(4097, 18)
+    var query = source.lazy().select_exprs([col("a").mean(), col("b").mean()])
+    # Full dictionary staging has separate, currently uncalibrated CPU work.
+    with assert_raises(contains="dictionary staging"):
+        _ = runtime.estimate_auto(query)
+    var numeric = (
+        source.select(["a", "b"])
         .lazy()
         .select_exprs([col("a").mean(), col("b").mean()])
     )
-    var estimate = runtime.estimate_auto(query)
-    assert_true("metal-decimal-means-v1" in estimate.family)
+    var estimate = runtime.estimate_auto(numeric)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     assert_true(estimate.peak_bytes > 0)
     var measured = query.profile(accelerator=runtime)
     same(measured[0], query.collect(engine="cpu"))

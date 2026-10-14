@@ -1,30 +1,10 @@
-"""Optional native Apple Metal provider for the shared accelerator row planner.
+"""Apple Metal execution through Mojo kernels inside the dataframe library.
 
-Importing this module loads no driver. Binary64 arithmetic uses integer-only
-GPU emulation, including floating sum/mean accumulation. Int64/UInt64 sums and
-means use exact two-word accumulation. Decimal32/64 sums return Decimal128;
-their means preserve the CPU scaled quotient/remainder conversion sequence.
-Automatic placement requires separate calibration for emulated work.
+Construction, import and explanation do not initialize a device. Shared Mojo
+planners bind the complete query before MAX creates a Metal context. Values
+stay in Mojo-owned device tables between regions and export only at the final
+CPU boundary. Automatic placement requires separately measured Mojo curves.
 """
-from .accelerator.metadata import schema_frame
-from std.ffi import external_call
-from std.math import isfinite
-from std.memory import Pointer, bitcast
-from std.os import getenv
-from std.os.path import exists
-from std.sys import CompilationTarget
-from std.time import perf_counter_ns
-from .accelerator.cost import (
-    PlanEstimate,
-    CalibrationKey,
-    select_auto as select_cost,
-)
-from .accelerator.cpu_work import cpu_features, duration_family
-from ._build_identity import CPU_BUILD_ID
-from .parallel import configured_workers
-from .decimal import pow10
-from .json_value import JsonValue
-from .accelerator.capabilities import RowCapabilities
 from .accelerator.sets import has_set_operations, lower_set_operations
 from .accelerator.selectors import has_selectors, lower_selectors
 from .accelerator.scalars import (
@@ -48,6 +28,12 @@ from .accelerator.aggregates import (
     has_aggregate_compositions,
     lower_aggregate_compositions,
 )
+from .accelerator.opaque import (
+    has_opaque_columns,
+    prepare as prepare_opaque,
+    restore as restore_opaque,
+    restoration_bytes as opaque_restoration_bytes,
+)
 from .accelerator.dictionaries import (
     DictionaryCodes,
     has_dictionary_columns,
@@ -56,1610 +42,77 @@ from .accelerator.dictionaries import (
     lower_dictionary_operations,
 )
 from .accelerator.memory import checked_add
-from .accelerator.rows import (
-    RowPlan,
-    lower_rows,
-    ROW_SORT_KEY,
-    ROW_RANK_KEY,
-    ROW_CUMULATIVE_KEY,
-    ROW_DURATION_KEY,
-    ROW_DURATION_CALENDAR,
-    ROW_DURATION_UTC,
-    ROW_DURATION_BOUNDS,
-    ROW_CALENDAR_OFFSET,
-    ROW_CALENDAR_TRUNCATE,
-    ROW_QUANTILE_LINEAR,
-    ROW_QUANTILE_MIDPOINT,
+from .accelerator.sources import (
+    file_source_nodes,
+    stage_file_sources,
+    prepare_file_sources,
 )
-from .accelerator.joins import (
-    JoinDag,
-    DagTask,
-    DAG_ROWS,
-    DAG_JOIN,
-    has_join,
-    has_scalar_consumers,
-    lower_join_dag,
+from .accelerator.cuts import (
+    has_cut_operations,
+    lower_cuts,
+    has_cut_materializations,
+    staging_bytes as cut_staging_bytes,
 )
-from .arrow import _c_string, _read_c_string
-from .column import Column
-from .dtype import DataType, NUMERIC_DTYPES
-from .execution_report import ExecutionReport
-from .expr import (
-    COL,
-    is_comparison,
-    DIV,
-    DT_YEAR,
-    DT_TOTAL,
-    DT_OFFSET_BY,
-    DT_TIME,
-    DT_TRUNCATE,
-    FLOORDIV,
-    MOD,
-    POW,
-    CLIP_LOW,
-    CLIP_HIGH,
-    FILL_NAN,
-    KEEP_NULLS,
-    ABS,
-    SQRT,
-    EXP,
-    LOG,
-    FLOOR,
-    CEIL,
-    ROUND,
-    IS_NAN,
-    IS_NOT_NAN,
-    IS_FINITE,
-    IS_INFINITE,
-    WHEN,
-    INT_IS_IN,
-    CAST,
-    LIT_INT,
-    LIT_FLOAT,
-    LIT_BOOL,
-    LIT_NULL,
-    ADD,
-    SUB,
-    MUL,
-    NEG,
-    GT,
-    EQ,
-    LT,
-    GE,
-    LE,
-    NE,
-    AND,
-    OR,
-    XOR,
-    FILL_NULL,
-    NOT,
-    IS_NULL,
-    IS_NOT_NULL,
-    SUM,
-    MEAN,
-    VAR,
-    SKEW,
-    KURTOSIS,
-    COV,
-    CORR,
-    STD,
-    MIN,
-    MAX,
-    COUNT,
-    LEN,
-    FIRST,
-    LAST,
-    ANY,
-    ALL,
-    NULL_COUNT,
-    ARG_MIN,
-    ARG_MAX,
+from .accelerator.distributions import has_scalar_modes, lower_scalar_modes
+from .accelerator.source_structs import (
+    has_source_structs,
+    lower_source_structs,
+    attach_metadata as attach_source_fields,
 )
-from .frame import DataFrame
+from .accelerator.structs import (
+    has_terminal_structs,
+    lower_terminal_structs,
+    assemble as assemble_structs,
+)
+from .accelerator.metadata import schema_frame
+from .accelerator.cost import PlanEstimate, CalibrationKey
+from .accelerator.capabilities import RowCapabilities
+from .accelerator.gpu.target import METAL_TARGET
+from .accelerator.joins import has_join, has_scalar_consumers
 from .lazy import AcceleratorBackend, LazyFrame
-from .accelerator.rows import (
-    ROW_GROUP_HEADER,
-    ROW_GROUP_HEADER_LAST,
-    ROW_GROUP_HEADER_WINDOW,
-    ROW_SLICE,
-    ROW_GROUP_KEY,
-    ROW_GROUP_OUTPUT,
-)
+from .column import Column
+from .frame import DataFrame
 from .series import Series
-
-comptime _Create = def(Int64, Int64, Int) thin abi("C") -> Int
-comptime _Release = def(Int) thin abi("C") -> None
-comptime _Execute = def(Int, Int, Int, Int) thin abi("C") -> Int32
-comptime _Estimate = def(Int, Int, Int) thin abi("C") -> Int32
-comptime _Probe = def(Int64, Int, Int, Int) thin abi("C") -> Int32
-comptime _Info = def(Int, Int, Int) thin abi("C") -> Int32
-comptime _Version = def() thin abi("C") -> Int64
-comptime _Count = def() thin abi("C") -> Int64
-comptime _Build = def() thin abi("C") -> Int
-comptime _PlanFeatures = def(Int, Int) thin abi("C") -> Int64
-comptime _JoinPrepare = def(Int, Int, Int, Int, Int) thin abi("C") -> Int32
-comptime _JoinFinish = def(Int, Int, Int64, Int, Int) thin abi("C") -> Int32
-comptime _QueryCreate = def(Int, Int64, Int) thin abi("C") -> Int
-comptime _ResidentRun = def(
-    Int, Int, Int, Int64, Int64, Int, Int, Int
-) thin abi("C") -> Int32
-
-
-def _create_call(callback: Int, device: Int, mut error: Int) -> Int:
-    return Pointer(to=callback).unsafe_bitcast[_Create]()[](
-        Int64(device), Int64(1), Int(Pointer(to=error))
-    )
-
-
-def _estimate_call(
-    callback: Int, request: List[Int64], mut memory: List[Int64], mut error: Int
-) -> Int32:
-    return Pointer(to=callback).unsafe_bitcast[_Estimate]()[](
-        Int(request.unsafe_ptr()),
-        Int(memory.unsafe_ptr()),
-        Int(Pointer(to=error)),
-    )
-
-
-def _info_call(
-    callback: Int, context: Int, mut info: List[Int64], mut error: Int
-) -> Int32:
-    return Pointer(to=callback).unsafe_bitcast[_Info]()[](
-        context, Int(info.unsafe_ptr()), Int(Pointer(to=error))
-    )
-
-
-def _execute_call(
-    callback: Int,
-    context: Int,
-    request: List[Int64],
-    mut stats: List[Int64],
-    mut error: Int,
-) -> Int32:
-    return Pointer(to=callback).unsafe_bitcast[_Execute]()[](
-        context,
-        Int(request.unsafe_ptr()),
-        Int(stats.unsafe_ptr()),
-        Int(Pointer(to=error)),
-    )
+from std.time import perf_counter_ns
 
 
 def metal_library_candidates() -> List[String]:
-    var candidates = List[String]()
-    var configured = getenv("DATAFRAME_METAL_LIBRARY")
-    if configured:
-        candidates.append(configured)
-        return candidates^
-    var prefix = getenv("CONDA_PREFIX")
-    if prefix:
-        candidates.append(prefix + "/lib/libdfmetal.dylib")
-    candidates.append("build/dfmetal/libdfmetal.dylib")
-    return candidates^
+    """Legacy discovery API; the Mojo provider needs no dataframe dylib."""
+    return List[String]()
 
 
 def metal_installed() -> Bool:
-    """Library presence only; this does not open Metal or discover devices."""
-    comptime if CompilationTarget.is_macos():
-        for path in metal_library_candidates():
-            if exists(path):
-                return True
-    return False
+    """Whether this target supports Mojo Metal; no device is initialized."""
+    from .accelerator.gpu.identity import available
 
-
-struct _Library(Movable):
-    var handle: Int
-    var create: Int
-    var release: Int
-    var execute: Int
-    var estimate: Int
-    var info: Int
-    var count: Int
-    var build: Int
-    var free: Int
-
-    def __init__(out self) raises:
-        self.handle = 0
-        self.create = 0
-        self.release = 0
-        self.execute = 0
-        self.estimate = 0
-        self.info = 0
-        self.count = 0
-        self.build = 0
-        self.free = 0
-        comptime if not CompilationTarget.is_macos():
-            raise Error("Metal requires Apple Silicon macOS")
-        var path = String()
-        for candidate in metal_library_candidates():
-            if exists(candidate):
-                path = candidate
-                break
-        if not path:
-            raise Error(
-                "Metal runtime is not installed; run native/dfmetal/build.sh or"
-                " set DATAFRAME_METAL_LIBRARY"
-            )
-        var name = _c_string(path)
-        # Darwin RTLD_NOW | RTLD_NODELETE. Every open is balanced by close;
-        # the native process cache and its code remain valid between queries.
-        self.handle = external_call["dlopen", Int](
-            name.unsafe_ptr(), Int32(0x82)
-        )
-        if self.handle == 0:
-            raise Error(
-                "Could not load Metal runtime: "
-                + _read_c_string(external_call["dlerror", Int]())
-            )
-        var version = self.symbol("dfm_abi_version")
-        if Pointer(to=version).unsafe_bitcast[_Version]()[]() != 2:
-            raise Error("Metal ABI version mismatch; rebuild native/dfmetal")
-        self.create = self.symbol("dfm_context_create")
-        self.release = self.symbol("dfm_context_release")
-        self.execute = self.symbol("dfm_execute")
-        self.estimate = self.symbol("dfm_estimate")
-        self.info = self.symbol("dfm_context_info")
-        self.count = self.symbol("dfm_device_count")
-        self.build = self.symbol("dfm_build_id")
-        self.free = self.symbol("dfm_free")
-
-    def __deinit__(deinit self):
-        if self.handle:
-            _ = external_call["dlclose", Int32](self.handle)
-
-    def symbol(self, name: String) raises -> Int:
-        var value = self.optional_symbol(name)
-        if not value:
-            raise Error("Metal runtime lacks " + name)
-        return value
-
-    def optional_symbol(self, name: String) -> Int:
-        var c_name = _c_string(name)
-        var value = external_call["dlsym", Int](
-            self.handle, c_name.unsafe_ptr()
-        )
-        return value
-
-    def check(self, status: Int32, error: Int) raises:
-        if status:
-            var message = _read_c_string(
-                error
-            ) if error else "missing native error"
-            if error:
-                var callback = self.free
-                Pointer(to=callback).unsafe_bitcast[_Release]()[](error)
-            raise Error(message)
-
-
-struct _Context(Movable):
-    var library: _Library
-    var address: Int
-
-    def __init__(out self, var library: _Library, device: Int) raises:
-        self.address = 0
-        self.library = library^
-        var error = 0
-        var callback = self.library.create
-        self.address = _create_call(callback, device, error)
-        self.library.check(Int32(self.address == 0), error)
-
-    def __deinit__(deinit self):
-        if self.address:
-            var callback = self.library.release
-            Pointer(to=callback).unsafe_bitcast[_Release]()[](self.address)
+    return available()
 
 
 def _capabilities() -> RowCapabilities:
-    return RowCapabilities(
-        "Metal",
-        float64=False,
-        float64_storage=True,
-        float64_emulated=True,
-        float_division=True,
-        float_rounding=True,
-        float_modulo=True,
-        float_transcendentals=True,
-        float_power=True,
-        float_sqrt=True,
-        wide_integer=False,
-        bounded_integer_sum=True,
-        extended_integers=True,
-        mixed_types=True,
-        casts=True,
-        extrema=True,
-        fixed_logical=True,
-        row_extras=True,
-        order=True,
-        grouped=True,
-        extra_reductions=True,
-        slices=True,
-        scalar_regions=True,
-        temporal_fields=True,
-        duration_totals=True,
-        calendar_offsets=True,
-        calendar_truncation=True,
-        temporal_offsets=True,
-        ranks=True,
-        cumulative_windows=True,
-        paired_moments=True,
-        moments=True,
-        quantiles=True,
-        higher_moments=True,
-        rolling_windows=True,
-        rolling_moments=True,
-        interpolation_windows=True,
-        coordinate_interpolation=True,
-        duration_rolling=True,
-        calendar_duration_rolling=True,
-        utc_duration_rolling=True,
-        fixed_zone_duration_rolling=True,
-        empty_outputs=True,
-        empty_inputs=True,
-        chunked_inputs=True,
-        shift_fill_windows=True,
-        decimal128=True,
-        decimal128_reductions=True,
-        decimal_mean=True,
-        decimal_float_cast=True,
-        decimal_casts=True,
-        decimal_comparisons=True,
-        decimal_arithmetic=True,
-        decimal_multiplicative=True,
-        reuse_column_slots=True,
-        proven_integer_operations=True,
-        max_nodes=128,
-        max_slots=256,
-        max_steps=128,
-        max_join_columns=256,
-    )
+    from .accelerator.gpu.runtime import capabilities
+
+    return capabilities()
 
 
-def _type(dtype: DataType) raises -> Int64:
-    if dtype.is_decimal() and dtype.decimal_width() == 128:
-        return 12
-    if dtype.physical() == DataType.FLOAT64:
-        return 11
-    if dtype.physical() == DataType.FLOAT32:
-        return 1
-    if dtype.physical() == DataType.INT32:
-        return 2
-    if dtype.physical() == DataType.INT64:
-        return 3
-    if dtype.physical() == DataType.BOOL:
-        return 4
-    if dtype.physical() == DataType.INT8:
-        return 5
-    if dtype.physical() == DataType.INT16:
-        return 6
-    if dtype.physical() == DataType.UINT8:
-        return 7
-    if dtype.physical() == DataType.UINT16:
-        return 8
-    if dtype.physical() == DataType.UINT32:
-        return 9
-    if dtype.physical() == DataType.UINT64:
-        return 10
-    raise Error("Metal unsupported dtype")
+def _describe_mojo_gpu(query: LazyFrame) -> String:
+    from .accelerator.gpu.runtime import describe, capabilities
+    from .accelerator.gpu.dag_runtime import describe as describe_dag
 
-
-def _op(op: Int) raises -> Int64:
-    if op == ROW_DURATION_UTC:
-        return 229
-    if op == ROW_DURATION_CALENDAR:
-        return 228
-    if op == ROW_DURATION_KEY or op == ROW_DURATION_BOUNDS:
-        return 226 if op == ROW_DURATION_KEY else 227
-    if op == EXP or op == LOG:
-        return 53 if op == EXP else 54
-    if op == ROW_CALENDAR_OFFSET:
-        return 145
-    if op == ROW_CALENDAR_TRUNCATE:
-        return 144
-    if op >= DT_YEAR and op <= DT_TRUNCATE:
-        return Int64(130 + op - DT_YEAR)
-    if op == INT_IS_IN:
-        return 172
     if (
-        op == FIRST
-        or op == LAST
-        or op == ANY
-        or op == ALL
-        or op == NULL_COUNT
-        or op == ARG_MIN
-        or op == ARG_MAX
+        has_join(query)
+        or has_scalar_consumers(query)
+        or has_cut_materializations(query)
     ):
-        return Int64(op)
-    if op == ROW_GROUP_HEADER:
-        return 201
-    if op == ROW_GROUP_HEADER_LAST:
-        return 205
-    if op == ROW_GROUP_HEADER_WINDOW:
-        return 209
-    if op == ROW_SLICE:
-        return 206
-    if op == ROW_GROUP_KEY:
-        return 202
-    if op == ROW_GROUP_OUTPUT:
-        return 203
-    # The native ABI has its own versioned opcodes.
-    if op == ROW_CUMULATIVE_KEY:
-        return 214
-    if op == ROW_RANK_KEY:
-        return 207
-    if op == ROW_SORT_KEY:
-        return 200
-    if op == FLOORDIV:
-        return 25
-    if op == MOD:
-        return 26
-    if op == POW:
-        return 27
-    if op == CLIP_LOW:
-        return 28
-    if op == CLIP_HIGH:
-        return 29
-    if op == FILL_NAN:
-        return 34
-    if op == KEEP_NULLS:
-        return 35
-    if op == ABS:
-        return 51
-    if op == SQRT:
-        return 52
-    if op == FLOOR:
-        return 55
-    if op == CEIL:
-        return 56
-    if op == ROUND:
-        return 57
-    if op == IS_NAN:
-        return 63
-    if op == IS_NOT_NAN:
-        return 64
-    if op == IS_FINITE:
-        return 65
-    if op == IS_INFINITE:
-        return 66
-    if op == WHEN:
-        return 100
-    if op == CAST:
-        return 79
-    if op == COL:
-        return 0
-    if op == LIT_INT:
-        return 1
-    if op == LIT_FLOAT:
-        return 2
-    if op == LIT_BOOL:
-        return 3
-    if op == ADD:
-        return 5
-    if op == SUB:
-        return 6
-    if op == MUL:
-        return 7
-    if op == DIV:
-        return 24
-    if op == GT:
-        return 8
-    if op == EQ:
-        return 9
-    if op == MIN:
-        return 80
-    if op == MAX:
-        return 81
-    if op == SUM:
-        return 10
-    if op == COV:
-        return 161
-    if op == CORR:
-        return 160
-    if op == SKEW:
-        return 98
-    if op == KURTOSIS:
-        return 99
-    if op == DT_OFFSET_BY:
-        return 142
-    if op == DT_TOTAL:
-        return 143
-    if op == VAR:
-        return 87
-    if op == STD:
-        return 86
-    if op == MEAN:
-        return 82
-    if op == COUNT:
-        return 11
-    if op == LIT_NULL:
-        return 12
-    if op == LT:
-        return 20
-    if op == GE:
-        return 21
-    if op == LE:
-        return 22
-    if op == NE:
-        return 23
-    if op == AND:
-        return 30
-    if op == OR:
-        return 31
-    if op == XOR:
-        return 32
-    if op == FILL_NULL:
-        return 33
-    if op == NEG:
-        return 50
-    if op == NOT:
-        return 60
-    if op == IS_NULL:
-        return 61
-    if op == IS_NOT_NULL:
-        return 62
-    if op == LEN:
-        return 90
-    raise Error("Metal unsupported expression opcode")
-
-
-def _input[T: DType](column: Column[Scalar[T]], dtype: Int64) -> List[Int64]:
-    var offset = column.validity_offset()
-    var has_bits = len(column._bits[]) != 0
-    return [
-        Int64(Int(column.unsafe_values())),
-        Int64(
-            Int(column.unsafe_validity().unsafe_offset(offset // 8))
-        ) if has_bits else Int64(0),
-        dtype,
-        Int64(offset % 8),
-        Int64(has_bits),
-    ]
-
-
-def _input_series(column: Series) raises -> List[Int64]:
-    if column.is_chunked():
-        raise Error("Metal chunked inputs require owned chunk descriptors")
-    if column.dtype().is_decimal() and column.dtype().decimal_width() == 128:
-        return _input(column.numeric[DType.int128](), Int64(12))
-    if column.dtype() == DataType.BOOL:
-        var source = column.bool()
-        var offset = source.validity_offset()
-        var has_bits = len(source._bits[]) != 0
-        return [
-            Int64(Int(source.unsafe_values().unsafe_offset(offset // 8))),
-            Int64(
-                Int(source.unsafe_validity().unsafe_offset(offset // 8))
-            ) if has_bits else Int64(0),
-            Int64(4),
-            Int64(offset % 8),
-            Int64(has_bits),
-        ]
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        if column.dtype().physical() == DataType.of(D):
-            return _input(column.numeric[D](), _type(column.dtype()))
-    raise Error("Metal unsupported input dtype")
-
-
-def _reduction_op(op: Int, source_dtype: DataType) raises -> Int64:
-    if ROW_QUANTILE_LINEAR <= op <= ROW_QUANTILE_MIDPOINT:
-        return Int64(221 + op - ROW_QUANTILE_LINEAR)
-    if source_dtype.is_decimal() and source_dtype.decimal_width() == 128:
-        if op == SUM:
-            return 215
-        if op == MEAN:
-            return 216
-    if op == SUM and source_dtype.is_decimal():
-        return 208
-    if op == MEAN and source_dtype.is_decimal():
-        return 212
-    if op == SUM and (
-        source_dtype.physical() == DataType.INT64
-        or source_dtype == DataType.UINT64
-    ):
-        return 210
-    if op == MEAN and (
-        source_dtype == DataType.INT64 or source_dtype == DataType.UINT64
-    ):
-        return 211
-    return _op(op)
-
-
-def _decimal128_reduction_metadata(
-    dtype: DataType, min_count: Int, workers: Int
-) raises -> Int64:
-    """Pack worker and logical decimal metadata into the native descriptor."""
-    if min_count < 0 or min_count > Int(Int32.MAX):
-        raise Error("Decimal128 reduction min_count exceeds native row bounds")
-    return (
-        Int64(min_count)
-        | Int64(dtype.precision()) << 32
-        | Int64(dtype.scale()) << 38
-        | Int64(min(max(1, workers), 0xFFFF)) << 44
-    )
-
-
-struct _Descriptors(Movable):
-    var input_chunks: List[List[Int64]]
-    var inputs: List[Int64]
-    var code: List[Int64]
-    var literals: List[Float64]
-    var gathers: List[Int64]
-    var steps: List[Int64]
-    var outputs: List[Int64]
-    var node_types: List[Int64]
-    var slot_types: List[Int64]
-    var typed: Bool
-
-    def __init__(out self, plan: RowPlan) raises:
-        self.input_chunks = List[List[Int64]]()
-        self.inputs = List[Int64]()
-        self.code = plan.code.copy()
-        self.literals = plan.literals.copy()
-        self.gathers = plan.gathers.copy()
-        self.steps = List[Int64]()
-        self.outputs = List[Int64]()
-        self.node_types = List[Int64]()
-        self.slot_types = List[Int64]()
-        self.typed = False
-        for step in plan.steps:
-            self.typed |= step.order or step.grouped
-        for output in plan.outputs:
-            self.typed |= (
-                output.reduction == MIN
-                or output.reduction == MEAN
-                or output.reduction == MAX
-                or output.reduction == FIRST
-                or output.reduction == LAST
-                or output.reduction == ANY
-                or output.reduction == ALL
-                or output.reduction == NULL_COUNT
-                or output.reduction == ARG_MIN
-                or output.reduction == ARG_MAX
-            )
-        for dtype in plan.node_dtypes:
-            self.node_types.append(_type(dtype))
-            self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
-        for dtype in plan.slot_dtypes:
-            self.slot_types.append(_type(dtype))
-            self.typed |= dtype == DataType.FLOAT64
-            self.typed |= dtype != plan.dtype and dtype != DataType.BOOL
-            self.typed |= dtype != dtype.physical()
-        for i in range(0, len(self.code), 4):
-            self.typed |= (
-                self.code[i] == CAST
-                or self.code[i] == DIV
-                or self.code[i] == WHEN
-                or self.code[i] == INT_IS_IN
-                or self.code[i] == ROW_SLICE
-                or (
-                    self.code[i] == ROUND
-                    and self.code[i + 3] != 0
-                    and plan.node_dtypes[i // 4].is_float()
-                )
-            )
-            if self.code[i] == ROW_GROUP_OUTPUT:
-                self.code[i + 3] = _reduction_op(
-                    Int(self.code[i + 3]),
-                    plan.slot_dtypes[Int(self.code[i + 1])],
-                )
-                if self.code[i + 3] == 212:
-                    self.literals[i // 4] = bitcast[DType.float64](
-                        Int64(plan.slot_dtypes[Int(self.code[i + 1])].scale())
-                    )
-                elif self.code[i + 3] == 215 or self.code[i + 3] == 216:
-                    var source = plan.slot_dtypes[Int(self.code[i + 1])]
-                    self.literals[i // 4] = bitcast[DType.float64](
-                        _decimal128_reduction_metadata(
-                            source,
-                            Int(bitcast[DType.int64](self.literals[i // 4])),
-                            configured_workers(),
-                        )
-                    )
-            self.code[i] = _op(Int(self.code[i]))
-        for column in plan.source._columns:
-            if column.is_chunked():
-                var words = List[Int64]()
-                for part in column.chunks():
-                    words.extend(_input_series(part))
-                    words.append(Int64(len(part)))
-                self.input_chunks.append(words^)
-                self.inputs.extend(
-                    [
-                        Int64(
-                            Int(
-                                self.input_chunks[
-                                    len(self.input_chunks) - 1
-                                ].unsafe_ptr()
-                            )
-                        ),
-                        Int64(0),
-                        _type(column.dtype()),
-                        Int64(column.n_chunks()),
-                        Int64(2),
-                    ]
-                )
-            else:
-                self.inputs.extend(_input_series(column))
-        for step in plan.steps:
-            for i in range(step.start, step.start + step.nodes):
-                if (
-                    plan.code[4 * i] == GT
-                    or plan.code[4 * i] == LT
-                    or plan.code[4 * i] == GE
-                    or plan.code[4 * i] == LE
-                    or plan.code[4 * i] == EQ
-                    or plan.code[4 * i] == NE
-                ):
-                    var left = Int(plan.code[4 * i + 1])
-                    var right = Int(plan.code[4 * i + 2])
-                    var left_type = plan.node_dtypes[step.start + left]
-                    var right_type = plan.node_dtypes[step.start + right]
-                    if left_type.is_decimal() and right_type.is_decimal():
-                        self.code[4 * i + 3] = (
-                            Int64(left_type.scale())
-                            | Int64(right_type.scale()) << 6
-                            | self.code[4 * i] << 12
-                        )
-                        self.code[4 * i] = 218
-                if plan.node_dtypes[i].is_decimal() and (
-                    plan.code[4 * i] == ADD
-                    or plan.code[4 * i] == SUB
-                    or plan.code[4 * i] == NEG
-                    or plan.code[4 * i] == ABS
-                    or plan.code[4 * i] == MUL
-                    or plan.code[4 * i] == DIV
-                ):
-                    var operand = Int(plan.code[4 * i + 1])
-                    var source = plan.node_dtypes[step.start + operand]
-                    if (
-                        plan.code[4 * i] == ADD
-                        or plan.code[4 * i] == SUB
-                        or plan.code[4 * i] == MUL
-                        or plan.code[4 * i] == DIV
-                    ):
-                        var other = Int(plan.code[4 * i + 2])
-                        self.code[4 * i + 3] = (
-                            Int64(source.scale())
-                            | Int64(
-                                plan.node_dtypes[step.start + other].scale()
-                            )
-                            << 6
-                            | self.code[4 * i] << 12
-                        )
-                        self.code[4 * i] = 219
-                    else:
-                        self.code[4 * i + 3] = self.code[4 * i]
-                        self.code[4 * i] = 220
-                if plan.code[4 * i] == CAST:
-                    var operand = Int(plan.code[4 * i + 1])
-                    if operand >= 0:
-                        var source = plan.node_dtypes[step.start + operand]
-                        if (
-                            source.is_decimal()
-                            and plan.node_dtypes[i] == DataType.FLOAT64
-                        ):
-                            self.code[4 * i] = 213
-                            self.code[4 * i + 2] = -1
-                            self.code[4 * i + 3] = Int64(source.scale())
-                            self.literals[i] = Float64(pow10(source.scale()))
-                        elif (
-                            source.is_decimal()
-                            or plan.node_dtypes[i].is_decimal()
-                        ):
-                            var target = plan.node_dtypes[i]
-                            self.code[4 * i] = 217
-                            self.code[4 * i + 2] = -1
-                            self.code[4 * i + 3] = (
-                                Int64(
-                                    source.scale() if source.is_decimal() else 0
-                                )
-                                | Int64(
-                                    target.scale() if target.is_decimal() else 0
-                                )
-                                << 6
-                                | Int64(
-                                    target.precision() if target.is_decimal() else 0
-                                )
-                                << 12
-                                | self.code[4 * i + 3] << 18
-                                | Int64(source.is_decimal()) << 19
-                                | Int64(target.is_decimal()) << 20
-                            )
-                            if target == DataType.FLOAT32:
-                                self.literals[i] = Float64(
-                                    pow10(source.scale())
-                                )
-            self.steps.extend(
-                [
-                    Int64(step.start),
-                    Int64(step.nodes),
-                    Int64(step.slot),
-                    Int64(5) if plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
-                    or plan.code[step.start * 4]
-                    == ROW_DURATION_KEY else Int64(4) if plan.code[
-                        step.start * 4
-                    ]
-                    == ROW_RANK_KEY else Int64(3) if step.grouped else (
-                        Int64(2) if step.order else Int64(step.filter)
-                    ),
-                    Int64(step.gather_start),
-                    Int64(
-                        step.gather_count if step.filter or step.order else 0
-                    ),
-                ]
-            )
-        for output in plan.outputs:
-            self.typed |= output.reduction == SUM and (
-                plan.slot_dtypes[output.slot].physical() == DataType.INT64
-                or plan.slot_dtypes[output.slot] == DataType.UINT64
-            )
-            self.outputs.extend(
-                [
-                    Int64(0),
-                    Int64(0),
-                    _type(output.dtype),
-                    Int64(output.slot),
-                    _reduction_op(
-                        output.reduction, plan.slot_dtypes[output.slot]
-                    ) if output.reduction
-                    >= 0 else Int64(-1),
-                    _decimal128_reduction_metadata(
-                        plan.slot_dtypes[output.slot],
-                        output.min_count,
-                        min(
-                            configured_workers(),
-                            min(
-                                8,
-                                max(
-                                    1,
-                                    plan.source.height() * 16 >> 22,
-                                ),
-                            ),
-                        ) if output.slot
-                        < plan.source.width() else configured_workers(),
-                    ) if plan.slot_dtypes[output.slot].is_decimal()
-                    and plan.slot_dtypes[output.slot].decimal_width() == 128
-                    and (
-                        output.reduction == SUM or output.reduction == MEAN
-                    ) else Int64(
-                        plan.slot_dtypes[output.slot].scale()
-                    ) if output.reduction
-                    == MEAN
-                    and plan.slot_dtypes[output.slot].is_decimal() else Int64(
-                        output.min_count
-                    ),
-                ]
-            )
-
-    def request(
-        self, plan: RowPlan, budget: Int, profiling: Bool
-    ) raises -> List[Int64]:
-        return [
-            Int64(2),
-            Int64(plan.source.height()),
-            Int64(0) if self.typed else _type(plan.dtype),
-            Int64(plan.slots),
-            Int64(plan.source.width()),
-            Int64(len(self.code)),
-            Int64(len(plan.literals)),
-            Int64(len(plan.steps)),
-            Int64(len(plan.gathers)),
-            Int64(len(plan.outputs)),
-            Int64(plan.limit),
-            Int64(plan.reductions),
-            Int64(profiling),
-            Int64(budget),
-            Int64(Int(self.inputs.unsafe_ptr())),
-            Int64(Int(self.code.unsafe_ptr())),
-            Int64(Int(self.literals.unsafe_ptr())),
-            Int64(Int(self.steps.unsafe_ptr())),
-            Int64(Int(self.gathers.unsafe_ptr())),
-            Int64(Int(self.outputs.unsafe_ptr())),
-            Int64(Int(self.node_types.unsafe_ptr())) if self.typed else Int64(
-                0
-            ),
-            Int64(Int(self.slot_types.unsafe_ptr())) if self.typed else Int64(
-                0
-            ),
-        ]
-
-
-def _allocate_output(
-    name: String, dtype: DataType, capacity: Int
-) raises -> Series:
-    return Series.full_null(name, dtype, capacity)
-
-
-def _output_addresses(column: Series) raises -> Tuple[Int, Int]:
-    if column.dtype().is_decimal() and column.dtype().decimal_width() == 128:
-        var value = column.numeric[DType.int128]()
-        return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
-    if column.dtype() == DataType.BOOL:
-        var value = column.bool()
-        return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
-    comptime for k in range(len(NUMERIC_DTYPES)):
-        comptime D = NUMERIC_DTYPES[k]
-        if column.dtype().physical() == DataType.of(D):
-            var value = column.numeric[D]()
-            return (Int(value.unsafe_values()), Int(value.unsafe_validity()))
-    raise Error("Metal unsupported output dtype")
-
-
-def _direct_filtered_reduction(plan: RowPlan) -> Bool:
-    if not plan.reductions:
-        return False
-    var filtered = False
-    for step in plan.steps:
-        if step.order or step.grouped:
-            return False
-        for i in range(step.start, step.start + step.nodes):
-            if plan.code[4 * i] == ROW_SLICE:
-                return False
-        filtered |= step.filter
-    for output in plan.outputs:
-        if (
-            output.reduction != SUM
-            and output.reduction != COUNT
-            and output.reduction != LEN
-        ):
-            return False
-    return filtered
-
-
-def _plan_features(
-    library: _Library, request: List[Int64], join: Bool = False
-) raises -> Int64:
-    var callback = library.optional_symbol(
-        "dfm_join_plan_features" if join else "dfm_plan_features"
-    )
-    if not callback:
-        return 0
-    var error = 0
-    var features = Pointer(to=callback).unsafe_bitcast[_PlanFeatures]()[](
-        Int(request.unsafe_ptr()), Int(Pointer(to=error))
-    )
-    library.check(Int32(features < 0), error)
-    return features
-
-
-def _execute(
-    plan: RowPlan, device: Int, budget: Int, profiling: Bool, start: Int
-) raises -> Tuple[DataFrame, DataFrame]:
-    var descriptors = _Descriptors(plan)
-    var request = descriptors.request(plan, budget, profiling)
-    var library = _Library()
-    var features = _plan_features(library, request)
-    var memory = List[Int64](length=8, fill=0)
-    var error = 0
-    var estimate = library.estimate
-    var status = _estimate_call(estimate, request, memory, error)
-    library.check(status, error)
-    if budget >= 0 and Int(memory[2]) > budget:
-        raise Error("Metal request exceeds memory budget before submission")
-    var initialized = perf_counter_ns()
-    var context = _Context(library^, device)
-    var initialization_ns = Int(perf_counter_ns() - initialized)
-    var info = List[Int64](length=6, fill=0)
-    var info_fn = context.library.info
-    status = _info_call(info_fn, context.address, info, error)
-    context.library.check(status, error)
-    var idle_bytes = 0
-    var workspace_info = context.library.optional_symbol("dfm_workspace_info")
-    if workspace_info:
-        var workspace = List[Int64](length=5, fill=0)
-        status = _info_call(workspace_info, context.address, workspace, error)
-        context.library.check(status, error)
-        idle_bytes = Int(workspace[0])
-    var headroom = max(0, Int(info[2]) - max(0, Int(info[3]) - idle_bytes))
-    if Int(memory[2]) > headroom:
-        raise Error("Metal request exceeds current working set headroom")
-    var capacity = 1 if plan.reductions else plan.source.height()
-    for step in plan.steps:
-        if step.grouped:
-            capacity = max(1, capacity)
-    var storage = List[Series]()
-    for i in range(len(plan.outputs)):
-        var output = _allocate_output(
-            plan.outputs[i].name, plan.outputs[i].dtype, capacity
-        )
-        var addresses = _output_addresses(output)
-        descriptors.outputs[6 * i] = Int64(addresses[0])
-        descriptors.outputs[6 * i + 1] = Int64(addresses[1])
-        storage.append(output^)
-    var stats = List[Int64](length=17, fill=0)
-    var execute = context.library.execute
-    status = _execute_call(execute, context.address, request, stats, error)
-    # Raw ABI addresses carry no Mojo origins. Explicitly retain the descriptor
-    # buffers and request until the synchronous native call has returned.
-    _ = descriptors^
-    _ = request^
-    context.library.check(status, error)
-    var columns = List[Series]()
-    for column in storage:
-        columns.append(column.slice(0, Int(stats[8])))
-    var result = DataFrame(columns^, height=Int(stats[8]))
-    var report = _native_report(
-        context,
-        device,
-        plan.root,
-        "RESIDENT ROW EXPRESSIONS",
-        plan.source.height(),
-        result.height(),
-        stats,
-        info,
-        initialization_ns,
-        start,
-        "native_metal_predicate_reductions" if features
-        & 1 else "native_metal_hash_groups" if features
-        & 2 else "native_metal_integer_radix_sort" if features
-        & 4 else "specialized_native_metal_stable_compaction",
-        (
-            "shared-buffer staging -> native Metal kernels -> synchronized CPU"
-            " result"
-        ),
-    )
-    return (result^, report^)
-
-
-def _native_report(
-    context: _Context,
-    device: Int,
-    root: Int,
-    label: String,
-    input_rows: Int,
-    output_rows: Int,
-    stats: List[Int64],
-    info: List[Int64],
-    initialization_ns: Int,
-    start: Int,
-    algorithm: String,
-    boundaries: String,
-    *,
-    build_rows: Int = 0,
-    builds: Int = 0,
-    build_side: String = "",
-    resident_input_bytes: Int = 0,
-    resident_output_bytes: Int = 0,
-) raises -> DataFrame:
-    var report = ExecutionReport()
-    report.record(
-        root,
-        label,
-        "metal",
-        input_rows,
-        output_rows,
-        algorithm=algorithm,
-        build_rows=build_rows,
-        builds=builds,
-        build_side=build_side,
-        wall_ns=Int(perf_counter_ns() - start),
-    )
-    var fields = report.frame()._columns.copy()
-    fields.append(Series("device_id", Column[Int64]([Int64(device)])))
-    fields.append(
-        Series("device_name", Column[String]([_read_c_string(Int(info[0]))]))
-    )
-    fields.append(Series("upload_bytes", Column[Int64]([stats[3]])))
-    fields.append(Series("download_bytes", Column[Int64]([stats[9]])))
-    fields.append(Series("shared_buffer_bytes", Column[Int64]([stats[0]])))
-    fields.append(Series("host_result_bytes", Column[Int64]([stats[1]])))
-    fields.append(Series("peak_requested_bytes", Column[Int64]([stats[2]])))
-    fields.append(
-        Series(
-            "resident_input_bytes", Column[Int64]([Int64(resident_input_bytes)])
-        )
-    )
-    fields.append(
-        Series(
-            "resident_output_bytes",
-            Column[Int64]([Int64(resident_output_bytes)]),
-        )
-    )
-    fields.append(Series("kernel_launches", Column[Int64]([stats[4]])))
-    fields.append(Series("synchronizations", Column[Int64]([stats[10]])))
-    fields.append(Series("pipeline_cache_hit", Column[Bool]([stats[11] != 0])))
-    fields.append(
-        Series(
-            "pipeline_compile_ms", Column[Float64]([Float64(stats[12]) / 1e6])
-        )
-    )
-    fields.append(
-        Series("staging_copy_ms", Column[Float64]([Float64(stats[13]) / 1e6]))
-    )
-    fields.append(
-        Series("submit_wait_ms", Column[Float64]([Float64(stats[14]) / 1e6]))
-    )
-    fields.append(
-        Series("result_copy_ms", Column[Float64]([Float64(stats[15]) / 1e6]))
-    )
-    fields.append(
-        Series(
-            "gpu_ms",
-            Column[Float64]([Float64(stats[16]) / 1e6], [stats[16] >= 0]),
-        )
-    )
-    fields.append(
-        Series(
-            "initialization_ms",
-            Column[Float64]([Float64(initialization_ns) / 1e6]),
-        )
-    )
-    var build_fn = context.library.build
-    fields.append(
-        Series(
-            "runtime_build_id",
-            Column[String](
-                [
-                    _read_c_string(
-                        Pointer(to=build_fn).unsafe_bitcast[_Build]()[]()
-                    )
-                ]
-            ),
-        )
-    )
-    fields.append(
-        Series(
-            "boundaries",
-            Column[String]([boundaries]),
-        )
-    )
-    return DataFrame(fields^)
-
-
-struct _JoinDescriptors(Movable):
-    var inputs: List[Int64]
-    var keys: List[Int64]
-    var outputs: List[Int64]
-
-    def __init__(
-        out self, task: DagTask, left: DataFrame, right: DataFrame
-    ) raises:
-        self.inputs = List[Int64]()
-        self.keys = task.keys.copy()
-        self.outputs = List[Int64]()
-        for side in range(2):
-            var frame = left.copy() if side == 0 else right.copy()
-            for column in frame._columns:
-                self.inputs.extend(_input_series(column))
-                self.inputs.append(Int64(side))
-        for field in task.fields:
-            self.outputs.extend(
-                [
-                    Int64(0),
-                    Int64(0),
-                    _type(field.dtype),
-                    Int64(field.left),
-                    Int64(field.right),
-                    Int64(field.prefer_right),
-                ]
-            )
-
-    def request(
-        self,
-        task: DagTask,
-        left: DataFrame,
-        right: DataFrame,
-        budget: Int,
-        profiling: Bool,
-    ) -> List[Int64]:
-        return [
-            Int64(1),
-            Int64(left.height()),
-            Int64(right.height()),
-            Int64(left.width() + right.width()),
-            Int64(len(self.keys) // 2),
-            Int64(len(task.fields)),
-            Int64(task.how),
-            Int64(task.limit),
-            Int64(budget),
-            Int64(profiling),
-            Int64(Int(self.inputs.unsafe_ptr())),
-            Int64(Int(self.keys.unsafe_ptr())),
-            Int64(Int(self.outputs.unsafe_ptr())),
-        ]
-
-
-def _join_finish_call(
-    callback: Int,
-    session: Int,
-    outputs: List[Int64],
-    mut stats: List[Int64],
-    mut error: Int,
-) -> Int32:
-    return Pointer(to=callback).unsafe_bitcast[_JoinFinish]()[](
-        session,
-        Int(outputs.unsafe_ptr()),
-        Int64(len(outputs) // 6),
-        Int(stats.unsafe_ptr()),
-        Int(Pointer(to=error)),
-    )
-
-
-struct _ResidentScope(Movable):
-    var context: _Context
-    var address: Int
-    var release: Int
-    var release_table: Int
-    var rows: Int
-    var join: Int
-    var info: Int
-    var query_info: Int
-    var export: Int
-    var device_info: List[Int64]
-    var initialization_ns: Int
-
-    def __init__(out self, device: Int, budget: Int) raises:
-        self.address = 0
-        self.release = 0
-        self.release_table = 0
-        self.rows = 0
-        self.join = 0
-        self.info = 0
-        self.query_info = 0
-        self.export = 0
-        self.device_info = List[Int64](length=6, fill=0)
-        self.initialization_ns = 0
-        var library = _Library()
-        var version = library.symbol("dfm_resident_abi_version")
-        if Pointer(to=version).unsafe_bitcast[_Version]()[]() != 1:
-            raise Error(
-                "Metal resident ABI version mismatch; rebuild native/dfmetal"
-            )
-        var create = library.symbol("dfm_query_create")
-        self.release = library.symbol("dfm_query_release")
-        self.release_table = library.symbol("dfm_resident_release")
-        self.rows = library.symbol("dfm_resident_rows")
-        self.join = library.symbol("dfm_resident_join")
-        self.info = library.symbol("dfm_resident_info")
-        self.query_info = library.symbol("dfm_query_info")
-        self.export = library.symbol("dfm_resident_export")
-        var start = perf_counter_ns()
-        self.context = _Context(library^, device)
-        self.initialization_ns = Int(perf_counter_ns() - start)
-        var error = 0
-        var status = _info_call(
-            self.context.library.info,
-            self.context.address,
-            self.device_info,
-            error,
-        )
-        self.context.library.check(status, error)
-        self.address = Pointer(to=create).unsafe_bitcast[_QueryCreate]()[](
-            self.context.address, Int64(budget), Int(Pointer(to=error))
-        )
-        self.context.library.check(Int32(self.address == 0), error)
-
-    def __deinit__(deinit self):
-        if self.address:
-            var callback = self.release
-            Pointer(to=callback).unsafe_bitcast[_Release]()[](self.address)
-
-
-struct _ResidentValue(Movable):
-    var frame: DataFrame
-    var address: Int
-    var release: Int
-    var rows: Int
-    var retained: Int
-
-    def __init__(
-        out self,
-        var frame: DataFrame,
-        address: Int = 0,
-        release: Int = 0,
-        rows: Int = -1,
-        retained: Int = 0,
-    ):
-        self.rows = frame.height() if rows < 0 else rows
-        self.frame = frame^
-        self.address = address
-        self.release = release
-        self.retained = retained
-
-    def __deinit__(deinit self):
-        if self.address:
-            var callback = self.release
-            Pointer(to=callback).unsafe_bitcast[_Release]()[](self.address)
-
-
-def _resident_run_call(
-    callback: Int,
-    query: Int,
-    request: List[Int64],
-    refs: List[Int64],
-    final: Bool,
-    mut address: Int,
-    mut stats: List[Int64],
-    mut error: Int,
-) -> Int32:
-    return Pointer(to=callback).unsafe_bitcast[_ResidentRun]()[](
-        query,
-        Int(request.unsafe_ptr()),
-        Int(refs.unsafe_ptr()),
-        Int64(len(refs) // 2),
-        Int64(final),
-        Int(Pointer(to=address)),
-        Int(stats.unsafe_ptr()),
-        Int(Pointer(to=error)),
-    )
-
-
-def _execute_join_dag(
-    dag: JoinDag,
-    device: Int,
-    budget: Int,
-    profiling: Bool,
-    query_start: Int,
-) raises -> Tuple[DataFrame, DataFrame]:
-    var scope = _ResidentScope(device, budget)
-    var values = List[_ResidentValue]()
-    var report = DataFrame(List[Series]())
-    var result = DataFrame(List[Series]())
-    var uses = List[Int](length=len(dag.tasks), fill=0)
-    for task in dag.tasks:
-        if task.source >= 0:
-            uses[task.source] += 1
-        if task.kind == DAG_JOIN:
-            uses[task.right] += 1
-    for index in range(len(dag.tasks)):
-        var task = dag.tasks[index].copy()
-        var start = Int(perf_counter_ns())
-        var final = index == dag.root
-        var input_rows: Int
-        var input_bytes = 0
-        var algorithm = String("native_metal_resident_rows")
-        var label = String("RESIDENT ROW EXPRESSIONS")
-        var stats = List[Int64](length=17, fill=0)
-        var address = 0
-        var error = 0
-        var status: Int32
-        if task.kind == DAG_JOIN:
-            var left = values[task.source].frame.copy()
-            var right = values[task.right].frame.copy()
-            var descriptors = _JoinDescriptors(task, left, right)
-            var request = descriptors.request(
-                task, left, right, budget, profiling
-            )
-            request[1] = Int64(values[task.source].rows)
-            request[2] = Int64(values[task.right].rows)
-            input_rows = values[task.source].rows
-            input_bytes = values[task.source].retained
-            if values[task.right].address != values[task.source].address:
-                input_bytes += values[task.right].retained
-            var refs = List[Int64]()
-            for side in range(2):
-                var parent = task.source if side == 0 else task.right
-                for column in range(values[parent].frame.width()):
-                    refs.extend([Int64(values[parent].address), Int64(column)])
-            var join_features = _plan_features(
-                scope.context.library, request, True
-            )
-            status = _resident_run_call(
-                scope.join,
-                scope.address,
-                request,
-                refs,
-                final,
-                address,
-                stats,
-                error,
-            )
-            _ = descriptors^
-            _ = request^
-            _ = refs^
-            scope.context.library.check(status, error)
-            algorithm = (
-                "native_metal_resident_hash_join" if join_features
-                & 1 else "native_metal_resident_sorted_join"
-            )
-            label = "JOIN"
-        else:
-            if task.source >= 0:
-                task.query._frames[0] = values[task.source].frame.copy()
-            var plan = lower_rows(
-                task.query, _capabilities(), terminal_boundary=task.terminal
-            )
-            plan.root = task.root
-            var chunked_source = False
-            for column in plan.source._columns:
-                chunked_source |= column.is_chunked()
-            if (
-                len(task.query._nodes) == 1
-                and task.source < 0
-                and not chunked_source
-            ):
-                # Keep original CPU scans until their first consumer. This
-                # avoids a standalone upload/submit/wait for an identity scan.
-                values.append(_ResidentValue(plan.source.copy()))
-                continue
-            var descriptors = _Descriptors(plan)
-            descriptors.typed = True
-            var request = descriptors.request(plan, budget, profiling)
-            var source_address = 0
-            var source_frame = plan.source.copy()
-            input_rows = plan.source.height()
-            if task.source >= 0:
-                source_address = values[task.source].address
-                source_frame = values[task.source].frame.copy()
-                input_rows = values[task.source].rows
-                input_bytes = values[task.source].retained
-            request[1] = Int64(input_rows)
-            var features = _plan_features(scope.context.library, request)
-            if features & 1:
-                algorithm = "native_metal_predicate_reductions"
-            elif features & 2:
-                algorithm = "native_metal_hash_groups"
-            elif features & 4:
-                algorithm = "native_metal_integer_radix_sort"
-            var refs = List[Int64]()
-            for name in plan.source.columns():
-                refs.extend(
-                    [Int64(source_address), Int64(source_frame._index(name))]
-                )
-            status = _resident_run_call(
-                scope.rows,
-                scope.address,
-                request,
-                refs,
-                final,
-                address,
-                stats,
-                error,
-            )
-            _ = descriptors^
-            _ = request^
-            _ = refs^
-            scope.context.library.check(status, error)
-        var metadata = List[Int64](length=3, fill=0)
-        status = _info_call(scope.info, address, metadata, error)
-        if status:
-            var release = scope.release_table
-            Pointer(to=release).unsafe_bitcast[_Release]()[](address)
-            scope.context.library.check(status, error)
-        values.append(
-            _ResidentValue(
-                task.schema.copy(),
-                address,
-                scope.release_table,
-                Int(metadata[0]),
-                Int(metadata[2]),
-            )
-        )
-        if final:
-            var output_columns = List[Series]()
-            var outputs = List[Int64]()
-            for i in range(task.schema.width()):
-                var field = task.schema._columns[i].copy()
-                var column = _allocate_output(
-                    field.name(), field.dtype(), Int(metadata[0])
-                )
-                var pointers = _output_addresses(column)
-                outputs.extend(
-                    [
-                        Int64(pointers[0]),
-                        Int64(pointers[1]),
-                        _type(field.dtype()),
-                        Int64(i),
-                        Int64(-1),
-                        Int64(0),
-                    ]
-                )
-                output_columns.append(column^)
-            status = _join_finish_call(
-                scope.export, address, outputs, stats, error
-            )
-            _ = outputs^
-            scope.context.library.check(status, error)
-            result = DataFrame(output_columns^, height=Int(metadata[0]))
-        var region = _native_report(
-            scope.context,
-            device,
-            task.root,
-            label,
-            input_rows,
-            Int(metadata[0]),
-            stats,
-            scope.device_info,
-            scope.initialization_ns if report.width() == 0 else 0,
-            start,
-            algorithm,
-            (
-                "CPU source staging -> resident Metal regions -> synchronized"
-                " final CPU result"
-            ),
-            build_rows=(
-                values[task.source].rows if task.how
-                == 2 else values[task.right].rows
-            ) if task.kind
-            == DAG_JOIN else 0,
-            builds=Int(task.kind == DAG_JOIN),
-            build_side=("left" if task.how == 2 else "right") if task.kind
-            == DAG_JOIN else "",
-            resident_input_bytes=input_bytes,
-            resident_output_bytes=Int(metadata[2]),
-        )
-        report = region^ if report.width() == 0 else report.vstack(region)
-        if task.source >= 0:
-            uses[task.source] -= 1
-            if uses[task.source] == 0:
-                values[task.source] = _ResidentValue(DataFrame(List[Series]()))
-        if task.kind == DAG_JOIN:
-            uses[task.right] -= 1
-            if uses[task.right] == 0:
-                values[task.right] = _ResidentValue(DataFrame(List[Series]()))
-    var query_info = List[Int64](length=3, fill=0)
-    var error = 0
-    var status = _info_call(scope.query_info, scope.address, query_info, error)
-    scope.context.library.check(status, error)
-    report = report.with_column(
-        Series(
-            "query_peak_requested_bytes",
-            Column[Int64](
-                List[Int64](length=report.height(), fill=query_info[1])
-            ),
-        )
-    )
-    var elapsed = Float64(Int(perf_counter_ns()) - query_start) / 1e6
-    report = report.with_column(
-        Series(
-            "query_wall_ms",
-            Column[Float64](
-                List[Float64](length=report.height(), fill=elapsed)
-            ),
-        )
-    )
-    return (result^, report^)
-
-
-def _probe_metadata(
-    library: _Library, device: Int, request: List[Int64]
-) raises -> List[Int64]:
-    var callback = library.symbol("dfm_probe")
-    var info = List[Int64](length=8, fill=0)
-    var error = 0
-    var status = Pointer(to=callback).unsafe_bitcast[_Probe]()[](
-        Int64(device),
-        Int(request.unsafe_ptr()) if len(request) else 0,
-        Int(info.unsafe_ptr()),
-        Int(Pointer(to=error)),
-    )
-    library.check(status, error)
-    return info^
-
-
-def _metal_calibration_key(
-    library: _Library,
-    metadata: List[Int64],
-    optimize: Bool,
-    streaming: Bool,
-    batch_size: Int,
-) -> CalibrationKey:
-    var callback = library.build
-    var native_id = _read_c_string(
-        Pointer(to=callback).unsafe_bitcast[_Build]()[]()
-    )
-    return CalibrationKey(
-        "metal",
-        "registry=" + String(metadata[0]) + ";unified=" + String(metadata[3]),
-        native_id^,
-        CPU_BUILD_ID,
-        _read_c_string(Int(metadata[7])),
-        configured_workers(),
-        optimize,
-        streaming,
-        batch_size,
-    )
+        return describe_dag(query, capabilities())
+    return describe(query)
 
 
 struct MetalRuntime(AcceleratorBackend):
-    """Apple Metal provider; copies retain configuration, native default cache is shared.
-
-    Construction validates configuration only. The entire query is bound before
-    opening the optional library or initializing a device. Native submission is
-    synchronized and serialized per cached context, including exceptional exits.
-    """
+    """Apple Metal provider with Mojo-owned kernels, buffers and query lifetime."""
 
     var _device: Int
     var _budget: Int
+    var _observation_only: Bool
 
     def __init__(
         out self, device_id: Int = 0, *, memory_limit_bytes: Int = -1
@@ -1671,440 +124,126 @@ struct MetalRuntime(AcceleratorBackend):
             )
         self._device = device_id
         self._budget = memory_limit_bytes
+        self._observation_only = False
 
     @staticmethod
     def device_count() raises -> Int:
-        var library = _Library()
-        var callback = library.count
-        return Int(Pointer(to=callback).unsafe_bitcast[_Count]()[]())
+        from .accelerator.gpu.identity import device_count
+
+        return device_count()
 
     def estimate_auto(self, query: LazyFrame) raises -> PlanEstimate:
-        """Bound numeric row work; never read values or submit device work."""
-        if has_selectors(query):
-            return self.estimate_auto(lower_selectors(query))
-        if has_scalar_projections(query):
-            return self.estimate_auto(lower_scalar_projections(query))
-        var work = cpu_features(query)
-        var plan = lower_rows(query, _capabilities())
-        var descriptors = _Descriptors(plan)
-        var request = descriptors.request(plan, self._budget, False)
-        var library = _Library()
-        var memory = List[Int64](length=8, fill=0)
-        var error = 0
-        var status = _estimate_call(library.estimate, request, memory, error)
-        library.check(status, error)
-        var metadata = _probe_metadata(library, self._device, request)
-        # The request stores raw ABI addresses without Mojo origins.
-        # Retain every descriptor buffer through both synchronous FFI calls.
-        _ = descriptors^
-        _ = request^
-        var device = work[0].copy()
-        device[8] = Float64(memory[4])
-        device[9] = 1
-        device[10] = Float64(memory[3])
-        device[11] = Float64(memory[1])
-        device[12] = Float64(memory[2])
-        device[13] = Float64(metadata[4] == 0)
-        device[14] = 0
-        var family = work[1].copy()
-        var chunked = False
-        var chunks = 0
-        for column in plan.source._columns:
-            chunked |= column.is_chunked()
-            chunks += column.n_chunks()
-        if chunked:
-            family += ";metal-chunked-inputs-v1:" + String(chunks)
-        if not plan.source.width():
-            family += ";metal-empty-inputs-v1"
-        if not len(plan.outputs):
-            family += ";metal-empty-outputs-v1"
-        if plan.reused_columns:
-            family += ";metal-column-slots-v1"
-        var paired = False
-        for output in plan.outputs:
-            paired |= output.reduction == COV or output.reduction == CORR
-        for i in range(0, len(plan.code), 4):
-            if plan.code[i] == ROW_GROUP_OUTPUT:
-                paired |= plan.code[i + 3] == COV or plan.code[i + 3] == CORR
-        if paired:
-            family += ";metal-paired-moments-v1"
-        var exponentials = 0
-        var logarithms = 0
-        for i in range(0, len(plan.code), 4):
-            exponentials += Int(plan.code[i] == EXP)
-            logarithms += Int(plan.code[i] == LOG)
-        if exponentials or logarithms:
-            family += (
-                ";metal-transcendentals-v1:e"
-                + String(exponentials)
-                + ":l"
-                + String(logarithms)
-            )
-        var powers = 0
-        for i in range(0, len(plan.code), 4):
-            powers += Int(
-                plan.code[i] == POW and plan.node_dtypes[i // 4].is_float()
-            )
-        if powers:
-            family += ";metal-floating-power-v1:p" + String(powers)
-        var calendar_offset = False
-        for i in range(0, len(plan.code), 4):
-            calendar_offset |= plan.code[i] == ROW_CALENDAR_OFFSET
-        if calendar_offset:
-            family += ";metal-calendar-offsets-v1"
-        var calendar = False
-        for i in range(0, len(plan.code), 4):
-            calendar |= plan.code[i] == ROW_CALENDAR_TRUNCATE
-        if calendar:
-            family += ";metal-calendar-truncation-v1"
-        var offsets = False
-        for i in range(0, len(plan.code), 4):
-            offsets |= plan.code[i] == DT_OFFSET_BY
-        if offsets:
-            family += ";metal-fixed-offsets-v1"
-        var totals = False
-        for i in range(0, len(plan.code), 4):
-            totals |= plan.code[i] == DT_TOTAL
-        if totals:
-            family += ";metal-duration-totals-v1"
-        var quantiles = False
-        for output in plan.outputs:
-            quantiles |= (
-                ROW_QUANTILE_LINEAR <= output.reduction <= ROW_QUANTILE_MIDPOINT
-            )
-        for i in range(0, len(plan.code), 4):
-            if plan.code[i] == ROW_GROUP_OUTPUT:
-                quantiles |= (
-                    ROW_QUANTILE_LINEAR
-                    <= Int(plan.code[i + 3])
-                    <= ROW_QUANTILE_MIDPOINT
-                )
-        if quantiles:
-            family += ";metal-quantiles-v1"
-        var higher = False
-        for output in plan.outputs:
-            higher |= output.reduction == SKEW or output.reduction == KURTOSIS
-        for i in range(0, len(plan.code), 4):
-            if plan.code[i] == ROW_GROUP_OUTPUT:
-                higher |= (
-                    plan.code[i + 3] == SKEW or plan.code[i + 3] == KURTOSIS
-                )
-        if higher:
-            family += ";metal-higher-moments-v1"
-        var moments = False
-        for output in plan.outputs:
-            moments |= output.reduction == VAR or output.reduction == STD
-        for i in range(0, len(plan.code), 4):
-            if plan.code[i] == ROW_GROUP_OUTPUT:
-                moments |= plan.code[i + 3] == VAR or plan.code[i + 3] == STD
-        if moments:
-            family += ";metal-moments-v1"
-        var ranked = False
-        var cumulative = False
-        var rolling = False
-        var rolling_moments = False
-        var interpolation = False
-        var coordinate_interpolation = False
-        var shift_fill = False
-        for step in plan.steps:
-            ranked |= plan.code[step.start * 4] == ROW_RANK_KEY
-            cumulative |= (
-                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
-                and plan.code[step.start * 4 + 3] < 4
-            )
-            shift_fill |= (
-                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
-                and plan.code[step.start * 4 + 3] >= 4
-                and plan.code[step.start * 4 + 3] <= 6
-            )
-        for step in plan.steps:
-            interpolation |= (
-                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
-                and plan.code[step.start * 4 + 3] >= 13
-            )
-            coordinate_interpolation |= (
-                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
-                and plan.code[step.start * 4 + 3] == 15
-            )
-            rolling_moments |= (
-                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
-                and plan.code[step.start * 4 + 3] >= 11
-                and plan.code[step.start * 4 + 3] <= 12
-            )
-            rolling |= (
-                plan.code[step.start * 4] == ROW_CUMULATIVE_KEY
-                and plan.code[step.start * 4 + 3] >= 7
-                and plan.code[step.start * 4 + 3] <= 12
-            )
-        if ranked:
-            family += ";metal-rank-v1"
-        if cumulative:
-            family += ";metal-cumulative-v1"
-        if shift_fill:
-            family += ";metal-shift-fill-v1"
-        if rolling:
-            family += ";metal-rolling-v1"
-        if rolling_moments:
-            family += ";metal-rolling-moments-v2"
-        if interpolation:
-            family += ";metal-interpolation-v1"
-        if coordinate_interpolation:
-            family += ";metal-coordinate-interpolation-v1"
-        family += duration_family(plan, "metal-")
-        var decimal_mean = False
-        for output in plan.outputs:
-            decimal_mean |= output.reduction == MEAN and (
-                plan.slot_dtypes[output.slot].is_decimal()
-            )
-        for i in range(0, len(plan.code), 4):
-            if plan.code[i] == ROW_GROUP_OUTPUT:
-                decimal_mean |= plan.code[i + 3] == MEAN and (
-                    plan.slot_dtypes[Int(plan.code[i + 1])].is_decimal()
-                )
-        if decimal_mean:
-            family += ";metal-decimal-means-v1"
-        var wide_integer = False
-        for output in plan.outputs:
-            wide_integer |= (
-                (output.reduction == SUM or output.reduction == MEAN)
-                and not plan.slot_dtypes[output.slot].is_decimal()
-                and (
-                    plan.slot_dtypes[output.slot].physical() == DataType.INT64
-                    or plan.slot_dtypes[output.slot] == DataType.UINT64
-                )
-            )
-        for i in range(0, len(plan.code), 4):
-            if plan.code[i] == ROW_GROUP_OUTPUT:
-                wide_integer |= (
-                    (plan.code[i + 3] == SUM or plan.code[i + 3] == MEAN)
-                    and not plan.slot_dtypes[Int(plan.code[i + 1])].is_decimal()
-                    and (
-                        plan.slot_dtypes[Int(plan.code[i + 1])].physical()
-                        == DataType.INT64
-                        or plan.slot_dtypes[Int(plan.code[i + 1])]
-                        == DataType.UINT64
-                    )
-                )
-        if wide_integer:
-            family += ";metal-wide-integer-reductions-v1"
-        var wide_decimal = False
-        for dtype in plan.node_dtypes:
-            wide_decimal |= dtype.is_decimal() and dtype.decimal_width() == 128
-        for output in plan.outputs:
-            wide_decimal |= (
-                output.dtype.is_decimal()
-                and output.dtype.decimal_width() == 128
-            )
-        if wide_decimal:
-            family += ";metal-decimal128-v1"
-        var wide_decimal_reduction = False
-        for output in plan.outputs:
-            wide_decimal_reduction |= (
-                (output.reduction == SUM or output.reduction == MEAN)
-                and plan.slot_dtypes[output.slot].is_decimal()
-                and plan.slot_dtypes[output.slot].decimal_width() == 128
-            )
-        for i in range(0, len(plan.code), 4):
-            if plan.code[i] == ROW_GROUP_OUTPUT:
-                var source = plan.slot_dtypes[Int(plan.code[i + 1])]
-                wide_decimal_reduction |= (
-                    (plan.code[i + 3] == SUM or plan.code[i + 3] == MEAN)
-                    and source.is_decimal()
-                    and source.decimal_width() == 128
-                )
-        if wide_decimal_reduction:
-            family += ";metal-decimal128-reductions-v1"
-        var decimal_float_cast = False
-        for step in plan.steps:
-            for i in range(step.start, step.start + step.nodes):
-                if (
-                    plan.code[4 * i] == CAST
-                    and plan.node_dtypes[i] == DataType.FLOAT64
-                ):
-                    var operand = Int(plan.code[4 * i + 1])
-                    if operand >= 0:
-                        decimal_float_cast |= plan.node_dtypes[
-                            step.start + operand
-                        ].is_decimal()
-        if decimal_float_cast:
-            family += ";metal-decimal-float-casts-v1"
-        var decimal_casts = False
-        for step in plan.steps:
-            for i in range(step.start, step.start + step.nodes):
-                if plan.code[4 * i] == CAST:
-                    var operand = Int(plan.code[4 * i + 1])
-                    if operand >= 0 and (
-                        plan.node_dtypes[i].is_decimal()
-                        or plan.node_dtypes[step.start + operand].is_decimal()
-                    ):
-                        decimal_casts = True
-        if decimal_casts:
-            family += ";metal-decimal-casts-v1"
-        var decimal_arithmetic = False
-        for i in range(len(plan.node_dtypes)):
-            decimal_arithmetic |= plan.node_dtypes[i].is_decimal() and (
-                plan.code[4 * i] == ADD
-                or plan.code[4 * i] == SUB
-                or plan.code[4 * i] == NEG
-                or plan.code[4 * i] == ABS
-            )
-        if decimal_arithmetic:
-            family += ";metal-decimal-arithmetic-v1"
-        var decimal_multiplicative = False
-        for i in range(len(plan.node_dtypes)):
-            decimal_multiplicative |= plan.node_dtypes[i].is_decimal() and (
-                plan.code[4 * i] == MUL or plan.code[4 * i] == DIV
-            )
-        if decimal_multiplicative:
-            family += ";metal-decimal-multiplicative-v1"
-        var decimal_comparisons = False
-        for step in plan.steps:
-            for i in range(step.start, step.start + step.nodes):
-                if is_comparison(Int(plan.code[4 * i])):
-                    var operand = Int(plan.code[4 * i + 1])
-                    if operand >= 0:
-                        decimal_comparisons |= plan.node_dtypes[
-                            step.start + operand
-                        ].is_decimal()
-        if decimal_comparisons:
-            family += ";metal-decimal-comparisons-v1"
-        var emulated = False
-        for i in range(len(plan.node_dtypes)):
-            if plan.node_dtypes[i] == DataType.FLOAT64:
-                emulated = True
-            if plan.node_dtypes[i].is_float() and (
-                plan.code[i * 4] == ROUND
-                or plan.code[i * 4] == DIV
-                or plan.code[i * 4] == EXP
-                or plan.code[i * 4] == LOG
-                or plan.code[i * 4] == POW
-                or plan.code[i * 4] == SQRT
-                or plan.code[i * 4] == FLOORDIV
-                or plan.code[i * 4] == MOD
-                or (
-                    plan.code[i * 4] == ROW_DURATION_KEY
-                    and plan.code[i * 4 + 3] == 0
-                )
-            ):
-                emulated = True
-        for output in plan.outputs:
-            emulated |= output.reduction == MEAN or (
-                output.reduction == SUM and output.dtype.is_float()
-            )
-        for step in plan.steps:
-            for i in range(step.start, step.start + step.nodes):
-                if (
-                    plan.code[i * 4] == CAST
-                    and plan.node_dtypes[i] == DataType.FLOAT32
-                ):
-                    var operand = Int(plan.code[i * 4 + 1])
-                    if operand >= 0:
-                        var source = plan.node_dtypes[step.start + operand]
-                        emulated |= (
-                            source == DataType.INT64
-                            or source == DataType.UINT64
-                        )
-        for i in range(0, len(plan.code), 4):
-            if plan.code[i] == ROW_GROUP_OUTPUT:
-                emulated |= plan.code[i + 3] == MEAN or (
-                    plan.code[i + 3] == SUM
-                    and plan.slot_dtypes[Int(plan.code[i + 1])].is_float()
-                )
-        if emulated:
-            family += ";metal-emulated-float64-v1"
-        for i in range(len(plan.node_dtypes)):
-            if plan.node_dtypes[i] == DataType.FLOAT32 and (
-                plan.code[i * 4] == ADD
-                or plan.code[i * 4] == SUB
-                or plan.code[i * 4] == MUL
-                or plan.code[i * 4] == DIV
-            ):
-                family += ";metal-float32-arithmetic-v1"
-                break
-        return PlanEstimate(
-            work[0].copy(), device^, Int(memory[2]), family^, "accel"
-        )
+        """Bound supported numeric work without reading values or device setup."""
+        from .accelerator.gpu.calibration import estimate
+
+        return estimate(query)
 
     def calibration_key(
         self, optimize: Bool, streaming: Bool, batch_size: Int
     ) raises -> CalibrationKey:
-        var library = _Library()
-        var metadata = _probe_metadata(library, self._device, List[Int64]())
-        return _metal_calibration_key(
-            library, metadata, optimize, streaming, batch_size
-        )
+        from .accelerator.gpu.identity import key
+
+        return key(self._device, optimize, streaming, batch_size)
 
     def select_auto(
         self, query: LazyFrame, optimize: Bool, streaming: Bool, batch_size: Int
     ) -> Tuple[String, String]:
-        try:
-            var path = getenv("DATAFRAME_ACCEL_COST_TABLE")
-            if not path:
-                return (
-                    "cpu",
-                    "auto uses CPU; no analytical calibration configured",
-                )
-            if CPU_BUILD_ID == "development-source-no-calibration":
-                return (
-                    "cpu",
-                    (
-                        "automatic calibration requires an identified"
-                        " CPU/provider package"
-                    ),
-                )
-            var facts = self.estimate_auto(query)
-            if self._budget >= 0 and facts.peak_bytes > self._budget:
-                return (
-                    "cpu",
-                    "estimated Metal payload exceeds configured memory limit",
-                )
-            var table: JsonValue
-            with open(path, "r") as file:
-                table = JsonValue(file.read())
-            var fraction = Float64(table.get("memory_fraction").text)
-            if not isfinite(fraction) or fraction <= 0 or fraction > 1:
-                return ("cpu", "invalid automatic memory headroom fraction")
-            var library = _Library()
-            var metadata = _probe_metadata(library, self._device, List[Int64]())
-            var free = max(
-                0,
-                Int(metadata[1]) - max(0, Int(metadata[2]) - Int(metadata[5])),
-            )
-            var budget = Int(Float64(free) * fraction)
-            if self._budget >= 0:
-                budget = min(budget, self._budget)
-            var key = _metal_calibration_key(
-                library, metadata, optimize, streaming, batch_size
-            )
-            var decision = select_cost(
-                facts, table, key, budget, external_call["time", Int64](Int(0))
-            )
-            return (
-                decision.engine.copy(),
-                decision.reason
-                + "; peak_bytes="
-                + String(facts.peak_bytes)
-                + "; budget_bytes="
-                + String(budget),
-            )
-        except error:
-            return (
-                "cpu",
-                "automatic analytical preflight rejected: " + String(error),
-            )
+        from .accelerator.gpu.calibration import select_auto
+
+        return select_auto(
+            query, self._device, self._budget, optimize, streaming, batch_size
+        )
 
     def execute(self, query: LazyFrame) raises -> Tuple[DataFrame, DataFrame]:
-        return self._run(query, False)
+        comptime if METAL_TARGET:
+            return self._run(query, False)
+        else:
+            raise Error(
+                "Mojo Metal execution requires an Apple Metal compilation target; "
+                + self.describe(query)
+            )
 
     def execute_profiled(
         self, query: LazyFrame
     ) raises -> Tuple[DataFrame, DataFrame]:
-        return self._run(query, True)
+        comptime if METAL_TARGET:
+            return self._run(query, True)
+        else:
+            raise Error(
+                "Mojo Metal execution requires an Apple Metal compilation target; "
+                + self.describe(query)
+            )
 
     def _run(
         self, query: LazyFrame, profiling: Bool
     ) raises -> Tuple[DataFrame, DataFrame]:
+        from .accelerator.gpu.runtime import execute, capabilities
+        from .accelerator.gpu.dag_runtime import execute as execute_dag
+
         var start = Int(perf_counter_ns())
+        if len(file_source_nodes(query)):
+            var staged = prepare_file_sources(
+                query, memory_limit_bytes=self._budget
+            )
+            var staging_bytes = staged.staging_bytes
+            var budget = self._budget
+            if budget >= 0:
+                budget -= staging_bytes
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
+            if staged.failure:
+                runtime._observation_only = True
+                for prefix in staged.prefixes:
+                    _ = runtime._run(prefix, False)
+                raise Error(staged.failure)
+            var decode_ms = Float64(Int(perf_counter_ns()) - start) / 1e6
+            var executed = runtime._run(staged.query, profiling)
+            var report = executed[1].copy()
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            var inner_peak = 0
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            for field in List[Tuple[String, Int64]](
+                [
+                    ("file_scan_count", Int64(staged.scan_count)),
+                    ("source_staging_bytes", Int64(staging_bytes)),
+                    (
+                        "query_peak_requested_bytes",
+                        Int64(checked_add(staging_bytes, inner_peak)),
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Int64](
+                            List[Int64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            for field in List[Tuple[String, Float64]](
+                [
+                    ("source_decode_ms", decode_ms),
+                    (
+                        "query_wall_ms",
+                        Float64(Int(perf_counter_ns()) - start) / 1e6,
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Float64](
+                            List[Float64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            return (executed[0].copy(), report^)
         if has_selectors(query):
             var executed = self._run(lower_selectors(query), profiling)
             var report = executed[1].with_column(
@@ -2119,6 +258,149 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_source_structs(query):
+            var plan = lower_source_structs(
+                query, memory_limit_bytes=self._budget
+            )
+            var budget = self._budget
+            if budget >= 0:
+                budget -= plan.staging_bytes
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
+            var executed = runtime._run(plan.query, profiling)
+            var result = executed[
+                0
+            ].copy() if self._observation_only else attach_source_fields(
+                executed[0], plan
+            )
+            var report = executed[1].copy()
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            var inner_peak = 0
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            for field in List[Tuple[String, Int64]](
+                [
+                    ("source_struct_staging_bytes", Int64(plan.staging_bytes)),
+                    (
+                        "query_peak_requested_bytes",
+                        Int64(checked_add(plan.staging_bytes, inner_peak)),
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Int64](
+                            List[Int64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            report = report.with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=report.height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (result^, report^)
+        if has_scalar_modes(query):
+            var executed = self._run(lower_scalar_modes(query), profiling)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
+        if has_cut_operations(query):
+            var lowered = lower_cuts(query)
+            var staging_bytes = cut_staging_bytes(lowered)
+            var budget = self._budget
+            if budget >= 0:
+                if staging_bytes > budget:
+                    raise Error(
+                        "Metal CUT scalar staging exceeds payload budget"
+                    )
+                budget -= staging_bytes
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
+            var executed = runtime._run(lowered, profiling)
+            var report = executed[1].copy()
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            var inner_peak = 0
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            report = report.with_column(
+                Series(
+                    "cut_staging_bytes",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(), fill=Int64(staging_bytes)
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "query_peak_requested_bytes",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(),
+                            fill=Int64(checked_add(staging_bytes, inner_peak)),
+                        )
+                    ),
+                )
+            )
+            report = report.with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (executed[0].copy(), report^)
+
+        if has_terminal_structs(query):
+            var plan = lower_terminal_structs(query)
+            var executed = self._run(plan.query, profiling)
+            if self._observation_only:
+                return executed^
+            var result = assemble_structs(executed[0], plan)
+            var report = executed[1].with_column(
+                Series(
+                    "query_wall_ms",
+                    Column[Float64](
+                        List[Float64](
+                            length=executed[1].height(),
+                            fill=Float64(Int(perf_counter_ns()) - start) / 1e6,
+                        )
+                    ),
+                )
+            )
+            return (result^, report^)
         if has_scalar_projections(query):
             var executed = self._run(lower_scalar_projections(query), profiling)
             var report = executed[1].with_column(
@@ -2224,6 +506,84 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (executed[0].copy(), report^)
+        if has_opaque_columns(query):
+            var plan = prepare_opaque(query, memory_limit_bytes=self._budget)
+            var opaque_staged_ns = Int(perf_counter_ns()) - start
+            var budget = self._budget
+            if budget >= 0:
+                budget -= plan.staging_bytes
+            var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
+            var executed = runtime._run(plan.query, profiling)
+            var result = executed[0].copy()
+            var restoration_bytes = 0
+            var opaque_restore_ns = 0
+            if not self._observation_only:
+                var opaque_restore_start = Int(perf_counter_ns())
+                restoration_bytes = opaque_restoration_bytes(executed[0], plan)
+                if (
+                    self._budget >= 0
+                    and restoration_bytes > self._budget - plan.staging_bytes
+                ):
+                    raise Error(
+                        "Metal opaque restoration exceeds memory budget"
+                    )
+                result = restore_opaque(executed[0], plan)
+                opaque_restore_ns = (
+                    Int(perf_counter_ns()) - opaque_restore_start
+                )
+            var report = executed[1].copy()
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            var inner_peak = 0
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            for field in List[Tuple[String, Int64]](
+                [
+                    ("opaque_staging_bytes", Int64(plan.staging_bytes)),
+                    ("opaque_restoration_bytes", Int64(restoration_bytes)),
+                    (
+                        "query_peak_requested_bytes",
+                        Int64(
+                            checked_add(
+                                plan.staging_bytes,
+                                max(inner_peak, restoration_bytes),
+                            )
+                        ),
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Int64](
+                            List[Int64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            for field in List[Tuple[String, Float64]](
+                [
+                    ("opaque_encode_ms", Float64(opaque_staged_ns) / 1e6),
+                    ("opaque_decode_ms", Float64(opaque_restore_ns) / 1e6),
+                    (
+                        "query_wall_ms",
+                        Float64(Int(perf_counter_ns()) - start) / 1e6,
+                    ),
+                ]
+            ):
+                report = report.with_column(
+                    Series(
+                        field[0],
+                        Column[Float64](
+                            List[Float64](length=report.height(), fill=field[1])
+                        ),
+                    )
+                )
+            return (result^, report^)
         if has_dictionary_columns(query):
             # Validate original string semantics before replacing values with
             # ordered codes. Schema execution reads no source rows.
@@ -2243,13 +603,16 @@ struct MetalRuntime(AcceleratorBackend):
                 budget -= staging_bytes
             var encoded = encode_query(staged_query, dictionary)
             var runtime = MetalRuntime(self._device, memory_limit_bytes=budget)
+            runtime._observation_only = self._observation_only
             var staged_ns = Int(perf_counter_ns()) - start
             var executed = runtime._run(encoded, profiling)
+            if self._observation_only:
+                return executed^
+            var restoration_bytes = dictionary.restoration_bytes(
+                executed[0], schema
+            )
             if self._budget >= 0:
-                if (
-                    dictionary.restoration_bytes(executed[0], schema)
-                    > self._budget - staging_bytes
-                ):
+                if restoration_bytes > self._budget - staging_bytes:
                     raise Error(
                         "Metal dictionary restoration exceeds payload budget"
                     )
@@ -2257,6 +620,30 @@ struct MetalRuntime(AcceleratorBackend):
             var result = restore_frame(executed[0], schema, dictionary)
             var decoded_ns = Int(perf_counter_ns()) - decode_start
             var report = executed[1].copy()
+            # Dictionary owners survive both GPU execution and restoration.
+            # Preserve region peaks while reporting the original query scope.
+            var inner_peak = 0
+            var peak_field = (
+                "query_peak_requested_bytes" if "query_peak_requested_bytes"
+                in report.columns() else "peak_requested_bytes"
+            )
+            for row in range(report.height()):
+                inner_peak = max(
+                    inner_peak, Int(report.item(row, peak_field).int64())
+                )
+            var query_peak = checked_add(
+                staging_bytes, max(inner_peak, restoration_bytes)
+            )
+            report = report.with_column(
+                Series(
+                    "query_peak_requested_bytes",
+                    Column[Int64](
+                        List[Int64](
+                            length=report.height(), fill=Int64(query_peak)
+                        )
+                    ),
+                )
+            )
             var elapsed = Float64(Int(perf_counter_ns()) - start) / 1e6
             report = report.with_column(
                 Series(
@@ -2319,19 +706,55 @@ struct MetalRuntime(AcceleratorBackend):
                 )
             )
             return (result^, report^)
-        if has_join(query) or has_scalar_consumers(query):
-            var dag = lower_join_dag(query, _capabilities())
-            return _execute_join_dag(
-                dag, self._device, self._budget, profiling, start
+        if (
+            has_join(query)
+            or has_scalar_consumers(query)
+            or has_cut_materializations(query)
+        ):
+            return execute_dag(
+                query,
+                self._device,
+                self._budget,
+                profiling,
+                capabilities(),
+                observation_only=self._observation_only,
             )
-        var plan = lower_rows(query, _capabilities())
-        return _execute(plan, self._device, self._budget, profiling, start)
+        return execute(
+            query,
+            self._device,
+            self._budget,
+            profiling,
+            observation_only=self._observation_only,
+        )
 
     def describe(self, query: LazyFrame) -> String:
         try:
+            if len(file_source_nodes(query)):
+                var staged = stage_file_sources(query, empty=True)
+                return "Metal file source decoding; " + self.describe(staged[0])
             if has_selectors(query):
                 return "Metal schema selector expansion; " + self.describe(
                     lower_selectors(query)
+                )
+            if has_source_structs(query):
+                var plan = lower_source_structs(query, metadata_only=True)
+                return "Metal nullable source struct fields; " + self.describe(
+                    plan.query
+                )
+            if has_scalar_modes(query):
+                return "Metal resident scalar mode; " + self.describe(
+                    lower_scalar_modes(query)
+                )
+            if has_cut_operations(query):
+                return (
+                    "Metal resident explicit CUT intervals; "
+                    + self.describe(lower_cuts(query))
+                )
+
+            if has_terminal_structs(query):
+                var plan = lower_terminal_structs(query)
+                return "Metal terminal struct fields; " + self.describe(
+                    plan.query
                 )
             if has_scalar_projections(query):
                 return "Metal resident scalar projection; " + self.describe(
@@ -2361,6 +784,11 @@ struct MetalRuntime(AcceleratorBackend):
                 return "Metal resident set operations; " + self.describe(
                     lower_set_operations(query)
                 )
+            if has_opaque_columns(query):
+                var plan = prepare_opaque(query, metadata_only=True)
+                return "Metal opaque byte transport; " + self.describe(
+                    plan.query
+                )
             if has_dictionary_columns(query):
                 _ = schema_frame(query, len(query._nodes) - 1)
                 var metadata = query.copy()
@@ -2373,29 +801,6 @@ struct MetalRuntime(AcceleratorBackend):
                 return "Metal ordered dictionary staging; " + self.describe(
                     encoded
                 )
-            if has_join(query) or has_scalar_consumers(query):
-                var dag = lower_join_dag(query, _capabilities())
-                return (
-                    "ENGINE accel: Metal native joins; " if dag.joins else "ENGINE accel: Metal resident row regions; "
-                ) + String(dag.joins) + " joins, " + String(
-                    len(dag.tasks)
-                ) + " resident regions; only the final result materializes" " CPU columns; optional runtime " + (
-                    "present" if metal_installed() else "missing"
-                ) + "\n"
-            var plan = lower_rows(query, _capabilities())
-            return (
-                "ENGINE accel: Metal native row expressions; "
-                + String(len(plan.steps))
-                + " steps, "
-                + String(plan.slots)
-                + " slots; optional runtime "
-                + ("present" if metal_installed() else "missing")
-                + (
-                    "; filtered reductions consume predicates without row compaction" if _direct_filtered_reduction(
-                        plan
-                    ) else ""
-                )
-                + "\n"
-            )
+            return _describe_mojo_gpu(query)
         except error:
             return "ENGINE accel: " + String(error) + "\n"

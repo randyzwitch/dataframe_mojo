@@ -38,10 +38,14 @@ def derive(source, name, engine):
     if name not in {"h2o", "pdsh", "tpcds", "clickbench"}:
         raise ValueError(name)
     if re.search(r"\.collect\((?!\))", source):
-        raise ValueError("Suite has a collect with arguments; review derivation")
+        raise ValueError(
+            "Suite has a collect with arguments; review derivation"
+        )
     if engine == "cpu":
         return source.replace(".collect()", '.collect(engine="cpu")')
-    source = source.replace(".collect()", ".collect(accelerator=MetalRuntime())")
+    source = source.replace(
+        ".collect()", ".collect(accelerator=MetalRuntime())"
+    )
     if name == "h2o":
         if source.count('ref x = t["x"]') != 2:
             raise ValueError("H2O scan definitions changed; review derivation")
@@ -53,24 +57,41 @@ def derive(source, name, engine):
         offsets = [0]
         for line in lines:
             offsets.append(offsets[-1] + len(line))
+
         def offset(position):
             return offsets[position[0] - 1] + position[1]
+
         tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
         replacements = []
         for index, token in enumerate(tokens):
             if token.type == tokenize.NAME and token.string == "return":
                 if token.start[1] != 8:
                     raise ValueError("Unexpected H2O return; review derivation")
-                end = next(t for t in tokens[index + 1:] if t.type == tokenize.NEWLINE)
+                end = next(
+                    t for t in tokens[index + 1 :] if t.type == tokenize.NEWLINE
+                )
                 start, stop = offset(token.end), offset(end.start)
                 expression = source[start:stop].strip()
-                replacements.append((start, stop, " (" + expression + ").collect(accelerator=MetalRuntime())"))
+                replacements.append(
+                    (
+                        start,
+                        stop,
+                        " ("
+                        + expression
+                        + ").collect(accelerator=MetalRuntime())",
+                    )
+                )
         if len(replacements) != 15:
             raise ValueError("H2O query count changed; review derivation")
         for start, stop, value in reversed(replacements):
             source = source[:start] + value + source[stop:]
     # Mojo only accepts the module docstring before imports. Keep it first.
-    source, imports = re.subn(r"(?m)^from ", "from dataframe.metal import MetalRuntime\nfrom ", source, count=1)
+    source, imports = re.subn(
+        r"(?m)^from ",
+        "from dataframe.metal import MetalRuntime\nfrom ",
+        source,
+        count=1,
+    )
     if imports != 1:
         raise ValueError("Suite has no import boundary; review derivation")
     return source
@@ -87,7 +108,7 @@ def stage_sources(destination):
                 derive(original.read_text(), name, engine)
             )
         if name == "h2o":
-            wrapper = '''from std.sys import argv
+            wrapper = """from std.sys import argv
 from metal_suite_common import run
 from cpu_h2o import groupby as cpu_groupby, join as cpu_join
 from metal_h2o import groupby as metal_groupby, join as metal_join
@@ -96,7 +117,7 @@ def main() raises:
         run[cpu_groupby, metal_groupby]()
     else:
         run[cpu_join, metal_join]()
-'''
+"""
         else:
             wrapper = f'''from metal_suite_common import run
 from cpu_{name} import query as cpu_query
@@ -113,27 +134,48 @@ def main() raises:
         copied[str(original.relative_to(ROOT))] = sha(original)
     return {
         "original_source_sha256": copied,
-        "derived_source_sha256": {p.name: sha(p) for p in destination.glob("*.mojo")},
+        "derived_source_sha256": {
+            p.name: sha(p) for p in destination.glob("*.mojo")
+        },
         "derivation": "Only materialization boundaries changed; H2O eager expressions adapted to lazy scans in the Metal worker. CPU expressions and all input dtypes retained. Every collect in Metal query modules explicitly names MetalRuntime; no automatic placement or CPU retry.",
     }
 
 
 def parse(output, query):
-    rows = [line.split("\t", 3) for line in output.splitlines() if line.startswith("coverage\t")]
+    rows = [
+        line.split("\t", 3)
+        for line in output.splitlines()
+        if line.startswith("coverage\t")
+    ]
     if len(rows) != 1 or len(rows[0]) != 4 or rows[0][1] != query:
         raise ValueError("Missing or ambiguous per-query coverage outcome")
     status = rows[0][2]
-    if status not in {"ok", "unsupported", "execution_failed", "wrong_answer", "reference_unsupported", "reference_failed"}:
+    if status not in {
+        "ok",
+        "unsupported",
+        "execution_failed",
+        "wrong_answer",
+        "reference_unsupported",
+        "reference_failed",
+    }:
         raise ValueError("Unknown coverage outcome")
     result = {"status": status, "reason": rows[0][3]}
     for line in output.splitlines():
         fields = line.split("\t")
-        if len(fields) == 2 and fields[0] in {"output_rows", "collections", "collection_ns"}:
+        if len(fields) == 2 and fields[0] in {
+            "output_rows",
+            "collections",
+            "collection_ns",
+        }:
             result[fields[0]] = int(fields[1])
         elif len(fields) == 2 and fields[0] == "ordered_equal":
             result["ordered_equal"] = fields[1] == "True"
-    if status == "ok" and (result.get("collections", 0) < 1 or "ordered_equal" not in result):
-        raise ValueError("Successful outcome lacks correctness/repetition evidence")
+    if status == "ok" and (
+        result.get("collections", 0) < 1 or "ordered_equal" not in result
+    ):
+        raise ValueError(
+            "Successful outcome lacks correctness/repetition evidence"
+        )
     return result
 
 
@@ -150,13 +192,19 @@ def main():
     parser.add_argument("--reps", type=int, default=2)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument("--library", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default=ROOT / "build/metal-suites/results.json")
+    parser.add_argument(
+        "--output", type=Path, default=ROOT / "build/metal-suites/results.json"
+    )
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
-    selected = list(suites.SUITES) if args.all_suites else args.suites.split(",")
-    if not set(selected) <= set(suites.SUITES) or min(args.reps, args.threads, args.timeout) < 1:
+    selected = list(suites.SUITES) if args.all_suites else args.suites.split(
+        ","
+    )
+    if (
+        not set(selected) <= set(suites.SUITES)
+        or min(args.reps, args.threads, args.timeout) < 1
+    ):
         parser.error("Unknown suite or nonpositive execution setting")
     wanted = set(args.queries.split(",")) if args.queries else None
     out = args.output.resolve().parent
@@ -171,20 +219,41 @@ def main():
     for name in sorted({suites.SUITES[s]["runner"] for s in selected}):
         binary = out / ("suite_" + name)
         if not args.skip_build:
-            subprocess.run(["mojo", "build", "-O3", "-I", str(ROOT), "-I", str(sources), str(sources / ("suite_" + name + ".mojo")), "-o", str(binary)], cwd=ROOT, check=True)
+            subprocess.run(
+                [
+                    "mojo",
+                    "build",
+                    "-O3",
+                    "-I",
+                    str(ROOT),
+                    "-I",
+                    str(sources),
+                    str(sources / ("suite_" + name + ".mojo")),
+                    "-o",
+                    str(binary),
+                ],
+                cwd=ROOT,
+                check=True,
+            )
         binaries[name] = binary
     data = {
         "format": "dataframe-metal-suite-coverage-v1",
         "provenance": {
             **provenance,
-            "recorded_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "recorded_at_utc": datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat(),
             "engine_revision": command(["git", "rev-parse", "HEAD"]),
-            "engine_status": command(["git", "status", "--porcelain", "--", "dataframe", "native/dfmetal"]),
+            "engine_status": command(
+                ["git", "status", "--porcelain", "--", "dataframe"]
+            ),
             "mojo": command(["mojo", "--version"]),
             "platform": platform.platform(),
             "driver_sha256": sha(__file__),
-            "native_library_sha256": sha(args.library),
-            "binaries_sha256": {name: sha(path) for name, path in binaries.items()},
+            "implementation": "mojo",
+            "binaries_sha256": {
+                name: sha(path) for name, path in binaries.items()
+            },
             "threads": args.threads,
             "scale": args.scale,
             "repetitions": args.reps,
@@ -195,27 +264,64 @@ def main():
     }
     (out / "logs").mkdir(exist_ok=True)
     for suite in selected:
-        queries = [q for q in suites.SUITES[suite]["queries"] if wanted is None or q in wanted]
+        queries = [
+            q
+            for q in suites.SUITES[suite]["queries"]
+            if wanted is None or q in wanted
+        ]
         for variant in suites.VARIANTS[suite]:
             paths = suites.tables(suite, variant, args.scale)
-            inputs = {name: {"path": str(path), "sha256": sha(path)} for name, path in paths.items()}
+            inputs = {
+                name: {"path": str(path), "sha256": sha(path)}
+                for name, path in paths.items()
+            }
             for query in queries:
                 label = f"{suite}-{variant}-{query}"
-                case = {"suite": suite, "variant": variant, "query": query, "inputs": inputs, "log": f"logs/{label}.txt"}
+                case = {
+                    "suite": suite,
+                    "variant": variant,
+                    "query": query,
+                    "inputs": inputs,
+                    "log": f"logs/{label}.txt",
+                }
                 env = os.environ.copy()
-                env.update(DATAFRAME_METAL_LIBRARY=str(args.library.resolve()), DATAFRAME_THREADS=str(args.threads))
-                call = [str(binaries[suites.SUITES[suite]["runner"]]), suite, query, str(args.reps)] + [f"{name}={path}" for name, path in paths.items()]
+                env.update(DATAFRAME_THREADS=str(args.threads))
+                call = [
+                    str(binaries[suites.SUITES[suite]["runner"]]),
+                    suite,
+                    query,
+                    str(args.reps),
+                ] + [f"{name}={path}" for name, path in paths.items()]
                 try:
-                    process = subprocess.run(call, cwd=ROOT, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=args.timeout)
+                    process = subprocess.run(
+                        call,
+                        cwd=ROOT,
+                        env=env,
+                        text=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        timeout=args.timeout,
+                    )
                     (out / case["log"]).write_text(process.stdout)
                     if process.returncode:
-                        case.update(status="process_failed", reason=process.stdout, exit_code=process.returncode)
+                        case.update(
+                            status="process_failed",
+                            reason=process.stdout,
+                            exit_code=process.returncode,
+                        )
                     else:
                         case.update(parse(process.stdout, query))
                 except subprocess.TimeoutExpired as error:
                     raw = error.stdout or b""
-                    (out / case["log"]).write_text(raw.decode(errors="replace") if isinstance(raw, bytes) else raw)
-                    case.update(status="timeout", reason=f"Exceeded {args.timeout} seconds")
+                    (out / case["log"]).write_text(
+                        raw.decode(errors="replace") if isinstance(
+                            raw, bytes
+                        ) else raw
+                    )
+                    case.update(
+                        status="timeout",
+                        reason=f"Exceeded {args.timeout} seconds",
+                    )
                 except ValueError as error:
                     case.update(status="protocol_failed", reason=str(error))
                 data["cases"].append(case)
@@ -223,7 +329,12 @@ def main():
                 print(label, case["status"], case.get("reason", ""), flush=True)
     # Unsupported coverage is expected; wrong answers and execution failures
     # still make the validation command fail while retaining the complete grid.
-    sys.exit(any(c["status"] not in {"ok", "unsupported", "reference_unsupported"} for c in data["cases"]))
+    sys.exit(
+        any(
+            c["status"] not in {"ok", "unsupported", "reference_unsupported"}
+            for c in data["cases"]
+        )
+    )
 
 
 if __name__ == "__main__":

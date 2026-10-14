@@ -32,12 +32,15 @@ from .expr import (
     DT_CONVERT_TZ,
 )
 from .series import Series
+from .expr_kernels import fit_mask
 from .temporal import (
     NANOS_PER_DAY,
     Parts,
     add_months,
     checked_add,
     checked_mul,
+    checked_sub,
+    checked_floor_div,
     days_from_civil,
     floor_div,
     floor_mod,
@@ -68,6 +71,7 @@ def temporal_binary(
     left_type: DataType,
     right_type: DataType,
     result_type: DataType,
+    mask: List[Bool] = List[Bool](),
 ) raises -> Series:
     if left.is_chunked() or right.is_chunked():
         return temporal_binary(
@@ -77,15 +81,19 @@ def temporal_binary(
             left_type,
             right_type,
             result_type,
+            mask,
         )
     ref a = left._data[Column[Int64]]
     ref b = right._data[Column[Int64]]
     if len(a) != len(b) and len(a) != 1 and len(b) != 1:
         raise Error("Incompatible expression lengths")
     var n = 0 if len(a) == 0 or len(b) == 0 else max(len(a), len(b))
+    var active = fit_mask(mask, n)
     var values = List[Int64](length=n, fill=0)
     var valid = List[Bool](length=n, fill=False)
     for i in range(n):
+        if len(active) and not active[i]:
+            continue
         var p = 0 if len(a) == 1 else i
         var q = 0 if len(b) == 1 else i
         if not (a._valid(p) and b._valid(q)):
@@ -99,11 +107,11 @@ def temporal_binary(
             if y == 0:
                 valid[i] = False
             else:
-                values[i] = floor_div(x, y)
+                values[i] = checked_floor_div(x, y)
         else:
             if left_type.is_date() and right_type.is_duration():
                 x = checked_mul(x, ticks_per_day(result_type))
-            var raw = checked_add(x, -y) if op == SUB else checked_add(x, y)
+            var raw = checked_sub(x, y) if op == SUB else checked_add(x, y)
             if left_type.is_date() and right_type.is_date():
                 raw = checked_mul(raw, 86400000)
             values[i] = raw
@@ -503,16 +511,21 @@ def _replace_time_zone(
 
 
 def _strptime(
-    input: Series, target: DataType, format: String, strict: Bool
+    input: Series,
+    target: DataType,
+    format: String,
+    strict: Bool,
+    mask: List[Bool] = List[Bool](),
 ) raises -> Series:
     ref column = input._data[StringColumn]
     var n = len(column)
+    var active = fit_mask(mask, n)
     var values = List[Int64](length=n, fill=0)
     var valid = List[Bool](length=n, fill=False)
     var result_type = strptime_target(target, format)
     var zone = zone_of(result_type)
     for i in range(n):
-        if not column._valid(i):
+        if not column._valid(i) or (len(active) and not active[i]):
             continue
         try:
             values[i] = parse_in(
@@ -526,14 +539,19 @@ def _strptime(
 
 
 def cast_temporal(
-    input: Series, source: DataType, target: DataType, strict: Bool
+    input: Series,
+    source: DataType,
+    target: DataType,
+    strict: Bool,
+    mask: List[Bool] = List[Bool](),
 ) raises -> Series:
     """Casts involving a temporal type: to and from Int64 (the stored
     value), to and from String (ISO 8601), between date and datetime,
     datetime to time, and between units."""
     if input.is_chunked():
-        return cast_temporal(input.rechunk(), source, target, strict)
+        return cast_temporal(input.rechunk(), source, target, strict, mask)
     var n = len(input)
+    var active = fit_mask(mask, n)
     # A zone-aware source casts to date, time and string at local time;
     # casts between datetimes keep the instant, as in Polars.
     var zone = zone_of(source)
@@ -542,53 +560,64 @@ def cast_temporal(
         var valid = List[Bool](length=n, fill=False)
         ref column = input._data[Column[Int64]]
         for i in range(n):
-            valid[i] = column._valid(i)
+            valid[i] = column._valid(i) and (not len(active) or active[i])
             if valid[i]:
                 texts[i] = format_in(column._get(i), source, "", zone)
         return Series(input.name(), StringColumn(texts, valid))
     if source == DataType.STRING:
-        return _strptime(input, target, "", strict).renamed(input.name())
+        return _strptime(input, target, "", strict, active).renamed(
+            input.name()
+        )
     if (
         source.physical() != DataType.INT64
         or target.physical() != DataType.INT64
+    ):
+        raise Error("cannot cast " + source.name() + " to " + target.name())
+    # Unsupported logical pairs are schema errors even in inactive branches;
+    # strict=False suppresses value conversion failures, not invalid casts.
+    var raw_identity = (
+        target == DataType.INT64 or source == DataType.INT64 or source == target
+    )
+    var date_to_datetime = source.is_date() and target.is_datetime()
+    var datetime_to_date = source.is_datetime() and target.is_date()
+    var datetime_to_time = source.is_datetime() and target.is_time()
+    var rescale = (source.is_datetime() and target.is_datetime()) or (
+        source.is_duration() and target.is_duration()
+    )
+    if not (
+        raw_identity
+        or date_to_datetime
+        or datetime_to_date
+        or datetime_to_time
+        or rescale
     ):
         raise Error("cannot cast " + source.name() + " to " + target.name())
     ref column = input._data[Column[Int64]]
     var values = List[Int64](length=n, fill=0)
     var valid = List[Bool](length=n, fill=False)
     for i in range(n):
-        if not column._valid(i):
+        if not column._valid(i) or (len(active) and not active[i]):
             continue
         var v = column._get(i)
         try:
-            if (
-                target == DataType.INT64
-                or source == DataType.INT64
-                or source == target
-            ):
+            if raw_identity:
                 values[i] = v
-            elif source.is_date() and target.is_datetime():
+            elif date_to_datetime:
                 values[i] = checked_mul(v, ticks_per_day(target))
-            elif source.is_datetime() and target.is_date():
+            elif datetime_to_date:
                 values[i] = floor_div(
                     to_local(v, source, zone), ticks_per_day(source)
                 )
-            elif source.is_datetime() and target.is_time():
+            elif datetime_to_time:
                 v = to_local(v, source, zone)
                 values[i] = floor_mod(v, ticks_per_day(source)) * (
                     Int64(1000000000) // source.per_second()
                 )
-            elif (source.is_datetime() and target.is_datetime()) or (
-                source.is_duration() and target.is_duration()
-            ):
+            else:
                 var a = source.per_second()
                 var b = target.per_second()
                 values[i] = checked_mul(v, b // a) if b >= a else floor_div(
                     v, a // b
-                )
-            else:
-                raise Error(
-                    "cannot cast " + source.name() + " to " + target.name()
                 )
             valid[i] = True
         except e:
