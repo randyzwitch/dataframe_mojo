@@ -1,7 +1,9 @@
 """UTC duration windows retain separate calendar and fixed-time stages."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, DataType, Series, Column, col
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import (
     lower_rows,
@@ -52,7 +54,7 @@ def test_utc_duration_capability_staged_metadata_wide_days_and_no_device_preflig
                     Int64(1 if unit == "ms" else 2 if unit == "us" else 3),
                 )
             assert_equal(count, 1)
-            _ = _Descriptors(plan)
+            _ = Program(plan)
             assert_true(
                 "unsupported"
                 not in MetalRuntime(device_id=999999).describe(query)

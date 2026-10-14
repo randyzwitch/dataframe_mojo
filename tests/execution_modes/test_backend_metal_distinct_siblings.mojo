@@ -1,8 +1,9 @@
 """Distinct counts reuse resident grouping, including null categories."""
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, StringColumn, Expr, col
 from dataframe.lazy import LazyFrame
-from dataframe.metal import MetalRuntime, _capabilities
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.distinct_counts import (
     has_distinct_counts,
     lower_distinct_counts,

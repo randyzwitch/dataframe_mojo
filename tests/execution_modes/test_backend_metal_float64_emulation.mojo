@@ -167,7 +167,7 @@ def test_native_metal_float64_emulation_has_separate_automatic_cost_family() rai
     ):
         var query = frame.lazy().select(expression)
         var facts = runtime.estimate_auto(query)
-        assert_true("metal-emulated-float64-v1" in facts.family)
+        assert_true(";mojo-metal-v1;ops=" in facts.family)
         same(
             query.collect(engine="auto", accelerator=runtime),
             query.collect(engine="cpu"),
@@ -175,13 +175,17 @@ def test_native_metal_float64_emulation_has_separate_automatic_cost_family() rai
     var narrow = DataFrame([Series("x", Column[Float32]([1, 2, 3]))])
     var reduction = narrow.lazy().select(col("x").sum())
     assert_true(
-        "metal-emulated-float64-v1" in runtime.estimate_auto(reduction).family
+        ";mojo-metal-v1;ops=" in runtime.estimate_auto(reduction).family
     )
-    assert_equal(
-        runtime.estimate_auto(
-            narrow.lazy().select(col("x") + lit(Float32(1)))
-        ).family,
-        "float32;metal-float32-arithmetic-v1",
+    var narrow_family = runtime.estimate_auto(
+        narrow.lazy().select(col("x") + lit(Float32(1)))
+    ).family
+    assert_true(";mojo-metal-v1;ops=" in narrow_family)
+    assert_true(
+        narrow_family
+        != runtime.estimate_auto(
+            frame.lazy().select(col("x") + lit(Float64(1)))
+        ).family
     )
 
 
@@ -267,8 +271,7 @@ def test_native_metal_floating_decimal_rounding_bits_extremes_and_cost() raises:
         for places in List[Int]([0, 2, -2]):
             var costed = frame.lazy().select(col("a").round(places))
             assert_true(
-                "metal-emulated-float64-v1"
-                in runtime.estimate_auto(costed).family
+                ";mojo-metal-v1;ops=" in runtime.estimate_auto(costed).family
             )
             same(
                 costed.collect(engine="auto", accelerator=runtime),
@@ -612,8 +615,7 @@ def test_native_metal_float64_remainder_extremes_filters_children_and_cost() rai
     )
     _ = require_metal()
     assert_true(
-        "metal-emulated-float64-v1"
-        in MetalRuntime().estimate_auto(query).family
+        ";mojo-metal-v1;ops=" in MetalRuntime().estimate_auto(query).family
     )
     var paired = frame.lazy().select((col("a") % col("b")).alias("remainder"))
     same(
@@ -667,8 +669,7 @@ def test_native_metal_float64_sqrt_bits_filters_children_and_cost() raises:
     var expression = col("a").sqrt()
     var query = frame.lazy().select(expression.alias("root"))
     assert_true(
-        "metal-emulated-float64-v1"
-        in MetalRuntime().estimate_auto(query).family
+        ";mojo-metal-v1;ops=" in MetalRuntime().estimate_auto(query).family
     )
     var runtime = MetalRuntime()
     same(query.collect(accelerator=runtime), query.collect(engine="cpu"))
@@ -745,8 +746,7 @@ def test_native_metal_float64_sqrt_bits_filters_children_and_cost() raises:
     var narrow = DataFrame([Series("x", Column[Float32](values^, valid^))])
     var narrow_query = narrow.lazy().with_columns(col("x").sqrt().alias("root"))
     assert_true(
-        "metal-emulated-float64-v1"
-        in runtime.estimate_auto(narrow_query).family
+        ";mojo-metal-v1;ops=" in runtime.estimate_auto(narrow_query).family
     )
     same(
         narrow_query.collect(accelerator=runtime),

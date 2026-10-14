@@ -66,7 +66,7 @@ and include any staging allocations.
 
 ## Apple implementation scope
 
-The Apple provider lives in this repository and uses native Metal operations.
+The Apple provider lives in this repository and runs Mojo kernels through MAX's Metal device API.
 It accelerates supported Float32, integer, Boolean, and integer-emulated
 Float64 regions, with no implicit downcasts. Emulated binary64 work uses a
 separate calibration family; uncalibrated plans and unsupported operations

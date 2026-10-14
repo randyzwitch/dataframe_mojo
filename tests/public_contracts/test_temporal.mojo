@@ -1586,36 +1586,87 @@ def test_temporal_subtraction_equal_minimum_ticks_cancel_exactly() raises:
             var dtype = DataType.datetime(unit) if kind else DataType.duration(
                 unit
             )
-            var frame = DataFrame(
+            var source = DataFrame(
                 [
-                    tagged("a", dtype, [Int64.MIN]),
-                    tagged("b", dtype, [Int64.MIN]),
+                    tagged(
+                        "a",
+                        dtype,
+                        [
+                            Int64.MIN,
+                            Int64.MAX,
+                            -1,
+                            Int64.MIN,
+                            Int64.MAX,
+                            Int64.MIN,
+                        ],
+                    ),
+                    tagged(
+                        "b",
+                        dtype,
+                        [Int64.MIN, Int64.MAX, Int64.MIN, -1, 1, 1],
+                        [True, True, True, True, True, False],
+                    ),
                 ]
             )
-            var actual = frame.select((col("a") - col("b")).alias("result"))
-            assert_ticks(actual, "result", DataType.duration(unit), [0])
+            for layout in range(3):
+                var frame = (
+                    source.copy() if layout
+                    == 0 else offset_layout(source) if layout
+                    == 1 else chunk_layout(source)
+                )
+                var actual = frame.select((col("a") - col("b")).alias("result"))
+                assert_ticks(
+                    actual,
+                    "result",
+                    DataType.duration(unit),
+                    [0, 0, Int64.MAX, Int64.MIN + 1, Int64.MAX - 1, 0],
+                    [True, True, True, True, True, False],
+                )
+    # Date subtraction scales the difference only after the checked subtraction.
+    for dtype in [DataType.DATE, DataType.TIME]:
+        var frame = DataFrame(
+            [
+                tagged("a", dtype, [Int64.MIN, Int64.MAX]),
+                tagged("b", dtype, [Int64.MIN, Int64.MAX]),
+            ]
+        )
+        var actual = frame.select((col("a") - col("b")).alias("result"))
+        assert_ticks(
+            actual,
+            "result",
+            DataType.duration("ms") if dtype.is_date() else DataType.duration(
+                "ns"
+            ),
+            [0, 0],
+        )
 
 
 def test_temporal_subtraction_rejects_unrepresentable_minimum_rhs() raises:
+    var left: List[Int64] = [0, 1, Int64.MAX, Int64.MIN, Int64.MIN]
+    var right: List[Int64] = [Int64.MIN, Int64.MIN, Int64.MIN, 1, Int64.MAX]
     for unit in [String("ms"), String("us"), String("ns")]:
         for kind in range(2):
             var dtype = DataType.datetime(unit) if kind else DataType.duration(
                 unit
             )
-            var frame = DataFrame(
-                [tagged("a", dtype, [0]), tagged("b", dtype, [Int64.MIN])]
-            )
-            var rejected = False
-            try:
-                _ = frame.select(col("a") - col("b"))
-            except error:
-                if String(error).find("temporal value overflows Int64") < 0:
-                    raise error^
-                rejected = True
-            assert_true(
-                rejected,
-                "minimum temporal RHS must reject an out-of-range difference",
-            )
+            for row in range(len(left)):
+                var frame = DataFrame(
+                    [
+                        tagged("a", dtype, [left[row]]),
+                        tagged("b", dtype, [right[row]]),
+                    ]
+                )
+                var rejected = False
+                try:
+                    _ = frame.select(col("a") - col("b"))
+                except error:
+                    if String(error).find("temporal value overflows Int64") < 0:
+                        raise error^
+                    rejected = True
+                assert_true(
+                    rejected,
+                    "minimum temporal RHS must reject an out-of-range difference",
+                )
 
 
 def test_temporal_strftime_escaped_percent_formats_one_literal_percent() raises:
@@ -1718,3 +1769,454 @@ def test_calendar_truncation_skips_unobserved_datetime_underflow() raises:
             assert_equal(actual.column("v").dtype(), dtype)
             assert_equal(actual.column("v").int64()._get(0), Int64(0))
             assert_equal(actual.column("v").int64()._get(1), Int64(0))
+
+
+def _assert_temporal_boundary_overflow(
+    frame: DataFrame, expression: Expr
+) raises:
+    var rejected = False
+    try:
+        _ = frame.select(expression.copy())
+    except error:
+        if String(error).find("temporal value overflows Int64") < 0:
+            raise error^
+        rejected = True
+    assert_true(rejected, "unrepresentable temporal result must raise overflow")
+
+
+def test_temporal_multiplication_signed_extremes_and_null_payloads() raises:
+    for unit in [String("ms"), String("us"), String("ns")]:
+        var dtype = DataType.duration(unit)
+        var source = DataFrame(
+            [
+                tagged(
+                    "d",
+                    dtype,
+                    [Int64.MIN, -2, 1, 0, Int64.MIN, Int64.MAX, -1, Int64.MIN],
+                ),
+                Series(
+                    "n",
+                    Column[Int64](
+                        [
+                            1,
+                            4611686018427387904,
+                            Int64.MIN,
+                            Int64.MIN,
+                            0,
+                            1,
+                            Int64.MAX,
+                            -1,
+                        ],
+                        [True, True, True, True, True, True, True, False],
+                    ),
+                ),
+            ]
+        )
+        var expected: List[Int64] = [
+            Int64.MIN,
+            Int64.MIN,
+            Int64.MIN,
+            0,
+            0,
+            Int64.MAX,
+            -9223372036854775807,
+            0,
+        ]
+        var valid: List[Bool] = [
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            True,
+            False,
+        ]
+        for layout in range(3):
+            var frame = (
+                source.copy() if layout
+                == 0 else offset_layout(source) if layout
+                == 1 else chunk_layout(source)
+            )
+            var actual = frame.select_exprs(
+                [
+                    (col("d") * col("n")).alias("left"),
+                    (col("n") * col("d")).alias("right"),
+                ]
+            )
+            assert_ticks(actual, "left", dtype, expected.copy(), valid.copy())
+            assert_ticks(actual, "right", dtype, expected.copy(), valid.copy())
+        var left: List[Int64] = [
+            Int64.MIN,
+            Int64.MAX,
+            Int64.MIN,
+            -4611686018427387904,
+            -1,
+        ]
+        var right: List[Int64] = [-1, 2, 2, 3, Int64.MIN]
+        for row in range(len(left)):
+            var frame = DataFrame(
+                [
+                    tagged("d", dtype, [left[row]]),
+                    Series("n", Column[Int64]([right[row]])),
+                ]
+            )
+            _assert_temporal_boundary_overflow(frame, col("d") * col("n"))
+            _assert_temporal_boundary_overflow(frame, col("n") * col("d"))
+
+
+def test_temporal_floor_division_signed_extremes_zero_and_null_payloads() raises:
+    for unit in [String("ms"), String("us"), String("ns")]:
+        var dtype = DataType.duration(unit)
+        var source = DataFrame(
+            [
+                tagged(
+                    "d",
+                    dtype,
+                    [
+                        Int64.MIN,
+                        Int64.MIN,
+                        Int64.MIN,
+                        Int64.MAX,
+                        -5,
+                        5,
+                        5,
+                        Int64.MIN,
+                    ],
+                ),
+                Series(
+                    "n",
+                    Column[Int64](
+                        [1, 2, Int64.MAX, -1, 2, -2, 0, -1],
+                        [True, True, True, True, True, True, True, False],
+                    ),
+                ),
+            ]
+        )
+        for layout in range(3):
+            var frame = (
+                source.copy() if layout
+                == 0 else offset_layout(source) if layout
+                == 1 else chunk_layout(source)
+            )
+            var actual = frame.select((col("d") // col("n")).alias("result"))
+            assert_ticks(
+                actual,
+                "result",
+                dtype,
+                [
+                    Int64.MIN,
+                    -4611686018427387904,
+                    -2,
+                    -9223372036854775807,
+                    -3,
+                    -3,
+                    0,
+                    0,
+                ],
+                [True, True, True, True, True, True, False, False],
+            )
+        var overflow = DataFrame(
+            [tagged("d", dtype, [Int64.MIN]), Series("n", Column[Int64]([-1]))]
+        )
+        _assert_temporal_boundary_overflow(overflow, col("d") // col("n"))
+
+
+def test_temporal_unit_casts_keep_minimum_ticks_when_no_scaling_is_needed() raises:
+    for unit in [String("ms"), String("us"), String("ns")]:
+        var source_type = DataType.datetime(unit)
+        var target_type = DataType.datetime(unit, "UTC")
+        var frame = DataFrame(
+            [tagged("t", source_type, [Int64.MIN, Int64.MAX, 0])]
+        )
+        var actual = frame.select(col("t").cast(target_type).alias("result"))
+        assert_ticks(actual, "result", target_type, [Int64.MIN, Int64.MAX, 0])
+        var restored = actual.select(
+            col("result").cast(source_type).alias("result")
+        )
+        assert_ticks(restored, "result", source_type, [Int64.MIN, Int64.MAX, 0])
+    var frame = DataFrame(
+        [tagged("d", DataType.duration("ns"), [Int64.MIN, Int64.MAX])]
+    )
+    var coarse = frame.select(
+        col("d").cast(DataType.duration("us")).alias("result")
+    )
+    assert_ticks(
+        coarse,
+        "result",
+        DataType.duration("us"),
+        [-9223372036854776, 9223372036854775],
+    )
+
+
+def test_temporal_binary_conditions_only_observe_selected_overflow() raises:
+    for unit in [String("ms"), String("us"), String("ns")]:
+        var dtype = DataType.duration(unit)
+        var source = DataFrame(
+            [
+                tagged("t", dtype, [Int64.MAX, 3, Int64.MIN, 7]),
+                tagged("plus", dtype, [1, 2, -1, -2]),
+                tagged("minus", dtype, [-1, 2, 1, -2]),
+                Series("n", Column[Int64]([2, 2, -1, -2])),
+                Series("keep", Column[Int64]([0, 1, 0, 1])),
+            ]
+        )
+        var expressions: List[Expr] = [
+            col("t") + col("plus"),
+            col("t") - col("minus"),
+            col("t") * col("n"),
+            col("t") // col("n"),
+        ]
+        var expected: List[List[Int64]] = [
+            [0, 5, 0, 5],
+            [0, 1, 0, 9],
+            [0, 6, 0, -14],
+            [0, 1, 0, -4],
+        ]
+        for layout in range(3):
+            var frame = (
+                source.copy() if layout
+                == 0 else offset_layout(source) if layout
+                == 1 else chunk_layout(source)
+            )
+            for operation_index in range(len(expressions)):
+                for reverse in [False, True]:
+                    var predicate = col("keep") == lit(
+                        Int64(0 if reverse else 1)
+                    )
+                    var expression = (
+                        when(predicate)
+                        .then(lit(Int64(0)).cast(dtype))
+                        .otherwise(
+                            expressions[operation_index].copy()
+                        ) if reverse else when(predicate)
+                        .then(expressions[operation_index].copy())
+                        .otherwise(lit(Int64(0)).cast(dtype))
+                    )
+                    for streaming in [False, True]:
+                        var actual = (
+                            frame.lazy()
+                            .select(expression.copy().alias("result"))
+                            .collect(engine="cpu", streaming=streaming)
+                        )
+                        assert_ticks(
+                            actual,
+                            "result",
+                            dtype,
+                            expected[operation_index].copy(),
+                        )
+                _assert_temporal_boundary_overflow(
+                    frame,
+                    when(lit(True))
+                    .then(expressions[operation_index].copy())
+                    .otherwise(lit(Int64(0)).cast(dtype)),
+                )
+        # A scalar is observed iff ANY selected row observes it, not just row0.
+        var scalars: List[Expr] = [
+            lit(Int64.MAX).cast(dtype) + lit(Int64(1)).cast(dtype),
+            lit(Int64.MIN).cast(dtype) - lit(Int64(1)).cast(dtype),
+            lit(Int64.MIN).cast(dtype) * lit(Int64(-1)),
+            lit(Int64.MIN).cast(dtype) // lit(Int64(-1)),
+        ]
+        for scalar_index in range(len(scalars)):
+            var inactive = (
+                when(col("keep") < lit(Int64(0)))
+                .then(scalars[scalar_index].copy())
+                .otherwise(lit(Int64(0)).cast(dtype))
+                .alias("result")
+            )
+            var actual = source.select(inactive)
+            assert_ticks(actual, "result", dtype, [0, 0, 0, 0])
+            _assert_temporal_boundary_overflow(
+                source,
+                when(col("keep") == lit(Int64(1)))
+                .then(scalars[scalar_index].copy())
+                .otherwise(lit(Int64(0)).cast(dtype)),
+            )
+    var dates = DataFrame(
+        [
+            tagged("date", DataType.DATE, [Int64.MAX, 1, Int64.MIN, -1]),
+            tagged("d", DataType.duration("ns"), [1, 1, -1, -1]),
+            Series("keep", Column[Int64]([0, 1, 0, 1])),
+        ]
+    )
+    var result = dates.select(
+        when(col("keep") == lit(Int64(1)))
+        .then(col("date") + col("d"))
+        .otherwise(lit(Int64(0)).cast(DataType.datetime("ns")))
+        .alias("result")
+    )
+    assert_ticks(
+        result,
+        "result",
+        DataType.datetime("ns"),
+        [0, 86400000000001, 0, -86400000000001],
+    )
+    _assert_temporal_boundary_overflow(
+        dates,
+        when(lit(True))
+        .then(col("date") + col("d"))
+        .otherwise(lit(Int64(0)).cast(DataType.datetime("ns"))),
+    )
+
+
+def test_temporal_cast_conditions_only_observe_selected_overflow() raises:
+    var target = DataType.duration("ns")
+    var source = DataFrame(
+        [
+            tagged("t", DataType.duration("ms"), [Int64.MAX, 2, Int64.MIN, -3]),
+            Series("keep", Column[Int64]([0, 1, 0, 1])),
+        ]
+    )
+    for layout in range(3):
+        var frame = (
+            source.copy() if layout
+            == 0 else offset_layout(source) if layout
+            == 1 else chunk_layout(source)
+        )
+        for streaming in [False, True]:
+            var expression = (
+                when(col("keep") == lit(Int64(1)))
+                .then(col("t").cast(target))
+                .otherwise(lit(Int64(0)).cast(target))
+                .alias("result")
+            )
+            var actual = (
+                frame.lazy()
+                .select(expression)
+                .collect(engine="cpu", streaming=streaming)
+            )
+            assert_ticks(actual, "result", target, [0, 2000000, 0, -3000000])
+            var relaxed = (
+                when(lit(True))
+                .then(col("t").cast(target, strict=False))
+                .otherwise(lit(Int64(0)).cast(target))
+                .alias("result")
+            )
+            var relaxed_result = (
+                frame.lazy()
+                .select(relaxed)
+                .collect(engine="cpu", streaming=streaming)
+            )
+            assert_ticks(
+                relaxed_result,
+                "result",
+                target,
+                [0, 2000000, 0, -3000000],
+                [False, True, False, True],
+            )
+        _assert_temporal_boundary_overflow(
+            frame,
+            when(col("keep") == lit(Int64(0)))
+            .then(col("t").cast(target))
+            .otherwise(lit(Int64(0)).cast(target)),
+        )
+    var scalar = lit(Int64.MAX).cast(DataType.duration("ms")).cast(target)
+    var unused = source.select(
+        when(col("keep") < lit(Int64(0)))
+        .then(scalar.copy())
+        .otherwise(lit(Int64(0)).cast(target))
+        .alias("result")
+    )
+    assert_ticks(unused, "result", target, [0, 0, 0, 0])
+    _assert_temporal_boundary_overflow(
+        source,
+        when(col("keep") == lit(Int64(1)))
+        .then(scalar.copy())
+        .otherwise(lit(Int64(0)).cast(target)),
+    )
+    var relaxed = source.select(
+        when(col("keep") == lit(Int64(1)))
+        .then(
+            lit(Int64.MAX)
+            .cast(DataType.duration("ms"))
+            .cast(target, strict=False)
+        )
+        .otherwise(lit(Int64(0)).cast(target))
+        .alias("result")
+    )
+    assert_ticks(
+        relaxed, "result", target, [0, 0, 0, 0], [True, False, True, False]
+    )
+
+
+def test_temporal_string_cast_conditions_skip_inactive_parse_failures() raises:
+    var source = DataFrame(
+        [
+            Series(
+                "t",
+                Column[String](
+                    ["invalid-date", "1970-01-02", "invalid-date", "1969-12-31"]
+                ),
+            ),
+            Series("keep", Column[Int64]([0, 1, 0, 1])),
+        ]
+    )
+    for layout in range(3):
+        var frame = (
+            source.copy() if layout
+            == 0 else offset_layout(source) if layout
+            == 1 else chunk_layout(source)
+        )
+        var expression = (
+            when(col("keep") == lit(Int64(1)))
+            .then(col("t").cast(DataType.DATE))
+            .otherwise(lit(Int64(0)).cast(DataType.DATE))
+            .alias("result")
+        )
+        var actual = frame.select(expression)
+        assert_ticks(actual, "result", DataType.DATE, [0, 1, 0, -1])
+        with assert_raises():
+            _ = frame.select(
+                when(col("keep") == lit(Int64(0)))
+                .then(col("t").cast(DataType.DATE))
+                .otherwise(lit(Int64(0)).cast(DataType.DATE))
+            )
+        var relaxed = frame.select(
+            col("t").cast(DataType.DATE, strict=False).alias("result")
+        )
+        assert_ticks(
+            relaxed,
+            "result",
+            DataType.DATE,
+            [0, 1, 0, -1],
+            [False, True, False, True],
+        )
+
+
+def test_temporal_cast_invalid_logical_pairs_reject_all_false_masks() raises:
+    var sources: List[DataType] = [
+        DataType.DATE,
+        DataType.duration("ms"),
+        DataType.datetime("us"),
+        DataType.TIME,
+    ]
+    var targets: List[DataType] = [
+        DataType.TIME,
+        DataType.DATE,
+        DataType.duration("us"),
+        DataType.datetime("us"),
+    ]
+    for pair_index in range(len(sources)):
+        var source = DataFrame([tagged("t", sources[pair_index], [0, 1])])
+        var message = (
+            "cannot cast "
+            + sources[pair_index].name()
+            + " to "
+            + targets[pair_index].name()
+        )
+        for layout in range(3):
+            var frame = (
+                source.copy() if layout
+                == 0 else offset_layout(source) if layout
+                == 1 else chunk_layout(source)
+            )
+            for strict in [False, True]:
+                for selected in [False, True]:
+                    var expression = (
+                        when(lit(selected))
+                        .then(col("t").cast(targets[pair_index], strict=strict))
+                        .otherwise(lit(Int64(0)).cast(targets[pair_index]))
+                    )
+                    with assert_raises(contains=message):
+                        _ = frame.select(expression)

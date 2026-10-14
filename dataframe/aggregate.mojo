@@ -842,6 +842,7 @@ struct Reducer(Movable):
     var pair_y: List[List[Float64]]
     # mode: occurrences per canonical value (bools as 0/1) and nulls.
     var mode_ints: List[Dict[Int64, Int64]]
+    var mode_decimals: List[Dict[Int128, Int64]]
     var mode_floats: List[Dict[UInt64, Int64]]
     var mode_float_values: List[Dict[UInt64, Float64]]
     var mode_strings: List[Dict[String, Int64]]
@@ -974,6 +975,10 @@ struct Reducer(Movable):
         var mode_ints = mode and (is_int or input_dtype == DataType.BOOL)
         self.mode_ints = List[Dict[Int64, Int64]](
             length=n if mode_ints else 0, fill=Dict[Int64, Int64]()
+        )
+        self.mode_decimals = List[Dict[Int128, Int64]](
+            length=n if mode and self.dtype.is_decimal() else 0,
+            fill=Dict[Int128, Int64](),
         )
         self.mode_floats = List[Dict[UInt64, Int64]](
             length=n if mode and is_float else 0, fill=Dict[UInt64, Int64]()
@@ -1400,7 +1405,26 @@ struct Reducer(Movable):
         """Track the first best value and its index within each group, and
         the first NaN, which counts only when a group has nothing else."""
         var is_max = self.op == ARG_MAX
-        if chunk._data.isa[Column[Int64]]():
+        if self.dtype.is_decimal():
+            # Decimal32/64 inputs are widened by update(), preserving their
+            # exact scaled integer order without converting through Float64.
+            ref column = chunk._data[Column[Int128]]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                var at = self.counts[g]
+                self.counts[g] += 1
+                if not column._valid(i):
+                    continue
+                var value = column._get(i)
+                if (
+                    not self.seen[g]
+                    or (is_max and value > self.decimals[g])
+                    or (not is_max and value < self.decimals[g])
+                ):
+                    self.decimals[g] = value
+                    self.positions[g] = at
+                    self.seen[g] = True
+        elif chunk._data.isa[Column[Int64]]():
             ref column = chunk._data[Column[Int64]]
             for i in range(len(column)):
                 var g = _group(grouped, groups, offset + i)
@@ -1476,7 +1500,18 @@ struct Reducer(Movable):
     def _update_mode(
         mut self, chunk: Series, offset: Int, grouped: Bool, groups: List[Int]
     ) raises:
-        if chunk._data.isa[Column[Int64]]():
+        if self.dtype.is_decimal():
+            ref column = chunk._data[Column[Int128]]
+            for i in range(len(column)):
+                var g = _group(grouped, groups, offset + i)
+                if not column._valid(i):
+                    self.mode_nulls[g] += 1
+                    continue
+                var key = column._get(i)
+                self.mode_decimals[g][key] = (
+                    self.mode_decimals[g].get(key, 0) + 1
+                )
+        elif chunk._data.isa[Column[Int64]]():
             ref column = chunk._data[Column[Int64]]
             for i in range(len(column)):
                 var g = _group(grouped, groups, offset + i)
@@ -1643,7 +1678,12 @@ struct Reducer(Movable):
                     self.comoments[g].merge(other.comoments[source])
             elif op == MODE or op == VALUE_COUNTS:
                 self.mode_nulls[g] += other.mode_nulls[source]
-                if len(self.mode_ints) > 0:
+                if self.dtype.is_decimal():
+                    for item in other.mode_decimals[source].items():
+                        self.mode_decimals[g][item.key] = (
+                            self.mode_decimals[g].get(item.key, 0) + item.value
+                        )
+                elif len(self.mode_ints) > 0:
                     for item in other.mode_ints[source].items():
                         self.mode_ints[g][item.key] = (
                             self.mode_ints[g].get(item.key, 0) + item.value
@@ -1800,6 +1840,7 @@ struct Reducer(Movable):
         self.pair_x.extend(added.pair_x.copy())
         self.pair_y.extend(added.pair_y.copy())
         self.mode_ints.extend(added.mode_ints.copy())
+        self.mode_decimals.extend(added.mode_decimals.copy())
         self.mode_floats.extend(added.mode_floats.copy())
         self.mode_float_values.extend(added.mode_float_values.copy())
         self.mode_strings.extend(added.mode_strings.copy())
@@ -1840,7 +1881,29 @@ struct Reducer(Movable):
         offsets.append(0)
         var total = 0
         var child: Series
-        if len(self.mode_ints) > 0:
+        if self.dtype.is_decimal():
+            var values = List[Int128]()
+            var valid = List[Bool]()
+            for g in range(n):
+                var best = self.mode_nulls[g]
+                for item in self.mode_decimals[g].items():
+                    best = max(best, item.value)
+                if best > 0:
+                    var chosen = List[Int128]()
+                    for item in self.mode_decimals[g].items():
+                        if item.value == best:
+                            chosen.append(item.key)
+                    sort(chosen)
+                    for value in chosen:
+                        values.append(value)
+                        valid.append(True)
+                    if self.mode_nulls[g] == best:
+                        values.append(0)
+                        valid.append(False)
+                    total = len(values)
+                offsets.append(Int64(total))
+            child = self._decimal_distribution(values^, valid^)
+        elif len(self.mode_ints) > 0:
             var values = List[Int64]()
             var valid = List[Bool]()
             for g in range(n):
@@ -1944,16 +2007,24 @@ struct Reducer(Movable):
         # Per group: distinct keys in value order, as (rank, count) pairs;
         # `order` indexes into the flat value buffers built below.
         var values_i = List[Int64]()
+        var values_d = List[Int128]()
         var values_f = List[Float64]()
         var values_s = List[String]()
         var valid = List[Bool]()
         var totals = List[Int64]()
         for g in range(n):
             var keys_i = List[Int64]()
+            var keys_d = List[Int128]()
             var keys_f = List[Float64]()
             var keys_s = List[String]()
             var key_counts = List[Int64]()
-            if len(self.mode_ints) > 0:
+            if self.dtype.is_decimal():
+                for key in self.mode_decimals[g].keys():
+                    keys_d.append(key)
+                sort(keys_d)
+                for key in keys_d:
+                    key_counts.append(self.mode_decimals[g][key])
+            elif len(self.mode_ints) > 0:
                 var ordered = List[Int64]()
                 for key in self.mode_ints[g].keys():
                     ordered.append(key)
@@ -2021,18 +2092,22 @@ struct Reducer(Movable):
                     counts.append(self.mode_nulls[g])
                     valid.append(False)
                     values_i.append(0)
+                    values_d.append(0)
                     values_f.append(0)
                     values_s.append("")
                 else:
                     counts.append(key_counts[slot])
                     valid.append(True)
                     values_i.append(keys_i[slot] if len(keys_i) else 0)
+                    values_d.append(keys_d[slot] if len(keys_d) else 0)
                     values_f.append(keys_f[slot] if len(keys_f) else 0)
                     values_s.append(keys_s[slot] if len(keys_s) else "")
                 totals.append(total)
             offsets.append(Int64(len(counts)))
         var values: Series
-        if len(self.mode_ints) > 0:
+        if self.dtype.is_decimal():
+            values = self._decimal_distribution(values_d^, valid.copy())
+        elif len(self.mode_ints) > 0:
             if self.input == DataType.BOOL:
                 var flags = List[Bool](capacity=len(values_i))
                 for value in values_i:
@@ -2066,6 +2141,28 @@ struct Reducer(Movable):
         var fields: List[Series] = [values.renamed(value_name), tally^]
         var structs = Series("", StructColumn(fields^))
         return Series("", ListColumn(offsets^, structs.renamed("item")))
+
+    def _decimal_distribution(
+        self, var values: List[Int128], var valid: List[Bool]
+    ) raises -> Series:
+        """Restore the original decimal storage without rescaling or rounding."""
+        if self.logical.decimal_width() == 32:
+            var narrow = List[Int32](capacity=len(values))
+            for value in values:
+                narrow.append(Int32(value))
+            return Series("", Column[Int32](narrow^, valid^)).with_dtype(
+                self.logical
+            )
+        if self.logical.decimal_width() == 64:
+            var narrow = List[Int64](capacity=len(values))
+            for value in values:
+                narrow.append(Int64(value))
+            return Series("", Column[Int64](narrow^, valid^)).with_dtype(
+                self.logical
+            )
+        return Series("", Column[Int128](values^, valid^)).with_dtype(
+            self.logical
+        )
 
     def _integer_sum(self) raises -> Series:
         """Exact sums of narrow or unsigned integers in their sum type."""

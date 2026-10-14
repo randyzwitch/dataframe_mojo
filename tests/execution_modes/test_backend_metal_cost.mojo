@@ -1,4 +1,4 @@
-"""Native analytical facts describe metadata and cache state without execution."""
+"""Mojo analytical facts describe metadata without source reads or execution."""
 from std.testing import assert_equal, assert_true, assert_raises
 from dataframe import DataFrame, Series, Column, Expr, col, lit, scan_csv
 from dataframe.metal import MetalRuntime
@@ -72,16 +72,10 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
     var dense = cost_query(DataFrame([Series("x", Column[Float32]([1, 2, 3]))]))
     var dense_facts = runtime.estimate_auto(dense[0])
     assert_equal(cold.cpu, dense_facts.cpu)
-    for at in range(len(cost_feature_names())):
-        # Three rows require one bitmap byte; omitting that buffer saves
-        # exactly one upload byte, without changing any other feature.
-        var bitmap_bytes = Float64(
-            1 if cost_feature_names()[at] == "upload_bytes" else 0
-        )
-        assert_equal(
-            cold.accelerator[at], dense_facts.accelerator[at] + bitmap_bytes
-        )
-    assert_equal(cold.family, "float32;metal-float32-arithmetic-v1")
+    # Mojo uploads a byte validity matrix for every cell, independent of
+    # whether the source owns a packed bitmap or has an all-valid shortcut.
+    assert_equal(cold.accelerator, dense_facts.accelerator)
+    assert_true(";mojo-metal-v1;ops=" in cold.family)
     assert_equal(cold.placement, "accel")
     assert_equal(estimate_feature(cold, "fixed", False), Float64(1))
     assert_equal(estimate_feature(cold, "rows", False), Float64(3))
@@ -90,7 +84,7 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
     assert_equal(estimate_feature(cold, "reduction_rows", False), Float64(0))
     assert_equal(estimate_feature(cold, "cast_node_rows", False), Float64(0))
     assert_true(estimate_feature(cold, "projection_node_rows", False) > 0)
-    assert_equal(estimate_feature(cold, "synchronizations", True), Float64(1))
+    assert_equal(estimate_feature(cold, "synchronizations", True), Float64(2))
     assert_equal(estimate_feature(cold, "cold", True), Float64(1))
     assert_equal(
         estimate_feature(cold, "allocation_bytes", True),
@@ -110,12 +104,9 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
     assert_native_report(measured[1])
     var warm = runtime.estimate_auto(first[0])
     assert_equal(warm.cpu, cold.cpu)
-    for at in range(len(cost_feature_names())):
-        assert_equal(
-            warm.accelerator[at],
-            Float64(0) if cost_feature_names()[at]
-            == "cold" else cold.accelerator[at],
-        )
+    # Standalone calls each own a context/buffer scope. They never inherit
+    # the deleted native process-wide shader-cache cold/warm flag.
+    assert_equal(warm.accelerator, cold.accelerator)
     var resized = cost_query(
         DataFrame([Series("x", Column[Float32]([4, 5, 6, 7, 8]))]), 101
     )
@@ -124,7 +115,7 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
     assert_equal(
         estimate_feature(resized_facts, "source_bytes", False), Float64(20)
     )
-    assert_equal(estimate_feature(resized_facts, "cold", True), Float64(0))
+    assert_equal(estimate_feature(resized_facts, "cold", True), Float64(1))
     var reused = resized[0].profile(accelerator=runtime)
     assert_domain(reused[0], resized[1])
     assert_native_report(reused[1])
@@ -135,10 +126,17 @@ def test_native_metal_analytical_estimates_are_value_blind_and_observe_cold_to_w
                     optimize, streaming, batch
                 )
                 assert_equal(identity.provider, "metal")
-                assert_true(identity.device.startswith("registry="))
+                assert_true(identity.device.startswith("mojo-metal;ordinal=0;"))
                 assert_true("unified=" in identity.device)
                 assert_equal(identity.cpu_build_id, CPU_BUILD_ID)
-                assert_equal(identity.runtime_build_id.byte_length(), 64)
+                if CPU_BUILD_ID == "development-source-no-calibration":
+                    assert_equal(identity.runtime_build_id, CPU_BUILD_ID)
+                else:
+                    assert_true(
+                        identity.runtime_build_id.startswith(
+                            "dataframe-mojo-metal-v1;source-compiler-sdk="
+                        )
+                    )
                 assert_true(
                     "model=" in identity.host and "os=" in identity.host
                 )

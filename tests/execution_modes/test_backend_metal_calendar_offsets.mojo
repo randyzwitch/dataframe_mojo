@@ -1,8 +1,10 @@
 """Signed calendar offsets clamp days, retain time, then add checked fixed ticks."""
+from dataframe.accelerator.gpu.program import Program
+from dataframe.accelerator.gpu.runtime import capabilities as _capabilities
 from std.testing import assert_equal, assert_true, assert_raises
 from std.memory import bitcast
 from dataframe import DataFrame, DataType, Series, Column, col, lit, when
-from dataframe.metal import MetalRuntime, _capabilities, _Descriptors
+from dataframe.metal import MetalRuntime
 from dataframe.accelerator.capabilities import RowCapabilities
 from dataframe.accelerator.rows import lower_rows, ROW_CALENDAR_OFFSET
 from tests.execution_modes.test_backend_metal import require_metal
@@ -35,8 +37,8 @@ def test_calendar_offsets_capability_signed_metadata_and_checked_boundaries() ra
     assert_equal(plan.code[4], Int64(ROW_CALENDAR_OFFSET))
     assert_equal(plan.code[6], Int64(-27))
     assert_equal(bitcast[DType.int64](plan.literals[1]), Int64(-3))
-    var desc = _Descriptors(plan)
-    assert_equal(desc.code[4], Int64(145))
+    var desc = Program(plan)
+    assert_equal(desc.code[4], Int64(ROW_CALENDAR_OFFSET))
     assert_true(
         "unsupported" not in MetalRuntime(device_id=999999).describe(query)
     )
@@ -175,7 +177,7 @@ def test_native_metal_calendar_offsets_profiles_cost_budget_and_runtime_reuse() 
     )
     var estimate = runtime.estimate_auto(query)
     assert_true(";calendar-offsets-v1" in estimate.family)
-    assert_true(";metal-calendar-offsets-v1" in estimate.family)
+    assert_true(";mojo-metal-v1;ops=" in estimate.family)
     var exact = MetalRuntime(memory_limit_bytes=estimate.peak_bytes)
     var measured = query.profile(accelerator=exact)
     assert_equal(
