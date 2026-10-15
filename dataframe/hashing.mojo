@@ -852,6 +852,17 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
             ids[i] = renumber[code]
         return RowKeys(ids^, representatives^)
 
+    # Column codes fold into one 64-bit key per row, so several columns
+    # cost one numbering pass rather than one table per column, as
+    # ClickHouse packs fixed-width keys into one integer
+    # (AggregationMethodKeysFixed). A stage is numbered, and its packed keys
+    # replaced by dense ids, before the key outgrows 64 bits, or before it
+    # leaves the direct-array range while still inside it, so that
+    # low-cardinality prefixes compress through a direct array first.
+    var limit = UInt64(max(4 * n, 1 << 20))
+    var packed = List[UInt64](unsafe_uninit_length=n)
+    var span = UInt64(1)
+    var folded = 0
     for j in range(len(keys)):
         # column_codes writes every valid row; null rows are given their
         # code below before it is read, so nothing is filled first (#388).
@@ -859,46 +870,78 @@ def encode_rows(keys: List[Series], nulls_equal: Bool) raises -> RowKeys:
         var has_nulls = keys[j].null_count() > 0
         var nulls = List[Bool](length=n if has_nulls else 0, fill=False)
         var distinct = column_codes(keys[j], codes, nulls)
-        # Value encoders assign first-occurrence ids already. Without nulls
-        # there is no null id to insert; BoolColumn alone uses fixed 0/1
-        # codes and still needs the ordinary renumbering below.
-        if j == 0:
-            if not has_nulls and not keys[j]._data.isa[BoolColumn]():
-                for i in range(n):
-                    if codes[i] == len(representatives):
-                        representatives.append(i)
-                ids = codes^
-                continue
-            ids = List[Int](unsafe_uninit_length=n)
         # Reserve code `distinct` for null so it is one ordinary value.
-        var radix = distinct + 1
-        # Combined codes index a direct array when there are few enough of
-        # them, else a 64-bit table; both replace a `Dict` lookup (#380).
-        var combinations = (len(representatives) if j > 0 else 1) * radix
-        var direct = combinations <= max(4 * n, 1 << 20)
-        var dense = List[Int](length=combinations if direct else 0, fill=-1)
-        var table = _U64Codes()
-        representatives = List[Int]()
+        var radix = UInt64(distinct + 1)
+        if folded >= 2 and (
+            span > UInt64.MAX // radix
+            or (span <= limit and span * radix > limit)
+        ):
+            span = UInt64(
+                _number_packed(
+                    packed, span, limit, exclude, excluded, ids, representatives
+                )
+            )
+            for i in range(n):
+                packed[i] = UInt64(ids[i])
+            folded = 1
+        if has_nulls:
+            for i in range(n):
+                if nulls[i]:
+                    if not nulls_equal:
+                        excluded[i] = True
+                    codes[i] = distinct
+        if folded == 0:
+            for i in range(n):
+                packed[i] = UInt64(codes[i])
+        else:
+            for i in range(n):
+                packed[i] = packed[i] * radix + UInt64(codes[i])
+        span *= radix
+        folded += 1
+    _ = _number_packed(
+        packed, span, limit, exclude, excluded, ids, representatives
+    )
+    return RowKeys(ids^, representatives^)
+
+
+def _number_packed(
+    packed: List[UInt64],
+    span: UInt64,
+    limit: UInt64,
+    exclude: Bool,
+    excluded: List[Bool],
+    mut ids: List[Int],
+    mut representatives: List[Int],
+) -> Int:
+    """Number packed row keys below `span` by first occurrence into `ids`
+    and `representatives`, through a direct array when `span` is within
+    `limit`, else a 64-bit table. Excluded rows get id -1. Return the
+    distinct count."""
+    var n = len(packed)
+    if len(ids) != n:
+        ids = List[Int](unsafe_uninit_length=n)
+    representatives = List[Int]()
+    if span <= limit:
+        var dense = List[Int](length=Int(span), fill=-1)
         for i in range(n):
-            if has_nulls and nulls[i]:
-                if not nulls_equal:
-                    excluded[i] = True
-                codes[i] = distinct
             if exclude and excluded[i]:
                 ids[i] = -1
                 continue
-            var combined = ids[i] * radix + codes[i] if j > 0 else codes[i]
-            var id: Int
-            if direct:
-                id = dense[combined]
-                if id < 0:
-                    id = len(representatives)
-                    dense[combined] = id
-                    representatives.append(i)
-            else:
-                var before = table.count
-                id = table.code(UInt64(combined))
-                if table.count > before:
-                    representatives.append(i)
+            var key = Int(packed[i])
+            var id = dense[key]
+            if id < 0:
+                id = len(representatives)
+                dense[key] = id
+                representatives.append(i)
             ids[i] = id
-    return RowKeys(ids^, representatives^)
+    else:
+        var table = _U64Codes()
+        for i in range(n):
+            if exclude and excluded[i]:
+                ids[i] = -1
+                continue
+            var before = table.count
+            ids[i] = table.code(packed[i])
+            if table.count > before:
+                representatives.append(i)
+    return len(representatives)

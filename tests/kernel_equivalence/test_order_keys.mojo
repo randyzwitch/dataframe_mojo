@@ -393,6 +393,36 @@ def test_composite_key_columns_preserve_boundaries_and_reject_packing_overflow()
     )
 
 
+def test_many_key_columns_number_through_direct_hashed_and_overflow_stages() raises:
+    # Two small columns, then seven with 1,200 values each: packed codes
+    # number through a direct array, then fold past the direct range into
+    # a 64-bit table, restaging when the key would outgrow 64 bits. Rows
+    # repeat with period 1,200, and one column has nulls.
+    var n = 2000
+    var multipliers: List[Int] = [3, 5, 1, 7, 11, 13, 17, 19, 23]
+    var rows = List[List[KeyCell]]()
+    for _ in range(n):
+        rows.append(List[KeyCell]())
+    var keys = List[Series]()
+    for c in range(len(multipliers)):
+        var values = List[Int64]()
+        var valid = List[Bool]()
+        for i in range(n):
+            var r = i % 1200
+            var value = (
+                r % multipliers[c] if c < 2 else (r * multipliers[c] + c) % 1201
+            )
+            var ok = c != 4 or r % 97 != 0
+            values.append(Int64(value))
+            valid.append(ok)
+            rows[i].append(
+                KeyCell(0, ok, integer=Int128(value) if ok else Int128(0))
+            )
+        keys.append(Series(String("k", c), Column[Int64](values^, valid^)))
+    for nulls_equal in [False, True]:
+        assert_key_encoding(encode_rows(keys, nulls_equal), rows, nulls_equal)
+
+
 def test_inline_external_and_common_prefix_strings_have_exact_key_and_sort_semantics() raises:
     var pattern: List[String] = [
         "",
