@@ -242,6 +242,12 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_native_execution_profile",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_partition_cuts.mojo::test_public_partition_cut_qcut_resident_outputs",
             "metal",
         )

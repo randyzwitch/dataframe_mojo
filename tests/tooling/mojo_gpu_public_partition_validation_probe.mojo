@@ -1,8 +1,5 @@
 """Actual public partition validation, isolated from passing private probes."""
 from std.testing import assert_equal
-from dataframe import DataFrame, Series, Column, col
-from dataframe.metal import MetalRuntime
-from tests.execution_modes.test_backend_metal import assert_native_report
 from tests.execution_modes.test_mojo_gpu_partition_cuts import (
     test_public_partition_cut_qcut_resident_outputs as outputs,
     test_public_partition_cut_qcut_eager_fault_order as faults,
@@ -10,33 +7,12 @@ from tests.execution_modes.test_mojo_gpu_partition_cuts import (
     test_public_partition_cuts_nested_numeric_scopes as nested,
     test_public_partition_when_head_and_sibling_error_contracts as contracts,
     test_public_partition_qcut_signed_zero_breakpoint_literals as zero_words,
+    test_public_partition_native_execution_profile as _native_report,
 )
 from tests.public_contracts.test_partition_cut_capture import (
     test_partition_cut_capture_keeps_original_controls_and_eager_state as capture,
     test_partition_nested_scope_cache_entry_snapshots as cache,
 )
-
-
-def _native_report() raises:
-    var frame = DataFrame(
-        [
-            Series("x", Column[Float64]([0, 10, 2, 14])),
-            Series("k", Column[Int32]([0, 1, 0, 1])),
-        ]
-    )
-    var probabilities: List[Float64] = [0.5]
-    var measured = (
-        frame.lazy()
-        .select(col("x").qcut(probabilities).over("k"))
-        .profile(
-            accelerator=MetalRuntime(),
-            optimize=False,
-            streaming=False,
-        )
-    )
-    assert_native_report(measured[1], nonempty=True)
-    assert_equal(measured[0].item(0, "x").string(), "(-inf, 1]")
-    assert_equal(measured[0].item(1, "x").string(), "(-inf, 12]")
 
 
 def main() raises:

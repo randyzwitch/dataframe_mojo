@@ -14,7 +14,10 @@ from dataframe import (
 )
 from dataframe.lazy import LazyFrame
 from dataframe.metal import MetalRuntime
-from tests.execution_modes.test_backend_metal import require_metal
+from tests.execution_modes.test_backend_metal import (
+    require_metal,
+    assert_native_report,
+)
 from tests.execution_modes.test_backend_metal_float64_emulation import same
 from tests.support.lifecycle_jobs import WorkerSetting
 
@@ -458,3 +461,25 @@ def test_public_partition_qcut_signed_zero_breakpoint_literals() raises:
             gpu.item(row, "x").struct_field("category").string(), "(-inf, 0]"
         )
     print("PASS public partition qcut literal signed-zero breakpoint words")
+
+
+def test_public_partition_native_execution_profile() raises:
+    var frame = DataFrame(
+        [
+            Series("x", Column[Float64]([0, 10, 2, 14])),
+            Series("k", Column[Int32]([0, 1, 0, 1])),
+        ]
+    )
+    var probabilities: List[Float64] = [0.5]
+    var measured = (
+        frame.lazy()
+        .select(col("x").qcut(probabilities).over("k"))
+        .profile(
+            accelerator=MetalRuntime(),
+            optimize=False,
+            streaming=False,
+        )
+    )
+    assert_native_report(measured[1], nonempty=True)
+    assert_equal(measured[0].item(0, "x").string(), "(-inf, 1]")
+    assert_equal(measured[0].item(1, "x").string(), "(-inf, 12]")
