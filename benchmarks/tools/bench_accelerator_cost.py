@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 FEATURES = ("fixed", "rows", "source_bytes", "projection_node_rows", "filter_node_rows", "reduction_rows", "integer_node_rows", "cast_node_rows", "launches", "synchronizations", "upload_bytes", "download_bytes", "allocation_bytes", "cold", "materializations")
 FORMAT = "dataframe-analytical-cost-v1"
 DTYPES = ("Float32", "Float64", "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64")
@@ -322,7 +322,7 @@ def main():
              and (c["workload"] if c["workload"] in ("sum", "count", "extrema") else c["reduction"]) not in args.exclude_reductions]
     if not cases:
         parser.error("selected calibration matrix is empty")
-    provenance = dict(recorded_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(), driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), runner_sha256=hashlib.sha256((ROOT / "benchmarks/bench_accelerator_cost.mojo").read_bytes()).hexdigest(), exposure="generated training; named mechanisms held out from this fit but previously exposed during development", external_holdout_policy="scripts/bench_policy.py: TPC-DS and ClickBench validation only", method="fresh process per case; one explicit runtime; cold context cost retained; alternating warm CPU/accelerator pairs; parity outside timings; full preflight overhead measured separately and added to accelerator cost; CPU lower and accelerator upper residual envelopes fitted on training only")
+    provenance = dict(recorded_at_utc=dt.datetime.now(dt.timezone.utc).isoformat(), driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(), runner_sha256=hashlib.sha256((ROOT / "benchmarks/bench_accelerator_cost.mojo").read_bytes()).hexdigest(), exposure="generated training; named mechanisms held out from this fit but previously exposed during development", external_holdout_policy="benchmarks/tools/bench_policy.py: TPC-DS and ClickBench validation only", method="fresh process per case; one explicit runtime; cold context cost retained; alternating warm CPU/accelerator pairs; parity outside timings; full preflight overhead measured separately and added to accelerator cost; CPU lower and accelerator upper residual envelopes fitted on training only")
     (args.output / "manifest.json").write_text(json.dumps(dict(provenance=provenance, cases=cases), indent=2) + "\n")
     if not args.collect:
         print("Wrote case manifest only; pass --collect with an identified provider binary to measure.")

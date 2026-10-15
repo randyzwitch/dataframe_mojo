@@ -9,7 +9,7 @@ import subprocess
 import tarfile
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "build/import"
 BASE = "eafdd9c"
 
@@ -123,7 +123,7 @@ def run():
                 fixture = ROOT / f'build/parquet-stream/{rows}.parquet'
                 if not fixture.exists():
                     raise RuntimeError(
-                        "Generate fixtures with scripts/bench_parquet_stream.py --run first"
+                        "Generate fixtures with benchmarks/tools/bench_parquet_stream.py --run first"
                     )
                 for round_ in range(3):
                     variants = (
