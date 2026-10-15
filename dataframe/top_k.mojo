@@ -23,11 +23,13 @@ from .bool_column import BoolColumn
 from .column import Column
 from .dtype import NUMERIC_DTYPES
 from .expr import COL, LE, LIT_INT, LT, OVER, RANK, SEP, split_names
+from .aggregate_table import TOP_ROWS_INLINE, aggregate_top_rows, key_supported
 from .hashing import encode_rows, encode_rows_parallel
 from .parallel import Job, run_jobs, worker_count
 from .partition import encode_partitioned, low_cardinality
 from .rank import _key, _pack
 from .series import Series
+from .trace import trace_path
 
 
 @always_inline
@@ -243,6 +245,47 @@ def _pattern(bound: BoundExpr) -> Tuple[Int, Int, Int]:
     return (rank.left, compare.left, k)
 
 
+def _table_top_rows(
+    keys: List[Series],
+    value: Series,
+    k: Int,
+    descending: Bool,
+    height: Int,
+    workers: Int,
+) raises -> Optional[List[Int]]:
+    """The kept rows through the aggregate table's top-rows state, as
+    DuckDB plans the idiom (its TopN window elimination makes a grouped
+    `arg_max(row, value, k)`, and Polars' H2O q8 is a grouped `top_k`):
+    each worker hashes its morsels' keys where they are and keeps every
+    group's k best pairs in the group's row, so no partition ids are made
+    for every row and no column is gathered into partition order. None
+    when a key has no key words, the value is not a plain number, or k
+    pairs do not fit inline."""
+    if workers <= 1 or k > TOP_ROWS_INLINE:
+        return None
+    var numeric = False
+    comptime for t in range(len(NUMERIC_DTYPES)):
+        comptime D = NUMERIC_DTYPES[t]
+        numeric = numeric or value._data.isa[Column[Scalar[D]]]()
+    if not numeric or value.dtype().is_decimal():
+        return None
+    var flat = List[Series](capacity=len(keys))
+    for key in keys:
+        if not key_supported(key):
+            return None
+        flat.append(key.rechunk() if key.is_chunked() else key.copy())
+    trace_path("filter.top_k_table")
+    var ranges = List[Int]()
+    var morsel = max(4096, min(1 << 16, height // (4 * workers) + 1))
+    var at = 0
+    while at < height:
+        var length = min(morsel, height - at)
+        ranges.append(at)
+        ranges.append(length)
+        at += length
+    return aggregate_top_rows(flat, value, k, descending, ranges, workers)
+
+
 def top_k_mask(
     bound: BoundExpr, columns: List[Series], height: Int
 ) raises -> Optional[BoolColumn]:
@@ -270,6 +313,11 @@ def top_k_mask(
         return BoolColumn(mask^)
     var whole = value.rechunk() if value.is_chunked() else value.copy()
     var workers = worker_count(height)
+    var table = _table_top_rows(keys, whole, k, descending, height, workers)
+    if table:
+        for row in table.value():
+            mask[row] = True
+        return BoolColumn(mask^)
     var partitions = encode_rows(keys, nulls_equal=True) if workers <= 1 else (
         encode_rows_parallel(keys, True, workers) if low_cardinality(
             keys
