@@ -181,7 +181,7 @@ comptime CONCAT = 15
 
 
 @fieldwise_init
-struct PlanNode(Copyable):
+struct PlanNode(Copyable, Deinitable):
     var kind: Int
     var left: Int
     var right: Int
@@ -1382,7 +1382,7 @@ struct _SubplanJob(Job):
         )
 
 
-struct LazyFrame(Copyable):
+struct LazyFrame(Copyable, Deinitable):
     """A deferred query; build it with DataFrame.lazy() or scan_csv()."""
 
     var _nodes: List[PlanNode]
