@@ -7,7 +7,7 @@ Building in reverse row order and probing disjoint left ranges preserves the
 join's documented left-major, right-input match order.
 """
 from std.bit import count_trailing_zeros
-from std.memory import ArcPointer, Pointer, bitcast, unsafe_memcpy
+from std.memory import ArcPointer, Pointer, bitcast, pack_bits, unsafe_memcpy
 from std.ffi import external_call
 from std.sys import size_of
 
@@ -547,26 +547,10 @@ def _tagged_probe(index: _HashBucket, hash: UInt64, key: UInt64) -> Int:
 
 @always_inline
 def _lane_bits(lanes: SIMD[DType.bool, 16]) -> UInt16:
-    """Bit `l` set where lane `l` is true."""
-    comptime weights = SIMD[DType.uint16, 16](
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
-        2048,
-        4096,
-        8192,
-        16384,
-        32768,
-    )
-    return (lanes.cast[DType.uint16]() * weights).reduce_add()
+    """Bit `l` set where lane `l` is true: one move-mask instruction
+    (`pmovmskb` on x86), where a weighted sum of the lanes took a dozen
+    vector instructions twice a probe (PDS-H q5's 6M lineitem probes)."""
+    return pack_bits[DType.uint16](lanes)
 
 
 struct _TagCursor:
