@@ -38,7 +38,12 @@ def _column(source: Table, name: String) raises -> Table:
                 and not source.storage
                 and not source.identity_storage
             ):
-                return Table.empty(result.schema.copy())
+                var empty = Table.empty(result.schema.copy())
+                empty.text = [source.text[index].copy()]
+                empty.categories = [source.categories[index].copy()]
+                empty.category_leases = source.category_leases.copy()
+                empty.grouped_keys = [source.grouped_keys[index].copy()]
+                return empty^
             result.columns = [source.columns[index]]
             result.text = [source.text[index].copy()]
             result.categories = [source.categories[index].copy()]
@@ -335,6 +340,10 @@ def produce(
                 table.schema._columns[
                     0
                 ]._field_metadata = logical._field_metadata
+                if table.text[0]:
+                    var publication_text = table.text[0].value().copy()
+                    publication_text.logical = logical.dtype()
+                    table.text[0] = publication_text^
                 if (
                     original.domains[request.source].kind == CODED_STRING
                     or not logical.dtype().is_categorical()
