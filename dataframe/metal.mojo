@@ -355,6 +355,8 @@ struct MetalRuntime(AcceleratorBackend):
                 capabilities(),
                 observation_only=self._observation_only,
                 text_context=self._text_context,
+                ordered_source=original_entry,
+                eager_feed=not self._execution_settings.streaming,
             )
         if has_grouped_implode(query) or has_checked_grouped_feeds(
             query, eager_feed=not self._execution_settings.streaming
@@ -986,6 +988,7 @@ struct MetalRuntime(AcceleratorBackend):
         return self._configured(query)._describe(query, True)
 
     def _describe(self, query: LazyFrame, original_entry: Bool) -> String:
+        from .accelerator.gpu.dag_runtime import describe as describe_nested_dag
         from .accelerator.gpu.runtime import _preflight
         from .accelerator.grouped_stream_routes import candidate
         from .parallel import configured_workers
@@ -1015,7 +1018,12 @@ struct MetalRuntime(AcceleratorBackend):
                     lower_selectors(query), False
                 )
             if has_explode(query):
-                return _describe_mojo_gpu(query)
+                return describe_nested_dag(
+                    query,
+                    _capabilities(),
+                    ordered_source=original_entry,
+                    eager_feed=not self._execution_settings.streaming,
+                )
             if has_grouped_implode(query) or has_checked_grouped_feeds(
                 query, eager_feed=not self._execution_settings.streaming
             ):

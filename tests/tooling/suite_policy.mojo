@@ -128,6 +128,24 @@ def production_policy() -> SuitePolicy:
     policy.capabilities = ["metal", "mojo_gpu"]
     policy.requirements.append(
         CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_explode_layouts_metadata_stable_children_and_retained_producer",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_explode_resident_row_join_group_slices_and_source_failure",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
+            "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo::test_mojo_gpu_grouped_explode_original_phase_errors_empty_observer_and_exact_budget",
+            "metal",
+        )
+    )
+    policy.requirements.append(
+        CapabilityRequirement(
             "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo::test_mojo_gpu_grouped_implode_higher_moment_siblings_literal_layouts_and_nan_payloads",
             "metal",
         )
@@ -2988,6 +3006,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
                 "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",
@@ -3428,6 +3447,7 @@ def production_policy() -> SuitePolicy:
                 "tests/execution_modes/test_mojo_gpu_grouped_moments_fma.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_feeds.mojo",
                 "tests/execution_modes/test_mojo_gpu_grouped_key_domains.mojo",
+                "tests/execution_modes/test_mojo_gpu_grouped_explode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode.mojo",
                 "tests/execution_modes/test_mojo_gpu_ordered_implode_states.mojo",
                 "tests/execution_modes/test_mojo_gpu_execution_settings.mojo",
