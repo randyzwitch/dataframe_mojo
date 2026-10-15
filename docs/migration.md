@@ -4,7 +4,7 @@ The API follows Polars' expression style (via Narwhals) closely. The main
 differences: expressions are built with `col`/`lit` and there is no implicit
 type promotion: a bare number adopts the other operand's dtype (`col("a") > 1`)
 and errors if it cannot (`col("i") * 2.5` on an integer column); `lit(Int64(1))` fixes a type explicitly;
-equality is `.eq()`; there is no index; and results are eager dataframes.
+equality is `==` or `.eq()`, and builds an expression rather than a Bool; there is no index; and results are eager dataframes.
 
 | Task | pandas | Polars | dataframe_mojo |
 |---|---|---|---|

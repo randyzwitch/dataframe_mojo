@@ -61,7 +61,7 @@ and UInt64 compute in 128 bits and range-check the result.
 | `%` | numeric | same | remainder takes the divisor's sign; integer modulo zero is null; float `x % 0`, `inf % y`, and NaN operands give NaN |
 | `**`, `.pow()` | numeric | same | integers are checked and raise on a negative exponent |
 | `<`, `<=`, `>`, `>=` | any | Bool | IEEE for floats (NaN compares false); strings byte-lexicographic, as in sort; `false < true` |
-| `.eq()`, `.ne()` | any | Bool | IEEE: NaN `.ne()` NaN is true |
+| `==`, `!=`, `.eq()`, `.ne()` | any | Bool | IEEE: NaN `!=` NaN is true |
 | unary `-`, `.abs()` | numeric | same | signed `MIN` raises; unsigned negation raises unless zero |
 | `.sqrt()`, `.exp()`, `.log()` | numeric | Float64 (Float32 for Float32) | natural log; IEEE results for negative inputs and zero |
 | `.floor()`, `.ceil()`, `.round(decimals=0)` | numeric | same | identity for integers; `round` is half away from zero and accepts negative decimals |
